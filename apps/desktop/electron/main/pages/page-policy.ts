@@ -25,8 +25,10 @@ export const PAGE_CALL_BURST = 40;
 export const PAGE_CALLS_PER_SECOND = 10;
 /** The JSON text of one call's input. */
 export const MAX_PAGE_CALL_INPUT_CHARS = 256 * 1024;
-/** `ui.copy` works this long after the person clicks, types or touches inside the page. */
-export const PAGE_COPY_WINDOW_MS = 5_000;
+/** `ui.open` and `ui.copy` work this long after the person clicks, types or touches inside the page. */
+export const PAGE_PERSON_INPUT_WINDOW_MS = 5_000;
+/** One `ui.open` per lease in this time, asked or not. */
+export const PAGE_OPEN_INTERVAL_MS = 2_000;
 export const MAX_PAGE_COPY_CHARS = 100_000;
 export const MAX_PAGE_OPEN_URL_CHARS = 2_048;
 

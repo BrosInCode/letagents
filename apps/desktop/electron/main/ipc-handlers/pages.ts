@@ -14,6 +14,7 @@ import {
 import { createPageCallHandler } from "../pages/page-bridge.js";
 import { createFilePageChoiceStore, createPageConfirmBroker, type PageChoiceStore } from "../pages/page-confirm.js";
 import { recordPageDiagnostic } from "../pages/page-diagnostics.js";
+import { roomPageGrants } from "../pages/page-grants.js";
 import {
   configureRoomPages,
   currentRoomPageTheme,
@@ -22,6 +23,7 @@ import {
   releaseRoomPage,
   roomPageLeaseForSender,
   setRoomPageTheme,
+  setRoomPageVisible,
 } from "../pages/page-host.js";
 import { PAGE_CALL_CHANNEL } from "../pages/page-policy.js";
 import { getMainWindow } from "../window.js";
@@ -51,13 +53,18 @@ export function registerDesktopPageIpcHandlers(
     dismiss: (id) => { send({ type: "dismiss", id }); },
     choices: backend.choices ?? createFilePageChoiceStore(),
   });
+  const source = backend.source ?? createHttpRoomPageSource();
+  // Each lease mints its own page_grant with the app session; page calls carry only that token.
+  roomPageGrants.configure((roomId, pageId) => source.grant(roomId, pageId));
   configureRoomPages({
-    source: backend.source ?? createHttpRoomPageSource(),
+    source,
+    grants: roomPageGrants,
     onLeaseEnd: (lease) => confirm.declineFor(lease),
+    onLeaseHidden: (lease) => confirm.declineFor(lease),
   });
   const handlePageCall = createPageCallHandler({
     leaseFor: roomPageLeaseForSender,
-    adapter: backend.adapter ?? createHttpPageApiAdapter(),
+    adapter: backend.adapter ?? createHttpPageApiAdapter({ grants: roomPageGrants }),
     methods: backend.methods ?? pageApiMethodNames(),
     confirm,
     viewer: async () => {
@@ -83,6 +90,10 @@ export function registerDesktopPageIpcHandlers(
   targetIpcMain.handle("desktop:pages:release", (event, url: unknown) => {
     assertAppWindowSender(event);
     releaseRoomPage(url);
+  });
+  targetIpcMain.handle("desktop:pages:set-visible", (event, url: unknown, visible: unknown) => {
+    assertAppWindowSender(event);
+    setRoomPageVisible(url, visible);
   });
   targetIpcMain.handle("desktop:pages:set-theme", (event, mode: unknown) => {
     assertAppWindowSender(event);

@@ -261,6 +261,7 @@
       :key="`page:${room.identifier}:${page.id}`"
       :room-identifier="room.identifier"
       :page="page"
+      :active="activeTab === roomPageTabId(page.id)"
     />
     <PageConfirmSheet />
 

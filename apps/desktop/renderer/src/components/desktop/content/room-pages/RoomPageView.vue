@@ -35,6 +35,8 @@ type PageStatus = "loading" | "running" | "failed" | "stopped";
 const props = defineProps<{
   roomIdentifier: string;
   page: DesktopRoomPage;
+  /** This page's tab is the room's active tab. */
+  active: boolean;
 }>();
 
 const root = ref<HTMLElement | null>(null);
@@ -81,6 +83,7 @@ async function start(): Promise<void> {
       return;
     }
     lease.value = next;
+    syncVisible();
   } catch (error) {
     if (run !== generation) return;
     status.value = "failed";
@@ -111,6 +114,17 @@ function onLoadFailed(event: Event): void {
   errorText.value = "This page could not be opened.";
 }
 
+/**
+ * Main lets only the page in the active tab, in a window the person can see,
+ * open links, copy or ask for a confirm sheet.
+ */
+function syncVisible(): void {
+  const current = lease.value;
+  if (!current) return;
+  const visible = props.active && document.visibilityState === "visible";
+  void desktopIpc.pages?.setVisible(current.url, visible).catch(() => undefined);
+}
+
 /** Pages follow the light or dark mode the app draws this tab in. */
 function syncTheme(): void {
   const element = root.value;
@@ -130,8 +144,11 @@ onMounted(() => {
   colorQuery = window.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
   colorQuery?.addEventListener("change", syncTheme);
   syncTheme();
+  document.addEventListener("visibilitychange", syncVisible);
   void start();
 });
+
+watch(() => props.active, syncVisible);
 
 // A new version (an agent's update, or a rollback) opens in place of the old one.
 watch(() => JSON.stringify([props.roomIdentifier, props.page.id, props.page.version]), () => { void start(); });
@@ -140,6 +157,7 @@ onBeforeUnmount(() => {
   stopEvents?.();
   stopEvents = null;
   colorQuery?.removeEventListener("change", syncTheme);
+  document.removeEventListener("visibilitychange", syncVisible);
   stopRun();
 });
 </script>

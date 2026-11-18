@@ -14,6 +14,7 @@ import { lockHtmlDemoContents } from "../attachments/html-demo-session.js";
 import { addWebviewRoute } from "../attachments/webview-router.js";
 import { electronMainDir } from "../paths.js";
 import type { RoomPageSource } from "./page-adapter.js";
+import type { PageGrantKeeper } from "./page-grants.js";
 import { recordPageDiagnostic } from "./page-diagnostics.js";
 import {
   lockRoomPageWebPreferences,
@@ -59,6 +60,12 @@ export interface RoomPageLease {
   lastInputAt: number;
   /** The page's calls over the bridge. */
   calls: InlineHtmlDemoBucket;
+  /** The page is in the room's active tab, in a window the person can see; the app window says so. */
+  visible: boolean;
+  /** When `ui.open` last went ahead for this lease. */
+  lastOpenAt: number;
+  /** Domains the person let this lease open; a new lease of the same page asks again. */
+  openDomains: Set<string>;
 }
 
 const leases = new Map<string, RoomPageLease>();
@@ -66,8 +73,12 @@ const leasesByGuestId = new Map<number, RoomPageLease>();
 let themeMode: DesktopPageThemeMode = "dark";
 let configured: {
   source: RoomPageSource;
+  /** Holds each lease's page grant token; a lease mints one when it is prepared. */
+  grants?: PageGrantKeeper;
   /** Called once when a lease ends, however it ends. */
   onLeaseEnd?: (lease: RoomPageLease) => void;
+  /** Called when a page leaves the active tab, so its open sheets go away. */
+  onLeaseHidden?: (lease: RoomPageLease) => void;
 } | null = null;
 
 /** Where pages come from, and what else must end with a lease. Set once by the IPC registrar. */
@@ -118,12 +129,16 @@ export async function prepareRoomPage(rawRoomId: unknown, rawPageId: unknown): P
     attachTimer: null,
     lastInputAt: Number.NEGATIVE_INFINITY,
     calls: inlineHtmlDemoBucket(PAGE_CALL_BURST, PAGE_CALLS_PER_SECOND, now),
+    visible: false,
+    lastOpenAt: Number.NEGATIVE_INFINITY,
+    openDomains: new Set(),
   };
   lease.attachTimer = setTimeout(() => {
     if (!lease.guest) endLease(lease);
   }, ROOM_PAGE_LEASE_MS);
   roomPageDocuments.set(host, html);
   leases.set(host, lease);
+  configured.grants?.start(host, roomId, page.id);
   return { url: lease.url, partition: PAGE_PARTITION, page };
 }
 
@@ -146,6 +161,31 @@ export function roomPageLeaseForSender(sender: WebContents | null | undefined, f
   if (!lease || lease.guest !== sender || lease.stopped || !isLive(lease) || sender.isDestroyed()) return null;
   if (!frame || frame !== sender.mainFrame) return null;
   return lease;
+}
+
+/**
+ * The app window says which page is in the room's active tab while the window
+ * can be seen. Only that page may open links, copy, or ask for a confirm
+ * sheet; a page that leaves the tab loses its open sheets.
+ */
+export function setRoomPageVisible(rawUrl: unknown, visible: unknown): void {
+  const host = roomPageLeaseHost(rawUrl);
+  const lease = host ? leases.get(host) : undefined;
+  if (!lease) return;
+  if (visible === true) {
+    for (const other of leases.values()) {
+      if (other !== lease && other.visible && other.embedder === lease.embedder) hideLease(other);
+    }
+    lease.visible = true;
+    return;
+  }
+  hideLease(lease);
+}
+
+function hideLease(lease: RoomPageLease): void {
+  if (!lease.visible) return;
+  lease.visible = false;
+  configured?.onLeaseHidden?.(lease);
 }
 
 export function currentRoomPageTheme(): PageTheme {
@@ -260,8 +300,10 @@ function endLease(lease: RoomPageLease): void {
   if (lease.attachTimer) clearTimeout(lease.attachTimer);
   lease.attachTimer = null;
   if (!isLive(lease)) return;
+  lease.visible = false;
   leases.delete(lease.host);
   roomPageDocuments.delete(lease.host);
+  configured?.grants?.drop(lease.host);
   configured?.onLeaseEnd?.(lease);
 }
 

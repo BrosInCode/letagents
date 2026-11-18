@@ -1,9 +1,12 @@
 import type { DesktopRoomPage } from "../../ipc-types.js";
 import { apiFetch, DesktopApiError } from "../auth.js";
+import { parsePageGrant, type PageGrant, type PageGrantKeeper } from "./page-grants.js";
 import { MAX_ROOM_PAGE_BYTES, PageCallFailure, type PageErrorCode } from "./page-policy.js";
 
 /** The page version a call comes from, as main knows it from the page's lease. */
 export interface PageCallContext {
+  /** The lease's host: the key of its page grant. */
+  leaseId: string;
   roomId: string;
   pageId: string;
   version: number;
@@ -18,10 +21,15 @@ export interface PageApiAdapter {
   call(lease: PageCallContext, method: string, input: unknown): Promise<unknown>;
 }
 
-/** Where main reads a room's pinned pages and a page's document. */
+/**
+ * Where main reads a room's pinned pages and a page's document, and mints a
+ * page's grant. These run with the person's app session; a page's own calls
+ * never do.
+ */
 export interface RoomPageSource {
   list(roomId: string): Promise<DesktopRoomPage[]>;
   load(roomId: string, pageId: string): Promise<{ page: DesktopRoomPage; html: string }>;
+  grant(roomId: string, pageId: string): Promise<PageGrant>;
 }
 
 export type PageApiHttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -83,7 +91,10 @@ export function pageApiRequest(
   const routePath = route.path.replace(/:([A-Za-z][A-Za-z0-9_]*)/g, (_match, name: string) => {
     if (name === "room") return encodeURIComponent(roomId);
     const value = fields[name];
-    if (typeof value !== "string" || !value) throw new PageCallFailure("invalid_input", `The call needs "${name}".`);
+    // A dot segment or a slash would move the call to another route, even encoded behind a proxy.
+    if (typeof value !== "string" || !value || value === "." || value === ".." || /[/\\]/.test(value)) {
+      throw new PageCallFailure("invalid_input", `The call needs "${name}" as one name, without slashes.`);
+    }
     delete fields[name];
     return encodeURIComponent(value);
   });
@@ -117,23 +128,28 @@ export function pageCallFailureFromApi(error: unknown): PageCallFailure {
 }
 
 /**
- * The adapter the app uses: each method's route in `routes`, with the app's
- * own sign-in. The page id and version go with every call so the server can
- * record "via <page>".
+ * The adapter the app uses: each method's route in `routes`, sent with the
+ * lease's own `page_grant` token and never with the person's session. A
+ * lease without a token gets `not_granted`.
  */
-export function createHttpPageApiAdapter(
-  routes: Readonly<Record<string, PageApiRoute>> = PAGE_API_ROUTES,
-  fetchApi: typeof apiFetch = apiFetch,
-): PageApiAdapter {
+export function createHttpPageApiAdapter(options: {
+  grants: Pick<PageGrantKeeper, "token">;
+  routes?: Readonly<Record<string, PageApiRoute>>;
+  fetchApi?: typeof apiFetch;
+}): PageApiAdapter {
+  const routes = options.routes ?? PAGE_API_ROUTES;
+  const fetchApi = options.fetchApi ?? apiFetch;
   return {
     async call(lease, method, input) {
       const route = Object.hasOwn(routes, method) ? routes[method] : undefined;
       if (!route) throw new PageCallFailure("not_found", `There is no method "${method}".`);
       const request = pageApiRequest(route, lease.roomId, input);
+      const token = await options.grants.token(lease.leaseId);
+      if (!token) throw new PageCallFailure("not_granted", "This page has no grant in this room.");
       const headers = new Headers(request.init.headers);
-      headers.set("X-LetAgents-Page", `${lease.pageId}@${lease.version}`);
+      headers.set("Authorization", `Bearer ${token}`);
       try {
-        return await fetchApi<unknown>(request.path, { ...request.init, headers }, { credential: "app" });
+        return await fetchApi<unknown>(request.path, { ...request.init, headers }, { credential: "none" });
       } catch (error) {
         throw pageCallFailureFromApi(error);
       }
@@ -176,23 +192,43 @@ export function createHttpRoomPageSource(fetchApi: typeof apiFetch = apiFetch): 
       if (Buffer.byteLength(body.html, "utf8") > MAX_ROOM_PAGE_BYTES) throw new Error("This page is larger than 2 MB, so it does not open.");
       return { page, html: body.html };
     },
+    async grant(roomId, pageId) {
+      const body = await fetchApi<unknown>(
+        `${roomBase(roomId)}/${encodeURIComponent(pageId)}/grant`,
+        { method: "POST", body: "{}" },
+        { credential: "app" },
+      );
+      const grant = parsePageGrant(body);
+      if (!grant) throw new Error("The server sent no page grant.");
+      return grant;
+    },
   };
 }
 
+type MemoryCall = { lease: PageCallContext; method: string; input: unknown; token: string };
+
 /**
- * Pages and answers held in memory: tests, and a desktop without the server
- * routes. `handlers` answer calls by method name.
+ * Pages, grants and answers held in memory, for tests. `handlers` answer calls
+ * by method name; like the server, a call needs the lease's grant token.
+ * `grantFails` makes every mint fail.
  */
 export function createMemoryPageBackend(input: {
   pages?: Record<string, Array<DesktopRoomPage & { html: string }>>;
   handlers?: Record<string, (lease: PageCallContext, input: unknown) => unknown>;
-} = {}): { adapter: PageApiAdapter; source: RoomPageSource; calls: Array<{ lease: PageCallContext; method: string; input: unknown }> } {
-  const calls: Array<{ lease: PageCallContext; method: string; input: unknown }> = [];
+  grants: Pick<PageGrantKeeper, "token">;
+  grantFails?: () => boolean;
+  grantTtlMs?: number;
+}): { adapter: PageApiAdapter; source: RoomPageSource; calls: MemoryCall[]; mints: Array<{ roomId: string; pageId: string }> } {
+  const calls: MemoryCall[] = [];
+  const mints: Array<{ roomId: string; pageId: string }> = [];
   return {
     calls,
+    mints,
     adapter: {
       async call(lease, method, callInput) {
-        calls.push({ lease, method, input: callInput });
+        const token = await input.grants.token(lease.leaseId);
+        if (!token) throw new PageCallFailure("not_granted", "This page has no grant in this room.");
+        calls.push({ lease, method, input: callInput, token });
         const handler = input.handlers?.[method];
         if (!handler) throw new PageCallFailure("not_found", `There is no method "${method}".`);
         return handler(lease, callInput);
@@ -207,6 +243,11 @@ export function createMemoryPageBackend(input: {
         if (!found) throw new Error("The page could not be loaded.");
         const { html, ...page } = found;
         return { page, html };
+      },
+      async grant(roomId, pageId) {
+        mints.push({ roomId, pageId });
+        if (input.grantFails?.()) throw new Error("The grant was refused.");
+        return { token: `grant-${mints.length}`, expiresAt: Date.now() + (input.grantTtlMs ?? 15 * 60_000), capabilities: ["rooms.read"] };
       },
     },
   };

@@ -13,6 +13,7 @@ import { registerDesktopRepoIpcHandlers } from "./ipc-handlers/repos.js";
 import { registerDesktopRoomIpcHandlers } from "./ipc-handlers/rooms.js";
 import { registerDesktopSupervisorIpcHandlers } from "./ipc-handlers/supervisor.js";
 import { registerDesktopWorkerIpcHandlers } from "./ipc-handlers/workers.js";
+import { refuseWebviewSenders } from "./ipc-sender-guard.js";
 
 const { ipcMain } = electron as typeof import("electron");
 
@@ -26,6 +27,9 @@ const { ipcMain } = electron as typeof import("electron");
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
 ): () => void {
+  // Room pages and demos are webviews in the app window: none of them reaches
+  // an app channel, whatever a registrar forgets to check.
+  targetIpcMain = refuseWebviewSenders(targetIpcMain);
   registerDesktopAuthAndSetupIpcHandlers(targetIpcMain);
   registerConversationIpcHandlers(targetIpcMain);
   registerDesktopAppIpcHandlers(targetIpcMain);

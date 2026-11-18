@@ -574,6 +574,8 @@ export interface DesktopApi {
     /** Load a page for one `<webview>`; the lease admits that webview once. */
     prepare: (roomId: string, pageId: string) => Promise<import("./pages.js").DesktopRoomPageLease>;
     release: (url: string) => Promise<void>;
+    /** The page is in the room's active tab in a visible window; only that page may open, copy or ask. */
+    setVisible: (url: string, visible: boolean) => Promise<void>;
     /** The app's light or dark mode, which pages follow. */
     setTheme: (mode: import("./pages.js").DesktopPageThemeMode) => Promise<void>;
     onEvent: (callback: (event: import("./pages.js").DesktopRoomPageEvent) => void) => () => void;

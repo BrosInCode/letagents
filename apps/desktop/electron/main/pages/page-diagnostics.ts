@@ -3,11 +3,16 @@ export const PAGE_DIAGNOSTICS_ENTRIES = 200;
 /** Page versions main keeps entries for; the least recently written go first. */
 export const PAGE_DIAGNOSTICS_PAGES = 32;
 export const MAX_PAGE_DIAGNOSTIC_TEXT = 2_000;
+/** Writes main keeps per page version: a burst, then this many a second. The rest are only counted. */
+export const PAGE_DIAGNOSTIC_WRITE_BURST = 20;
+export const PAGE_DIAGNOSTIC_WRITES_PER_SECOND = 5;
 
 export type PageDiagnostic =
   | { kind: "console"; at: string; level: "warning" | "error"; message: string; source: string; line: number }
   | { kind: "crash"; at: string; reason: string }
-  | { kind: "call"; at: string; method: string; code: string; message: string };
+  | { kind: "call"; at: string; method: string; code: string; message: string }
+  /** Entries main did not keep because the page wrote too fast, since the last kept one. */
+  | { kind: "dropped"; at: string; count: number };
 
 /** One page version in one room, the unit an agent reads diagnostics for. */
 export interface PageDiagnosticsKey {
@@ -22,6 +27,7 @@ type PageDiagnosticInput =
   | Omit<Extract<PageDiagnostic, { kind: "call" }>, "at">;
 
 const buffers = new Map<string, PageDiagnostic[]>();
+const writeRates = new Map<string, { tokens: number; updatedAt: number; dropped: number }>();
 
 function keyOf(key: PageDiagnosticsKey): string {
   return JSON.stringify([key.roomId, key.pageId, key.version]);
@@ -38,11 +44,25 @@ function clip(text: unknown): string {
  */
 export function recordPageDiagnostic(key: PageDiagnosticsKey, entry: PageDiagnosticInput, now = Date.now()): void {
   const id = keyOf(key);
+  const rate = writeRates.get(id) ?? { tokens: PAGE_DIAGNOSTIC_WRITE_BURST, updatedAt: now, dropped: 0 };
+  writeRates.set(id, rate);
+  rate.tokens = Math.min(PAGE_DIAGNOSTIC_WRITE_BURST, rate.tokens + (Math.max(0, now - rate.updatedAt) * PAGE_DIAGNOSTIC_WRITES_PER_SECOND) / 1000);
+  rate.updatedAt = Math.max(rate.updatedAt, now);
+  // A page that logs or fails in a loop costs main a counter, not a string copy each time.
+  if (rate.tokens < 1) {
+    rate.dropped += 1;
+    return;
+  }
+  rate.tokens -= 1;
   const buffer = buffers.get(id) ?? [];
   // Re-inserting keeps the map in least-recently-written order.
   buffers.delete(id);
   buffers.set(id, buffer);
   const at = new Date(now).toISOString();
+  if (rate.dropped > 0) {
+    buffer.push({ kind: "dropped", at, count: rate.dropped });
+    rate.dropped = 0;
+  }
   if (entry.kind === "console") {
     buffer.push({ ...entry, at, message: clip(entry.message), source: clip(entry.source) });
   } else if (entry.kind === "crash") {
@@ -54,6 +74,7 @@ export function recordPageDiagnostic(key: PageDiagnosticsKey, entry: PageDiagnos
   for (const oldest of buffers.keys()) {
     if (buffers.size <= PAGE_DIAGNOSTICS_PAGES) break;
     buffers.delete(oldest);
+    writeRates.delete(oldest);
   }
 }
 
@@ -83,4 +104,5 @@ export function restorePageDiagnostics(key: PageDiagnosticsKey, entries: readonl
 
 export function clearPageDiagnosticsForTest(): void {
   buffers.clear();
+  writeRates.clear();
 }

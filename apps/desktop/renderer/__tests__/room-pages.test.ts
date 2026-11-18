@@ -13,6 +13,7 @@ import {
   availableRoomTab,
   keptRoomPages,
   MAX_ROOM_PAGE_TABS,
+  PAGE_CONFIRM_ARM_MS,
   pageConfirmCopy,
   pageThemeModeOf,
   withRoomPageTabs,
@@ -105,5 +106,15 @@ describe("room page presentation", () => {
     assert.match(shell, /<RoomPageView\s+v-for="page in keptPages"\s+v-show="activeTab === roomPageTabId\(page\.id\)"/);
     assert.equal(shell.match(/<PageConfirmSheet \/>/g)?.length, 1);
     assert.match(shell, /:pages-menu="pagesMenu"/);
+    assert.match(shell, /:active="activeTab === roomPageTabId\(page\.id\)"/, "main hears which page is in the active tab");
+  });
+
+  it("arm the confirm action only after the sheet has shown for a moment", () => {
+    assert.equal(PAGE_CONFIRM_ARM_MS, 500);
+    const sheet = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-pages/PageConfirmSheet.vue", import.meta.url)), "utf8");
+    assert.match(sheet, /class="primary-button" type="button" :disabled="!armed"/);
+    assert.match(sheet, /if \(!current \|\| \(value === "confirmed" && !armed\.value\)\) return;/);
+    const view = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-pages/RoomPageView.vue", import.meta.url)), "utf8");
+    assert.match(view, /props\.active && document\.visibilityState === "visible"/);
   });
 });

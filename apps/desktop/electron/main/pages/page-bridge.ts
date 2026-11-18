@@ -10,7 +10,8 @@ import {
   MAX_PAGE_CALL_INPUT_CHARS,
   MAX_PAGE_COPY_CHARS,
   PAGE_BUILTIN_METHODS,
-  PAGE_COPY_WINDOW_MS,
+  PAGE_OPEN_INTERVAL_MS,
+  PAGE_PERSON_INPUT_WINDOW_MS,
   PageCallFailure,
   pageOpenTarget,
   type PageCallResult,
@@ -49,8 +50,9 @@ export interface PageCallEvent {
 /**
  * The main side of `page:call`, the only channel a room page has. In order:
  * the sender must be a live page lease's own main frame (not the app window,
- * not a demo), the method must exist, the page must be inside its call rate,
- * and only then does main answer it or hand it to the API adapter. Every
+ * not a demo), the page must be inside its call rate, the method must exist
+ * and the input must fit, and only then does main answer it or hand it to the
+ * API adapter. Every
  * outcome is a value, never a thrown error, so the page gets the error code.
  */
 export function createPageCallHandler(deps: PageBridgeDeps) {
@@ -76,22 +78,49 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
     }
   }
 
+  /** Leases with a confirm sheet open or being asked for; set before any await, so a burst gets one. */
+  const confirming = new WeakSet<RoomPageLease>();
+
+  /**
+   * Opening, copying and asking for a sheet work only for the page in the
+   * active tab, right after the person's own click or key press in it: main
+   * saw that input itself, and the page cannot fake it.
+   */
+  function assertPersonPresent(lease: RoomPageLease, action: string): void {
+    if (!lease.visible) throw new PageCallFailure("not_granted", `${action} works only from the page in the open tab.`);
+    if (now() - lease.lastInputAt > PAGE_PERSON_INPUT_WINDOW_MS) {
+      throw new PageCallFailure("not_granted", `${action} works only right after a click or key press in the page.`);
+    }
+  }
+
   async function openLink(lease: RoomPageLease, input: unknown): Promise<null> {
     const target = pageOpenTarget(field(input, "url"));
     if (!target) throw new PageCallFailure("not_granted", "A page can open only https links.");
-    const viewer = requireViewer(await deps.viewer());
-    if (deps.confirm.pendingFor(lease) > 0) throw new PageCallFailure("rate_limited", "Answer the open question first.", 1_000);
-    const answer = await deps.confirm.ask(lease, scopeOf(lease, viewer), {
-      kind: "open",
-      pageTitle: lease.page.title,
-      text: target.url,
-      target: target.domain,
-      rememberable: false,
-      // The first link to a new domain asks; later ones from this page version open at once.
-      rememberOnConfirm: true,
-      choice: `open:${target.domain}`,
-    });
-    if (answer !== "confirmed") throw new PageCallFailure("declined", "The link was not opened.");
+    assertPersonPresent(lease, "ui.open");
+    const time = now();
+    const wait = lease.lastOpenAt + PAGE_OPEN_INTERVAL_MS - time;
+    if (wait > 0) throw new PageCallFailure("rate_limited", "A page can open one link every 2 seconds.", Math.ceil(wait));
+    if (confirming.has(lease)) throw new PageCallFailure("rate_limited", "Answer the open question first.", 1_000);
+    lease.lastOpenAt = time;
+    if (!lease.openDomains.has(target.domain)) {
+      confirming.add(lease);
+      try {
+        const viewer = requireViewer(await deps.viewer());
+        // The first link to a new domain asks; later ones from this open page go ahead.
+        const answer = await deps.confirm.ask(lease, scopeOf(lease, viewer), {
+          kind: "open",
+          pageTitle: lease.page.title,
+          text: target.url,
+          target: target.domain,
+          rememberable: false,
+          choice: `open:${target.domain}`,
+        });
+        if (answer !== "confirmed") throw new PageCallFailure("declined", "The link was not opened.");
+      } finally {
+        confirming.delete(lease);
+      }
+      lease.openDomains.add(target.domain);
+    }
     await deps.openExternal(target.url);
     return null;
   }
@@ -100,10 +129,7 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
     const text = field(input, "text");
     if (typeof text !== "string") throw new PageCallFailure("invalid_input", "ui.copy takes plain text.");
     if (text.length > MAX_PAGE_COPY_CHARS) throw new PageCallFailure("too_large", `ui.copy takes at most ${MAX_PAGE_COPY_CHARS} characters.`);
-    // Main saw the input itself; a page cannot fake a click to fill the clipboard on its own.
-    if (now() - lease.lastInputAt > PAGE_COPY_WINDOW_MS) {
-      throw new PageCallFailure("not_granted", "ui.copy works only right after a click or key press in the page.");
-    }
+    assertPersonPresent(lease, "ui.copy");
     deps.writeClipboard(text);
     return null;
   }
@@ -120,16 +146,18 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
   return async function handlePageCall(event: PageCallEvent, payload: unknown): Promise<PageCallResult> {
     const lease = deps.leaseFor(event.sender, event.senderFrame);
     if (!lease) return { ok: false, error: { code: "not_granted", message: "Only a room page can use this bridge." } };
-    const method = field(payload, "method");
-    const input = field(payload, "input") ?? null;
+    let method: unknown = "";
     try {
+      // The rate comes first: a refused or malformed call costs the page a token too.
+      takeCall(lease);
+      method = field(payload, "method");
+      const input = field(payload, "input") ?? null;
       if (!isPageMethodName(method) || !(PAGE_BUILTIN_METHODS.has(method) || deps.methods.has(method))) {
         throw new PageCallFailure("not_found", `There is no method "${typeof method === "string" ? method.slice(0, 100) : ""}".`);
       }
       if (inputChars(input) > MAX_PAGE_CALL_INPUT_CHARS) {
         throw new PageCallFailure("too_large", `A call's input may be at most ${MAX_PAGE_CALL_INPUT_CHARS} characters of JSON.`);
       }
-      takeCall(lease);
       const value = PAGE_BUILTIN_METHODS.has(method)
         ? await builtin(lease, method, input)
         : await deps.adapter.call(contextOf(lease), method, input);
@@ -150,7 +178,7 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
 }
 
 function contextOf(lease: RoomPageLease): PageCallContext {
-  return { roomId: lease.roomId, pageId: lease.page.id, version: lease.page.version };
+  return { leaseId: lease.host, roomId: lease.roomId, pageId: lease.page.id, version: lease.page.version };
 }
 
 function scopeOf(lease: RoomPageLease, viewer: PageViewer) {

@@ -1,6 +1,9 @@
 import type { DesktopPageConfirmKind, DesktopPageThemeMode, DesktopRoomPage } from "../../../../../../electron/ipc-types";
 import { roomPageIdOfTab, roomPageTabId, type RoomTab, type RoomTabId } from "../room-shell/types";
 
+/** A confirm sheet's action button works only this long after the sheet shows. */
+export const PAGE_CONFIRM_ARM_MS = 500;
+
 /** Pinned pages that get their own tab; more than this go into one "Pages" menu. */
 export const MAX_ROOM_PAGE_TABS = 3;
 

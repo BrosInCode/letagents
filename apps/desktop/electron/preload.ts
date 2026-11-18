@@ -481,6 +481,7 @@ const api: DesktopApi = {
     list: (roomId) => ipcRenderer.invoke("desktop:pages:list", roomId),
     prepare: (roomId, pageId) => ipcRenderer.invoke("desktop:pages:prepare", roomId, pageId),
     release: (url) => ipcRenderer.invoke("desktop:pages:release", url),
+    setVisible: (url, visible) => ipcRenderer.invoke("desktop:pages:set-visible", url, visible),
     setTheme: (mode) => ipcRenderer.invoke("desktop:pages:set-theme", mode),
     onEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, event: Parameters<typeof callback>[0]) => callback(event);
