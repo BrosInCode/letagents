@@ -83,6 +83,16 @@ if (testDatabaseUrl) {
     await members!.addRoomMember({ roomId: roomA, accountId: bob.id, addedVia: "seed" });
     await members!.addRoomMember({ roomId: roomA, accountId: cy.id, addedVia: "seed" });
     await members!.addRoomMember({ roomId: roomB, accountId: ada.id, addedVia: "creator" });
+    // Page and viewer data exist only for a page the room has: these pages are pinned in every test room.
+    for (const pageId of ["pg_caps", "pg_events", "pg_fresh", "pg_full", "pg_hub", "pg_list", "pg_other", "pg_room_two", "pg_shared", "pg_u", "pg_view"]) {
+      await dbClient!.pool.query(`INSERT INTO pages (id, owner_kind, owner_room_id, slug, title, current_version, created_by_kind, created_by)
+        VALUES ($1, 'room', $2, $1, $1, 1, 'person', $3)`, [pageId, roomA, ada.id]);
+      await dbClient!.pool.query(`INSERT INTO page_versions (page_id, version, html, sha256, byte_size, manifest, author_kind, author_id, status)
+        VALUES ($1, 1, '<p></p>', '', 7, '{}'::jsonb, 'person', $2, 'live')`, [pageId, ada.id]);
+      for (const roomId of [roomA, roomB, REPO_ROOM]) {
+        await dbClient!.pool.query("INSERT INTO page_placements (page_id, room_id, surface, position) VALUES ($1, $2, 'room.tab', 0)", [pageId, roomId]);
+      }
+    }
 
     server = appModule!.createApiApp().listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -469,7 +479,7 @@ test("the scope in the input picks the capability the pipeline checks", async ()
   });
 });
 
-test("page and viewer data need a page placed in the room (pageExistsInRoom)", async () => {
+test("page and viewer data need a page placed in the room (pageExistsInRoom)", { skip }, async () => {
   const call = { actor: agentActor, room: { id: "room_a" } as never, account: null };
   const pageExists = async (roomId: string, pageId: string) => roomId === "room_a" && pageId === "pg_placed";
   for (const run of [
@@ -479,5 +489,8 @@ test("page and viewer data need a page placed in the room (pageExistsInRoom)", a
   ]) {
     await assert.rejects(run(), { code: "not_found", message: "No page with this id in this room." });
   }
-  assert.equal(await documents.pageExistsInRoom("room_a", "anything"), true, "until the pages registry fills it");
+  // The pages registry answers: a page the room owns or has pinned.
+  assert.equal(await documents.pageExistsInRoom(roomA, "pg_hub"), true);
+  assert.equal(await documents.pageExistsInRoom(roomB, "pg_hub"), true);
+  assert.equal(await documents.pageExistsInRoom(roomA, "pg_unplaced"), false);
 });
