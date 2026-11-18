@@ -2,6 +2,7 @@ import { localSupervisedRoomToolAvailable } from "../../../shared/local-supervis
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { registerRoomKnowledgeTools } from "./tools/knowledge.js";
 import { registerWakeRuleTools } from "./tools/wake-rules.js";
+import { registerJobTools } from "./tools/jobs.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAgentSessionTools } from "./tools/agent-sessions.js";
 import { registerMessageTools, registerStatusTools } from "./tools/messages.js";
@@ -60,6 +61,7 @@ export function registerTools(
   registerRoomInspectionTools(tools);
   registerRoomKnowledgeTools(tools);
   registerWakeRuleTools(tools);
+  registerJobTools(tools);
   registerStatusTools(tools);
   if (profile === "autonomous_mcp_worker" || profile === "interactive_desktop") registerWorkspaceTools(tools);
   registerTaskTools(tools);
