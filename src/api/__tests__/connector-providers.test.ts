@@ -147,10 +147,19 @@ test("a backslash outside quotes escapes the next character, as in Jira, so it c
     assert.throws(() => jiraQueryClause(filter), TrackerProviderError, filter);
   }
   // A room admin's filter may use escapes Jira accepts; a caller's query may not, outside quotes.
-  for (const filter of ["project = HT\\", "labels = a\\ b", "summary ~ \\\\'a ) OR (b'"]) {
+  for (const filter of ["labels = a\\ b", "summary ~ \\\\'a ) OR (b'"]) {
     assert.equal(jiraFilterClause(filter), filter);
     assert.throws(() => jiraQueryClause(filter), /backslash/, filter);
   }
+  // A trailing backslash escapes nothing; before the ) this provider adds it
+  // would turn that ) into a literal. Refused in a room filter too.
+  for (const filter of ["project = HT\\", "project = HT \\  ", "summary ~ \\\\\\", 'summary ~ "a\\']) {
+    assert.throws(() => jiraFilterClause(filter), /unbalanced/, filter);
+    assert.throws(() => jiraQueryClause(filter), TrackerProviderError, filter);
+  }
+  // An escaped backslash at the end is a whole escape, and a stripped ORDER BY takes its backslash with it.
+  assert.equal(jiraFilterClause("labels = a\\\\"), "labels = a\\\\");
+  assert.equal(jiraFilterClause("project = HT ORDER BY rank\\"), "project = HT");
   assert.equal(jiraQueryClause(`summary ~ "a \\" b" AND labels = 'it\\'s'`), `summary ~ "a \\" b" AND labels = 'it\\'s'`);
 });
 
