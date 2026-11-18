@@ -21,4 +21,30 @@ export const PAGE_HTML_MAX_BYTES: number;
  * compares them).
  */
 export const PAGE_THEME_TOKEN_NAMES: readonly string[];
+/**
+ * The helpers the desktop bridge puts on `letagents.use(area)`: each local
+ * name and the contract method it calls. The preload runs sandboxed and
+ * cannot import this, so a test compares it with the preload's own tables.
+ * @type {Readonly<Record<string, Readonly<Record<string, string>>>>}
+ */
+export const PAGE_AREA_HELPERS: Readonly<Record<string, Readonly<Record<string, string>>>>;
+/**
+ * The watch helper an area offers: its local name and the read it keeps
+ * running. `watch(input, cb)` takes the input first; `onChange(cb, input?)`
+ * the callback first.
+ * @type {Readonly<Record<string, readonly [string, string]>>}
+ */
+export const PAGE_AREA_WATCHES: Readonly<Record<string, readonly [string, string]>>;
+/** The reads a page may watch; the desktop's watch table must name the same ones (a test compares them). */
+export const PAGE_WATCHABLE_READS: readonly string[];
+/** The room changes the desktop relays to `letagents.events.onChange`. */
+export const PAGE_CHANGE_RESOURCES: readonly string[];
+/** How the desktop runs watches; a test compares these with its constants. */
+export const PAGE_WATCH_LIMITS: Readonly<{
+    debounceMs: 250;
+    workItemPollMs: 120000;
+    maxWatches: 16;
+}>;
+/** Calls the desktop asks the viewer about first, in an app-drawn sheet. */
+export const PAGE_CONFIRMED_METHODS: readonly string[];
 export type KnownApiMethod = import("./index.mjs").KnownApiMethod;

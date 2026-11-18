@@ -17,7 +17,7 @@ A room page is one HTML file that a team pins as a tab in a LetAgents room. It r
 ```
 - `api`: 1. `title`: 1 to 80 characters. `surfaces`: "room.tab", "task.panel", "message", "room.widget"; this version shows "room.tab" only. `owner`: "room".
 - `capabilities`: what the page may call; ask for the fewest. A room admin grants them when pinning; a call without one is `not_granted`. A new version that asks for more waits for a room admin.
-- `collections`: `{ "viewer": ["name"], "page": ["name"], "room": ["name"] }`, the data the page keeps per scope (needs `data.<scope>`). Names: a-z, 0-9, _.
+- `collections`: `{ "viewer": ["name"], "page": ["name"], "room": ["name"] }`, the data the page keeps per scope (needs `data.<scope>`). A name is a-z, 0-9 and _, starts with a letter, at most 40 characters. A document id is 1 to 128 letters, digits, _ . : or -.
 - `workItemFields`: tracker custom fields the page reads, such as "customfield_10027" (needs `work_items.read`).
 
 Capabilities by what happens when the page uses one: allowed: rooms.read, people.read, agents.read, messages.read, tasks.read, planning.read, work_items.read, git.read, memory.read, intents.read, jobs.read, data.viewer, data.page, data.room; a room admin approves: tasks.propose (allowed while Board Manager is off), tickets.propose (allowed when the viewer's own tracker connection runs it); the viewer confirms each call in an app sheet: jobs.start, messages.post.
@@ -25,10 +25,31 @@ Capabilities by what happens when the page uses one: allowed: rooms.read, people
 ## window.letagents
 Every call returns a Promise. A refusal rejects with `{ code, message, retryAfterMs? }`. Codes: invalid_input, unauthenticated, not_granted, not_participant, not_found, no_source, source_unavailable, rate_limited, conflict, too_large, declined, pending_approval, internal. `declined`: the viewer said no in the confirm sheet. After `rate_limited`, wait `retryAfterMs`.
 - `letagents.api.call(method, input?)` or `letagents.use(area).call(verb, input?)`: a method below.
-- `letagents.page.get()` → `{ id, title, version }`; `letagents.viewer.get()` → `{ id, login, displayName }`; `letagents.ui.context()` → `{ surface, room: { id }, page, viewer }`.
+- Built in, no capability needed: `letagents.page.get()` → `{ id, title, version }`, `letagents.viewer.get()` → `{ id, login, displayName }`, and every `letagents.ui` call: `ui.context()` → `{ surface, room: { id }, page, viewer }`.
 - `letagents.ui.open(url)`: https only, in the system browser; the first link to a new domain asks the viewer. `letagents.ui.copy(text)`: plain text. Both only within 5 s of a click or key press in the page.
 - `letagents.ui.theme.get()` → `{ mode: "light"|"dark", tokens }`; `letagents.ui.theme.onChange(fn)` returns an unsubscribe function.
-- At most a burst of 40 calls, then 10 a second. Nothing is pushed to the page but the theme: read again to see changes.
+- `jobs.start` and `intents.propose` first show the viewer an app-drawn sheet with everything they send; a no rejects with `declined` and sends nothing. Only the page in the open tab may ask, one sheet at a time.
+- At most a burst of 40 calls, then 10 a second.
+
+## Helpers: letagents.use(area)
+Each name calls the method in brackets (the same name when none), with that method's input: `use("board").tasks({ status: "in_progress" })`. `use(area).call(verb, input?)` calls the method `<area>.<verb>`.
+- `use("rooms")`: `get`.
+- `use("people")`: `list`, `viewer`.
+- `use("agents")`: `list`.
+- `use("messages")`: `recent`, `thread`.
+- `use("board")`: `tasks` (tasks.list), `get`, `planning` (planning.get); `onChange(cb, input?)` watches tasks.list.
+- `use("work_items")`: `search`, `get`, `history`; `watch(input, cb)` watches work_items.search.
+- `use("git")`: `pullRequests`.
+- `use("memory")`: `list`.
+- `use("jobs")`: `start`, `get`, `list`, `cancel`; `onChange(cb, input?)` watches jobs.list.
+- `use("intents")`: `propose`, `get`, `list`; `onChange(cb, input?)` watches intents.list.
+- `use("data").collection(scope, name)` (viewer: data.viewer, page: data.page, room: data.room): `list(input?)`, `get(docId)`, `set(docId, data, options?)`, `update(docId, data, options?)`, `delete(docId, options?)`, `onSnapshot(cb, input?)` watches data.list. `options`: `{ ifRevision? }`.
+
+## Live updates
+- A watch runs its read now, then again about 250 ms after each change in the room; work item reads also run at least every 2 minutes. Each answer calls `cb(result, error)`: one of the two is null. A watch returns a function that stops it.
+- `letagents.watch(method, input, cb)` watches any of: work_items.search, work_items.get, work_items.history, data.list, data.get, jobs.list, jobs.get, intents.list, intents.get, tasks.list, tasks.get, planning.get. It needs the method's capability.
+- At most 16 watches run per page; one more calls back with `too_large`.
+- `letagents.events.onChange(cb)` gets `{ resource }` (work_items, documents, jobs, intents, pages, tasks) when something changes, or `{ resource: "*" }` after a gap; returns an unsubscribe function.
 
 ## Methods
 A field without a type is a string. `?` optional, `= x` default, `<n>` a number. Path fields are required.
