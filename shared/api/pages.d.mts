@@ -695,6 +695,7 @@ export const approvePageVersion: import("./core.mjs").ApiMethod<"pages.approve",
         "work_items.read": "work_items.read";
         "git.read": "git.read";
         "memory.read": "memory.read";
+        "jobs.read": "jobs.read";
         "data.viewer": "data.viewer";
         "data.page": "data.page";
         "data.room": "data.room";
@@ -1346,6 +1347,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
         "work_items.read": "work_items.read";
         "git.read": "git.read";
         "memory.read": "memory.read";
+        "jobs.read": "jobs.read";
         "data.viewer": "data.viewer";
         "data.page": "data.page";
         "data.room": "data.room";

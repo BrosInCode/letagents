@@ -36,6 +36,7 @@
               "work_items.read",
               "git.read",
               "memory.read",
+              "jobs.read",
               "data.viewer",
               "data.page",
               "data.room",

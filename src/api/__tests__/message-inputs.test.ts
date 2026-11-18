@@ -147,3 +147,9 @@ test("public messages cannot preempt cloud answers while local answer sync remai
   const localKey = "attention-response:request-0001";
   assert.equal(parseCreateMessageBody({ client_message_id: localKey }).client_message_id, localKey);
 });
+
+test("no sender can pass a message off as an API job's thread root", () => {
+  for (const key of ["internal:job:job_0123456789abcdef0123456789abcdef", " internal:job:anything"]) {
+    assert.throws(() => parseCreateMessageBody({ client_message_id: key }), /reserved namespace/);
+  }
+});

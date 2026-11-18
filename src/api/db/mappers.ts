@@ -7,6 +7,7 @@ import { resolveRoomDisplayName } from "../rooms/display-name.js";
 import { board_intents, board_manager_assignments, github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, room_board_settings, rooms, room_git_bindings, room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
 import { formatAttachmentId, formatMessageId, formatTaskId } from "./utils.js";
 import type { MessageReaction } from "../../../shared/message-reactions.mjs";
+import { jobIdFromClientMessageId } from "../../../shared/api/jobs.mjs";
 import type { BoardIntent, BoardIntentRow, BoardManagerAssignment, BoardManagerAssignmentRow, CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitRoomBinding, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, MessageThreadSummary, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomBoardSettings, RoomBoardSettingsRow, RoomKind, RoomParticipant, RoomParticipantRow, RoomSharedArtifact, RoomSharedArtifactTaskLink, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
 
 export function toProject(row: typeof rooms.$inferSelect): Project {
@@ -223,6 +224,8 @@ export function toMessage(row: MessageRow): Message {
   return {
     id: formatMessageId(row.number),
     ...(/^desktop-send:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(row.client_message_id || "")
+      // A job's thread root says which job it is, so an agent's reply goes into its thread.
+      || jobIdFromClientMessageId(row.client_message_id)
       ? { client_message_id: row.client_message_id! } : {}),
     agent_identity: row.publisher_agent_key
       ? {

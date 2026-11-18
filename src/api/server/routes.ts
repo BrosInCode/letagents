@@ -9,6 +9,7 @@ import { registerRoomNotificationPreferenceRoutes } from "../routes/rooms/notifi
 import { registerAgentAskRoutes } from "../routes/agent-asks.js";
 import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import { registerWakeRuleRoutes } from "../routes/rooms/wake-rules.js";
+import { registerJobAgentRoutes } from "../routes/rooms/jobs.js";
 import { registerRoomInviteRoutes } from "../routes/rooms/invites.js";
 import { registerRoomMemberRoutes } from "../routes/rooms/members.js";
 import { registerDemoMarkRoutes } from "../routes/rooms/demo-marks.js";
@@ -608,6 +609,7 @@ export function registerApiRoutes(app: Express): void {
   });
   registerRoomKnowledgeRoutes(app, roomMessageRouteDeps);
   registerWakeRuleRoutes(app, roomMessageRouteDeps);
+  registerJobAgentRoutes(app, roomMessageRouteDeps);
   registerWakeRuleLinkRoutes(app);
   registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
   registerSupervisorHostGrantRoutes(app, roomPresenceRouteDeps);

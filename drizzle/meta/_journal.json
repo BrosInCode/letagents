@@ -1071,9 +1071,16 @@
       "version": "7",
       "when": 1795015200000,
       "tag": "0152_api_documents",
-        "breakpoints": true
-      },
-      {
+      "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1795015300000,
+      "tag": "0153_api_jobs",
+      "breakpoints": true
+    },
+    {
       "idx": 155,
       "version": "7",
       "when": 1795015500000,

@@ -294,6 +294,24 @@ test("supervised reply targets inherit true threads but not top-level quote repl
   );
 });
 
+test("a reply to an API job's thread root goes into the job's thread; other internal ids stay top-level", () => {
+  const root = { id: "msg_60", thread_root_id: "msg_60", thread: { root_message_id: "msg_60", is_thread_reply: false } };
+  assert.deepEqual(
+    supervisedReplyTargetForSourceMessage({ ...root, client_message_id: "internal:job:job_0123456789abcdef0123456789abcdef" }),
+    { replyTo: "msg_60", threadRootId: "msg_60" },
+  );
+  assert.deepEqual(supervisedReplyTargetForSourceMessage(root), { replyTo: null, threadRootId: null });
+  assert.deepEqual(
+    supervisedReplyTargetForSourceMessage({ ...root, client_message_id: "desktop-send:32571cb6-3fe9-48a1-9b3c-28f775bdc724" }),
+    { replyTo: null, threadRootId: null },
+  );
+  // A person's follow-up inside the job's thread keeps its own thread, as before.
+  assert.deepEqual(
+    supervisedReplyTargetForSourceMessage({ id: "msg_62", thread_root_id: "msg_60", thread: { root_message_id: "msg_60", is_thread_reply: true } }),
+    { replyTo: "msg_62", threadRootId: "msg_60" },
+  );
+});
+
 test("reply attachments are uploaded with the worker's bearer just before the reply, and a file that cannot be uploaded never blocks it", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-reply-attachments-"));
   const path = join(root, "state.sqlite");
