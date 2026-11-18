@@ -42,6 +42,49 @@ export function toJsonSchema(method: Pick<AnyApiMethod, "input" | "output">): {
     input: Record<string, unknown>;
     output: Record<string, unknown>;
 };
+/**
+ * A whole number from `min` to `max`, as a number or its decimal text.
+ * @overload
+ * @param {{ min: number, max: number }} options
+ * @returns {QueryInt}
+ */
+export function queryInt(options: {
+    min: number;
+    max: number;
+}): QueryInt;
+/**
+ * @overload
+ * @param {{ min: number, max: number, default: number }} options
+ * @returns {z.ZodDefault<QueryInt>}
+ */
+export function queryInt(options: {
+    min: number;
+    max: number;
+    default: number;
+}): z.ZodDefault<QueryInt>;
+/**
+ * `true` or `false`, as a boolean or the exact text "true" or "false".
+ * @overload
+ * @param {{}} [options]
+ * @returns {QueryBool}
+ */
+export function queryBool(options?: {} | undefined): QueryBool;
+/**
+ * @overload
+ * @param {{ default: boolean }} options
+ * @returns {z.ZodDefault<QueryBool>}
+ */
+export function queryBool(options: {
+    default: boolean;
+}): z.ZodDefault<QueryBool>;
+/**
+ * Input fields of a GET or DELETE method that a query string could never
+ * satisfy: a plain number or boolean, with no text form. Use queryInt and
+ * queryBool instead.
+ * @param {Pick<AnyApiMethod, "name" | "httpMethod" | "input">} method
+ * @returns {string[]}
+ */
+export function queryInputProblems(method: Pick<AnyApiMethod, "name" | "httpMethod" | "input">): string[];
 /** Inside `api: 1` the contract only grows; the compatibility test enforces it. */
 export const API_VERSION: 1;
 export const API_AREAS: readonly ["rooms", "people", "agents", "messages", "tasks", "planning", "work_items", "git", "memory", "data", "intents", "jobs", "events", "pages"];
@@ -53,6 +96,12 @@ export const API_AREAS: readonly ["rooms", "people", "agents", "messages", "task
  */
 export const METHOD_KINDS: readonly ["read", "intent", "job", "write"];
 export const HTTP_VERBS: readonly ["GET", "POST", "PUT", "PATCH", "DELETE"];
+/**
+ * - `json`: one JSON body, checked against `output`.
+ * - `stream`: the handler writes the response itself (server-sent events);
+ *   `output` describes one event's data.
+ */
+export const RESPONSE_KINDS: readonly ["json", "stream"];
 /**
  * Per-actor limits. A method names its class; the server counts each actor
  * (principal plus page, job or integration) per class.
@@ -92,6 +141,7 @@ export const API_ERROR_CODES: readonly ["invalid_input", "unauthenticated", "not
 /** @typedef {typeof API_AREAS[number]} ApiArea */
 /** @typedef {typeof METHOD_KINDS[number]} MethodKind */
 /** @typedef {typeof HTTP_VERBS[number]} HttpVerb */
+/** @typedef {typeof RESPONSE_KINDS[number]} ResponseKind */
 /** @typedef {keyof typeof RATE_CLASSES} RateClass */
 /** @typedef {typeof API_ERROR_CODES[number]} ApiErrorCode */
 /** @typedef {import("./capabilities.mjs").CapabilityName} CapabilityName */
@@ -150,9 +200,12 @@ export class ApiError extends Error {
     /** @returns {ApiErrorBody} */
     toBody(): ApiErrorBody;
 }
+export type QueryInt = ReturnType<typeof queryIntSchema>;
+export type QueryBool = ReturnType<typeof queryBoolSchema>;
 export type ApiArea = (typeof API_AREAS)[number];
 export type MethodKind = (typeof METHOD_KINDS)[number];
 export type HttpVerb = (typeof HTTP_VERBS)[number];
+export type ResponseKind = (typeof RESPONSE_KINDS)[number];
 export type RateClass = keyof typeof RATE_CLASSES;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 export type CapabilityName = import("./capabilities.mjs").CapabilityName;
@@ -164,6 +217,7 @@ export type MethodSpec<Name extends string = string, Input extends z.ZodType = z
     description: string;
     path: string;
     httpMethod?: HttpVerb;
+    response?: ResponseKind;
     input: Input;
     output: Output;
     errors?: readonly ApiErrorCode[];
@@ -177,6 +231,7 @@ export type ApiMethod<Name extends string = string, Input extends z.ZodType = z.
     readonly description: string;
     readonly path: string;
     readonly httpMethod: HttpVerb;
+    readonly response: ResponseKind;
     readonly input: Input;
     readonly output: Output;
     readonly errors: readonly ApiErrorCode[];
@@ -184,3 +239,13 @@ export type ApiMethod<Name extends string = string, Input extends z.ZodType = z.
 };
 export type AnyApiMethod = ApiMethod<string, z.ZodType, z.ZodType>;
 import { z } from "zod";
+/**
+ * @param {number} min
+ * @param {number} max
+ */
+declare function queryIntSchema(min: number, max: number): z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>;
+declare function queryBoolSchema(): z.ZodUnion<readonly [z.ZodBoolean, z.ZodPipe<z.ZodEnum<{
+    true: "true";
+    false: "false";
+}>, z.ZodTransform<boolean, "true" | "false">>]>;
+export {};
