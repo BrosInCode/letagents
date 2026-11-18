@@ -169,12 +169,8 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
   }
 
   function takeCall(lease: RoomPageLease): void {
-    const bucket = lease.calls;
-    if (takeInlineHtmlDemoTokens(bucket, 1, now())) return;
-    // A refused call does not count, so a page that waits gets its next call.
-    bucket.tokens += 1;
-    const retryAfterMs = Math.max(1, Math.ceil(((1 - bucket.tokens) / bucket.perSecond) * 1000));
-    throw new PageCallFailure("rate_limited", "This page is making calls too fast.", retryAfterMs);
+    const retryAfterMs = takePageCall(lease, now());
+    if (retryAfterMs > 0) throw new PageCallFailure("rate_limited", "This page is making calls too fast.", retryAfterMs);
   }
 
   return async function handlePageCall(event: PageCallEvent, payload: unknown): Promise<PageCallResult> {
@@ -326,6 +322,18 @@ export function describeIntent(kind: unknown, payload: unknown): ConfirmedSheet 
     default:
       return null;
   }
+}
+
+/**
+ * Takes one call from the page's budget, which its own calls and its watches'
+ * re-runs share. 0 when taken; otherwise how long until one is free. A
+ * refused call does not count, so a page that waits gets its next call.
+ */
+export function takePageCall(lease: Pick<RoomPageLease, "calls">, now: number): number {
+  const bucket = lease.calls;
+  if (takeInlineHtmlDemoTokens(bucket, 1, now)) return 0;
+  bucket.tokens += 1;
+  return Math.max(1, Math.ceil(((1 - bucket.tokens) / bucket.perSecond) * 1000));
 }
 
 export function contextOf(lease: RoomPageLease): PageCallContext {

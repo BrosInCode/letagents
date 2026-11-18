@@ -352,6 +352,11 @@ test("a worker bearer reaches /api/v1 writes only on the routes of methods flagg
   assert.equal(requiredAgentSessionRouteCapability("POST", `/api/v1/rooms/${room}/pages`), "coordination.propose");
   assert.equal(requiredAgentSessionRouteCapability("POST", `/api/v1/rooms/${room}/pages/page_ab12/versions`), "coordination.propose");
   assert.equal(requiredAgentSessionRouteCapability("GET", `/api/v1/rooms/${room}/pages/page_ab12/diagnostics`), "coordination.read");
+  // Message reads need messages.read, as on the older message routes.
+  assert.equal(requiredAgentSessionRouteCapability("GET", `/api/v1/rooms/${room}/messages`), "messages.read");
+  assert.equal(requiredAgentSessionRouteCapability("GET", `/api/v1/rooms/${room}/messages/msg_12/thread`), "messages.read");
+  assert.equal(requiredAgentSessionRouteCapability("GET", `/rooms/${room}/messages`), "messages.read");
+  assert.equal(requiredAgentSessionRouteCapability("GET", `/api/v1/rooms/${room}/tasks`), "coordination.read");
   for (const [verb, path] of [
     ["POST", `/api/v1/rooms/${room}/pages/page_ab12/grant`],
     ["POST", `/api/v1/rooms/${room}/pages/page_ab12/placements`],

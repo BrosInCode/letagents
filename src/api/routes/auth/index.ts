@@ -448,8 +448,14 @@ export function registerAuthLogoutRoute(
     // Pages this app session opened end with it, on this device only. First,
     // so their streams close now: deleting the session drops their rows.
     // An owner token mints no page grants, so its sign-out revokes none.
+    // A failed revoke must not keep the person signed in: deleting the
+    // session below deletes its grants too, only without closing streams now.
     if (req.authKind === "session" && req.sessionAccount && "id" in req.sessionAccount) {
-      await (deps.revokePageGrants ?? revokePageGrants)({ sessionId: req.sessionAccount.id });
+      try {
+        await (deps.revokePageGrants ?? revokePageGrants)({ sessionId: req.sessionAccount.id });
+      } catch (error) {
+        console.error("[auth/logout] could not revoke the session's page grants; the session delete removes them", error);
+      }
     }
     const cookies = parseCookies(req.headers.cookie);
     const retired: string[] = [];

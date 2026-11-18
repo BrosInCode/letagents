@@ -12,6 +12,8 @@ import { parseBearerAuthorization } from "../request/bearer-authorization.js";
 import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
 import { isRemoteMcpRequestPath, mcpBearerChallenge } from "../mcp-oauth/config.js";
 import { isApiV1RequestPath, requestPathname } from "../v1/page-grant-token.js";
+import { ApiError } from "../../../shared/api/core.mjs";
+import { DEFAULT_JSON_BODY_LIMIT_BYTES, deferPageHtmlBody, isOversizedAnonymousBody, isPageHtmlBodyRequest } from "./page-html-body.js";
 
 export const INVALID_BEARER_MESSAGE = "The bearer credential is invalid or expired. Reconnect with a current credential.";
 
@@ -49,15 +51,12 @@ export function buildAllowedOrigins(): Set<string> {
   ]);
 }
 
-/** POST /api/v1/rooms/:room/pages and /api/v1/rooms/:room/pages/:pageId/versions. */
-const PAGE_HTML_BODY_PATH = /^\/api\/v1\/rooms\/[^/]+\/pages(?:\/[^/]+\/versions)?\/?$/;
-
 export function registerHttpMiddleware(
   app: Express,
   deps: HttpMiddlewareDeps
 ): void {
   const json = express.json({
-    limit: "1mb",
+    limit: DEFAULT_JSON_BODY_LIMIT_BYTES,
     verify(req, _res, buf) {
       const request = req as AuthenticatedRequest & { originalUrl?: string };
       // Signed webhooks (GitHub, ticket trackers) verify the exact bytes.
@@ -66,12 +65,20 @@ export function registerHttpMiddleware(
       }
     },
   });
-  // A room page's HTML is up to 2 MB, sent as a JSON string. JSON escapes a
-  // control character as \uXXXX, six bytes for one, so the body can be six
-  // times the HTML. Only the page create and version routes take that body.
-  const pageHtmlJson = express.json({ limit: "13mb" });
-  app.use((req, res, next) =>
-    (req.method === "POST" && PAGE_HTML_BODY_PATH.test(req.path) ? pageHtmlJson : json)(req, res, next));
+  // A page's HTML body may pass the 1 MB limit, so it is read only once the
+  // /api/v1 pipeline knows the caller: nobody makes the server buffer a
+  // large body without signing in.
+  app.use((req, res, next) => {
+    if (!isPageHtmlBodyRequest(req)) return json(req, res, next);
+    if (isOversizedAnonymousBody(req)) {
+      const refused = new ApiError("unauthenticated", "Sign in to LetAgents to use the API.");
+      res.setHeader("Connection", "close");
+      res.status(refused.status).json(refused.toBody());
+      return;
+    }
+    deferPageHtmlBody(req);
+    next();
+  });
 
   app.use(async (req: AuthenticatedRequest, _res, next) => {
     try {

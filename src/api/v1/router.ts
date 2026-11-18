@@ -4,6 +4,7 @@ import { actorKey } from "../../../shared/api/actor.mjs";
 import { ApiError, capabilityForCall, describeIssues, methodMayReturn, type AnyApiMethod } from "../../../shared/api/core.mjs";
 import { GitHubAccessUnavailableError } from "../github/repo-access.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
+import { closeIfBodyUnread, readDeferredPageHtmlBody } from "../http/page-html-body.js";
 import { apiActionTarget, recordApiAction, type ApiActionRecord } from "./actions.js";
 import { identifyCaller, resolveRoomAccess } from "./actor.js";
 import { API_V1_ROUTES } from "./areas.js";
@@ -67,11 +68,18 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
       try {
         // Who, then the limit, before any room or database work, so a
         // flood costs one lookup per call.
-        const caller = await identify(req);
+        let caller = await identify(req);
         if (!caller) throw new ApiError("unauthenticated", "Sign in to LetAgents to use the API.");
         const rate = rateLimiter.take(actorKey(caller), method.rateClass);
         if (!rate.allowed) {
           throw new ApiError("rate_limited", "Too many calls. Wait and try again.", { retryAfterMs: rate.retryAfterMs });
+        }
+        // A page's large HTML body is read only now (see page-html-body.ts).
+        // The caller is identified again: body fields can mark a session's
+        // call as not made in person.
+        if (await readDeferredPageHtmlBody(req, res)) {
+          caller = await identify(req);
+          if (!caller) throw new ApiError("unauthenticated", "Sign in to LetAgents to use the API.");
         }
         const call: ApiCallContext = { ...(await roomAccess(caller, roomParam ?? "")), account: caller.account, req };
         if (method.kind !== "read") recordable = { actor: call.actor, method: method.name, capability: method.capability };
@@ -106,6 +114,7 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
           res.end();
           return;
         }
+        closeIfBodyUnread(req, res);
         const apiError = toApiError(error, method, strict && inHandler);
         if (recordable) await record({ ...recordable, target: actionTarget(req, pathParams), outcome: apiError.code });
         replyApiError(res, apiError);
@@ -114,6 +123,7 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
   }
 
   router.use((req, res) => {
+    closeIfBodyUnread(req, res);
     replyApiError(res, new ApiError("not_found", `No LetAgents API method answers ${req.method} ${API_V1_PREFIX}${req.path}.`));
   });
   return router;

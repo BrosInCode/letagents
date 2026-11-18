@@ -37,19 +37,33 @@ interface Watch {
   input: unknown;
   resources: readonly string[];
   pollMs: number | null;
-  /** The next run: after a pointer's debounce, a rate limit's wait, or the poll. */
+  /** The next run of this watch alone: a rate limit's wait, the call budget's, or the poll. */
   timer: ReturnType<typeof setTimeout> | null;
   timerAt: number;
   running: boolean;
   /** A pointer came while the read ran: run once more after it. */
   dirty: boolean;
   stopped: boolean;
+  /** The first run is part of the `events.watch` call, which paid for it. */
+  started: boolean;
+}
+
+interface LeaseWatches {
+  watches: Map<string, Watch>;
+  /** Watches a pointer named since the last batch; they run together. */
+  pending: Set<Watch>;
+  batch: ReturnType<typeof setTimeout> | null;
 }
 
 /**
  * The watches of every open page, run in main: a page names a read once, main
  * runs it now and again after each pointer for its resource (or a stream
  * gap), and pushes each answer. The page keeps only its callbacks.
+ *
+ * Pointers are batched per lease: the first starts a 250 ms wait, and every
+ * watch named until it ends runs once then. Each re-run also costs a token
+ * from the page's own call budget (`take`), so 16 watches cannot call faster
+ * than the page itself may; a watch out of budget runs later, never not at all.
  */
 export function createPageWatches<Lease extends object>(deps: {
   /** The read, with the lease's own grant; refusals are `PageCallFailure`. */
@@ -57,10 +71,12 @@ export function createPageWatches<Lease extends object>(deps: {
   push(lease: Lease, message: PageWatchMessage): void;
   /** Contract methods the page may call at all. */
   methods: ReadonlySet<string>;
+  /** Takes one call from the lease's budget: 0 when taken, else the wait in ms. */
+  take?(lease: Lease): number;
   now?: () => number;
 }) {
   const now = deps.now ?? Date.now;
-  const byLease = new WeakMap<Lease, Map<string, Watch>>();
+  const byLease = new WeakMap<Lease, LeaseWatches>();
 
   async function runWatch(lease: Lease, watch: Watch): Promise<void> {
     if (watch.stopped) return;
@@ -68,6 +84,17 @@ export function createPageWatches<Lease extends object>(deps: {
       watch.dirty = true;
       return;
     }
+    if (watch.started) {
+      const wait = deps.take?.(lease) ?? 0;
+      if (wait > 0) {
+        schedule(lease, watch, Math.max(PAGE_WATCH_DEBOUNCE_MS, wait));
+        return;
+      }
+    }
+    // This run answers whatever the scheduled one would have.
+    if (watch.timer) clearTimeout(watch.timer);
+    watch.timer = null;
+    watch.started = true;
     watch.running = true;
     let message: PageWatchMessage | null;
     let retryAfterMs: number | null = null;
@@ -92,16 +119,13 @@ export function createPageWatches<Lease extends object>(deps: {
       schedule(lease, watch, retryAfterMs);
     } else if (watch.dirty) {
       watch.dirty = false;
-      schedule(lease, watch, PAGE_WATCH_DEBOUNCE_MS);
+      queue(lease, watch);
     } else if (watch.pollMs !== null) {
       schedule(lease, watch, watch.pollMs);
     }
   }
 
-  /**
-   * Run the watch after `delay`, or sooner when a run is already due sooner.
-   * A pointer (250 ms) brings a waiting poll forward; it never waits for it.
-   */
+  /** Run this watch alone after `delay`, or sooner when a run is already due sooner. */
   function schedule(lease: Lease, watch: Watch, delay: number): void {
     if (watch.stopped) return;
     const at = now() + delay;
@@ -116,10 +140,25 @@ export function createPageWatches<Lease extends object>(deps: {
     }, delay);
   }
 
-  function stopWatch(watch: Watch): void {
+  /** Run this watch with the lease's next batch; the first pointer of a burst starts it. */
+  function queue(lease: Lease, watch: Watch): void {
+    const state = byLease.get(lease);
+    if (!state || watch.stopped) return;
+    state.pending.add(watch);
+    if (state.batch) return;
+    state.batch = setTimeout(() => {
+      state.batch = null;
+      const due = [...state.pending];
+      state.pending.clear();
+      for (const next of due) void runWatch(lease, next);
+    }, PAGE_WATCH_DEBOUNCE_MS);
+  }
+
+  function stopWatch(state: LeaseWatches, watch: Watch): void {
     watch.stopped = true;
     if (watch.timer) clearTimeout(watch.timer);
     watch.timer = null;
+    state.pending.delete(watch);
   }
 
   return {
@@ -129,40 +168,43 @@ export function createPageWatches<Lease extends object>(deps: {
         ? PAGE_WATCHABLE_METHODS[method]
         : undefined;
       if (!spec) throw new PageCallFailure("not_found", `${typeof method === "string" ? method.slice(0, 100) : "This"} cannot be watched.`);
-      const watches = byLease.get(lease) ?? new Map<string, Watch>();
-      byLease.set(lease, watches);
-      const previous = watches.get(id);
-      if (previous) stopWatch(previous);
-      else if (watches.size >= MAX_PAGE_WATCHES) throw new PageCallFailure("too_large", `A page can keep at most ${MAX_PAGE_WATCHES} watches.`);
+      const state = byLease.get(lease) ?? { watches: new Map<string, Watch>(), pending: new Set<Watch>(), batch: null };
+      byLease.set(lease, state);
+      const previous = state.watches.get(id);
+      if (previous) stopWatch(state, previous);
+      else if (state.watches.size >= MAX_PAGE_WATCHES) throw new PageCallFailure("too_large", `A page can keep at most ${MAX_PAGE_WATCHES} watches.`);
       const watch: Watch = {
         id, method: method as string, input, resources: spec.resources, pollMs: spec.pollMs,
-        timer: null, timerAt: 0, running: false, dirty: false, stopped: false,
+        timer: null, timerAt: 0, running: false, dirty: false, stopped: false, started: false,
       };
-      watches.set(id, watch);
+      state.watches.set(id, watch);
       void runWatch(lease, watch);
     },
     stop(lease: Lease, id: unknown): void {
-      const watches = byLease.get(lease);
-      const watch = typeof id === "string" ? watches?.get(id) : undefined;
-      if (!watch) return;
-      stopWatch(watch);
-      watches!.delete(watch.id);
+      const state = byLease.get(lease);
+      const watch = typeof id === "string" ? state?.watches.get(id) : undefined;
+      if (!state || !watch) return;
+      stopWatch(state, watch);
+      state.watches.delete(watch.id);
     },
     stopAll(lease: Lease): void {
-      for (const watch of byLease.get(lease)?.values() ?? []) stopWatch(watch);
+      const state = byLease.get(lease);
+      if (!state) return;
+      for (const watch of state.watches.values()) stopWatch(state, watch);
+      if (state.batch) clearTimeout(state.batch);
       byLease.delete(lease);
     },
     /** A pointer for one resource, or `gap` for everything, in this lease's room. */
     notify(lease: Lease, resource: string | "gap"): void {
-      for (const watch of byLease.get(lease)?.values() ?? []) {
+      for (const watch of byLease.get(lease)?.watches.values() ?? []) {
         if (resource !== "gap" && !watch.resources.includes(resource)) continue;
         // A pointer while the read runs means its answer may already be old: run once more after it.
         if (watch.running) watch.dirty = true;
-        else schedule(lease, watch, PAGE_WATCH_DEBOUNCE_MS);
+        else queue(lease, watch);
       }
     },
     count(lease: Lease): number {
-      return byLease.get(lease)?.size ?? 0;
+      return byLease.get(lease)?.watches.size ?? 0;
     },
   };
 }
