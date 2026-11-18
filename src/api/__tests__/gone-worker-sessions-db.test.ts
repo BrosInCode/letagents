@@ -188,3 +188,44 @@ test("a refused deletion ends no offline agent, and names up to three agents in 
     return true;
   });
 });
+
+async function supervise(sessionId: string, ownerAccountId: string, grantId: string, expiresIn: string) {
+  await pool!.query(`INSERT INTO supervisor_host_grants (grant_id,owner_account_id,host_id,installation_id,token_hash,allowed_room_ids,allowed_agent_keys,
+      issued_at,expires_at,created_at,updated_at)
+    VALUES ($1,$2,'host_'||$1,'install_'||$1,'hash_'||$1,'{}','{}',now() - interval '2 days',now() + $3::interval,now(),now())`,
+  [grantId, ownerAccountId, expiresIn]);
+  await pool!.query("UPDATE room_agent_sessions SET supervisor_grant_id = $2 WHERE session_id = $1", [sessionId, grantId]);
+}
+
+test("the sweep keeps desktop agents while their grant is current, and ends them once it expired", { skip }, async () => {
+  const account = await owner();
+  const room = await dbApi!.createProjectWithName("gone-supervised");
+  const current = await worker(room.id, account.id, "Current");
+  const lapsed = await worker(room.id, account.id, "Lapsed");
+  await silentFor(current.session_id, 120);
+  await silentFor(lapsed.session_id, 120);
+  await supervise(current.session_id, account.id, "grant_current", "1 day");
+  await supervise(lapsed.session_id, account.id, "grant_lapsed", "-1 day");
+
+  assert.deepEqual(await sessions!.endGoneWorkerSessions(), [lapsed.session_id]);
+  assert.equal((await endedAt(current.session_id)).ended_at, null);
+});
+
+test("room deletion waits for a desktop agent with a current grant, not one whose grant expired", { skip }, async () => {
+  const account = await owner();
+  const room = await dbApi!.createProjectWithName("delete-supervised");
+  const current = await worker(room.id, account.id, "Current");
+  const lapsed = await worker(room.id, account.id, "Lapsed");
+  await silentFor(current.session_id, 120);
+  await silentFor(lapsed.session_id, 120);
+  await supervise(current.session_id, account.id, "grant_current", "1 day");
+  await supervise(lapsed.session_id, account.id, "grant_lapsed", "-1 day");
+
+  await assert.rejects(deletion!.deleteRoomData(room.id), (error: any) => {
+    assert.equal(error.message, "Current is still in this room. Disconnect or retire it before deleting the room.");
+    return true;
+  });
+  await pool!.query("UPDATE supervisor_host_grants SET revoked_at = now() WHERE grant_id = 'grant_current'");
+  await deletion!.deleteRoomData(room.id);
+  assert.equal((await pool!.query("SELECT id FROM rooms WHERE id = $1", [room.id])).rowCount, 0);
+});
