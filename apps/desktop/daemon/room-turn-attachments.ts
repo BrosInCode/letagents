@@ -4,6 +4,8 @@ import { lstat, mkdtemp, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createPrivateDir, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
+import { detectAttachmentFile, sniffAttachmentImageType } from "../../../shared/attachment-content.mjs";
+import { AttachmentDownloadError as RoomAttachmentDownloadError } from "../../../shared/attachment-download.mjs";
 import { isHtmlDemoFile } from "../../../shared/live-demo.mjs";
 
 import type { ProviderRoomTurnAttachment, RoomTurnAttachmentOrigin, RoomTurnFileAccess, RoomTurnImageDelivery, RoomTurnImageMimeType } from "./provider-action-port.js";
@@ -91,21 +93,11 @@ const SWEEP_INTERVAL_MS = 10 * 60_000;
 const MIME_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
 
 /** A download that did not give usable bytes. Its message never holds an address or a credential. */
-export class RoomAttachmentDownloadError extends Error {
-  constructor(readonly reason: "too_large" | "unavailable") {
-    super(reason === "too_large" ? "The attachment is larger than the limit." : "The attachment could not be downloaded.");
-    this.name = "RoomAttachmentDownloadError";
-  }
-}
+export { RoomAttachmentDownloadError };
 
 /** The image type the bytes show, or null. */
 export function sniffRoomTurnImageType(bytes: Uint8Array): RoomTurnImageMimeType | null {
-  const startsWith = (offset: number, ...values: number[]) => values.every((value, index) => bytes[offset + index] === value);
-  if (startsWith(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "image/png";
-  if (startsWith(0, 0xff, 0xd8, 0xff)) return "image/jpeg";
-  if (startsWith(0, 0x47, 0x49, 0x46, 0x38) && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61) return "image/gif";
-  if (startsWith(0, 0x52, 0x49, 0x46, 0x46) && startsWith(8, 0x57, 0x45, 0x42, 0x50)) return "image/webp";
-  return null;
+  return sniffAttachmentImageType(bytes);
 }
 
 type DeclaredAttachment = { index: number; id: string | null; fileName: string; mimeType: string; sizeBytes: number | null };
@@ -164,35 +156,8 @@ function declaresPdf(file: { fileName: string; mimeType: string }): boolean {
 }
 
 /** What a file's bytes are. A NUL byte means binary, as Git decides; text need not be valid UTF-8. */
-export function detectRoomTurnFile(bytes: Uint8Array):
-  | { kind: "empty" } | { kind: "binary" } | { kind: "pdf" }
-  | { kind: "text"; bytes: Uint8Array; encoding: "utf-8" | "utf-16" | "unknown"; lines: number; longestLine: number } {
-  if (!bytes.byteLength) return { kind: "empty" };
-  if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d) return { kind: "pdf" };
-  let text = bytes;
-  let encoding: "utf-8" | "utf-16" | "unknown" = "utf-8";
-  const utf16 = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" : bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : null;
-  if (utf16) {
-    let decoded: string;
-    try { decoded = new TextDecoder(utf16, { fatal: true }).decode(bytes); } catch { return { kind: "binary" }; }
-    if (decoded.includes("\u0000")) return { kind: "binary" };
-    text = new TextEncoder().encode(decoded);
-    encoding = "utf-16";
-  } else {
-    if (bytes.includes(0)) return { kind: "binary" };
-    try { new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { encoding = "unknown"; }
-  }
-  let lines = 0;
-  let longestLine = 0;
-  let start = 0;
-  for (let index = 0; index <= text.byteLength; index++) {
-    if (index === text.byteLength ? index > start : text[index] === 0x0a) {
-      lines += 1;
-      longestLine = Math.max(longestLine, index - start);
-      start = index + 1;
-    }
-  }
-  return { kind: "text", bytes: text, encoding, lines, longestLine };
+export function detectRoomTurnFile(bytes: Uint8Array): ReturnType<typeof detectAttachmentFile> {
+  return detectAttachmentFile(bytes);
 }
 
 /** The activating message's attachments, under either field name the server sends. */

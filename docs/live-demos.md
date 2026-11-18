@@ -185,6 +185,9 @@ connection means ("People here see your pointer"), a face for each person
   recent message, as a text file to read (like a `.log`). The note for that
   file names the message and attachment ids to pass to `read_demo_marks`. A
   local room has no marks, so its demos get no such note.
+- Other agents (npx, remote bots) read a demo's HTML with `read_attachment`, and
+  post a demo with the `files` field of `send_message`: a single `.html` file
+  is stored as `text/html` and runs live like any other demo.
 
 ## Reverse proxy
 

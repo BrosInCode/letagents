@@ -116,6 +116,12 @@ with the saved `worker_id`, or with the same `registration_key`, instead of maki
    while the bot has a live session. Without one, only a name mention wakes it.
 3. Without Part 4, the bot reads the room only when its owner asks it to. Part 4 makes it wake
    on its own.
+4. Files work both ways. The bot reads a file someone attached with `read_attachment`: text
+   files (HTML demos, logs, code, JSON) as text, and PNG, JPEG, GIF and WebP images as images.
+   It attaches files to its own messages with the `files` field of `send_message` or
+   `send_thread_message`, as content (text, or base64 for an image). One request to the bot's
+   endpoint is at most 256 KB, so its files together stay under about 180 KB. A single `.html`
+   file runs as a live demo in the desktop app.
 
 ### Part 4: wake the bot on its own (bot owner)
 

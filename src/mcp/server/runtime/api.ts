@@ -120,7 +120,7 @@ export function rememberRefusedRoomId(roomId: string): void {
   if (roomId) lastRefusedRoom.set(roomId);
 }
 
-function apiErrorFor(status: number, body: string): ApiError {
+export function apiErrorFor(status: number, body: string): ApiError {
   if (status !== 403) return new ApiError(status, body);
   let payload: unknown;
   try {
@@ -249,6 +249,32 @@ export async function apiCallWhenFree<T = unknown>(path: string, options?: Reque
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
+}
+
+/**
+ * One API request with this process's identity, answered as the raw response:
+ * for a route that answers with something other than JSON (an attachment's
+ * redirect to storage). The caller reads or cancels the body. A failure is the
+ * response's own status; nothing is retried or forgotten here.
+ */
+export async function apiRequest(path: string, options: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(options.headers);
+  const scope = currentSessionScope();
+  if (scope) {
+    // In process, as the session's account; any caller Authorization header is dropped.
+    headers.delete("Authorization");
+    return scope.dispatch(path, { ...options, headers });
+  }
+  const runtime = requireValidWorkerBearerRuntime();
+  if (runtime.mode === "worker") {
+    headers.set("Authorization", `Bearer ${runtime.bearer}`);
+  } else if (runtime.mode === "supervised") {
+    headers.set("Authorization", `Bearer ${await getSupervisedCredential()}`);
+  } else {
+    const ownerToken = await getLetagentsToken();
+    if (ownerToken && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${ownerToken}`);
+  }
+  return fetch(`${getApiUrl()}${path}`, { ...options, headers });
 }
 
 export async function apiCall<T = unknown>(path: string, options?: RequestInit): Promise<T> {
