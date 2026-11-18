@@ -327,6 +327,10 @@ We do not guard, and say why:
 - Exfiltration: no network; jobs, posts and documents are visible to the room.
 - DNS prefetch / WebRTC lookups from the sandbox: accepted for demos already.
 - Encrypting documents per page: they are room data, like messages.
+- Work item queries as a yes/no oracle: Jira refuses (400) a query that names a project or key it does
+  not know and answers (200, empty) one it does, so a caller can still learn whether a project or key
+  exists on the site. The API forwards no Jira error text, only "Jira refused the query"; the bit that
+  remains is accepted.
 
 ## Build order
 
