@@ -44,6 +44,7 @@ export const page_versions = pgTable("page_versions", {
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   pk: primaryKey({ name: "page_versions_pkey", columns: [table.page_id, table.version] }),
+  author_owner_idx: index("page_versions_author_owner_idx").on(table.author_owner_account_id).where(sql`${table.author_owner_account_id} IS NOT NULL`),
   version_check: check("page_versions_version_check", sql`${table.version} > 0`),
   byte_size_check: check("page_versions_byte_size_check", sql`${table.byte_size} > 0 AND ${table.byte_size} <= 2097152`),
   author_kind_check: check("page_versions_author_kind_check", sql`${table.author_kind} IN ('person', 'agent')`),
@@ -61,6 +62,7 @@ export const page_placements = pgTable("page_placements", {
 }, (table) => ({
   pk: primaryKey({ name: "page_placements_pkey", columns: [table.page_id, table.room_id, table.surface] }),
   room_surface_idx: index("page_placements_room_surface_idx").on(table.room_id, table.surface, table.position),
+  pinned_by_idx: index("page_placements_pinned_by_idx").on(table.pinned_by).where(sql`${table.pinned_by} IS NOT NULL`),
   surface_check: check("page_placements_surface_check", sql`${table.surface} IN ('room.tab', 'task.panel', 'message', 'room.widget')`),
   position_check: check("page_placements_position_check", sql`${table.position} >= 0`),
 }));
@@ -74,6 +76,8 @@ export const page_grants = pgTable("page_grants", {
   approved_at: timestamp("approved_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   pk: primaryKey({ name: "page_grants_pkey", columns: [table.page_id, table.version, table.room_id] }),
+  room_idx: index("page_grants_room_idx").on(table.room_id),
+  approved_by_idx: index("page_grants_approved_by_idx").on(table.approved_by).where(sql`${table.approved_by} IS NOT NULL`),
   version_fk: foreignKey({
     name: "page_grants_version_fk",
     columns: [table.page_id, table.version],
@@ -88,6 +92,8 @@ export const page_diagnostics = pgTable("page_diagnostics", {
   kind: text("kind").notNull(),
   message: text("message").notNull(),
   at: timestamp("at", { mode: "string", withTimezone: true }).notNull(),
+  reporter_kind: text("reporter_kind").notNull(),
+  reporter_account_id: text("reporter_account_id").references(() => accounts.id, { onDelete: "set null" }),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   version_fk: foreignKey({
@@ -98,4 +104,6 @@ export const page_diagnostics = pgTable("page_diagnostics", {
   version_idx: index("page_diagnostics_version_idx").on(table.page_id, table.version, table.id),
   kind_check: check("page_diagnostics_kind_check", sql`${table.kind} IN ('console_error', 'exception', 'failed_call')`),
   message_check: check("page_diagnostics_message_check", sql`char_length(${table.message}) BETWEEN 1 AND 2000`),
+  reporter_kind_check: check("page_diagnostics_reporter_kind_check", sql`${table.reporter_kind} IN ('person', 'page')`),
+  reporter_idx: index("page_diagnostics_reporter_idx").on(table.reporter_account_id).where(sql`${table.reporter_account_id} IS NOT NULL`),
 }));

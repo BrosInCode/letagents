@@ -1,7 +1,7 @@
 {
   "pages.approve": {
     "kind": "write",
-    "capability": "rooms.read",
+    "capability": "rooms.admin",
     "httpMethod": "POST",
     "path": "/rooms/:room/pages/:pageId/approve",
     "response": "json",
@@ -802,7 +802,7 @@
   },
   "pages.delete": {
     "kind": "write",
-    "capability": "rooms.read",
+    "capability": "rooms.admin",
     "httpMethod": "DELETE",
     "path": "/rooms/:room/pages/:pageId",
     "response": "json",
@@ -1386,6 +1386,7 @@
     "response": "json",
     "rateClass": "write",
     "errors": [
+      "conflict",
       "not_found"
     ],
     "input": {
@@ -1407,33 +1408,8 @@
         "token": {
           "type": "string"
         },
-        "grantId": {
-          "type": "string"
-        },
         "expiresAt": {
           "type": "string"
-        },
-        "page": {
-          "type": "object",
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "title": {
-              "type": "string"
-            },
-            "version": {
-              "type": "integer",
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991
-            }
-          },
-          "required": [
-            "id",
-            "title",
-            "version"
-          ],
-          "additionalProperties": false
         },
         "capabilities": {
           "type": "array",
@@ -1444,9 +1420,7 @@
       },
       "required": [
         "token",
-        "grantId",
         "expiresAt",
-        "page",
         "capabilities"
       ],
       "additionalProperties": false
@@ -1512,7 +1486,7 @@
   },
   "pages.pin": {
     "kind": "write",
-    "capability": "rooms.read",
+    "capability": "rooms.admin",
     "httpMethod": "POST",
     "path": "/rooms/:room/pages/:pageId/placements",
     "response": "json",
@@ -2375,7 +2349,7 @@
   },
   "pages.setCurrent": {
     "kind": "write",
-    "capability": "rooms.read",
+    "capability": "rooms.admin",
     "httpMethod": "POST",
     "path": "/rooms/:room/pages/:pageId/current",
     "response": "json",
@@ -2754,7 +2728,7 @@
   },
   "pages.unpin": {
     "kind": "write",
-    "capability": "rooms.read",
+    "capability": "rooms.admin",
     "httpMethod": "DELETE",
     "path": "/rooms/:room/pages/:pageId/placements",
     "response": "json",

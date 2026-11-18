@@ -4,12 +4,13 @@ import { CAPABILITIES, isCapabilityName, type CapabilityName } from "../../../sh
 import { ApiError } from "../../../shared/api/core.mjs";
 import { parsePageManifest, type DataScope, type PageManifest } from "../../../shared/api/manifest.mjs";
 import { extractPageManifest, PAGE_LIMITS, type PageVersionStatus } from "../../../shared/api/pages.mjs";
+import { ROOM_RESOURCE_PAGES } from "../../../shared/room-resource-invalidation.mjs";
 import { isRoomAdminAccount } from "../connectors/rules/engine.js";
 import type { MessageAttachmentData } from "../db/types.js";
 import * as store from "../db/pages.js";
 import { isHumanAppWrite, isSameOriginCookieWrite } from "../request/app-session.js";
 import { decideRoomAdmin, roomAccessPrincipal } from "../rooms/access-decision.js";
-import { createBridgedEmitter } from "../server/bridged-emitter.js";
+import { queueRoomResourceInvalidation } from "../server/events.js";
 import {
   createPresignedAttachmentDownload,
   isAttachmentStorageConfigured,
@@ -68,11 +69,15 @@ export function decideVersionStatus(input: {
 /** Who calls, as the registry sees it. Admin status is read once per call, and only when a rule needs it. */
 export interface PageCaller {
   call: ApiCallContext;
-  /** The person's account, when a person calls for themselves (not through a page). */
+  /**
+   * The person's account, when a person calls for themselves: no via, or the
+   * remote MCP integration, which acts as the person's owner token does.
+   * Never through a page or a job.
+   */
   accountId: string | null;
   /** The agent key, when an agent calls. */
   agentKey: string | null;
-  /** True when the call comes through a page grant. */
+  /** The page id, when the call comes through a page grant. */
   viaPage: string | null;
   isRoomAdmin(): Promise<boolean>;
 }
@@ -80,7 +85,8 @@ export interface PageCaller {
 export function pageCaller(call: ApiCallContext): PageCaller {
   const { actor } = call;
   const viaPage = actor.via?.kind === "page" ? actor.via.id : null;
-  const accountId = actor.principal.kind === "person" && !viaPage && call.account ? call.account.account_id : null;
+  const forThemselves = !actor.via || actor.via.kind === "integration";
+  const accountId = actor.principal.kind === "person" && forThemselves && call.account ? call.account.account_id : null;
   const agentKey = actor.principal.kind === "agent" ? actor.principal.id : null;
   let admin: Promise<boolean> | null = null;
   return {
@@ -120,6 +126,8 @@ export async function versionAuthor(caller: PageCaller): Promise<{
   trust: PageAuthorTrust;
 }> {
   if (caller.viaPage) throw new ApiError("not_granted", "A page cannot change pages.");
+  // A job carries no permission: page versions come from the agent or person directly.
+  if (caller.call.actor.via?.kind === "job") throw new ApiError("not_granted", "Pages are not changed through a job.");
   if (caller.agentKey) {
     const ownerAccountId = await store.getAgentOwnerAccountId(caller.agentKey);
     const ownerIsAdmin = ownerAccountId ? await isRoomAdminAccount(caller.call.room.id, ownerAccountId, { outage: "throw" }) : false;
@@ -208,22 +216,9 @@ export function preparePageHtml(html: string): PageHtml {
 
 // ── Events ──────────────────────────────────────────────────────────────
 
-// The one lane for LetAgents API resources ("room-resources"): the room
-// stream sends a `pages` pointer from it once that lane's listener is in the
-// event broker. createBridgedEmitter returns the one emitter per lane.
-const roomResourceEvents = createBridgedEmitter("room-resources");
-const pendingPageInvalidations = new Map<string, ReturnType<typeof setTimeout>>();
-const PAGE_INVALIDATION_COALESCE_MS = 100;
-
 /** Tells the room's clients that its pages changed; they read again through /api/v1. */
 export function queuePagesInvalidation(roomId: string): void {
-  if (pendingPageInvalidations.has(roomId)) return;
-  const timer = setTimeout(() => {
-    pendingPageInvalidations.delete(roomId);
-    roomResourceEvents.emit("room_resource:invalidated", { projectId: roomId, resource: "pages" });
-  }, PAGE_INVALIDATION_COALESCE_MS);
-  timer.unref?.();
-  pendingPageInvalidations.set(roomId, timer);
+  queueRoomResourceInvalidation(roomId, ROOM_RESOURCE_PAGES);
 }
 
 // ── Hooks for other API areas ───────────────────────────────────────────
@@ -231,6 +226,12 @@ export function queuePagesInvalidation(roomId: string): void {
 /** Whether the room owns the page or has it pinned: documents in the page scope are reachable only then. */
 export async function pageExistsInRoom(roomId: string, pageId: string): Promise<boolean> {
   return Boolean(await store.getRoomPage(roomId, pageId));
+}
+
+/** The collections a page version's manifest names, per scope; none for an unknown version. */
+export async function pageManifestCollections(pageId: string, version: number): Promise<PageManifest["collections"]> {
+  const row = await store.getPageVersion(pageId, version);
+  return { ...(row?.manifest.collections ?? {}) };
 }
 
 /** The collections a page version's manifest names in one data scope; none for an unknown version. */

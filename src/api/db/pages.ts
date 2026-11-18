@@ -103,9 +103,34 @@ export async function listRoomPages(roomId: string, surface?: PageSurface): Prom
   return rows;
 }
 
-export async function countRoomOwnedPages(client: Queryable, roomId: string): Promise<number> {
-  const { rows } = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM pages WHERE owner_room_id = $1", [roomId]);
+/** Pages the room owns that have a live version. */
+export async function countRoomLivePages(client: Queryable, roomId: string): Promise<number> {
+  const { rows } = await client.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM pages WHERE owner_room_id = $1 AND current_version IS NOT NULL", [roomId]);
   return rows[0]!.count;
+}
+
+/** Pages in the room that one author made and that have no live version yet. */
+export async function countAuthorUnlivedPages(client: Queryable, roomId: string, author: { kind: "person" | "agent"; id: string }): Promise<number> {
+  const { rows } = await client.query<{ count: number }>(
+    `SELECT count(*)::int AS count FROM pages
+      WHERE owner_room_id = $1 AND current_version IS NULL AND created_by_kind = $2 AND created_by = $3`,
+    [roomId, author.kind, author.id],
+  );
+  return rows[0]!.count;
+}
+
+/** A page's drafts and versions waiting for approval, oldest first. The caller holds the page row lock. */
+export async function listUnpublishedVersions(client: Queryable, pageId: string): Promise<Pick<PageVersionRow, "version" | "author_kind" | "author_id">[]> {
+  const { rows } = await client.query<Pick<PageVersionRow, "version" | "author_kind" | "author_id">>(
+    "SELECT version, author_kind, author_id FROM page_versions WHERE page_id = $1 AND status IN ('draft', 'pending_approval') ORDER BY version",
+    [pageId],
+  );
+  return rows;
+}
+
+export async function deletePageVersion(client: Queryable, pageId: string, version: number): Promise<void> {
+  await client.query("DELETE FROM page_versions WHERE page_id = $1 AND version = $2 AND status IN ('draft', 'pending_approval')", [pageId, version]);
 }
 
 /** Slugs in the room equal to `base` or `base-<n>`, to pick a free one. */
@@ -272,16 +297,19 @@ export async function insertPageDiagnostics(input: {
   pageId: string;
   version: number;
   entries: readonly { kind: string; message: string; at: string }[];
+  /** `page` when the page reported through its own grant; `person` when the app did with the person's session. */
+  reporterKind: "person" | "page";
+  reporterAccountId: string;
   keep: number;
 }): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query(
-      `INSERT INTO page_diagnostics (page_id, version, kind, message, at)
-        SELECT $1, $2, entry.kind, entry.message, entry.at
+      `INSERT INTO page_diagnostics (page_id, version, kind, message, at, reporter_kind, reporter_account_id)
+        SELECT $1, $2, entry.kind, entry.message, entry.at, $4, $5
           FROM jsonb_to_recordset($3::jsonb) AS entry(kind text, message text, at timestamptz)`,
-      [input.pageId, input.version, JSON.stringify(input.entries)],
+      [input.pageId, input.version, JSON.stringify(input.entries), input.reporterKind, input.reporterAccountId],
     );
     await client.query(
       `DELETE FROM page_diagnostics WHERE page_id = $1 AND version = $2 AND id < (

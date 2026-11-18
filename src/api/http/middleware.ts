@@ -66,9 +66,10 @@ export function registerHttpMiddleware(
       }
     },
   });
-  // A room page's HTML is up to 2 MB as a JSON string, which escaping can
-  // grow. Only the page create and version routes take the larger body.
-  const pageHtmlJson = express.json({ limit: "4mb" });
+  // A room page's HTML is up to 2 MB, sent as a JSON string. JSON escapes a
+  // control character as \uXXXX, six bytes for one, so the body can be six
+  // times the HTML. Only the page create and version routes take that body.
+  const pageHtmlJson = express.json({ limit: "13mb" });
   app.use((req, res, next) =>
     (req.method === "POST" && PAGE_HTML_BODY_PATH.test(req.path) ? pageHtmlJson : json)(req, res, next));
 

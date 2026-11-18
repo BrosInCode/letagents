@@ -5,15 +5,21 @@
 // pinned there. Another room's page id is `not_found`.
 import { z } from "zod";
 
-import { CAPABILITY_NAMES } from "./capabilities.mjs";
+import { GRANTABLE_CAPABILITY_NAMES } from "./capabilities.mjs";
 import { defineMethod, queryInt } from "./core.mjs";
 import { PAGE_MANIFEST_SCRIPT_TYPE, PAGE_OWNER_KINDS, PAGE_SURFACES } from "./manifest.mjs";
 
 export const PAGE_LIMITS = Object.freeze({
   /** The page's HTML, as UTF-8 bytes. */
   htmlBytes: 2 * 1024 * 1024,
-  /** Pages a room owns, pinned or not. */
-  pagesPerRoom: 50,
+  /** Pages with a live version a room owns, pinned or not. */
+  livePagesPerRoom: 50,
+  /** Pages with no live version yet that one author made in one room. */
+  unlivedPagesPerAuthor: 5,
+  /** Drafts and versions waiting for approval per page. */
+  unpublishedVersionsPerPage: 10,
+  /** Drafts and versions waiting for approval per page per author; a new one replaces the author's oldest. */
+  unpublishedVersionsPerAuthor: 3,
   /** Pinned pages per surface in one room. The desktop shows 3 as tabs and the rest in a menu. */
   placementsPerSurface: 10,
   /** Superseded versions kept per page for roll back; older ones are deleted. */
@@ -130,9 +136,9 @@ export const PageDocument = z.object({ page: PageRef, html: z.string() });
 export const PageGrantToken = z.object({
   /** The page_grant bearer. Only the app's main process holds it; never hand it to the page. */
   token: z.string(),
-  grantId: z.string(),
+  /** ISO time; open the page again (pages.grant) before then. */
   expiresAt: z.string(),
-  page: PageRef,
+  /** What the live version was granted in this room; the bearer holds exactly these. */
   capabilities: z.array(z.string()),
 });
 
@@ -235,7 +241,7 @@ export const createPage = defineMethod({
   kind: "write",
   capability: "rooms.read",
   description:
-    "Makes a page in this room from its HTML (html) or from an HTML attachment of a message in this room (source). The HTML must hold one <script type=\"application/letagents-page+json\"> manifest; its title names the page. Version 1 goes live at once when a room admin or an agent in the room makes it and its manifest asks for no capabilities; otherwise it waits for a room admin to grant them (pages.approve). A person who is not a room admin always gets a version that waits. draft: true keeps it visible only to room admins and you. Pinning is pages.pin.",
+    "Makes a page in this room from its HTML (html) or from an HTML attachment of a message in this room (source). The HTML must hold one <script type=\"application/letagents-page+json\"> manifest; its title names the page. Version 1 goes live at once when a room admin or an agent in the room makes it and its manifest asks for no capabilities; otherwise it waits for a room admin to grant them (pages.approve). A person who is not a room admin always gets a version that waits. draft: true keeps it visible only to room admins and you. Until a version goes live, others see the page as \"Untitled\". A room holds 50 live pages, and each author at most 5 pages that are not live yet (conflict). Pinning is pages.pin.",
   path: "/rooms/:room/pages",
   input: z
     .strictObject({
@@ -257,7 +263,7 @@ export const publishPageVersion = defineMethod({
   kind: "write",
   capability: "rooms.read",
   description:
-    "Adds a version of a page, from html or an HTML attachment (source). It goes live at once, with an \"Updated by\" record, when a room admin or an agent in the room made it and it asks for no capability beyond what the live version was granted. It waits for a room admin (status pending_approval) when it asks for more, or when the page holds jobs.start, messages.post or a *.propose capability and the author is a person who is not a room admin, or an agent whose owner is not one. draft: true keeps it visible only to room admins and its author.",
+    "Adds a version of a page, from html or an HTML attachment (source). It goes live at once, with an \"Updated by\" record, when a room admin or an agent in the room made it and it asks for no capability beyond what the live version was granted. It waits for a room admin (status pending_approval) when it asks for more, or when the page holds jobs.start, messages.post or a *.propose capability and the author is a person who is not a room admin, or an agent whose owner is not one. draft: true keeps it visible only to room admins and its author. A page holds at most 10 drafts and waiting versions (conflict), and each author at most 3: a fourth replaces that author's oldest.",
   path: "/rooms/:room/pages/:pageId/versions",
   input: z
     .strictObject({ pageId, html: htmlInput.optional(), source: PageSource.optional(), draft: z.boolean().default(false) })
@@ -271,7 +277,7 @@ export const pinPage = defineMethod({
   name: "pages.pin",
   area: "pages",
   kind: "write",
-  capability: "rooms.read",
+  capability: "rooms.admin",
   description:
     "Pins a page with a live version on a surface of this room (v1: room.tab), at position (0 first; the end when left out). Pinning it again moves it. Room admins only, signed in to the LetAgents app.",
   path: "/rooms/:room/pages/:pageId/placements",
@@ -290,7 +296,7 @@ export const unpinPage = defineMethod({
   area: "pages",
   kind: "write",
   httpMethod: "DELETE",
-  capability: "rooms.read",
+  capability: "rooms.admin",
   description:
     "Removes a page from a surface of this room and ends every open page grant for it. The page and its versions stay. Room admins only, signed in to the LetAgents app.",
   path: "/rooms/:room/pages/:pageId/placements",
@@ -304,14 +310,14 @@ export const approvePageVersion = defineMethod({
   name: "pages.approve",
   area: "pages",
   kind: "write",
-  capability: "rooms.read",
+  capability: "rooms.admin",
   description:
     "Grants a version the capabilities a room admin chose (each must be in its manifest; fewer is fine). A version waiting for approval then goes live. On the live version it changes the grant. Either way every open page grant for the page ends, so viewers open it again with the new grant. Room admins only, signed in to the LetAgents app.",
   path: "/rooms/:room/pages/:pageId/approve",
   input: z.strictObject({
     pageId,
     version: pageVersion,
-    capabilities: z.array(z.enum(CAPABILITY_NAMES)).refine((names) => new Set(names).size === names.length, {
+    capabilities: z.array(z.enum(GRANTABLE_CAPABILITY_NAMES)).refine((names) => new Set(names).size === names.length, {
       error: "Capabilities must not repeat.",
     }),
   }),
@@ -324,7 +330,7 @@ export const setCurrentPageVersion = defineMethod({
   name: "pages.setCurrent",
   area: "pages",
   kind: "write",
-  capability: "rooms.read",
+  capability: "rooms.admin",
   description:
     "Makes an earlier live version the page's live version again (roll back, or Undo after an update). It keeps the grant that version had. Every open page grant for the page ends. Room admins only, signed in to the LetAgents app.",
   path: "/rooms/:room/pages/:pageId/current",
@@ -339,7 +345,7 @@ export const deletePage = defineMethod({
   area: "pages",
   kind: "write",
   httpMethod: "DELETE",
-  capability: "rooms.read",
+  capability: "rooms.admin",
   description:
     "Deletes a page this room owns, with every version, placement, grant and diagnostic, and ends its open page grants. Room admins only, signed in to the LetAgents app.",
   path: "/rooms/:room/pages/:pageId",
@@ -355,11 +361,11 @@ export const grantPage = defineMethod({
   kind: "write",
   capability: "rooms.read",
   description:
-    "Opens a pinned page for the signed-in person: a short-lived page_grant for the live version, with the capabilities a room admin granted it. The LetAgents app calls this in its main process and keeps the token from the page. People only, signed in to the app; agents and pages get not_granted.",
+    "Opens a pinned page for the signed-in person: a short-lived page_grant for the live version, with the capabilities a room admin granted it. The LetAgents app calls this in its main process and keeps the token from the page. People only, signed in to the app; agents and pages get not_granted. conflict: the page changed while it was opening; call again.",
   path: "/rooms/:room/pages/:pageId/grant",
   input: z.strictObject({ pageId }),
   output: PageGrantToken,
-  errors: ["not_found"],
+  errors: ["not_found", "conflict"],
   rateClass: "write",
 });
 
@@ -369,7 +375,7 @@ export const reportPageDiagnostics = defineMethod({
   kind: "write",
   capability: "rooms.read",
   description:
-    "Records console errors, uncaught exceptions and failed calls of a page version, for its authors to read. The newest 200 per version are kept. Sent by the app showing the page.",
+    "Records console errors, uncaught exceptions and failed calls of a page version, for its authors to read. The newest 200 per version are kept. Sent by the LetAgents app showing the page, with the person's app session, or by the page version itself through its page grant.",
   path: "/rooms/:room/pages/:pageId/diagnostics",
   input: z.strictObject({
     pageId,
@@ -395,7 +401,7 @@ export const listPageDiagnostics = defineMethod({
   kind: "read",
   capability: "rooms.read",
   description:
-    "The newest console errors, exceptions and failed calls reported for a page version (the live version when left out), newest first. Readable by room admins, the version's author (or the author's owner) and agents in the room.",
+    "The newest console errors, exceptions and failed calls reported for a page version (the live version when left out), newest first. Readable by room admins, the version's author (or the author's owner) and agents in the room; a draft's or waiting version's only by those who can see it.",
   path: "/rooms/:room/pages/:pageId/diagnostics",
   input: z.strictObject({
     pageId,

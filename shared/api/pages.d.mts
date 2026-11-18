@@ -15,8 +15,14 @@ export function extractPageManifest(html: string): {
 export const PAGE_LIMITS: Readonly<{
     /** The page's HTML, as UTF-8 bytes. */
     htmlBytes: number;
-    /** Pages a room owns, pinned or not. */
-    pagesPerRoom: 50;
+    /** Pages with a live version a room owns, pinned or not. */
+    livePagesPerRoom: 50;
+    /** Pages with no live version yet that one author made in one room. */
+    unlivedPagesPerAuthor: 5;
+    /** Drafts and versions waiting for approval per page. */
+    unpublishedVersionsPerPage: 10;
+    /** Drafts and versions waiting for approval per page per author; a new one replaces the author's oldest. */
+    unpublishedVersionsPerAuthor: 3;
     /** Pinned pages per surface in one room. The desktop shows 3 as tabs and the rest in a menu. */
     placementsPerSurface: 10;
     /** Superseded versions kept per page for roll back; older ones are deleted. */
@@ -213,13 +219,7 @@ export const PageDocument: z.ZodObject<{
 export type PageGrantToken = z.infer<typeof PageGrantToken>;
 export const PageGrantToken: z.ZodObject<{
     token: z.ZodString;
-    grantId: z.ZodString;
     expiresAt: z.ZodString;
-    page: z.ZodObject<{
-        id: z.ZodString;
-        title: z.ZodString;
-        version: z.ZodNumber;
-    }, z.core.$strip>;
     capabilities: z.ZodArray<z.ZodString>;
 }, z.core.$strip>;
 export type PageDiagnosticEntry = z.infer<typeof PageDiagnosticEntry>;
@@ -702,6 +702,7 @@ export const approvePageVersion: import("./core.mjs").ApiMethod<"pages.approve",
         "tickets.propose": "tickets.propose";
         "jobs.start": "jobs.start";
         "messages.post": "messages.post";
+        "rooms.admin": "rooms.admin";
     }>>;
 }, z.core.$strict>, z.ZodObject<{
     id: z.ZodString;
@@ -868,13 +869,7 @@ export const grantPage: import("./core.mjs").ApiMethod<"pages.grant", z.ZodObjec
     pageId: z.ZodString;
 }, z.core.$strict>, z.ZodObject<{
     token: z.ZodString;
-    grantId: z.ZodString;
     expiresAt: z.ZodString;
-    page: z.ZodObject<{
-        id: z.ZodString;
-        title: z.ZodString;
-        version: z.ZodNumber;
-    }, z.core.$strip>;
     capabilities: z.ZodArray<z.ZodString>;
 }, z.core.$strip>>;
 export const reportPageDiagnostics: import("./core.mjs").ApiMethod<"pages.reportDiagnostics", z.ZodObject<{
@@ -1358,6 +1353,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
         "tickets.propose": "tickets.propose";
         "jobs.start": "jobs.start";
         "messages.post": "messages.post";
+        "rooms.admin": "rooms.admin";
     }>>;
 }, z.core.$strict>, z.ZodObject<{
     id: z.ZodString;
@@ -1521,13 +1517,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
     pageId: z.ZodString;
 }, z.core.$strict>, z.ZodObject<{
     token: z.ZodString;
-    grantId: z.ZodString;
     expiresAt: z.ZodString;
-    page: z.ZodObject<{
-        id: z.ZodString;
-        title: z.ZodString;
-        version: z.ZodNumber;
-    }, z.core.$strip>;
     capabilities: z.ZodArray<z.ZodString>;
 }, z.core.$strip>>, import("./core.mjs").ApiMethod<"pages.reportDiagnostics", z.ZodObject<{
     pageId: z.ZodString;

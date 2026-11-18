@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { isCapabilityName } from "../../../../shared/api/capabilities.mjs";
+import { isGrantableCapabilityName, type CapabilityName } from "../../../../shared/api/capabilities.mjs";
 import { ApiError } from "../../../../shared/api/core.mjs";
 import {
   approvePageVersion,
@@ -26,7 +26,7 @@ import { getMessageAttachment } from "../../db/messages/attachments.js";
 import { inTransaction } from "../../db/room-members.js";
 import { isAppSession } from "../../request/app-session.js";
 import type { ApiCallContext } from "../context.js";
-import { pageGrantsUnavailable, type PageGrantsPort } from "../page-grants-port.js";
+import { mintPageGrant, requirePageGrantMinter, revokePageGrants } from "../page-grants.js";
 import {
   canSeeVersion,
   decideVersionStatus,
@@ -47,19 +47,18 @@ import {
 import { defineRoute, withStatus, type ApiRoute } from "../route.js";
 
 export interface PagesRouteDeps {
-  /** Mints and revokes page_grant bearers. */
-  grants?: PageGrantsPort;
   /** Reads an HTML attachment's bytes from attachment storage. */
   readAttachment?: AttachmentReader;
 }
 
 const PAGE_NOT_FOUND = "No page with this id in this room.";
+/** What others see of a page that has no live version and no version they may see. */
+const UNTITLED = "Untitled";
 
 // Routes for the methods in shared/api/pages.mjs, made with defineRoute.
 // Every route finds the page through the room in the URL (store.getRoomPage
 // and store.lockRoomPage), so another room's page id is not_found.
 export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[] {
-  const grants = deps.grants ?? pageGrantsUnavailable;
   const readAttachment = deps.readAttachment ?? readAttachmentFromStorage;
 
   const loadHtml = async (input: { html?: string; source?: PageSource }, call: ApiCallContext): Promise<PageHtml & { source: PageSource | null }> => {
@@ -100,8 +99,11 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
       const pageId = `page_${randomUUID().replace(/-/g, "")}`;
       await inTransaction(async (client) => {
         await store.lockRoomPages(client, call.room.id);
-        if ((await store.countRoomOwnedPages(client, call.room.id)) >= PAGE_LIMITS.pagesPerRoom) {
-          throw new ApiError("conflict", `A room holds at most ${PAGE_LIMITS.pagesPerRoom} pages. Delete one first.`);
+        // Live pages count against the room; pages still waiting count
+        // against their author, so nobody can fill the room with them.
+        if (status === "live") await requireLivePageRoom(client, call.room.id);
+        else if ((await store.countAuthorUnlivedPages(client, call.room.id, author)) >= PAGE_LIMITS.unlivedPagesPerAuthor) {
+          throw new ApiError("conflict", `You have ${PAGE_LIMITS.unlivedPagesPerAuthor} pages here that are not live yet. Wait for approval or ask a room admin to delete one.`);
         }
         const slug = await pickSlug(client, call.room.id, input.slug, content.manifest.title);
         await store.insertRoomPage(client, {
@@ -119,7 +121,7 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
       const caller = pageCaller(call);
       const author = await versionAuthor(caller);
       const content = await loadHtml(input, call);
-      await inTransaction(async (client) => {
+      const published = await inTransaction(async (client) => {
         const page = await store.lockRoomPage(client, call.room.id, input.pageId);
         if (!page) throw new ApiError("not_found", PAGE_NOT_FOUND);
         if (page.owner_room_id !== call.room.id) throw new ApiError("not_granted", "Change this page in the room that owns it.");
@@ -127,12 +129,16 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
         const status = decideVersionStatus({
           draft: input.draft, trust: author.trust, granted: current?.capabilities ?? [], requested: content.manifest.capabilities,
         });
+        if (status !== "live") await makeRoomForUnpublished(client, page.id, author);
         const version = await store.insertPageVersion(client, newVersion(page.id, content, author, status));
         // Same or fewer capabilities: the admin who granted the live version
         // granted these too, so the record keeps their name.
         if (status === "live") await goLive(client, call.room.id, page.id, version, content, current?.approved_by ?? null);
         else await store.touchPage(client, page.id);
+        return status;
       });
+      // Bearers of the replaced version run old code; viewers open the new one.
+      if (published === "live") await revokePageGrants({ pageId: input.pageId, roomId: call.room.id });
       queuePagesInvalidation(call.room.id);
       return withStatus(201, await pageDetail(caller, await requirePage(call, input.pageId)));
     }),
@@ -176,7 +182,7 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
           roomId: call.room.id, surface, pageIds: order.filter((id) => id !== page.id), newPageId: null, pinnedBy: null,
         });
       });
-      await grants.revokePageGrants({ pageId, roomId: call.room.id });
+      await revokePageGrants({ pageId, roomId: call.room.id });
       queuePagesInvalidation(call.room.id);
       const page = await store.getRoomPage(call.room.id, pageId);
       if (!page) throw new ApiError("not_found", PAGE_NOT_FOUND);
@@ -187,10 +193,12 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
       const caller = pageCaller(call);
       const accountId = await requireRoomAdminInPerson(caller);
       await inTransaction(async (client) => {
+        await store.lockRoomPages(client, call.room.id);
         const page = await store.lockRoomPage(client, call.room.id, pageId);
         if (!page) throw new ApiError("not_found", PAGE_NOT_FOUND);
         const row = await store.getPageVersion(page.id, version, client);
         if (!row) throw new ApiError("not_found", "No such version of this page.");
+        if (page.current_version === null && row.status === "pending_approval") await requireLivePageRoom(client, call.room.id);
         if (row.status === "draft") throw new ApiError("conflict", "This version is a draft. Publish it before approving it.");
         if (row.status === "superseded") throw new ApiError("conflict", "This version was replaced. Use pages.setCurrent to bring it back.");
         const granted = grantableCapabilities(row.manifest, capabilities);
@@ -201,7 +209,7 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
         }
       });
       // Bearers carry the capabilities they were minted with; viewers mint again.
-      await grants.revokePageGrants({ pageId, roomId: call.room.id });
+      await revokePageGrants({ pageId, roomId: call.room.id });
       queuePagesInvalidation(call.room.id);
       return pageDetail(caller, await requirePage(call, pageId));
     }),
@@ -220,7 +228,7 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
         return true;
       });
       if (changed) {
-        await grants.revokePageGrants({ pageId, roomId: call.room.id });
+        await revokePageGrants({ pageId, roomId: call.room.id });
         queuePagesInvalidation(call.room.id);
       }
       return pageDetail(caller, await requirePage(call, pageId));
@@ -230,49 +238,55 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
       await requireRoomAdminInPerson(pageCaller(call));
       const deleted = await inTransaction((client) => store.deleteRoomPage(client, call.room.id, pageId));
       if (!deleted) throw new ApiError("not_found", PAGE_NOT_FOUND);
-      await grants.revokePageGrants({ pageId });
+      await revokePageGrants({ pageId });
       queuePagesInvalidation(call.room.id);
       return { id: pageId, deleted: true as const };
     }),
 
     defineRoute(grantPage, async ({ pageId }, call) => {
-      const caller = pageCaller(call);
       // A grant acts for the person, so only their own app sign-in makes one:
-      // no agent, no page grant, no owner token.
-      if (!caller.accountId || call.actor.via || !isAppSession(call.req)) {
+      // no agent, no page or job, no owner token.
+      if (call.actor.principal.kind !== "person" || call.actor.via) {
         throw new ApiError("not_granted", "Only a person signed in to the LetAgents app can open a page.");
       }
-      const page = await requirePage(call, pageId);
-      const placements = await store.listPagePlacements(page.id, call.room.id);
-      if (!placements.length) throw new ApiError("not_found", "This page is not pinned in this room.");
-      if (page.current_version === null) throw new ApiError("not_found", "This page has no live version yet.");
-      const grant = await store.getPageGrant(page.id, page.current_version, call.room.id);
-      const capabilities = (grant?.capabilities ?? []).filter(isCapabilityName);
-      const minted = await grants.mintPageGrant({
-        req: call.req, accountId: caller.accountId, roomId: call.room.id, pageId: page.id, pageVersion: page.current_version, capabilities,
-      });
-      return withStatus(201, {
-        token: minted.token,
-        grantId: minted.grantId,
-        expiresAt: minted.expiresAt,
-        page: { id: page.id, title: page.title, version: page.current_version },
-        capabilities,
-      });
+      const minter = requirePageGrantMinter(call.req);
+      let before = await openablePage(call, pageId);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const minted = await mintPageGrant({
+          minter, roomId: call.room.id, pageId, pageVersion: before.version, capabilities: before.capabilities,
+        });
+        // An approve, roll back or update between the read and the mint
+        // revoked the page's grants before this one existed: read again.
+        const after = await openablePage(call, pageId);
+        if (after.version === before.version && sameCapabilities(after.capabilities, before.capabilities)) {
+          return withStatus(201, { token: minted.token, expiresAt: minted.expiresAt, capabilities: [...before.capabilities] });
+        }
+        await revokePageGrants({ grantId: minted.grantId });
+        before = after;
+      }
+      throw new ApiError("conflict", "The page changed while it was opening. Open it again.");
     }),
 
     defineRoute(reportPageDiagnostics, async ({ pageId, version, entries }, call) => {
-      const caller = pageCaller(call);
-      // The app showing the page reports, as the viewer or through the page's own grant.
-      if (!caller.accountId && caller.viaPage !== pageId) throw new ApiError("not_granted", "Only the app showing this page can report its diagnostics.");
+      const { actor } = call;
+      // The app reports with the person's own app session, or the page
+      // version itself through its grant; nobody reports for another version.
+      const fromPage = actor.via?.kind === "page" && actor.via.id === pageId && actor.via.version === version;
+      const fromApp = !actor.via && isAppSession(call.req);
+      if (actor.principal.kind !== "person" || !call.account || !(fromPage || fromApp)) {
+        throw new ApiError("not_granted", "Only the LetAgents app showing this page version can report its diagnostics.");
+      }
       const page = await requirePage(call, pageId);
       const row = await store.getPageVersion(page.id, version);
-      if (!row || !(await canSeeVersion(caller, row))) throw new ApiError("not_found", "No such version of this page.");
+      if (!row || !(await canSeeVersion(pageCaller(call), row))) throw new ApiError("not_found", "No such version of this page.");
       const now = Date.now();
       await store.insertPageDiagnostics({
         pageId: page.id,
         version,
         // A time in the future is the reporter's clock; it would hold the entry on top.
         entries: entries.map((entry) => ({ ...entry, at: new Date(Math.min(entry.at ? Date.parse(entry.at) : now, now)).toISOString() })),
+        reporterKind: fromPage ? "page" : "person",
+        reporterAccountId: call.account.account_id,
         keep: PAGE_LIMITS.diagnosticsPerVersion,
       });
       return { accepted: entries.length };
@@ -284,7 +298,7 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
       const wanted = version ?? page.current_version;
       if (wanted === null) throw new ApiError("not_found", "This page has no live version yet.");
       const row = await store.getPageVersion(page.id, wanted);
-      if (!row) throw new ApiError("not_found", "No such version of this page.");
+      if (!row || !(await canSeeVersion(caller, row))) throw new ApiError("not_found", "No such version of this page.");
       if (!caller.agentKey && !isVersionAuthor(caller, row) && !(await caller.isRoomAdmin())) {
         throw new ApiError("not_granted", "Only room admins, the version's author and agents in the room read its diagnostics.");
       }
@@ -300,6 +314,46 @@ async function requirePage(call: ApiCallContext, pageId: string): Promise<store.
   const page = await store.getRoomPage(call.room.id, pageId);
   if (!page) throw new ApiError("not_found", PAGE_NOT_FOUND);
   return page;
+}
+
+/** The live version of a page pinned in this room, and what it was granted here. */
+async function openablePage(call: ApiCallContext, pageId: string): Promise<{ version: number; capabilities: CapabilityName[] }> {
+  const page = await requirePage(call, pageId);
+  if (!(await store.listPagePlacements(page.id, call.room.id)).length) throw new ApiError("not_found", "This page is not pinned in this room.");
+  if (page.current_version === null) throw new ApiError("not_found", "This page has no live version yet.");
+  const grant = await store.getPageGrant(page.id, page.current_version, call.room.id);
+  return { version: page.current_version, capabilities: (grant?.capabilities ?? []).filter(isGrantableCapabilityName) };
+}
+
+function sameCapabilities(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((name) => right.includes(name));
+}
+
+async function requireLivePageRoom(client: Parameters<typeof store.touchPage>[0], roomId: string): Promise<void> {
+  if ((await store.countRoomLivePages(client, roomId)) >= PAGE_LIMITS.livePagesPerRoom) {
+    throw new ApiError("conflict", `A room holds at most ${PAGE_LIMITS.livePagesPerRoom} live pages. Delete one first.`);
+  }
+}
+
+/**
+ * Drafts and waiting versions are bounded per page and per author. At the
+ * author's limit the author's oldest one makes way, so an agent iterating
+ * on a page is never stuck; at the page's limit nobody adds more.
+ */
+async function makeRoomForUnpublished(
+  client: Parameters<typeof store.touchPage>[0],
+  pageId: string,
+  author: { kind: "person" | "agent"; id: string },
+): Promise<void> {
+  const waiting = await store.listUnpublishedVersions(client, pageId);
+  const own = waiting.filter((row) => row.author_kind === author.kind && row.author_id === author.id);
+  if (own.length >= PAGE_LIMITS.unpublishedVersionsPerAuthor) {
+    await store.deletePageVersion(client, pageId, own[0]!.version);
+    return;
+  }
+  if (waiting.length >= PAGE_LIMITS.unpublishedVersionsPerPage) {
+    throw new ApiError("conflict", `This page has ${PAGE_LIMITS.unpublishedVersionsPerPage} drafts and versions waiting for approval. A room admin must approve some first.`);
+  }
 }
 
 function newVersion(
@@ -359,10 +413,13 @@ async function pageDetail(caller: PageCaller, page: store.PageRow): Promise<Page
   const grant = current ? await store.getPageGrant(page.id, current.version, roomId) : null;
   const versions: store.PageVersionRow[] = [];
   for (const row of all) if (await canSeeVersion(caller, row)) versions.push(row);
+  // Until a version goes live the title and slug come from a draft or a
+  // waiting version, which only its author and room admins may read.
+  const hidden = page.current_version === null && versions.length === 0;
   return {
     id: page.id,
-    title: page.title,
-    slug: page.slug,
+    title: hidden ? UNTITLED : page.title,
+    slug: hidden ? "untitled" : page.slug,
     owner: { kind: page.owner_kind, id: (page.owner_room_id ?? page.owner_org_id)! },
     currentVersion: page.current_version,
     updatedBy: current ? toAuthor(current) : null,

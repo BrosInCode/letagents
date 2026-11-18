@@ -13,7 +13,8 @@
 -- room. Short-lived page_grant bearer tokens are minted from these rows and
 -- live in their own table.
 -- `page_diagnostics`: console errors, exceptions and failed calls per version,
--- trimmed to the newest entries by the server.
+-- trimmed to the newest entries by the server, with the person whose app
+-- reported them and whether it came through the page's own grant.
 -- Older servers never read these tables.
 SET LOCAL lock_timeout = '3s';
 --> statement-breakpoint
@@ -64,6 +65,8 @@ CREATE TABLE IF NOT EXISTS "page_versions" (
 	CONSTRAINT "page_versions_source_check" CHECK (("source_message_id" IS NULL) = ("source_attachment_id" IS NULL))
 );
 --> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "page_versions_author_owner_idx" ON "page_versions" USING btree ("author_owner_account_id") WHERE "author_owner_account_id" IS NOT NULL;
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "page_placements" (
 	"page_id" text NOT NULL REFERENCES "pages"("id") ON DELETE CASCADE,
 	"room_id" text NOT NULL REFERENCES "rooms"("id") ON DELETE CASCADE ON UPDATE CASCADE,
@@ -78,6 +81,8 @@ CREATE TABLE IF NOT EXISTS "page_placements" (
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "page_placements_room_surface_idx" ON "page_placements" USING btree ("room_id", "surface", "position");
 --> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "page_placements_pinned_by_idx" ON "page_placements" USING btree ("pinned_by") WHERE "pinned_by" IS NOT NULL;
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "page_grants" (
 	"page_id" text NOT NULL,
 	"version" integer NOT NULL,
@@ -89,6 +94,10 @@ CREATE TABLE IF NOT EXISTS "page_grants" (
 	CONSTRAINT "page_grants_version_fk" FOREIGN KEY ("page_id", "version") REFERENCES "page_versions"("page_id", "version") ON DELETE CASCADE
 );
 --> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "page_grants_room_idx" ON "page_grants" USING btree ("room_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "page_grants_approved_by_idx" ON "page_grants" USING btree ("approved_by") WHERE "approved_by" IS NOT NULL;
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "page_diagnostics" (
 	"id" bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
 	"page_id" text NOT NULL,
@@ -96,10 +105,15 @@ CREATE TABLE IF NOT EXISTS "page_diagnostics" (
 	"kind" text NOT NULL,
 	"message" text NOT NULL,
 	"at" timestamp with time zone NOT NULL,
+	"reporter_kind" text NOT NULL,
+	"reporter_account_id" text REFERENCES "accounts"("id") ON DELETE SET NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "page_diagnostics_version_fk" FOREIGN KEY ("page_id", "version") REFERENCES "page_versions"("page_id", "version") ON DELETE CASCADE,
 	CONSTRAINT "page_diagnostics_kind_check" CHECK ("kind" IN ('console_error', 'exception', 'failed_call')),
-	CONSTRAINT "page_diagnostics_message_check" CHECK (char_length("message") BETWEEN 1 AND 2000)
+	CONSTRAINT "page_diagnostics_message_check" CHECK (char_length("message") BETWEEN 1 AND 2000),
+	CONSTRAINT "page_diagnostics_reporter_kind_check" CHECK ("reporter_kind" IN ('person', 'page'))
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "page_diagnostics_version_idx" ON "page_diagnostics" USING btree ("page_id", "version", "id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "page_diagnostics_reporter_idx" ON "page_diagnostics" USING btree ("reporter_account_id") WHERE "reporter_account_id" IS NOT NULL;
