@@ -9,6 +9,7 @@
       :room="room"
       :storage="storage"
       :tabs="tabs"
+      :pages-menu="pagesMenu"
       :active-tab="activeTab"
       :attention="attention"
       @open-inbox="emit('open-inbox')"
@@ -253,6 +254,16 @@
 
     </Transition>
 
+    <!-- Pinned pages stay alive, hidden, once opened, so switching tabs keeps their state. -->
+    <RoomPageView
+      v-for="page in keptPages"
+      v-show="activeTab === roomPageTabId(page.id)"
+      :key="`page:${room.identifier}:${page.id}`"
+      :room-identifier="room.identifier"
+      :page="page"
+    />
+    <PageConfirmSheet />
+
     <DesktopRoomRulesModal
       :open="rulesOpen"
       @close="rulesOpen = false"
@@ -364,6 +375,9 @@ import RoomChatView from "./RoomChatView.vue";
 import RoomEventsView from "./RoomEventsView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
 import RoomMemoryView from "./RoomMemoryView.vue";
+import RoomPageView from "./room-pages/RoomPageView.vue";
+import PageConfirmSheet from "./room-pages/PageConfirmSheet.vue";
+import { roomPageTabId } from "./room-shell/types";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
 import ReleaseQueueWidget from "../../../../../../../shared/ui/board/ReleaseQueueWidget.vue";
@@ -537,7 +551,7 @@ function openThreadFromBoard(threadRootId: string): void {
 }
 
 const {
-  tabs,
+  tabs, pagesMenu, keptPages,
 } = Object.assign(app, useRoomShellNotifications(app));
 
 Object.assign(app, useRoomShellInspectorWatchers(app));

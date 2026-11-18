@@ -477,6 +477,23 @@ const api: DesktopApi = {
     },
     jevMetrics: () => ipcRenderer.invoke("desktop:connectors:jev-metrics"),
   },
+  pages: {
+    list: (roomId) => ipcRenderer.invoke("desktop:pages:list", roomId),
+    prepare: (roomId, pageId) => ipcRenderer.invoke("desktop:pages:prepare", roomId, pageId),
+    release: (url) => ipcRenderer.invoke("desktop:pages:release", url),
+    setTheme: (mode) => ipcRenderer.invoke("desktop:pages:set-theme", mode),
+    onEvent: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, event: Parameters<typeof callback>[0]) => callback(event);
+      ipcRenderer.on("desktop:pages:event", listener);
+      return () => ipcRenderer.off("desktop:pages:event", listener);
+    },
+    onConfirm: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, message: Parameters<typeof callback>[0]) => callback(message);
+      ipcRenderer.on("desktop:pages:confirm", listener);
+      return () => ipcRenderer.off("desktop:pages:confirm", listener);
+    },
+    answerConfirm: (id, answer, remember) => ipcRenderer.invoke("desktop:pages:answer-confirm", id, answer, remember),
+  },
   mcpConnections: {
     list: () => ipcRenderer.invoke("desktop:mcp-connections:list"),
     disconnect: (id) => ipcRenderer.invoke("desktop:mcp-connections:disconnect", id),

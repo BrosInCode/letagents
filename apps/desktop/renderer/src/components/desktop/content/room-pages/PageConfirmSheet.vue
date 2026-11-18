@@ -1,0 +1,135 @@
+<template>
+  <DesktopDialogShell
+    :open="Boolean(request)"
+    aria-labelledby="room-page-confirm-title"
+    backdrop-class="desktop-task-modal-backdrop"
+    panel-class="desktop-task-modal room-page-confirm"
+    :show-close="false"
+    initial-focus="[data-page-confirm-cancel]"
+    :focus-key="request?.id ?? null"
+    test-id="room-page-confirm"
+    @close="answer('declined')"
+  >
+    <template v-if="request">
+      <p class="room-page-confirm-source">{{ request.pageTitle }} · version {{ request.pageVersion }}</p>
+      <h3 id="room-page-confirm-title">{{ copy.title }}</h3>
+      <!-- The page's own words, exactly as it sent them; the app draws everything around them. -->
+      <pre class="room-page-confirm-text" data-testid="room-page-confirm-text">{{ request.text }}</pre>
+      <p class="room-page-confirm-target"><span>{{ copy.targetLabel }}</span> <strong data-testid="room-page-confirm-target">{{ request.target }}</strong></p>
+      <label v-if="request.rememberable" class="room-page-confirm-remember">
+        <input v-model="remember" type="checkbox" data-testid="room-page-confirm-remember" />
+        Don't ask again for this page version
+      </label>
+      <div class="room-page-confirm-actions">
+        <button class="ghost-button" type="button" data-page-confirm-cancel data-testid="room-page-confirm-decline" @click="answer('declined')">Cancel</button>
+        <button class="primary-button" type="button" data-testid="room-page-confirm-accept" @click="answer('confirmed')">{{ copy.action }}</button>
+      </div>
+    </template>
+  </DesktopDialogShell>
+</template>
+
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import type { DesktopPageConfirmAnswer, DesktopPageConfirmRequest } from "../../../../../../electron/ipc-types";
+import { desktopIpc } from "../../../../ipc";
+import DesktopDialogShell from "../DesktopDialogShell.vue";
+import { pageConfirmCopy } from "./room-pages";
+
+/**
+ * The confirm sheet main asks for on a page's behalf: opening a link to a new
+ * site now, and posts and agent jobs in later steps. One sheet at a time; the
+ * rest wait their turn. Closing it any way but the action button is a no.
+ */
+const queue = ref<DesktopPageConfirmRequest[]>([]);
+const remember = ref(false);
+const request = computed(() => queue.value[0] ?? null);
+const copy = computed(() => pageConfirmCopy(request.value?.kind ?? "open"));
+let stop: (() => void) | null = null;
+
+function answer(value: DesktopPageConfirmAnswer): void {
+  const current = request.value;
+  if (!current) return;
+  const keep = value === "confirmed" && current.rememberable && remember.value;
+  queue.value = queue.value.slice(1);
+  remember.value = false;
+  void desktopIpc.pages?.answerConfirm(current.id, value, keep).catch(() => undefined);
+}
+
+onMounted(() => {
+  stop = desktopIpc.pages?.onConfirm((message) => {
+    if (message.type === "ask") {
+      queue.value = [...queue.value, message.request];
+      return;
+    }
+    if (request.value?.id === message.id) remember.value = false;
+    queue.value = queue.value.filter((entry) => entry.id !== message.id);
+  }) ?? null;
+});
+
+onBeforeUnmount(() => {
+  stop?.();
+  stop = null;
+  // A sheet nobody can answer any more is a no, so the page is not left waiting.
+  for (const entry of queue.value) void desktopIpc.pages?.answerConfirm(entry.id, "declined", false).catch(() => undefined);
+  queue.value = [];
+});
+</script>
+
+<style scoped>
+.room-page-confirm {
+  display: grid;
+  gap: 12px;
+  width: min(460px, calc(100vw - 48px));
+  padding: 24px;
+}
+
+.room-page-confirm h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.room-page-confirm-source,
+.room-page-confirm-target {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.room-page-confirm-target strong {
+  color: var(--text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.room-page-confirm-text {
+  max-height: 200px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.room-page-confirm-remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
+
+.room-page-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.room-page-confirm-actions button {
+  min-height: 36px;
+}
+</style>

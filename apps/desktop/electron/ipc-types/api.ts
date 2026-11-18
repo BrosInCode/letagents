@@ -567,6 +567,20 @@ export interface DesktopApi {
     /** PR6: count, outcome and latency of Jev questions for the account's connections. */
     jevMetrics?: () => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerJevMetrics>;
   };
+  /** Pages pinned in a room's tab bar, each in its own sandboxed webview. */
+  pages?: {
+    /** The room's pinned pages in tab order; empty for a room with none. */
+    list: (roomId: string) => Promise<import("./pages.js").DesktopRoomPage[]>;
+    /** Load a page for one `<webview>`; the lease admits that webview once. */
+    prepare: (roomId: string, pageId: string) => Promise<import("./pages.js").DesktopRoomPageLease>;
+    release: (url: string) => Promise<void>;
+    /** The app's light or dark mode, which pages follow. */
+    setTheme: (mode: import("./pages.js").DesktopPageThemeMode) => Promise<void>;
+    onEvent: (callback: (event: import("./pages.js").DesktopRoomPageEvent) => void) => () => void;
+    /** Confirm sheets main asks the app to draw for a page, and sheets it takes back. */
+    onConfirm: (callback: (message: import("./pages.js").DesktopPageConfirmMessage) => void) => () => void;
+    answerConfirm: (id: string, answer: import("./pages.js").DesktopPageConfirmAnswer, remember: boolean) => Promise<void>;
+  };
   /** Apps signed in to the remote MCP endpoint (https://letagents.chat/mcp) with OAuth. */
   mcpConnections: {
     list: () => Promise<{ connections: import("../main/mcp-connections.js").RemoteMcpConnectionView[] }>;
