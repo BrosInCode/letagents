@@ -20,6 +20,7 @@ test.beforeEach(async () => {
   await pool.query("DROP SCHEMA IF EXISTS drizzle CASCADE");
   await pool.query("CREATE SCHEMA public");
   await migrate(dbClient.db, { migrationsFolder: path.resolve(process.cwd(), "drizzle") });
+  sessions!.resetGoneWorkerSweepCursorForTests();
 });
 
 if (testDatabaseUrl) test.after(async () => { await pool?.end(); });
@@ -66,9 +67,17 @@ test("the sweep ends workers whose process is gone and keeps the rest", { skip }
   const gone = await worker(room.id, account.id, "Gone");
   const recent = await worker(room.id, account.id, "Recent");
   const waiting = await worker(room.id, account.id, "Waiting");
+  const subscribed = await worker(room.id, account.id, "Subscribed");
   await silentFor(gone.session_id, 11);
   await silentFor(recent.session_id, 5);
   await silentFor(waiting.session_id, 11);
+  await silentFor(subscribed.session_id, 11);
+  // A rule made with an owner token, such as an MCP event subscription,
+  // names the session that made it.
+  await pool!.query(`INSERT INTO agent_wake_rules (id,room_id,agent_key,agent_name,event,arguments,identity_key,cursor_at,created_at,updated_at,
+      delivery_kind,delivery_target,credential_kind,credential_ref,created_by_session_id,status)
+    VALUES ('subscribed-rule',$1,'owner/Subscribed','Subscribed','room.message','{}','subscribed-rule',now(),now(),now(),'webhook','{"sealed":"unused"}',
+      'token','owner-token',$2,'paused')`, [room.id, subscribed.session_id]);
   // An agent that asked to be woken while away is meant to be offline.
   await pool!.query(`INSERT INTO agent_wake_rules (id,room_id,agent_key,agent_name,event,arguments,identity_key,cursor_at,created_at,updated_at,
       delivery_kind,delivery_target,credential_kind,credential_ref,status)
@@ -82,6 +91,7 @@ test("the sweep ends workers whose process is gone and keeps the rest", { skip }
   assert.equal(ended.end_reason, null);
   assert.equal((await endedAt(recent.session_id)).ended_at, null);
   assert.equal((await endedAt(waiting.session_id)).ended_at, null);
+  assert.equal((await endedAt(subscribed.session_id)).ended_at, null);
   assert.equal(
     (await pool!.query("SELECT status FROM agent_wake_rules WHERE id='waiting-rule'")).rows[0].status,
     "active",
@@ -130,10 +140,51 @@ test("room deletion ends offline agents and names agents that are still there", 
     assert.equal(error.message, "Running is still in this room. Disconnect or retire it before deleting the room.");
     return true;
   });
-  assert.ok((await endedAt(offline.session_id)).ended_at, "the offline agent was ended");
+  // A deletion that is refused ends no one.
+  assert.equal((await endedAt(offline.session_id)).ended_at, null);
   assert.equal((await endedAt(running.session_id)).ended_at, null);
 
   await sessions!.endRoomAgentSession({ session_id: running.session_id, room_id: room.id });
   await deletion!.deleteRoomData(room.id);
   assert.equal((await pool!.query("SELECT id FROM rooms WHERE id = $1", [room.id])).rowCount, 0);
+});
+
+test("older MCP clients the rule never calls gone do not hold back the sweep", { skip }, async () => {
+  const account = await owner();
+  const room = await dbApi!.createProjectWithName("gone-legacy");
+  // Older MCP clients: no process connection, no host id. They answer from
+  // the session they hold until restarted, so silence never ends them.
+  const legacy = [];
+  for (let index = 0; index < 3; index += 1) {
+    const session = await worker(room.id, account.id, `Legacy${index}`, `worker_${String(index).repeat(32)}`);
+    await pool!.query(`UPDATE room_agent_sessions SET process_host_id = NULL, process_seen_at = NULL,
+        last_seen_at = now() - interval '3 hours', agent_heard_at = now() - interval '3 hours' WHERE session_id = $1`, [session.session_id]);
+    legacy.push(session);
+  }
+  const gone = await worker(room.id, account.id, "Gone");
+  await silentFor(gone.session_id, 11);
+
+  assert.deepEqual(await sessions!.endGoneWorkerSessions({ limit: 2 }), [gone.session_id]);
+  for (const session of legacy) assert.equal((await endedAt(session.session_id)).ended_at, null);
+});
+
+test("a refused deletion ends no offline agent, and names up to three agents in a list", { skip }, async () => {
+  const account = await owner();
+  const room = await dbApi!.createProjectWithName("delete-refused");
+  const offline = await worker(room.id, account.id, "Offline");
+  await silentFor(offline.session_id, 1);
+  await pool!.query(`INSERT INTO agent_asks (id,link_token_hash,room_id,asker_account_id,provider_id,model_label,expires_at)
+    VALUES ('ask-1','hash-1',$1,$2,'claude','Claude',now() + interval '1 day')`, [room.id, account.id]);
+  await assert.rejects(deletion!.deleteRoomData(room.id), (error: any) => error.status === 409 && /agent requests/.test(error.message));
+  assert.equal((await endedAt(offline.session_id)).ended_at, null);
+
+  await pool!.query("DELETE FROM agent_asks WHERE id='ask-1'");
+  for (const name of ["Ash", "Birch", "Cedar"]) {
+    const session = await worker(room.id, account.id, name);
+    await pool!.query("UPDATE room_agent_sessions SET process_seen_at = now(), process_disconnected_at = NULL WHERE session_id = $1", [session.session_id]);
+  }
+  await assert.rejects(deletion!.deleteRoomData(room.id), (error: any) => {
+    assert.equal(error.message, "Ash, Birch and Cedar are still in this room. Disconnect or retire them before deleting the room.");
+    return true;
+  });
 });
