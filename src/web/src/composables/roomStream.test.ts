@@ -132,6 +132,9 @@ test('resource pointers negotiate once, advance inertly, and fail closed when ma
   assert.equal(parseRoomResourceInvalidation({
     room_id: 'room_pointer', resource: 'execution_delegation',
   }).status, 'supported')
+  for (const resource of ['work_items', 'documents', 'jobs', 'intents', 'pages']) {
+    assert.equal(parseRoomResourceInvalidation({ room_id: 'room_pointer', resource }).status, 'supported', resource)
+  }
   assert.equal(parseRoomResourceInvalidation({
     room_id: 'room_pointer', resource: 'future_resource',
   }).status, 'unsupported')

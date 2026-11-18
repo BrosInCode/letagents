@@ -17,6 +17,8 @@ else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 delete process.env.LETAGENTS_BASE_URL;
 delete process.env.PUBLIC_API_URL;
 process.env.LETAGENTS_JEV_ROUTING = "off";
+// Worker sessions get a bearer, so an agent can call /api/v1 as itself.
+process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "1";
 
 const skip = testDatabaseUrl ? false : "set TEST_DB_URL to run the /api/v1 jobs DB tests";
 const dbClient = testDatabaseUrl ? await import("../db/client.js") : null;
@@ -31,9 +33,11 @@ const routesModule = testDatabaseUrl ? await import("../server/routes.js") : nul
 const mentionEvents = testDatabaseUrl ? await import("../rooms/mention-events.js") : null;
 const jobService = testDatabaseUrl ? await import("../jobs/service.js") : null;
 const jobStore = testDatabaseUrl ? await import("../db/api-jobs.js") : null;
+const policies = testDatabaseUrl ? await import("../v1/policy.js") : null;
+const jobPolicy = testDatabaseUrl ? await import("../jobs/policy.js") : null;
 
 type Person = { id: string; login: string; cookie: string; token: string };
-type Agent = { key: string; session_id: string; session_token: string };
+type Agent = { key: string; session_id: string; session_token: string; bearer: string | null };
 
 let server: Server | null = null;
 let origin = "";
@@ -68,7 +72,7 @@ async function agent(room: string, owner: Person, name: string, online: boolean)
       credential_fence: { kind: "session_token", token_hash: utils!.hashToken(session.session_token) },
     });
   }
-  return { key: session.agent_key, session_id: session.session_id, session_token: session.session_token };
+  return { key: session.agent_key, session_id: session.session_id, session_token: session.session_token, bearer: session.worker_bearer };
 }
 
 if (testDatabaseUrl) {
@@ -416,4 +420,64 @@ test("through a page, only jobs that page started can be cancelled", { skip }, a
   await assert.rejects(jobService!.cancelJob({
     roomId, id: other, actor: { principal: { kind: "person", id: bob.id }, via: page, roomId }, isRoomAdmin,
   }), { code: "not_granted" });
+});
+
+test("the room's jobs.start policy decides: deny and approve refuse, allow starts", { skip }, async () => {
+  const gus = await member("gus");
+  for (const mode of ["deny", "approve"] as const) {
+    await policies!.setRoomPolicy({ roomId, capability: "jobs.start", mode, accountId: ada.id });
+    const res = await start(gus, { instruction: "Tidy the board" });
+    assert.equal(res.status, 403, mode);
+    assert.equal(res.body.code, "not_granted", mode);
+    if (mode === "approve") assert.match(res.body.message, /approval/);
+  }
+  await policies!.setRoomPolicy({ roomId, capability: "jobs.start", mode: "allow", accountId: ada.id });
+  assert.equal((await start(gus, { instruction: "Tidy the board" })).status, 200);
+  await policies!.setRoomPolicy({ roomId, capability: "jobs.start", mode: null, accountId: ada.id });
+});
+
+test("confirm passes for a page call, whose confirm sheet ran in the app; an agent never starts a job", { skip }, async () => {
+  const page = { principal: { kind: "person" as const, id: "acct" }, via: { kind: "page" as const, id: "page_x", version: 1 }, roomId: "room" };
+  const policy = (mode: "allow" | "confirm" | "approve" | "deny") => async () =>
+    ({ capability: "jobs.start" as const, mode, configured: mode, source: "room" as const, rule: null });
+  await jobPolicy!.requireJobStartAllowed(page, "room", policy("confirm"));
+  await jobPolicy!.requireJobStartAllowed(page, "room", policy("allow"));
+  await assert.rejects(jobPolicy!.requireJobStartAllowed(page, "room", policy("approve")), { code: "not_granted" });
+  await assert.rejects(jobPolicy!.requireJobStartAllowed(page, "room", policy("deny")), { code: "not_granted" });
+  const agentActor = { principal: { kind: "agent" as const, id: "ada/cedar" }, roomId: "room" };
+  await assert.rejects(jobPolicy!.requireJobStartAllowed(agentActor, "room", policy("allow")), { code: "not_granted" });
+});
+
+test("an agent reads jobs through /api/v1 in its own room but cannot start or cancel one", { skip }, async () => {
+  const bearer = agents[0]!.bearer;
+  assert.ok(bearer, "worker sessions carry a bearer in this test");
+  const listed = await call(v1(roomId, "?limit=1"), { token: bearer });
+  assert.equal(listed.status, 200);
+  const count = async () => Number((await dbClient!.pool.query("SELECT count(*) FROM api_jobs WHERE room_id = $1", [roomId])).rows[0].count);
+  const before = await count();
+  // The worker bearer route check refuses the write before the API sees it;
+  // requireJobStartAllowed refuses an agent too, behind it (tested above).
+  const started = await call(v1(roomId), { token: bearer, body: { instruction: "Do my work for me" } });
+  assert.equal(started.status, 403);
+  assert.equal(await count(), before, "no job was made");
+  const job = listed.body.jobs[0] as { id: string };
+  const cancelled = await call(v1(roomId, `/${job.id}/cancel`), { token: bearer, body: {} });
+  assert.equal(cancelled.status, 403);
+});
+
+test("a supervised agent reports on its job with its worker bearer alone", { skip }, async () => {
+  const hal = await member("hal");
+  const { body } = await start(hal, { agent: agents[0]!.key, instruction: "Count open PRs", resultSchema: { type: "integer" } });
+  const bearer = agents[0]!.bearer!;
+  const read = await call(agentRoute(roomId, body.id), { token: bearer });
+  assert.equal(read.status, 200);
+  assert.deepEqual(read.body.job.resultSchema, { type: "integer" });
+  const progress = await call(agentRoute(roomId, `${body.id}/progress`), { token: bearer, body: { progress: "Counting" } });
+  assert.equal(progress.status, 200);
+  assert.equal(progress.body.job.state, "running");
+  const otherBearer = agents[1]!.bearer!;
+  assert.equal((await call(agentRoute(roomId, `${body.id}/complete`), { token: otherBearer, body: { result: 3 } })).status, 403);
+  const done = await call(agentRoute(roomId, `${body.id}/complete`), { token: bearer, body: { result: 3 } });
+  assert.equal(done.status, 200);
+  assert.equal(done.body.job.state, "done");
 });

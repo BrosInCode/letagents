@@ -146,6 +146,7 @@ export function queueRoomResourceInvalidation(projectId: string, resource: RoomR
   timer.unref?.();
   pendingRoomResourceInvalidations.set(key, timer);
 }
+
 /**
  * A ticket changed in a tracker this room imports from. Pages re-read their
  * work items through `/api/v1`, which checks the room filter again.

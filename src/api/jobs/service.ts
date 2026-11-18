@@ -26,6 +26,7 @@ import {
 import { formatMessageId } from "../db/utils.js";
 import { ROOM_RESOURCE_JOBS } from "../../../shared/room-resource-invalidation.mjs";
 import { emitProjectMessage, queueRoomResourceInvalidation } from "../server/events.js";
+import type { ResolvedApiPolicy } from "../v1/policy.js";
 import { requireJobStartAllowed } from "./policy.js";
 import { assertJobResultSchemaBounds, jobResultProblems, jsonBytes } from "./result-schema.js";
 
@@ -112,10 +113,12 @@ export async function startJob(
     instruction: string;
     input?: unknown;
     resultSchema?: JobResultSchema;
+    /** The room's `jobs.start` policy for this call; the route passes the answer the capability check read. */
+    policy?: () => Promise<ResolvedApiPolicy>;
   },
   deps: JobServiceDeps = defaultDeps,
 ): Promise<Job> {
-  await requireJobStartAllowed(input.actor, input.roomId);
+  await requireJobStartAllowed(input.actor, input.roomId, input.policy);
   if (instructionLooksLikeJobFooter(input.instruction)) {
     throw new ApiError("invalid_input", "The instruction may not contain a job id or a line that starts with \"Job \".");
   }

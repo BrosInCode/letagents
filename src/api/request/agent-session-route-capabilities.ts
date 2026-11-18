@@ -39,9 +39,15 @@ const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSes
   { method: "POST", path: /^\/rooms\/.+\/(?:tasks|board-intents)$/, capability: "coordination.propose" },
   { method: "POST", path: /^\/rooms\/.+\/board-intents\/[^/]+\/(?:approve|deny)$/, capability: "coordination.self_write" },
   { method: "POST", path: /^\/rooms\/.+\/artifacts$/, capability: "artifacts.self_write" },
+  // A job given to the agent (get_job, update_job, complete_job); the route checks it is the job's agent.
+  { method: "GET", path: /^\/rooms\/.+\/jobs\/job_[0-9a-f]{32}$/, capability: "coordination.read" },
+  { method: "POST", path: /^\/rooms\/.+\/jobs\/job_[0-9a-f]{32}\/(?:progress|complete)$/, capability: "coordination.self_write" },
   // A given agent reads the asker's code and proposes changes through LetAgents (Ask for an agent).
   { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/(?:files|read|search)$/, capability: "coordination.read" },
   { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/proposals$/, capability: "coordination.propose" },
+  // LetAgents API reads: each /api/v1 route checks its own capability and the
+  // worker's room; writes through the API are not open to worker bearers yet.
+  { method: "GET", path: /^\/api\/v1\/rooms\/.+$/, capability: "coordination.read" },
 ];
 
 // What a given agent may do while it waits for the asker to accept it: stay connected, nothing else.

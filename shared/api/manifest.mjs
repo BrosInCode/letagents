@@ -4,7 +4,7 @@
 // data it keeps. A room admin grants the capabilities when pinning the page.
 import { z } from "zod";
 
-import { CAPABILITY_NAMES } from "./capabilities.mjs";
+import { GRANTABLE_CAPABILITY_NAMES } from "./capabilities.mjs";
 import { API_VERSION, describeIssues } from "./core.mjs";
 
 export const PAGE_MANIFEST_SCRIPT_TYPE = "application/letagents-page+json";
@@ -19,7 +19,10 @@ export const PAGE_TITLE_MAX = 80;
 export const PAGE_COLLECTIONS_PER_SCOPE_MAX = 32;
 export const PAGE_WORK_ITEM_FIELDS_MAX = 50;
 
-const COLLECTION_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+// The same rule as DATA_COLLECTION_NAME in data.mjs (which imports this
+// module, so it cannot be imported here): a page cannot name a collection
+// that the data methods would refuse.
+const COLLECTION_NAME = /^[a-z][a-z0-9_]{0,39}$/;
 // Tracker field ids: `customfield_10027`, `story_points`, `System.Tags`.
 const WORK_ITEM_FIELD = /^[A-Za-z][A-Za-z0-9_.:-]{0,99}$/;
 
@@ -30,12 +33,13 @@ const WORK_ITEM_FIELD = /^[A-Za-z][A-Za-z0-9_.:-]{0,99}$/;
  */
 const unique = (values) => new Set(values).size === values.length;
 
-const capabilityName = z.string().refine((value) => /** @type {readonly string[]} */ (CAPABILITY_NAMES).includes(value), {
-  error: (issue) => `Unknown capability ${JSON.stringify(issue.input)}. Known capabilities: ${CAPABILITY_NAMES.join(", ")}.`,
+// Room administration (`grantable: false`) is never a page's: it reads as unknown here.
+const capabilityName = z.string().refine((value) => /** @type {readonly string[]} */ (GRANTABLE_CAPABILITY_NAMES).includes(value), {
+  error: (issue) => `Unknown capability ${JSON.stringify(issue.input)}. Known capabilities: ${GRANTABLE_CAPABILITY_NAMES.join(", ")}.`,
 });
 
 const collectionNames = z
-  .array(z.string().regex(COLLECTION_NAME, { error: "A collection name is lower case letters, digits and _, starting with a letter, at most 64 characters." }))
+  .array(z.string().regex(COLLECTION_NAME, { error: "A collection name is lower case letters, digits and _, starting with a letter, at most 40 characters." }))
   .max(PAGE_COLLECTIONS_PER_SCOPE_MAX)
   .refine(unique, { error: "Collection names must not repeat." });
 

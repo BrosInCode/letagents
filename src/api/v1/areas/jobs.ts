@@ -1,13 +1,15 @@
 import { cancelJob as cancelJobMethod, getJob as getJobMethod, listJobs as listJobsMethod, startJob as startJobMethod } from "../../../../shared/api/jobs.mjs";
 import { cancelJob, getJob, listJobs, startJob } from "../../jobs/service.js";
 import { decideRoomAdmin, roomAccessPrincipal } from "../../rooms/access-decision.js";
+import { resolveCallPolicy } from "../capability.js";
 import { defineRoute, type ApiRoute } from "../route.js";
 
 // Routes for the methods in shared/api/jobs.mjs, made with defineRoute.
 export const routes: readonly ApiRoute[] = [
-  defineRoute(startJobMethod, (input, { room, actor, account }) => startJob({
+  defineRoute(startJobMethod, (input, { room, actor, account, req }) => startJob({
     roomId: room.id,
     actor,
+    policy: () => resolveCallPolicy({ actor, req }, "jobs.start"),
     senderLabel: account?.login ?? actor.principal.login ?? actor.principal.id,
     agent: input.agent,
     instruction: input.instruction,
