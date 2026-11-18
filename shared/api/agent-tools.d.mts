@@ -16,10 +16,10 @@ export function agentToolMethods(methods?: readonly KnownApiMethod[]): KnownApiM
 /**
  * The tool's description: the method's own words for agents, then what the
  * server checks and what it can answer.
- * @param {Pick<KnownApiMethod, "name" | "description" | "capability" | "errors" | "kind">} method
+ * @param {Pick<import("./core.mjs").AnyApiMethod, "name" | "description" | "capability" | "capabilityFromInput" | "errors" | "kind">} method
  * @returns {string}
  */
-export function agentToolDescription(method: Pick<KnownApiMethod, "name" | "description" | "capability" | "errors" | "kind">): string;
+export function agentToolDescription(method: Pick<import("./core.mjs").AnyApiMethod, "name" | "description" | "capability" | "capabilityFromInput" | "errors" | "kind">): string;
 /**
  * The generated tools, by name, for lists that cannot load zod (the desktop
  * daemon's read-only lists).
@@ -35,12 +35,13 @@ export function agentToolCatalog(methods?: readonly KnownApiMethod[]): {
 /** @typedef {import("./core.mjs").AgentAccess} AgentAccess */
 export const AGENT_TOOL_PREFIX: "api_";
 /**
- * Methods whose MCP tool is written by hand, by the tool's name: the page
- * tools read a workspace file or take snake_case names that the generated
- * shape cannot give. The generator skips these methods; their flag still
- * says that agents may call them.
+ * Methods whose MCP tool is written by hand, by the tool's name. The page
+ * tools read a workspace file and take the snake_case names of the plan;
+ * `get_job` came first, for the agent a job is given to. The generator skips
+ * these methods; their flag still says that agents may call them.
  */
 export const HAND_WRITTEN_AGENT_TOOLS: Readonly<{
+    "jobs.get": "get_job";
     "pages.list": "list_pages";
     "pages.document": "read_page";
     "pages.diagnostics": "read_page_diagnostics";

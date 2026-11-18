@@ -246,6 +246,7 @@
     "path": "/rooms/:room/jobs/:id",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [
       "not_found"
     ],
@@ -485,6 +486,7 @@
     "path": "/rooms/:room/jobs",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [],
     "input": {
       "type": "object",

@@ -19,6 +19,12 @@ export const API_AGENT_TOOLS = Object.freeze([
   Object.freeze({name: "api_work_items_history", method: "work_items.history", access: "read"}),
   Object.freeze({name: "api_git_pull_requests", method: "git.pullRequests", access: "read"}),
   Object.freeze({name: "api_memory_list", method: "memory.list", access: "read"}),
+  Object.freeze({name: "api_data_list", method: "data.list", access: "read"}),
+  Object.freeze({name: "api_data_get", method: "data.get", access: "read"}),
+  Object.freeze({name: "api_data_set", method: "data.set", access: "write"}),
+  Object.freeze({name: "api_data_update", method: "data.update", access: "write"}),
+  Object.freeze({name: "api_data_delete", method: "data.delete", access: "write"}),
+  Object.freeze({name: "api_jobs_list", method: "jobs.list", access: "read"}),
 ]);
 
 /** The generated tools that only read: supervised agents run them without journaling. */

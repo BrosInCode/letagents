@@ -1,3 +1,5 @@
+import { API_AGENT_READ_TOOLS } from "./api-agent-tools.mjs";
+
 /**
  * Room tools that only read. A supervised agent's every other tool call is a
  * mutation: the MCP facade asks the daemon to journal it, and the daemon
@@ -25,6 +27,11 @@ export const SUPERVISED_READ_ONLY_TOOLS = new Set([
   "get_job",
   "list_board_intents",
   "get_onboarding_status",
+  "list_pages",
+  "read_page",
+  "read_page_diagnostics",
+  // Tools made from LetAgents API methods flagged agents: "read" (GET routes only).
+  ...API_AGENT_READ_TOOLS,
   // Removed in letagents 0.12.46; kept so a daemon and an older pinned MCP runtime classify it alike.
   "status_local_codex_session",
   "rental_list_requests",
