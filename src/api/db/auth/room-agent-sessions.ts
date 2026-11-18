@@ -36,6 +36,8 @@ import {
   type RoomAgentDeliveryCredentialFence,
   isAgentProcessGone,
   AGENT_PROCESS_EXITED,
+  AGENT_PROCESS_GONE_AFTER_MS,
+  AGENT_WITHOUT_EVIDENCE_GONE_AFTER_MS,
 } from "../../../shared/agent-presence.js";
 import {
   DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES,
@@ -1366,6 +1368,13 @@ export async function endRoomAgentSession(input: {
    * room. Its shared live activity stays for the next session to replace.
    */
   restarting?: boolean;
+  /**
+   * End the session only if its agent is gone, read again under the row
+   * lock. See endGoneWorkerSessions.
+   */
+  only_if_gone?: { now_ms: number };
+  /** End the session only if it is still open: do not repeat its end. */
+  only_if_open?: boolean;
 }): Promise<RoomAgentSession | null> {
   const unavailableReceiptTargets: number[] = [];
   const releasedReplyTurns: ReleasedReplyTurn[] = [];
@@ -1394,8 +1403,12 @@ export async function endRoomAgentSession(input: {
     // the same exact current grant fence and session coordinates.
     if (session.ended_at) return toRoomAgentSession(session as RoomAgentSessionRow);
   }
+  if (input.only_if_gone && !(await isWorkerSessionGoneTx(tx, input.session_id, input.only_if_gone.now_ms))) {
+    return null;
+  }
   const now = new Date().toISOString();
   const conditions = [eq(room_agent_sessions.session_id, input.session_id)];
+  if (input.only_if_gone || input.only_if_open) conditions.push(isNull(room_agent_sessions.ended_at));
   if (input.room_id) {
     conditions.push(eq(room_agent_sessions.room_id, input.room_id));
   }
@@ -1485,6 +1498,121 @@ export async function endRoomAgentSession(input: {
     queueMessageInfoInvalidation(unavailableReceiptRoom, null);
   }
   return ended;
+}
+
+/**
+ * Worker sessions that the sweep may end: open, not run by a supervisor
+ * (the desktop retires its own agents), and holding no wake rule that waits
+ * to wake the agent while it is away. A rule made under the session's own
+ * credential names it; one made with an owner token, such as an MCP event
+ * subscription, records the session that made it.
+ */
+const sweepableWorkerSession = sql`
+  ${room_agent_sessions.ended_at} IS NULL
+  AND ${room_agent_sessions.session_kind} = 'worker'
+  AND ${room_agent_sessions.supervisor_grant_id} IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM agent_wake_rules AS wake_rule
+     WHERE wake_rule.room_id = ${room_agent_sessions.room_id}
+       AND wake_rule.status IN ('active', 'paused', 'pending_confirmation')
+       AND ((wake_rule.credential_kind = 'agent_session' AND wake_rule.credential_ref = ${room_agent_sessions.session_id})
+         OR wake_rule.created_by_session_id = ${room_agent_sessions.session_id})
+  )`;
+
+/**
+ * The rows that isAgentProcessGone may call gone, as SQL, so that rows it
+ * never calls gone do not fill each batch: a process that said it exited;
+ * a process connection silent for its window; or, with no process evidence,
+ * a long silence from a client that can recover (not an older MCP client,
+ * which answers from the session it holds until it is restarted).
+ */
+function mayBeGoneSql(nowMs: number) {
+  const evidenceSilentSince = new Date(nowMs - AGENT_PROCESS_GONE_AFTER_MS).toISOString();
+  const silenceSilentSince = new Date(nowMs - AGENT_WITHOUT_EVIDENCE_GONE_AFTER_MS).toISOString();
+  const lastActivity = sql`GREATEST(
+    ${room_agent_sessions.last_seen_at},
+    COALESCE(${room_agent_sessions.process_seen_at}, ${room_agent_sessions.last_seen_at}),
+    COALESCE(${room_agent_sessions.agent_heard_at}, ${room_agent_sessions.last_seen_at})
+  )`;
+  return sql`(
+    (${room_agent_sessions.process_connection_id} = ${AGENT_PROCESS_EXITED}
+      AND ${room_agent_sessions.process_seen_at} IS NOT NULL
+      AND ${room_agent_sessions.process_disconnected_at} IS NOT NULL)
+    OR (${room_agent_sessions.process_seen_at} IS NOT NULL AND ${lastActivity} <= ${evidenceSilentSince})
+    OR (${room_agent_sessions.process_seen_at} IS NULL AND ${lastActivity} <= ${silenceSilentSince}
+      AND (${room_agent_sessions.process_host_id} IS NOT NULL
+        OR ${room_agent_sessions.agent_instance_id} IS NULL
+        OR ${room_agent_sessions.agent_instance_id} !~ '^worker_[a-f0-9]{32}$'))
+  )`;
+}
+
+async function isWorkerSessionGoneTx(tx: any, sessionId: string, nowMs: number): Promise<boolean> {
+  const [current] = await tx.select().from(room_agent_sessions)
+    .where(and(eq(room_agent_sessions.session_id, sessionId), sweepableWorkerSession))
+    .for("update")
+    .limit(1);
+  if (!current) return false;
+  const { connected } = await getSessionConnections(tx, current.room_id, [current.session_id], nowMs);
+  return isAgentProcessGone(
+    { ...current, delivery_connected: connected.has(current.session_id) },
+    { now_ms: nowMs },
+  );
+}
+
+/**
+ * Where the sweep reads its next batch. A row that the SQL lets through but
+ * the full rule keeps (an agent waiting for messages now) moves the cursor
+ * on, so such rows never hold back the rows after them.
+ */
+let goneSweepCursor: string | null = null;
+
+/**
+ * Ends the worker sessions whose agent is gone, by the same evidence that
+ * lets another agent take a gone agent's name.
+ *
+ * An agent that is not driven by a supervisor (an MCP client in Claude Code,
+ * Codex or Cursor) rarely says goodbye: its chat is closed, and its session
+ * would stay open for good. Every check that asks "is this agent in the
+ * room?" would then count it, though the room shows it as offline.
+ *
+ * The end is the one an agent makes when it leaves by itself: its task
+ * leases pass to its next session, and an MCP client that comes back
+ * registers again under the same name.
+ *
+ * Returns the ended session ids; the caller closes their process connections.
+ */
+export async function endGoneWorkerSessions(options: { now_ms?: number; limit?: number } = {}): Promise<string[]> {
+  const nowMs = options.now_ms ?? Date.now();
+  const limit = options.limit ?? 100;
+  const candidates = await db.select({ session_id: room_agent_sessions.session_id })
+    .from(room_agent_sessions)
+    .where(and(
+      sweepableWorkerSession,
+      mayBeGoneSql(nowMs),
+      goneSweepCursor === null ? undefined : gt(room_agent_sessions.session_id, goneSweepCursor),
+    ))
+    .orderBy(asc(room_agent_sessions.session_id))
+    .limit(limit);
+  goneSweepCursor = candidates.length < limit ? null : candidates[candidates.length - 1].session_id;
+  const ended: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      const session = await endRoomAgentSession({
+        session_id: candidate.session_id,
+        only_if_gone: { now_ms: nowMs },
+      });
+      if (session) ended.push(session.session_id);
+    } catch (error) {
+      // One session that cannot be ended must not hold back the others.
+      console.error(`Could not end gone worker session ${candidate.session_id}:`, error);
+    }
+  }
+  return ended;
+}
+
+/** Tests only: start the next sweep from the first session again. */
+export function resetGoneWorkerSweepCursorForTests(): void {
+  goneSweepCursor = null;
 }
 
 /**
