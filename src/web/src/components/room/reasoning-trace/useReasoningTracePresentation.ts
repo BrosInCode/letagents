@@ -1,4 +1,4 @@
-import { computed, type ComputedRef } from 'vue'
+import { computed, getCurrentInstance, onMounted, onScopeDispose, ref, watch, type ComputedRef } from 'vue'
 import {
   parseAgentIdentity,
   type RoomReasoningSession,
@@ -8,16 +8,38 @@ import {
   buildCurrentSnapshot,
   buildHighlights,
   buildTimelineEntries,
-  entryLabel,
+  classifyReasoningStream,
   formatTimestamp,
-  isCodexReasoningSummarySnapshot,
-  isCodexSnapshotPayload,
-  resolveStreamState,
 } from './reasoningTrace'
+
+/** How often the open modal re-checks whether a live stream has gone stale. */
+const STALE_CHECK_INTERVAL_MS = 30_000
 
 export function useReasoningTracePresentation(
   activeSession: ComputedRef<RoomReasoningSession | null>,
+  open: () => boolean = () => true,
 ) {
+  // A clock that runs only while the modal is open, so a live stream that went
+  // silent decays to "Stale" instead of reading as live forever.
+  const now = ref(Date.now())
+  let clock: ReturnType<typeof setInterval> | null = null
+  const stopClock = () => {
+    if (clock) clearInterval(clock)
+    clock = null
+  }
+  const watchOpen = () => watch(open, (isOpen) => {
+    stopClock()
+    if (!isOpen) return
+    now.value = Date.now()
+    clock = setInterval(() => { now.value = Date.now() }, STALE_CHECK_INTERVAL_MS)
+  }, { immediate: true })
+  // Only a mounted component runs the clock: a server render or a plain call
+  // (a test) never mounts, so it must not leave a timer running.
+  if (getCurrentInstance()) {
+    onMounted(watchOpen)
+    onScopeDispose(stopClock)
+  }
+
   const titleId = computed(() => {
     const raw = String(activeSession.value?.id || 'reasoning').replace(/[^A-Za-z0-9_-]/g, '-')
     return `reasoning-modal-title-${raw || 'session'}`
@@ -68,34 +90,26 @@ export function useReasoningTracePresentation(
     buildTimelineEntries(activeSession.value, currentSnapshot.value, currentLiveTimelineEntry.value)
   )
 
-  const isCodexReasoningSummary = computed(() =>
-    isCodexReasoningSummarySnapshot(currentSnapshot.value)
-  )
-
-  const isCodexSnapshot = computed(() =>
-    isCodexSnapshotPayload(currentSnapshot.value)
-  )
-
-  const streamState = computed(() =>
-    resolveStreamState(
-      activeSession.value,
-      currentSnapshot.value,
-      isCodexReasoningSummary.value,
-      isCodexSnapshot.value,
-    )
-  )
-
-  const streamLabel = computed(() => {
-    if (isCodexReasoningSummary.value) return 'Live update'
-    if (isCodexSnapshot.value) return 'Snapshot'
-    const status = String(currentSnapshot.value?.status || activeSession.value?.status || '').trim()
-    return status ? entryLabel({ id: 'status', text: status, timestamp: '', label: status }) : 'Work log'
+  const streamClassification = computed(() => {
+    const snapshot = currentSnapshot.value
+    return classifyReasoningStream({
+      status: snapshot?.status || activeSession.value?.status,
+      summary: snapshot?.summary,
+      checking: snapshot?.checking,
+      nextAction: snapshot?.next_action,
+      updatedAt: activeSession.value?.updated_at || activeSession.value?.created_at,
+      now: now.value,
+    })
   })
+  const streamState = computed(() => streamClassification.value.state)
+  const streamLabel = computed(() => streamClassification.value.label)
+  const streamDescription = computed(() => streamClassification.value.description)
 
   return {
     currentSummary,
     heading,
     highlights,
+    streamDescription,
     streamLabel,
     streamState,
     subtitle,
