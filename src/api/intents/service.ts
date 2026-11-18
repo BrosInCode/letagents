@@ -20,6 +20,7 @@ import {
   type ApiIntentRow,
 } from "../db/api-intents.js";
 import type { Project } from "../db/types.js";
+import { GitHubAccessUnavailableError } from "../github/repo-access.js";
 import { emitProjectMessage, queueRoomResourceInvalidation } from "../server/events.js";
 import type { RoomAccessAccount } from "../rooms/access.js";
 import { resolvePolicy, type ResolvedApiPolicy } from "../v1/policy.js";
@@ -229,6 +230,12 @@ export async function approveIntent(
   try {
     context = await runContextNow(room, running, deps);
   } catch (error) {
+    if (isTransient(error)) {
+      // GitHub or the tracker did not answer, or the room's tracker budget is
+      // spent: nothing ran, so the intent stays approved and the next approve runs it.
+      await moveApiIntent(room.id, running.id, ["running"], { state: "approved" }, deps.now());
+      throw error;
+    }
     return toIntent(await finish(room.id, running, { state: "failed", error: failureText(error) }, deps));
   }
   return toIntent(await runIntent(room, running, context, deps));
@@ -358,6 +365,11 @@ async function refreshIntent(roomId: string, row: ApiIntentRow, deps: IntentServ
   if (!effect) return row;
   const outcome = ticketEffectOutcome(effect);
   return outcome.state === "running" ? row : finish(roomId, row, outcome, deps);
+}
+
+function isTransient(error: unknown): boolean {
+  return (error instanceof ApiError && (error.code === "rate_limited" || error.code === "source_unavailable"))
+    || error instanceof GitHubAccessUnavailableError;
 }
 
 function failureText(error: unknown): string {

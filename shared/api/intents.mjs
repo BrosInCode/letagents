@@ -213,7 +213,8 @@ export const approveIntent = defineMethod({
   capability: "rooms.admin",
   description:
     "Approves a pending intent, which then runs at once with the proposer's rights. Approving again returns the intent "
-    + "and runs nothing twice. A denied intent gives conflict. Room admins only, signed in to the LetAgents app; pages, "
+    + "and runs nothing twice. A denied intent gives conflict. When GitHub or the tracker does not answer, the intent stays "
+    + "approved and the error says to retry; approving again runs it. Room admins only, signed in to the LetAgents app; pages, "
     + "agents and owner tokens get not_granted.",
   path: "/rooms/:room/intents/:intentId/approve",
   input: z.strictObject({ intentId }),
