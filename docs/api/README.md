@@ -18,9 +18,10 @@ the page bridge and MCP tool schemas all come from it. The plan is
 | Compatibility snapshot | `shared/api/__snapshots__/<area>.json` |
 | Routes of one area | `src/api/v1/areas/<area>.ts` |
 | Mount list | `src/api/v1/areas.ts` (`API_V1_ROUTES`) |
-| Route pipeline | `src/api/v1/router.ts`, `defineRoute` in `src/api/v1/route.ts` |
-| Actor resolver | `src/api/v1/actor.ts` (`resolveApiActor`) |
+| Route pipeline | `src/api/v1/router.ts`; `defineRoute`, `defineStreamRoute`, `withStatus` in `src/api/v1/route.ts` |
+| Caller and room access | `src/api/v1/actor.ts` (`identifyCaller`, `resolveRoomAccess`) |
 | Capability check | `src/api/v1/capability.ts` (`checkCapability`) |
+| Types for those steps | `src/api/v1/context.ts` |
 
 ## Add a method
 
@@ -43,8 +44,15 @@ the page bridge and MCP tool schemas all come from it. The plan is
    ```
 
    - A read is a `GET`; other kinds default to `POST` (set `httpMethod` for `PUT`, `PATCH`, `DELETE`).
-   - `GET` and `DELETE` read input from the query string, so numbers need `z.coerce.number()`.
-     Other verbs read the JSON body. Path parameters other than `:room` are input fields.
+   - `GET` and `DELETE` read input from the query string. Use `queryInt({ min, max, default? })`
+     and `queryBool({ default? })` from `core.mjs` for numbers and booleans: they take the JSON
+     value (MCP, the page bridge) and its exact text (`"20"`, `"true"`). A plain `z.number()`,
+     `z.coerce.number()` or `z.boolean()` there fails the contract test. Other verbs read the
+     JSON body. Path parameters other than `:room` are input fields.
+   - Two routes for one verb must not match the same URL: `/tasks/:taskId` and `/tasks/search`
+     are refused at load. Use another fixed segment (`/task-search`).
+   - `response: "stream"` marks a method whose handler writes the response itself (server-sent
+     events); its `output` describes one event. The default is `"json"`.
    - Use `z.strictObject` for inputs, so a misspelled field is an error, not ignored.
    - Use camelCase field names. Export each schema and a same-named type:
      `/** @typedef {z.infer<typeof Task>} Task */`.
@@ -65,17 +73,33 @@ the page bridge and MCP tool schemas all come from it. The plan is
    ];
    ```
 
-   The router already did these steps, in this order: sign-in, room access through the room in
-   the URL (`not_found`, `not_participant`), `checkCapability`, the per-actor rate limit, and the
-   input parse. The handler gets the parsed input and `{ actor, room, access, account, req }`.
+   The router runs these steps, in this order, before and after the handler:
+   1. `identifyCaller(req)`: who calls (`unauthenticated` when nobody).
+   2. The rate limit for the method's `rateClass`, per caller, across rooms (`rate_limited`).
+   3. `resolveRoomAccess(caller, roomParam)`: the room in the URL (`not_found`, `not_participant`).
+   4. The input parse (`invalid_input`).
+   5. `checkCapability(actor, method, input, call)`, with the parsed input (`not_granted`).
+   6. The handler, with the parsed input and `{ actor, room, access, account, req }`.
+   7. The output parse: the answer is always the parsed output, so a field the schema does not
+      name is never sent. Output that does not parse is `internal` (logged as a contract mismatch).
+
    Throw `ApiError` for an expected refusal. Any other error is answered as `internal`, and the
-   detail goes only to the server log. Outside production the router also checks the output
-   against the schema, and refuses an error code the method does not list.
+   detail goes only to the server log. Outside production, a handler error code the method does
+   not list also becomes `internal`, so the test shows it.
+
+   - `return withStatus(201, output)` answers 201 (or 202). There is no 204: every method has an
+     output schema.
+   - For a `response: "stream"` method, use
+     `defineStreamRoute(method, async (input, call, res) => { ... })`. Steps 1 to 5 run first; the
+     handler then owns `res` and resolves when the stream ends.
 
 3. **Generate.** Run `node scripts/build-api-contracts.mjs`. It type-checks the contract,
    writes the `.d.mts` files and refreshes the snapshot. It refuses to refresh the snapshot when
-   the change removes a method or a field, or narrows a type: inside `api: 1` the contract only
-   grows. Commit the generated files with the change.
+   the change removes a method or a field, narrows a type, or changes the path, verb, capability,
+   rate class or response kind: inside `api: 1` the contract only grows. Commit the generated
+   files with the change. The test also compares with the snapshot on the base branch
+   (`API_CONTRACT_BASE_REF`, default `origin/feat/letagents-api`), so `--allow-breaking` on a
+   feature branch does not get a break past review.
 
 4. **Test.** Add a route test (see `src/api/__tests__/api-v1-rooms-db.test.ts`) and run:
 

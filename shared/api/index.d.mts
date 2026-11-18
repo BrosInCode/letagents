@@ -5,8 +5,9 @@
  */
 export function getApiMethod(name: string): KnownApiMethod | undefined;
 /**
- * Two methods with one name, or one HTTP route, would make the contract and
- * the server disagree about which one a call means.
+ * Two methods with one name, or two routes that can match the same URL, would
+ * make the contract and the server disagree about which one a call means.
+ * `/tasks/:taskId` and `/tasks/search` overlap: "search" is also a task id.
  * @param {ReadonlyArray<{ name: string, httpMethod: string, path: string }>} methods
  */
 export function assertUniqueMethods(methods: ReadonlyArray<{

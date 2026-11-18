@@ -36,6 +36,13 @@ export const METHOD_KINDS = /** @type {const} */ (["read", "intent", "job", "wri
 export const HTTP_VERBS = /** @type {const} */ (["GET", "POST", "PUT", "PATCH", "DELETE"]);
 
 /**
+ * - `json`: one JSON body, checked against `output`.
+ * - `stream`: the handler writes the response itself (server-sent events);
+ *   `output` describes one event's data.
+ */
+export const RESPONSE_KINDS = /** @type {const} */ (["json", "stream"]);
+
+/**
  * Per-actor limits. A method names its class; the server counts each actor
  * (principal plus page, job or integration) per class.
  */
@@ -72,6 +79,7 @@ export const API_ERROR_CODES = /** @type {const} */ ([
 /** @typedef {typeof API_AREAS[number]} ApiArea */
 /** @typedef {typeof METHOD_KINDS[number]} MethodKind */
 /** @typedef {typeof HTTP_VERBS[number]} HttpVerb */
+/** @typedef {typeof RESPONSE_KINDS[number]} ResponseKind */
 /** @typedef {keyof typeof RATE_CLASSES} RateClass */
 /** @typedef {typeof API_ERROR_CODES[number]} ApiErrorCode */
 /** @typedef {import("./capabilities.mjs").CapabilityName} CapabilityName */
@@ -192,6 +200,7 @@ function formatIssuePath(path) {
  *   description: string,
  *   path: string,
  *   httpMethod?: HttpVerb,
+ *   response?: ResponseKind,
  *   input: Input,
  *   output: Output,
  *   errors?: readonly ApiErrorCode[],
@@ -211,6 +220,7 @@ function formatIssuePath(path) {
  *   readonly description: string,
  *   readonly path: string,
  *   readonly httpMethod: HttpVerb,
+ *   readonly response: ResponseKind,
  *   readonly input: Input,
  *   readonly output: Output,
  *   readonly errors: readonly ApiErrorCode[],
@@ -259,6 +269,8 @@ export function defineMethod(spec) {
   if (typeof spec.path !== "string" || !(spec.path === "/rooms/:room" || spec.path.startsWith("/rooms/:room/"))) {
     throw new TypeError(`${where}: the path must start with "/rooms/:room".`);
   }
+  const response = spec.response ?? "json";
+  if (!RESPONSE_KINDS.includes(response)) throw new TypeError(`${where}: unknown response kind ${JSON.stringify(response)}.`);
   const inputKeys = spec.input instanceof z.ZodObject ? Object.keys(spec.input.shape) : null;
   for (const [, param] of spec.path.matchAll(PATH_PARAM)) {
     if (param === "room") continue;
@@ -276,6 +288,7 @@ export function defineMethod(spec) {
     description: spec.description.trim(),
     path: spec.path,
     httpMethod,
+    response,
     input: spec.input,
     output: spec.output,
     errors: Object.freeze(errors),
@@ -304,4 +317,96 @@ export function toJsonSchema(method) {
     input: /** @type {Record<string, unknown>} */ (z.toJSONSchema(method.input, { io: "input" })),
     output: /** @type {Record<string, unknown>} */ (z.toJSONSchema(method.output, { io: "output" })),
   };
+}
+
+// ── Query-string inputs ─────────────────────────────────────────────────
+// A GET or DELETE takes its input from the query string, where every value is
+// a string; MCP and the page bridge send JSON numbers and booleans. These
+// accept both and nothing else: no "" as 0, no "yes" as true.
+
+const INTEGER_TEXT = /^-?\d{1,15}$/;
+
+/**
+ * @param {number} min
+ * @param {number} max
+ */
+function queryIntSchema(min, max) {
+  const int = z.number().int().min(min).max(max);
+  return z.union([int, z.string().regex(INTEGER_TEXT).transform(Number).pipe(int)], {
+    error: `Expected a whole number from ${min} to ${max}.`,
+  });
+}
+
+function queryBoolSchema() {
+  return z.union([z.boolean(), z.enum(["true", "false"]).transform((value) => value === "true")], {
+    error: "Expected true or false.",
+  });
+}
+
+/** @typedef {ReturnType<typeof queryIntSchema>} QueryInt */
+/** @typedef {ReturnType<typeof queryBoolSchema>} QueryBool */
+
+/**
+ * A whole number from `min` to `max`, as a number or its decimal text.
+ * @overload
+ * @param {{ min: number, max: number }} options
+ * @returns {QueryInt}
+ */
+/**
+ * @overload
+ * @param {{ min: number, max: number, default: number }} options
+ * @returns {z.ZodDefault<QueryInt>}
+ */
+/**
+ * @param {{ min: number, max: number, default?: number }} options
+ * @returns {QueryInt | z.ZodDefault<QueryInt>}
+ */
+export function queryInt({ min, max, default: fallback }) {
+  const schema = queryIntSchema(min, max);
+  return fallback === undefined ? schema : schema.default(fallback);
+}
+
+/**
+ * `true` or `false`, as a boolean or the exact text "true" or "false".
+ * @overload
+ * @param {{}} [options]
+ * @returns {QueryBool}
+ */
+/**
+ * @overload
+ * @param {{ default: boolean }} options
+ * @returns {z.ZodDefault<QueryBool>}
+ */
+/**
+ * @param {{ default?: boolean }} [options]
+ * @returns {QueryBool | z.ZodDefault<QueryBool>}
+ */
+export function queryBool({ default: fallback } = {}) {
+  const schema = queryBoolSchema();
+  return fallback === undefined ? schema : schema.default(fallback);
+}
+
+/**
+ * Input fields of a GET or DELETE method that a query string could never
+ * satisfy: a plain number or boolean, with no text form. Use queryInt and
+ * queryBool instead.
+ * @param {Pick<AnyApiMethod, "name" | "httpMethod" | "input">} method
+ * @returns {string[]}
+ */
+export function queryInputProblems(method) {
+  if (method.httpMethod !== "GET" && method.httpMethod !== "DELETE") return [];
+  const schema = /** @type {{ properties?: Record<string, any> }} */ (z.toJSONSchema(method.input, { io: "input" }));
+  /** @type {string[]} */
+  const problems = [];
+  for (const [field, property] of Object.entries(schema.properties ?? {})) {
+    const values = property.type === "array" && property.items ? property.items : property;
+    const alternatives = /** @type {any[]} */ (values.anyOf ?? values.oneOf ?? [values]);
+    const types = alternatives.flatMap((alt) => (Array.isArray(alt.type) ? alt.type : [alt.type]));
+    const textForm = types.includes("string") || types.includes(undefined);
+    const plain = types.filter((type) => type === "number" || type === "integer" || type === "boolean");
+    if (plain.length && !textForm) {
+      problems.push(`${method.name}: the query field "${field}" is a plain ${plain[0]}; use queryInt() or queryBool().`);
+    }
+  }
+  return problems;
 }

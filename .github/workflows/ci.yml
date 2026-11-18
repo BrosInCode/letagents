@@ -146,8 +146,15 @@ jobs:
       - name: Test packed MCP runtime
         run: npm run test:package-runtime
 
+      # The contract may only grow: the snapshot is also compared with the
+      # one on the pull request's base, which a feature branch cannot refresh.
       - name: Test LetAgents API contract and route pipeline
-        run: npm run test:api-contracts
+        env:
+          API_CONTRACT_BASE: ${{ github.base_ref || github.ref_name }}
+        run: |
+          git fetch --no-tags --depth=1 origin "+refs/heads/${API_CONTRACT_BASE}:refs/remotes/origin/${API_CONTRACT_BASE}" \
+            || echo "Base ${API_CONTRACT_BASE} not fetched; only the checked-in snapshot is compared."
+          API_CONTRACT_BASE_REF="origin/${API_CONTRACT_BASE}" npm run test:api-contracts
 
       - name: Install Vue dependencies without lifecycle scripts
         run: cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
