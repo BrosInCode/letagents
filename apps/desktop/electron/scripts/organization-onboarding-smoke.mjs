@@ -58,7 +58,13 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
       assert.equal(args[1], !org.setup, 'only an owner of a company nobody set up asks for setup');
       org.setup = true; org.joined = true; return { status: 'ok' };
     }
-    case 'organizations.rooms': return { status: 'ok', rooms: args[0] === '42' ? [companyRoom] : [] };
+    case 'organizations.rooms': return { status: 'ok', rooms: [
+      ...(args[0] === '42' ? [companyRoom] : []),
+      ...createdRooms.filter(room => room.organizationId === args[0]).map(room => ({
+        kind: 'room', room_id: 'room_q4', display_name: 'Q4 launch', organization_id: room.organizationId,
+        github_repo_id: null, full_name: null, visibility: null,
+      })),
+    ] };
     case 'organizations.openOnGitHub': openedGitHubPages.push(args[0]); return;
     case 'room.createInviteRoom': {
       createdRooms.push(args[0] ?? null);
@@ -72,9 +78,19 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'room.getSnapshot': return snapshot(args[0] || undefined);
     case 'room.listAccountRooms': return [];
     case 'room.getSourceStates': return {};
+    case 'room.getMyWork': return { cards: [], next_cursor: null, has_connections: false, providers: [] };
     case 'room.getLatestMessages': return [];
     case 'conversations.list': return { conversations: [], version: '0' };
     case 'conversations.changes': return { version: '0' };
+    case 'repos.openRoom': {
+      const repoPath = args[0];
+      const roomIdentifier = 'github.com/herotel/app';
+      return {
+        canceled: false, repoPath, roomIdentifier, source: 'git_remote', warning: null, error: null,
+        repoStatus: { rootPath: repoPath, branch: 'feature/room', worktrees: [] },
+        snapshot: snapshot(roomIdentifier),
+      };
+    }
     case 'repos.getStatus': return { available: false, rootPath: null, roomIdentifier: null, branch: null, worktrees: [] };
     default:
       if (method.includes('list') || method.includes('Bindings') || method.includes('Actions')) return [];
@@ -141,8 +157,8 @@ try {
   await click('[data-testid="company-menu-all"]');
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').trim().startsWith('Rooms') && !document.querySelector('[data-testid="company-home"]')`);
   // A company link opens a dialog over any view, and survives a restart until it is answered.
-  await click('[data-testid="sidebar-rent"]');
-  await waitFor(`Boolean(document.querySelector('[data-testid="rent-marketplace-view"]'))`);
+  await click('[data-testid="sidebar-my-work"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="my-work-view"]'))`);
   links.acceptCompanyLink('letagents://company/46');
   assert.equal(links.getPendingCompanyLink(), '46');
   const reloadedLinks = await import(`../../dist-electron/main/company-links.js?restart=${Date.now()}`);
@@ -165,31 +181,48 @@ try {
   await click('[data-testid="company-invite-show_rooms"]');
   await waitFor(`!document.querySelector('[data-testid="company-invite-dialog"]') && (document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').includes('Northwind')`);
   assert.equal(links.getPendingCompanyLink(), null);
-  // The company owns work rooms: a new blank room is created in the selected company.
+  // New room starts at the draft in the selected company.
   await click('[data-testid="sidebar-new-room"]');
-  await click('[data-testid="new-room-modal"] [role="tab"][id$="-tab-standalone"]');
-  await waitFor(`document.querySelector('[data-testid="new-room-storage"] button')?.getAttribute('aria-label') === 'Where it lives: Northwind'`);
-  await click('[data-testid="new-room-storage"] button');
-  await waitFor(`Boolean(document.querySelector('[popover]:popover-open [role="option"][aria-selected="true"]'))`);
-  await js(`document.querySelector('[popover]:popover-open [role="option"]:last-child').click()`);
-  await waitFor(`document.querySelector('[data-testid="new-room-storage-description"]')?.textContent.includes('stays on this device')`);
-  await click('[data-testid="new-room-storage"] button');
-  await js(`document.querySelector('[popover]:popover-open [role="option"]:first-child').click()`);
-  await waitFor(`document.querySelector('[data-testid="new-room-storage"] button')?.getAttribute('aria-label') === 'Where it lives: Northwind'`);
+  const organizationTrigger = '[data-testid="new-room-organization"] button[aria-haspopup="listbox"]';
+  const accessTrigger = '[data-testid="new-room-storage"] button[aria-haspopup="listbox"]';
+  const option = (label) => js(`[...document.querySelectorAll('[popover]:popover-open [role="option"]')].find(item => item.textContent.trim().endsWith(${JSON.stringify(label)})).click()`);
+  await waitFor(`document.querySelector(${JSON.stringify(organizationTrigger)})?.getAttribute('aria-label') === 'Organization: Northwind'`);
+  await click(organizationTrigger);
+  await option('Personal');
+  await click(accessTrigger);
+  await option('Only on this device');
+  await click(organizationTrigger);
+  await option('Northwind');
+  await click(organizationTrigger);
+  await option('Personal');
+  await waitFor(`document.querySelector(${JSON.stringify(accessTrigger)})?.getAttribute('aria-label') === 'Room access: Only on this device'`);
+  await click(organizationTrigger);
+  await option('Herotel');
+  // A project preview replaces the room identity and removing it restores the draft.
+  await js(`{ const input = document.querySelector('[data-testid="new-room-name-input"]'); input.value = 'Q4 launch'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
+  await click('[data-testid="new-room-add-project"]');
+  await click('button.desktop-new-room-text-button');
+  await js(`{ const input = document.querySelector('[data-testid="new-room-project-path-input"]'); input.value = '/fixture/app'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
+  await js(`document.querySelector('[data-testid="new-room-project-path-submit"]').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'mouse' }))`);
+  await click('[data-testid="new-room-project-path-submit"]');
+  await waitFor(`document.querySelector('[data-testid="new-room-project-preview"]')?.textContent.includes('feature/room')`);
+  await waitFor(`document.querySelector('[data-testid="new-room-confirm-project"]') === document.activeElement`);
+  await capture('09-project-room.png');
+  await click('button[aria-label="Remove project"]');
+  await waitFor(`document.querySelector('[data-testid="new-room-name-input"]')?.value === 'Q4 launch'`);
+  assert.equal(await js(`document.querySelector(${JSON.stringify(organizationTrigger)})?.getAttribute('aria-label')`), 'Organization: Herotel');
   await capture('09-new-company-room.png');
-  await click('[data-testid="new-room-storage"] button');
+  await click(organizationTrigger);
   await waitFor(`Boolean(document.querySelector('[popover]:popover-open [role="option"][aria-selected="true"]'))`);
   await capture('09-new-company-room-menu.png');
   await js(`document.querySelector('[popover]:popover-open [role="option"][aria-selected="true"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
   await waitFor(`!document.querySelector('[popover]:popover-open') && Boolean(document.querySelector('[data-testid="new-room-modal"]'))`);
   await click('[data-testid="new-room-create-standalone"]');
-  await waitFor(`Boolean(document.querySelector('[data-testid="new-room-success-step"]'))`);
-  assert.deepEqual(createdRooms, [{ organizationId: '46' }]);
-  await click('[data-testid="new-room-done"]');
-  await waitFor(`!document.querySelector('[data-testid="new-room-modal"]')`);
+  await waitFor(`!document.querySelector('[data-testid="new-room-modal"]') && document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent.includes('Herotel') && document.body.innerText.includes('Q4 launch')`);
+  assert.deepEqual(createdRooms, [{ organizationId: '42' }]);
   // A pasted company link opens the company dialog instead of joining a room.
   await click('[data-testid="sidebar-new-room"]');
-  await click('[data-testid="new-room-modal"] [role="tab"][id$="-tab-join"]');
+  await click('[data-testid="new-room-join-entry"]');
   await js(`{ const input = document.querySelector('[data-testid="new-room-join-input"]'); input.value = 'https://letagents.chat/company/42'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await click('[data-testid="new-room-join-submit"]');
   await waitFor(`Boolean(document.querySelector('[data-testid="company-invite-dialog"]')) && document.body.innerText.includes('Show Herotel rooms')`);
@@ -197,7 +230,7 @@ try {
   await waitFor(`!document.querySelector('[data-testid="company-invite-dialog"]') && (document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').includes('Herotel')`);
   // Opening a room outside the company switches back to All rooms, so the room never hides.
   await click('[data-testid="sidebar-new-room"]');
-  await click('[data-testid="new-room-modal"] [role="tab"][id$="-tab-join"]');
+  await click('[data-testid="new-room-join-entry"]');
   await js(`{ const input = document.querySelector('[data-testid="new-room-join-input"]'); input.value = 'github.com/alex/personal'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await click('[data-testid="new-room-join-submit"]');
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').trim().startsWith('Rooms') && !document.querySelector('[data-testid="company-home"]')`);
