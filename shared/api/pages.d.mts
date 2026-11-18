@@ -686,9 +686,10 @@ export const approvePageVersion: import("./core.mjs").ApiMethod<"pages.approve",
     pageId: z.ZodString;
     version: z.ZodNumber;
     capabilities: z.ZodArray<z.ZodEnum<{
-        "agents.read": "agents.read";
+        "jobs.start": "jobs.start";
         "rooms.read": "rooms.read";
         "people.read": "people.read";
+        "agents.read": "agents.read";
         "messages.read": "messages.read";
         "tasks.read": "tasks.read";
         "planning.read": "planning.read";
@@ -701,7 +702,6 @@ export const approvePageVersion: import("./core.mjs").ApiMethod<"pages.approve",
         "data.room": "data.room";
         "tasks.propose": "tasks.propose";
         "tickets.propose": "tickets.propose";
-        "jobs.start": "jobs.start";
         "messages.post": "messages.post";
         "rooms.admin": "rooms.admin";
     }>>;
@@ -1338,9 +1338,10 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
     pageId: z.ZodString;
     version: z.ZodNumber;
     capabilities: z.ZodArray<z.ZodEnum<{
-        "agents.read": "agents.read";
+        "jobs.start": "jobs.start";
         "rooms.read": "rooms.read";
         "people.read": "people.read";
+        "agents.read": "agents.read";
         "messages.read": "messages.read";
         "tasks.read": "tasks.read";
         "planning.read": "planning.read";
@@ -1353,7 +1354,6 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
         "data.room": "data.room";
         "tasks.propose": "tasks.propose";
         "tickets.propose": "tickets.propose";
-        "jobs.start": "jobs.start";
         "messages.post": "messages.post";
         "rooms.admin": "rooms.admin";
     }>>;

@@ -12,7 +12,9 @@ import { isPolicyCapability, resolvePolicy, type ResolvedApiPolicy } from "./pol
  * agent's) room rights, which the access check already proved, intersected
  * with the grant of what they act through:
  * 1. Room administration (not grantable) is for a person acting for
- *    themselves: no page, agent, job or integration.
+ *    themselves: no page, agent, job or integration. An agent's worker
+ *    bearer reads, and writes only through a method the contract opens to
+ *    agents (`agents: "write"`).
  * 2. Through a page: the page grant must hold the capability, for this page
  *    version in this room. Through a job or the remote MCP integration: the
  *    principal's own rights; a job carries no permission and adds none.
@@ -29,6 +31,9 @@ export function createCapabilityCheck(deps: { resolvePolicy?: typeof resolvePoli
     const capability = capabilityForCall(method, input);
     if (!getCapability(capability).grantable && (actor.principal.kind !== "person" || actor.via)) {
       throw new ApiError("not_granted", "Only a person signed in to LetAgents, acting for themselves, can do this.");
+    }
+    if (actor.principal.kind === "agent" && method.kind !== "read" && method.agents !== "write") {
+      throw new ApiError("not_granted", "Agents cannot use this method through the LetAgents API.");
     }
     if (actor.via?.kind === "page" && !pageGrantHolds(call.req.pageGrant ?? null, actor, capability)) {
       throw new ApiError("not_granted", `This caller does not hold the "${capability}" capability.`);

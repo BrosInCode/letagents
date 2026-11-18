@@ -205,6 +205,7 @@ export const listPages = defineMethod({
   input: z.strictObject({ surface: z.enum(PAGE_SURFACES).optional() }),
   output: PageList,
   rateClass: "read",
+  agents: "read",
 });
 
 export const getPageDocument = defineMethod({
@@ -219,6 +220,7 @@ export const getPageDocument = defineMethod({
   output: PageDocument,
   errors: ["not_found"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const getPage = defineMethod({
@@ -233,6 +235,7 @@ export const getPage = defineMethod({
   output: PageDetail,
   errors: ["not_found"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const createPage = defineMethod({
@@ -255,6 +258,7 @@ export const createPage = defineMethod({
   output: PageDetail,
   errors: ["not_found", "too_large", "conflict"],
   rateClass: "write",
+  agents: "write",
 });
 
 export const publishPageVersion = defineMethod({
@@ -271,6 +275,7 @@ export const publishPageVersion = defineMethod({
   output: PageDetail,
   errors: ["not_found", "too_large", "conflict"],
   rateClass: "write",
+  agents: "write",
 });
 
 export const pinPage = defineMethod({
@@ -411,6 +416,7 @@ export const listPageDiagnostics = defineMethod({
   output: PageDiagnostics,
   errors: ["not_found"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const methods = /** @type {const} */ ([

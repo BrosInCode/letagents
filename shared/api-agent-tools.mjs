@@ -25,6 +25,7 @@ export const API_AGENT_TOOLS = Object.freeze([
   Object.freeze({name: "api_data_update", method: "data.update", access: "write"}),
   Object.freeze({name: "api_data_delete", method: "data.delete", access: "write"}),
   Object.freeze({name: "api_jobs_list", method: "jobs.list", access: "read"}),
+  Object.freeze({name: "api_pages_get", method: "pages.get", access: "read"}),
 ]);
 
 /** The generated tools that only read: supervised agents run them without journaling. */

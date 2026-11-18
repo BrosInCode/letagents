@@ -208,17 +208,15 @@ test("the page tools: publish_page only where files can be read, and its descrip
   assert.deepEqual([...supervised.keys()], ["list_pages", "read_page", "read_page_diagnostics"]);
 });
 
-test("page tools call the pages methods, or say the server has no pages yet", async () => {
+test("list_pages, read_page and read_page_diagnostics call the pages routes in the agent's room", async () => {
   const requests = fakeApi(() => ({ status: 200, body: { pages: [] } }));
-  const tools = registered((server) => registerPageTools(server, { publish: true }));
-  const result = JSON.parse((await tools.get("list_pages")!.handler({ room_id: "design-lounge", surface: "room.tab" })).content[0]!.text);
-  if (getApiMethod("pages.list")) {
-    assert.deepEqual(result, { pages: [] });
-    assert.deepEqual({ path: requests.at(-1)!.path, search: requests.at(-1)!.search }, { path: "/api/v1/rooms/design-lounge/pages", search: "?surface=room.tab" });
-  } else {
-    assert.deepEqual(result, { success: false, error: "This LetAgents version has no room pages yet (no pages.list in its API)." });
-    assert.equal(requests.length, 0);
-  }
+  const client = await connected((server) => registerPageTools(server, { publish: true }));
+  assert.deepEqual(await callTool(client, "list_pages", { room_id: "design-lounge", surface: "room.tab" }), { pages: [] });
+  assert.deepEqual({ path: requests.at(-1)!.path, search: requests.at(-1)!.search }, { path: "/api/v1/rooms/design-lounge/pages", search: "?surface=room.tab" });
+  await callTool(client, "read_page", { room_id: "design-lounge", page_id: "page_ab12", version: 3 });
+  assert.deepEqual({ path: requests.at(-1)!.path, search: requests.at(-1)!.search }, { path: "/api/v1/rooms/design-lounge/pages/page_ab12/document", search: "?version=3" });
+  await callTool(client, "read_page_diagnostics", { room_id: "design-lounge", page_id: "page_ab12" });
+  assert.deepEqual({ path: requests.at(-1)!.path, search: requests.at(-1)!.search }, { path: "/api/v1/rooms/design-lounge/pages/page_ab12/diagnostics", search: "" }, "the server picks the limit");
 });
 
 /** Run `check` with the server pinned to `folder` as it starts. */
@@ -244,6 +242,17 @@ test("publish_page reads the page with the attachment file guard: in the workspa
   writeFileSync(join(tempDir, "outside.html"), "<p>outside</p>");
   await startedIn(project, async () => {
     assert.equal(await readPageFile("desk.html"), "<!doctype html><title>Desk</title>");
+    const requests = fakeApi(() => ({ status: 200, body: { id: "page_ab12" } }));
+    const publish = registered((server) => registerPageTools(server, { publish: true })).get("publish_page")!.handler;
+    await publish({ room_id: "design-lounge", path: "desk.html", draft: true });
+    assert.deepEqual(requests.at(-1), { method: "POST", path: "/api/v1/rooms/design-lounge/pages", search: "",
+      body: { html: "<!doctype html><title>Desk</title>", draft: true }, authorization: "Bearer owner-token" });
+    await publish({ room_id: "design-lounge", path: "desk.html", page_id: "page_ab12" });
+    assert.deepEqual({ path: requests.at(-1)!.path, body: requests.at(-1)!.body },
+      { path: "/api/v1/rooms/design-lounge/pages/page_ab12/versions", body: { html: "<!doctype html><title>Desk</title>" } });
+    const refused = JSON.parse((await publish({ room_id: "design-lounge", path: "notes.txt" })).content[0]!.text);
+    assert.equal(refused.success, false);
+    assert.equal(requests.length, 2, "a refused file sends nothing");
     await assert.rejects(readPageFile("notes.txt"), /not an \.html file\. Nothing was published\./);
     await assert.rejects(readPageFile("big.html"), /larger than 2 MB/);
     await assert.rejects(readPageFile("latin1.html"), /not UTF-8/);

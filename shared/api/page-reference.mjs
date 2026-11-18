@@ -6,11 +6,12 @@ import { CAPABILITIES, CAPABILITY_NAMES, getCapability } from "./capabilities.mj
 import { API_ERROR_CODES, API_VERSION, toJsonSchema } from "./core.mjs";
 import { API_METHODS } from "./index.mjs";
 import { DATA_SCOPES, PAGE_MANIFEST_SCRIPT_TYPE, PAGE_SURFACES, PAGE_TITLE_MAX } from "./manifest.mjs";
+import { PAGE_LIMITS } from "./pages.mjs";
 
 /** @typedef {import("./index.mjs").KnownApiMethod} KnownApiMethod */
 
 /** The server keeps at most this much HTML per page version. */
-export const PAGE_HTML_MAX_BYTES = 2 * 1024 * 1024;
+export const PAGE_HTML_MAX_BYTES = PAGE_LIMITS.htmlBytes;
 
 /**
  * The `--la-*` CSS variables the app sets on a page's root element, in light
@@ -174,7 +175,8 @@ class TypeNamer {
     if (isObjectShape(schema)) {
       const shape = JSON.stringify(schema);
       this.uses.set(shape, (this.uses.get(shape) ?? 0) + 1);
-      if (key && !this.proposed.has(shape)) this.proposed.set(shape, { name: typeName(key, area, item), area });
+      // A method's whole output is named after its area (`Job`); a nested shape after its field.
+      if (!this.proposed.has(shape)) this.proposed.set(shape, { name: key ? typeName(key, area, item) : pascal(singular(area)), area });
       for (const [name, property] of Object.entries(schema.properties)) this.count(property, name, area);
       return;
     }
@@ -315,12 +317,13 @@ function singular(word) {
 
 /**
  * An id pattern as an example (`^msg_[1-9]\\d*$` → `"msg_<n>"`); any other
- * pattern as written.
+ * pattern as a plain string.
  * @param {string} pattern
  */
 function patternText(pattern) {
   const example = pattern.replace(/^\^|\$$/g, "").replace(/\[1-9\]\\d\*|\\d\{1,\d+\}|\\d\+/g, "<n>");
-  return /^[A-Za-z0-9_<>-]+$/.test(example) ? `"${example}"` : `string /${pattern}/`;
+  // Other patterns are rules the server explains when an input breaks them.
+  return /^[A-Za-z0-9_<>-]+$/.test(example) ? `"${example}"` : "string";
 }
 
 /** @param {string} text */
