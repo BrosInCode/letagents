@@ -18,6 +18,8 @@ export const apiUrl =
 export const attachmentProtocolScheme = "letagents-attachment";
 /** Served only inside the HTML demo session; the app window cannot load it. */
 export const htmlDemoProtocolScheme = "letagents-demo";
+/** Served only inside the room page session, a sibling of the demo scheme. */
+export const pageProtocolScheme = "letagents-page";
 export const roomMessageHistoryPageSize = 150;
 
 export function getLetAgentsLocalStatePath(): string {
