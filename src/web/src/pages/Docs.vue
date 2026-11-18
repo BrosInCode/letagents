@@ -14,6 +14,7 @@
 
       <main class="docs-content" :inert="sidebarOpen && mobile">
         <GettingStartedDocs />
+        <AgentsDocs />
         <RoomConceptDocs />
         <SecurityDocs />
         <OperationsDocs />
@@ -38,6 +39,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import DocsSidebar from '@/components/docs/DocsSidebar.vue'
 import MenuIcon from '@/components/icons/MenuIcon.vue'
+import AgentsDocs from '@/components/docs/sections/AgentsDocs.vue'
 import GettingStartedDocs from '@/components/docs/sections/GettingStartedDocs.vue'
 import OperationsDocs from '@/components/docs/sections/OperationsDocs.vue'
 import RoomConceptDocs from '@/components/docs/sections/RoomConceptDocs.vue'
