@@ -4,7 +4,7 @@
 // data it keeps. A room admin grants the capabilities when pinning the page.
 import { z } from "zod";
 
-import { CAPABILITY_NAMES } from "./capabilities.mjs";
+import { GRANTABLE_CAPABILITY_NAMES } from "./capabilities.mjs";
 import { API_VERSION, describeIssues } from "./core.mjs";
 
 export const PAGE_MANIFEST_SCRIPT_TYPE = "application/letagents-page+json";
@@ -33,8 +33,9 @@ const WORK_ITEM_FIELD = /^[A-Za-z][A-Za-z0-9_.:-]{0,99}$/;
  */
 const unique = (values) => new Set(values).size === values.length;
 
-const capabilityName = z.string().refine((value) => /** @type {readonly string[]} */ (CAPABILITY_NAMES).includes(value), {
-  error: (issue) => `Unknown capability ${JSON.stringify(issue.input)}. Known capabilities: ${CAPABILITY_NAMES.join(", ")}.`,
+// Room administration (`grantable: false`) is never a page's: it reads as unknown here.
+const capabilityName = z.string().refine((value) => /** @type {readonly string[]} */ (GRANTABLE_CAPABILITY_NAMES).includes(value), {
+  error: (issue) => `Unknown capability ${JSON.stringify(issue.input)}. Known capabilities: ${GRANTABLE_CAPABILITY_NAMES.join(", ")}.`,
 });
 
 const collectionNames = z

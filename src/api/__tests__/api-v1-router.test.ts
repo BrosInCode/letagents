@@ -14,7 +14,17 @@ import type { ApiCallerIdentifier, ApiRoomAccessResolver } from "../v1/context.j
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerApiV1Routes } = await import("../v1/router.js");
 const { defineRoute, defineStreamRoute, withStatus } = await import("../v1/route.js");
-const { checkCapability } = await import("../v1/capability.js");
+const { createCapabilityCheck } = await import("../v1/capability.js");
+type ApiActionRecord = import("../v1/actions.js").ApiActionRecord;
+
+// The real capability check with the room policy stubbed: writes are denied in room "closed".
+const checkCapability = createCapabilityCheck({
+  resolvePolicy: async (roomId, capability) => {
+    const mode = roomId === "closed" ? "deny" as const : "approve" as const;
+    return { capability, mode, configured: mode, source: "room", rule: null };
+  },
+});
+const recorded: ApiActionRecord[] = [];
 const { createApiRateLimiter } = await import("../v1/rate-limit.js");
 const { API_V1_ROUTES } = await import("../v1/areas.js");
 
@@ -108,6 +118,7 @@ test.before(async () => {
       capabilityInputs.push(input);
       await checkCapability(actor, method, input, call);
     },
+    recordAction: async (record) => { recorded.push(record); },
     rateLimiter: createApiRateLimiter({ now: () => now, classes: { read: { limit: 3, windowMs: 10_000 }, search: { limit: 1, windowMs: 1 }, write: { limit: 1, windowMs: 1 }, post: { limit: 1, windowMs: 1 }, intent: { limit: 100, windowMs: 1 }, job: { limit: 1, windowMs: 1 } } }),
     strictContract: true,
   });
@@ -190,14 +201,67 @@ test("caller and room refusals pass through: no sign-in 401, another room 403, a
   });
 });
 
-test("every route checks the capability: today a person passes, also through remote MCP, and a page does not", async () => {
+test("every route checks the capability: a person and an agent pass reads, also through remote MCP; a page needs its grant", async () => {
   assert.equal((await call("/rooms/r1/echo/t")).status, 200);
+  // No page grant on the request: the page holds nothing.
   assert.deepEqual(await call("/rooms/r1/echo/t", { via: "page_1" }), {
     status: 403, body: { code: "not_granted", message: 'This caller does not hold the "tasks.read" capability.' }, retryAfter: null,
   });
   const person = { kind: "person" as const, id: "acct_ada" };
   await checkCapability({ principal: person, via: { kind: "integration", id: "remote-mcp" }, roomId: "r1" }, echo, {}, {} as never);
-  await assert.rejects(checkCapability({ principal: { kind: "agent", id: "a/b" }, roomId: "r1" }, echo, {}, {} as never), /not_granted|does not hold/);
+  await checkCapability({ principal: { kind: "agent", id: "a/b" }, roomId: "r1" }, echo, {}, {} as never);
+  const page = { principal: person, via: { kind: "page" as const, id: "page_1", version: 2 }, roomId: "r1" };
+  const grant = { grant_id: "pgt_1", room_id: "r1", page_id: "page_1", page_version: 2, capabilities: ["tasks.read"], expires_at: "" };
+  await checkCapability(page, echo, {}, { req: { pageGrant: grant } } as never);
+  // The grant binds one page version in one room.
+  for (const other of [{ page_version: 1 }, { room_id: "r2" }, { page_id: "page_2" }, { capabilities: ["rooms.read"] }]) {
+    await assert.rejects(checkCapability(page, echo, {}, { req: { pageGrant: { ...grant, ...other } } } as never), /does not hold the "tasks.read" capability/);
+  }
+});
+
+test("the policy covers every policy capability: deny refuses reads too; confirm or approve pass only to intents and jobs", async () => {
+  const example = { area: "data", description: "An example.", path: "/rooms/:room/data-example", input: z.strictObject({}), output: z.object({}) } as const;
+  const dataRead = defineMethod({ ...example, name: "data.readExample", kind: "read", capability: "data.room", rateClass: "read" });
+  const dataWrite = defineMethod({ ...example, name: "data.writeExample", kind: "write", capability: "data.page", rateClass: "write" });
+  const job = defineMethod({ ...example, area: "jobs", name: "jobs.startExample", kind: "job", capability: "jobs.start", rateClass: "job" });
+  const person = (roomId: string) => ({ principal: { kind: "person" as const, id: "acct_ada" }, roomId });
+  const fresh = () => ({ req: {} }) as never;
+  await assert.rejects(checkCapability(person("closed"), dataRead, {}, fresh()), /does not allow "data\.room"/);
+  await assert.rejects(checkCapability(person("r1"), dataWrite, {}, fresh()), /"data\.page" needs a room admin's approval, which this method cannot wait for/);
+  await checkCapability(person("r1"), job, {}, fresh());
+  // Room administration is a person's own: no agent, no page, no integration.
+  const admin = defineMethod({ ...example, area: "rooms", name: "rooms.adminExample", kind: "write", capability: "rooms.admin", rateClass: "write" });
+  await checkCapability(person("r1"), admin, {}, fresh());
+  for (const actor of [
+    { principal: { kind: "agent" as const, id: "a/b" }, roomId: "r1" },
+    { ...person("r1"), via: { kind: "integration" as const, id: "remote-mcp" } },
+    { ...person("r1"), via: { kind: "page" as const, id: "page_1", version: 1 } },
+  ]) {
+    await assert.rejects(checkCapability(actor, admin, {}, fresh()), /acting for themselves/);
+  }
+});
+
+test("a write consults the room policy: deny refuses it, approve passes to the handler", async () => {
+  const post = (room: string) => call(`/rooms/${room}/proposals`, { user: "acct_policy", method: "POST", body: '{"title":"a"}', headers: { "content-type": "application/json" } });
+  assert.equal((await post("r1")).status, 201);
+  assert.deepEqual((await post("closed")).body, {
+    code: "not_granted", message: 'This room does not allow "tasks.propose" through the LetAgents API.',
+  });
+});
+
+test("writes, intents and jobs are recorded with their actor and outcome, refusals after the room check included; reads are not", async () => {
+  recorded.length = 0;
+  await call("/rooms/r1/echo/t", { user: "acct_audit" });
+  const post = (room: string, body: string) => call(`/rooms/${room}/proposals`, { user: "acct_audit", method: "POST", body, headers: { "content-type": "application/json" } });
+  await post("r1", '{"title":"a"}');
+  await post("r1", '{"title":""}');
+  await post("closed", '{"title":"a"}');
+  await post("elsewhere", '{"title":"a"}');
+  assert.deepEqual(recorded.map(({ actor, method, capability, target, outcome }) => ({ principal: actor.principal.id, room: actor.roomId, method, capability, target, outcome })), [
+    { principal: "acct_audit", room: "r1", method: "tasks.proposeExample", capability: "tasks.propose", target: null, outcome: "ok" },
+    { principal: "acct_audit", room: "r1", method: "tasks.proposeExample", capability: "tasks.propose", target: null, outcome: "invalid_input" },
+    { principal: "acct_audit", room: "closed", method: "tasks.proposeExample", capability: "tasks.propose", target: null, outcome: "not_granted" },
+  ]);
 });
 
 test("the rate limit counts per actor and per class, and says when to retry", async () => {

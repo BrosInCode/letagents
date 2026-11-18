@@ -277,6 +277,8 @@ if (windows) {
 const requiredAppFiles = [
   ...(preview ? ["preview-bootstrap.mjs", "preview-isolation.cjs"] : []),
   "dist-electron/main.js",
+  // The room page bridge: tsc writes it as CommonJS beside main.js.
+  "dist-electron/page-preload.cjs",
   "dist-electron/main/agents/codex-provider-adapter.js",
   "dist-electron/main/agents/codex/adapter.js",
   "dist-electron/main/agents/codex/adapter-attach.js",

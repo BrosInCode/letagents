@@ -16,7 +16,7 @@ import {
   setDesktopNotificationBadgeCount,
 } from "./main/notifications.js";
 import { letagentsHomePath } from "../../../shared/letagents-home.mjs";
-import { attachmentProtocolScheme, htmlDemoProtocolScheme, workspaceRoot } from "./main/paths.js";
+import { attachmentProtocolScheme, htmlDemoProtocolScheme, pageProtocolScheme, workspaceRoot } from "./main/paths.js";
 import {
   setExecutionDelegationInvalidationHandler,
   stopDesktopRoomStream,
@@ -58,6 +58,12 @@ function startDesktopApp(): void {
     {
       // Standard and secure so each demo window has its own origin and storage.
       scheme: htmlDemoProtocolScheme,
+      privileges: { standard: true, secure: true },
+    },
+    {
+      // Room pages: the same privileges as demos, on their own scheme so a page
+      // origin can never be a demo origin.
+      scheme: pageProtocolScheme,
       privileges: { standard: true, secure: true },
     },
   ]);

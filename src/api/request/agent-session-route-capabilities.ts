@@ -42,6 +42,9 @@ const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSes
   // A given agent reads the asker's code and proposes changes through LetAgents (Ask for an agent).
   { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/(?:files|read|search)$/, capability: "coordination.read" },
   { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/proposals$/, capability: "coordination.propose" },
+  // LetAgents API reads: each /api/v1 route checks its own capability and the
+  // worker's room; writes through the API are not open to worker bearers yet.
+  { method: "GET", path: /^\/api\/v1\/rooms\/.+$/, capability: "coordination.read" },
 ];
 
 // What a given agent may do while it waits for the asker to accept it: stay connected, nothing else.

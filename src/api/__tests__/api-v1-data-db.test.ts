@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
+import { capabilityForCall } from "../../../shared/api/core.mjs";
 import { DataDocument, getDocument, listDocuments, setDocument } from "../../../shared/api/data.mjs";
 import { parsePageManifest } from "../../../shared/api/manifest.mjs";
 
@@ -21,7 +22,7 @@ delete process.env.PUBLIC_API_URL;
 
 const documents = await import("../v1/documents.js");
 const { resolveDocumentScope } = documents;
-const { checkScopeCapability } = await import("../v1/areas/data.js");
+const { createCapabilityCheck } = await import("../v1/capability.js");
 
 const skip = testDatabaseUrl ? false : "set TEST_DB_URL to run the /api/v1 data DB tests";
 const dbClient = testDatabaseUrl ? await import("../db/client.js") : null;
@@ -446,17 +447,24 @@ test("a collection name a manifest accepts is one the data methods accept", () =
   assert.equal(parsePageManifest({ api: 1, title: "T", surfaces: ["room.tab"], capabilities, collections: { room: [`c${"x".repeat(40)}`] } }).ok, false);
 });
 
-test("the scope in the input picks the capability the check asks for", async () => {
+test("the scope in the input picks the capability the pipeline checks", async () => {
   for (const method of [listDocuments, getDocument, setDocument]) {
-    assert.equal(method.capabilityFromInput?.({ scope: "viewer" } as never), "data.viewer");
-    assert.equal(method.capabilityFromInput?.({ scope: "page" } as never), "data.page");
-    assert.equal(method.capabilityFromInput?.({ scope: "room" } as never), "data.room");
+    assert.equal(capabilityForCall(method, { scope: "viewer" }), "data.viewer");
+    assert.equal(capabilityForCall(method, { scope: "page" }), "data.page");
+    assert.equal(capabilityForCall(method, { scope: "room" }), "data.room");
   }
-  const call = { actor: pageActor, room: { id: "room_a" }, account: null } as never;
-  await assert.rejects(checkScopeCapability(setDocument, { scope: "room" }, call), {
+  // A page whose grant holds data.page only.
+  const actor = { ...pageActor, via: { ...pageActor.via, version: 1 } };
+  const pageGrant = { page_id: "pg_hub", page_version: 1, room_id: "room_a", capabilities: ["data.page"] };
+  const call = { actor, room: { id: "room_a" }, account: null, req: { pageGrant } } as never;
+  const check = createCapabilityCheck({
+    resolvePolicy: async (_roomId, capability) => ({ capability, mode: "allow", configured: "allow", source: "default", rule: null }),
+  });
+  await check(actor, setDocument, { scope: "page" }, call);
+  await assert.rejects(check(actor, setDocument, { scope: "room" }, call), {
     code: "not_granted", message: 'This caller does not hold the "data.room" capability.',
   });
-  await assert.rejects(checkScopeCapability(listDocuments, { scope: "viewer" }, call), {
+  await assert.rejects(check(actor, listDocuments, { scope: "viewer" }, call), {
     code: "not_granted", message: 'This caller does not hold the "data.viewer" capability.',
   });
 });

@@ -47,14 +47,14 @@ export const WorkItem: z.ZodObject<{
     status: z.ZodString;
     statusCategory: z.ZodEnum<{
         done: "done";
-        todo: "todo";
         in_progress: "in_progress";
+        todo: "todo";
     }>;
     state: z.ZodEnum<{
         done: "done";
-        todo: "todo";
         in_progress: "in_progress";
         in_review: "in_review";
+        todo: "todo";
     }>;
     assignee: z.ZodNullable<z.ZodObject<{
         id: z.ZodString;
@@ -108,14 +108,14 @@ export const WorkItemSearchResult: z.ZodObject<{
         status: z.ZodString;
         statusCategory: z.ZodEnum<{
             done: "done";
-            todo: "todo";
             in_progress: "in_progress";
+            todo: "todo";
         }>;
         state: z.ZodEnum<{
             done: "done";
-            todo: "todo";
             in_progress: "in_progress";
             in_review: "in_review";
+            todo: "todo";
         }>;
         assignee: z.ZodNullable<z.ZodObject<{
             id: z.ZodString;
@@ -200,14 +200,14 @@ export const searchWorkItems: import("./core.mjs").ApiMethod<"work_items.search"
         status: z.ZodString;
         statusCategory: z.ZodEnum<{
             done: "done";
-            todo: "todo";
             in_progress: "in_progress";
+            todo: "todo";
         }>;
         state: z.ZodEnum<{
             done: "done";
-            todo: "todo";
             in_progress: "in_progress";
             in_review: "in_review";
+            todo: "todo";
         }>;
         assignee: z.ZodNullable<z.ZodObject<{
             id: z.ZodString;
@@ -264,14 +264,14 @@ export const getWorkItem: import("./core.mjs").ApiMethod<"work_items.get", z.Zod
     status: z.ZodString;
     statusCategory: z.ZodEnum<{
         done: "done";
-        todo: "todo";
         in_progress: "in_progress";
+        todo: "todo";
     }>;
     state: z.ZodEnum<{
         done: "done";
-        todo: "todo";
         in_progress: "in_progress";
         in_review: "in_review";
+        todo: "todo";
     }>;
     assignee: z.ZodNullable<z.ZodObject<{
         id: z.ZodString;
@@ -354,14 +354,14 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"work_items.searc
         status: z.ZodString;
         statusCategory: z.ZodEnum<{
             done: "done";
-            todo: "todo";
             in_progress: "in_progress";
+            todo: "todo";
         }>;
         state: z.ZodEnum<{
             done: "done";
-            todo: "todo";
             in_progress: "in_progress";
             in_review: "in_review";
+            todo: "todo";
         }>;
         assignee: z.ZodNullable<z.ZodObject<{
             id: z.ZodString;
@@ -417,14 +417,14 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"work_items.searc
     status: z.ZodString;
     statusCategory: z.ZodEnum<{
         done: "done";
-        todo: "todo";
         in_progress: "in_progress";
+        todo: "todo";
     }>;
     state: z.ZodEnum<{
         done: "done";
-        todo: "todo";
         in_progress: "in_progress";
         in_review: "in_review";
+        todo: "todo";
     }>;
     assignee: z.ZodNullable<z.ZodObject<{
         id: z.ZodString;
