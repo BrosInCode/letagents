@@ -435,11 +435,18 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         await waitFor("codex provider", () => document.querySelector('[data-testid="desktop-add-agent-provider-codex"]'));
         result.codexProvider = true;
         // The first message (supervised charter) is part of the agent's identity.
+        // It can sit below the fold of the Identity panel, which scrolls.
         const charter = await waitFor("supervised charter on identity step", () =>
           onStep("Identity") &&
           document.querySelector(modalSelector + ' .agent-refresh-identity [data-testid="desktop-add-agent-supervised-charter"]')
         );
-        result.supervisedCharter = rectInsideViewport(charter);
+        const identityPanel = document.querySelector(modalSelector + " .agent-refresh-identity");
+        charter.scrollIntoView({ block: "nearest" });
+        const charterRect = rectFor(charter);
+        const identityRect = rectFor(identityPanel);
+        result.supervisedCharter = rectInsideViewport(charter) &&
+          Boolean(charterRect && identityRect && charterRect.top >= identityRect.top && charterRect.bottom <= identityRect.bottom);
+        if (identityPanel instanceof HTMLElement) identityPanel.scrollTop = 0;
 
         await continueToBrain("add-agent modal");
         await waitFor("codex missing runtime", () =>
