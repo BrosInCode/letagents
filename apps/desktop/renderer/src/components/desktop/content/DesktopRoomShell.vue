@@ -254,10 +254,11 @@
 
     </Transition>
 
-    <!-- Pinned pages stay alive, hidden, once opened, so switching tabs keeps their state. -->
+    <!-- Pinned pages stay alive once opened, so switching tabs keeps their state. They are
+         hidden with visibility, not display: none, inside RoomPageView: Electron does not
+         repaint a <webview> that attached or sat in a display: none parent. -->
     <RoomPageView
       v-for="page in keptPages"
-      v-show="activeTab === roomPageTabId(page.id)"
       :key="`page:${room.identifier}:${page.id}`"
       :room-identifier="room.identifier"
       :page="page"

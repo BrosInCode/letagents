@@ -23,6 +23,7 @@ import {
   listRoomPages,
   prepareRoomPage,
   releaseRoomPage,
+  markRoomPageOutdated,
   roomPageLeaseForSender,
   sendToRoomPage,
   setRoomPageTheme,
@@ -59,7 +60,7 @@ export function registerDesktopPageIpcHandlers(
   });
   const source = backend.source ?? createHttpRoomPageSource();
   // Each lease mints its own page_grant with the app session; page calls carry only that token.
-  roomPageGrants.configure((roomId, pageId) => source.grant(roomId, pageId));
+  roomPageGrants.configure((roomId, pageId, version) => source.grant(roomId, pageId, version), markRoomPageOutdated);
   const adapter = backend.adapter ?? createHttpPageApiAdapter({ grants: roomPageGrants });
   const methods = backend.methods ?? pageApiMethodNames();
   const watches = createPageWatches<RoomPageLease>({

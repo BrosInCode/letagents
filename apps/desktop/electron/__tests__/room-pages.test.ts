@@ -57,6 +57,7 @@ const {
   roomPageLeaseForSender,
   setRoomPageTheme,
   setRoomPageVisible,
+  markRoomPageOutdated,
 } = await import("../main/pages/page-host.js");
 const { createPageGrantKeeper, parsePageGrant, PAGE_GRANT_REFRESH_BEFORE_MS, PAGE_GRANT_RETRY_MS } = await import("../main/pages/page-grants.js");
 const { isRefusedWebviewSender, refuseWebviewSenders } = await import("../main/ipc-sender-guard.js");
@@ -79,6 +80,8 @@ class FakeGuest extends EventEmitter {
   crashed = false;
   sent: Array<{ channel: string; payload: unknown }> = [];
   scripts = 0;
+  invalidations = 0;
+  invalidate() { this.invalidations += 1; }
   getType() { return "webview"; }
   isDestroyed() { return this.destroyed; }
   isCrashed() { return this.crashed; }
@@ -109,14 +112,19 @@ installRoomPageHost(appWindow as never);
 
 let grantFails = false;
 const grants = createPageGrantKeeper();
+const roomAPages = [
+  { id: "sprint", title: "Sprint view", version: 3, html: "<h1>Sprint</h1>" },
+  { id: "big", title: "Big", version: 1, html: "x".repeat(2 * 1024 * 1024 + 1) },
+];
+/** Another version of a page goes live on the server. */
+function setLiveVersion(pageId: string, version: number) {
+  roomAPages.find((page) => page.id === pageId)!.version = version;
+}
 const backend = createMemoryPageBackend({
   grants,
   grantFails: () => grantFails,
   pages: {
-    "room-a": [
-      { id: "sprint", title: "Sprint view", version: 3, html: "<h1>Sprint</h1>" },
-      { id: "big", title: "Big", version: 1, html: "x".repeat(2 * 1024 * 1024 + 1) },
-    ],
+    "room-a": roomAPages,
   },
   handlers: {
     "rooms.get": (lease) => ({ id: lease.roomId, name: "Room A" }),
@@ -138,7 +146,7 @@ const watches = createPageWatches<Lease>({
   methods: PAGE_METHODS,
 });
 const lastEnded: unknown[] = [];
-grants.configure((roomId, pageId) => backend.source.grant(roomId, pageId));
+grants.configure((roomId, pageId, version) => backend.source.grant(roomId, pageId, version), markRoomPageOutdated);
 configureRoomPages({
   source: backend.source,
   grants,
@@ -147,7 +155,7 @@ configureRoomPages({
   onLeasePointer: (lease, resource) => watches.notify(lease, resource),
 });
 
-const shown: Array<{ id: string; kind: string; text: string; target: string; rememberable: boolean }> = [];
+const shown: Array<{ id: string; kind: string; text: string; target: string; details?: string | null; rememberable: boolean }> = [];
 let showSheets = true;
 const choices = createMemoryPageChoiceStore();
 const confirm = createPageConfirmBroker({
@@ -384,7 +392,7 @@ test("grant keeper: one mint at a time, a new token a minute before expiry, a pa
       return { token: `t${mints.length}`, expiresAt: time + 15 * 60_000, capabilities: ["rooms.read"] };
     },
   });
-  keeper.start("L", "r", "p");
+  keeper.start("L", "r", "p", 1);
   assert.deepEqual(await Promise.all([keeper.token("L"), keeper.token("L")]), ["t1", "t1"]);
   assert.equal(mints.length, 1, "the lease's first mint is shared");
   assert.deepEqual(keeper.capabilities("L"), ["rooms.read"]);
@@ -459,7 +467,7 @@ test("ui.open: https only, from the open tab right after a click, one per 2 s, a
     await flushImmediates();
     assert.equal(shown.length, 1);
     assert.deepEqual({ ...shown[0], id: "" }, {
-      id: "", kind: "open", pageTitle: "Sprint view", pageVersion: 3, text: "https://example.com/a?b=1", target: "example.com", rememberable: false,
+      id: "", kind: "open", pageTitle: "Sprint view", pageVersion: 3, text: "https://example.com/a?b=1", target: "example.com", details: null, rememberable: false,
     });
     const tooSoon = await callFrom(guest, "ui.open", { url: "https://example.com/other" });
     assert.equal(!tooSoon.ok && tooSoon.error.code, "rate_limited", "one open per 2 seconds");
@@ -532,12 +540,13 @@ test("ui.copy works only from the open tab, right after the person's own input i
   }
 });
 
-test("only one page is visible at a time in a window", async () => {
+test("only one page is visible at a time in a window, and a page that shows is asked to paint again", async () => {
   const a = await openPage();
   const b = await openPage();
   try {
     setRoomPageVisible(a.lease.url, true);
     setRoomPageVisible(b.lease.url, true);
+    assert.equal(b.guest.invalidations, 1, "a guest kept hidden may hold an old frame");
     a.guest.emit("input-event", {}, { type: "mouseDown" });
     clock = Date.now();
     assert.equal((await callFrom(a.guest, "ui.copy", { text: "a" })).ok, false, "showing b hid a");
@@ -752,11 +761,11 @@ test("http page source: a server without page routes is a room with no pages, an
   assert.deepEqual(await source.list("room"), [{ id: "p1", title: "Release", version: 2 }]);
   assert.deepEqual(await source.load("room", "p1"), { page: { id: "p1", title: "Release", version: 2 }, html: "<p>ok</p>" });
   await assert.rejects(source.load("room", "other"), /could not be loaded/);
-  assert.deepEqual(await source.grant("github.com/a/b", "p1"), { token: "pg", expiresAt: Date.parse("2030-01-01T00:00:00Z"), capabilities: ["rooms.read"] });
+  assert.deepEqual(await source.grant("github.com/a/b", "p1", 2), { token: "pg", expiresAt: Date.parse("2030-01-01T00:00:00Z"), capabilities: ["rooms.read"] });
   assert.equal(requests.at(-1)?.path, "/api/v1/rooms/github.com%2Fa%2Fb/pages/p1/grant");
   assert.equal(requests.at(-1)?.init?.method, "POST");
   assert.deepEqual(requests.at(-1)?.options, { credential: "app" });
-  await assert.rejects(source.grant("room", "bad"), /no page grant/);
+  await assert.rejects(source.grant("room", "bad", 1), /no page grant/);
 });
 
 test("IPC from a webview guest reaches only page:call", async () => {
@@ -825,7 +834,7 @@ test("a page's data.set reaches the adapter with that page's own grant token", a
   }
 });
 
-test("jobs.start shows the app-drawn sheet first: a no sends nothing, a yes sends the exact instruction", async () => {
+test("jobs.start shows the app-drawn sheet first: everything it sends, who may get it; a no sends nothing", async () => {
   const { lease, guest } = await openPage();
   shown.length = 0;
   try {
@@ -833,10 +842,11 @@ test("jobs.start shows the app-drawn sheet first: a no sends nothing, a yes send
     assert.equal(!hidden.ok && hidden.error.code, "not_granted", "only the page in the open tab may ask");
     setRoomPageVisible(lease.url, true);
     const before = backend.calls.length;
-    const declined = callFrom(guest, "jobs.start", { instruction: "Rebase PR 12" });
+    const declined = callFrom(guest, "jobs.start", { instruction: "Rebase PR 12", input: { pr: 12 }, resultSchema: { type: "object" } });
     await flushImmediates();
     assert.deepEqual({ ...shown[0], id: "" }, {
-      id: "", kind: "job", pageTitle: "Sprint view", pageVersion: 3, text: "Rebase PR 12", target: "Any online agent", rememberable: true,
+      id: "", kind: "job", pageTitle: "Sprint view", pageVersion: 3, text: "Rebase PR 12", target: "An online agent in the room",
+      details: 'Input:\n{\n  "pr": 12\n}\n\nResult schema:\n{\n  "type": "object"\n}', rememberable: true,
     });
     const busy = await callFrom(guest, "jobs.start", { instruction: "again" });
     assert.equal(!busy.ok && busy.error.message, "Answer the open question first.");
@@ -846,11 +856,14 @@ test("jobs.start shows the app-drawn sheet first: a no sends nothing, a yes send
     assert.equal(backend.calls.length, before, "a declined job sends nothing");
     const empty = await callFrom(guest, "jobs.start", { instruction: "  " });
     assert.equal(!empty.ok && empty.error.code, "invalid_input");
-    assert.equal(shown.length, 1, "nothing to confirm, no sheet");
+    const tooLong = await callFrom(guest, "jobs.start", { instruction: "x".repeat(20_001) });
+    assert.equal(!tooLong.ok && tooLong.error.code, "too_large", "text the sheet would cut is never sent");
+    assert.equal(shown.length, 1, "nothing to confirm in full, no sheet");
 
     const confirmed = callFrom(guest, "jobs.start", { instruction: "Summarise the sprint", agent: "agent:codex-1" });
     await flushImmediates();
-    assert.equal(shown[1].target, "agent:codex-1");
+    assert.equal(shown[1].target, "agent:codex-1, or another online agent if agent:codex-1 is offline");
+    assert.equal(shown[1].details, null);
     confirm.answer(shown[1].id, "confirmed", true);
     assert.equal((await confirmed).ok, true);
     assert.deepEqual(backend.calls.at(-1)?.input, { instruction: "Summarise the sprint", agent: "agent:codex-1" });
@@ -859,6 +872,14 @@ test("jobs.start shows the app-drawn sheet first: a no sends nothing, a yes send
   } finally {
     releaseRoomPage(lease.url);
   }
+});
+
+test("the confirm broker never cuts: text the sheet cannot show in full is a no", async () => {
+  const scope = { viewerId: "acct-1", roomId: "room-a", pageId: "sprint", version: 3 };
+  const before = shown.length;
+  assert.equal(await confirm.ask({}, scope, { kind: "post", pageTitle: "Sprint", text: "x".repeat(20_001), target: "#room", rememberable: false, choice: "post" }), "declined");
+  assert.equal(await confirm.ask({}, scope, { kind: "job", pageTitle: "Sprint", text: "ok", target: "t", details: "y".repeat(100_001), rememberable: false, choice: "job" }), "declined");
+  assert.equal(shown.length, before, "no sheet shows part of it");
 });
 
 test("room stream pointers reach only that room's pages, and a gap means read everything again", async (t) => {
@@ -910,39 +931,88 @@ test("room stream pointers reach only that room's pages, and a gap means read ev
   }
 });
 
-test("work item watches re-run at most every 2 minutes, and watches are capped and dropped with the page", async (t) => {
+test("work item watches: a pointer re-runs after 250 ms, a quiet watch polls every 2 minutes, and a rate limit waits as asked", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   let runs = 0;
+  let limited = false;
   const pushed: unknown[] = [];
   const lease = {};
   const local = createPageWatches<object>({
-    run: async () => ({ run: ++runs }),
+    run: async () => {
+      runs += 1;
+      if (limited) throw new PageCallFailure("rate_limited", "Too many searches.", 4_000);
+      return { run: runs };
+    },
     push: (_lease, message) => { pushed.push(message); },
     methods: new Set(["work_items.search", "jobs.list"]),
   });
-  local.start(lease, "w", "work_items.search", { query: "sprint" });
+  const settle = async (ms: number) => { t.mock.timers.tick(ms); await flushImmediates(); };
+  local.start(lease, "w", "work_items.search", { query: "fixVersion = 2.4" });
   await flushImmediates();
   assert.equal(runs, 1);
+  // DS-7 moved to Done: the webhook's pointer arrives right after the first read.
   local.notify(lease, "work_items");
-  t.mock.timers.tick(PAGE_WATCH_DEBOUNCE_MS);
-  await flushImmediates();
-  assert.equal(runs, 1, "not before the 2-minute floor");
-  t.mock.timers.tick(120_000);
-  await flushImmediates();
-  assert.equal(runs, 2);
+  await settle(PAGE_WATCH_DEBOUNCE_MS - 1);
+  assert.equal(runs, 1, "debounced");
+  await settle(1);
+  assert.equal(runs, 2, "the change shows within the debounce, not at the 2-minute poll");
+  local.notify(lease, "work_items");
+  local.notify(lease, "work_items");
+  local.notify(lease, "gap");
+  await settle(PAGE_WATCH_DEBOUNCE_MS);
+  assert.equal(runs, 3, "a burst is one re-read");
+  await settle(119_000);
+  assert.equal(runs, 3);
+  await settle(1_000);
+  assert.equal(runs, 4, "no event for 2 minutes: poll");
   local.notify(lease, "jobs");
-  t.mock.timers.tick(120_000);
-  await flushImmediates();
-  assert.equal(runs, 2, "another resource does not wake it");
+  await settle(PAGE_WATCH_DEBOUNCE_MS);
+  assert.equal(runs, 4, "another resource does not wake it");
+
+  limited = true;
+  local.notify(lease, "work_items");
+  await settle(PAGE_WATCH_DEBOUNCE_MS);
+  assert.equal(runs, 5);
+  const pushedBefore = pushed.length;
+  await settle(3_999);
+  assert.equal(runs, 5, "waits the server's retryAfterMs");
+  limited = false;
+  await settle(1);
+  assert.equal(runs, 6);
+  assert.equal(pushed.length, pushedBefore + 1, "the rate limit itself never reaches the page");
+
   for (let index = 1; index < MAX_PAGE_WATCHES; index += 1) local.start(lease, `j${index}`, "jobs.list", {});
   assert.throws(() => local.start(lease, "one-more", "jobs.list", {}), /at most 16 watches/);
+  await flushImmediates();
+  const total = runs;
   local.stopAll(lease);
   assert.equal(local.count(lease), 0);
   local.notify(lease, "gap");
-  t.mock.timers.tick(120_000);
-  await flushImmediates();
-  assert.equal(runs, 2 + MAX_PAGE_WATCHES - 1, "nothing runs after the page closed");
+  await settle(240_000);
+  assert.equal(runs, total, "nothing runs after the page closed");
   assert.ok(pushed.every((message) => (message as { event: string }).event === "watch"));
+});
+
+test("a lease whose version is no longer live closes as outdated, and never gets a token again", async () => {
+  const { lease, guest } = await openPage();
+  const host = lease.url.slice("letagents-page://".length, -1);
+  try {
+    assert.ok(await grants.token(host));
+    // Version 4 went live while version 3 was open.
+    setLiveVersion("sprint", 4);
+    grants.invalidate(host);
+    embedder.sent = [];
+    assert.equal(await grants.token(host), null);
+    assert.deepEqual(embedder.sent.at(-1), { channel: ROOM_PAGE_EVENT_CHANNEL, payload: { type: "stopped", url: lease.url, reason: "outdated" } });
+    await flushImmediates();
+    assert.equal(guest.destroyed, true, "closed without crashing its process");
+    assert.equal(guest.crashed, false);
+    assert.equal(await grants.token(host), null);
+  } finally {
+    setLiveVersion("sprint", 3);
+    releaseRoomPage(lease.url);
+    embedder.sent = [];
+  }
 });
 
 test("pages ride the room stream the app already runs: no page module opens one", () => {
@@ -988,8 +1058,8 @@ test("a revoked page grant is minted again once, and the call retried", async ()
   assert.equal(invalidated, 1);
   const keeper = createPageGrantKeeper({ mint: async () => ({ token: `m${++mintCount}`, expiresAt: Date.now() + 900_000, capabilities: [] }) });
   let mintCount = 0;
-  keeper.start("A", "r", "page_1");
-  keeper.start("B", "r", "page_2");
+  keeper.start("A", "r", "page_1", 1);
+  keeper.start("B", "r", "page_2", 1);
   assert.equal(await keeper.token("A"), "m1");
   assert.equal(await keeper.token("B"), "m2");
   keeper.invalidatePage("page_1");
@@ -997,14 +1067,26 @@ test("a revoked page grant is minted again once, and the call retried", async ()
   assert.equal(await keeper.token("B"), "m2");
 });
 
-test("intents.propose shows the change in plain words first; a no proposes nothing", async () => {
-  assert.deepEqual(describeIntent("ticket.transition", { key: "DS-7", toStatus: "Released" }),
-    { kind: "intent", text: "Move DS-7 to Released", target: "DS-7 in this room's tracker" });
-  assert.deepEqual(describeIntent("task.update", { taskId: "task_12", status: "in_progress", assignee: "Ada" }),
-    { kind: "intent", text: "Task task_12: move it to In progress; assign it to Ada", target: "This room's board" });
-  assert.equal(describeIntent("task.update", { taskId: "task_12", assignee: null })?.text, "Task task_12: remove its assignee");
-  assert.equal(describeIntent("task.create", { title: "Ship docs", description: "All of them" })?.text, "Create the task \"Ship docs\"\n\nAll of them");
-  assert.equal(describeIntent("ticket.comment", { key: "DS-7", body: "Done in 1.4" })?.text, "Comment on DS-7:\n\nDone in 1.4");
+test("intents.propose shows every value it sends in plain words first; a no proposes nothing", async () => {
+  const intent = (kind: string, payload: unknown) => {
+    const sheet = describeIntent(kind, payload);
+    return sheet && { text: sheet.text, target: sheet.target, rememberable: sheet.rememberable, choice: sheet.choice };
+  };
+  assert.deepEqual(intent("ticket.transition", { key: "DS-7", toStatus: "Released" }),
+    { text: "Move DS-7 to Released", target: "DS-7 in this room's tracker", rememberable: true, choice: "intents.propose:ticket.transition" });
+  assert.deepEqual(intent("task.update", { taskId: "task_12", status: "in_progress", assignee: "Ada", assigneeAgentKey: "agent:codex-1" }), {
+    text: "Change task task_12:\n• Status → In progress\n• Assignee → \"Ada\"\n• Assignee agent → \"agent:codex-1\"",
+    target: "This room's board", rememberable: true, choice: "intents.propose:task.update",
+  });
+  assert.equal(intent("task.update", { taskId: "task_12", assignee: null, assigneeAgentKey: "agent:x" })?.text,
+    "Change task task_12:\n• Assignee → (cleared)\n• Assignee agent → \"agent:x\"", "each field with its own value");
+  assert.deepEqual(intent("task.update", { taskId: "task_12", description: "New words" }), {
+    text: "Change task task_12:\n• Description → (below)\n\nNew words", target: "This room's board", rememberable: false, choice: "intents.propose:task.update",
+  });
+  assert.equal(intent("task.create", { title: "Ship docs", description: "All of them" })?.rememberable, false);
+  assert.equal(intent("task.create", { title: "Ship docs" })?.rememberable, true);
+  assert.deepEqual(intent("ticket.comment", { key: "DS-7", body: "Done in 1.4" }),
+    { text: "Comment on DS-7:\n\nDone in 1.4", target: "DS-7 in this room's tracker", rememberable: false, choice: "intents.propose:ticket.comment" });
   assert.equal(describeIntent("task.update", { taskId: "task_12" }), null, "nothing to change");
   assert.equal(describeIntent("other.kind", {}), null);
 
@@ -1023,10 +1105,19 @@ test("intents.propose shows the change in plain words first; a no proposes nothi
     assert.equal(backend.calls.length, before, "a declined proposal sends nothing");
     const unknown = await callFrom(guest, "intents.propose", { kind: "ticket.delete", payload: {} });
     assert.equal(!unknown.ok && unknown.error.code, "invalid_input");
-    const confirmed = callFrom(guest, "intents.propose", { kind: "ticket.comment", payload: { key: "DS-7", body: "Done" } });
+    // A yes with "Don't ask again" on a transition covers transitions only, never a comment.
+    const transition = callFrom(guest, "intents.propose", { kind: "ticket.transition", payload: { key: "DS-7", toStatus: "Done" } });
     await flushImmediates();
-    confirm.answer(shown[1].id, "confirmed", false);
-    assert.equal((await confirmed).ok, true);
+    confirm.answer(shown[1].id, "confirmed", true);
+    assert.equal((await transition).ok, true);
+    assert.equal((await callFrom(guest, "intents.propose", { kind: "ticket.transition", payload: { key: "DS-8", toStatus: "Done" } })).ok, true);
+    assert.equal(shown.length, 2);
+    const comment = callFrom(guest, "intents.propose", { kind: "ticket.comment", payload: { key: "DS-7", body: "Done" } });
+    await flushImmediates();
+    assert.equal(shown.length, 3, "a comment always asks");
+    assert.equal(shown[2].rememberable, false);
+    confirm.answer(shown[2].id, "confirmed", true);
+    assert.equal((await comment).ok, true);
     assert.equal(backend.calls.at(-1)?.method, "intents.propose");
   } finally {
     releaseRoomPage(lease.url);

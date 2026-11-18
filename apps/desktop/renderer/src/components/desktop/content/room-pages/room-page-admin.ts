@@ -31,10 +31,26 @@ export function pendingPageVersion(detail: DesktopRoomPageDetail): DesktopRoomPa
   return pending && pending.version > (detail.currentVersion ?? 0) ? pending : null;
 }
 
-/** The live version an Undo goes back to: the newest superseded one before the current version. */
-export function previousLiveVersion(detail: DesktopRoomPageDetail): DesktopRoomPageDetail["versions"][number] | null {
+/**
+ * After a roll back: the next newer version that was live, the one a Redo
+ * brings back. Null when the live version is the newest that went live.
+ */
+export function rolledBackFrom(detail: DesktopRoomPageDetail): DesktopRoomPageDetail["versions"][number] | null {
   const current = detail.currentVersion;
   if (current === null) return null;
+  return detail.versions
+    .filter((version) => version.status === "superseded" && version.version > current)
+    .sort((a, b) => a.version - b.version)[0] ?? null;
+}
+
+/**
+ * The live version an Undo goes back to: the newest superseded one before the
+ * current version. Only for an update: after a roll back an Undo would go
+ * further back, so there is none (a Redo instead).
+ */
+export function previousLiveVersion(detail: DesktopRoomPageDetail): DesktopRoomPageDetail["versions"][number] | null {
+  const current = detail.currentVersion;
+  if (current === null || rolledBackFrom(detail)) return null;
   return detail.versions
     .filter((version) => version.status === "superseded" && version.version < current)
     .sort((a, b) => b.version - a.version)[0] ?? null;

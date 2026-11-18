@@ -1,6 +1,6 @@
 import type { DesktopRoomPage } from "../../ipc-types.js";
 import { apiFetch, DesktopApiError } from "../auth.js";
-import { parsePageGrant, type PageGrant, type PageGrantKeeper } from "./page-grants.js";
+import { PageGrantOutdated, parsePageGrant, type PageGrant, type PageGrantKeeper } from "./page-grants.js";
 import { MAX_ROOM_PAGE_BYTES, PageCallFailure, type PageErrorCode } from "./page-policy.js";
 
 /** The page version a call comes from, as main knows it from the page's lease. */
@@ -29,7 +29,8 @@ export interface PageApiAdapter {
 export interface RoomPageSource {
   list(roomId: string): Promise<DesktopRoomPage[]>;
   load(roomId: string, pageId: string): Promise<{ page: DesktopRoomPage; html: string }>;
-  grant(roomId: string, pageId: string): Promise<PageGrant>;
+  /** A grant for exactly `version`; `PageGrantOutdated` when another version is live. */
+  grant(roomId: string, pageId: string, version: number): Promise<PageGrant>;
 }
 
 export type PageApiHttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -233,12 +234,18 @@ export function createHttpRoomPageSource(fetchApi: typeof apiFetch = apiFetch): 
       if (Buffer.byteLength(body.html, "utf8") > MAX_ROOM_PAGE_BYTES) throw new Error("This page is larger than 2 MB, so it does not open.");
       return { page, html: body.html };
     },
-    async grant(roomId, pageId) {
-      const body = await fetchApi<unknown>(
-        `${roomBase(roomId)}/${encodeURIComponent(pageId)}/grant`,
-        { method: "POST", body: "{}" },
-        { credential: "app" },
-      );
+    async grant(roomId, pageId, version) {
+      let body: unknown;
+      try {
+        body = await fetchApi<unknown>(
+          `${roomBase(roomId)}/${encodeURIComponent(pageId)}/grant`,
+          { method: "POST", body: JSON.stringify({ version }) },
+          { credential: "app" },
+        );
+      } catch (error) {
+        if (error instanceof DesktopApiError && error.status === 409) throw new PageGrantOutdated(error.message);
+        throw error;
+      }
       const grant = parsePageGrant(body);
       if (!grant) throw new Error("The server sent no page grant.");
       return grant;
@@ -285,9 +292,11 @@ export function createMemoryPageBackend(input: {
         const { html, ...page } = found;
         return { page, html };
       },
-      async grant(roomId, pageId) {
+      async grant(roomId, pageId, version) {
         mints.push({ roomId, pageId });
         if (input.grantFails?.()) throw new Error("The grant was refused.");
+        const live = input.pages?.[roomId]?.find((page) => page.id === pageId);
+        if (live && live.version !== version) throw new PageGrantOutdated(`Version ${version} is no longer live.`);
         return { token: `grant-${mints.length}`, expiresAt: Date.now() + (input.grantTtlMs ?? 15 * 60_000), capabilities: ["rooms.read"] };
       },
     },

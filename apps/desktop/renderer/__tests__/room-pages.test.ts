@@ -103,7 +103,11 @@ describe("room page presentation", () => {
 
   it("are hosted by the room shell with keep-alive and one confirm sheet", () => {
     const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
-    assert.match(shell, /<RoomPageView\s+v-for="page in keptPages"\s+v-show="activeTab === roomPageTabId\(page\.id\)"/);
+    assert.match(shell, /<RoomPageView\s+v-for="page in keptPages"/);
+    assert.doesNotMatch(shell, /<RoomPageView[^>]*v-show/, "never display: none: Electron does not repaint such a webview");
+    const pageView = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-pages/RoomPageView.vue", import.meta.url)), "utf8");
+    assert.match(pageView, /\.room-page-view\.is-hidden \{\s*visibility: hidden;\s*pointer-events: none;\s*\}/);
+    assert.match(pageView, /:class="\{ 'is-hidden': !active \}"/);
     assert.equal(shell.match(/<PageConfirmSheet \/>/g)?.length, 1);
     assert.match(shell, /:pages-menu="pagesMenu"/);
     assert.match(shell, /:active="activeTab === roomPageTabId\(page\.id\)"/, "main hears which page is in the active tab");
@@ -120,7 +124,8 @@ describe("room page presentation", () => {
 });
 
 describe("room page administration", async () => {
-  const { pageGrantRows, pendingPageVersion, previousLiveVersion, pageUpdateChanges } = await import("../src/components/desktop/content/room-pages/room-page-admin");
+  const { pageGrantRows, pendingPageVersion, previousLiveVersion, pageUpdateChanges, rolledBackFrom } = await import("../src/components/desktop/content/room-pages/room-page-admin");
+  const { revealHiddenCharacters } = await import("../src/components/desktop/content/room-pages/room-pages");
   const version = (number: number, status: string, capabilities: string[] = [], byteSize = 1000) => ({
     version: number, status, sha256: "x", byteSize, capabilities, surfaces: ["room.tab"], source: null,
     author: { kind: "agent", id: "agent:codex-1", ownerAccountId: "acct_1" }, createdAt: "2026-11-18T10:00:00Z",
@@ -145,6 +150,24 @@ describe("room page administration", async () => {
     assert.equal(previousLiveVersion(pages)?.version, 2);
     assert.equal(pendingPageVersion(detail(3, [version(3, "live"), version(2, "pending_approval")])), null, "an older waiting version is not news");
     assert.equal(previousLiveVersion(detail(1, [version(1, "live")])), null, "a first version has nothing to undo");
+    assert.equal(rolledBackFrom(pages), null);
+  });
+
+  it("after a roll back offers Redo to the next newer version, never an Undo further back", () => {
+    const rolledBack = detail(2, [version(4, "superseded"), version(3, "superseded"), version(2, "live"), version(1, "superseded")]);
+    assert.equal(rolledBackFrom(rolledBack)?.version, 3);
+    assert.equal(previousLiveVersion(rolledBack), null);
+  });
+
+  it("shows hidden and reordering characters in a confirm sheet as visible tags", () => {
+    assert.equal(revealHiddenCharacters("Move DS-7 to \u202Eesaeler\u202C now\u200B"), "Move DS-7 to ⟨U+202E⟩esaeler⟨U+202C⟩ now⟨U+200B⟩");
+    assert.equal(revealHiddenCharacters("\uFEFFa\u2066b\u2069"), "⟨U+FEFF⟩a⟨U+2066⟩b⟨U+2069⟩");
+    assert.equal(revealHiddenCharacters("plain text"), "plain text");
+    const sheet = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-pages/PageConfirmSheet.vue", import.meta.url)), "utf8");
+    assert.match(sheet, /\{\{ shown\(request\.text\) \}\}/);
+    assert.match(sheet, /\{\{ shown\(request\.target\) \}\}/);
+    assert.match(sheet, /\{\{ shown\(request\.details\) \}\}/);
+    assert.equal(sheet.match(/unicode-bidi: isolate;/g)?.length, 2);
   });
 
   it("says what an update changed", () => {

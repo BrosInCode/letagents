@@ -40,6 +40,7 @@
     "screenshot:updates": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_UPDATES_SCREENSHOT=/tmp/letagents-desktop-updates.png electron .",
     "smoke:packaged-supervisor": "npm run package:artifact && node electron/scripts/packaged-supervisor-smoke.mjs",
     "smoke:cursor-managed": "node --import tsx electron/scripts/cursor-managed-isolation-smoke.ts",
+    "smoke:room-pages": "npm run build:electron && electron electron/scripts/room-pages-smoke.cjs",
     "smoke:opencode-contract": "npm run build:electron && node electron/scripts/opencode-runtime-contract-smoke.mjs",
     "smoke:claude-daemon-inbox": "node --import tsx electron/scripts/claude-daemon-inbox-spike.ts",
     "test": "npm run test:renderer && npm run test:electron && npm run test:daemon && npm run test:packaging",

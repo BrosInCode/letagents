@@ -494,6 +494,50 @@ test("API resource pointers, board changes and stream gaps reach main's pointer 
   }
 });
 
+test("a tracker change's work_items frame re-runs a page's work item watch within the debounce", async () => {
+  // The whole desktop path of a ticket change, as the server writes it: SSE frame,
+  // room stream, pointer hub, the page relay's notify, the watch's re-run.
+  const { subscribeRoomStreamPointers } = await import("../main/room-stream-pointers.js");
+  const { createPageWatches, PAGE_WATCH_DEBOUNCE_MS } = await import("../main/pages/page-watch.js");
+  const lease = { roomId: ROOM };
+  const runs: number[] = [];
+  const watches = createPageWatches<typeof lease>({
+    run: async () => { runs.push(Date.now()); return { items: runs.length }; },
+    push: () => undefined,
+    methods: new Set(["work_items.search"]),
+  });
+  const trace: string[] = [];
+  const stop = subscribeRoomStreamPointers((pointer) => {
+    trace.push("gap" in pointer ? "gap" : pointer.resource);
+    if (!pointer.roomIds.includes(lease.roomId)) return;
+    watches.notify(lease, "gap" in pointer ? "gap" : pointer.resource);
+  });
+  const router = installFetchRouter();
+  try {
+    const canonicalRoom = `${ROOM}_canonical`;
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    sse.pushRaw(`event: room_sync\ndata: ${JSON.stringify({ room_id: canonicalRoom, checkpoint: "msg_1", gap: false, event_cursor: "c0" })}\n\n`);
+    await starting;
+    watches.start(lease, "release", "work_items.search", { query: "fixVersion = \"2.4\"" });
+    await waitUntil(() => runs.length === 1);
+    const sentAt = Date.now();
+    sse.pushRaw(`id: c1\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({ room_id: canonicalRoom, resource: "work_items" })}\n\n`);
+    await waitUntil(() => runs.length === 2, 3_000);
+    assert.deepEqual(trace, ["work_items"]);
+    assert.ok(runs[1] - sentAt < PAGE_WATCH_DEBOUNCE_MS + 1_000, `re-ran ${runs[1] - sentAt} ms after the frame`);
+    sse.close();
+  } finally {
+    stop();
+    watches.stopAll(lease);
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
 test("SSE sends the snapshot cursor and forwards the revision handshake", async () => {
   const router = installFetchRouter();
   try {

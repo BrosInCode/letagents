@@ -68,6 +68,8 @@ export interface RoomPageLease {
   lastOpenAt: number;
   /** Domains the person let this lease open; a new lease of the same page asks again. */
   openDomains: Set<string>;
+  /** Another version went live before the webview attached: it closes as soon as it does. */
+  outdated: boolean;
 }
 
 const leases = new Map<string, RoomPageLease>();
@@ -161,13 +163,14 @@ export async function prepareRoomPage(rawRoomId: unknown, rawPageId: unknown): P
     visible: false,
     lastOpenAt: Number.NEGATIVE_INFINITY,
     openDomains: new Set(),
+    outdated: false,
   };
   lease.attachTimer = setTimeout(() => {
     if (!lease.guest) endLease(lease);
   }, ROOM_PAGE_LEASE_MS);
   roomPageDocuments.set(host, html);
   leases.set(host, lease);
-  configured.grants?.start(host, roomId, page.id);
+  configured.grants?.start(host, roomId, page.id, page.version);
   return { url: lease.url, partition: PAGE_PARTITION, page };
 }
 
@@ -206,6 +209,8 @@ export function setRoomPageVisible(rawUrl: unknown, visible: unknown): void {
       if (other !== lease && other.visible && other.embedder === lease.embedder) hideLease(other);
     }
     lease.visible = true;
+    // A guest that sat hidden may keep an old frame; ask it to paint again now that it shows.
+    if (lease.guest && !lease.guest.isDestroyed() && !lease.stopped) lease.guest.invalidate();
     return;
   }
   hideLease(lease);
@@ -215,6 +220,14 @@ function hideLease(lease: RoomPageLease): void {
   if (!lease.visible) return;
   lease.visible = false;
   configured?.onLeaseHidden?.(lease);
+}
+
+/** The server will not grant the version this lease shows: close it, and the view loads the live one. */
+export function markRoomPageOutdated(leaseId: string): void {
+  const lease = leases.get(leaseId);
+  if (!lease) return;
+  lease.outdated = true;
+  stopGuest(lease, "outdated");
 }
 
 export function currentRoomPageTheme(): PageTheme {
@@ -271,6 +284,7 @@ function bindGuest(guest: WebContents, lease: RoomPageLease, embedder: WebConten
     }
   });
   watchGuestEventFlood(guest, () => lease.stopped, () => stopGuest(lease, "overloaded"));
+  if (lease.outdated) setImmediate(() => stopGuest(lease, "outdated"));
   guest.on("input-event", (_event: Event, input: InputEvent) => {
     if (PERSON_INPUT_TYPES.has(input.type)) lease.lastInputAt = Date.now();
   });
@@ -319,7 +333,8 @@ function stopGuest(lease: RoomPageLease, reason: StopReason): void {
   // Not inside the guest's own event: closing a guest deletes it at once.
   setImmediate(() => {
     if (guest.isDestroyed()) return;
-    if (!guest.isCrashed()) guest.forcefullyCrashRenderer();
+    // A hung or flooding page's process is ended first, so the close does not wait on it.
+    if (reason !== "outdated" && !guest.isCrashed()) guest.forcefullyCrashRenderer();
     guest.close();
   });
 }

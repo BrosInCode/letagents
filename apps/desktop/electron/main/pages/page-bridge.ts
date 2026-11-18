@@ -2,7 +2,7 @@ import type { WebContents, WebFrameMain } from "electron";
 
 import { takeInlineHtmlDemoTokens } from "../attachments/html-demo-policy.js";
 import type { PageApiAdapter, PageCallContext } from "./page-adapter.js";
-import type { PageConfirmBroker } from "./page-confirm.js";
+import { fitsPageConfirmSheet, type PageConfirmBroker } from "./page-confirm.js";
 import type { PageDiagnostic, PageDiagnosticsKey } from "./page-diagnostics.js";
 import type { RoomPageLease } from "./page-host.js";
 import type { PageWatches } from "./page-watch.js";
@@ -145,17 +145,14 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
     if (!describe) return;
     const sheet = describe(input);
     if (!sheet) throw new PageCallFailure("invalid_input", `${method} needs its text before it can be confirmed.`);
+    // The sheet scrolls but never cuts: a call it cannot show in full is refused, so nothing unseen is sent.
+    if (!fitsPageConfirmSheet(sheet)) throw new PageCallFailure("too_large", `${method} sends more than the confirm sheet can show.`);
     if (!lease.visible) throw new PageCallFailure("not_granted", `${method} works only from the page in the open tab.`);
     if (confirming.has(lease)) throw new PageCallFailure("rate_limited", "Answer the open question first.", 1_000);
     confirming.add(lease);
     try {
       const viewer = requireViewer(await deps.viewer());
-      const answer = await deps.confirm.ask(lease, scopeOf(lease, viewer), {
-        ...sheet,
-        pageTitle: lease.page.title,
-        rememberable: true,
-        choice: method,
-      });
+      const answer = await deps.confirm.ask(lease, scopeOf(lease, viewer), { ...sheet, pageTitle: lease.page.title });
       if (answer !== "confirmed") throw new PageCallFailure("declined", "The person said no, so nothing was sent.");
     } finally {
       confirming.delete(lease);
@@ -218,68 +215,113 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
   };
 }
 
-/** The sheet each confirmed method shows: the exact text the call sends, and where it goes. */
-const CONFIRMED_METHODS: Readonly<Record<string, (input: unknown) => { kind: "job" | "post" | "intent"; text: string; target: string } | null>> = {
-  "jobs.start": (input) => {
-    const instruction = field(input, "instruction");
-    if (typeof instruction !== "string" || !instruction.trim()) return null;
-    const agent = field(input, "agent");
-    return { kind: "job", text: instruction, target: typeof agent === "string" && agent.trim() ? agent : "Any online agent" };
-  },
+/** What a confirmed call shows in its sheet: every value it sends, and whether "Don't ask again" may skip it later. */
+export interface ConfirmedSheet {
+  kind: "job" | "post" | "intent";
+  text: string;
+  target: string;
+  details: string | null;
+  /** Free text (a comment, a description) is new every time: a yes never covers the next one. */
+  rememberable: boolean;
+  /** What "Don't ask again" covers: the method, and for an intent its kind. */
+  choice: string;
+}
+
+const CONFIRMED_METHODS: Readonly<Record<string, (input: unknown) => ConfirmedSheet | null>> = {
+  "jobs.start": describeJob,
   // A page viewer cannot read the room's policy (rooms.listPolicies is admin
   // only), so every proposal asks: the sheet is required under `confirm` and
   // only one more yes under `allow` or `approve`.
   "intents.propose": (input) => describeIntent(field(input, "kind"), field(input, "payload")),
 };
 
+/** Formatted JSON of what a job sends besides its instruction, so the sheet shows it all. */
+function jsonDetails(parts: Array<[string, unknown]>): string | null {
+  const shown = parts.filter(([, value]) => value !== undefined);
+  if (shown.length === 0) return null;
+  return shown.map(([label, value]) => `${label}:\n${JSON.stringify(value, null, 2) ?? String(value)}`).join("\n\n");
+}
+
+export function describeJob(input: unknown): ConfirmedSheet | null {
+  const instruction = field(input, "instruction");
+  if (typeof instruction !== "string" || !instruction.trim()) return null;
+  const agent = field(input, "agent");
+  const named = typeof agent === "string" && agent.trim() ? agent.trim() : null;
+  return {
+    kind: "job",
+    text: instruction,
+    // The server picks another online agent when the named one is offline.
+    target: named ? `${named}, or another online agent if ${named} is offline` : "An online agent in the room",
+    details: jsonDetails([["Input", field(input, "input")], ["Result schema", field(input, "resultSchema")]]),
+    rememberable: true,
+    choice: "jobs.start",
+  };
+}
+
 const TASK_STATUS_WORDS: Readonly<Record<string, string>> = {
   proposed: "Proposed", accepted: "Accepted", assigned: "Assigned", in_progress: "In progress", blocked: "Blocked",
   in_review: "In review", merged: "Merged", done: "Done", cancelled: "Cancelled",
 };
 
+/** One payload value as the sheet shows it: text in quotes, `null` as "(cleared)". */
+function shownValue(value: unknown): string {
+  if (value === null) return "(cleared)";
+  if (typeof value === "string") return `"${value}"`;
+  return JSON.stringify(value) ?? String(value);
+}
+
 /**
  * An intent in plain words, from its kind and payload, such as "Move DS-7 to
- * Released". Every value the change sends is in the text; null for a payload
- * the server would refuse anyway.
+ * Released". Every field the payload sends is shown with its own value; null
+ * for a payload the server would refuse anyway.
  */
-export function describeIntent(kind: unknown, payload: unknown): { kind: "intent"; text: string; target: string } | null {
+export function describeIntent(kind: unknown, payload: unknown): ConfirmedSheet | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const fields = payload as Record<string, unknown>;
   const text = (name: string): string | null => {
-    const value = field(payload, name);
+    const value = fields[name];
     return typeof value === "string" && value.trim() ? value.trim() : null;
   };
+  const sheet = (lines: string[], target: string, rememberable: boolean): ConfirmedSheet => ({
+    kind: "intent", text: lines.join("\n"), target, details: null, rememberable, choice: `intents.propose:${kind as string}`,
+  });
+  const board = "This room's board";
   switch (kind) {
     case "task.create": {
       const title = text("title");
       if (!title) return null;
-      const description = text("description");
-      return { kind: "intent", text: `Create the task "${title}"${description ? `\n\n${description}` : ""}`, target: "This room's board" };
+      const lines = [`Create the task "${title}"`];
+      const hasDescription = typeof fields.description === "string";
+      if (hasDescription) lines.push("", "Description:", fields.description as string);
+      return sheet(lines, board, !hasDescription);
     }
     case "task.update": {
       const taskId = text("taskId");
       if (!taskId) return null;
-      const changes: string[] = [];
-      const status = text("status");
-      if (status) changes.push(`move it to ${TASK_STATUS_WORDS[status] ?? status}`);
-      const assignee = field(payload, "assignee");
-      const agentKey = field(payload, "assigneeAgentKey");
-      if (assignee === null || agentKey === null) changes.push("remove its assignee");
-      else if (typeof assignee === "string" || typeof agentKey === "string") changes.push(`assign it to ${text("assignee") ?? text("assigneeAgentKey")}`);
-      const title = text("title");
-      if (title) changes.push(`rename it to "${title}"`);
-      if (typeof field(payload, "description") === "string") changes.push("replace its description");
-      if (changes.length === 0) return null;
-      const description = typeof field(payload, "description") === "string" ? `\n\nNew description:\n${field(payload, "description") as string}` : "";
-      return { kind: "intent", text: `Task ${taskId}: ${changes.join("; ")}${description}`, target: "This room's board" };
+      const lines = [`Change task ${taskId}:`];
+      if ("status" in fields) {
+        const status = fields.status;
+        lines.push(`• Status → ${typeof status === "string" ? TASK_STATUS_WORDS[status] ?? status : shownValue(status)}`);
+      }
+      if ("assignee" in fields) lines.push(`• Assignee → ${shownValue(fields.assignee)}`);
+      if ("assigneeAgentKey" in fields) lines.push(`• Assignee agent → ${shownValue(fields.assigneeAgentKey)}`);
+      if ("title" in fields) lines.push(`• Title → ${shownValue(fields.title)}`);
+      const hasDescription = "description" in fields;
+      if (hasDescription) lines.push("• Description → (below)", "", typeof fields.description === "string" ? fields.description : shownValue(fields.description));
+      const known = new Set(["taskId", "status", "assignee", "assigneeAgentKey", "title", "description"]);
+      for (const [name, value] of Object.entries(fields)) if (!known.has(name)) lines.push(`• ${name} → ${shownValue(value)}`);
+      if (lines.length === 1) return null;
+      return sheet(lines, board, !hasDescription);
     }
     case "ticket.transition": {
       const key = text("key");
       const toStatus = text("toStatus");
-      return key && toStatus ? { kind: "intent", text: `Move ${key} to ${toStatus}`, target: `${key} in this room's tracker` } : null;
+      return key && toStatus ? sheet([`Move ${key} to ${toStatus}`], `${key} in this room's tracker`, true) : null;
     }
     case "ticket.comment": {
       const key = text("key");
-      const body = text("body");
-      return key && body ? { kind: "intent", text: `Comment on ${key}:\n\n${body}`, target: `${key} in this room's tracker` } : null;
+      const body = typeof fields.body === "string" && fields.body.trim() ? fields.body : null;
+      return key && body ? sheet([`Comment on ${key}:`, "", body], `${key} in this room's tracker`, false) : null;
     }
     default:
       return null;

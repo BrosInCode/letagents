@@ -2,6 +2,9 @@
   <section
     ref="root"
     class="room-tab-page room-page-view"
+    :class="{ 'is-hidden': !active }"
+    :aria-hidden="active ? undefined : 'true'"
+    :inert="!active"
     :aria-label="page.title"
     :data-status="status"
     :data-testid="`room-page-view-${page.id}`"
@@ -12,6 +15,11 @@
         <span>Updated by {{ banner.label }}</span>
         <button type="button" class="room-page-banner-link" :aria-expanded="changesOpen" @click="changesOpen = !changesOpen">See changes</button>
         <button v-if="canManage && banner.undoVersion" type="button" class="room-page-banner-link" data-testid="room-page-undo" :disabled="undoing" @click="undo(banner.undoVersion)">{{ undoing ? "Undoing…" : "Undo" }}</button>
+        <button type="button" class="room-page-banner-close" aria-label="Dismiss" @click="dismiss">×</button>
+      </template>
+      <template v-else-if="banner.kind === 'rolledBack'">
+        <span>Rolled back to version {{ banner.version }}</span>
+        <button v-if="canManage" type="button" class="room-page-banner-link" data-testid="room-page-redo" :disabled="undoing" @click="undo(banner.redoVersion)">{{ undoing ? "Working…" : `Redo version ${banner.redoVersion}` }}</button>
         <button type="button" class="room-page-banner-close" aria-label="Dismiss" @click="dismiss">×</button>
       </template>
       <template v-else>
@@ -46,7 +54,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DesktopRoomPage, DesktopRoomPageEvent, DesktopRoomPageLease } from "../../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../../ipc";
 import { pageThemeModeOf } from "./room-pages";
-import { pageUpdateChanges, pendingPageVersion, previousLiveVersion, type PageGrantSheetState } from "./room-page-admin";
+import { pageUpdateChanges, pendingPageVersion, previousLiveVersion, rolledBackFrom, type PageGrantSheetState } from "./room-page-admin";
 import { requestRoomPagesRefresh } from "./useRoomPages";
 import type { DesktopRoomPageInfo } from "../../../../../../electron/ipc-types";
 
@@ -103,6 +111,9 @@ const banner = computed(() => {
   if (!detail) return null;
   const pending = props.canManage ? pendingPageVersion(detail) : null;
   if (pending) return { kind: "pending" as const, version: pending.version, capabilities: pending.capabilities };
+  if (detail.currentVersion !== null && dismissedVersion.value === detail.currentVersion) return null;
+  const newer = rolledBackFrom(detail);
+  if (newer && detail.currentVersion !== null) return { kind: "rolledBack" as const, version: detail.currentVersion, redoVersion: newer.version };
   const previous = previousLiveVersion(detail);
   const label = info.value?.updatedByLabel;
   if (!previous || !label || detail.currentVersion === null || dismissedVersion.value === detail.currentVersion) return null;
@@ -243,6 +254,13 @@ function syncTheme(): void {
 onMounted(() => {
   stopEvents = desktopIpc.pages?.onEvent((event) => {
     if (event.type !== "stopped" || event.url !== lease.value?.url) return;
+    if (event.reason === "outdated") {
+      // Another version went live: read the tabs again and open the live version here.
+      requestRoomPagesRefresh();
+      void start();
+      void loadInfo();
+      return;
+    }
     stoppedReason.value = event.reason;
     status.value = "stopped";
     // Main already ended the lease; the webview goes with it.
@@ -276,6 +294,16 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/*
+ * A page in another tab stays laid out and painted, only invisible: Electron
+ * does not repaint a <webview> that was created or kept under display: none,
+ * and showing it again left the tab blank.
+ */
+.room-page-view.is-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .room-page-view {
   position: relative;
   display: grid;

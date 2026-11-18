@@ -1,6 +1,18 @@
 import type { DesktopPageConfirmKind, DesktopPageThemeMode, DesktopRoomPage } from "../../../../../../electron/ipc-types";
 import { roomPageIdOfTab, roomPageTabId, type RoomTab, type RoomTabId } from "../room-shell/types";
 
+/**
+ * Characters that reorder or hide text: direction overrides and isolates
+ * (U+202A–202E, U+2066–2069) and zero-width marks (U+200B–200F, U+FEFF). A
+ * page could use them to make the sheet show one thing and send another, so
+ * the sheet shows each one as a visible tag such as ⟨U+202E⟩.
+ */
+const HIDDEN_CHARACTERS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200F\uFEFF]/g;
+
+export function revealHiddenCharacters(text: string): string {
+  return text.replace(HIDDEN_CHARACTERS, (character) => `⟨U+${character.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}⟩`);
+}
+
 /** A confirm sheet's action button works only this long after the sheet shows. */
 export const PAGE_CONFIRM_ARM_MS = 500;
 

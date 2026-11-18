@@ -12,7 +12,7 @@
     @close="emit('cancel')"
   >
     <template v-if="sheet">
-      <p class="room-page-grant-source">{{ sheet.title }} · version {{ sheet.version }}</p>
+      <p class="room-page-grant-source"><bdi>{{ revealHiddenCharacters(sheet.title) }}</bdi> · version {{ sheet.version }}</p>
       <h3 id="room-page-grant-title">{{ sheet.mode === "pin" ? "Pin this page to the room?" : "Approve this version?" }}</h3>
       <p v-if="rows.length === 0" class="room-page-grant-none">This page reads nothing from the room and acts for nobody.</p>
       <template v-else>
@@ -50,6 +50,7 @@
 import { computed, ref, watch } from "vue";
 import DesktopDialogShell from "../DesktopDialogShell.vue";
 import { pageGrantRows, type PageGrantSheetState } from "./room-page-admin";
+import { revealHiddenCharacters } from "./room-pages";
 
 /**
  * The grant sheet a room admin sees before a page version goes live: what

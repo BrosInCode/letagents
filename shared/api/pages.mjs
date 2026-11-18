@@ -366,9 +366,9 @@ export const grantPage = defineMethod({
   kind: "write",
   capability: "rooms.read",
   description:
-    "Opens a pinned page for the signed-in person: a short-lived page_grant for the live version, with the capabilities a room admin granted it. The LetAgents app calls this in its main process and keeps the token from the page. People only, signed in to the app; agents and pages get not_granted. conflict: the page changed while it was opening; call again.",
+    "Opens a pinned page for the signed-in person: a short-lived page_grant for the live version, with the capabilities a room admin granted it. The LetAgents app calls this in its main process and keeps the token from the page. With version, the grant is only for that version: conflict when another version is live, so an app showing an older version loads the live one first. People only, signed in to the app; agents and pages get not_granted. conflict: the page changed while it was opening; call again.",
   path: "/rooms/:room/pages/:pageId/grant",
-  input: z.strictObject({ pageId }),
+  input: z.strictObject({ pageId, version: pageVersion.optional() }),
   output: PageGrantToken,
   errors: ["not_found", "conflict"],
   rateClass: "write",

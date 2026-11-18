@@ -1401,6 +1401,11 @@
         "pageId": {
           "type": "string",
           "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [

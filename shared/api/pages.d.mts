@@ -869,6 +869,7 @@ export const deletePage: import("./core.mjs").ApiMethod<"pages.delete", z.ZodObj
 }, z.core.$strip>>;
 export const grantPage: import("./core.mjs").ApiMethod<"pages.grant", z.ZodObject<{
     pageId: z.ZodString;
+    version: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strict>, z.ZodObject<{
     token: z.ZodString;
     expiresAt: z.ZodString;
@@ -1519,6 +1520,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
     deleted: z.ZodLiteral<true>;
 }, z.core.$strip>>, import("./core.mjs").ApiMethod<"pages.grant", z.ZodObject<{
     pageId: z.ZodString;
+    version: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strict>, z.ZodObject<{
     token: z.ZodString;
     expiresAt: z.ZodString;

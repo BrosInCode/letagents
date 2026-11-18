@@ -2,22 +2,23 @@ import { PageCallFailure, type PageCallError } from "./page-policy.js";
 
 /**
  * Reads a page may keep watching, and the room stream resources that make
- * main run them again. A tracker search re-runs at most every 2 minutes: each
- * run can reach Jira or Linear, and the server caches it for 60 s anyway.
+ * main run them again. A pointer re-runs a read after the debounce. A tracker
+ * read also re-runs every 2 minutes when no pointer came: a ticket can change
+ * in a tracker without a webhook, and the server's poll catches it then.
  */
-export const PAGE_WATCHABLE_METHODS: Readonly<Record<string, { resources: readonly string[]; floorMs: number }>> = {
-  "work_items.search": { resources: ["work_items"], floorMs: 120_000 },
-  "work_items.get": { resources: ["work_items"], floorMs: 120_000 },
-  "work_items.history": { resources: ["work_items"], floorMs: 120_000 },
-  "data.list": { resources: ["documents"], floorMs: 0 },
-  "data.get": { resources: ["documents"], floorMs: 0 },
-  "jobs.list": { resources: ["jobs"], floorMs: 0 },
-  "jobs.get": { resources: ["jobs"], floorMs: 0 },
-  "intents.list": { resources: ["intents"], floorMs: 0 },
-  "intents.get": { resources: ["intents"], floorMs: 0 },
-  "tasks.list": { resources: ["tasks"], floorMs: 0 },
-  "tasks.get": { resources: ["tasks"], floorMs: 0 },
-  "planning.get": { resources: ["tasks"], floorMs: 0 },
+export const PAGE_WATCHABLE_METHODS: Readonly<Record<string, { resources: readonly string[]; pollMs: number | null }>> = {
+  "work_items.search": { resources: ["work_items"], pollMs: 120_000 },
+  "work_items.get": { resources: ["work_items"], pollMs: 120_000 },
+  "work_items.history": { resources: ["work_items"], pollMs: 120_000 },
+  "data.list": { resources: ["documents"], pollMs: null },
+  "data.get": { resources: ["documents"], pollMs: null },
+  "jobs.list": { resources: ["jobs"], pollMs: null },
+  "jobs.get": { resources: ["jobs"], pollMs: null },
+  "intents.list": { resources: ["intents"], pollMs: null },
+  "intents.get": { resources: ["intents"], pollMs: null },
+  "tasks.list": { resources: ["tasks"], pollMs: null },
+  "tasks.get": { resources: ["tasks"], pollMs: null },
+  "planning.get": { resources: ["tasks"], pollMs: null },
 };
 
 /** Room stream resources main relays to pages; any other pointer is not theirs. */
@@ -35,9 +36,10 @@ interface Watch {
   method: string;
   input: unknown;
   resources: readonly string[];
-  floorMs: number;
-  lastRunAt: number;
+  pollMs: number | null;
+  /** The next run: after a pointer's debounce, a rate limit's wait, or the poll. */
   timer: ReturnType<typeof setTimeout> | null;
+  timerAt: number;
   running: boolean;
   /** A pointer came while the read ran: run once more after it. */
   dirty: boolean;
@@ -67,28 +69,47 @@ export function createPageWatches<Lease extends object>(deps: {
       return;
     }
     watch.running = true;
-    watch.lastRunAt = now();
-    let message: PageWatchMessage;
+    let message: PageWatchMessage | null;
+    let retryAfterMs: number | null = null;
     try {
       const value = await deps.run(lease, watch.method, watch.input);
       message = { event: "watch", id: watch.id, value: value === undefined ? null : value };
     } catch (error) {
       const failure = error instanceof PageCallFailure ? error : new PageCallFailure("source_unavailable", "The read failed. It runs again on the next change.");
-      message = { event: "watch", id: watch.id, error: failure.toError() };
+      // The server allows a few live tracker searches per room at a time: wait as long as it asks, then read again.
+      if (failure.code === "rate_limited") {
+        retryAfterMs = Math.max(PAGE_WATCH_DEBOUNCE_MS, failure.retryAfterMs ?? 1_000);
+        message = null;
+      } else {
+        message = { event: "watch", id: watch.id, error: failure.toError() };
+      }
     } finally {
       watch.running = false;
     }
     if (watch.stopped) return;
-    deps.push(lease, message);
-    if (watch.dirty) {
+    if (message) deps.push(lease, message);
+    if (retryAfterMs !== null) {
+      schedule(lease, watch, retryAfterMs);
+    } else if (watch.dirty) {
       watch.dirty = false;
-      schedule(lease, watch);
+      schedule(lease, watch, PAGE_WATCH_DEBOUNCE_MS);
+    } else if (watch.pollMs !== null) {
+      schedule(lease, watch, watch.pollMs);
     }
   }
 
-  function schedule(lease: Lease, watch: Watch): void {
-    if (watch.stopped || watch.timer) return;
-    const delay = Math.max(PAGE_WATCH_DEBOUNCE_MS, watch.lastRunAt + watch.floorMs - now());
+  /**
+   * Run the watch after `delay`, or sooner when a run is already due sooner.
+   * A pointer (250 ms) brings a waiting poll forward; it never waits for it.
+   */
+  function schedule(lease: Lease, watch: Watch, delay: number): void {
+    if (watch.stopped) return;
+    const at = now() + delay;
+    if (watch.timer) {
+      if (watch.timerAt <= at) return;
+      clearTimeout(watch.timer);
+    }
+    watch.timerAt = at;
     watch.timer = setTimeout(() => {
       watch.timer = null;
       void runWatch(lease, watch);
@@ -114,8 +135,8 @@ export function createPageWatches<Lease extends object>(deps: {
       if (previous) stopWatch(previous);
       else if (watches.size >= MAX_PAGE_WATCHES) throw new PageCallFailure("too_large", `A page can keep at most ${MAX_PAGE_WATCHES} watches.`);
       const watch: Watch = {
-        id, method: method as string, input, resources: spec.resources, floorMs: spec.floorMs,
-        lastRunAt: Number.NEGATIVE_INFINITY, timer: null, running: false, dirty: false, stopped: false,
+        id, method: method as string, input, resources: spec.resources, pollMs: spec.pollMs,
+        timer: null, timerAt: 0, running: false, dirty: false, stopped: false,
       };
       watches.set(id, watch);
       void runWatch(lease, watch);
@@ -134,7 +155,10 @@ export function createPageWatches<Lease extends object>(deps: {
     /** A pointer for one resource, or `gap` for everything, in this lease's room. */
     notify(lease: Lease, resource: string | "gap"): void {
       for (const watch of byLease.get(lease)?.values() ?? []) {
-        if (resource === "gap" || watch.resources.includes(resource)) schedule(lease, watch);
+        if (resource !== "gap" && !watch.resources.includes(resource)) continue;
+        // A pointer while the read runs means its answer may already be old: run once more after it.
+        if (watch.running) watch.dirty = true;
+        else schedule(lease, watch, PAGE_WATCH_DEBOUNCE_MS);
       }
     },
     count(lease: Lease): number {

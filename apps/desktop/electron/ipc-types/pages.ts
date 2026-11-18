@@ -18,7 +18,8 @@ export interface DesktopRoomPageLease {
 export type DesktopRoomPageEvent = {
   type: "stopped";
   url: string;
-  reason: "unresponsive" | "crashed" | "overloaded";
+  /** `outdated`: another version of the page went live; the view loads it. */
+  reason: "unresponsive" | "crashed" | "overloaded" | "outdated";
 };
 
 export type DesktopPageThemeMode = "light" | "dark";
@@ -37,6 +38,8 @@ export interface DesktopPageConfirmRequest {
   pageVersion: number;
   text: string;
   target: string;
+  /** Data sent with the text (a job's input and result schema), as formatted JSON; null when none. */
+  details: string | null;
   /** Offer "Don't ask again for this page version". */
   rememberable: boolean;
 }

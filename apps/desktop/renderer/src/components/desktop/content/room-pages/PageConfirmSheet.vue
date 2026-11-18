@@ -11,11 +11,15 @@
     @close="answer('declined')"
   >
     <template v-if="request">
-      <p class="room-page-confirm-source">{{ request.pageTitle }} · version {{ request.pageVersion }}</p>
+      <p class="room-page-confirm-source"><bdi>{{ shown(request.pageTitle) }}</bdi> · version {{ request.pageVersion }}</p>
       <h3 id="room-page-confirm-title">{{ copy.title }}</h3>
-      <!-- The page's own words, exactly as it sent them; the app draws everything around them. -->
-      <pre class="room-page-confirm-text" data-testid="room-page-confirm-text">{{ request.text }}</pre>
-      <p class="room-page-confirm-target"><span>{{ copy.targetLabel }}</span> <strong data-testid="room-page-confirm-target">{{ request.target }}</strong></p>
+      <!-- The page's own words, all of them, with hidden or reordering characters shown as tags; the app draws everything around them. -->
+      <pre class="room-page-confirm-text" data-testid="room-page-confirm-text">{{ shown(request.text) }}</pre>
+      <template v-if="request.details">
+        <p class="room-page-confirm-label">Sent with it</p>
+        <pre class="room-page-confirm-text room-page-confirm-details" data-testid="room-page-confirm-details">{{ shown(request.details) }}</pre>
+      </template>
+      <p class="room-page-confirm-target"><span>{{ copy.targetLabel }}</span> <strong data-testid="room-page-confirm-target">{{ shown(request.target) }}</strong></p>
       <label v-if="request.rememberable" class="room-page-confirm-remember">
         <input v-model="remember" type="checkbox" data-testid="room-page-confirm-remember" />
         Don't ask again for this page version
@@ -34,7 +38,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DesktopPageConfirmAnswer, DesktopPageConfirmRequest } from "../../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../../ipc";
 import DesktopDialogShell from "../DesktopDialogShell.vue";
-import { PAGE_CONFIRM_ARM_MS, pageConfirmCopy } from "./room-pages";
+import { PAGE_CONFIRM_ARM_MS, pageConfirmCopy, revealHiddenCharacters as shown } from "./room-pages";
 
 /**
  * The confirm sheet main asks for on a page's behalf: opening a link to a new
@@ -110,6 +114,13 @@ onBeforeUnmount(() => {
   color: var(--text);
   font-weight: 600;
   overflow-wrap: anywhere;
+  unicode-bidi: isolate;
+}
+
+.room-page-confirm-label {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
 }
 
 .room-page-confirm-text {
@@ -124,6 +135,7 @@ onBeforeUnmount(() => {
   font-size: 0.8rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  unicode-bidi: isolate;
 }
 
 .room-page-confirm-remember {
