@@ -16,7 +16,7 @@ import {
   TASK_STATUS_ORDER,
   taskStatusAccent,
   taskStatusLabel,
-} from '../src/domain/taskStatus'
+} from '../../../shared/ui/task-status'
 
 test('task lifecycle presentation covers every canonical status in order', () => {
   assert.deepEqual(TASK_STATUS_ORDER, [

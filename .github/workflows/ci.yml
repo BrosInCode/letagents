@@ -24,6 +24,9 @@ on:
       - dev
       - staging
       - main
+      # Integration branch for the shared web/desktop UI work. Remove when it
+      # merges into staging.
+      - shared-ui
   push:
     branches:
       - dev

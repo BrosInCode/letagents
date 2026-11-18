@@ -4,6 +4,8 @@ import {
 } from '../../../../../../shared/room-knowledge.mjs'
 import { webHighlighter } from './code-highlighter'
 
+export { isAmbientSystemMessage, stripStatusPrefix } from '../../../../../../shared/ui/room-messages'
+
 /**
  * The text people see for a room message. A person's Needs-you answer carries
  * the asking agent's handle and the request id for that agent's routing; the
@@ -59,18 +61,6 @@ export function formatMessageTime(timestamp: string, now = new Date()): string {
   } catch {
     return ''
   }
-}
-
-export function isAmbientSystemMessage(sender: string, text: string): boolean {
-  const normalizedSender = String(sender || '').trim().toLowerCase()
-  const normalizedText = String(text || '')
-  return ['letagents', 'system'].includes(normalizedSender)
-    && /^\[status\]\s*/i.test(normalizedText)
-    && !/\b(stale|blocked|failed|error|cannot|can't|cancelled)\b/i.test(normalizedText)
-}
-
-export function stripStatusPrefix(text: string): string {
-  return String(text || '').replace(/^\[status\]\s*/i, '').trim()
 }
 
 const MAX_BLOCKQUOTE_DEPTH = 8

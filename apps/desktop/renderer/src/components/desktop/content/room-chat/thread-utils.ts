@@ -14,6 +14,8 @@ export interface ThreadSummary {
 export interface ThreadParticipantSummary {
   key: string;
   displayName: string;
+  /** The full sender label; the avatar color comes from its owner. */
+  sender?: string;
   color: string | null;
 }
 
@@ -313,6 +315,7 @@ function parseThreadParticipants(participants: DesktopRoomMessageThreadParticipa
     return {
       key: participant.sender || `${displayName}-${index}`,
       displayName,
+      sender: participant.sender,
       color: null,
     };
   });

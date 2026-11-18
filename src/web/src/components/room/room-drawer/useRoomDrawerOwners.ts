@@ -16,7 +16,7 @@ export function getOwnerFromSender(sender: string, source: string | null): strin
   if (source === 'browser') return raw
   const parsed = parseAgentIdentity(sender)
   if (parsed.ownerAttribution) {
-    const ownerMatch = parsed.ownerAttribution.match(/^(.+?)(?:'s?\s+agent)$/i)
+    const ownerMatch = parsed.ownerAttribution.match(/^(.+?)['’]s?\s+agent$/i)
     if (ownerMatch) return ownerMatch[1].trim()
     return parsed.ownerAttribution
   }

@@ -36,7 +36,7 @@
 
 <script setup lang="ts">
 import type { TaskGitHubArtifactStatus } from '@/composables/useRoom'
-import { taskStatusAccent } from '../../../domain/taskStatus'
+import { taskStatusAccent } from '../../../../../../shared/ui/task-status'
 import TaskBoardCard from './TaskBoardCard.vue'
 import type {
   TaskGroup,
