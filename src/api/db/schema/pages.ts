@@ -3,7 +3,7 @@ import { bigint, check, foreignKey, index, integer, jsonb, pgTable, primaryKey, 
 import { accounts, rooms } from "./core.js";
 
 /**
- * Room pages (shared/api/pages.mjs), created in migration 0155. v1 pages are
+ * Room pages (shared/api/pages.mjs), created in migration 0154. v1 pages are
  * owned by a room; `org` is in the contract for a later page library.
  */
 export const pages = pgTable("pages", {
