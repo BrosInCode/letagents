@@ -1,6 +1,9 @@
 import type { AgentInspectorRequest } from "../desktop-chat-message/types";
 
-export type RoomTabId = "chat" | "memory" | "events" | "board" | "activity" | "rooms";
+export type RoomTabId = "chat" | "memory" | "events" | "board" | "activity" | "rooms" | `page:${string}`;
+
+/** A pinned room page's tab: `page:` and the page id. */
+export type RoomPageTabId = `page:${string}`;
 
 export interface RoomTabIndicator {
   label: string;
@@ -25,7 +28,21 @@ export function isRoomTabId(value: string | null): value is RoomTabId {
     || value === "board"
     || value === "activity"
     || value === "rooms"
+    || isRoomPageTabId(value)
   );
+}
+
+export function isRoomPageTabId(value: string | null | undefined): value is RoomPageTabId {
+  return typeof value === "string" && value.startsWith("page:") && value.length > "page:".length && value.length <= 205;
+}
+
+export function roomPageTabId(pageId: string): RoomPageTabId {
+  return `page:${pageId}`;
+}
+
+/** The page id of a page tab, or null for any other tab. */
+export function roomPageIdOfTab(tabId: string | null | undefined): string | null {
+  return isRoomPageTabId(tabId) ? tabId.slice("page:".length) : null;
 }
 
 

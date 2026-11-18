@@ -22,6 +22,9 @@ the page bridge and MCP tool schemas all come from it. The plan is
 | Caller and room access | `src/api/v1/actor.ts` (`identifyCaller`, `resolveRoomAccess`) |
 | Capability check | `src/api/v1/capability.ts` (`checkCapability`) |
 | Types for those steps | `src/api/v1/context.ts` |
+| Page grants (mint, refresh, revoke) | `src/api/v1/page-grants.ts` |
+| Room policy (`resolvePolicy`, `resolveCallPolicy`) | `src/api/v1/policy.ts`, `src/api/v1/capability.ts` |
+| Action record (`api_actions`) | `src/api/v1/actions.ts` |
 
 ## Add a method
 
@@ -87,6 +90,10 @@ the page bridge and MCP tool schemas all come from it. The plan is
    detail goes only to the server log. Outside production, a handler error code the method does
    not list also becomes `internal`, so the test shows it.
 
+   - After a write, tell the room's clients to read again with
+     `queueRoomResourceInvalidation(room.id, resource)` from `src/api/server/events.ts`. The
+     resource must be in `ROOM_RESOURCE_INVALIDATION_RESOURCES`; the event carries only the room
+     and the resource name.
    - `return withStatus(201, output)` answers 201 (or 202). There is no 204: every method has an
      output schema.
    - For a `response: "stream"` method, use
@@ -107,6 +114,27 @@ the page bridge and MCP tool schemas all come from it. The plan is
    node --test scripts/build-api-contracts.test.mjs   # declarations and snapshot current, no break
    node --import tsx --test src/api/__tests__/api-contract.test.ts src/api/__tests__/api-v1-router.test.ts
    ```
+
+## Callers, grants and policy
+
+- Callers: an app session or owner token is a person; a remote MCP session's call is a person
+  `via: integration remote-mcp`; a worker bearer is an agent in its own room (GET only); a
+  `page_grant` bearer (`lapg.<hex>`) is the person `via: page` (id and version) in one room.
+  A `page_grant` is refused on every path outside `/api/v1`.
+- A method's capability is `capability`, or `capabilityFromInput(input)` when the method has one
+  (a document's scope, an intent's kind). The check, the grant and the policy all use that one.
+- The capability check, in order: `rooms.admin` (not grantable) is for a person acting for
+  themselves only; a page needs the capability in its grant, for its page version and room; a
+  capability with a room policy (all but reads and `rooms.admin`) reads the policy: `deny` is
+  `not_granted`, `confirm` and `approve` pass only to `intent` and `job` methods, whose handler
+  calls `resolveCallPolicy(call, capability)` and acts on `mode`. `confirm` applies only through
+  a page. Every refusal is `not_granted`.
+- Minting: `requirePageGrantMinter(req)` (an app session only), then `mintPageGrant({ minter,
+  roomId, pageId, pageVersion, capabilities })`; refresh with `refreshPageGrant({ minter, token })`.
+  `revokePageGrants({ pageId?, roomId?, accountId?, sessionId?, grantId? })` revokes and closes
+  the grants' streams. Signing out of an app session revokes the grants it minted.
+- The router appends every non-read call that passed the room check to `api_actions`. A handler
+  names its target with `setApiActionTarget(call, target)`; otherwise the path parameters are used.
 
 ## Wire format
 

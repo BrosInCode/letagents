@@ -23,6 +23,7 @@ export const CAPABILITY_POLICY_RULES = /** @type {const} */ (["board_manager_mod
  *   readonly defaultPolicy: CapabilityPolicy,
  *   readonly policyRule: CapabilityPolicyRule | null,
  *   readonly writeLike: boolean,
+ *   readonly grantable: boolean,
  * }} CapabilitySpec
  */
 
@@ -30,6 +31,10 @@ export const CAPABILITY_POLICY_RULES = /** @type {const} */ (["board_manager_mod
  * `writeLike` marks capabilities that act for the viewer (posts, jobs,
  * proposals). A new page version that holds one waits for a room admin when
  * a non-admin made it.
+ *
+ * `grantable: false` marks capabilities only a person acting for themselves
+ * holds (room administration). No manifest may ask for one and no page
+ * grant may hold one, so a page never reaches those methods.
  */
 export const CAPABILITIES = Object.freeze({
   "rooms.read": spec("See this room's name, kind and repository", "allow"),
@@ -48,12 +53,27 @@ export const CAPABILITIES = Object.freeze({
   "tickets.propose": spec("Propose ticket status changes and comments", "approve", "own_tracker_connection", true),
   "jobs.start": spec("Ask an agent in this room to do work for you", "confirm", null, true),
   "messages.post": spec("Post messages in this room for you", "confirm", null, true),
+  "rooms.admin": spec("Manage this room's API settings", "allow", null, false, false),
 });
 
 /** @typedef {keyof typeof CAPABILITIES} CapabilityName */
 
 /** @type {readonly CapabilityName[]} */
 export const CAPABILITY_NAMES = Object.freeze(/** @type {CapabilityName[]} */ (Object.keys(CAPABILITIES)));
+
+/**
+ * The capabilities a page manifest may ask for and a page grant may hold.
+ * @type {readonly CapabilityName[]}
+ */
+export const GRANTABLE_CAPABILITY_NAMES = Object.freeze(CAPABILITY_NAMES.filter((name) => CAPABILITIES[name].grantable));
+
+/**
+ * @param {unknown} value
+ * @returns {value is CapabilityName}
+ */
+export function isGrantableCapabilityName(value) {
+  return isCapabilityName(value) && CAPABILITIES[value].grantable;
+}
 
 /**
  * @param {unknown} value
@@ -76,8 +96,9 @@ export function getCapability(name) {
  * @param {CapabilityPolicy} defaultPolicy
  * @param {CapabilityPolicyRule | null} [policyRule]
  * @param {boolean} [writeLike]
+ * @param {boolean} [grantable]
  * @returns {CapabilitySpec}
  */
-function spec(label, defaultPolicy, policyRule = null, writeLike = false) {
-  return Object.freeze({ label, defaultPolicy, policyRule, writeLike });
+function spec(label, defaultPolicy, policyRule = null, writeLike = false, grantable = true) {
+  return Object.freeze({ label, defaultPolicy, policyRule, writeLike, grantable });
 }

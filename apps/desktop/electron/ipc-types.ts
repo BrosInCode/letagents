@@ -14,3 +14,4 @@ export type * from "./ipc-types/supervisor-grant.js";
 export type * from "./ipc-types/tasks.js";
 export type * from "./ipc-types/updates.js";
 export type * from "./ipc-types/board-governance.js";
+export type * from "./ipc-types/pages.js";
