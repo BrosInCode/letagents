@@ -5,7 +5,7 @@ import { accounts, rooms } from "./core.js";
 import { workflow_effects } from "./effects.js";
 
 /**
- * LetAgents API intents (migration 0154): a proposed write, its actor chain,
+ * LetAgents API intents (migration 0155): a proposed write, its actor chain,
  * the room policy's answer and what running it did. `payload_fingerprint`
  * is a hash of the kind's payload, so one proposer has at most one pending
  * intent per change while two proposers each get their own.

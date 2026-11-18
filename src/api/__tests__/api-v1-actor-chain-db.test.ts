@@ -216,6 +216,7 @@ test("an expired grant fails", { skip }, async () => {
 });
 
 test("refresh gives a new token with the same binding, for the same person only", { skip }, async () => {
+  await helpers!.seedLivePage({ roomId: roomA, pageId: "page_refresh", version: 3, capabilities: ["rooms.read"], createdBy: bob.id });
   const grant = await helpers!.mintTestPageGrant({ accountId: bob.id, roomId: roomA, pageId: "page_refresh", pageVersion: 3, capabilities: ["rooms.read"] });
   assert.equal(await grants!.refreshPageGrant({ minter: helpers!.testPageGrantMinter(ada.id, ada.sessionId), token: grant.token }), null);
   const next = await grants!.refreshPageGrant({ minter: helpers!.testPageGrantMinter(bob.id, bob.sessionId), token: grant.token });
@@ -265,6 +266,7 @@ test("the live recheck accepts a page grant inside the mounted /api/v1 router, a
 });
 
 test("a revoke that races a refresh of the same page leaves no live token", { skip }, async () => {
+  await helpers!.seedLivePage({ roomId: roomA, pageId: "page_race", version: 1, capabilities: ["rooms.read"], createdBy: bob.id });
   const grant = await helpers!.mintTestPageGrant({ accountId: bob.id, sessionId: bob.sessionId, roomId: roomA, pageId: "page_race", capabilities: ["rooms.read"] });
   // Hold the page's lock, as a slow refresh would, and start a refresh and a revoke behind it.
   const holder = await dbClient!.pool.connect();
