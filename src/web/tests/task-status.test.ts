@@ -176,7 +176,7 @@ before(async () => {
   TaskBoardTaskDialog = (await vite.ssrLoadModule('/src/components/room/task-board/TaskBoardTaskDialog.vue')).default
   TaskBoard = (await vite.ssrLoadModule('/src/components/room/TaskBoard.vue')).default
   BoardCreateTaskDialog = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/board/BoardCreateTaskDialog.vue', import.meta.url)))).default
-  TaskMarkdownEditor = (await vite.ssrLoadModule('/src/components/room/task-board/TaskMarkdownEditor.vue')).default
+  TaskMarkdownEditor = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/TaskMarkdownEditor.vue', import.meta.url)))).default
 })
 after(async () => { await vite?.close() })
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { copyTextToClipboard } from "../src/domain/clipboard";
+import { copyTextToClipboard } from "../../../../shared/ui/clipboard";
 import { useCopyIndicator, useCopyValueIndicator } from "../src/composables/useCopyIndicator";
 
 function withGlobal<T>(name: "navigator" | "window", value: unknown, run: () => Promise<T>): Promise<T> {

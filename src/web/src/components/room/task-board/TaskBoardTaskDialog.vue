@@ -102,7 +102,7 @@ import { taskStatusAccent, taskStatusLabel } from '../../../../../../shared/ui/t
 import TaskLeaseAuthority from '../task-lease-authority/TaskLeaseAuthority.vue'
 import TaskReviewAuthority from '../task-review-authority/TaskReviewAuthority.vue'
 import TaskMergeReadiness from '../TaskMergeReadiness.vue'
-import TaskMarkdownEditor from './TaskMarkdownEditor.vue'
+import TaskMarkdownEditor from '../../../../../../shared/ui/TaskMarkdownEditor.vue'
 import { renderTaskMarkdown } from '../chat-message/formatting'
 import {
   canFocusTask, formatActorName, formatTaskShortId, formatTimestamp,

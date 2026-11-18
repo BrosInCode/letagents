@@ -237,5 +237,5 @@ test("markdown cache: noCache skips the cache (editor preview)", () => {
   markdownCache.clear();
   renderMarkdown("draft text", { block: true, noCache: true });
   assert.equal(markdownCache.size, 0);
-  assert.match(source("../src/components/desktop/content/room-board/TaskMarkdownEditor.vue"), /noCache: true/);
+  assert.match(source("../../../../shared/ui/TaskMarkdownEditor.vue"), /noCache: true/);
 });

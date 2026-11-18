@@ -21,7 +21,7 @@
 
 <script setup lang="ts">
 import IdeBadge from '../chat-message/IdeBadge.vue'
-import type { PresenceChip } from './presenceChips'
+import type { PresenceChip } from '../../../../../../shared/ui/presence-chips'
 
 defineProps<{ chips: PresenceChip[] }>()
 </script>

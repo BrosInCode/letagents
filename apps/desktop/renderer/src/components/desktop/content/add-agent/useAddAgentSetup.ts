@@ -24,7 +24,7 @@ import {
   visibleDesktopAgentProviders,
   type AgentSetupConfirmation,
 } from "../../../../domain/managed-agents";
-import { copyTextToClipboard } from "../../../../domain/clipboard";
+import { copyTextToClipboard } from "../../../../../../../../shared/ui/clipboard";
 import { createManagedAgentWorktree } from "../../../../domain/managed-agent-worktrees";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { contextualAddAgentError, type AddAgentFeedbackTone } from "./add-agent-errors";

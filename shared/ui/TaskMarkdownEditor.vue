@@ -5,7 +5,8 @@
       <div class="task-markdown-toolbar" role="group" aria-label="Markdown formatting">
         <button v-for="tool in markdownTools" :key="tool.id" type="button" class="task-markdown-tool" :data-tool="tool.id"
           :aria-label="tool.label" :title="tool.label" :disabled="disabled || preview" @mousedown.prevent @click="format(tool.id)">
-          <span aria-hidden="true">{{ tool.symbol }}</span>
+          <component :is="icons[tool.id]" v-if="icons?.[tool.id]" :size="16" aria-hidden="true" />
+          <span v-else aria-hidden="true">{{ tool.symbol }}</span>
         </button>
         <div class="task-markdown-tabs" role="group" aria-label="Editor mode">
           <button type="button" :aria-pressed="!preview" @click="preview = false">Write</button>
@@ -20,15 +21,24 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, useId } from 'vue'
-import { applyMarkdownTool, markdownTools, type MarkdownTool } from '../../../../../../shared/task-markdown-editing.mjs'
-import { renderTaskMarkdown } from '../chat-message/formatting'
-const props = withDefaults(defineProps<{ modelValue: string; disabled?: boolean; id?: string; label?: string }>(), { disabled: false, label: 'Description' })
+import type { Component } from 'vue'
+import { applyMarkdownTool, markdownTools, type MarkdownTool } from '../task-markdown-editing.mjs'
+import { renderMarkdown } from './markdown/markdown'
+// Task description editor shared by the web and desktop boards. An app may pass
+// toolbar icons; without them each tool shows its short text symbol.
+const props = withDefaults(defineProps<{
+  modelValue: string
+  disabled?: boolean
+  id?: string
+  label?: string
+  icons?: Partial<Record<MarkdownTool, Component>>
+}>(), { disabled: false, label: 'Description' })
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 const textarea = ref<HTMLTextAreaElement | null>(null)
 const preview = ref(false)
 const generatedId = useId()
 const inputId = computed(() => props.id || 'task-markdown-' + generatedId)
-const rendered = computed(() => renderTaskMarkdown(props.modelValue, true))
+const rendered = computed(() => renderMarkdown(props.modelValue, { block: true, mentions: false, preservePaths: true, noCache: true }))
 async function format(tool: MarkdownTool) {
   const input = textarea.value
   if (!input || props.disabled || preview.value) return
@@ -47,4 +57,4 @@ function onKeydown(event: KeyboardEvent) {
 }
 </script>
 
-<style src="../../../../../../shared/task-markdown.css"></style>
+<style src="../task-markdown.css"></style>

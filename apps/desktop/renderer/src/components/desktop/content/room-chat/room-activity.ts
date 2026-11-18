@@ -1,4 +1,4 @@
-import type { PresenceChipAgent } from "../../../../domain/presence-chips";
+import type { PresenceChipAgent } from "../../../../../../../../shared/ui/presence-chips";
 import type { ComposerEventPreview } from "./composer-event-preview";
 
 /** How long a short notice stays on the activity line. */
