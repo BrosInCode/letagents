@@ -63,8 +63,8 @@ export const PageVersionSummary: z.ZodObject<{
     version: z.ZodNumber;
     status: z.ZodEnum<{
         pending_approval: "pending_approval";
-        live: "live";
         draft: "draft";
+        live: "live";
         superseded: "superseded";
     }>;
     sha256: z.ZodString;
@@ -168,8 +168,8 @@ export const PageDetail: z.ZodObject<{
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -323,8 +323,8 @@ export const getPage: import("./core.mjs").ApiMethod<"pages.get", z.ZodObject<{
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -407,8 +407,8 @@ export const createPage: import("./core.mjs").ApiMethod<"pages.create", z.ZodObj
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -491,8 +491,8 @@ export const publishPageVersion: import("./core.mjs").ApiMethod<"pages.publishVe
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -573,8 +573,8 @@ export const pinPage: import("./core.mjs").ApiMethod<"pages.pin", z.ZodObject<{
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -657,8 +657,8 @@ export const unpinPage: import("./core.mjs").ApiMethod<"pages.unpin", z.ZodObjec
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -686,9 +686,9 @@ export const approvePageVersion: import("./core.mjs").ApiMethod<"pages.approve",
     pageId: z.ZodString;
     version: z.ZodNumber;
     capabilities: z.ZodArray<z.ZodEnum<{
+        "agents.read": "agents.read";
         "rooms.read": "rooms.read";
         "people.read": "people.read";
-        "agents.read": "agents.read";
         "messages.read": "messages.read";
         "tasks.read": "tasks.read";
         "planning.read": "planning.read";
@@ -754,8 +754,8 @@ export const approvePageVersion: import("./core.mjs").ApiMethod<"pages.approve",
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -833,8 +833,8 @@ export const setCurrentPageVersion: import("./core.mjs").ApiMethod<"pages.setCur
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -984,8 +984,8 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -1067,8 +1067,8 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -1150,8 +1150,8 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -1231,8 +1231,8 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -1314,8 +1314,8 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -1342,9 +1342,9 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
     pageId: z.ZodString;
     version: z.ZodNumber;
     capabilities: z.ZodArray<z.ZodEnum<{
+        "agents.read": "agents.read";
         "rooms.read": "rooms.read";
         "people.read": "people.read";
-        "agents.read": "agents.read";
         "messages.read": "messages.read";
         "tasks.read": "tasks.read";
         "planning.read": "planning.read";
@@ -1410,8 +1410,8 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
@@ -1488,8 +1488,8 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"pages.list", z.Z
         version: z.ZodNumber;
         status: z.ZodEnum<{
             pending_approval: "pending_approval";
-            live: "live";
             draft: "draft";
+            live: "live";
             superseded: "superseded";
         }>;
         sha256: z.ZodString;
