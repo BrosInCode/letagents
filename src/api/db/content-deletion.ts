@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 import { db } from "./client.js";
 import { parseScopedId } from "./utils.js";
+import { endRoomAgentSession } from "./auth/room-agent-sessions.js";
+import { getSessionConnections } from "./messages/session-connections.js";
 
 export async function isRoomDeleted(roomId: string): Promise<boolean> {
   return Boolean((await db.execute(sql`SELECT 1 FROM deleted_rooms WHERE room_id=${roomId}`)).rows.length);
@@ -142,33 +144,91 @@ export async function getRoomDeletionPreview(roomId: string): Promise<{
   return { children: preview.children, counts: { messages: preview.messages, threads: preview.threads, tasks: preview.tasks, files: preview.files } };
 }
 
-export async function deleteRoomData(roomId: string): Promise<{ deleted_room_ids: string[]; parent_room_id: string | null }> {
-  return db.transaction(async tx => {
-    // Lock each parent before discovering its children. FK checks prevent new
-    // children, sessions and uploads from arriving after their parent is fenced.
-    const rooms: Array<{ id: string; parent_room_id: string | null }> = [];
-    const pending = [roomId];
-    while (pending.length) {
-      const id = pending.shift()!;
-      await lockRoom(tx, id);
-      const existing = await tx.execute<{ id: string; parent_room_id: string | null }>(sql`SELECT id,parent_room_id FROM rooms WHERE id=${id} FOR UPDATE`);
-      if (!existing.rows.length) continue;
-      rooms.push(existing.rows[0]);
-      const children = await tx.execute<{ id: string }>(sql`SELECT id FROM rooms WHERE parent_room_id=${id} ORDER BY id`);
-      pending.push(...children.rows.map(child => child.id));
+type OpenWorkerSession = {
+  session_id: string; room_id: string; display_name: string; supervisor_grant_id: string | null; process_live: boolean;
+};
+/** A running agent process refreshes its connection every 30 seconds. */
+const PROCESS_LIVE_SQL = sql`(process_seen_at >= now() - interval '90 seconds'
+  AND (process_disconnected_at IS NULL OR process_disconnected_at < process_seen_at)) AS process_live`;
+
+/**
+ * The open worker sessions that keep a room from being deleted: agents that
+ * are there. One that waits for messages now, or whose process holds its
+ * connection, is there; one run by the desktop is there until the desktop
+ * retires it, and the desktop lists it while it is offline. Any other agent
+ * is offline, and the room no longer waits for it.
+ */
+async function splitOpenWorkerSessions(executor: Transaction | typeof db, sessions: readonly OpenWorkerSession[]) {
+  const present: OpenWorkerSession[] = [];
+  const offline: OpenWorkerSession[] = [];
+  const byRoom = new Map<string, OpenWorkerSession[]>();
+  for (const session of sessions) byRoom.set(session.room_id, [...(byRoom.get(session.room_id) ?? []), session]);
+  for (const [roomId, roomSessions] of byRoom) {
+    const { reachable } = await getSessionConnections(executor, roomId, roomSessions.map(session => session.session_id));
+    for (const session of roomSessions) {
+      (session.supervisor_grant_id || session.process_live || reachable.has(session.session_id) ? present : offline).push(session);
     }
-    if (!rooms.length) throw new ContentDeletionError(404, "Room not found.");
-    const ids = sql.join(rooms.map(room => sql`${room.id}`), sql`, `);
-    const active = await tx.execute(sql`SELECT 1 FROM room_agent_sessions WHERE room_id IN (${ids}) AND ended_at IS NULL AND session_kind='worker' LIMIT 1`);
-    if (active.rows.length) throw new ContentDeletionError(409, "Disconnect or retire the room's agents before deleting this room.");
-    const asks = await tx.execute(sql`SELECT 1 FROM agent_asks WHERE room_id IN (${ids}) AND state IN ('open','claimed','on_hold','active','paused') LIMIT 1`);
-    if (asks.rows.length) throw new ContentDeletionError(409, "Cancel or end this room's agent requests before deleting it.");
-    const deliveries = await tx.execute<{ state: string }>(sql`SELECT state FROM wake_webhook_deliveries WHERE room_id IN (${ids}) FOR UPDATE`);
-    if (deliveries.rows.some(row => row.state === "processing")) throw new ContentDeletionError(409, "Wait for this room's notifications being sent to finish before deleting it.");
-    const effects = await tx.execute<{ processing_token: string | null }>(sql`SELECT processing_token FROM workflow_effects WHERE room_id IN (${ids}) FOR UPDATE`);
-    if (effects.rows.some(row => row.processing_token)) throw new ContentDeletionError(409, "Wait for this room's pending external actions to finish before deleting it.");
-    const rentals = await tx.execute(sql`SELECT 1 FROM rental_sessions WHERE room_id IN (${ids}) OR target_room_id IN (${ids}) UNION ALL SELECT 1 FROM rental_activity_events WHERE room_id IN (${ids}) LIMIT 1`);
-    if (rentals.rows.length) throw new ContentDeletionError(409, "This room has rental history and cannot be permanently deleted. Archive it to remove it from your room list.");
+  }
+  return { present, offline };
+}
+
+function presentAgentsMessage(present: readonly OpenWorkerSession[]): string {
+  const names = [...new Set(present.map(session => session.display_name))];
+  const shown = names.length > 3
+    ? `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`
+    : names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0];
+  return `${shown} ${names.length === 1 ? "is" : "are"} still in this room. Disconnect or retire ${names.length === 1 ? "it" : "them"} before deleting the room.`;
+}
+
+/**
+ * Locks the room tree and makes every check that refuses a deletion. Open
+ * worker sessions of agents that are offline do not refuse it; they are
+ * returned for the caller to end.
+ */
+async function lockDeletableRoomTree(tx: Transaction, roomId: string) {
+  // Lock each parent before discovering its children. FK checks prevent new
+  // children, sessions and uploads from arriving after their parent is fenced.
+  const rooms: Array<{ id: string; parent_room_id: string | null }> = [];
+  const pending = [roomId];
+  while (pending.length) {
+    const id = pending.shift()!;
+    await lockRoom(tx, id);
+    const existing = await tx.execute<{ id: string; parent_room_id: string | null }>(sql`SELECT id,parent_room_id FROM rooms WHERE id=${id} FOR UPDATE`);
+    if (!existing.rows.length) continue;
+    rooms.push(existing.rows[0]);
+    const children = await tx.execute<{ id: string }>(sql`SELECT id FROM rooms WHERE parent_room_id=${id} ORDER BY id`);
+    pending.push(...children.rows.map(child => child.id));
+  }
+  if (!rooms.length) throw new ContentDeletionError(404, "Room not found.");
+  const ids = sql.join(rooms.map(room => sql`${room.id}`), sql`, `);
+  const active = await tx.execute<OpenWorkerSession>(sql`SELECT session_id,room_id,display_name,supervisor_grant_id,${PROCESS_LIVE_SQL} FROM room_agent_sessions
+    WHERE room_id IN (${ids}) AND ended_at IS NULL AND session_kind='worker' ORDER BY session_id FOR UPDATE`);
+  const { present, offline } = await splitOpenWorkerSessions(tx, active.rows);
+  if (present.length) throw new ContentDeletionError(409, presentAgentsMessage(present));
+  const asks = await tx.execute(sql`SELECT 1 FROM agent_asks WHERE room_id IN (${ids}) AND state IN ('open','claimed','on_hold','active','paused') LIMIT 1`);
+  if (asks.rows.length) throw new ContentDeletionError(409, "Cancel or end this room's agent requests before deleting it.");
+  const deliveries = await tx.execute<{ state: string }>(sql`SELECT state FROM wake_webhook_deliveries WHERE room_id IN (${ids}) FOR UPDATE`);
+  if (deliveries.rows.some(row => row.state === "processing")) throw new ContentDeletionError(409, "Wait for this room's notifications being sent to finish before deleting it.");
+  const effects = await tx.execute<{ processing_token: string | null }>(sql`SELECT processing_token FROM workflow_effects WHERE room_id IN (${ids}) FOR UPDATE`);
+  if (effects.rows.some(row => row.processing_token)) throw new ContentDeletionError(409, "Wait for this room's pending external actions to finish before deleting it.");
+  const rentals = await tx.execute(sql`SELECT 1 FROM rental_sessions WHERE room_id IN (${ids}) OR target_room_id IN (${ids}) UNION ALL SELECT 1 FROM rental_activity_events WHERE room_id IN (${ids}) LIMIT 1`);
+  if (rentals.rows.length) throw new ContentDeletionError(409, "This room has rental history and cannot be permanently deleted. Archive it to remove it from your room list.");
+  return { rooms, ids, offline };
+}
+
+export async function deleteRoomData(roomId: string): Promise<{ deleted_room_ids: string[]; parent_room_id: string | null }> {
+  // First make every check without changing anything: a deletion that will
+  // be refused must not end anyone's session.
+  const { offline } = await db.transaction(tx => lockDeletableRoomTree(tx, roomId));
+  // Offline agents are ended the way they would end if they left by
+  // themselves, so their credentials and open work close cleanly first.
+  for (const session of offline) {
+    await endRoomAgentSession({ session_id: session.session_id, room_id: session.room_id, only_if_open: true });
+  }
+  return db.transaction(async tx => {
+    const { rooms, ids, offline: stillOpen } = await lockDeletableRoomTree(tx, roomId);
+    // An agent joined, or went offline, in the moment between the two steps.
+    if (stillOpen.length) throw new ContentDeletionError(409, "An agent changed in this room while it was being deleted. Try again.");
     await tx.execute(sql`INSERT INTO deleted_rooms(room_id) SELECT id FROM rooms WHERE id IN (${ids}) ON CONFLICT DO NOTHING`);
     await tx.execute(sql`INSERT INTO deleted_rooms(room_id) SELECT alias FROM room_aliases WHERE room_id IN (${ids}) ON CONFLICT DO NOTHING`);
     await tx.execute(sql`INSERT INTO attachment_deletion_queue(object_key)
