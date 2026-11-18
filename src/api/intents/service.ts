@@ -11,6 +11,7 @@ import {
   type TicketCommentPayload,
   type TicketTransitionPayload,
 } from "../../../shared/api/intents.mjs";
+import { ROOM_RESOURCE_INTENTS } from "../../../shared/room-resource-invalidation.mjs";
 import {
   getApiIntent,
   insertApiIntent,
@@ -19,6 +20,7 @@ import {
   type ApiIntentRow,
 } from "../db/api-intents.js";
 import type { Project } from "../db/types.js";
+import { emitProjectMessage, queueRoomResourceInvalidation } from "../server/events.js";
 import type { RoomAccessAccount } from "../rooms/access.js";
 import { resolvePolicy, type ResolvedApiPolicy } from "../v1/policy.js";
 import {
@@ -67,27 +69,9 @@ export const defaultIntentServiceDeps: IntentServiceDeps = {
   board: () => (defaultBoard ??= createDefaultTaskIntentBoard()),
   tickets: () => (defaultTickets ??= createDefaultTicketIntentDeps()),
   notifyApprovers: postApprovalNotice,
-  invalidate: invalidateIntents,
+  invalidate: (roomId) => queueRoomResourceInvalidation(roomId, ROOM_RESOURCE_INTENTS),
   now: () => new Date().toISOString(),
 };
-
-/** The `intents` resource name in the room stream's invalidation list. */
-const INTENTS_RESOURCE = "intents";
-
-/**
- * Sends the room's `intents` pointer through the shared API resource helper.
- * PR3 adds that helper (`queueRoomResourceInvalidation`) and the `intents`
- * name to the stream's list; until it is merged into this branch the helper
- * is absent and clients see changes on their next read.
- * TODO(after PR3 merges): call queueRoomResourceInvalidation(roomId, ROOM_RESOURCE_INTENTS) directly.
- */
-function invalidateIntents(roomId: string): void {
-  void import("../server/events.js").then((events) => {
-    const queue = (events as { queueRoomResourceInvalidation?: (roomId: string, resource: string) => void })
-      .queueRoomResourceInvalidation;
-    queue?.(roomId, INTENTS_RESOURCE);
-  }).catch((error: unknown) => console.warn("[api intents] the intents event failed", error));
-}
 
 export function toIntent(row: ApiIntentRow): Intent {
   return {
@@ -418,10 +402,7 @@ export function describeIntent(kind: IntentKind, payload: Record<string, unknown
 
 /** The room notice for a pending intent. It names nobody, so it wakes no agent. */
 async function postApprovalNotice(room: Project, row: ApiIntentRow): Promise<void> {
-  const [{ emitProjectMessage }, { safeNotificationFragment }] = await Promise.all([
-    import("../server/events.js"),
-    import("../routes/rooms/board.js"),
-  ]);
+  const { safeNotificationFragment } = await import("../routes/rooms/board.js");
   const who = row.principal_kind === "agent"
     ? safeNotificationFragment(`agent ${row.principal_id}`, "An agent")
     : safeNotificationFragment(row.principal_login, "A participant");

@@ -8,6 +8,12 @@ export const ROOM_RESOURCE_WAKE_RULES: "wake_rules";
 /** A reaction was added or removed; consumers re-read the reactions of the messages they show. */
 export const ROOM_RESOURCE_MESSAGE_PINS: "message_pins";
 export const ROOM_RESOURCE_MESSAGE_REACTIONS: "message_reactions";
+/** LetAgents API resources; clients re-read them through the checked /api/v1 routes. */
+export const ROOM_RESOURCE_WORK_ITEMS: "work_items";
+export const ROOM_RESOURCE_DOCUMENTS: "documents";
+export const ROOM_RESOURCE_JOBS: "jobs";
+export const ROOM_RESOURCE_INTENTS: "intents";
+export const ROOM_RESOURCE_PAGES: "pages";
 /** Protocol-known references; consumers independently choose what they render. */
 export const ROOM_RESOURCE_INVALIDATION_RESOURCES: readonly [
   "agent_work",
@@ -16,6 +22,11 @@ export const ROOM_RESOURCE_INVALIDATION_RESOURCES: readonly [
   "wake_rules",
   "message_reactions",
   "message_pins",
+  "work_items",
+  "documents",
+  "jobs",
+  "intents",
+  "pages",
 ];
 
 export type RoomResourceInvalidationResource =

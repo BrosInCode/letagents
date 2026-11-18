@@ -22,6 +22,7 @@ function createSources() {
     agentApprovalEvents: new EventEmitter(),
     executionDelegationEvents: new EventEmitter(),
     wakeRuleEvents: new EventEmitter(),
+    roomResourceEvents: new EventEmitter(),
     joinRequestEvents: new EventEmitter(),
   };
 }
@@ -186,6 +187,24 @@ test("wake-rule invalidations remain pointer-only broker events", async () => {
       roomId: "room_wake",
     });
   }
+
+  subscription.close();
+  broker.close();
+});
+
+test("LetAgents API resources share one lane and stay pointer-only; an unknown name forces a repair", async () => {
+  const sources = createSources();
+  const broker = createRoomEventBroker(sources, { instanceId: "broker" });
+  const subscription = broker.subscribe("room_api");
+
+  for (const resource of ["documents", "jobs"]) {
+    sources.roomResourceEvents.emit("room_resource:invalidated", { projectId: "room_api", resource });
+    const delivery = await subscription.next();
+    assert.ok(delivery?.type === "event");
+    assert.deepEqual(delivery.envelope.event, { kind: "resource_invalidated", resource, roomId: "room_api" });
+  }
+  sources.roomResourceEvents.emit("room_resource:invalidated", { projectId: "room_api", resource: "secrets" });
+  assert.equal((await subscription.next())?.type, "gap");
 
   subscription.close();
   broker.close();

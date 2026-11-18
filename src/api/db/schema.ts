@@ -38,4 +38,5 @@ export * from "./schema/remote-mcp-sessions.js";
 export * from "./schema/mcp-oauth.js";
 export * from "./schema/content-deletion.js";
 export * from "./schema/api.js";
+export * from "./schema/api-documents.js";
 export * from "./schema/api-intents.js";

@@ -87,6 +87,7 @@ const members = testDatabaseUrl ? await import("../db/room-members.js") : null;
 const filters = testDatabaseUrl ? await import("../connectors/room-filters.js") : null;
 const crypto = testDatabaseUrl ? await import("../connectors/crypto.js") : null;
 const policy = testDatabaseUrl ? await import("../v1/policy.js") : null;
+const events = testDatabaseUrl ? await import("../server/events.js") : null;
 const helpers = testDatabaseUrl ? await import("./page-grant-test-helpers.js") : null;
 const appModule = testDatabaseUrl ? await import("../server/app.js") : null;
 const routesModule = testDatabaseUrl ? await import("../server/routes.js") : null;
@@ -183,6 +184,14 @@ test("a member's ticket.transition waits for a room admin, and the room hears ab
   const { id: roomId, route } = await room();
   tickets.set("HT-1", { status: "To Do" });
   jiraWrites.length = 0;
+  const heard = new Promise<string>((resolve) => {
+    const listener = (event: { projectId: string; resource: string }) => {
+      if (event.projectId !== roomId || event.resource !== "intents") return;
+      events!.roomResourceEvents.off("room_resource:invalidated", listener);
+      resolve(event.resource);
+    };
+    events!.roomResourceEvents.on("room_resource:invalidated", listener);
+  });
 
   const res = await propose(route, dan.session, "ticket.transition", { key: "HT-1", toStatus: "In Progress" });
   assert.equal(res.status, 201, JSON.stringify(res.body));
@@ -191,6 +200,8 @@ test("a member's ticket.transition waits for a room admin, and the room hears ab
   assert.deepEqual(res.body.proposedBy, { principal: { kind: "person", id: dan.id, login: "dan" } });
   assert.equal(jiraWrites.length, 0);
   assert.deepEqual(await effectsFor(roomId), []);
+  // Pages hear `intents` and read again.
+  assert.equal(await heard, "intents");
 
   const notice = await dbClient!.pool.query("SELECT text, source FROM messages WHERE room_id = $1 AND client_message_id = $2",
     [roomId, `api_intent:${res.body.id}:approval_notify`]);

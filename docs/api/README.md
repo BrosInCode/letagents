@@ -90,6 +90,10 @@ the page bridge and MCP tool schemas all come from it. The plan is
    detail goes only to the server log. Outside production, a handler error code the method does
    not list also becomes `internal`, so the test shows it.
 
+   - After a write, tell the room's clients to read again with
+     `queueRoomResourceInvalidation(room.id, resource)` from `src/api/server/events.ts`. The
+     resource must be in `ROOM_RESOURCE_INVALIDATION_RESOURCES`; the event carries only the room
+     and the resource name.
    - `return withStatus(201, output)` answers 201 (or 202). There is no 204: every method has an
      output schema.
    - For a `response: "stream"` method, use
