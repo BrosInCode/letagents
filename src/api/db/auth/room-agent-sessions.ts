@@ -1220,8 +1220,13 @@ const notOwnedByRemovedMember = sql`NOT EXISTS (
       WHERE member.room_id = removal.room_id AND member.account_id = removal.account_id)
     AND ${supervisor_host_grants.rental_session_id} IS NULL
     AND COALESCE(${supervisor_host_grants.scope_key}, '') NOT LIKE 'ask:%'
-    AND NOT EXISTS (SELECT 1 FROM rental_sessions WHERE room_agent_session_id = ${room_agent_sessions.session_id})
-    AND NOT EXISTS (SELECT 1 FROM agent_asks WHERE room_agent_session_id = ${room_agent_sessions.session_id})
+    -- These two tables have no index on room_agent_session_id. Tying each
+    -- lookup to the removal row keeps the planner from running it for every
+    -- bearer; it runs only for an owner who was removed.
+    AND NOT EXISTS (SELECT 1 FROM rental_sessions
+      WHERE room_agent_session_id = ${room_agent_sessions.session_id} AND removal.account_id IS NOT NULL)
+    AND NOT EXISTS (SELECT 1 FROM agent_asks
+      WHERE room_agent_session_id = ${room_agent_sessions.session_id} AND removal.account_id IS NOT NULL)
 )`;
 
 export async function getRoomAgentSessionBearerByToken(
