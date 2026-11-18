@@ -1,5 +1,5 @@
 import { activityUnread } from '../../../../../shared/ui/activity/unread'
-import { roomAccessRefusal } from '../../../../../shared/room-membership.mjs'
+import { needsGitHubSignIn, roomAccessRefusal } from '../../../../../shared/room-membership.mjs'
 import { apiFetch, onRoomAccessRefused, roomPath, type RoomApiFailure } from './api'
 import { mergeMessages } from './data'
 import { joinRoomSession, loadRoomBootstrap } from './join'
@@ -66,6 +66,7 @@ function roomJoinErrorFrom(error: RoomApiFailure, roomIdentifier: string): RoomJ
     refusal: roomAccessRefusal(payload),
     displayName: typeof payload?.display_name === 'string' ? payload.display_name : null,
     joinRequest: joinRequestFromPayload(payload),
+    needsGitHubSignIn: needsGitHubSignIn(payload),
     retryAfterMs: error.retryAfterMs ?? null,
   }
 }

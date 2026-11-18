@@ -16,7 +16,7 @@ import {
   parseApiErrorPayload,
 } from "../../runtime/api.js";
 import { maybeHandleRepoRoomAuthRequired } from "../../runtime/device-auth.js";
-import { joinRequestInstruction } from "../../runtime/room-access.js";
+import { joinRequestInstruction, toRoomAccessRefusalResult } from "../../runtime/room-access.js";
 import { getCurrentRoom } from "../../runtime/room-state.js";
 import { workerModeDisabledToolResult } from "../../runtime/worker-bearer.js";
 import { isLocalRoomStorageEnabled } from "../../runtime.js";
@@ -154,6 +154,7 @@ export async function requestRoomAccess(roomId: string) {
     // A server that gates this route as well still says where the request stands.
     if (error instanceof RoomAccessRefusedError) {
       const room = { room_id: error.roomId ?? roomId, display_name: error.displayName ?? roomId };
+      if (error.needsGitHubSignIn) return toRoomAccessRefusalResult(error);
       if (error.refusal === "repo_collaborator_required") return githubRolesResult(room);
       if (error.joinRequest?.state === "pending"
         || (error.joinRequest?.state === "declined" && isFuture(error.joinRequest.retry_after))) {

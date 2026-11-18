@@ -241,6 +241,7 @@ test('the room list shows a public repo room only to people with a GitHub role o
   const collaborator = await person('collaborator', 'github-token-role');
   const revoked = await person('revoked', 'github-token-dead');
   const blocked = await person('blocked', 'github-token-sso');
+  const tokenless = await person('tokenless');
   await pool!.query(`INSERT INTO rooms (id, display_name, created_at) VALUES
     ('github.com/acme/public', 'acme/public', now()), ('github.com/acme/secret', 'acme/secret', now())`);
   for (const account of [reader, collaborator]) {
@@ -261,6 +262,18 @@ test('the room list shows a public repo room only to people with a GitHub role o
   assert.deepEqual((await call('GET', '/account/rooms', reader.token)).body.rooms, [], 'no role, no listing');
   assert.deepEqual((await call('GET', '/account/rooms', collaborator.token)).body.rooms.map((room: any) => room.room_id),
     ['github.com/acme/public']);
+  // No live GitHub token (a remote MCP grant whose person has none): a 403 that
+  // keeps the LetAgents sign-in and asks for a GitHub sign-in, with the code
+  // older clients already read as a repo refusal.
+  for (const room of ['github.com%2Facme%2Fpublic', 'github.com%2Facme%2Fsecret']) {
+    const read = await call('GET', `/rooms/${room}/messages`, tokenless.token);
+    assert.equal(read.status, 403, `${room}: never a 401, which deletes the MCP client's sign-in`);
+    assert.equal(read.body.code, 'REPO_COLLABORATOR_REQUIRED');
+    assert.equal(read.body.reason, 'github_sign_in_required');
+    assert.match(read.body.message, /Sign in to LetAgents with GitHub again/);
+  }
+  assert.equal((await call('GET', '/rooms/github.com%2Facme%2Fpublic/messages', reader.token)).body.reason, undefined,
+    'a GitHub "no role" answer is not a sign-in problem');
   for (const account of [revoked, blocked]) {
     const read = await call('GET', '/rooms/github.com%2Facme%2Fsecret/messages', account.token);
     assert.equal(read.status, 403, `${account.login}: a dead or blocked token is a refusal, not a retry`);

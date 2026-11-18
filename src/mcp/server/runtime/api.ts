@@ -1,6 +1,7 @@
 import { clearAuthenticatedAccountCache } from "./auth-cache.js";
 import { currentWorkerCall } from "../../worker-call-context.js";
 import {
+  needsGitHubSignIn,
   roomAccessRefusal,
   type RoomJoinRequestSummary,
 } from "../../../../shared/room-membership.mjs";
@@ -93,6 +94,8 @@ export class RoomAccessRefusedError extends ApiError {
   readonly displayName: string | null;
   readonly joinRequest: RoomJoinRequestSummary | null;
   readonly serverMessage: string | null;
+  /** A repo refusal that a new GitHub sign-in can clear: LetAgents holds no live GitHub token for the person. */
+  readonly needsGitHubSignIn: boolean;
 
   constructor(status: number, body: string, refusal: RoomAccessRefusalKind, payload: Record<string, unknown>) {
     super(status, body);
@@ -104,6 +107,7 @@ export class RoomAccessRefusedError extends ApiError {
       ? payload.join_request as RoomJoinRequestSummary
       : null;
     this.serverMessage = typeof payload.message === "string" ? payload.message : null;
+    this.needsGitHubSignIn = needsGitHubSignIn(payload);
   }
 }
 

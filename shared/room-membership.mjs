@@ -37,10 +37,21 @@ export const REPO_ROOM_USES_GITHUB_ROLES = Object.freeze({
   code: 'REPO_ROOM_USES_GITHUB_ROLES',
 });
 
+/**
+ * The `reason` on a REPO_COLLABORATOR_REQUIRED body when LetAgents holds no
+ * live GitHub token for the person, so it could not ask GitHub for the role.
+ * The code stays REPO_COLLABORATOR_REQUIRED, so an older client still shows a
+ * refusal; a newer client reads the reason and asks for a GitHub sign-in.
+ */
+export const GITHUB_SIGN_IN_REQUIRED_REASON = 'github_sign_in_required';
+
 export const ROOM_MEMBERSHIP_REQUIRED_MESSAGE =
   'Only members can open this room. Ask to join, and a room admin can let you in.';
 export const REPO_COLLABORATOR_REQUIRED_MESSAGE =
   'Only people with a role on this GitHub repository can open its room. Ask a repository admin to add you on GitHub.';
+export const GITHUB_SIGN_IN_REQUIRED_MESSAGE =
+  'LetAgents has no live GitHub sign-in for your account, so it cannot check your role on this repository. '
+  + 'Sign in to LetAgents with GitHub again (on letagents.chat, or with start_device_auth in an MCP client), then open the room again.';
 export const ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY_MESSAGE =
   'Ask to join the main room, not one of its focus rooms.';
 export const REPO_ACCESS_UNAVAILABLE_MESSAGE =
@@ -70,12 +81,26 @@ export function roomMembershipRequiredBody({ room_id, display_name, join_request
   };
 }
 
-export function repoCollaboratorRequiredBody({ room_id }) {
+export function repoCollaboratorRequiredBody({ room_id, reason }) {
+  if (reason === GITHUB_SIGN_IN_REQUIRED_REASON) {
+    return {
+      ...REPO_COLLABORATOR_REQUIRED,
+      reason: GITHUB_SIGN_IN_REQUIRED_REASON,
+      message: GITHUB_SIGN_IN_REQUIRED_MESSAGE,
+      room_id,
+    };
+  }
   return {
     ...REPO_COLLABORATOR_REQUIRED,
     message: REPO_COLLABORATOR_REQUIRED_MESSAGE,
     room_id,
   };
+}
+
+/** True for a repo refusal that a new GitHub sign-in can clear. */
+export function needsGitHubSignIn(body) {
+  return Boolean(body && typeof body === 'object' && body.reason === GITHUB_SIGN_IN_REQUIRED_REASON
+    && roomAccessRefusal(body) === 'repo_collaborator_required');
 }
 
 /**
