@@ -72,7 +72,9 @@ export function createTrackerEffectExecutor(deps: {
       } catch (error) {
         const text = await deps.service.recordFailure(row, error);
         if (error instanceof TrackerProviderError && error.outcome !== "ambiguous") {
-          return { kind: "definite_failure", error: text };
+          return error.permanent
+            ? { kind: "definite_failure", error: text, final: true }
+            : { kind: "definite_failure", error: text };
         }
         return { kind: "ambiguous", error: text };
       }

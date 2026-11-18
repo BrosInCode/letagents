@@ -164,6 +164,11 @@ export class TrackerProviderError extends Error {
     readonly status: number | null = null,
     /** How long the tracker asked callers to wait (Retry-After), when it said. */
     readonly retryAfterMs: number | null = null,
+    /**
+     * A "definite" refusal that a retry cannot change, such as a status the
+     * ticket has no way to reach. Effects fail on the first attempt.
+     */
+    readonly permanent = false,
   ) {
     super(message);
     this.name = "TrackerProviderError";

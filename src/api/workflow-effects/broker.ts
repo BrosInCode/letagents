@@ -174,7 +174,7 @@ async function performCreate(input: {
       now: input.now,
     });
   } else if (result.kind === "definite_failure") {
-    const exhausted = input.effect.attempt_count >= input.effect.max_attempts;
+    const exhausted = result.final === true || input.effect.attempt_count >= input.effect.max_attempts;
     persisted = await input.store.fail({
       id: input.effect.id,
       processing_token: input.token,
@@ -182,6 +182,7 @@ async function performCreate(input: {
       next_attempt_at: exhausted
         ? null
         : new Date(input.now.getTime() + FAILED_RETRY_BASE_MS * input.effect.attempt_count),
+      ...(result.final === true ? { exhaust: true } : {}),
       now: input.now,
     });
   } else {

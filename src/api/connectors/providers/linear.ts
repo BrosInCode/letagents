@@ -265,7 +265,7 @@ export function createLinearProvider(options: LinearProviderOptions = {}): WorkI
       const url = asString(issue.url) ?? undefined;
       if (sameStatus(current, toStatus)) return { externalId: `${key}:status:${current}`, url };
       const target = teamStates(issue).find((state) => sameStatus(state.name, toStatus));
-      if (!target) throw new TrackerProviderError("definite", `Linear issue ${key}'s team has no status "${toStatus}".`);
+      if (!target) throw new TrackerProviderError("definite", `Linear issue ${key}'s team has no status "${toStatus}".`, null, null, true);
       const data = await graphql(
         conn,
         "mutation Move($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) { success } }",

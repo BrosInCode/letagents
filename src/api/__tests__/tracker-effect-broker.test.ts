@@ -297,6 +297,41 @@ test("a definite tracker failure is retried after the backoff and then succeeds"
   assert.equal(attempts, 2);
 });
 
+test("a status the Jira ticket cannot reach fails for good on the first attempt; a 429 stays retryable", async () => {
+  let writes = 0;
+  let throttle = true;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (/\/issue\/HT-1234\?fields=/.test(url)) return new Response(JSON.stringify(fixture("jira-issue-ht-1234")), { status: 200 });
+    if (/\/issue\/HT-1234\/transitions$/.test(url)) {
+      if (init?.method !== "POST") return new Response(JSON.stringify(fixture("jira-transitions-ht-1234")), { status: 200 });
+      writes += 1;
+      return throttle ? new Response("rate limited", { status: 429 }) : new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected live request: ${url}`);
+  }) as typeof fetch;
+  const { broker, advance } = harness({ jira: createJiraProvider({ fetchImpl, env: {} }), linear: createLinearProvider({ fetchImpl }) });
+
+  const missing = await broker.submitTrackerEffect(transition({ idempotency_key: "intent_1", action: { kind: "tracker_transition", to_status: "Released" } }));
+  assert.equal(missing.state, "failed");
+  assert.match(missing.last_error ?? "", /no transition from "In Progress" to "Released"/);
+  assert.equal(missing.next_attempt_at, null);
+  assert.equal(missing.attempt_count, missing.max_attempts, "no attempts are left, so the intent fails now");
+  advance(10 * 60_000);
+  assert.equal((await broker.reconcile(missing)).attempt_count, missing.max_attempts);
+  assert.equal(writes, 0);
+
+  const throttled = await broker.submitTrackerEffect(transition({ idempotency_key: "intent_2" }));
+  assert.equal(throttled.state, "failed");
+  assert.match(throttled.last_error ?? "", /429/);
+  assert.ok(throttled.next_attempt_at, "a 429 is retried after the backoff");
+  assert.equal(throttled.attempt_count, 1);
+  throttle = false;
+  advance(60_000);
+  assert.equal((await broker.reconcile(throttled)).state, "succeeded");
+  assert.equal(writes, 2);
+});
+
 test("an auth failure fails the effect and marks the connection for reconnect", async () => {
   const jira = stubProvider({
     async transition() { throw new TrackerProviderError("auth", "Tracker answered 401: token ATATT3xFfGF0secretsecretsecret revoked", 401); },
