@@ -68,6 +68,6 @@ test("cookie logout deletes only the presented browser session", async () => {
   assert.deepEqual(revokedOwnerTokenIds, []);
 });
 
-test("logout revokes the signed-in person's page grants", () => {
-  assert.deepEqual(revokedPageGrants, [{ accountId: "acct_owner" }, { accountId: "acct_cookie" }]);
+test("logout revokes the page grants of the app session that signs out, and an owner token's logout revokes none", () => {
+  assert.deepEqual(revokedPageGrants, [{ sessionId: "session-row" }]);
 });

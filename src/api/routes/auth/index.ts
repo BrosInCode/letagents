@@ -445,6 +445,12 @@ export function registerAuthLogoutRoute(
   deps: AuthLogoutRouteDeps = defaultAuthLogoutRouteDeps,
 ): void {
   app.post("/auth/logout", async (req: AuthenticatedRequest, res) => {
+    // Pages this app session opened end with it, on this device only. First,
+    // so their streams close now: deleting the session drops their rows.
+    // An owner token mints no page grants, so its sign-out revokes none.
+    if (req.authKind === "session" && req.sessionAccount && "id" in req.sessionAccount) {
+      await (deps.revokePageGrants ?? revokePageGrants)({ sessionId: req.sessionAccount.id });
+    }
     const cookies = parseCookies(req.headers.cookie);
     const retired: string[] = [];
     if (cookies.letagents_session) {
@@ -463,10 +469,6 @@ export function registerAuthLogoutRoute(
     // The ended credentials' room streams and account activity stream close
     // now, on every API instance, instead of at their next re-check.
     (deps.retireCredentials ?? retireAccountCredentials)(retired);
-    // Pages act for the person who opened them; signing out ends them all.
-    if (req.sessionAccount && (req.authKind === "session" || req.authKind === "owner_token")) {
-      await (deps.revokePageGrants ?? revokePageGrants)({ accountId: req.sessionAccount.account_id });
-    }
     clearSessionCookie(res);
     res.json({ success: true });
   });

@@ -1,7 +1,7 @@
 // Rooms: what a page may know about the room it runs in.
 import { z } from "zod";
 
-import { CAPABILITY_NAMES, CAPABILITY_POLICIES, CAPABILITY_POLICY_RULES } from "./capabilities.mjs";
+import { CAPABILITY_POLICIES, CAPABILITY_POLICY_RULES, GRANTABLE_CAPABILITY_NAMES } from "./capabilities.mjs";
 import { defineMethod } from "./core.mjs";
 
 export const RoomRepo = z.object({
@@ -56,10 +56,10 @@ export const getRoom = defineMethod({
 });
 
 /**
- * Capabilities with a room policy: everything but reads, which every room
- * participant may use in `api: 1`.
+ * Capabilities with a room policy: everything a page may be granted but
+ * reads, which every room participant may use in `api: 1`.
  */
-export const POLICY_CAPABILITY_NAMES = CAPABILITY_NAMES.filter((name) => !name.endsWith(".read"));
+export const POLICY_CAPABILITY_NAMES = GRANTABLE_CAPABILITY_NAMES.filter((name) => !name.endsWith(".read"));
 
 export const RoomApiPolicy = z.object({
   capability: z.string(),
@@ -80,7 +80,7 @@ export const listRoomPolicies = defineMethod({
   name: "rooms.listPolicies",
   area: "rooms",
   kind: "read",
-  capability: "rooms.read",
+  capability: "rooms.admin",
   description:
     "The room's API policy for each capability that is not a read: allow, confirm (the viewer confirms in the app), approve (a room admin approves) or deny. Room admins only, signed in as themselves; pages and agents get not_granted.",
   path: "/rooms/:room/policies",
@@ -94,7 +94,7 @@ export const setRoomPolicy = defineMethod({
   area: "rooms",
   kind: "write",
   httpMethod: "PUT",
-  capability: "rooms.read",
+  capability: "rooms.admin",
   description:
     "Sets the room's API policy for one capability; mode null goes back to the LetAgents default. Returns every policy. Room admins only, in the LetAgents app; pages, agents and owner tokens get not_granted.",
   path: "/rooms/:room/policies",

@@ -32,9 +32,13 @@ export interface ResolvedApiPolicy {
   rule: CapabilityPolicyRule | null;
 }
 
-/** Reads are always allowed for room participants in `api: 1`; only the other capabilities have a room policy. */
+/**
+ * Reads are always allowed for room participants in `api: 1`, and room
+ * administration (not grantable) is the admin's own; every other capability
+ * has a room policy.
+ */
 export function isPolicyCapability(capability: CapabilityName): boolean {
-  return !capability.endsWith(".read");
+  return !capability.endsWith(".read") && getCapability(capability).grantable;
 }
 
 export const POLICY_CAPABILITIES: readonly CapabilityName[] = Object.freeze(CAPABILITY_NAMES.filter(isPolicyCapability));

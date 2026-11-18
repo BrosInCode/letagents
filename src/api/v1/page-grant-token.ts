@@ -36,3 +36,15 @@ export function isWellFormedPageGrantToken(token: string): boolean {
 export function isApiV1RequestPath(path: string | undefined): boolean {
   return typeof path === "string" && path.startsWith(API_V1_PATH_PREFIX);
 }
+
+/**
+ * The request's full path. Inside a mounted router Express strips the mount
+ * point from `req.path` (`/api/v1/rooms/x` reads `/rooms/x`), so the path
+ * limit reads `originalUrl`, which no router rewrites.
+ */
+export function requestPathname(req: { originalUrl?: string; url?: string }): string | undefined {
+  const raw = req.originalUrl ?? req.url;
+  if (typeof raw !== "string") return undefined;
+  const query = raw.indexOf("?");
+  return query === -1 ? raw : raw.slice(0, query);
+}

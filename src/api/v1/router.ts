@@ -1,7 +1,7 @@
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 
 import { actorKey } from "../../../shared/api/actor.mjs";
-import { ApiError, describeIssues, methodMayReturn, type AnyApiMethod } from "../../../shared/api/core.mjs";
+import { ApiError, capabilityForCall, describeIssues, methodMayReturn, type AnyApiMethod } from "../../../shared/api/core.mjs";
 import { GitHubAccessUnavailableError } from "../github/repo-access.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
 import { apiActionTarget, recordApiAction, type ApiActionRecord } from "./actions.js";
@@ -79,6 +79,8 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
         if (!parsed.success) {
           throw new ApiError("invalid_input", describeIssues(parsed.error).map(({ path, message }) => (path ? `${path}: ${message}` : message)).join("; "));
         }
+        // The capability this input needs (a document's scope, an intent's kind) is what the record names.
+        if (recordable) recordable.capability = capabilityForCall(method, parsed.data);
         await capabilityCheck(call.actor, method, parsed.data, call);
 
         inHandler = true;

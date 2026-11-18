@@ -219,6 +219,28 @@ test("every route checks the capability: a person and an agent pass reads, also 
   }
 });
 
+test("the policy covers every policy capability: deny refuses reads too; confirm or approve pass only to intents and jobs", async () => {
+  const example = { area: "data", description: "An example.", path: "/rooms/:room/data-example", input: z.strictObject({}), output: z.object({}) } as const;
+  const dataRead = defineMethod({ ...example, name: "data.readExample", kind: "read", capability: "data.room", rateClass: "read" });
+  const dataWrite = defineMethod({ ...example, name: "data.writeExample", kind: "write", capability: "data.page", rateClass: "write" });
+  const job = defineMethod({ ...example, area: "jobs", name: "jobs.startExample", kind: "job", capability: "jobs.start", rateClass: "job" });
+  const person = (roomId: string) => ({ principal: { kind: "person" as const, id: "acct_ada" }, roomId });
+  const fresh = () => ({ req: {} }) as never;
+  await assert.rejects(checkCapability(person("closed"), dataRead, {}, fresh()), /does not allow "data\.room"/);
+  await assert.rejects(checkCapability(person("r1"), dataWrite, {}, fresh()), /"data\.page" needs a room admin's approval, which this method cannot wait for/);
+  await checkCapability(person("r1"), job, {}, fresh());
+  // Room administration is a person's own: no agent, no page, no integration.
+  const admin = defineMethod({ ...example, area: "rooms", name: "rooms.adminExample", kind: "write", capability: "rooms.admin", rateClass: "write" });
+  await checkCapability(person("r1"), admin, {}, fresh());
+  for (const actor of [
+    { principal: { kind: "agent" as const, id: "a/b" }, roomId: "r1" },
+    { ...person("r1"), via: { kind: "integration" as const, id: "remote-mcp" } },
+    { ...person("r1"), via: { kind: "page" as const, id: "page_1", version: 1 } },
+  ]) {
+    await assert.rejects(checkCapability(actor, admin, {}, fresh()), /acting for themselves/);
+  }
+});
+
 test("a write consults the room policy: deny refuses it, approve passes to the handler", async () => {
   const post = (room: string) => call(`/rooms/${room}/proposals`, { user: "acct_policy", method: "POST", body: '{"title":"a"}', headers: { "content-type": "application/json" } });
   assert.equal((await post("r1")).status, 201);

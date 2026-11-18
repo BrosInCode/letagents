@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 import { ApiError } from "../../../shared/api/core.mjs";
-import { isCapabilityName, type CapabilityName } from "../../../shared/api/capabilities.mjs";
-import { getLiveApiPageToken, insertApiPageToken, revokeApiPageTokens } from "../db/api-page-tokens.js";
+import { isGrantableCapabilityName, type CapabilityName } from "../../../shared/api/capabilities.mjs";
+import { insertApiPageToken, refreshApiPageToken, revokeApiPageTokens } from "../db/api-page-tokens.js";
+import type { SessionAccount } from "../db.js";
 import { hashToken } from "../db/utils.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
 import { isAppSession } from "../request/app-session.js";
@@ -18,6 +19,8 @@ declare const minterBrand: unique symbol;
  */
 export interface PageGrantMinter {
   readonly accountId: string;
+  /** The app session; signing out of it ends the grants it minted. */
+  readonly sessionId: string;
   readonly [minterBrand]: true;
 }
 
@@ -38,7 +41,8 @@ export function requirePageGrantMinter(req: AuthenticatedRequest): PageGrantMint
   if (!isAppSession(req)) {
     throw new ApiError("not_granted", "Only a person signed in to the LetAgents app can open a page.");
   }
-  return { accountId: req.sessionAccount!.account_id } as PageGrantMinter;
+  const session = req.sessionAccount as SessionAccount;
+  return { accountId: session.account_id, sessionId: session.id } as PageGrantMinter;
 }
 
 /**
@@ -57,13 +61,15 @@ export async function mintPageGrant(input: {
 }): Promise<MintedPageGrant> {
   if (!input.roomId || !input.pageId) throw new TypeError("mintPageGrant needs a room and a page.");
   if (!Number.isInteger(input.pageVersion) || input.pageVersion < 1) throw new TypeError("mintPageGrant needs a positive page version.");
-  const unknown = input.capabilities.filter((name) => !isCapabilityName(name));
-  if (unknown.length) throw new TypeError(`mintPageGrant: unknown capabilities ${unknown.join(", ")}.`);
+  // Room administration is never a page's, whatever a caller passes.
+  const refused = input.capabilities.filter((name) => !isGrantableCapabilityName(name));
+  if (refused.length) throw new TypeError(`mintPageGrant: capabilities a page cannot hold: ${refused.join(", ")}.`);
   const token = newPageGrantToken();
   const row = await insertApiPageToken({
     tokenId: `pgt_${randomUUID()}`,
     tokenHash: hashToken(token),
     accountId: input.minter.accountId,
+    sessionId: input.minter.sessionId,
     roomId: input.roomId,
     pageId: input.pageId,
     pageVersion: input.pageVersion,
@@ -75,26 +81,32 @@ export async function mintPageGrant(input: {
 
 /**
  * A new token with the same binding (room, page version, capabilities) as a
- * live one, for the same person. The old token keeps working until its own
- * expiry, so calls in flight during the swap do not fail. Returns null when
- * the old token is unknown, expired, revoked, or another person's; the
- * client then mints again through the pages registry, which rechecks the page.
+ * live one, for the same person, bound to the refreshing session. The old
+ * token keeps working until its own expiry, so calls in flight during the
+ * swap do not fail. Returns null when the old token is unknown, expired,
+ * revoked, or another person's; the client then mints again through the
+ * pages registry, which rechecks the page. A revoke running at the same time
+ * revokes the new token too (see api-page-tokens.ts).
  */
 export async function refreshPageGrant(input: { minter: PageGrantMinter; token: string }): Promise<MintedPageGrant | null> {
-  const current = await getLiveApiPageToken(hashToken(input.token));
-  if (!current || current.account_id !== input.minter.accountId) return null;
-  return mintPageGrant({
-    minter: input.minter,
-    roomId: current.room_id,
-    pageId: current.page_id,
-    pageVersion: current.page_version,
-    capabilities: current.capabilities.filter(isCapabilityName),
+  const token = newPageGrantToken();
+  const row = await refreshApiPageToken({
+    oldTokenHash: hashToken(input.token),
+    accountId: input.minter.accountId,
+    next: {
+      tokenId: `pgt_${randomUUID()}`,
+      tokenHash: hashToken(token),
+      sessionId: input.minter.sessionId,
+      expiresAt: new Date(Date.now() + PAGE_GRANT_TTL_MS).toISOString(),
+    },
   });
+  return row ? { token, grantId: row.token_id, expiresAt: new Date(row.expires_at).toISOString() } : null;
 }
 
 /**
  * Revokes the live page grants that match every given filter: a page (unpin,
- * grant change, delete), a room, a person (sign-out), or one grant. Calls
+ * grant change, delete), a room, a person, the app session that minted them
+ * (sign-out), or one grant. Calls
  * with a revoked grant fail at once, and the grants' open streams close now,
  * on every API instance. Returns how many grants were revoked.
  */
@@ -102,12 +114,14 @@ export async function revokePageGrants(filter: {
   pageId?: string;
   roomId?: string;
   accountId?: string;
+  sessionId?: string;
   grantId?: string;
 }): Promise<number> {
   const hashes = await revokeApiPageTokens({
     pageId: filter.pageId,
     roomId: filter.roomId,
     accountId: filter.accountId,
+    sessionId: filter.sessionId,
     tokenId: filter.grantId,
   });
   retirePageGrantStreams(hashes);

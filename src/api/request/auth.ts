@@ -7,7 +7,7 @@ import { getMcpOAuthAccessGrant, getMcpOAuthGrantBySecretHash } from "../db/mcp-
 import { isRemoteMcpRequestPath, mcpOAuthUrls } from "../mcp-oauth/config.js";
 import { grantSecretOf, looksLikeMcpAccessToken, safeEqual, sha256Hex } from "../mcp-oauth/tokens.js";
 import { getLiveApiPageTokenAccount } from "../db/api-page-tokens.js";
-import { isApiV1RequestPath, isWellFormedPageGrantToken, looksLikePageGrantToken } from "../v1/page-grant-token.js";
+import { isApiV1RequestPath, isWellFormedPageGrantToken, looksLikePageGrantToken, requestPathname } from "../v1/page-grant-token.js";
 import {
   getOwnerTokenAccountByToken,
   getRoomAgentSessionBearerByToken,
@@ -152,7 +152,7 @@ async function resolveMcpOAuthAccessToken(req: Request, token: string): Promise<
  */
 async function resolvePageGrantToken(req: Request, token: string): Promise<ResolvedRequestAuth> {
   const refused: ResolvedRequestAuth = { account: null, authKind: null };
-  if (!isApiV1RequestPath(req.path) || !isWellFormedPageGrantToken(token)) return refused;
+  if (!isApiV1RequestPath(requestPathname(req)) || !isWellFormedPageGrantToken(token)) return refused;
   const grant = await getLiveApiPageTokenAccount(sha256Hex(token));
   if (!grant) return refused;
   return {
