@@ -93,6 +93,9 @@ function scanJql(text: string): { balanced: boolean; bareBackslash: boolean } {
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
     if (char === "\\") {
+      // A backslash that escapes nothing: Jira's lexer and this one may
+      // disagree on what it does to the closing group, so it never balances.
+      if (index === text.length - 1) return { balanced: false, bareBackslash: true };
       if (!quote) bareBackslash = true;
       index += 1;
     } else if (quote) {
