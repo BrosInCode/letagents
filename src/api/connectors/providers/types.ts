@@ -67,6 +67,28 @@ export interface ExternalItem {
   tracker_updated_at: string | null;
   /** A small, credential-free subset of the provider's record. */
   payload: Record<string, unknown>;
+  /** Read-model fields, only when the call asked for `detail`; sync never stores them. */
+  detail?: ExternalItemDetail;
+}
+
+/** What the API's work-item read model shows beyond what sync keeps. */
+export interface ExternalItemDetail {
+  /** The provider's status category: `new`, `indeterminate`, `done` (Jira). */
+  status_category: string | null;
+  parent: { key: string; title: string | null } | null;
+  fix_versions: Array<{ id: string; name: string; released: boolean | null; release_date: string | null }>;
+  labels: string[];
+  /** When the ticket last moved to another status category (Jira). */
+  status_changed_at: string | null;
+  /** Raw values of the fields the caller named, by field id; a field the tracker did not return is absent. */
+  fields: Record<string, unknown>;
+}
+
+/** One status change from the tracker's own history, oldest first. */
+export interface ExternalStatusChange {
+  from: string | null;
+  to: string;
+  at: string;
 }
 
 /**
@@ -109,6 +131,16 @@ export interface ListItemsOptions {
   updatedBefore?: string;
   /** Upper bound on items returned. Default 50, at most 200. */
   limit?: number;
+  /**
+   * A second filter ANDed with the room filter, in its own group (Jira: JQL
+   * checked like the room filter). Refused without a room filter, so it can
+   * never run unscoped on the filter owner's credentials.
+   */
+  extraFilter?: string;
+  /** Read the fields the API read model shows (`ExternalItem.detail`). */
+  detail?: boolean;
+  /** With `detail`: raw values of these field ids (Jira custom fields). */
+  rawFields?: readonly string[];
 }
 
 /**
@@ -155,6 +187,11 @@ export interface WorkItemProvider {
   findTransition(conn: ProviderConnection, key: string, toStatus: string, since: string): Promise<TrackerWriteResult | null>;
   /** Reconciliation for an ambiguous comment: the comment with the marker, or null. */
   findComment(conn: ProviderConnection, key: string, correlationKey: string): Promise<TrackerWriteResult | null>;
+  /**
+   * The ticket's status changes, oldest first, and whether the tracker gave
+   * the whole history. Null when the ticket does not exist.
+   */
+  listStatusHistory?(conn: ProviderConnection, key: string): Promise<{ changes: ExternalStatusChange[]; complete: boolean } | null>;
   verifyWebhook?(req: WebhookRequest): WebhookVerification;
   parseWebhook?(payload: unknown): ExternalItemChange[];
 }

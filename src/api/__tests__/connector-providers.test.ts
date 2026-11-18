@@ -116,6 +116,47 @@ test("Jira filters cannot break out of their group", async () => {
   assert.equal((calls[0].body as { jql: string }).jql, "(summary ~ \"a ) b\" AND (labels = x)) ORDER BY updated DESC");
 });
 
+test("an extra Jira filter is checked and grouped on its own, and never runs without a room filter", async () => {
+  const { impl, calls } = fakeFetch([at("POST", /\/search\/jql$/, { issues: [], isLast: true })]);
+  const jira = createJiraProvider({ fetchImpl: impl, env: {} });
+  for (const extraFilter of [") OR (project = HR", "x) OR (project = SECRET", "summary ~ \"open"]) {
+    await assert.rejects(jira.listItems(jiraConnection(), "project = HT", { extraFilter }), TrackerProviderError, extraFilter);
+  }
+  for (const filter of [null, "", "ORDER BY rank"]) {
+    await assert.rejects(jira.listItems(jiraConnection(), filter, { extraFilter: "project = HR" }), /needs a room filter/);
+  }
+  assert.equal(calls.length, 0);
+  await jira.listItems(jiraConnection(), "project = HT ORDER BY rank", { extraFilter: "status = Done OR labels = x ORDER BY key" });
+  assert.equal((calls[0].body as { jql: string }).jql, "(project = HT) AND (status = Done OR labels = x) ORDER BY updated DESC");
+  // An empty query leaves the room filter alone.
+  await jira.listItems(jiraConnection(), "project = HT", { extraFilter: "" });
+  assert.equal((calls[1].body as { jql: string }).jql, "(project = HT) ORDER BY updated DESC");
+});
+
+test("Jira status history reads every changelog page, oldest first", async () => {
+  const entry = (id: number, to: string) => ({
+    id: String(id), created: `2026-10-${String(10 + id).padStart(2, "0")}T10:00:00.000+0000`,
+    items: [{ field: "status", fromString: id === 1 ? null : `S${id - 1}`, toString: to }, { field: "labels", toString: "x" }],
+  });
+  const { impl, calls } = fakeFetch([
+    at("GET", /\/HT-7\/changelog\?startAt=0&/, { startAt: 0, total: 3, isLast: false, values: [entry(1, "S1"), entry(2, "S2")] }),
+    at("GET", /\/HT-7\/changelog\?startAt=2&/, { startAt: 2, total: 3, isLast: true, values: [entry(3, "S3")] }),
+    at("GET", /\/HT-8\/changelog/, { errorMessages: ["Issue does not exist"] }, 404),
+  ]);
+  const jira = createJiraProvider({ fetchImpl: impl, env: {} });
+  const history = await jira.listStatusHistory!(jiraConnection(), "HT-7");
+  assert.deepEqual(history, {
+    complete: true,
+    changes: [
+      { from: null, to: "S1", at: "2026-10-11T10:00:00.000Z" },
+      { from: "S1", to: "S2", at: "2026-10-12T10:00:00.000Z" },
+      { from: "S2", to: "S3", at: "2026-10-13T10:00:00.000Z" },
+    ],
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(await jira.listStatusHistory!(jiraConnection(), "HT-8"), null);
+});
+
 test("an OAuth refresh another process already saved is reused instead of refreshing again", async () => {
   const { impl, calls } = fakeFetch([at("GET", /\/myself$/, fixture("jira-myself"))]);
   let refreshes = 0;

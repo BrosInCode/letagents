@@ -148,6 +148,7 @@ interface EventSourceDeps {
   wakeRuleEvents?: EventEmitter;
   messageReactionEvents?: EventEmitter;
   messagePinEvents?: EventEmitter;
+  workItemEvents?: EventEmitter;
   joinRequestEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
   contentDeletionEvents?: EventEmitter;
@@ -327,6 +328,9 @@ export class RoomEventBroker {
       [deps.wakeRuleEvents, "wake_rules:invalidated", ROOM_RESOURCE_WAKE_RULES],
       [deps.messagePinEvents, "message_pins:invalidated", ROOM_RESOURCE_MESSAGE_PINS],
       [deps.messageReactionEvents, "message_reactions:invalidated", ROOM_RESOURCE_MESSAGE_REACTIONS],
+      // PR3 of the LetAgents API adds "work_items" to ROOM_RESOURCE_INVALIDATION_RESOURCES;
+      // drop this cast then. Nothing on the server rejects a name the list lacks.
+      [deps.workItemEvents, "work_items:invalidated", "work_items" as RoomResourceInvalidationResource],
     ];
     for (const [emitter, eventName, resource] of invalidationSources) {
       if (!emitter) continue;

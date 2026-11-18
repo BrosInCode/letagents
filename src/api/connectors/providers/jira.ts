@@ -7,6 +7,8 @@ import { parseJiraWebhook, verifyJiraWebhook } from "./webhooks.js";
 import { jiraIteration, planningEstimate, trackerAvatarUrl, type TrackerPlanning } from "./planning.js";
 import {
   type ExternalItem,
+  type ExternalItemDetail,
+  type ExternalStatusChange,
   type JiraCredentials,
   type ListItemsOptions,
   type ProviderConnection,
@@ -20,6 +22,10 @@ export const JIRA_EFFECT_PROPERTY_KEY = "letagents.effect";
 
 const ISSUE_KEY = /^[A-Z][A-Z0-9_]*-\d{1,12}$/;
 const ITEM_FIELDS = ["summary", "status", "assignee", "updated", "labels"];
+/** Fields only the API read model shows; sync does not ask for them. */
+const DETAIL_FIELDS = ["fixVersions", "parent", "statuscategorychangedate"];
+/** Changelog pages read for a status history (100 entries each). */
+const MAX_HISTORY_PAGES = 10;
 const PAGE_SIZE = 100;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -131,6 +137,31 @@ export function toAdf(text: string): Record<string, unknown> {
   };
 }
 
+function issueDetail(fields: Record<string, unknown>, statusCategory: string | null, rawFields: readonly string[]): ExternalItemDetail {
+  const parent = asRecord(fields.parent);
+  const parentKey = asString(parent.key);
+  const versions = Array.isArray(fields.fixVersions) ? fields.fixVersions.map(asRecord) : [];
+  const raw: Record<string, unknown> = {};
+  for (const id of rawFields) if (Object.hasOwn(fields, id)) raw[id] = fields[id];
+  return {
+    status_category: statusCategory,
+    parent: parentKey ? { key: parentKey, title: asString(asRecord(parent.fields).summary) } : null,
+    fix_versions: versions.flatMap((version) => {
+      const id = asString(version.id);
+      const name = asString(version.name);
+      return id && name ? [{
+        id,
+        name,
+        released: typeof version.released === "boolean" ? version.released : null,
+        release_date: asString(version.releaseDate),
+      }] : [];
+    }),
+    labels: Array.isArray(fields.labels) ? fields.labels.filter((label): label is string => typeof label === "string") : [],
+    status_changed_at: jiraTime(fields.statuscategorychangedate),
+    fields: raw,
+  };
+}
+
 function sameStatus(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
@@ -192,7 +223,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
     return [...ITEM_FIELDS, ...(mapping?.sprint ?? []), ...(mapping?.estimate ? [mapping.estimate] : []), ...(includeRelease ? mapping?.release.map(field => field.id) ?? [] : [])];
   }
 
-  function toItem(conn: ProviderConnection, issue: unknown, mapping?: JiraPlanningFields | null): ExternalItem | null {
+  function toItem(conn: ProviderConnection, issue: unknown, mapping?: JiraPlanningFields | null, rawFields?: readonly string[]): ExternalItem | null {
     const record = asRecord(issue);
     const key = asString(record.key);
     if (!key) return null;
@@ -222,6 +253,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
           ...(mapping?.release.map(field => ({ ...field, values: Object.hasOwn(fields, field.id) ? releaseOptions(fields[field.id]) : null })) ?? [])] satisfies ReleaseField[],
         ...(mapping !== undefined ? { planning: issuePlanning(fields, mapping) } : {}),
       },
+      ...(rawFields ? { detail: issueDetail(fields, statusCategory, rawFields) } : {}),
     };
   }
 
@@ -277,6 +309,13 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       const clauses: string[] = [];
       const base = jiraFilterClause(filter);
       if (base) clauses.push(`(${base})`);
+      if (opts.extraFilter !== undefined) {
+        // Each filter is checked and grouped on its own, so neither can close
+        // the other's group: the result is always (room filter) AND (query).
+        if (!base) throw new TrackerProviderError("definite", "A query needs a room filter to scope it.");
+        const extra = jiraFilterClause(opts.extraFilter);
+        if (extra) clauses.push(`(${extra})`);
+      }
       if (opts.assigneeMe) clauses.push("assignee = currentUser()");
       if (opts.updatedSince) {
         const since = Date.parse(opts.updatedSince);
@@ -294,6 +333,8 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       }
       const jql = `${clauses.join(" AND ")} ORDER BY updated DESC`.trim();
       const mapping = opts.includePlanning ? await readPlanningFields(conn) : undefined;
+      const rawFields = opts.detail ? [...new Set(opts.rawFields ?? [])] : undefined;
+      const fields = rawFields ? [...new Set([...fieldsWithPlanning(mapping), ...DETAIL_FIELDS, ...rawFields])] : fieldsWithPlanning(mapping);
       const items: ExternalItem[] = [];
       let nextPageToken: string | null = null;
       do {
@@ -301,7 +342,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
           method: "POST",
           body: {
             jql,
-            fields: fieldsWithPlanning(mapping),
+            fields,
             maxResults: Math.min(PAGE_SIZE, limit - items.length),
             ...(nextPageToken ? { nextPageToken } : {}),
           },
@@ -309,7 +350,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         const page = asRecord(response.json);
         const issues = Array.isArray(page.issues) ? page.issues : [];
         for (const issue of issues) {
-          const item = toItem(conn, issue, mapping);
+          const item = toItem(conn, issue, mapping, rawFields);
           if (item) items.push(item);
           if (items.length >= limit) break;
         }
@@ -402,6 +443,41 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         }
       }
       return null;
+    },
+
+    async listStatusHistory(conn, rawKey) {
+      const key = assertJiraKey(rawKey);
+      const changes: ExternalStatusChange[] = [];
+      let startAt = 0;
+      let complete = false;
+      for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
+        let json: Record<string, unknown>;
+        try {
+          json = asRecord((await api(conn, `/issue/${encodeURIComponent(key)}/changelog?startAt=${startAt}&maxResults=${PAGE_SIZE}`)).json);
+        } catch (error) {
+          if (error instanceof TrackerProviderError && error.status === 404) return null;
+          throw error;
+        }
+        const values = Array.isArray(json.values) ? json.values : [];
+        for (const entry of values) {
+          const history = asRecord(entry);
+          const at = jiraTime(history.created);
+          if (!at) continue;
+          for (const item of Array.isArray(history.items) ? history.items : []) {
+            const change = asRecord(item);
+            const to = asString(change.toString);
+            if (change.field === "status" && to) changes.push({ from: asString(change.fromString), to, at });
+          }
+        }
+        startAt += values.length;
+        if (json.isLast === true || values.length === 0 || (Number.isFinite(Number(json.total)) && startAt >= Number(json.total))) {
+          complete = true;
+          break;
+        }
+      }
+      // Jira answers oldest first; a stable sort keeps two changes in one entry in order.
+      changes.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+      return { changes, complete };
     },
 
     verifyWebhook: verifyJiraWebhook,
