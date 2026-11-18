@@ -3,16 +3,23 @@ import test from "node:test";
 
 import { z } from "zod";
 
+import { readFileSync } from "node:fs";
+
 import {
   buildContractSnapshot,
+  buildGeneratedFiles,
   emitContractDeclarations,
   findBreakingChanges,
   readBaseSnapshot,
   readSnapshot,
   staleDeclarations,
+  staleGeneratedFiles,
   staleSnapshotAreas,
 } from "./build-api-contracts.mjs";
-import { toJsonSchema } from "../shared/api/core.mjs";
+import { defineMethod, toJsonSchema } from "../shared/api/core.mjs";
+import { API_METHODS } from "../shared/api/index.mjs";
+import { PAGE_MANIFEST_SCRIPT_TYPE } from "../shared/api/manifest.mjs";
+import { PAGE_THEME_TOKEN_NAMES, pageMethods, pageReference } from "../shared/api/page-reference.mjs";
 
 test("the checked-in contract declarations match the contract", () => {
   const stale = staleDeclarations(emitContractDeclarations());
@@ -22,6 +29,41 @@ test("the checked-in contract declarations match the contract", () => {
 test("the checked-in contract snapshot matches the contract", async () => {
   const stale = staleSnapshotAreas(await buildContractSnapshot());
   assert.deepEqual(stale, [], `Stale snapshot areas: ${stale.join(", ")}. Run node scripts/build-api-contracts.mjs.`);
+});
+
+test("the generated agent tool list and page reference match the contract", async () => {
+  const stale = staleGeneratedFiles(await buildGeneratedFiles());
+  assert.deepEqual(stale, [], `Stale files: ${stale.join(", ")}. Run node scripts/build-api-contracts.mjs.`);
+});
+
+test("the page reference names every method a page can call, and no page management", () => {
+  const reference = pageReference();
+  const callable = pageMethods();
+  assert.ok(callable.length >= 14);
+  for (const method of callable) assert.ok(reference.includes(`\`${method.name}(`), method.name);
+  for (const method of API_METHODS.filter((m) => m.area === "pages" || m.capability === "rooms.admin")) {
+    assert.equal(reference.includes(`\`${method.name}(`), false, `${method.name} is not for pages`);
+  }
+  assert.ok(reference.includes(`<script type="${PAGE_MANIFEST_SCRIPT_TYPE}">`));
+  for (const words of ["ui.open", "ui.copy", "ui.theme", "ui.context", "No network", "data:", "declined"]) assert.ok(reference.includes(words), words);
+});
+
+test("the page reference names the theme variables the desktop sets", () => {
+  // Read as text: the desktop module imports Electron.
+  const policy = readFileSync(new URL("../apps/desktop/electron/main/pages/page-policy.ts", import.meta.url), "utf8");
+  const light = policy.slice(policy.indexOf("light: {"), policy.indexOf("dark: {"));
+  assert.deepEqual([...light.matchAll(/"(--la-[a-z-]+)":/g)].map((match) => match[1]), [...PAGE_THEME_TOKEN_NAMES]);
+});
+
+test("the agents flag is checked against the method kind, and a removed or changed flag breaks the contract", () => {
+  const base = { area: "rooms", capability: "rooms.read", description: "x", path: "/rooms/:room/x", input: z.strictObject({}), output: z.object({}) };
+  assert.throws(() => defineMethod({ ...base, name: "rooms.x", kind: "read", rateClass: "read", agents: "write" }), /agents: "read" is for a read/);
+  assert.throws(() => defineMethod({ ...base, name: "rooms.y", kind: "write", rateClass: "write", agents: "read" }), /agents: "read" is for a read/);
+  assert.throws(() => defineMethod({ ...base, name: "rooms.z", kind: "read", rateClass: "read", agents: "maybe" }), /unknown agent access/);
+  assert.equal(defineMethod({ ...base, name: "rooms.w", kind: "read", rateClass: "read" }).agents, undefined);
+  const flagged = snapshotOf(z.object({}), z.object({}), { agents: "read" });
+  assert.deepEqual(findBreakingChanges(snapshotOf(z.object({}), z.object({})), flagged), [], "adding the flag is an addition");
+  assert.deepEqual(findBreakingChanges(flagged, snapshotOf(z.object({}), z.object({}))), ["rooms.example: agents changed from \"read\" to null."]);
 });
 
 test("the contract has no breaking change against the snapshot", async () => {

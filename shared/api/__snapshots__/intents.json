@@ -372,6 +372,7 @@
     "path": "/rooms/:room/intents/:intentId",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [
       "not_found"
     ],
@@ -552,6 +553,7 @@
     "path": "/rooms/:room/intents",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [],
     "input": {
       "type": "object",
@@ -758,6 +760,7 @@
     "path": "/rooms/:room/intents",
     "response": "json",
     "rateClass": "intent",
+    "agents": "write",
     "errors": [
       "conflict",
       "no_source",

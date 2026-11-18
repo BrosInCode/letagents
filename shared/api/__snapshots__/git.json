@@ -6,6 +6,7 @@
     "path": "/rooms/:room/git/pull-requests",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [],
     "input": {
       "type": "object",

@@ -412,6 +412,7 @@
     "path": "/rooms/:room/pages",
     "response": "json",
     "rateClass": "write",
+    "agents": "write",
     "errors": [
       "conflict",
       "not_found",
@@ -850,6 +851,7 @@
     "path": "/rooms/:room/pages/:pageId/diagnostics",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [
       "not_found"
     ],
@@ -943,6 +945,7 @@
     "path": "/rooms/:room/pages/:pageId/document",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [
       "not_found"
     ],
@@ -1015,6 +1018,7 @@
     "path": "/rooms/:room/pages/:pageId",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [
       "not_found"
     ],
@@ -1435,6 +1439,7 @@
     "path": "/rooms/:room/pages",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [],
     "input": {
       "type": "object",
@@ -1878,6 +1883,7 @@
     "path": "/rooms/:room/pages/:pageId/versions",
     "response": "json",
     "rateClass": "write",
+    "agents": "write",
     "errors": [
       "conflict",
       "not_found",

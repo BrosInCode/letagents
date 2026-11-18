@@ -1,3 +1,4 @@
+import { API_METHODS } from "../../../shared/api/index.mjs";
 import type { AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
 
 // Exact, anchored templates only. New subroutes receive no worker authority.
@@ -46,9 +47,26 @@ const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSes
   { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/(?:files|read|search)$/, capability: "coordination.read" },
   { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/proposals$/, capability: "coordination.propose" },
   // LetAgents API reads: each /api/v1 route checks its own capability and the
-  // worker's room; writes through the API are not open to worker bearers yet.
+  // worker's room.
   { method: "GET", path: /^\/api\/v1\/rooms\/.+$/, capability: "coordination.read" },
+  // LetAgents API writes that the contract opens to agents (`agents: "write"`),
+  // each by its own route; checkCapability refuses an agent any other write.
+  ...API_METHODS.filter((method) => method.agents === "write").map((method) => ({
+    method: method.httpMethod,
+    path: apiV1RoutePattern(method.path),
+    capability: "coordination.propose" as const,
+  })),
 ];
+
+/** `/rooms/:room/data/:scope/:collection/:docId` as an anchored pattern under /api/v1; the room may hold slashes, as above. */
+function apiV1RoutePattern(path: string): RegExp {
+  const segments = path.split("/").map((segment) => {
+    if (segment === ":room") return ".+";
+    if (segment.startsWith(":")) return "[^/]+";
+    return segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  });
+  return new RegExp(`^\\/api\\/v1${segments.join("\\/")}$`);
+}
 
 // What a given agent may do while it waits for the asker to accept it: stay connected, nothing else.
 const WHILE_WAITING_FOR_ASKER: ReadonlyArray<{ method: string; path: RegExp }> = [

@@ -415,7 +415,7 @@ test("board kinds keep the person's own rights: admin-only changes are refused a
   assert.equal((await api!.getTaskById(roomId, created.body.result.taskId))!.status, "accepted");
 });
 
-test("an owner token acts through an integration: no board kinds, and ticket writes on the filter owner's token wait", { skip }, async () => {
+test("an owner token acts through an integration: no board kinds, and every ticket write waits for a room admin", { skip }, async () => {
   const { id: roomId, route } = await room();
   const task = await api!.createTask(roomId, "Owner token target", "human");
   tickets.set("HT-6", { status: "To Do" });
@@ -432,11 +432,14 @@ test("an owner token acts through an integration: no board kinds, and ticket wri
   const pending = await propose(route, DAN_OWNER_TOKEN, "ticket.transition", { key: "HT-6", toStatus: "Done" });
   assert.equal(pending.body.state, "pending_approval", JSON.stringify(pending.body));
   assert.deepEqual(pending.body.proposedBy.via, { kind: "integration", id: "owner-token" });
-  // Bob's own connection on the room's site writes as Bob: it runs.
+  // Bob's own connection is on the room's site, but a token is not Bob in person: it waits too.
   const own = await propose(route, BOB_OWNER_TOKEN, "ticket.comment", { key: "HT-6", body: "Seen" });
-  assert.equal(own.body.state, "done", JSON.stringify(own.body));
-  assert.deepEqual(jiraWrites.map(({ as }) => as), ["bob@example.com"]);
+  assert.equal(own.body.state, "pending_approval", JSON.stringify(own.body));
+  assert.deepEqual(jiraWrites, [], "nothing is written to Jira before an admin approves");
   assert.equal((await api!.getTaskById(roomId, task.id))!.assignee, null);
+  const ownApproved = await approve(route, ada.session, own.body.id);
+  assert.equal(ownApproved.body.state, "done", JSON.stringify(ownApproved.body));
+  assert.equal(jiraWrites.length, 1);
 
   // Approving later keeps the limit the proposal was stored with.
   const approved = await approve(route, ada.session, pending.body.id);

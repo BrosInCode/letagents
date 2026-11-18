@@ -224,6 +224,7 @@ export const getJob = defineMethod({
   output: Job,
   errors: ["not_found"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const listJobs = defineMethod({
@@ -239,6 +240,7 @@ export const listJobs = defineMethod({
   }),
   output: z.object({ jobs: z.array(Job) }),
   rateClass: "read",
+  agents: "read",
 });
 
 export const cancelJob = defineMethod({

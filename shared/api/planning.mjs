@@ -94,6 +94,7 @@ export const getPlanning = defineMethod({
   input: z.strictObject({}),
   output: Planning,
   rateClass: "read",
+  agents: "read",
 });
 
 export const methods = /** @type {const} */ ([getPlanning]);

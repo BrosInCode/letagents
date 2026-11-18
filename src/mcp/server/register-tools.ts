@@ -3,6 +3,8 @@ import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { registerRoomKnowledgeTools } from "./tools/knowledge.js";
 import { registerWakeRuleTools } from "./tools/wake-rules.js";
 import { registerJobTools } from "./tools/jobs.js";
+import { registerApiTools } from "./tools/api-tools.js";
+import { registerPageTools } from "./tools/page-tools.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAgentSessionTools } from "./tools/agent-sessions.js";
 import { registerMessageTools, registerStatusTools } from "./tools/messages.js";
@@ -62,6 +64,9 @@ export function registerTools(
   registerRoomKnowledgeTools(tools);
   registerWakeRuleTools(tools);
   registerJobTools(tools);
+  registerApiTools(tools);
+  // publish_page reads a workspace file, like message attachments.
+  registerPageTools(tools, { publish: surface.messageFileAttachments && !options.remote });
   registerStatusTools(tools);
   if (profile === "autonomous_mcp_worker" || profile === "interactive_desktop") registerWorkspaceTools(tools);
   registerTaskTools(tools);

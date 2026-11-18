@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { API_AGENT_TOOLS } from "../../../shared/api-agent-tools.mjs";
 import { currentSessionScope } from "./runtime/session-scope.js";
 
 /**
@@ -19,6 +20,7 @@ export const REMOTE_EXCLUDED_TOOLS: Readonly<Record<string, string>> = {
   clear_saved_auth: "No saved local auth exists on the remote endpoint.",
   get_onboarding_status: "Reports local auth bootstrap, which the remote endpoint does not use.",
   resume_room_session: "Local room sessions do not survive a remote connection.",
+  publish_page: "Reads the page from a local HTML file.",
 };
 
 /**
@@ -40,6 +42,9 @@ export const REMOTE_ALLOWED_TOOLS: readonly string[] = [
   "request_room_access", "search_gifs",
   "send_message", "send_thread_message", "set_agent_name", "set_board_manager_mode",
   "submit_review_verdict", "update_job", "update_task", "wait_for_messages",
+  "list_pages", "read_page", "read_page_diagnostics",
+  // Tools made from the LetAgents API contract call the server only.
+  ...API_AGENT_TOOLS.map((tool) => tool.name),
 ];
 const REMOTE_ALLOWED = new Set(REMOTE_ALLOWED_TOOLS);
 

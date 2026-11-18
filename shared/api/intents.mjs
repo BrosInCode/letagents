@@ -189,6 +189,7 @@ export const proposeIntent = defineMethod({
   output: Intent,
   errors: ["not_found", "no_source", "conflict"],
   rateClass: "intent",
+  agents: "write",
 });
 
 export const getIntent = defineMethod({
@@ -202,6 +203,7 @@ export const getIntent = defineMethod({
   output: Intent,
   errors: ["not_found"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const listIntents = defineMethod({
@@ -217,6 +219,7 @@ export const listIntents = defineMethod({
   }),
   output: IntentList,
   rateClass: "read",
+  agents: "read",
 });
 
 export const approveIntent = defineMethod({

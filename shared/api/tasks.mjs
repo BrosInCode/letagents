@@ -74,6 +74,7 @@ export const listTasks = defineMethod({
   }),
   output: TaskPage,
   rateClass: "read",
+  agents: "read",
 });
 
 export const getTask = defineMethod({
@@ -87,6 +88,7 @@ export const getTask = defineMethod({
   output: Task,
   errors: ["not_found"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const methods = /** @type {const} */ ([listTasks, getTask]);
