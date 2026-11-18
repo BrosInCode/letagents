@@ -42,6 +42,12 @@ test("the remote surface is exactly the allow list, and every stdio tool is clas
   // The server has no caller files to attach; stdio reads them from the caller's workspace.
   for (const [name, schema] of remote) assert.equal(Object.hasOwn(schema, "attachments"), false, `${name} has no attachments input`);
   for (const name of ["send_message", "send_thread_message"]) assert.equal(Object.hasOwn(stdio.get(name)!, "attachments"), true, `stdio ${name} keeps attachments`);
+  // Files given as content need no folder, so a remote bot can send them.
+  for (const name of ["send_message", "send_thread_message"]) {
+    assert.equal(Object.hasOwn(remote.get(name)!, "files"), true, `remote ${name} offers files`);
+    assert.equal(Object.hasOwn(stdio.get(name)!, "files"), true, `stdio ${name} offers files`);
+  }
+  assert.ok(remote.has("read_attachment"), "remote bots read attachments");
 });
 
 test("the remote proxy strips cwd from registerTool and refuses shapes it does not know", () => {
