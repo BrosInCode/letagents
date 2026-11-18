@@ -47,6 +47,7 @@ export const listMemory = defineMethod({
   input: z.strictObject({}),
   output: MemoryList,
   rateClass: "read",
+  agents: "read",
 });
 
 export const methods = /** @type {const} */ ([listMemory]);

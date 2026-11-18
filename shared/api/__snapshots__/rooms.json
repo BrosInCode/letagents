@@ -6,6 +6,7 @@
     "path": "/rooms/:room",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [
       "not_found"
     ],

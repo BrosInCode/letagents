@@ -104,6 +104,7 @@ export const listPullRequests = defineMethod({
   input: z.strictObject({}),
   output: PullRequestList,
   rateClass: "read",
+  agents: "read",
 });
 
 export const methods = /** @type {const} */ ([listPullRequests]);

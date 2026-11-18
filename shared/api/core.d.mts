@@ -103,6 +103,14 @@ export const HTTP_VERBS: readonly ["GET", "POST", "PUT", "PATCH", "DELETE"];
  */
 export const RESPONSE_KINDS: readonly ["json", "stream"];
 /**
+ * Whether agents get the method as an MCP tool (`api_<area>_<verb>`), and how:
+ * - `read`: a read tool; supervised agents run it without journaling it.
+ * - `write`: a tool that changes something (a document, an intent, a page);
+ *   the server must also let agent callers use the method.
+ * Without the flag, agents have no tool for the method.
+ */
+export const AGENT_ACCESS: readonly ["read", "write"];
+/**
  * Per-actor limits. A method names its class; the server counts each actor
  * (principal plus page, job or integration) per class.
  */
@@ -142,6 +150,7 @@ export const API_ERROR_CODES: readonly ["invalid_input", "unauthenticated", "not
 /** @typedef {typeof METHOD_KINDS[number]} MethodKind */
 /** @typedef {typeof HTTP_VERBS[number]} HttpVerb */
 /** @typedef {typeof RESPONSE_KINDS[number]} ResponseKind */
+/** @typedef {typeof AGENT_ACCESS[number]} AgentAccess */
 /** @typedef {keyof typeof RATE_CLASSES} RateClass */
 /** @typedef {typeof API_ERROR_CODES[number]} ApiErrorCode */
 /** @typedef {import("./capabilities.mjs").CapabilityName} CapabilityName */
@@ -206,6 +215,7 @@ export type ApiArea = (typeof API_AREAS)[number];
 export type MethodKind = (typeof METHOD_KINDS)[number];
 export type HttpVerb = (typeof HTTP_VERBS)[number];
 export type ResponseKind = (typeof RESPONSE_KINDS)[number];
+export type AgentAccess = (typeof AGENT_ACCESS)[number];
 export type RateClass = keyof typeof RATE_CLASSES;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 export type CapabilityName = import("./capabilities.mjs").CapabilityName;
@@ -222,6 +232,7 @@ export type MethodSpec<Name extends string = string, Input extends z.ZodType = z
     output: Output;
     errors?: readonly ApiErrorCode[];
     rateClass: RateClass;
+    agents?: AgentAccess;
 };
 export type ApiMethod<Name extends string = string, Input extends z.ZodType = z.ZodType<any, any, z.core.$ZodTypeInternals<any, any>>, Output extends z.ZodType = z.ZodType<any, any, z.core.$ZodTypeInternals<any, any>>> = {
     readonly name: Name;
@@ -236,6 +247,7 @@ export type ApiMethod<Name extends string = string, Input extends z.ZodType = z.
     readonly output: Output;
     readonly errors: readonly ApiErrorCode[];
     readonly rateClass: RateClass;
+    readonly agents?: AgentAccess;
 };
 export type AnyApiMethod = ApiMethod<string, z.ZodType, z.ZodType>;
 import { z } from "zod";

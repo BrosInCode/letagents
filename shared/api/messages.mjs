@@ -79,6 +79,7 @@ export const listRecentMessages = defineMethod({
   input: z.strictObject({ before: MessageId.optional(), limit: PageLimit }),
   output: RecentMessages,
   rateClass: "read",
+  agents: "read",
 });
 
 export const getMessageThread = defineMethod({
@@ -93,6 +94,7 @@ export const getMessageThread = defineMethod({
   output: MessageThread,
   errors: ["not_found"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const methods = /** @type {const} */ ([listRecentMessages, getMessageThread]);

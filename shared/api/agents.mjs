@@ -36,6 +36,7 @@ export const listAgents = defineMethod({
   input: z.strictObject({}),
   output: AgentList,
   rateClass: "read",
+  agents: "read",
 });
 
 export const methods = /** @type {const} */ ([listAgents]);

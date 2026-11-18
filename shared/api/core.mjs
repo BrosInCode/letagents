@@ -43,6 +43,15 @@ export const HTTP_VERBS = /** @type {const} */ (["GET", "POST", "PUT", "PATCH", 
 export const RESPONSE_KINDS = /** @type {const} */ (["json", "stream"]);
 
 /**
+ * Whether agents get the method as an MCP tool (`api_<area>_<verb>`), and how:
+ * - `read`: a read tool; supervised agents run it without journaling it.
+ * - `write`: a tool that changes something (a document, an intent, a page);
+ *   the server must also let agent callers use the method.
+ * Without the flag, agents have no tool for the method.
+ */
+export const AGENT_ACCESS = /** @type {const} */ (["read", "write"]);
+
+/**
  * Per-actor limits. A method names its class; the server counts each actor
  * (principal plus page, job or integration) per class.
  */
@@ -80,6 +89,7 @@ export const API_ERROR_CODES = /** @type {const} */ ([
 /** @typedef {typeof METHOD_KINDS[number]} MethodKind */
 /** @typedef {typeof HTTP_VERBS[number]} HttpVerb */
 /** @typedef {typeof RESPONSE_KINDS[number]} ResponseKind */
+/** @typedef {typeof AGENT_ACCESS[number]} AgentAccess */
 /** @typedef {keyof typeof RATE_CLASSES} RateClass */
 /** @typedef {typeof API_ERROR_CODES[number]} ApiErrorCode */
 /** @typedef {import("./capabilities.mjs").CapabilityName} CapabilityName */
@@ -205,6 +215,7 @@ function formatIssuePath(path) {
  *   output: Output,
  *   errors?: readonly ApiErrorCode[],
  *   rateClass: RateClass,
+ *   agents?: AgentAccess,
  * }} MethodSpec
  */
 
@@ -225,6 +236,7 @@ function formatIssuePath(path) {
  *   readonly output: Output,
  *   readonly errors: readonly ApiErrorCode[],
  *   readonly rateClass: RateClass,
+ *   readonly agents?: AgentAccess,
  * }} ApiMethod
  */
 
@@ -280,6 +292,14 @@ export function defineMethod(spec) {
   for (const code of errors) {
     if (!API_ERROR_CODES.includes(code)) throw new TypeError(`${where}: unknown error code ${JSON.stringify(code)}.`);
   }
+  if (spec.agents !== undefined) {
+    if (!AGENT_ACCESS.includes(spec.agents)) throw new TypeError(`${where}: unknown agent access ${JSON.stringify(spec.agents)}.`);
+    // Supervised agents skip the effect journal for read tools, so a read tool must change nothing.
+    if ((spec.agents === "read") !== (spec.kind === "read")) {
+      throw new TypeError(`${where}: agents: "read" is for a read, and agents: "write" for any other kind.`);
+    }
+    if (response !== "json") throw new TypeError(`${where}: an agent tool answers once, so the method must answer with JSON.`);
+  }
   return Object.freeze({
     name: spec.name,
     area: spec.area,
@@ -293,6 +313,7 @@ export function defineMethod(spec) {
     output: spec.output,
     errors: Object.freeze(errors),
     rateClass: spec.rateClass,
+    ...(spec.agents ? { agents: spec.agents } : {}),
   });
 }
 

@@ -52,6 +52,7 @@ export const getRoom = defineMethod({
   output: RoomSummary,
   errors: ["not_found"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const methods = /** @type {const} */ ([getRoom]);
