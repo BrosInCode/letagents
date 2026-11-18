@@ -1,5 +1,6 @@
 import { ApiError } from "../../../shared/api/core.mjs";
 import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
+import { isHumanAppWrite } from "../request/app-session.js";
 import { classifyRoomAccess, decideRoomRead, roomAccessPrincipal, type RoomAccessPrincipal } from "../rooms/access-decision.js";
 import { resolveExistingRoomRequest } from "../rooms/resolution.js";
 import { normalizeRoomId } from "../rooms/routing.js";
@@ -11,12 +12,19 @@ const ACCESS_RETRY_AFTER_MS = 30_000;
 
 /** A remote MCP session (ChatGPT, Claude connectors) calls with the person's owner token, through this integration. */
 export const REMOTE_MCP_INTEGRATION_ID = "remote-mcp";
+/**
+ * Any other owner token: what local MCP agents and scripts hold. It acts for
+ * the person, but not as the person in person, so it never skips a room
+ * admin's approval the way the person's own app session does.
+ */
+export const OWNER_TOKEN_INTEGRATION_ID = "owner-token";
 
 /**
  * Who sent the request:
- * - an app session or an owner token: the person. A remote MCP session's
- *   call arrives in process with the person's owner token; it is marked as
- *   that integration.
+ * - the person's own app session (`isHumanAppWrite`): the person, in person.
+ * - an owner token: the person through an integration. A remote MCP
+ *   session's call arrives in process with the owner token and is
+ *   `remote-mcp`; every other owner token is `owner-token`.
  * - a worker bearer: the agent, bound to its session's room.
  * - a page grant: the person who opened the page, through that page
  *   version, bound to the room it was minted for.
@@ -27,15 +35,21 @@ export const identifyCaller: ApiCallerIdentifier = async (req) => {
   const account = req.sessionAccount ?? null;
   switch (req.authKind) {
     case "session":
-    case "owner_token":
+    case "owner_token": {
       if (!account) return null;
+      const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : {};
+      const inPerson = isHumanAppWrite(req, body);
       return {
         principal: { kind: "person", id: account.account_id, login: account.login },
-        ...(req.authKind === "owner_token" && inProcessPrincipal(req)
-          ? { via: { kind: "integration" as const, id: REMOTE_MCP_INTEGRATION_ID } }
-          : {}),
+        ...(inPerson ? {} : {
+          via: {
+            kind: "integration" as const,
+            id: req.authKind === "owner_token" && inProcessPrincipal(req) ? REMOTE_MCP_INTEGRATION_ID : OWNER_TOKEN_INTEGRATION_ID,
+          },
+        }),
         account,
       };
+    }
     case "agent_session": {
       const session = req.agentSession;
       if (!session) return null;

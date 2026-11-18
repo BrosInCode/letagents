@@ -41,3 +41,4 @@ export * from "./schema/api.js";
 export * from "./schema/api-documents.js";
 export * from "./schema/api-jobs.js";
 export * from "./schema/pages.js";
+export * from "./schema/api-intents.js";

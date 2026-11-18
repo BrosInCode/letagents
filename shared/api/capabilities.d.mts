@@ -54,6 +54,7 @@ export const CAPABILITIES: Readonly<{
     "work_items.read": CapabilitySpec;
     "git.read": CapabilitySpec;
     "memory.read": CapabilitySpec;
+    "intents.read": CapabilitySpec;
     "jobs.read": CapabilitySpec;
     "data.viewer": CapabilitySpec;
     "data.page": CapabilitySpec;
