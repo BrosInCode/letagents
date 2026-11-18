@@ -3,18 +3,57 @@
     <!-- Always present, so a screen reader hears each change of it. -->
     <span class="desktop-invite-bot-sr" role="status">{{ spoken }}</span>
     <!-- A Git Room takes no bots: pick the invite room the bot joins first. -->
-    <div v-if="view === 'rooms'" key="rooms" class="desktop-invite-bot-view" :data-swap="swap || undefined" data-testid="desktop-invite-bot-rooms">
+    <div
+      v-if="view === 'rooms'"
+      key="rooms"
+      class="desktop-invite-bot-view desktop-invite-bot-rooms"
+      :data-swap="swap || undefined"
+      :data-searchable="picker.searchable.value || undefined"
+      data-testid="desktop-invite-bot-rooms"
+    >
       <div class="desktop-invite-bot-head">
         <p class="desktop-invite-bot-title">Invite a bot</p>
         <p class="desktop-invite-bot-sub">Bots join invite rooms, not Git Rooms. Pick the room the bot joins.</p>
       </div>
-      <!-- While the rooms load the list itself holds focus, so Escape and Tab act on the panel. -->
+      <!-- A long list gets the GIF panel's search field; it takes the focus. -->
+      <label v-if="picker.searchable.value" class="desktop-composer-gif-search desktop-invite-bot-search">
+        <Search :size="15" aria-hidden="true" />
+        <input
+          type="text"
+          :value="picker.query.value"
+          maxlength="100"
+          placeholder="Find a room"
+          aria-label="Find a room"
+          role="combobox"
+          aria-autocomplete="list"
+          :aria-expanded="picker.shown.value.length > 0"
+          :aria-controls="picker.shown.value.length ? listId : undefined"
+          :aria-activedescendant="activeRoomId"
+          autocomplete="off"
+          spellcheck="false"
+          data-invite-autofocus
+          data-testid="desktop-invite-bot-room-search"
+          @input="findRoom(($event.target as HTMLInputElement).value)"
+          @keydown="searchKey"
+        />
+        <kbd aria-hidden="true">↵</kbd>
+      </label>
+      <!-- The rooms scroll inside the GIF grid's height. While the rooms load the list itself holds focus, so Escape and Tab act on the panel. -->
       <div
+        :id="listId"
+        ref="list"
         class="desktop-invite-bot-list"
+        :role="picker.searchable.value && picker.shown.value.length ? 'listbox' : undefined"
         :aria-busy="roomsState === 'loading' || undefined"
         :tabindex="roomsState === 'loading' ? -1 : undefined"
         :data-invite-autofocus="roomsState === 'loading' || undefined"
+        :data-more-above="fades.above || undefined"
+        :data-more-below="fades.below || undefined"
+        :data-typed="typed || undefined"
         aria-label="Invite rooms"
+        data-testid="desktop-invite-bot-room-list"
+        @scroll.passive="updateFades"
+        @animationend="updateFades"
       >
         <!-- Two quiet rows hold the place while the rooms load, so the list does not jump. -->
         <template v-if="roomsState === 'loading'">
@@ -23,24 +62,36 @@
         </template>
         <p v-else-if="roomsState === 'error'" class="desktop-invite-bot-error" role="alert">{{ roomsError }}</p>
         <p v-else-if="roomsState === 'ready' && !rooms.length" class="desktop-invite-bot-note">You are in no invite room yet.</p>
+        <p v-else-if="!picker.shown.value.length" class="desktop-invite-bot-note" role="status" data-testid="desktop-invite-bot-no-match">
+          No room called "{{ picker.query.value.trim() }}". Make a new one below.
+        </p>
         <button
-          v-for="(room, index) in rooms"
+          v-for="(room, index) in picker.shown.value"
+          :id="picker.searchable.value ? `${listId}-${index}` : undefined"
           :key="room.id"
           type="button"
           class="desktop-composer-add-menu-item desktop-invite-bot-room"
+          :role="picker.searchable.value ? 'option' : undefined"
+          :tabindex="picker.searchable.value ? -1 : undefined"
+          :aria-selected="picker.searchable.value ? index === picker.active.value : undefined"
+          :data-active="(picker.searchable.value && index === picker.active.value) || undefined"
           :style="{ '--invite-row': index }"
           :data-fresh="room.id === freshRoomId || undefined"
-          :data-invite-autofocus="index === 0 || undefined"
+          :data-invite-autofocus="(!picker.searchable.value && index === 0) || undefined"
           :data-testid="`desktop-invite-bot-room-${room.id}`"
           @click="pickRoom(room)"
+          @pointermove="picker.searchable.value && picker.setActive(index)"
         >
           <Hash class="desktop-composer-add-menu-icon" :size="16" aria-hidden="true" />
-          <span class="desktop-composer-add-menu-label">{{ room.displayName }}</span>
-          <span class="desktop-composer-add-menu-end">{{ roomMeta(room) }}</span>
+          <span class="desktop-composer-add-menu-label"><template v-for="(part, at) in picker.nameParts(room.displayName)" :key="at"><mark
+            v-if="part.match" class="desktop-invite-bot-match">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></span>
+          <span class="desktop-composer-add-menu-end">{{ inviteRoomMeta(room) }}</span>
         </button>
-        <div v-if="roomsState !== 'loading'" class="desktop-composer-add-menu-separator" role="separator"></div>
+      </div>
+      <!-- "New invite room" stays below the list, however far it scrolls. -->
+      <div v-if="roomsState !== 'loading'" class="desktop-invite-bot-foot-rooms">
+        <div class="desktop-composer-add-menu-separator" role="separator"></div>
         <button
-          v-if="roomsState !== 'loading'"
           type="button"
           class="desktop-composer-add-menu-item desktop-invite-bot-new-room"
           :aria-disabled="creatingRoom || undefined"
@@ -104,8 +155,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
-import { ChevronLeft, Hash, Plus } from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { ChevronLeft, Hash, Plus, Search } from "@lucide/vue";
 import CopyStateLabel from "../../../../../../../../shared/ui/CopyStateLabel.vue";
 import InviteBotMessage from "../../../../../../../../shared/ui/InviteBotMessage.vue";
 import InviteBotPicker from "../../../../../../../../shared/ui/InviteBotPicker.vue";
@@ -113,6 +164,7 @@ import { inviteBotCodeSummary, useInviteBotCode } from "../../../../../../../../
 import type { DesktopBotInviteRoom } from "../../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { roomInvites } from "../../../../composables/useRoomInvites";
+import { inviteRoomListFades, inviteRoomMeta, inviteRoomScrollToReveal, useInviteRoomPicker } from "./invite-room-picker";
 import { prefersReducedMotion } from "./room-gif-search";
 
 /** The room whose composer opened the panel. */
@@ -183,11 +235,60 @@ const spoken = computed(() => roomsState.value === "loading"
   ? "Checking your rooms…"
   : invite.copied.value ? "Invite copied. The code works one time." : "");
 
-/** "3 people", and what an invite there does when the viewer is not its admin. */
-function roomMeta(room: DesktopBotInviteRoom): string {
-  const people = room.memberCount === null ? "" : room.memberCount === 1 ? "1 person" : `${room.memberCount} people`;
-  return room.role === "admin" ? people : people ? `${people} · asks admin` : "asks admin";
+const list = ref<HTMLElement | null>(null);
+const listId = `desktop-invite-bot-rooms-${Math.random().toString(36).slice(2, 10)}`;
+const picker = useInviteRoomPicker(rooms, (room) => pickRoom(room));
+const activeRoomId = computed(() => picker.shown.value.length ? `${listId}-${picker.active.value}` : undefined);
+/** Rows past an edge of the list: that edge fades. */
+const fades = reactive({ above: false, below: false });
+/** After the first key in the search field, rows appear without motion. */
+const typed = ref(false);
+let listResize: ResizeObserver | null = null;
+
+function updateFades(): void {
+  const element = list.value;
+  if (!element) return;
+  const next = inviteRoomListFades(element);
+  fades.above = next.above;
+  fades.below = next.below;
 }
+
+function findRoom(text: string): void {
+  typed.value = true;
+  picker.setQuery(text);
+}
+
+/** Scrolls only the list, so the active row is in sight and clear of the fades. */
+function revealActive(): void {
+  void nextTick(() => {
+    const element = list.value;
+    const row = element?.querySelector?.<HTMLElement>("[data-active]");
+    if (!element || !row) return;
+    element.scrollTop = inviteRoomScrollToReveal(element, { top: row.offsetTop, height: row.offsetHeight });
+  });
+}
+
+/** ↑ and ↓ bring the active row into sight; the pointer moving over a row never scrolls the list. */
+function searchKey(event: KeyboardEvent): void {
+  if (picker.handleKey(event) && (event.key === "ArrowDown" || event.key === "ArrowUp")) revealActive();
+}
+
+// The fades follow the rows shown and the list's own height (the flyout may cap it).
+// Rows slide in by a few pixels, which adds to the scroll height until they land, so
+// the list measures again when a row's motion ends (`animationend` in the template).
+watch(() => picker.shown.value, () => void nextTick(updateFades));
+watch(list, (element) => {
+  listResize?.disconnect();
+  listResize = null;
+  if (!element) return;
+  if (typeof ResizeObserver !== "undefined") {
+    listResize = new ResizeObserver(updateFades);
+    listResize.observe(element);
+  }
+  void nextTick(updateFades);
+});
+// A new search, or Escape clearing one, shows its first rows (its first row is active).
+watch(() => picker.query.value, () => { if (list.value) list.value.scrollTop = 0; });
 
 function swapTo(next: "rooms" | "invite"): void {
   swap.value = prefersReducedMotion() ? null : next === "invite" ? "forward" : "back";
@@ -221,7 +322,11 @@ function pickRoom(room: DesktopBotInviteRoom): void {
 
 function backToRooms(): void {
   invite.reset();
+  // Back in the list, the rows come in as they did the first time; the search keeps its text
+  // and its active row, which the list scrolls to.
+  typed.value = false;
   swapTo("rooms");
+  if (picker.searchable.value) revealActive();
 }
 
 /** Makes a room on press, with a name made up like any new room's, and shows its invite. */
@@ -237,6 +342,8 @@ async function newRoom(): Promise<void> {
     // Back to Rooms lists it, so a second press does not make another room.
     rooms.value = [room, ...rooms.value.filter((listed) => listed.id !== room.id)];
     freshRoomId.value = room.id;
+    // Back in the list, the new room shows at the top, not hidden by a search.
+    picker.setQuery("");
     pickRoom(room);
   } catch (error) {
     newRoomError.value = error instanceof Error && error.message ? error.message : "The room could not be made. Try again.";
@@ -257,6 +364,7 @@ async function copy(): Promise<void> {
 onMounted(() => { if (view.value === "rooms") void loadRooms(); });
 onBeforeUnmount(() => {
   unmounted = true;
+  listResize?.disconnect();
   clearTimeout(sentTimer);
   roomInvites.reveal(madeHere);
 });

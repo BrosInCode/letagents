@@ -10,7 +10,8 @@ test("the composer's + menu closes on a click elsewhere or Escape, and drops its
   const menu = source("room-chat/RoomComposerAddMenu.vue");
   assert.match(menu, /document\[method\]\("pointerdown", closeOnOutsidePointer as EventListener, true\)/);
   assert.match(menu, /document\[method\]\("keydown", closeOnEscape as EventListener, true\)/);
-  assert.match(menu, /onBeforeUnmount\(\(\) => setDocumentListeners\(false\)\)/);
+  // On unmount it drops the document listeners and stops watching the composer's height.
+  assert.match(menu, /onBeforeUnmount\(\(\) => \{\s*setDocumentListeners\(false\);\s*composerResize\?\.disconnect\(\);\s*\}\)/);
 });
 
 test("the giving screen shows why \"Can't right now\" did not go through, and stays open", () => {
