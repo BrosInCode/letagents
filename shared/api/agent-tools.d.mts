@@ -16,10 +16,10 @@ export function agentToolMethods(methods?: readonly KnownApiMethod[]): KnownApiM
 /**
  * The tool's description: the method's own words for agents, then what the
  * server checks and what it can answer.
- * @param {Pick<import("./core.mjs").AnyApiMethod, "name" | "description" | "capability" | "capabilityFromInput" | "errors" | "kind">} method
+ * @param {Pick<import("./core.mjs").AnyApiMethod, "name" | "description" | "capability" | "capabilityFromInput" | "errors" | "kind" | "input" | "output">} method
  * @returns {string}
  */
-export function agentToolDescription(method: Pick<import("./core.mjs").AnyApiMethod, "name" | "description" | "capability" | "capabilityFromInput" | "errors" | "kind">): string;
+export function agentToolDescription(method: Pick<import("./core.mjs").AnyApiMethod, "name" | "description" | "capability" | "capabilityFromInput" | "errors" | "kind" | "input" | "output">): string;
 /**
  * The generated tools, by name, for lists that cannot load zod (the desktop
  * daemon's read-only lists).
@@ -31,6 +31,18 @@ export function agentToolCatalog(methods?: readonly KnownApiMethod[]): {
     method: string;
     access: AgentAccess;
 }[];
+/**
+ * For a method whose capability follows its input (`capabilityFromInput`):
+ * the input field that picks it and each capability with its values, found by
+ * asking the method about every value of each enum field. `data.*`: by scope;
+ * `intents.propose`: by kind.
+ * @param {Pick<import("./core.mjs").AnyApiMethod, "capability" | "capabilityFromInput" | "input" | "output">} method
+ * @returns {{ field: string, text: string } | null}
+ */
+export function capabilitiesByInput(method: Pick<import("./core.mjs").AnyApiMethod, "capability" | "capabilityFromInput" | "input" | "output">): {
+    field: string;
+    text: string;
+} | null;
 /** @typedef {import("./index.mjs").KnownApiMethod} KnownApiMethod */
 /** @typedef {import("./core.mjs").AgentAccess} AgentAccess */
 export const AGENT_TOOL_PREFIX: "api_";

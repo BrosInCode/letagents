@@ -75,7 +75,6 @@
     "path": "/rooms/:room/people/me",
     "response": "json",
     "rateClass": "read",
-    "agents": "read",
     "errors": [],
     "input": {
       "type": "object",

@@ -195,10 +195,12 @@ export async function proposeIntent(
       accountId: actor.principal.kind === "person" ? actor.principal.id : null,
     });
     context = { kind: "ticket", plan };
-    // Only the viewer's own connection writes as the viewer. Any other write
-    // uses the filter owner's credentials, so a room admin approves it, also
+    // Only the viewer's own connection writes as the viewer, and only while
+    // the viewer acts in person or through a page they opened. Any other
+    // write (the filter owner's credentials, or the person's own connection
+    // used by a token or an agent's integration) waits for a room admin, also
     // when the room set this capability to allow or confirm.
-    if (!plan.own) mode = "approve";
+    if (!plan.own || !actsInPersonOrThroughPage(actor)) mode = "approve";
     else if (mode === "approve" && policy.rule === "own_tracker_connection") mode = "allow";
   }
 

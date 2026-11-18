@@ -7,7 +7,6 @@
 export const API_AGENT_TOOLS = Object.freeze([
   Object.freeze({name: "api_rooms_get", method: "rooms.get", access: "read"}),
   Object.freeze({name: "api_people_list", method: "people.list", access: "read"}),
-  Object.freeze({name: "api_people_viewer", method: "people.viewer", access: "read"}),
   Object.freeze({name: "api_agents_list", method: "agents.list", access: "read"}),
   Object.freeze({name: "api_messages_recent", method: "messages.recent", access: "read"}),
   Object.freeze({name: "api_messages_thread", method: "messages.thread", access: "read"}),

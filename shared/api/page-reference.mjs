@@ -4,6 +4,7 @@
 // must be able to build a page from it alone, so it stays complete but short.
 import { CAPABILITIES, CAPABILITY_NAMES, getCapability } from "./capabilities.mjs";
 import { API_ERROR_CODES, API_VERSION, toJsonSchema } from "./core.mjs";
+import { capabilitiesByInput } from "./agent-tools.mjs";
 import { API_METHODS } from "./index.mjs";
 import { DATA_SCOPES, PAGE_MANIFEST_SCRIPT_TYPE, PAGE_SURFACES, PAGE_TITLE_MAX } from "./manifest.mjs";
 import { PAGE_LIMITS } from "./pages.mjs";
@@ -71,7 +72,9 @@ export function pageReference(methods = API_METHODS) {
   }
   const lines = callable.map(({ method, input, output }) => {
     const errors = method.errors.length ? ` Errors: ${method.errors.join(", ")}.` : "";
-    return `- \`${method.name}(${types.render(input, "input")}) → ${types.render(output, "output")}\` [${method.capability}] `
+    const byInput = capabilitiesByInput(method);
+    const capability = byInput ? `by ${byInput.field}: ${byInput.text}` : method.capability;
+    return `- \`${method.name}(${types.render(input, "input")}) → ${types.render(output, "output")}\` [${capability}] `
       + `${firstSentences(method.description)}${errors}`;
   });
 
