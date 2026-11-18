@@ -763,6 +763,7 @@ export const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused
   list_wake_rules: "approved",        // what agents in the room are waiting for
   get_room_artifacts: "approved",     // branches, pull requests and checks shared with the room
   get_room_events: "approved",        // GitHub events the room already holds
+  get_job: "approved",                // a job a person gave the agent: its input and result schema
   // Optional expression lookup, enabled by the Room's human-admin setting.
   search_gifs: "approved",           // provider metadata; no repository writes
   // Saying something in the room.
@@ -774,6 +775,8 @@ export const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused
   set_reply_thread: "approved",       // where the final answer goes; approved at every access level
   set_reply_gif: "approved",          // optional attachment to the same final answer
   react_to_message: "approved",       // room communication under the agent's identity
+  update_job: "approved",             // progress on a job it was given; changes only the job's own record
+  complete_job: "approved",           // the job's result or error, checked by the room server
   // Runs git in a folder the caller names, on this Mac and outside Codex's sandbox.
   check_repo: "refused",
   // The daemon reads the named files on this Mac, outside Codex's sandbox, and posts them to the room.

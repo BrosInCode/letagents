@@ -10,6 +10,8 @@ export const ROOM_RESOURCE_WAKE_RULES = "wake_rules";
 // of the messages they show; the pointer never says which message changed.
 export const ROOM_RESOURCE_MESSAGE_PINS = "message_pins";
 export const ROOM_RESOURCE_MESSAGE_REACTIONS = "message_reactions";
+// A LetAgents API job started or changed. Consumers re-read jobs through /api/v1.
+export const ROOM_RESOURCE_JOBS = "jobs";
 // Protocol-known references. Each consumer still decides which surfaces, if
 // any, react to a supported pointer.
 export const ROOM_RESOURCE_INVALIDATION_RESOURCES = [
@@ -19,6 +21,7 @@ export const ROOM_RESOURCE_INVALIDATION_RESOURCES = [
   ROOM_RESOURCE_WAKE_RULES,
   ROOM_RESOURCE_MESSAGE_REACTIONS,
   ROOM_RESOURCE_MESSAGE_PINS,
+  ROOM_RESOURCE_JOBS,
 ];
 
 function exactKeys(value, keys) {

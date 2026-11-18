@@ -56,6 +56,7 @@ export const executionDelegationEvents = createBridgedEmitter("execution-delegat
 export const wakeRuleEvents = createBridgedEmitter("wake-rules");
 export const messagePinEvents = createBridgedEmitter("message-pins");
 export const messageReactionEvents = createBridgedEmitter("message-reactions");
+export const jobEvents = createBridgedEmitter("jobs");
 
 const ROOM_INVALIDATION_COALESCE_MS = 100;
 
@@ -123,6 +124,9 @@ export const queueMessageReactionInvalidation = createRoomInvalidationQueue(
 
 /** A pin changes a read model, never the message/notification/agent stream. */
 export const queueMessagePinInvalidation = createRoomInvalidationQueue(messagePinEvents, "message_pins:invalidated");
+
+/** A job started or changed state, progress or result. Consumers re-read jobs through /api/v1. */
+export const queueJobInvalidation = createRoomInvalidationQueue(jobEvents, "jobs:invalidated");
 
 export type AccountRoomAccessResolver = (input: {
   accountId: string;

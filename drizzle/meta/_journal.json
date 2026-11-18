@@ -1058,6 +1058,13 @@
       "when": 1795000700000,
       "tag": "0150_room_invites",
       "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1795001000000,
+      "tag": "0153_api_jobs",
+      "breakpoints": true
     }
   ]
 }

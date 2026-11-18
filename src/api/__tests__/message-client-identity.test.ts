@@ -38,3 +38,12 @@ test("message projection echoes random desktop submission IDs but keeps internal
   assert.equal(toMessage(row).client_message_id, undefined);
   assert.equal(toMessage({ ...row, client_message_id: "desktop-send:private-internal-key" }).client_message_id, undefined);
 });
+
+test("a job's thread root names its job, so the agent's reply goes into the thread", async () => {
+  process.env.DB_URL ||= "postgresql://postgres:postgres@localhost:5432/letagents";
+  const { toMessage } = await import("../db/mappers.js");
+  const id = "internal:job:job_0123456789abcdef0123456789abcdef";
+  assert.equal(toMessage({ ...row, client_message_id: id }).client_message_id, id);
+  assert.equal(toMessage({ ...row, client_message_id: "internal:job:not-a-job" }).client_message_id, undefined);
+  assert.equal(toMessage({ ...row, client_message_id: "internal:attention-request:k_1" }).client_message_id, undefined);
+});

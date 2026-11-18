@@ -76,7 +76,7 @@ test("every method in the contract is unique, described and has JSON Schema for 
 
 test("the capability registry has every capability the plan names, with a label and a default policy", () => {
   assert.deepEqual([...CAPABILITY_NAMES].sort(), [
-    "agents.read", "data.page", "data.room", "data.viewer", "git.read", "jobs.start", "memory.read", "messages.post",
+    "agents.read", "data.page", "data.room", "data.viewer", "git.read", "jobs.read", "jobs.start", "memory.read", "messages.post",
     "messages.read", "people.read", "planning.read", "rooms.read", "tasks.propose", "tasks.read", "tickets.propose", "work_items.read",
   ]);
   for (const name of CAPABILITY_NAMES) assert.ok(CAPABILITIES[name].label.length > 10, name);

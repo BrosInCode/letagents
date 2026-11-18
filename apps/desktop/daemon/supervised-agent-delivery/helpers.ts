@@ -21,7 +21,8 @@ export type SupervisedReplyTarget = {
  * Supervised replies inherit only real thread membership. Current room rows
  * identify top-level quote replies with thread_root_id equal to their own id;
  * carrying quote-only reply_to metadata forward would incorrectly pull the
- * provider response into a thread.
+ * provider response into a thread. The one top-level exception is a job's
+ * thread root, whose reply starts that thread.
  */
 export function supervisedReplyTargetForSourceMessage(sourceMessage: unknown): SupervisedReplyTarget {
   if (!sourceMessage || typeof sourceMessage !== "object" || Array.isArray(sourceMessage)) {
@@ -39,10 +40,17 @@ export function supervisedReplyTargetForSourceMessage(sourceMessage: unknown): S
     && sourceId !== null
     && threadRootId !== sourceId
     && (thread?.is_thread_reply !== false);
-  return isThreadReply
-    ? { replyTo: sourceId, threadRootId }
-    : { replyTo: null, threadRootId: null };
+  if (isThreadReply) return { replyTo: sourceId, threadRootId };
+  // A job's thread root (shared/api/jobs.mjs JOB_CLIENT_MESSAGE_ID_PREFIX; the
+  // contract module is not imported here because it loads zod) is the job's
+  // conversation: the agent answers inside it, never in the main room.
+  if (sourceId !== null && typeof source.client_message_id === "string" && source.client_message_id.startsWith(JOB_ROOT_CLIENT_ID_PREFIX)) {
+    return { replyTo: sourceId, threadRootId: sourceId };
+  }
+  return { replyTo: null, threadRootId: null };
 }
+
+const JOB_ROOT_CLIENT_ID_PREFIX = "internal:job:";
 
 export class AuthorityLostError extends Error {
   constructor() {

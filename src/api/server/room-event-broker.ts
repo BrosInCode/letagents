@@ -15,6 +15,7 @@ import {
   ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_AGENT_WORK,
   ROOM_RESOURCE_EXECUTION_DELEGATION,
+  ROOM_RESOURCE_JOBS,
   ROOM_RESOURCE_MESSAGE_REACTIONS,
   ROOM_RESOURCE_MESSAGE_PINS,
   ROOM_RESOURCE_WAKE_RULES,
@@ -148,6 +149,7 @@ interface EventSourceDeps {
   wakeRuleEvents?: EventEmitter;
   messageReactionEvents?: EventEmitter;
   messagePinEvents?: EventEmitter;
+  jobEvents?: EventEmitter;
   joinRequestEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
   contentDeletionEvents?: EventEmitter;
@@ -327,6 +329,7 @@ export class RoomEventBroker {
       [deps.wakeRuleEvents, "wake_rules:invalidated", ROOM_RESOURCE_WAKE_RULES],
       [deps.messagePinEvents, "message_pins:invalidated", ROOM_RESOURCE_MESSAGE_PINS],
       [deps.messageReactionEvents, "message_reactions:invalidated", ROOM_RESOURCE_MESSAGE_REACTIONS],
+      [deps.jobEvents, "jobs:invalidated", ROOM_RESOURCE_JOBS],
     ];
     for (const [emitter, eventName, resource] of invalidationSources) {
       if (!emitter) continue;
