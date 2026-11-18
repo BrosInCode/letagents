@@ -1373,6 +1373,8 @@ export async function endRoomAgentSession(input: {
    * lock. See endGoneWorkerSessions.
    */
   only_if_gone?: { now_ms: number };
+  /** End the session only if it is still open: do not repeat its end. */
+  only_if_open?: boolean;
 }): Promise<RoomAgentSession | null> {
   const unavailableReceiptTargets: number[] = [];
   const releasedReplyTurns: ReleasedReplyTurn[] = [];
@@ -1406,7 +1408,7 @@ export async function endRoomAgentSession(input: {
   }
   const now = new Date().toISOString();
   const conditions = [eq(room_agent_sessions.session_id, input.session_id)];
-  if (input.only_if_gone) conditions.push(isNull(room_agent_sessions.ended_at));
+  if (input.only_if_gone || input.only_if_open) conditions.push(isNull(room_agent_sessions.ended_at));
   if (input.room_id) {
     conditions.push(eq(room_agent_sessions.room_id, input.room_id));
   }

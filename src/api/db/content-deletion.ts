@@ -223,7 +223,7 @@ export async function deleteRoomData(roomId: string): Promise<{ deleted_room_ids
   // Offline agents are ended the way they would end if they left by
   // themselves, so their credentials and open work close cleanly first.
   for (const session of offline) {
-    await endRoomAgentSession({ session_id: session.session_id, room_id: session.room_id });
+    await endRoomAgentSession({ session_id: session.session_id, room_id: session.room_id, only_if_open: true });
   }
   return db.transaction(async tx => {
     const { rooms, ids, offline: stillOpen } = await lockDeletableRoomTree(tx, roomId);
