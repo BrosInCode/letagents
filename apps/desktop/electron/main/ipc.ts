@@ -7,11 +7,13 @@ import { registerDesktopAskIpcHandlers } from "./ipc-handlers/asks.js";
 import { registerConversationIpcHandlers } from "./ipc-handlers/conversations.js";
 import { registerTicketConnectorIpcHandlers } from "./ipc-handlers/connectors.js";
 import { registerDesktopAuthAndSetupIpcHandlers } from "./ipc-handlers/auth-setup.js";
+import { registerDesktopPageIpcHandlers } from "./ipc-handlers/pages.js";
 import { registerDesktopRentalDomainIpcHandlers } from "./ipc-handlers/rental.js";
 import { registerDesktopRepoIpcHandlers } from "./ipc-handlers/repos.js";
 import { registerDesktopRoomIpcHandlers } from "./ipc-handlers/rooms.js";
 import { registerDesktopSupervisorIpcHandlers } from "./ipc-handlers/supervisor.js";
 import { registerDesktopWorkerIpcHandlers } from "./ipc-handlers/workers.js";
+import { refuseWebviewSenders } from "./ipc-sender-guard.js";
 
 const { ipcMain } = electron as typeof import("electron");
 
@@ -25,6 +27,9 @@ const { ipcMain } = electron as typeof import("electron");
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
 ): () => void {
+  // Room pages and demos are webviews in the app window: none of them reaches
+  // an app channel, whatever a registrar forgets to check.
+  targetIpcMain = refuseWebviewSenders(targetIpcMain);
   registerDesktopAuthAndSetupIpcHandlers(targetIpcMain);
   registerConversationIpcHandlers(targetIpcMain);
   registerDesktopAppIpcHandlers(targetIpcMain);
@@ -36,5 +41,6 @@ export function registerDesktopIpcHandlers(
   registerDesktopSupervisorIpcHandlers(targetIpcMain);
   registerDesktopWorkerIpcHandlers(targetIpcMain);
   registerTicketConnectorIpcHandlers(targetIpcMain);
+  registerDesktopPageIpcHandlers(targetIpcMain);
   return startRentalServices;
 }

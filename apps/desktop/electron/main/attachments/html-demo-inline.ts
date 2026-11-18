@@ -1,4 +1,3 @@
-import electron from "electron";
 import type { BrowserWindow as ElectronBrowserWindow, Event, InputEvent, WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 
@@ -21,12 +20,6 @@ import {
   inlineHtmlDemoAnchor,
   inlineHtmlDemoAnchorScript,
   inlineHtmlDemoAttachLease,
-  INLINE_HTML_DEMO_EVENT_BURST,
-  INLINE_HTML_DEMO_EVENTS_PER_SECOND,
-  INLINE_HTML_DEMO_TEXT_BURST,
-  INLINE_HTML_DEMO_TEXT_PER_SECOND,
-  inlineHtmlDemoBucket,
-  inlineHtmlDemoEventText,
   inlineHtmlDemoFocusAllowed,
   inlineHtmlDemoHeight,
   inlineHtmlDemoLeaseHost,
@@ -41,7 +34,6 @@ import {
   inlineHtmlDemoPointer,
   lockInlineHtmlDemoWebPreferences,
   MAX_INLINE_HTML_DEMO_DOWNLOADS,
-  takeInlineHtmlDemoTokens,
   MAX_INLINE_HTML_DEMOS,
 } from "./html-demo-policy.js";
 import {
@@ -51,8 +43,8 @@ import {
   loadHtmlDemoAttachment,
   lockHtmlDemoContents,
 } from "./html-demo-session.js";
-
-const { app } = electron as typeof import("electron");
+import { watchGuestEventFlood } from "./guest-event-flood.js";
+import { addWebviewRoute } from "./webview-router.js";
 
 export const INLINE_HTML_DEMO_EVENT_CHANNEL = "desktop:room:inline-html-demo-event";
 
@@ -61,21 +53,6 @@ export const INLINE_HTML_DEMO_EVENT_CHANNEL = "desktop:room:inline-html-demo-eve
  * sound on, and each one lets the demo take keyboard focus; the page cannot fake one.
  */
 const PERSON_INPUT_TYPES = new Set<InputEvent["type"]>(["mouseDown", "rawKeyDown", "keyDown", "touchStart"]);
-
-/**
- * The guest events Electron 42 forwards to the `<webview>` element, each one a
- * message through main to the app page (lib/browser/web-view-events.ts).
- * A page can repeat most of them as fast as it likes.
- */
-const FORWARDED_GUEST_EVENTS = [
-  "load-commit", "did-finish-load", "did-fail-load", "did-frame-finish-load", "did-start-loading",
-  "did-stop-loading", "dom-ready", "console-message", "context-menu", "devtools-open-url",
-  "devtools-opened", "devtools-closed", "devtools-focused", "will-navigate", "will-frame-navigate",
-  "did-start-navigation", "did-redirect-navigation", "did-navigate", "did-frame-navigate",
-  "did-navigate-in-page", "page-title-updated", "page-favicon-updated", "enter-html-full-screen",
-  "leave-html-full-screen", "media-started-playing", "media-paused", "found-in-page",
-  "did-change-theme-color", "update-target-url", "-focus-change",
-] as const;
 
 type StopReason = Extract<DesktopInlineHtmlDemoEvent, { type: "stopped" }>["reason"];
 
@@ -175,9 +152,6 @@ let htmlCacheBytes = 0;
 const htmlLoads = new Map<string, Promise<string>>();
 /** Moves on when the cache is cleared, so a download started before then is not cached. */
 let htmlCacheGeneration = 0;
-/** The lease whose webview Electron is creating right now, in this task. */
-let attaching: { lease: InlineHtmlDemoLease; embedder: WebContents; hostWindow: DemoHostWindow } | null = null;
-let guestBindingInstalled = false;
 
 /** Load a room HTML attachment for a `<webview>` in the chat; the lease admits one webview, once. */
 export async function prepareInlineHtmlDemo(rawHref: unknown): Promise<DesktopInlineHtmlDemoLease> {
@@ -514,14 +488,11 @@ function pointerLeftDemos(hostWindow: DemoHostWindow, now: boolean): void {
 }
 
 /**
- * Let the app window show inline demos. A `<webview>` attaches only with a
- * lease from `prepareInlineHtmlDemo`; every other webview is refused.
+ * Let the app window show inline demos. A `<webview>` attaches as a demo only
+ * with a lease from `prepareInlineHtmlDemo`; the window's webview router
+ * refuses every webview that no route claims.
  */
 export function installInlineHtmlDemoHost(hostWindow: ElectronBrowserWindow): void {
-  if (!guestBindingInstalled) {
-    app.on("web-contents-created", (_event, contents) => bindAttachingGuest(contents));
-    guestBindingInstalled = true;
-  }
   const embedder = hostWindow.webContents;
   const demoHost: DemoHostWindow = {
     lastTabAt: Number.NEGATIVE_INFINITY,
@@ -551,38 +522,23 @@ export function installInlineHtmlDemoHost(hostWindow: ElectronBrowserWindow): vo
     }
   });
   hostWindow.on("focus", () => { demoHost.focusedAt = Date.now(); });
-  embedder.on("will-attach-webview", (event, webPreferences, params) => {
-    const host = inlineHtmlDemoAttachLease(params, webPreferences, leases);
-    const lease = host ? leases.get(host) : undefined;
-    if (!lease) {
-      event.preventDefault();
-      return;
-    }
-    lockInlineHtmlDemoWebPreferences(webPreferences);
-    params.src = lease.url;
-    delete params.allowpopups;
-    lease.attached = true;
-    // Electron creates the guest right after this listener returns, in the same
-    // task, and reports it to "web-contents-created". A later webview is a later
-    // task, so it never finds this lease waiting for it.
-    attaching = { lease, embedder, hostWindow: demoHost };
-    queueMicrotask(() => { attaching = null; });
-  });
-  embedder.on("did-attach-webview", (_event, guest) => {
-    if (leasesByGuestId.get(guest.id)?.guest === guest) return;
-    // A webview that passed the lease check but is not bound to its lease does not run.
-    setImmediate(() => {
-      if (!guest.isDestroyed()) guest.close();
-    });
+  addWebviewRoute(embedder, {
+    claim(webPreferences, params) {
+      const host = inlineHtmlDemoAttachLease(params, webPreferences, leases);
+      const lease = host ? leases.get(host) : undefined;
+      if (!lease) return null;
+      lockInlineHtmlDemoWebPreferences(webPreferences);
+      params.src = lease.url;
+      delete params.allowpopups;
+      lease.attached = true;
+      return { bind: (guest) => bindGuest(guest, lease, embedder, demoHost) };
+    },
+    owns: (guest) => leasesByGuestId.get(guest.id)?.guest === guest,
   });
 }
 
 /** Lock a just-created guest before it loads anything, and tie it to its lease. */
-function bindAttachingGuest(guest: WebContents): void {
-  const current = attaching;
-  attaching = null;
-  if (!current || guest.getType() !== "webview") return;
-  const { lease, embedder, hostWindow } = current;
+function bindGuest(guest: WebContents, lease: InlineHtmlDemoLease, embedder: WebContents, hostWindow: DemoHostWindow): void {
   const guestId = guest.id;
   lease.guest = guest;
   lease.embedder = embedder;
@@ -600,17 +556,7 @@ function bindAttachingGuest(guest: WebContents): void {
     }
   });
   const emitter: NodeJS.EventEmitter = guest;
-  const boundAt = Date.now();
-  const events = inlineHtmlDemoBucket(INLINE_HTML_DEMO_EVENT_BURST, INLINE_HTML_DEMO_EVENTS_PER_SECOND, boundAt);
-  const text = inlineHtmlDemoBucket(INLINE_HTML_DEMO_TEXT_BURST, INLINE_HTML_DEMO_TEXT_PER_SECOND, boundAt);
-  const countEvent = (...args: unknown[]) => {
-    if (lease.stopped) return;
-    const now = Date.now();
-    const eventsLeft = takeInlineHtmlDemoTokens(events, 1, now);
-    const textLeft = takeInlineHtmlDemoTokens(text, inlineHtmlDemoEventText(args), now);
-    if (!eventsLeft || !textLeft) stopGuest(lease, "overloaded");
-  };
-  for (const name of FORWARDED_GUEST_EVENTS) emitter.on(name, countEvent);
+  watchGuestEventFlood(guest, () => lease.stopped, () => stopGuest(lease, "overloaded"));
 
   guest.setAudioMuted(true);
   let muted = true;
