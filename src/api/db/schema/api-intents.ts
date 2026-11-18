@@ -21,6 +21,8 @@ export const api_intents = pgTable(
     principal_kind: text("principal_kind").notNull(),
     principal_id: text("principal_id").notNull(),
     principal_login: text("principal_login"),
+    /** The caller's retry key: a retried proposal with the same key returns this intent. */
+    client_intent_id: text("client_intent_id"),
     via_kind: text("via_kind"),
     via_id: text("via_id"),
     via_version: integer("via_version"),
@@ -38,6 +40,10 @@ export const api_intents = pgTable(
     uniqueIndex("api_intents_pending_uq")
       .on(table.room_id, table.kind, table.payload_fingerprint, table.principal_kind, table.principal_id)
       .where(sql`${table.state} = 'pending_approval'`),
+    uniqueIndex("api_intents_client_id_uq")
+      .on(table.room_id, table.principal_kind, table.principal_id, table.client_intent_id)
+      .where(sql`${table.client_intent_id} IS NOT NULL`),
+    index("api_intents_running_idx").on(table.updated_at).where(sql`${table.state} = 'running'`),
     check("api_intents_kind_check", sql`${table.kind} IN ('task.create', 'task.update', 'ticket.transition', 'ticket.comment')`),
     check("api_intents_state_check", sql`${table.state} IN ('pending_approval', 'approved', 'running', 'done', 'failed', 'denied')`),
     check("api_intents_principal_kind_check", sql`${table.principal_kind} IN ('person', 'agent')`),

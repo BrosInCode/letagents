@@ -83,6 +83,10 @@ const dbClient = testDatabaseUrl ? await import("../db/client.js") : null;
 const api = testDatabaseUrl ? await import("../db.js") : null;
 const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
 const accountSessions = testDatabaseUrl ? await import("../db/auth/account-sessions.js") : null;
+const ownerTokens = testDatabaseUrl ? await import("../db/auth/owner-tokens.js") : null;
+const intentStore = testDatabaseUrl ? await import("../db/api-intents.js") : null;
+const intentService = testDatabaseUrl ? await import("../intents/service.js") : null;
+const effectRuntime = testDatabaseUrl ? await import("../workflow-effects/runtime.js") : null;
 const members = testDatabaseUrl ? await import("../db/room-members.js") : null;
 const filters = testDatabaseUrl ? await import("../connectors/room-filters.js") : null;
 const crypto = testDatabaseUrl ? await import("../connectors/crypto.js") : null;
@@ -124,6 +128,8 @@ async function connection(owner: Person, site: string, siteKey: string): Promise
 }
 
 let adaAcme = "";
+const BOB_OWNER_TOKEN = "api_v1_intents_owner_token_bob";
+const DAN_OWNER_TOKEN = "api_v1_intents_owner_token_dan";
 
 /** A room Ada made (she is its admin); Bob, Cy and Dan are members. Its Jira filter is `project = HT` on Ada's acme connection. */
 async function room(options: { tracker?: boolean } = {}) {
@@ -147,6 +153,8 @@ if (testDatabaseUrl) {
     bob = await person("bob");
     cy = await person("cy");
     dan = await person("dan");
+    await ownerTokens!.createOwnerToken({ accountId: bob.id, githubUserId: "intent-bob", token: BOB_OWNER_TOKEN });
+    await ownerTokens!.createOwnerToken({ accountId: dan.id, githubUserId: "intent-dan", token: DAN_OWNER_TOKEN });
     adaAcme = await connection(ada, "https://acme.atlassian.net", "acme");
     await connection(bob, "https://acme.atlassian.net", "acme");
     await connection(cy, "https://other.atlassian.net", "other");
@@ -405,4 +413,118 @@ test("board kinds keep the person's own rights: admin-only changes are refused a
   assert.equal(updated.title, "Refactor the v1 API");
   const created = await propose(route, ada.session, "task.create", { title: "Plan the launch" });
   assert.equal((await api!.getTaskById(roomId, created.body.result.taskId))!.status, "accepted");
+});
+
+test("an owner token acts through an integration: no board kinds, and ticket writes on the filter owner's token wait", { skip }, async () => {
+  const { id: roomId, route } = await room();
+  const task = await api!.createTask(roomId, "Owner token target", "human");
+  tickets.set("HT-6", { status: "To Do" });
+  jiraWrites.length = 0;
+
+  for (const [kind, payload] of [["task.create", { title: "From a script" }], ["task.update", { taskId: task.id, assignee: "bob" }]] as const) {
+    const res = await propose(route, BOB_OWNER_TOKEN, kind, payload);
+    assert.equal(res.status, 403, JSON.stringify(res.body));
+    assert.equal(res.body.code, "not_granted");
+    assert.match(res.body.message, /board intents/);
+  }
+
+  // Dan has no connection of his own: the filter owner's would write, so an admin approves.
+  const pending = await propose(route, DAN_OWNER_TOKEN, "ticket.transition", { key: "HT-6", toStatus: "Done" });
+  assert.equal(pending.body.state, "pending_approval", JSON.stringify(pending.body));
+  assert.deepEqual(pending.body.proposedBy.via, { kind: "integration", id: "owner-token" });
+  // Bob's own connection on the room's site writes as Bob: it runs.
+  const own = await propose(route, BOB_OWNER_TOKEN, "ticket.comment", { key: "HT-6", body: "Seen" });
+  assert.equal(own.body.state, "done", JSON.stringify(own.body));
+  assert.deepEqual(jiraWrites.map(({ as }) => as), ["bob@example.com"]);
+  assert.equal((await api!.getTaskById(roomId, task.id))!.assignee, null);
+
+  // Approving later keeps the limit the proposal was stored with.
+  const approved = await approve(route, ada.session, pending.body.id);
+  assert.equal(approved.body.state, "done", JSON.stringify(approved.body));
+  assert.equal(jiraWrites.at(-1)!.as, "ada@example.com");
+});
+
+test("a room that allows tickets.propose still needs an admin when the filter owner's connection would write", { skip }, async () => {
+  const { id: roomId, route } = await room();
+  tickets.set("HT-7", { status: "To Do" });
+  jiraWrites.length = 0;
+  for (const mode of ["allow", "confirm"] as const) {
+    await policy!.setRoomPolicy({ roomId, capability: "tickets.propose", mode, accountId: ada.id });
+    const res = await propose(route, dan.session, "ticket.comment", { key: "HT-7", body: `under ${mode}` });
+    assert.equal(res.body.state, "pending_approval", JSON.stringify(res.body));
+  }
+  // The viewer's own connection follows the room's allow.
+  const own = await propose(route, bob.session, "ticket.comment", { key: "HT-7", body: "mine" });
+  assert.equal(own.body.state, "done", JSON.stringify(own.body));
+  assert.equal(jiraWrites.length, 1);
+});
+
+test("a retry with the same clientIntentId returns the first intent and runs nothing again", { skip }, async () => {
+  const { route } = await room();
+  tickets.set("HT-8", { status: "To Do" });
+  jiraWrites.length = 0;
+  const body = { kind: "ticket.comment", clientIntentId: "page-42:comment-1", payload: { key: "HT-8", body: "Once" } };
+  const first = await call(route, bob.session, body);
+  assert.equal(first.status, 201);
+  assert.equal(first.body.state, "done");
+  assert.equal(first.body.clientIntentId, "page-42:comment-1");
+  const retry = await call(route, bob.session, body);
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.id, first.body.id);
+  assert.equal(jiraWrites.length, 1);
+  // The same key for another change is a conflict; another person's same key is their own.
+  assert.equal((await call(route, bob.session, { ...body, payload: { key: "HT-8", body: "Twice" } })).body.code, "conflict");
+  const dans = await call(route, dan.session, body);
+  assert.equal(dans.status, 201);
+  assert.notEqual(dans.body.id, first.body.id);
+  assert.equal((await call(route, bob.session, { ...body, clientIntentId: "has spaces" })).body.code, "invalid_input");
+});
+
+test("an approved intent that has not started can still be denied", { skip }, async () => {
+  const { id: roomId, route } = await room();
+  tickets.set("HT-9", { status: "To Do" });
+  const res = await propose(route, dan.session, "ticket.transition", { key: "HT-9", toStatus: "Done" });
+  const now = new Date().toISOString();
+  assert.ok(await intentStore!.moveApiIntent(roomId, res.body.id, ["pending_approval"], { state: "approved", decided_by: ada.id, decided_at: now }, now));
+  const denied = await deny(route, ada.session, res.body.id);
+  assert.equal(denied.body.state, "denied", JSON.stringify(denied.body));
+  assert.equal(tickets.get("HT-9")!.status, "To Do");
+});
+
+test("intents a stopped server left running finish from the board or the journal", { skip }, async () => {
+  const { id: roomId, route } = await room();
+  tickets.set("HT-10", { status: "To Do" });
+  const actor = { principal: { kind: "person" as const, id: bob.id, login: "bob" }, roomId };
+  const long = new Date(Date.now() - 11 * 60_000).toISOString();
+  const running = async (kind: "task.create" | "task.update" | "ticket.comment", payload: Record<string, unknown>) =>
+    (await intentStore!.insertApiIntent({ roomId, kind, payload, actor, state: "running", now: long })).row;
+
+  // A card made before the stop: done. No card: failed. An update: failed.
+  const made = await running("task.create", { title: "Made before the stop" });
+  const card = await api!.createTask(roomId, "Made before the stop", "human", undefined, undefined, {
+    clientTaskId: (await import("../intents/task-executor.js")).intentClientTaskId(made.id),
+  });
+  const lost = await running("task.create", { title: "Never made" });
+  const update = await running("task.update", { taskId: card.id, assignee: "bob" });
+  // A ticket write the journal finished, and one that never reached it.
+  const written = await running("ticket.comment", { key: "HT-10", body: "Reached the journal" });
+  const reserved = await effectRuntime!.workflowEffectBroker.reserveTrackerEffect({
+    room_id: roomId, task_id: null, connection_id: adaAcme, connection_account_id: ada.id, provider: "jira", key: "HT-10",
+    idempotency_key: `api_intent:${written.id}`, actor_label: "bob", action: { kind: "tracker_comment", body: "Reached the journal" },
+  });
+  // Driven outside any intent run: the settle hook finishes the intent.
+  await effectRuntime!.workflowEffectBroker.driveTrackerEffect(reserved);
+  assert.equal((await intentStore!.getApiIntent(roomId, written.id))!.state, "done");
+  const never = await running("ticket.comment", { key: "HT-10", body: "Never journaled" });
+  const fresh = await intentStore!.insertApiIntent({ roomId, kind: "task.update", payload: { taskId: card.id, status: "cancelled" }, actor, state: "running", now: new Date().toISOString() });
+
+  assert.ok((await intentService!.sweepStuckIntents()) >= 4);
+  const state = async (id: string) => (await intentStore!.getApiIntent(roomId, id))!;
+  assert.deepEqual([(await state(made.id)).state, (await state(made.id)).result], ["done", { taskId: card.id }]);
+  assert.equal((await state(lost.id)).state, "failed");
+  assert.equal((await state(update.id)).state, "failed");
+  assert.equal((await state(never.id)).state, "failed");
+  // Running for less than ten minutes: left alone.
+  assert.equal((await state(fresh.row.id)).state, "running");
+  assert.equal((await call(`${route}/${made.id}`, dan.session)).body.state, "done");
 });

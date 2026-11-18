@@ -7,13 +7,14 @@ import { requireRoomAdminInPerson } from "./rooms.js";
 
 // Routes for the methods in shared/api/intents.mjs, made with defineRoute.
 export const routes: readonly ApiRoute[] = [
-  defineRoute(proposeIntent, async ({ kind, payload }, call) => {
+  defineRoute(proposeIntent, async ({ kind, payload, clientIntentId }, call) => {
     const { intent, created } = await service.proposeIntent({
       actor: call.actor,
       room: call.room,
       account: call.account,
       kind,
       payload,
+      ...(clientIntentId ? { clientIntentId } : {}),
       // The capability check read it for this call; the handler acts on the same answer.
       policy: await resolveCallPolicy(call, intentCapability({ kind })),
     });

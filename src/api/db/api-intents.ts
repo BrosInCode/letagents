@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt } from "drizzle-orm";
 
 import type { ApiActor } from "../../../shared/api/actor.mjs";
 import type { IntentKind, IntentState } from "../../../shared/api/intents.mjs";
@@ -30,13 +30,41 @@ export function intentPayloadFingerprint(kind: IntentKind, payload: Record<strin
   return createHash("sha256").update(`${kind}\0${stableJson(payload)}`).digest("hex");
 }
 
-function isPendingConflict(error: unknown): boolean {
+function uniqueViolation(error: unknown): string | null {
   for (let current: unknown = error, depth = 0; current && depth < 4; depth += 1) {
     const record = current as { code?: unknown; constraint?: unknown; cause?: unknown };
-    if (record.code === "23505" && record.constraint === "api_intents_pending_uq") return true;
+    if (record.code === "23505" && typeof record.constraint === "string") return record.constraint;
     current = record.cause;
   }
-  return false;
+  return null;
+}
+
+/** The same caller's retry key was already used for another change. */
+export class ApiIntentClientIdConflictError extends Error {
+  constructor() {
+    super("This clientIntentId was already used for a different change.");
+    this.name = "ApiIntentClientIdConflictError";
+  }
+}
+
+export async function findApiIntentByClientId(
+  roomId: string,
+  principal: ApiActor["principal"],
+  clientIntentId: string,
+): Promise<ApiIntentRow | null> {
+  const [row] = await db.select().from(api_intents).where(and(
+    eq(api_intents.room_id, roomId),
+    eq(api_intents.principal_kind, principal.kind),
+    eq(api_intents.principal_id, principal.id),
+    eq(api_intents.client_intent_id, clientIntentId),
+  )).limit(1);
+  return row ?? null;
+}
+
+/** The intent a retry key names, when it is the same change; a different change is a conflict. */
+export function sameClientIntent(row: ApiIntentRow, kind: IntentKind, payload: Record<string, unknown>): ApiIntentRow {
+  if (row.kind !== kind || row.payload_fingerprint !== intentPayloadFingerprint(kind, payload)) throw new ApiIntentClientIdConflictError();
+  return row;
 }
 
 /**
@@ -50,6 +78,7 @@ export async function insertApiIntent(input: {
   payload: Record<string, unknown>;
   actor: ApiActor;
   state: IntentState;
+  clientIntentId?: string | null;
   now: string;
 }): Promise<{ row: ApiIntentRow; created: boolean }> {
   const fingerprint = intentPayloadFingerprint(input.kind, input.payload);
@@ -63,6 +92,7 @@ export async function insertApiIntent(input: {
     principal_kind: principal.kind,
     principal_id: principal.id,
     principal_login: principal.login ?? null,
+    client_intent_id: input.clientIntentId ?? null,
     via_kind: via?.kind ?? null,
     via_id: via?.id ?? null,
     via_version: via?.version ?? null,
@@ -79,7 +109,13 @@ export async function insertApiIntent(input: {
     const [row] = await db.insert(api_intents).values(values).returning();
     return { row: row!, created: true };
   } catch (error) {
-    if (!isPendingConflict(error)) throw error;
+    const constraint = uniqueViolation(error);
+    if (constraint === "api_intents_client_id_uq" && input.clientIntentId) {
+      // A concurrent retry with the same key stored it first.
+      const first = await findApiIntentByClientId(input.roomId, principal, input.clientIntentId);
+      if (first) return { row: sameClientIntent(first, input.kind, input.payload), created: false };
+    }
+    if (constraint !== "api_intents_pending_uq") throw error;
   }
   const [existing] = await db.select().from(api_intents).where(and(
     eq(api_intents.room_id, input.roomId),
@@ -124,5 +160,20 @@ export async function moveApiIntent(
     .set({ ...change, updated_at: now })
     .where(and(eq(api_intents.room_id, roomId), eq(api_intents.id, id), inArray(api_intents.state, [...from])))
     .returning();
+  return row ?? null;
+}
+
+/** Intents `running` since before `before`, oldest first: what a stopped server may have left. */
+export async function listStaleRunningApiIntents(before: string, limit: number): Promise<ApiIntentRow[]> {
+  return db.select().from(api_intents)
+    .where(and(eq(api_intents.state, "running"), lt(api_intents.updated_at, before)))
+    .orderBy(asc(api_intents.updated_at))
+    .limit(limit);
+}
+
+/** The running intent a journal row was made for (its idempotency key is `api_intent:<id>`). */
+export async function getRunningApiIntent(roomId: string, id: string): Promise<ApiIntentRow | null> {
+  const [row] = await db.select().from(api_intents)
+    .where(and(eq(api_intents.room_id, roomId), eq(api_intents.id, id), eq(api_intents.state, "running"))).limit(1);
   return row ?? null;
 }

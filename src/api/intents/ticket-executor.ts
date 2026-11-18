@@ -15,6 +15,18 @@ import type { ReserveResult, SubmitTrackerEffectInput } from "../workflow-effect
  *    it runs with the room filter's connection, and room policy asks a room
  *    admin first.
  */
+/** Every intent's journal row has the idempotency key `api_intent:<intent id>`. */
+export const API_INTENT_EFFECT_KEY_PREFIX = "api_intent:";
+
+export function intentEffectKey(intentId: string): string {
+  return `${API_INTENT_EFFECT_KEY_PREFIX}${intentId}`;
+}
+
+/** The intent a journal row was made for, or null for any other row. */
+export function intentIdFromEffectKey(idempotencyKey: string): string | null {
+  return idempotencyKey.startsWith(API_INTENT_EFFECT_KEY_PREFIX) ? idempotencyKey.slice(API_INTENT_EFFECT_KEY_PREFIX.length) : null;
+}
+
 export interface TicketIntentDeps {
   /** The ticket inside the room filter, or ApiError `not_found` / `no_source`. */
   locate(roomId: string, key: string): Promise<LocatedWorkItem>;
@@ -22,7 +34,8 @@ export interface TicketIntentDeps {
   findConnectionBySite(accountId: string, provider: TrackerProvider, siteKey: string): Promise<TrackerConnectionRow | null>;
   reserve(input: SubmitTrackerEffectInput): Promise<ReserveResult>;
   drive(reserved: ReserveResult): Promise<WorkflowEffect>;
-  getEffect(id: string): Promise<WorkflowEffect | null>;
+  /** The intent's journal row by its idempotency key: the id may be gone after the journal prunes it. */
+  findEffect(roomId: string, idempotencyKey: string): Promise<WorkflowEffect | null>;
 }
 
 export interface TicketWritePlan {
@@ -78,7 +91,7 @@ export function ticketEffectRequest(input: {
     provider: input.plan.provider,
     key: input.plan.key,
     // One journal row per intent: a repeated run reads the first one back.
-    idempotency_key: `api_intent:${input.intentId}`,
+    idempotency_key: intentEffectKey(input.intentId),
     actor_label: input.actorLabel,
     action: input.kind === "ticket.transition"
       ? { kind: "tracker_transition", to_status: input.payload.toStatus ?? "" }
@@ -110,10 +123,11 @@ export function ticketEffectOutcome(effect: WorkflowEffect): TicketEffectOutcome
 
 /** The production wiring: the work item reader, the connection store and the effect broker. */
 export async function createDefaultTicketIntentDeps(): Promise<TicketIntentDeps | null> {
-  const [{ getDefaultWorkItemsReader }, { trackerConnectionStore }, { workflowEffectBroker }] = await Promise.all([
+  const [{ getDefaultWorkItemsReader }, { trackerConnectionStore }, { workflowEffectBroker }, effects] = await Promise.all([
     import("../connectors/work-items.js"),
     import("../connectors/store.js"),
     import("../workflow-effects/runtime.js"),
+    import("../db/workflow-effects.js"),
   ]);
   const reader = getDefaultWorkItemsReader();
   // No connector key on this server: no tracker connection can exist.
@@ -124,6 +138,6 @@ export async function createDefaultTicketIntentDeps(): Promise<TicketIntentDeps 
     findConnectionBySite: (accountId, provider, siteKey) => trackerConnectionStore.findBySite(accountId, provider, siteKey),
     reserve: (input) => workflowEffectBroker.reserveTrackerEffect(input),
     drive: (reserved) => workflowEffectBroker.driveTrackerEffect(reserved),
-    getEffect: (id) => workflowEffectBroker.getEffect(id),
+    findEffect: effects.getWorkflowEffectByIdempotencyKey,
   };
 }

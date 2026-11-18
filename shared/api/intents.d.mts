@@ -133,6 +133,8 @@ export const INTENT_PAYLOADS: Readonly<{
         body: z.ZodString;
     }, z.core.$strict>;
 }>;
+/** The caller's own retry key: letters, digits and `._:-`, up to 64. */
+export const CLIENT_INTENT_ID_PATTERN: RegExp;
 export const ProposeIntentInput: z.ZodObject<{
     kind: z.ZodEnum<{
         "task.create": "task.create";
@@ -140,6 +142,7 @@ export const ProposeIntentInput: z.ZodObject<{
         "ticket.transition": "ticket.transition";
         "ticket.comment": "ticket.comment";
     }>;
+    clientIntentId: z.ZodOptional<z.ZodString>;
     payload: z.ZodUnion<readonly [z.ZodObject<{
         title: z.ZodString;
         description: z.ZodOptional<z.ZodString>;
@@ -224,6 +227,7 @@ export const Intent: z.ZodObject<{
             version: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
+    clientIntentId: z.ZodNullable<z.ZodString>;
     decidedBy: z.ZodNullable<z.ZodString>;
     decidedAt: z.ZodNullable<z.ZodString>;
     result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -270,6 +274,7 @@ export const IntentList: z.ZodObject<{
                 version: z.ZodOptional<z.ZodNumber>;
             }, z.core.$strip>>;
         }, z.core.$strip>;
+        clientIntentId: z.ZodNullable<z.ZodString>;
         decidedBy: z.ZodNullable<z.ZodString>;
         decidedAt: z.ZodNullable<z.ZodString>;
         result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -285,6 +290,7 @@ export const proposeIntent: import("./core.mjs").ApiMethod<"intents.propose", z.
         "ticket.transition": "ticket.transition";
         "ticket.comment": "ticket.comment";
     }>;
+    clientIntentId: z.ZodOptional<z.ZodString>;
     payload: z.ZodUnion<readonly [z.ZodObject<{
         title: z.ZodString;
         description: z.ZodOptional<z.ZodString>;
@@ -348,6 +354,7 @@ export const proposeIntent: import("./core.mjs").ApiMethod<"intents.propose", z.
             version: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
+    clientIntentId: z.ZodNullable<z.ZodString>;
     decidedBy: z.ZodNullable<z.ZodString>;
     decidedAt: z.ZodNullable<z.ZodString>;
     result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -393,6 +400,7 @@ export const getIntent: import("./core.mjs").ApiMethod<"intents.get", z.ZodObjec
             version: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
+    clientIntentId: z.ZodNullable<z.ZodString>;
     decidedBy: z.ZodNullable<z.ZodString>;
     decidedAt: z.ZodNullable<z.ZodString>;
     result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -447,6 +455,7 @@ export const listIntents: import("./core.mjs").ApiMethod<"intents.list", z.ZodOb
                 version: z.ZodOptional<z.ZodNumber>;
             }, z.core.$strip>>;
         }, z.core.$strip>;
+        clientIntentId: z.ZodNullable<z.ZodString>;
         decidedBy: z.ZodNullable<z.ZodString>;
         decidedAt: z.ZodNullable<z.ZodString>;
         result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -493,6 +502,7 @@ export const approveIntent: import("./core.mjs").ApiMethod<"intents.approve", z.
             version: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
+    clientIntentId: z.ZodNullable<z.ZodString>;
     decidedBy: z.ZodNullable<z.ZodString>;
     decidedAt: z.ZodNullable<z.ZodString>;
     result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -539,6 +549,7 @@ export const denyIntent: import("./core.mjs").ApiMethod<"intents.deny", z.ZodObj
             version: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
+    clientIntentId: z.ZodNullable<z.ZodString>;
     decidedBy: z.ZodNullable<z.ZodString>;
     decidedAt: z.ZodNullable<z.ZodString>;
     result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -553,6 +564,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"intents.propose"
         "ticket.transition": "ticket.transition";
         "ticket.comment": "ticket.comment";
     }>;
+    clientIntentId: z.ZodOptional<z.ZodString>;
     payload: z.ZodUnion<readonly [z.ZodObject<{
         title: z.ZodString;
         description: z.ZodOptional<z.ZodString>;
@@ -616,6 +628,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"intents.propose"
             version: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
+    clientIntentId: z.ZodNullable<z.ZodString>;
     decidedBy: z.ZodNullable<z.ZodString>;
     decidedAt: z.ZodNullable<z.ZodString>;
     result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -660,6 +673,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"intents.propose"
             version: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
+    clientIntentId: z.ZodNullable<z.ZodString>;
     decidedBy: z.ZodNullable<z.ZodString>;
     decidedAt: z.ZodNullable<z.ZodString>;
     result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -713,6 +727,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"intents.propose"
                 version: z.ZodOptional<z.ZodNumber>;
             }, z.core.$strip>>;
         }, z.core.$strip>;
+        clientIntentId: z.ZodNullable<z.ZodString>;
         decidedBy: z.ZodNullable<z.ZodString>;
         decidedAt: z.ZodNullable<z.ZodString>;
         result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -758,6 +773,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"intents.propose"
             version: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
+    clientIntentId: z.ZodNullable<z.ZodString>;
     decidedBy: z.ZodNullable<z.ZodString>;
     decidedAt: z.ZodNullable<z.ZodString>;
     result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -803,6 +819,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"intents.propose"
             version: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
+    clientIntentId: z.ZodNullable<z.ZodString>;
     decidedBy: z.ZodNullable<z.ZodString>;
     decidedAt: z.ZodNullable<z.ZodString>;
     result: z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>;

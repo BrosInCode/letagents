@@ -112,8 +112,17 @@ export function parseIntentPayload(kind, payload) {
 
 // One object at the top, so MCP tools can take it as their input; the payload
 // is checked against its kind below.
+/** The caller's own retry key: letters, digits and `._:-`, up to 64. */
+export const CLIENT_INTENT_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
+
 export const ProposeIntentInput = z.strictObject({
   kind: z.enum(INTENT_KINDS),
+  /**
+   * Optional retry key, unique per proposer in the room. A retry with the same
+   * key returns the first intent and proposes nothing new; the same key with
+   * another change is a conflict.
+   */
+  clientIntentId: z.string().regex(CLIENT_INTENT_ID_PATTERN).optional(),
   payload: z.union([TaskCreatePayload, TaskUpdatePayload, TicketTransitionPayload, TicketCommentPayload]),
 }).superRefine((value, ctx) => {
   const parsed = parseIntentPayload(value.kind, value.payload);
@@ -137,6 +146,8 @@ export const Intent = z.object({
   payload: z.record(z.string(), z.unknown()),
   state: z.enum(INTENT_STATES),
   proposedBy: IntentProposer,
+  /** The proposer's retry key, when it gave one. */
+  clientIntentId: z.string().nullable(),
   /** The room admin (account id) who approved or denied it; null while undecided or when policy allowed it. */
   decidedBy: z.string().nullable(),
   decidedAt: z.string().nullable(),
@@ -169,8 +180,10 @@ export const proposeIntent = defineMethod({
     + "ticket.comment { key, body }. Board kinds need tasks.propose, ticket kinds tickets.propose. The room policy decides: "
     + "the intent runs at once (state running, then done or failed), or waits for a room admin (pending_approval). "
     + "A ticket must be inside the room's tracker filter. A ticket write runs at once only through the viewer's own "
-    + "tracker connection on the room's tracker site; otherwise a room admin approves it. Proposing the same pending "
-    + "change again returns the pending intent.",
+    + "tracker connection on the room's tracker site; otherwise a room admin approves it. Owner tokens and other "
+    + "integrations act for the person but not in person: board kinds are refused for them (agents use board intents). "
+    + "Proposing the same pending change again returns the pending intent; a retry with the same clientIntentId returns "
+    + "the first intent.",
   path: "/rooms/:room/intents",
   input: ProposeIntentInput,
   output: Intent,
@@ -229,8 +242,8 @@ export const denyIntent = defineMethod({
   kind: "write",
   capability: "rooms.admin",
   description:
-    "Denies a pending intent; nothing is written. Denying again returns the intent. An intent that was approved gives "
-    + "conflict. Room admins only, signed in to the LetAgents app; pages, agents and owner tokens get not_granted.",
+    "Denies a pending or approved intent that has not started; nothing is written. Denying again returns the intent. "
+    + "An intent that started running or finished gives conflict. Room admins only, signed in to the LetAgents app; pages, agents and owner tokens get not_granted.",
   path: "/rooms/:room/intents/:intentId/deny",
   input: z.strictObject({ intentId, reason: z.string().trim().max(INTENT_LIMITS.reasonChars).optional() }),
   output: Intent,

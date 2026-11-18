@@ -13,12 +13,18 @@ import {
 } from "../../../shared/api/intents.mjs";
 import { ROOM_RESOURCE_INTENTS } from "../../../shared/room-resource-invalidation.mjs";
 import {
+  ApiIntentClientIdConflictError,
+  findApiIntentByClientId,
   getApiIntent,
+  getRunningApiIntent,
   insertApiIntent,
   listApiIntents,
+  listStaleRunningApiIntents,
   moveApiIntent,
+  sameClientIntent,
   type ApiIntentRow,
 } from "../db/api-intents.js";
+import type { WorkflowEffect } from "../db/types/effects.js";
 import type { Project } from "../db/types.js";
 import { GitHubAccessUnavailableError } from "../github/repo-access.js";
 import { emitProjectMessage, queueRoomResourceInvalidation } from "../server/events.js";
@@ -27,6 +33,7 @@ import { resolvePolicy, type ResolvedApiPolicy } from "../v1/policy.js";
 import {
   checkTaskUpdate,
   createDefaultTaskIntentBoard,
+  intentClientTaskId,
   runTaskCreate,
   runTaskUpdate,
   TaskIntentRefusal,
@@ -34,6 +41,8 @@ import {
 } from "./task-executor.js";
 import {
   createDefaultTicketIntentDeps,
+  intentEffectKey,
+  intentIdFromEffectKey,
   planTicketWrite,
   ticketEffectOutcome,
   ticketEffectRequest,
@@ -94,6 +103,7 @@ export function toIntent(row: ApiIntentRow): Intent {
         },
       } : {}),
     },
+    clientIntentId: row.client_intent_id,
     decidedBy: row.decided_by,
     decidedAt: isoTime(row.decided_at),
     result: row.result ?? null,
@@ -137,6 +147,8 @@ export async function proposeIntent(
     account: RoomAccessAccount | null;
     kind: IntentKind;
     payload: unknown;
+    /** The caller's retry key (`clientIntentId`). */
+    clientIntentId?: string;
     /** The policy the caller already resolved for this call (the /api/v1 check); read here otherwise. */
     policy?: ResolvedApiPolicy;
   },
@@ -148,6 +160,11 @@ export async function proposeIntent(
     throw new ApiError("invalid_input", parsed.error.issues.map((issue) => `payload.${issue.path.join(".")}: ${issue.message}`).join("; "));
   }
   const payload = parsed.data as Record<string, unknown>;
+  if (input.clientIntentId) {
+    // A retry: the first intent, as it is now. Nothing is checked or run again.
+    const first = await findApiIntentByClientId(room.id, actor.principal, input.clientIntentId);
+    if (first) return { intent: toIntent(await refreshIntent(room.id, clientIntent(first, kind, payload), deps)), created: false };
+  }
   const capability = intentCapability({ kind });
   const policy = input.policy ?? await deps.resolvePolicy(room.id, capability, actor);
   if (policy.mode === "deny") {
@@ -157,8 +174,9 @@ export async function proposeIntent(
 
   let context: RunContext;
   if (kind === "task.create" || kind === "task.update") {
-    if (actor.principal.kind !== "person" || !input.account) {
-      throw new ApiError("not_granted", "Agents change the board with board intents, not API intents.");
+    if (!actsInPersonOrThroughPage(actor) || !input.account) {
+      throw new ApiError("not_granted",
+        "Board changes through the API need the person in the LetAgents app or a page they opened; agents and tokens use board intents.");
     }
     const role = await deps.roomRole(room, { accountId: actor.principal.id, account: input.account });
     if (role === "none") throw new ApiError("not_participant", "You are not a participant in this room.");
@@ -177,12 +195,18 @@ export async function proposeIntent(
       accountId: actor.principal.kind === "person" ? actor.principal.id : null,
     });
     context = { kind: "ticket", plan };
-    if (mode === "approve" && plan.own && policy.rule === "own_tracker_connection") mode = "allow";
+    // Only the viewer's own connection writes as the viewer. Any other write
+    // uses the filter owner's credentials, so a room admin approves it, also
+    // when the room set this capability to allow or confirm.
+    if (!plan.own) mode = "approve";
+    else if (mode === "approve" && policy.rule === "own_tracker_connection") mode = "allow";
   }
 
   const now = deps.now();
   if (mode === "approve") {
-    const { row, created } = await insertApiIntent({ roomId: room.id, kind, payload, actor, state: "pending_approval", now });
+    const { row, created } = await clientIdConflictAsApiError(insertApiIntent({
+      roomId: room.id, kind, payload, actor, state: "pending_approval", clientIntentId: input.clientIntentId, now,
+    }));
     if (created) {
       deps.invalidate(room.id);
       try {
@@ -194,7 +218,10 @@ export async function proposeIntent(
     }
     return { intent: toIntent(row), created };
   }
-  const { row } = await insertApiIntent({ roomId: room.id, kind, payload, actor, state: "running", now });
+  const { row, created } = await clientIdConflictAsApiError(insertApiIntent({
+    roomId: room.id, kind, payload, actor, state: "running", clientIntentId: input.clientIntentId, now,
+  }));
+  if (!created) return { intent: toIntent(await refreshIntent(room.id, row, deps)), created: false };
   deps.invalidate(room.id);
   return { intent: toIntent(await runIntent(room, row, context, deps)), created: true };
 }
@@ -241,17 +268,20 @@ export async function approveIntent(
   return toIntent(await runIntent(room, running, context, deps));
 }
 
-/** A room admin refuses a pending intent; nothing is written. Denying again returns it. */
+/**
+ * A room admin refuses an intent that has not started (pending, or approved
+ * but not yet running); nothing is written. Denying again returns it.
+ */
 export async function denyIntent(
   input: { room: Project; intentId: string; adminAccountId: string; reason?: string },
   deps: IntentServiceDeps = defaultIntentServiceDeps,
 ): Promise<Intent> {
   const { room } = input;
   const row = await requireIntent(room.id, input.intentId);
-  if (row.state === "pending_approval") {
+  if (row.state === "pending_approval" || row.state === "approved") {
     const now = deps.now();
     const reason = input.reason?.trim();
-    const denied = await moveApiIntent(room.id, row.id, ["pending_approval"], {
+    const denied = await moveApiIntent(room.id, row.id, ["pending_approval", "approved"], {
       state: "denied",
       decided_by: input.adminAccountId,
       decided_at: now,
@@ -264,7 +294,7 @@ export async function denyIntent(
   }
   const current = await requireIntent(room.id, row.id);
   if (current.state === "denied") return toIntent(current);
-  throw new ApiError("conflict", "This intent was already approved.");
+  throw new ApiError("conflict", "This intent already started or finished.");
 }
 
 export async function getIntent(roomId: string, intentId: string, deps: IntentServiceDeps = defaultIntentServiceDeps): Promise<Intent> {
@@ -300,7 +330,10 @@ async function refusalAsApiError<T>(work: Promise<T>): Promise<T> {
 async function runContextNow(room: Project, row: ApiIntentRow, deps: IntentServiceDeps): Promise<RunContext> {
   const kind = row.kind as IntentKind;
   if (kind === "task.create" || kind === "task.update") {
-    // Only people propose board kinds (proposeIntent).
+    // proposeIntent stores board kinds only from a person in person or through a page.
+    if (row.principal_kind !== "person" || (row.via_kind !== null && row.via_kind !== "page")) {
+      throw new ApiError("not_granted", "Board changes through the API need the person in the LetAgents app or a page they opened.");
+    }
     const role = await deps.roomRole(room, { accountId: row.principal_id });
     if (role === "none") throw new ApiError("not_participant", "The person who proposed this can no longer open this room.");
     return { kind: "task", isAdmin: role === "admin" };
@@ -357,14 +390,110 @@ async function finish(
   return moved ?? await getApiIntent(roomId, row.id) ?? row;
 }
 
-/** A running ticket write follows its journal row; the journal sweep retries it in the background. */
+/**
+ * A running ticket write follows its journal row, found by its idempotency
+ * key (`effect_id` is cleared when the journal prunes a settled row).
+ */
 async function refreshIntent(roomId: string, row: ApiIntentRow, deps: IntentServiceDeps): Promise<ApiIntentRow> {
-  if (row.state !== "running" || !row.effect_id) return row;
+  if (row.state !== "running" || !row.kind.startsWith("ticket.")) return row;
   const tickets = await deps.tickets();
-  const effect = tickets ? await tickets.getEffect(row.effect_id) : null;
+  const effect = tickets ? await tickets.findEffect(roomId, intentEffectKey(row.id)) : null;
   if (!effect) return row;
   const outcome = ticketEffectOutcome(effect);
   return outcome.state === "running" ? row : finish(roomId, row, outcome, deps);
+}
+
+/**
+ * The effect broker calls this after every write or lookup it runs. An
+ * intent's ticket write finishes its intent here, whether a request or the
+ * journal sweep ran it.
+ */
+export async function settleIntentFromEffect(effect: WorkflowEffect, deps: IntentServiceDeps = defaultIntentServiceDeps): Promise<void> {
+  const intentId = intentIdFromEffectKey(effect.idempotency_key);
+  if (!intentId) return;
+  const row = await getRunningApiIntent(effect.room_id, intentId);
+  if (!row) return;
+  const outcome = ticketEffectOutcome(effect);
+  if (outcome.state !== "running") await finish(effect.room_id, row, outcome, deps);
+}
+
+/** How long an intent may stay `running` before the sweep looks at it. */
+export const STUCK_INTENT_AFTER_MS = 10 * 60_000;
+/** A ticket write the tracker never confirmed (a comment stays ambiguous) fails after this. */
+export const UNCONFIRMED_TICKET_WRITE_FAILS_AFTER_MS = 24 * 60 * 60_000;
+
+/**
+ * Intents a stopped server left `running`. A board change runs in one
+ * request, so one still running after ten minutes was cut short:
+ * - `task.create`: done when its card exists (the card's creation id is the
+ *   intent's), else failed. Nothing is run again.
+ * - `task.update`: failed; the person reads the task and proposes again.
+ * - ticket kinds: finished from the journal row with the intent's key. No
+ *   row: it never reached the journal, so failed. A row still unsettled:
+ *   the journal sweep retries it; the intent goes to the back of the queue,
+ *   and fails after a day without a confirmed write.
+ */
+export async function sweepStuckIntents(deps: IntentServiceDeps = defaultIntentServiceDeps, limit = 50): Promise<number> {
+  const nowMs = Date.parse(deps.now());
+  const stale = await listStaleRunningApiIntents(new Date(nowMs - STUCK_INTENT_AFTER_MS).toISOString(), limit);
+  for (const row of stale) {
+    try {
+      await sweepOne(row, nowMs, deps);
+    } catch (error) {
+      console.error(`[api intents] the stuck intent sweep failed for ${row.id}`, error);
+    }
+  }
+  return stale.length;
+}
+
+async function sweepOne(row: ApiIntentRow, nowMs: number, deps: IntentServiceDeps): Promise<void> {
+  const stopped = "The server stopped while it made this change. Read the current state and propose it again if it is still needed.";
+  if (row.kind === "task.create") {
+    const card = await (await deps.board()).findTaskByClientId(row.room_id, intentClientTaskId(row.id));
+    await finish(row.room_id, row, card ? { state: "done", result: { taskId: card.id } } : { state: "failed", error: stopped }, deps);
+    return;
+  }
+  if (row.kind === "task.update") {
+    await finish(row.room_id, row, { state: "failed", error: stopped }, deps);
+    return;
+  }
+  const tickets = await deps.tickets();
+  const effect = tickets ? await tickets.findEffect(row.room_id, intentEffectKey(row.id)) : null;
+  if (!effect) {
+    await finish(row.room_id, row, { state: "failed", error: "The tracker was not changed: the server stopped before the write started." }, deps);
+    return;
+  }
+  const outcome = ticketEffectOutcome(effect);
+  if (outcome.state !== "running") {
+    await finish(row.room_id, row, outcome, deps);
+  } else if (nowMs - Date.parse(row.created_at) > UNCONFIRMED_TICKET_WRITE_FAILS_AFTER_MS) {
+    await finish(row.room_id, row, { state: "failed", error: "The tracker never confirmed this change. Check the ticket." }, deps);
+  } else {
+    await moveApiIntent(row.room_id, row.id, ["running"], {}, deps.now());
+  }
+}
+
+/** A person in the LetAgents app, or a page they opened. Not an agent, a job, an owner token or another integration. */
+function actsInPersonOrThroughPage(actor: ApiActor): boolean {
+  return actor.principal.kind === "person" && (!actor.via || actor.via.kind === "page");
+}
+
+function clientIntent(row: ApiIntentRow, kind: IntentKind, payload: Record<string, unknown>): ApiIntentRow {
+  try {
+    return sameClientIntent(row, kind, payload);
+  } catch (error) {
+    if (error instanceof ApiIntentClientIdConflictError) throw new ApiError("conflict", error.message);
+    throw error;
+  }
+}
+
+async function clientIdConflictAsApiError<T>(work: Promise<T>): Promise<T> {
+  try {
+    return await work;
+  } catch (error) {
+    if (error instanceof ApiIntentClientIdConflictError) throw new ApiError("conflict", error.message);
+    throw error;
+  }
 }
 
 function isTransient(error: unknown): boolean {

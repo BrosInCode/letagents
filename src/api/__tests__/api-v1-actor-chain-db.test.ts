@@ -380,7 +380,11 @@ test("policy routes: a room admin in the app reads and sets them; others, owner 
 
   const refused = { code: "not_granted", message: "Only a room admin, signed in to LetAgents, can manage this room's API policy." };
   assert.deepEqual(await v1(route, { headers: { cookie: bob.cookie } }), { status: 403, body: refused });
-  assert.deepEqual(await put({ bearer: OWNER_TOKEN }), { status: 403, body: refused });
+  // An owner token acts through an integration, so room administration is refused before the route runs.
+  assert.deepEqual(await put({ bearer: OWNER_TOKEN }), {
+    status: 403, body: { code: "not_granted", message: "Only a person signed in to LetAgents, acting for themselves, can do this." },
+  });
+  assert.equal((await v1(route, { bearer: OWNER_TOKEN })).body.code, "not_granted");
   const adminPage = await helpers!.mintTestPageGrant({ accountId: ada.id, roomId: roomA, capabilities: ["rooms.read"] });
   // The pipeline refuses a page before the handler: room administration is never granted.
   assert.deepEqual(await put({ bearer: adminPage.token }), {

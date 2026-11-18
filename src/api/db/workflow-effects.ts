@@ -292,6 +292,13 @@ export async function reserveTrackerWorkflowEffect(
   });
 }
 
+/** The journal row for one idempotency key in a room (unique), whatever its id. */
+export async function getWorkflowEffectByIdempotencyKey(roomId: string, idempotencyKey: string): Promise<WorkflowEffect | null> {
+  const [row] = await db.select().from(workflow_effects)
+    .where(and(eq(workflow_effects.room_id, roomId), eq(workflow_effects.idempotency_key, idempotencyKey))).limit(1);
+  return row ? toWorkflowEffect(row) : null;
+}
+
 export async function getWorkflowEffect(id: string): Promise<WorkflowEffect | null> {
   const [row] = await db.select().from(workflow_effects).where(eq(workflow_effects.id, id)).limit(1);
   return row ? toWorkflowEffect(row) : null;

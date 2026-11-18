@@ -118,6 +118,12 @@
           ],
           "additionalProperties": false
         },
+        "clientIntentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "decidedBy": {
           "type": [
             "string",
@@ -163,6 +169,7 @@
         "payload",
         "state",
         "proposedBy",
+        "clientIntentId",
         "decidedBy",
         "decidedAt",
         "result",
@@ -296,6 +303,12 @@
           ],
           "additionalProperties": false
         },
+        "clientIntentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "decidedBy": {
           "type": [
             "string",
@@ -341,6 +354,7 @@
         "payload",
         "state",
         "proposedBy",
+        "clientIntentId",
         "decidedBy",
         "decidedAt",
         "result",
@@ -469,6 +483,12 @@
           ],
           "additionalProperties": false
         },
+        "clientIntentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "decidedBy": {
           "type": [
             "string",
@@ -514,6 +534,7 @@
         "payload",
         "state",
         "proposedBy",
+        "clientIntentId",
         "decidedBy",
         "decidedAt",
         "result",
@@ -661,6 +682,12 @@
                 ],
                 "additionalProperties": false
               },
+              "clientIntentId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "decidedBy": {
                 "type": [
                   "string",
@@ -706,6 +733,7 @@
               "payload",
               "state",
               "proposedBy",
+              "clientIntentId",
               "decidedBy",
               "decidedAt",
               "result",
@@ -746,6 +774,10 @@
             "ticket.transition",
             "ticket.comment"
           ]
+        },
+        "clientIntentId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{1,64}$"
         },
         "payload": {
           "anyOf": [
@@ -971,6 +1003,12 @@
           ],
           "additionalProperties": false
         },
+        "clientIntentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "decidedBy": {
           "type": [
             "string",
@@ -1016,6 +1054,7 @@
         "payload",
         "state",
         "proposedBy",
+        "clientIntentId",
         "decidedBy",
         "decidedAt",
         "result",

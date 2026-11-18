@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS "api_intents" (
 	"principal_kind" text NOT NULL,
 	"principal_id" text NOT NULL,
 	"principal_login" text,
+	"client_intent_id" text,
 	"via_kind" text,
 	"via_id" text,
 	"via_version" integer,
@@ -41,10 +42,18 @@ CREATE INDEX IF NOT EXISTS "api_intents_room_created_idx" ON "api_intents" USING
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "api_intents_pending_uq" ON "api_intents" USING btree ("room_id", "kind", "payload_fingerprint", "principal_kind", "principal_id") WHERE "state" = 'pending_approval';
 --> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "api_intents_client_id_uq" ON "api_intents" USING btree ("room_id", "principal_kind", "principal_id", "client_intent_id") WHERE "client_intent_id" IS NOT NULL;
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "api_intents_running_idx" ON "api_intents" USING btree ("updated_at") WHERE "state" = 'running';
+--> statement-breakpoint
 ALTER TABLE "workflow_effects" ALTER COLUMN "task_id" DROP NOT NULL;
 --> statement-breakpoint
 ALTER TABLE "workflow_effects" ADD COLUMN IF NOT EXISTS "subject" text;
 --> statement-breakpoint
 ALTER TABLE "workflow_effects" DROP CONSTRAINT IF EXISTS "workflow_effects_target_check";
 --> statement-breakpoint
-ALTER TABLE "workflow_effects" ADD CONSTRAINT "workflow_effects_target_check" CHECK ("task_id" IS NOT NULL OR ("kind" IN ('tracker_transition', 'tracker_comment') AND "subject" IS NOT NULL));
+-- NOT VALID, then VALIDATE in its own statement, as earlier migrations here
+-- do: the old-row scan runs under VALIDATE's lighter lock.
+ALTER TABLE "workflow_effects" ADD CONSTRAINT "workflow_effects_target_check" CHECK ("task_id" IS NOT NULL OR ("kind" IN ('tracker_transition', 'tracker_comment') AND "subject" IS NOT NULL)) NOT VALID;
+--> statement-breakpoint
+ALTER TABLE "workflow_effects" VALIDATE CONSTRAINT "workflow_effects_target_check";
