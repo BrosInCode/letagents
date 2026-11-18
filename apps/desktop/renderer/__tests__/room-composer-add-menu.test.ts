@@ -225,6 +225,49 @@ test('the panel beside the menu is never taller than the space above the compose
   assert.equal(vm.flyoutMaxHeight.value, 628);
 });
 
+test('the panel measures its cap again while the composer under it changes height, and stops when it closes', async t => {
+  const observers: Array<{ observed: unknown[]; disconnected: boolean; fire: () => void }> = [];
+  (globalThis as any).ResizeObserver = class {
+    observed: unknown[] = [];
+    disconnected = false;
+    constructor(private callback: () => void) { observers.push(this as any); }
+    observe(target: unknown) { this.observed.push(target); }
+    disconnect() { this.disconnected = true; }
+    fire() { this.callback(); }
+  };
+  t.after(() => { delete (globalThis as any).ResizeObserver; });
+  const { vm } = mountMenu(t, { inviteAvailable: true });
+  Object.assign(window, { innerWidth: 1400 });
+  vm.openMenu(true);
+  vm.choose(vm.items.value.find((item: any) => item.id === 'invite'), true);
+  await flush();
+  let bottom = 640;
+  const composer = { overflowY: 'visible', parentElement: null, getBoundingClientRect: () => ({ top: 650 }) };
+  vm.flyoutElement.value = { getBoundingClientRect: () => ({ bottom, left: 0 }), offsetParent: composer, parentElement: composer, querySelector: () => null };
+  await flush();
+  assert.equal(observers.length, 1);
+  assert.equal(vm.flyoutMaxHeight.value, 628);
+  // A notice grows the composer by 100px: the panel's bottom edge moves up with it.
+  bottom = 540;
+  observers[0]!.fire();
+  assert.equal(vm.flyoutMaxHeight.value, 528);
+  vm.flyoutElement.value = null;
+  await flush();
+  assert.equal(observers[0]!.disconnected, true, 'a closed panel stops watching');
+});
+
+test('an Escape that ends an input method composition leaves the panel open', async t => {
+  const { vm } = mountMenu(t, { inviteAvailable: true });
+  vm.openMenu(true);
+  vm.choose(vm.items.value.find((item: any) => item.id === 'invite'), true);
+  await flush();
+  vm.handleFlyoutKey(key('Escape', { isComposing: true }));
+  assert.equal(vm.flyout.value, 'invite');
+  vm.handleFlyoutKey(key('Escape'));
+  await flush();
+  assert.equal(vm.flyout.value, null, 'a plain Escape still goes back to the menu');
+});
+
 test('disabling "+" closes an open menu and keeps it closed', async t => {
   const { vm, props } = mountMenu(t);
   vm.toggle({ detail: 1 });

@@ -35,6 +35,11 @@
   flex-direction: column;
 }
 
+/* The narrow panel's Back row keeps its height; only the panel's content gives way. */
+.desktop-composer-add-flyout[data-flyout="invite"] > :not(.desktop-invite-bot) {
+  flex: none;
+}
+
 /* No room beside the menu: the panel takes the menu's place, with a Back row. */
 .desktop-composer-add-flyout.is-narrow {
   left: -1px;

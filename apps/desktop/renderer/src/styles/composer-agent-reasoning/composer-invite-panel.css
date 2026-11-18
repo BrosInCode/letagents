@@ -111,9 +111,16 @@
   display: none;
 }
 
-/* With a search field, the list keeps its height while you type, so the panel does not jump. */
+/* With a search field, the list keeps its height while you type, so the panel does not jump.
+   Under a small height cap it keeps two rows; below that the panel scrolls. */
 .desktop-invite-bot-rooms[data-searchable] .desktop-invite-bot-list {
   height: 236px;
+  min-height: 72px;
+}
+
+/* A short list (six rooms or fewer) keeps every row; under a small cap the panel scrolls. */
+.desktop-invite-bot-rooms:not([data-searchable]) .desktop-invite-bot-list {
+  flex-shrink: 0;
 }
 
 .desktop-invite-bot-list[data-more-below] {

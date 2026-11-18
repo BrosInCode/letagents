@@ -26,15 +26,15 @@
           aria-label="Find a room"
           role="combobox"
           aria-autocomplete="list"
-          aria-expanded="true"
-          :aria-controls="listId"
+          :aria-expanded="picker.shown.value.length > 0"
+          :aria-controls="picker.shown.value.length ? listId : undefined"
           :aria-activedescendant="activeRoomId"
           autocomplete="off"
           spellcheck="false"
           data-invite-autofocus
           data-testid="desktop-invite-bot-room-search"
           @input="findRoom(($event.target as HTMLInputElement).value)"
-          @keydown="picker.handleKey"
+          @keydown="searchKey"
         />
         <kbd aria-hidden="true">↵</kbd>
       </label>
@@ -164,7 +164,7 @@ import { inviteBotCodeSummary, useInviteBotCode } from "../../../../../../../../
 import type { DesktopBotInviteRoom } from "../../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { roomInvites } from "../../../../composables/useRoomInvites";
-import { inviteRoomListFades, inviteRoomMeta, useInviteRoomPicker } from "./invite-room-picker";
+import { inviteRoomListFades, inviteRoomMeta, inviteRoomScrollToReveal, useInviteRoomPicker } from "./invite-room-picker";
 import { prefersReducedMotion } from "./room-gif-search";
 
 /** The room whose composer opened the panel. */
@@ -256,8 +256,21 @@ function updateFades(): void {
 function findRoom(text: string): void {
   typed.value = true;
   picker.setQuery(text);
-  // A new search shows its first rows.
-  if (list.value) list.value.scrollTop = 0;
+}
+
+/** Scrolls only the list, so the active row is in sight and clear of the fades. */
+function revealActive(): void {
+  void nextTick(() => {
+    const element = list.value;
+    const row = element?.querySelector?.<HTMLElement>("[data-active]");
+    if (!element || !row) return;
+    element.scrollTop = inviteRoomScrollToReveal(element, { top: row.offsetTop, height: row.offsetHeight });
+  });
+}
+
+/** ↑ and ↓ bring the active row into sight; the pointer moving over a row never scrolls the list. */
+function searchKey(event: KeyboardEvent): void {
+  if (picker.handleKey(event) && (event.key === "ArrowDown" || event.key === "ArrowUp")) revealActive();
 }
 
 // The fades follow the rows shown and the list's own height (the flyout may cap it).
@@ -274,10 +287,8 @@ watch(list, (element) => {
   }
   void nextTick(updateFades);
 });
-// The active row stays in sight while ↑ and ↓ move it.
-watch(() => picker.active.value, () => void nextTick(() => {
-  list.value?.querySelector<HTMLElement>("[data-active]")?.scrollIntoView?.({ block: "nearest" });
-}));
+// A new search, or Escape clearing one, shows its first rows (its first row is active).
+watch(() => picker.query.value, () => { if (list.value) list.value.scrollTop = 0; });
 
 function swapTo(next: "rooms" | "invite"): void {
   swap.value = prefersReducedMotion() ? null : next === "invite" ? "forward" : "back";
@@ -311,9 +322,11 @@ function pickRoom(room: DesktopBotInviteRoom): void {
 
 function backToRooms(): void {
   invite.reset();
-  // Back in the list, the rows come in as they did the first time; the search keeps its text.
+  // Back in the list, the rows come in as they did the first time; the search keeps its text
+  // and its active row, which the list scrolls to.
   typed.value = false;
   swapTo("rooms");
+  if (picker.searchable.value) revealActive();
 }
 
 /** Makes a room on press, with a name made up like any new room's, and shows its invite. */

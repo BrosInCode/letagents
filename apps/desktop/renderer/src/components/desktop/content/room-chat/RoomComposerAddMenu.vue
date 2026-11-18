@@ -390,7 +390,8 @@ function closeOnOutsidePointer(event: PointerEvent): void {
 // Escape spent on closing the menu does nothing else, such as dismissing a suggestion.
 /** An Escape the panel did not use (on a quick search, Back or the GIPHY link) goes back to the menu. */
 function handleFlyoutKey(event: KeyboardEvent): void {
-  if (event.key !== "Escape" || event.defaultPrevented) return;
+  // An Escape that ends an input method's composition is the input method's, not the panel's.
+  if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
   event.preventDefault();
   event.stopPropagation();
   backToMenu();
@@ -441,10 +442,25 @@ function setDocumentListeners(listening: boolean): void {
   if (typeof window !== "undefined") window[method]("resize", measureFlyout);
 }
 watch(open, setDocumentListeners);
-// Measured once the panel is in the page, before it is painted.
-watch(flyoutElement, (element) => { if (element) measureFlyoutHeight(); }, { flush: "post" });
+// Measured once the panel is in the page, before it is painted, and again while the
+// composer under it changes height (a notice or an approval appears): the panel moves with it.
+let composerResize: ResizeObserver | null = null;
+watch(flyoutElement, (element) => {
+  composerResize?.disconnect();
+  composerResize = null;
+  if (!element) return;
+  measureFlyoutHeight();
+  const composer = element.offsetParent;
+  if (composer && typeof ResizeObserver !== "undefined") {
+    composerResize = new ResizeObserver(() => measureFlyoutHeight());
+    composerResize.observe(composer);
+  }
+}, { flush: "post" });
 watch(() => props.disabled, (disabled) => { if (disabled) closeMenu(); });
-onBeforeUnmount(() => setDocumentListeners(false));
+onBeforeUnmount(() => {
+  setDocumentListeners(false);
+  composerResize?.disconnect();
+});
 
 defineExpose({ close: closeMenu, isOpen: () => open.value, openGif });
 </script>

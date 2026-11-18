@@ -10,6 +10,7 @@ import {
   inviteRoomListFades,
   inviteRoomMeta,
   inviteRoomNameParts,
+  inviteRoomScrollToReveal,
   useInviteRoomPicker,
 } from "../src/components/desktop/content/room-chat/invite-room-picker";
 import type { DesktopBotInviteRoom } from "../../electron/ipc-types";
@@ -191,6 +192,18 @@ test("an edge of the list fades only while more rows are past it", () => {
   assert.deepEqual(inviteRoomListFades({ scrollTop: 863.5, scrollHeight: 1100, clientHeight: 236 }), { above: true, below: false });
 });
 
+test("↑ and ↓ scroll only as far as needed to bring the active row clear of the fades", () => {
+  // 31 rows of 34px with a 2px gap; the list shows 236px.
+  const list = { scrollTop: 0, clientHeight: 236 };
+  const row = (index: number) => ({ top: index * 36, height: 34 });
+  assert.equal(inviteRoomScrollToReveal(list, row(0)), 0, "a row in sight does not scroll");
+  assert.equal(inviteRoomScrollToReveal(list, row(4)), 0);
+  assert.equal(inviteRoomScrollToReveal(list, row(5)), 5 * 36 + 34 + 22 - 236, "a row under the bottom fade comes up just clear of it");
+  assert.equal(inviteRoomScrollToReveal({ scrollTop: 400, clientHeight: 236 }, row(10)), 10 * 36 - 22, "a row above comes down clear of the top fade");
+  assert.equal(inviteRoomScrollToReveal({ scrollTop: 400, clientHeight: 236 }, row(0)), 0, "the first row scrolls to the very top");
+  assert.equal(inviteRoomScrollToReveal({ scrollTop: 400, clientHeight: 236 }, row(13)), 400, "a row already clear of both fades stays put");
+});
+
 /* ---------- the styles and the template ---------- */
 
 const css = readFileSync(new URL("../src/styles/composer-agent-reasoning/composer-invite-panel.css", import.meta.url), "utf8");
@@ -224,6 +237,9 @@ test("the flyout is never taller than its measured cap, and the invite panel shr
   assert.match(rule(flyoutCss, '.desktop-composer-add-flyout[data-flyout="invite"]'), /flex-direction: column/);
   assert.match(rule(css, ".desktop-invite-bot"), /flex-direction: column;[\s\S]*min-height: 0/);
   assert.match(rule(css, ".desktop-invite-bot-rooms > :not(.desktop-invite-bot-list)"), /flex: none/, "the title, search and New invite room keep their height");
+  assert.match(rule(flyoutCss, '.desktop-composer-add-flyout[data-flyout="invite"] > :not(.desktop-invite-bot)'), /flex: none/, "the narrow panel's Back row keeps its height");
+  assert.match(rule(css, ".desktop-invite-bot-rooms[data-searchable] .desktop-invite-bot-list"), /min-height: 72px/, "a long list keeps two rows under a small cap");
+  assert.match(rule(css, ".desktop-invite-bot-rooms:not([data-searchable]) .desktop-invite-bot-list"), /flex-shrink: 0/, "a short list keeps every row");
 });
 
 test("the search field is the GIF panel's, takes the focus, and New invite room stays below the scrolling list", () => {
@@ -233,6 +249,10 @@ test("the search field is the GIF panel's, takes the focus, and New invite room 
   assert.match(search, /data-invite-autofocus/);
   assert.match(search, /role="combobox"/);
   assert.match(search, /:aria-activedescendant="activeRoomId"/);
+  assert.match(search, /:aria-expanded="picker\.shown\.value\.length > 0"/, "no match, nothing expanded");
+  assert.match(search, /@keydown="searchKey"/);
+  // The pointer over a row moves the active row but never scrolls the list; only ↑ and ↓ do.
+  assert.doesNotMatch(panelSource, /scrollIntoView/);
   const listStart = panelSource.indexOf('class="desktop-invite-bot-list"');
   const listEnd = panelSource.indexOf('<div v-if="roomsState !== \'loading\'" class="desktop-invite-bot-foot-rooms">');
   const newRoom = panelSource.indexOf('data-testid="desktop-invite-bot-new-room"');

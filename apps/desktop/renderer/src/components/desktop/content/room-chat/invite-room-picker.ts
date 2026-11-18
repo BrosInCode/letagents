@@ -45,6 +45,23 @@ export function inviteRoomListFades(list: { scrollTop: number; scrollHeight: num
   };
 }
 
+/** The height of an edge fade; a row the keys move to is kept clear of it. */
+export const INVITE_ROOM_FADE_PX = 22;
+
+/**
+ * Where to scroll the list so a row is in sight and clear of the edge fades;
+ * the list's own scroll limits stop it at either end, where no edge fades.
+ */
+export function inviteRoomScrollToReveal(
+  list: { scrollTop: number; clientHeight: number },
+  row: { top: number; height: number },
+  margin = INVITE_ROOM_FADE_PX,
+): number {
+  if (row.top - margin < list.scrollTop) return Math.max(0, row.top - margin);
+  if (row.top + row.height + margin > list.scrollTop + list.clientHeight) return row.top + row.height + margin - list.clientHeight;
+  return list.scrollTop;
+}
+
 /**
  * The room list's search: it filters by name as you type (case-insensitive),
  * and one row is active for the keys. ↑ and ↓ move the active row, ↵ picks it,
