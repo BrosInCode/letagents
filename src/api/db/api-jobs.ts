@@ -1,15 +1,15 @@
-import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
+import { ACTIVE_AGENT_PRESENCE_WINDOW_MS } from "../../shared/agent-presence.js";
 import { FINISHED_JOB_STATES, type JobState } from "../../../shared/api/jobs.mjs";
 import { db } from "./client.js";
-import { getSessionConnections } from "./messages/session-connections.js";
 import { getRecentHumanConversationRecipient } from "./messages/account-agent-routing.js";
-import { api_jobs, room_agent_sessions, type ApiJobRow } from "./schema.js";
+import { api_jobs, room_agent_delivery_sessions, room_agent_sessions, type ApiJobRow } from "./schema.js";
 import type { MessageCreateTransaction } from "./messages/create/types.js";
 
 export type { ApiJobRow };
 
-// The same bound message routing uses for one room's worker sessions.
+// Online worker sessions read for one job; far above any real room.
 const MAX_ONLINE_LOOKUP_SESSIONS = 200;
 // A message number above any real one: the recent-partner lookup reads the
 // messages before it.
@@ -57,13 +57,18 @@ export function isFinishedJobState(state: JobState): boolean {
 
 /**
  * The agent keys online in the room now, longest-present first. Online means
- * a worker session whose delivery connection is reachable inside the 90 s
- * presence window (or its reconnect grace), the same test message routing
- * uses for a mention. An open session alone is not enough: sessions that
- * were never ended stay open long after their agent left.
+ * a worker session whose delivery connection is reachable: open and seen
+ * inside the 90 s presence window, or inside its reconnect grace (the test
+ * `isAgentDeliverySessionReachable` makes, and routing uses for a mention).
+ * An open session alone is not enough: sessions that were never ended stay
+ * open long after their agent left. Reachability is filtered here, before the
+ * bound, so old silent sessions cannot crowd out a live agent.
  */
 export async function listOnlineRoomAgentKeys(roomId: string, nowMs = Date.now()): Promise<string[]> {
-  const sessions = await db.select({ session_id: room_agent_sessions.session_id, agent_key: room_agent_sessions.agent_key })
+  const now = new Date(nowMs).toISOString();
+  const cutoff = new Date(nowMs - ACTIVE_AGENT_PRESENCE_WINDOW_MS).toISOString();
+  const delivery = room_agent_delivery_sessions;
+  const sessions = await db.select({ agent_key: room_agent_sessions.agent_key })
     .from(room_agent_sessions)
     .where(and(
       eq(room_agent_sessions.room_id, roomId),
@@ -71,15 +76,17 @@ export async function listOnlineRoomAgentKeys(roomId: string, nowMs = Date.now()
       // Routing reaches only sessions that were not ended, so an ended one
       // cannot take a job even while its connection lingers.
       isNull(room_agent_sessions.ended_at),
+      sql`EXISTS (
+        SELECT 1 FROM ${delivery}
+         WHERE ${delivery.room_id} = ${room_agent_sessions.room_id}
+           AND ${delivery.delivery_key} = 'agent_session:' || ${room_agent_sessions.session_id}
+           AND ((${delivery.active_connection_count} > 0 AND ${delivery.updated_at} >= ${cutoff}::timestamptz)
+             OR ${delivery.reconnect_grace_expires_at} >= ${now}::timestamptz)
+      )`,
     ))
     .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id))
     .limit(MAX_ONLINE_LOOKUP_SESSIONS);
-  const { reachable } = await getSessionConnections(db, roomId, sessions.map((session) => session.session_id), nowMs);
-  const keys: string[] = [];
-  for (const session of sessions) {
-    if (reachable.has(session.session_id) && !keys.includes(session.agent_key)) keys.push(session.agent_key);
-  }
-  return keys;
+  return [...new Set(sessions.map((session) => session.agent_key))];
 }
 
 /** The agent this person last talked with in the room (the same rule a large room's unaddressed message uses). */

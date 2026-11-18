@@ -17,12 +17,12 @@ function registered(): Map<string, { description: string; schema: Record<string,
   return tools;
 }
 
-test("agents get get_job, update_job and complete_job, keyed by the job id in the message footer", () => {
+test("agents get get_job, update_job and complete_job, keyed by the job id in the message's client_message_id", () => {
   const tools = registered();
   assert.deepEqual([...tools.keys()], ["get_job", "update_job", "complete_job"]);
   assert.deepEqual(Object.keys(tools.get("update_job")!.schema), ["job_id", "progress", "state", "room_id", "agent_session_id"]);
   assert.deepEqual(Object.keys(tools.get("complete_job")!.schema), ["job_id", "result", "error", "room_id", "agent_session_id"]);
-  for (const { description } of tools.values()) assert.match(description, /Job job_/);
+  for (const { description } of tools.values()) assert.match(description, /client_message_id is "internal:job:<job id>"/);
   assert.match(tools.get("complete_job")!.description, /resultSchema/);
 });
 

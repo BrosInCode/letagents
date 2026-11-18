@@ -9,6 +9,8 @@ import {
   type Job,
   type JobResultSchema,
   type JobState,
+  instructionLooksLikeJobFooter,
+  jsonNestsDeeperThan,
 } from "../../../shared/api/jobs.mjs";
 import {
   getApiJob,
@@ -114,6 +116,12 @@ export async function startJob(
   deps: JobServiceDeps = defaultDeps,
 ): Promise<Job> {
   await requireJobStartAllowed(input.actor, input.roomId);
+  if (instructionLooksLikeJobFooter(input.instruction)) {
+    throw new ApiError("invalid_input", "The instruction may not contain a job id or a line that starts with \"Job \".");
+  }
+  if (jsonNestsDeeperThan(input.input, JOB_LIMITS.jsonDepth)) {
+    throw new ApiError("invalid_input", `input nests deeper than ${JOB_LIMITS.jsonDepth} levels.`);
+  }
   if (input.input !== undefined && jsonBytes(input.input) > JOB_LIMITS.inputBytes) {
     throw new ApiError("too_large", `input is larger than ${JOB_LIMITS.inputBytes} bytes.`);
   }
@@ -163,6 +171,10 @@ export async function startJob(
     source: "browser",
     account_id: input.actor.principal.id,
     client_message_id: jobClientMessageId(row.id),
+    // The instruction is the person's text, and may say "@everyone" or name
+    // other agents and people. Routing it would wake or notify them; the job
+    // goes to its one agent alone, which gets the only receipt.
+    addressed_to: { agent_key: target, reason: "explicit_mention" },
     with_created_message_in_transaction: async (tx, message) => {
       const withRoot = { ...row, root_message_number: message.number };
       await insertApiJob(withRoot, tx);
@@ -198,8 +210,9 @@ async function changeUnfinished(
 }
 
 /**
- * Cancels a job that has not finished. The person who started it may, by
- * whatever page or app they use; otherwise only a room admin.
+ * Cancels a job that has not finished. Through a page or app: only a job
+ * started through that same page or app, for the same person. A person acting
+ * directly: their own jobs, or any job as a room admin.
  */
 export async function cancelJob(
   input: { roomId: string; id: string; actor: ApiActor; isRoomAdmin: () => Promise<boolean> },
@@ -208,7 +221,15 @@ export async function cancelJob(
   const row = await getApiJob(input.roomId, input.id);
   if (!row) throw new ApiError("not_found", "No job with this id in this room.");
   const creator = row.principal_kind === input.actor.principal.kind && row.principal_id === input.actor.principal.id;
-  if (!creator && !(await input.isRoomAdmin())) {
+  const via = input.actor.via;
+  if (via) {
+    // A page or app holds `jobs.read` to cancel, so it may stop only what it
+    // started itself, never what the person started elsewhere or, as an
+    // admin, anyone's job.
+    if (!creator || row.via_kind !== via.kind || row.via_id !== via.id) {
+      throw new ApiError("not_granted", "A page or app can cancel only the jobs started through it.");
+    }
+  } else if (!creator && !(await input.isRoomAdmin())) {
     throw new ApiError("not_granted", "Only the person who started this job, or a room admin, can cancel it.");
   }
   return changeUnfinished(input.roomId, row, { state: "cancelled", finished_at: deps.now() }, deps);
@@ -264,6 +285,9 @@ export async function completeJobAsAgent(
       throw new ApiError("invalid_input", `error must be 1 to ${JOB_LIMITS.errorChars} characters.`);
     }
     return changeUnfinished(input.roomId, row, { state: "failed", error, finished_at: deps.now() }, deps);
+  }
+  if (jsonNestsDeeperThan(input.result, JOB_LIMITS.jsonDepth)) {
+    throw new ApiError("invalid_input", `result nests deeper than ${JOB_LIMITS.jsonDepth} levels.`);
   }
   if (jsonBytes(input.result) > JOB_LIMITS.resultBytes) {
     throw new ApiError("too_large", `result is larger than ${JOB_LIMITS.resultBytes} bytes.`);

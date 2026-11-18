@@ -11,6 +11,19 @@ export function isJobId(value: unknown): value is string;
  */
 export function jobIdFromClientMessageId(clientMessageId: unknown): string | null;
 /**
+ * Whether a JSON value nests deeper than `limit` objects or arrays. Walks level
+ * by level without recursion, so a hostile value cannot exhaust the stack.
+ * @param {unknown} value
+ * @param {number} limit
+ * @returns {boolean}
+ */
+export function jsonNestsDeeperThan(value: unknown, limit: number): boolean;
+/**
+ * @param {string} instruction
+ * @returns {boolean}
+ */
+export function instructionLooksLikeJobFooter(instruction: string): boolean;
+/**
  * - `queued`: posted to the agent; it has not said it started.
  * - `no_agent`: no agent was online in the room, so nothing was posted.
  * - `running`, `needs_input`: the agent is on it, or waits for a person in the job's thread.
@@ -27,6 +40,8 @@ export const JOB_LIMITS: Readonly<{
     inputBytes: number;
     resultSchemaBytes: number;
     resultSchemaDepth: 6;
+    /** Nesting of `input` and `result`, so no step that walks them can run out of stack. */
+    jsonDepth: 32;
     resultBytes: number;
     progressChars: 500;
     errorChars: 2000;
@@ -58,8 +73,28 @@ export const JobResultSchema: z.ZodObject<{
     additionalProperties: z.ZodOptional<z.ZodBoolean>;
     items: z.ZodOptional<typeof JobResultSchema>;
 }, z.core.$strict>;
+/**
+ * A result schema as a caller sends it: refused before it is parsed when it
+ * nests too deep, since parsing a recursive schema recurses too.
+ */
+export const JobResultSchemaInput: z.ZodPreprocess<z.ZodObject<{
+    type: z.ZodOptional<z.ZodEnum<{
+        string: "string";
+        number: "number";
+        boolean: "boolean";
+        object: "object";
+        null: "null";
+        array: "array";
+        integer: "integer";
+    }>>;
+    description: z.ZodOptional<z.ZodString>;
+    enum: z.ZodOptional<z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean, z.ZodNull]>>>;
+    properties: z.ZodOptional<z.ZodRecord<z.ZodString, typeof JobResultSchema>>;
+    required: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    additionalProperties: z.ZodOptional<z.ZodBoolean>;
+    items: z.ZodOptional<typeof JobResultSchema>;
+}, z.core.$strict>, unknown>;
 export type JobCreator = z.infer<typeof JobCreator>;
-/** @typedef {z.infer<typeof JobResultSchema>} JobResultSchema */
 export const JobCreator: z.ZodObject<{
     principal: z.ZodObject<{
         kind: z.ZodEnum<{
@@ -143,7 +178,7 @@ export const startJob: import("./core.mjs").ApiMethod<"jobs.start", z.ZodObject<
     agent: z.ZodOptional<z.ZodString>;
     instruction: z.ZodString;
     input: z.ZodOptional<z.ZodUnknown>;
-    resultSchema: z.ZodOptional<z.ZodObject<{
+    resultSchema: z.ZodOptional<z.ZodPreprocess<z.ZodObject<{
         type: z.ZodOptional<z.ZodEnum<{
             string: "string";
             number: "number";
@@ -159,7 +194,7 @@ export const startJob: import("./core.mjs").ApiMethod<"jobs.start", z.ZodObject<
         required: z.ZodOptional<z.ZodArray<z.ZodString>>;
         additionalProperties: z.ZodOptional<z.ZodBoolean>;
         items: z.ZodOptional<typeof JobResultSchema>;
-    }, z.core.$strict>>;
+    }, z.core.$strict>, unknown>>;
 }, z.core.$strict>, z.ZodObject<{
     id: z.ZodString;
     roomId: z.ZodString;
@@ -413,7 +448,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"jobs.start", z.Z
     agent: z.ZodOptional<z.ZodString>;
     instruction: z.ZodString;
     input: z.ZodOptional<z.ZodUnknown>;
-    resultSchema: z.ZodOptional<z.ZodObject<{
+    resultSchema: z.ZodOptional<z.ZodPreprocess<z.ZodObject<{
         type: z.ZodOptional<z.ZodEnum<{
             string: "string";
             number: "number";
@@ -429,7 +464,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"jobs.start", z.Z
         required: z.ZodOptional<z.ZodArray<z.ZodString>>;
         additionalProperties: z.ZodOptional<z.ZodBoolean>;
         items: z.ZodOptional<typeof JobResultSchema>;
-    }, z.core.$strict>>;
+    }, z.core.$strict>, unknown>>;
 }, z.core.$strict>, z.ZodObject<{
     id: z.ZodString;
     roomId: z.ZodString;
