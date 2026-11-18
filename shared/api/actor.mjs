@@ -34,8 +34,9 @@ export const ApiActor = z.object({
 
 /**
  * A stable key for per-actor limits: the same principal through two pages
- * counts as two actors.
- * @param {ApiActor} actor
+ * counts as two actors. The room is not part of it, so one caller has one
+ * budget across rooms.
+ * @param {Pick<ApiActor, "principal" | "via">} actor
  * @returns {string}
  */
 export function actorKey(actor) {

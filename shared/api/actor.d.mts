@@ -4,11 +4,12 @@
 /** @typedef {z.infer<typeof ApiActor>} ApiActor */
 /**
  * A stable key for per-actor limits: the same principal through two pages
- * counts as two actors.
- * @param {ApiActor} actor
+ * counts as two actors. The room is not part of it, so one caller has one
+ * budget across rooms.
+ * @param {Pick<ApiActor, "principal" | "via">} actor
  * @returns {string}
  */
-export function actorKey(actor: ApiActor): string;
+export function actorKey(actor: Pick<ApiActor, "principal" | "via">): string;
 export const ACTOR_PRINCIPAL_KINDS: readonly ["person", "agent"];
 export const ACTOR_VIA_KINDS: readonly ["page", "job", "integration"];
 export type ActorPrincipal = z.infer<typeof ActorPrincipal>;
