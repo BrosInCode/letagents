@@ -469,10 +469,6 @@ export function registerAuthLogoutRoute(
     // The ended credentials' room streams and account activity stream close
     // now, on every API instance, instead of at their next re-check.
     (deps.retireCredentials ?? retireAccountCredentials)(retired);
-    // Pages act for the person who opened them; signing out ends them all.
-    if (req.sessionAccount && (req.authKind === "session" || req.authKind === "owner_token")) {
-      await (deps.revokePageGrants ?? revokePageGrants)({ accountId: req.sessionAccount.account_id });
-    }
     clearSessionCookie(res);
     res.json({ success: true });
   });
