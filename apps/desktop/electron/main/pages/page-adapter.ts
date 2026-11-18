@@ -78,6 +78,9 @@ export const PAGE_API_ROUTES: Readonly<Record<string, PageApiRoute>> = {
   "jobs.get": { method: "GET", path: "/rooms/:room/jobs/:id" },
   "jobs.list": { method: "GET", path: "/rooms/:room/jobs" },
   "jobs.cancel": { method: "POST", path: "/rooms/:room/jobs/:id/cancel" },
+  "intents.propose": { method: "POST", path: "/rooms/:room/intents" },
+  "intents.get": { method: "GET", path: "/rooms/:room/intents/:intentId" },
+  "intents.list": { method: "GET", path: "/rooms/:room/intents" },
 };
 
 export function pageApiMethodNames(routes: Readonly<Record<string, PageApiRoute>> = PAGE_API_ROUTES): ReadonlySet<string> {
@@ -159,7 +162,7 @@ export function pageCallFailureFromApi(error: unknown): PageCallFailure {
  * lease without a token gets `not_granted`.
  */
 export function createHttpPageApiAdapter(options: {
-  grants: Pick<PageGrantKeeper, "token">;
+  grants: Pick<PageGrantKeeper, "token"> & Partial<Pick<PageGrantKeeper, "invalidate">>;
   routes?: Readonly<Record<string, PageApiRoute>>;
   fetchApi?: typeof apiFetch;
 }): PageApiAdapter {
@@ -170,13 +173,25 @@ export function createHttpPageApiAdapter(options: {
       const route = Object.hasOwn(routes, method) ? routes[method] : undefined;
       if (!route) throw new PageCallFailure("not_found", `There is no method "${method}".`);
       const request = pageApiRequest(route, lease.roomId, input);
-      const token = await options.grants.token(lease.leaseId);
-      if (!token) throw new PageCallFailure("not_granted", "This page has no grant in this room.");
-      const headers = new Headers(request.init.headers);
-      headers.set("Authorization", `Bearer ${token}`);
+      const send = async () => {
+        const token = await options.grants.token(lease.leaseId);
+        if (!token) throw new PageCallFailure("not_granted", "This page has no grant in this room.");
+        const headers = new Headers(request.init.headers);
+        headers.set("Authorization", `Bearer ${token}`);
+        return fetchApi<unknown>(request.path, { ...request.init, headers }, { credential: "none" });
+      };
       try {
-        return await fetchApi<unknown>(request.path, { ...request.init, headers }, { credential: "none" });
+        return await send();
       } catch (error) {
+        // A grant ends when an admin approves, rolls back or unpins the page: mint once more and retry.
+        if (error instanceof DesktopApiError && error.status === 401 && options.grants.invalidate) {
+          options.grants.invalidate(lease.leaseId);
+          try {
+            return await send();
+          } catch (retryError) {
+            throw pageCallFailureFromApi(retryError);
+          }
+        }
         throw pageCallFailureFromApi(error);
       }
     },

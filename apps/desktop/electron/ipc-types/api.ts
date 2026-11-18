@@ -582,6 +582,16 @@ export interface DesktopApi {
     /** Confirm sheets main asks the app to draw for a page, and sheets it takes back. */
     onConfirm: (callback: (message: import("./pages.js").DesktopPageConfirmMessage) => void) => () => void;
     answerConfirm: (id: string, answer: import("./pages.js").DesktopPageConfirmAnswer, remember: boolean) => Promise<void>;
+    /** One page's registry detail and who made its live version. */
+    info?: (roomId: string, pageId: string) => Promise<import("./pages.js").DesktopRoomPageInfo>;
+    /** Room admins: make a page from an HTML attachment of a message in this room. */
+    createFromAttachment?: (roomId: string, messageId: string, attachmentId: string) => Promise<import("./pages.js").DesktopRoomPageDetail>;
+    /** Room admins: grant a version the capabilities chosen in the grant sheet; a waiting version goes live. */
+    approve?: (roomId: string, pageId: string, version: number, capabilities: string[]) => Promise<import("./pages.js").DesktopRoomPageDetail>;
+    /** Room admins: pin a live page as a room tab. */
+    pin?: (roomId: string, pageId: string) => Promise<import("./pages.js").DesktopRoomPageDetail>;
+    /** Room admins: make an earlier live version current again (Undo after an update). */
+    setCurrent?: (roomId: string, pageId: string, version: number) => Promise<import("./pages.js").DesktopRoomPageDetail>;
   };
   /** Apps signed in to the remote MCP endpoint (https://letagents.chat/mcp) with OAuth. */
   mcpConnections: {

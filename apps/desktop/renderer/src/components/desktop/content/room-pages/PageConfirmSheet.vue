@@ -85,7 +85,8 @@ onBeforeUnmount(() => {
 });
 </script>
 
-<style scoped>
+<style>
+/* The dialog shell draws the panel, so these rules are not scoped to this component; every class is this sheet's own. */
 .room-page-confirm {
   display: grid;
   gap: 12px;

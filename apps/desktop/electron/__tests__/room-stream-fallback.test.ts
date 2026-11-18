@@ -475,6 +475,10 @@ test("API resource pointers, board changes and stream gaps reach main's pointer 
     sse.pushRaw(`id: c1\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({ room_id: canonicalRoom, resource: "work_items" })}\n\n`);
     await waitUntil(() => pointers.length === 1);
     assert.deepEqual(pointers[0], { roomIds: [ROOM, canonicalRoom], resource: "work_items" });
+    sse.pushRaw(`id: c1b\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({ room_id: canonicalRoom, resource: "pages" })}\n\n`);
+    await waitUntil(() => emitted.some((event) => event.type === "resource_invalidation" && event.resource === "pages"));
+    assert.equal(pointers.length, 2, "the renderer's page tabs and main's page relay both hear a pages pointer");
+    pointers.pop();
     sse.pushRaw(`event: task_remove\ndata: ${JSON.stringify({ task_id: "task_9", room_id: canonicalRoom })}\n\n`);
     await waitUntil(() => pointers.length === 2);
     assert.deepEqual(pointers[1], { roomIds: [ROOM, canonicalRoom], resource: "tasks" });

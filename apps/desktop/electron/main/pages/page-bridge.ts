@@ -219,14 +219,72 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
 }
 
 /** The sheet each confirmed method shows: the exact text the call sends, and where it goes. */
-const CONFIRMED_METHODS: Readonly<Record<string, (input: unknown) => { kind: "job" | "post"; text: string; target: string } | null>> = {
+const CONFIRMED_METHODS: Readonly<Record<string, (input: unknown) => { kind: "job" | "post" | "intent"; text: string; target: string } | null>> = {
   "jobs.start": (input) => {
     const instruction = field(input, "instruction");
     if (typeof instruction !== "string" || !instruction.trim()) return null;
     const agent = field(input, "agent");
     return { kind: "job", text: instruction, target: typeof agent === "string" && agent.trim() ? agent : "Any online agent" };
   },
+  // A page viewer cannot read the room's policy (rooms.listPolicies is admin
+  // only), so every proposal asks: the sheet is required under `confirm` and
+  // only one more yes under `allow` or `approve`.
+  "intents.propose": (input) => describeIntent(field(input, "kind"), field(input, "payload")),
 };
+
+const TASK_STATUS_WORDS: Readonly<Record<string, string>> = {
+  proposed: "Proposed", accepted: "Accepted", assigned: "Assigned", in_progress: "In progress", blocked: "Blocked",
+  in_review: "In review", merged: "Merged", done: "Done", cancelled: "Cancelled",
+};
+
+/**
+ * An intent in plain words, from its kind and payload, such as "Move DS-7 to
+ * Released". Every value the change sends is in the text; null for a payload
+ * the server would refuse anyway.
+ */
+export function describeIntent(kind: unknown, payload: unknown): { kind: "intent"; text: string; target: string } | null {
+  const text = (name: string): string | null => {
+    const value = field(payload, name);
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  };
+  switch (kind) {
+    case "task.create": {
+      const title = text("title");
+      if (!title) return null;
+      const description = text("description");
+      return { kind: "intent", text: `Create the task "${title}"${description ? `\n\n${description}` : ""}`, target: "This room's board" };
+    }
+    case "task.update": {
+      const taskId = text("taskId");
+      if (!taskId) return null;
+      const changes: string[] = [];
+      const status = text("status");
+      if (status) changes.push(`move it to ${TASK_STATUS_WORDS[status] ?? status}`);
+      const assignee = field(payload, "assignee");
+      const agentKey = field(payload, "assigneeAgentKey");
+      if (assignee === null || agentKey === null) changes.push("remove its assignee");
+      else if (typeof assignee === "string" || typeof agentKey === "string") changes.push(`assign it to ${text("assignee") ?? text("assigneeAgentKey")}`);
+      const title = text("title");
+      if (title) changes.push(`rename it to "${title}"`);
+      if (typeof field(payload, "description") === "string") changes.push("replace its description");
+      if (changes.length === 0) return null;
+      const description = typeof field(payload, "description") === "string" ? `\n\nNew description:\n${field(payload, "description") as string}` : "";
+      return { kind: "intent", text: `Task ${taskId}: ${changes.join("; ")}${description}`, target: "This room's board" };
+    }
+    case "ticket.transition": {
+      const key = text("key");
+      const toStatus = text("toStatus");
+      return key && toStatus ? { kind: "intent", text: `Move ${key} to ${toStatus}`, target: `${key} in this room's tracker` } : null;
+    }
+    case "ticket.comment": {
+      const key = text("key");
+      const body = text("body");
+      return key && body ? { kind: "intent", text: `Comment on ${key}:\n\n${body}`, target: `${key} in this room's tracker` } : null;
+    }
+    default:
+      return null;
+  }
+}
 
 export function contextOf(lease: RoomPageLease): PageCallContext {
   return { leaseId: lease.host, roomId: lease.roomId, pageId: lease.page.id, version: lease.page.version };

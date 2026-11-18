@@ -175,5 +175,11 @@ the call rate and the method, sends the call with the lease's own `page_grant` t
 - Watches run in main: the read runs at once and again 250 ms after a room stream pointer for its
   resource (`work_items` at most every 2 minutes), or after a stream gap. The callback gets
   `(value, null)` or `(null, error)`.
-- `jobs.start` shows an app-drawn confirm sheet (instruction and target agent) before main sends it;
-  a no is `declined` and sends nothing.
+- `jobs.start` and `intents.propose` show an app-drawn confirm sheet (the instruction and target
+  agent; the change in plain words, such as "Move DS-7 to Released") before main sends them; a no
+  is `declined` and sends nothing. A page viewer cannot read the room policy (`rooms.listPolicies`
+  is `rooms.admin`), so the desktop asks for every proposal, not only under `confirm`.
+- Room admins pin an HTML attachment from its inline demo card: `pages.create` (source), the grant
+  sheet over the version's capabilities (`pages.approve`, fewer allowed), then `pages.pin`. A page
+  tab shows "Updated by … · See changes · Undo" (`pages.setCurrent`, admins) and, for admins, a
+  waiting version to review. These calls use the person's app session (`isHumanAppWrite`).

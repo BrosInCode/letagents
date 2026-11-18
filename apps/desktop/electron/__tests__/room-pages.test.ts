@@ -28,6 +28,7 @@ mock.module("electron", { defaultExport: { app } });
 mock.module("../main/auth.js", { namedExports: {
   apiFetch: async () => { throw new Error("no network in tests"); },
   DesktopApiError: FakeApiError,
+  readStoredAuth: async () => ({ account: null }),
 } });
 mock.module("../main/attachments/html-demo-session.js", { namedExports: {
   htmlDemoDocuments: demoDocuments,
@@ -59,7 +60,8 @@ const {
 } = await import("../main/pages/page-host.js");
 const { createPageGrantKeeper, parsePageGrant, PAGE_GRANT_REFRESH_BEFORE_MS, PAGE_GRANT_RETRY_MS } = await import("../main/pages/page-grants.js");
 const { isRefusedWebviewSender, refuseWebviewSenders } = await import("../main/ipc-sender-guard.js");
-const { contextOf, createPageCallHandler } = await import("../main/pages/page-bridge.js");
+const { contextOf, createPageCallHandler, describeIntent } = await import("../main/pages/page-bridge.js");
+const { createRoomPageAdmin, PAGE_ADMIN_ROUTES } = await import("../main/pages/page-admin.js");
 const { createPageWatches, MAX_PAGE_WATCHES, PAGE_WATCH_DEBOUNCE_MS } = await import("../main/pages/page-watch.js");
 const { publishRoomStreamPointer } = await import("../main/room-stream-pointers.js");
 const { sendToRoomPage } = await import("../main/pages/page-host.js");
@@ -123,11 +125,12 @@ const backend = createMemoryPageBackend({
     "work_items.search": () => ({ items: [], run: ++workItemRuns }),
     "jobs.start": (_lease, input) => ({ id: "job_1", state: "queued", input }),
     "tasks.list": () => ({ tasks: [] }),
+    "intents.propose": (_lease, input) => ({ id: "int_1", state: "running", input }),
   },
 });
 let dataListRuns = 0;
 let workItemRuns = 0;
-const PAGE_METHODS = new Set(["rooms.get", "data.set", "data.list", "work_items.search", "jobs.start", "tasks.list"]);
+const PAGE_METHODS = new Set(["rooms.get", "data.set", "data.list", "work_items.search", "jobs.start", "tasks.list", "intents.propose"]);
 type Lease = Parameters<typeof contextOf>[0];
 const watches = createPageWatches<Lease>({
   run: (lease, method, input) => backend.adapter.call(contextOf(lease), method, input),
@@ -803,7 +806,7 @@ test("the page route table holds every page-callable read, work item, data and j
     assert.notEqual(method.capability, "rooms.admin", `${name} is room administration`);
     assert.equal(getCapability(method.capability).grantable, true, `${name} needs a capability a page can hold`);
   }
-  const wanted = API_METHODS.filter((method) => ["rooms", "people", "agents", "messages", "tasks", "planning", "work_items", "git", "memory", "data", "jobs"].includes(method.area)
+  const wanted = API_METHODS.filter((method) => ["rooms", "people", "agents", "messages", "tasks", "planning", "work_items", "git", "memory", "data", "jobs", "intents"].includes(method.area)
     && method.capability !== "rooms.admin" && getCapability(method.capability).grantable);
   assert.deepEqual(wanted.map((method) => method.name).filter((name) => !Object.hasOwn(PAGE_API_ROUTES, name)), [], "every merged page method is wired");
 });
@@ -954,4 +957,110 @@ test("pages ride the room stream the app already runs: no page module opens one"
   publishRoomStreamPointer({ roomIds: ["room-without-pages"], gap: true });
   publishRoomStreamPointer({ roomIds: ["room-without-pages"], resource: "jobs" });
   assert.equal(embedder.sent.length, before);
+});
+
+test("work_items.search sends a list of fields as repeated query keys, as the server reads them", async () => {
+  const paths: string[] = [];
+  const adapter = createHttpPageApiAdapter({
+    grants: { token: async () => "t" },
+    fetchApi: (async (path: string) => { paths.push(path); return {}; }) as never,
+  });
+  await adapter.call({ leaseId: "L", roomId: "r", pageId: "p", version: 1 }, "work_items.search", { query: "status = Done", fields: ["customfield_1", "customfield_2"], limit: 20 });
+  assert.equal(paths[0], "/api/v1/rooms/r/work-items?query=status+%3D+Done&fields=customfield_1&fields=customfield_2&limit=20");
+  assert.doesNotMatch(paths[0], /%5B|%22/, "never JSON text in the query");
+});
+
+test("a revoked page grant is minted again once, and the call retried", async () => {
+  let invalidated = 0;
+  let token = "old";
+  const calls: string[] = [];
+  const adapter = createHttpPageApiAdapter({
+    grants: { token: async () => token, invalidate: () => { invalidated += 1; token = "new"; } },
+    fetchApi: (async (_path: string, init: RequestInit) => {
+      const sent = new Headers(init.headers).get("Authorization")!;
+      calls.push(sent);
+      if (sent === "Bearer old") throw new FakeApiError(401, { code: "unauthenticated", message: "Sign in." });
+      return { ok: true };
+    }) as never,
+  });
+  assert.deepEqual(await adapter.call({ leaseId: "L", roomId: "r", pageId: "p", version: 1 }, "rooms.get", null), { ok: true });
+  assert.deepEqual(calls, ["Bearer old", "Bearer new"]);
+  assert.equal(invalidated, 1);
+  const keeper = createPageGrantKeeper({ mint: async () => ({ token: `m${++mintCount}`, expiresAt: Date.now() + 900_000, capabilities: [] }) });
+  let mintCount = 0;
+  keeper.start("A", "r", "page_1");
+  keeper.start("B", "r", "page_2");
+  assert.equal(await keeper.token("A"), "m1");
+  assert.equal(await keeper.token("B"), "m2");
+  keeper.invalidatePage("page_1");
+  assert.equal(await keeper.token("A"), "m3", "an approved or rolled back page mints again");
+  assert.equal(await keeper.token("B"), "m2");
+});
+
+test("intents.propose shows the change in plain words first; a no proposes nothing", async () => {
+  assert.deepEqual(describeIntent("ticket.transition", { key: "DS-7", toStatus: "Released" }),
+    { kind: "intent", text: "Move DS-7 to Released", target: "DS-7 in this room's tracker" });
+  assert.deepEqual(describeIntent("task.update", { taskId: "task_12", status: "in_progress", assignee: "Ada" }),
+    { kind: "intent", text: "Task task_12: move it to In progress; assign it to Ada", target: "This room's board" });
+  assert.equal(describeIntent("task.update", { taskId: "task_12", assignee: null })?.text, "Task task_12: remove its assignee");
+  assert.equal(describeIntent("task.create", { title: "Ship docs", description: "All of them" })?.text, "Create the task \"Ship docs\"\n\nAll of them");
+  assert.equal(describeIntent("ticket.comment", { key: "DS-7", body: "Done in 1.4" })?.text, "Comment on DS-7:\n\nDone in 1.4");
+  assert.equal(describeIntent("task.update", { taskId: "task_12" }), null, "nothing to change");
+  assert.equal(describeIntent("other.kind", {}), null);
+
+  const { lease, guest } = await openPage();
+  shown.length = 0;
+  try {
+    setRoomPageVisible(lease.url, true);
+    const before = backend.calls.length;
+    const pending = callFrom(guest, "intents.propose", { kind: "ticket.transition", payload: { key: "DS-7", toStatus: "Released" } });
+    await flushImmediates();
+    assert.equal(shown[0].kind, "intent");
+    assert.equal(shown[0].text, "Move DS-7 to Released");
+    confirm.answer(shown[0].id, "declined", false);
+    const result = await pending;
+    assert.equal(!result.ok && result.error.code, "declined");
+    assert.equal(backend.calls.length, before, "a declined proposal sends nothing");
+    const unknown = await callFrom(guest, "intents.propose", { kind: "ticket.delete", payload: {} });
+    assert.equal(!unknown.ok && unknown.error.code, "invalid_input");
+    const confirmed = callFrom(guest, "intents.propose", { kind: "ticket.comment", payload: { key: "DS-7", body: "Done" } });
+    await flushImmediates();
+    confirm.answer(shown[1].id, "confirmed", false);
+    assert.equal((await confirmed).ok, true);
+    assert.equal(backend.calls.at(-1)?.method, "intents.propose");
+  } finally {
+    releaseRoomPage(lease.url);
+  }
+});
+
+test("page administration goes with the app session to the contract's routes", async () => {
+  const { getApiMethod } = await import("../../../../shared/api/index.mjs");
+  for (const [name, route] of Object.entries(PAGE_ADMIN_ROUTES)) {
+    const method = getApiMethod(name)!;
+    assert.deepEqual(route, { method: method.httpMethod, path: method.path }, name);
+  }
+  const requests: Array<{ path: string; init?: RequestInit; options?: unknown }> = [];
+  const detail = (version: number) => ({
+    id: "page_1", title: "Sprint", currentVersion: version, updatedBy: { kind: "agent", id: "agent:codex-1", ownerAccountId: "acct_2" }, versions: [],
+  });
+  const admin = createRoomPageAdmin((async (path: string, init?: RequestInit, options?: unknown) => {
+    requests.push({ path, init, options });
+    if (path.endsWith("/agents")) return { agents: [{ agentKey: "agent:codex-1", label: "Codex · EmmyMay" }] };
+    return detail(2);
+  }) as never, async () => "acct_1");
+  assert.deepEqual(await admin.info("github.com/a/b", "page_1"), { detail: detail(2), updatedByLabel: "Codex · EmmyMay" });
+  await admin.createFromAttachment("r", "msg_12", "att_1");
+  assert.equal(requests.at(-1)?.path, "/api/v1/rooms/r/pages");
+  assert.equal(requests.at(-1)?.init?.body, JSON.stringify({ source: { messageId: "msg_12", attachmentId: "att_1" } }));
+  await admin.approve("r", "page_1", 2, ["tasks.read", "tasks.read", "jobs.start"]);
+  assert.equal(requests.at(-1)?.path, "/api/v1/rooms/r/pages/page_1/approve");
+  assert.equal(requests.at(-1)?.init?.body, JSON.stringify({ version: 2, capabilities: ["tasks.read", "jobs.start"] }));
+  await admin.pin("r", "page_1");
+  assert.equal(requests.at(-1)?.init?.body, JSON.stringify({ surface: "room.tab" }));
+  await admin.setCurrent("r", "page_1", 1);
+  assert.equal(requests.at(-1)?.path, "/api/v1/rooms/r/pages/page_1/current");
+  assert.ok(requests.every((request) => (request.options as { credential?: string }).credential === "app"), "the person's own app session");
+  await assert.rejects(admin.createFromAttachment("r", "../x", "att_1"), /Only a message in this room/);
+  await assert.rejects(admin.approve("r", "page_1", 0, []), /Choose a version/);
+  await assert.rejects(admin.pin("r", "../page"), /without slashes/);
 });

@@ -84,6 +84,15 @@ export function createPageGrantKeeper(options: {
       // A failed refresh may still leave the old token a little time.
       return state.grant && now() < state.grant.expiresAt && leases.get(leaseId) === state ? state.grant.token : null;
     },
+    /** The server refused the token (revoked, or the page changed): the next call mints a new one. */
+    invalidate(leaseId: string): void {
+      const state = leases.get(leaseId);
+      if (state) state.grant = null;
+    },
+    /** A page was approved, rolled back or re-pinned: every open lease of it mints again. */
+    invalidatePage(pageId: string): void {
+      for (const state of leases.values()) if (state.pageId === pageId) state.grant = null;
+    },
     capabilities(leaseId: string): string[] {
       return [...(leases.get(leaseId)?.grant?.capabilities ?? [])];
     },

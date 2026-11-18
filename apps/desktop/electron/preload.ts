@@ -494,6 +494,11 @@ const api: DesktopApi = {
       return () => ipcRenderer.off("desktop:pages:confirm", listener);
     },
     answerConfirm: (id, answer, remember) => ipcRenderer.invoke("desktop:pages:answer-confirm", id, answer, remember),
+    info: (roomId, pageId) => ipcRenderer.invoke("desktop:pages:info", roomId, pageId),
+    createFromAttachment: (roomId, messageId, attachmentId) => ipcRenderer.invoke("desktop:pages:create-from-attachment", roomId, messageId, attachmentId),
+    approve: (roomId, pageId, version, capabilities) => ipcRenderer.invoke("desktop:pages:approve", roomId, pageId, version, capabilities),
+    pin: (roomId, pageId) => ipcRenderer.invoke("desktop:pages:pin", roomId, pageId),
+    setCurrent: (roomId, pageId, version) => ipcRenderer.invoke("desktop:pages:set-current", roomId, pageId, version),
   },
   mcpConnections: {
     list: () => ipcRenderer.invoke("desktop:mcp-connections:list"),

@@ -47,12 +47,14 @@ const CONFIRM_TITLES: Record<DesktopPageConfirmKind, string> = {
   open: "Open this link?",
   job: "Ask an agent?",
   post: "Post to the room?",
+  intent: "Propose this change?",
 };
 
 const CONFIRM_ACTIONS: Record<DesktopPageConfirmKind, string> = {
   open: "Open link",
   job: "Ask agent",
   post: "Post",
+  intent: "Propose",
 };
 
 /** The words of a confirm sheet; the page's own text is shown as given, never as its title. */
