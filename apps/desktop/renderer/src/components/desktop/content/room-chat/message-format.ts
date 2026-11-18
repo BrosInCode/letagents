@@ -1,4 +1,3 @@
-import { formatDate } from "../../../../domain/formatters";
 export function displaySender(sender: string): string {
   const [name] = sender.split("|").map((part) => part.trim()).filter(Boolean);
   return name || "Unknown";
@@ -29,10 +28,4 @@ export function applySelectedTextQuoteToDraft(
   const text = draft.trim();
   if (!quote) return text;
   return text ? `${quote}\n\n${text}` : quote;
-}
-
-export function formatDateTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return formatDate("monthDayTime", date);
 }

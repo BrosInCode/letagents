@@ -1,17 +1,6 @@
+import { parseAgentIdentity } from '@/composables/room/identity'
 import type { RoomMessage, RoomMessageAttachment } from '@/composables/useRoom'
-
-export interface MessageImageAttachment {
-  id: string
-  messageId: string
-  attachment: RoomMessageAttachment
-  href: string
-  name: string
-  mimeType: string
-  sizeBytes: number
-  metaLabel: string
-  sender: string
-  timestamp: string
-}
+import type { RoomImage } from '../../../../../shared/ui/image-viewer/types'
 
 export function attachmentName(attachment: RoomMessageAttachment): string {
   return attachment.file_name || attachment.filename || attachment.name || 'attachment'
@@ -66,21 +55,18 @@ export function imageAttachmentId(messageId: string, attachment: RoomMessageAtta
   return `${messageId}:${attachmentKey(attachment)}`
 }
 
-export function collectMessageImageAttachments(messages: readonly RoomMessage[]): MessageImageAttachment[] {
-  const images: MessageImageAttachment[] = []
+/** Every image in these messages, in the shape the shared image viewer shows. */
+export function collectMessageImageAttachments(messages: readonly RoomMessage[]): RoomImage[] {
+  const images: RoomImage[] = []
   for (const message of messages) {
     for (const attachment of message.attachments || []) {
       if (!isImageAttachment(attachment)) continue
       images.push({
         id: imageAttachmentId(message.id, attachment),
-        messageId: message.id,
-        attachment,
         href: attachmentHref(attachment),
         name: attachmentName(attachment),
-        mimeType: attachmentMimeType(attachment),
-        sizeBytes: attachmentSize(attachment),
-        metaLabel: attachmentMeta(attachment),
-        sender: message.sender,
+        meta: attachmentMeta(attachment),
+        sender: parseAgentIdentity(message.sender).displayName,
         timestamp: message.timestamp,
       })
     }

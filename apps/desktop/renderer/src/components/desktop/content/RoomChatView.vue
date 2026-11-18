@@ -182,13 +182,13 @@
           @open-agent-correction="(handoff, opened) => emit('open-agent-correction', handoff, opened)"
         />
 
-        <DesktopImageViewerModal
+        <ImageViewer
           v-if="activeImageId && roomImages.length"
           :images="roomImages"
           :active-image-id="activeImageId"
-          @close="activeImageId = null"
-          @next="shiftImage(1)"
-          @previous="shiftImage(-1)"
+          @close="closeImageViewer"
+          @next="showNextImage"
+          @previous="showPreviousImage"
         />
       </div>
 
@@ -214,7 +214,7 @@ import type { RoomGif } from "../../../../../../../shared/room-expressions.mjs";
 import type { ChatScrollPosition } from "../../../domain/chat-scroll";
 import { provideRoomMessageMotion } from "../../../../../../../shared/ui/useRoomMessageMotion";
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
-import { computed, nextTick, onBeforeUnmount, provide, ref, toRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onDeactivated, provide, ref, toRef, watch } from "vue";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { useStableIdSet } from "../../../composables/useStableIdSet";
 import PinnedMessages from "../../../../../../../shared/ui/PinnedMessages.vue";
@@ -234,7 +234,7 @@ import type {
   DesktopSupervisorManifestEntry,
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
-import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
+import ImageViewer from "../../../../../../../shared/ui/image-viewer/ImageViewer.vue";
 import {
   normalizeManagedAgentRoomIdentifier,
   type ManagedAgentWorkIndicator,
@@ -490,8 +490,13 @@ const {
   activeImageId,
   roomImages,
   openImageViewer,
-  shiftImage,
+  closeImageViewer,
+  showNextImage,
+  showPreviousImage,
 } = useRoomImages(threadImageMessages);
+// The room view stays alive behind Settings and Inbox; an open viewer would
+// keep the page scroll locked there.
+onDeactivated(closeImageViewer);
 
 const {
   attaching,
