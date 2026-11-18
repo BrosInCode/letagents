@@ -3,7 +3,7 @@ import type { EventEmitter } from "node:events";
 import type { Express } from "express";
 
 import { ROOM_INVITE_EVENT } from "../../../../shared/room-invites.mjs";
-import { ROOM_JOIN_REQUEST_EVENT } from "../../../../shared/room-join-requests.mjs";
+import { ROOM_JOIN_REQUEST_DECISION_EVENT, ROOM_JOIN_REQUEST_EVENT } from "../../../../shared/room-join-requests.mjs";
 import { ROOM_MENTION_EVENT } from "../../../../shared/room-mention-events.mjs";
 import type { AccountActivityHub, AccountRoomActivity } from "../../account-activity/hub.js";
 import type { getAccountRoomsForAccount } from "../../account-room-membership/list.js";
@@ -29,6 +29,7 @@ import {
 import {
   ROOM_JOIN_REQUEST_CHANGED,
   readRoomJoinRequestChangedEvent,
+  roomJoinRequestDecisionStreamPayload,
   roomJoinRequestEvents,
   roomJoinRequestStreamPayload,
 } from "../../rooms/join-request-events.js";
@@ -276,7 +277,19 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
       const onJoinRequest = (payload: unknown) => {
         const event = readRoomJoinRequestChangedEvent(payload);
         // The event is published once per room under the access room; one frame is enough here.
-        if (!event || event.projectId !== event.accessRoomId || !watchedRoomIds.has(event.accessRoomId.toLowerCase())) return;
+        if (!event || event.projectId !== event.accessRoomId) return;
+        // The answer to this account's own request. The person cannot read the
+        // room yet, so no room check applies; the frame carries only their own
+        // view of the request, and the app opens the room on an approval.
+        if (event.request.account_id === accountId) {
+          if (event.request.state !== "pending" && !connection.closed) {
+            void connection.write(frame(ROOM_JOIN_REQUEST_DECISION_EVENT, roomJoinRequestDecisionStreamPayload(event))).catch((error) => {
+              console.warn("[account activity] join request decision write failed", error);
+            });
+          }
+          return;
+        }
+        if (!watchedRoomIds.has(event.accessRoomId.toLowerCase())) return;
         void isRoomAdmin(accountId, event.accessRoomId).then((admin) => {
           if (admin && !connection.closed) writeAboutRoom(event.accessRoomId, () => frame(ROOM_JOIN_REQUEST_EVENT, roomJoinRequestStreamPayload(event.accessRoomId, event)));
         }).catch((error) => {

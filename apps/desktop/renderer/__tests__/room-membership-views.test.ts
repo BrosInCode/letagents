@@ -485,7 +485,11 @@ function mountSession(status: DesktopRoomAccess["status"] = "ready", duringCheck
   const mounted = renderer.createApp(Provider);
   mounted.provide(ssrContextKey, { modules: new Set<string>() });
   mounted.mount(hostNode("root"));
-  return { loading, refreshes, syncs, refuse, accessChanged: () => accessChanged(), unmount: () => mounted.unmount() };
+  const decide = (state: "approved" | "declined" = "approved") => session.handleDesktopRoomStreamEvent({
+    type: "join_request_decision", roomIdentifier: "design-room",
+    event: { room_id: "design-room", request: { id: "rjr_1", state, created_at: "2026-11-18T09:00:00.000Z", decided_at: "2026-11-18T09:01:00.000Z", retry_after: null } },
+  });
+  return { loading, access, refreshes, syncs, refuse, decide, accessChanged: () => accessChanged(), unmount: () => mounted.unmount() };
 }
 
 test("a refusal checks an open room once, and the check's own refusal starts no loop", async () => {
@@ -544,5 +548,42 @@ test("a room already on the join card is not reloaded by a refusal; Leave asks f
     session.accessChanged();
     await flush();
     assert.equal(session.refreshes.length, 1, "Leave checks the room again");
+  } finally { session.unmount(); }
+});
+
+test("an approval checks the room on the join card at once, so the room opens without a click", async () => {
+  const session = mountSession("membership_required");
+  try {
+    session.decide("approved");
+    await flush();
+    assert.equal(session.refreshes.length, 1, "one check, and its own stream refusal starts no other");
+    // A decline also checks once, so the card shows it and when to ask again.
+    session.decide("declined");
+    await flush();
+    assert.equal(session.refreshes.length, 2);
+  } finally { session.unmount(); }
+});
+
+test("a decision that lands during a running check waits for it, then checks once", async () => {
+  const session = mountSession("membership_required");
+  try {
+    session.loading.value = true;
+    await nextTick();
+    session.decide();
+    session.decide();
+    await flush();
+    assert.equal(session.refreshes.length, 0, "nothing starts while a check runs");
+    session.loading.value = false;
+    await flush();
+    assert.equal(session.refreshes.length, 1, "the check that may predate the approval is followed by one more");
+  } finally { session.unmount(); }
+});
+
+test("a decision does not reload a room that is already open", async () => {
+  const session = mountSession("ready");
+  try {
+    session.decide();
+    await flush();
+    assert.equal(session.refreshes.length, 0);
   } finally { session.unmount(); }
 });

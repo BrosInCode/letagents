@@ -253,6 +253,53 @@ test('a member who is not an admin, an owner token, and a room the account is no
   }
 });
 
+test('the person who asked hears the answer to their own request, with no admin name and no room check', async () => {
+  const s = await server({ admin: false });
+  try {
+    const response = await fetch(`${s.base}/account/activity/stream`);
+    const reading = readEvents(response, 3);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const own = { ...joinRequest, room_id: 'members-room', account_id: 'acct-1', login: 'Emmy' };
+    const emit = (request: typeof own, projectId = 'members-room') => s.joinRequestEvents.emit('join_request:changed', {
+      projectId, accessRoomId: 'members-room', roomDisplayName: 'Members room', request,
+    });
+    // Still pending: nothing to tell. A focus room copy of the answer: one frame is enough.
+    emit(own);
+    emit({ ...own, state: 'approved', decided_at: '2026-11-18T09:01:00.000Z', decided_by_login: 'owner' }, 'focus_42');
+    emit({ ...own, state: 'approved', decided_at: '2026-11-18T09:01:00.000Z', decided_by_login: 'owner' });
+    // Someone else's answer in a room this account does not administer: nothing.
+    emit({ ...own, account_id: 'acct-2', state: 'declined', decided_at: '2026-11-18T09:02:00.000Z' });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    s.working.set('invite-room', ['CedarRidge']);
+    s.presence.emit(PRESENCE_CHANGED, 'invite-room');
+    const events = await reading;
+    assert.deepEqual(events.map(e => e.event), ['snapshot', 'join_request_decision', 'room']);
+    assert.deepEqual(events[1]!.data, {
+      room_id: 'members-room',
+      request: { id: 'rjr_1', state: 'approved', created_at: own.created_at, decided_at: '2026-11-18T09:01:00.000Z', retry_after: null },
+    });
+    assert.deepEqual(s.checks.filter(room => room === 'members-room'), [], 'the room the person cannot read yet is not checked');
+    assert.deepEqual(s.adminChecks, [], 'the person who asked is not asked for an admin role');
+  } finally { await s.close(); }
+});
+
+test('an owner token does not hear the answer to a join request', async () => {
+  const s = await server({ auth: 'owner_token' });
+  try {
+    const response = await fetch(`${s.base}/account/activity/stream`);
+    const reading = readEvents(response, 2);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    s.joinRequestEvents.emit('join_request:changed', {
+      projectId: 'members-room', accessRoomId: 'members-room', roomDisplayName: 'Members room',
+      request: { ...joinRequest, account_id: 'acct-1', state: 'approved', decided_at: '2026-11-18T09:01:00.000Z' },
+    });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    s.working.set('invite-room', ['CedarRidge']);
+    s.presence.emit(PRESENCE_CHANGED, 'invite-room');
+    assert.deepEqual((await reading).map(e => e.event), ['snapshot', 'room']);
+  } finally { await s.close(); }
+});
+
 test('a read the account records in a watched room reaches its stream; others do not', async () => {
   const { accountReadEvents, ACCOUNT_ROOM_READ } = await import('../account-unread/read-events.js');
   const s = await server();

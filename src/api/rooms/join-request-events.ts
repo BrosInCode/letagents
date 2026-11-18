@@ -64,3 +64,14 @@ export function roomJoinRequestStreamPayload(
     request: { ...event.request, room_display_name: event.roomDisplayName },
   };
 }
+
+/**
+ * The `join_request_decision` SSE payload for the person who asked: their own
+ * view of the request (no admin's name), so a waiting screen opens the room.
+ */
+export function roomJoinRequestDecisionStreamPayload(
+  event: Pick<RoomJoinRequestChangedEvent, "accessRoomId" | "request">,
+): Record<string, unknown> {
+  const { id, state, created_at, decided_at, retry_after } = event.request;
+  return { room_id: event.accessRoomId, request: { id, state, created_at, decided_at, retry_after } };
+}

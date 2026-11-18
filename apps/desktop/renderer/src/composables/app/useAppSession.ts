@@ -122,6 +122,26 @@ export function useAppSessionActions(context: unknown) {
     recheckRooms();
   }
 
+  // An admin answered this account's own request to join a room. A join card
+  // on screen checks the room once, at once: the room opens on an approval,
+  // and the card shows a decline. The decision's room is the main room of a
+  // focus room, so it is not matched to the card's room by name; a decision
+  // is rare and costs one check. A check already running may predate the
+  // decision, so the check waits for it to end and then runs.
+  let decisionWaiting = false;
+
+  function handleJoinRequestDecision(): void {
+    if (app.activeEntry.value.type !== "room" || !isMembershipRefusal(app.selectedAccess.value.status)) return;
+    if (loading.value) { decisionWaiting = true; return; }
+    recheckRooms();
+  }
+
+  watch(loading, (busy) => {
+    if (busy || !decisionWaiting) return;
+    decisionWaiting = false;
+    handleJoinRequestDecision();
+  });
+
   watch(loading, (busy) => {
     if (busy || !deferredRefusalRoom) return;
     const room = deferredRefusalRoom;
@@ -168,6 +188,10 @@ export function useAppSessionActions(context: unknown) {
     if (event.type === "join_request") {
       // A request to join a room this account administers: the banner, the Inbox and the alerts read the store.
       roomJoinRequests.receive(event.event);
+      return;
+    }
+    if (event.type === "join_request_decision") {
+      handleJoinRequestDecision();
       return;
     }
     if (event.type === "room_invite") {
