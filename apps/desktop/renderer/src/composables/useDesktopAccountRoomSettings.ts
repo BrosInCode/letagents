@@ -68,7 +68,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       settingsFeedback.value = { message: "Settings refreshed.", state: "success" };
     } catch (error) {
       settingsFeedback.value = {
-        message: error instanceof Error ? error.message : "Settings could not refresh.",
+        message: safeUserVisibleErrorDetail(error, "Settings could not refresh."),
         state: "error",
       };
     }
@@ -87,7 +87,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       settingsFeedback.value = null;
     } catch (error) {
       settingsFeedback.value = {
-        message: error instanceof Error ? error.message : `Could not open ${room.displayName}.`,
+        message: safeUserVisibleErrorDetail(error, `Could not open ${room.displayName}.`),
         state: "error",
       };
     } finally {
@@ -109,7 +109,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       settingsFeedback.value = { message: `Left ${room.displayName}.`, state: "success" };
     } catch (error) {
       settingsFeedback.value = {
-        message: error instanceof Error ? error.message : `Could not leave ${room.displayName}.`,
+        message: safeUserVisibleErrorDetail(error, `Could not leave ${room.displayName}.`),
         state: "error",
       };
     } finally {
@@ -133,7 +133,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       };
     } catch (error) {
       settingsFeedback.value = {
-        message: error instanceof Error ? error.message : `Could not update ${room.displayName}.`,
+        message: safeUserVisibleErrorDetail(error, `Could not update ${room.displayName}.`),
         state: "error",
       };
     } finally {
@@ -150,7 +150,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       settingsFeedback.value = { message: `${room.displayName} restored to your sidebar.`, state: "success" };
     } catch (error) {
       settingsFeedback.value = {
-        message: error instanceof Error ? error.message : `Could not restore ${room.displayName}.`,
+        message: safeUserVisibleErrorDetail(error, `Could not restore ${room.displayName}.`),
         state: "error",
       };
     } finally {
@@ -170,7 +170,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       reportSidebarRoomAction(`Renamed to ${room.displayName || displayName}.`, "success");
     } catch (error) {
       reportSidebarRoomAction(
-        error instanceof Error ? error.message : `Could not rename ${entry.title}.`,
+        safeUserVisibleErrorDetail(error, `Could not rename ${entry.title}.`),
         "error",
       );
     } finally {
@@ -192,7 +192,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       reportSidebarRoomAction(`${displayName} hidden.`, "success");
     } catch (error) {
       reportSidebarRoomAction(
-        error instanceof Error ? error.message : `Could not hide ${displayName}.`,
+        safeUserVisibleErrorDetail(error, `Could not hide ${displayName}.`),
         "error",
       );
     } finally {
@@ -275,7 +275,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       );
     } catch (error) {
       reportSidebarRoomAction(
-        error instanceof Error ? error.message : `Could not update ${displayName}.`,
+        safeUserVisibleErrorDetail(error, `Could not update ${displayName}.`),
         "error",
       );
     } finally {
@@ -307,7 +307,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       );
     } catch (error) {
       reportSidebarRoomAction(
-        error instanceof Error ? error.message : `Could not hide ${displayName}.`,
+        safeUserVisibleErrorDetail(error, `Could not hide ${displayName}.`),
         "error",
       );
     } finally {
@@ -459,7 +459,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       await options.refreshAccountRooms();
       await options.onRoomArchived?.(room.roomIdentifier, room.displayName);
     } catch (error) {
-      options.notify?.(error instanceof Error ? error.message : "Room archived, but the room list could not refresh.", "error");
+      options.notify?.(safeUserVisibleErrorDetail(error, "Room archived, but the room list could not refresh."), "error");
     } finally { pendingRoomDeletion.value = null; }
   }
   async function confirmRoomDeletion(confirmation: string): Promise<void> {
@@ -514,7 +514,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
         return;
       }
       settingsFeedback.value = {
-        message: error instanceof Error ? error.message : `Could not delete ${room.displayName}.`,
+        message: safeUserVisibleErrorDetail(error, `Could not delete ${room.displayName}.`),
         state: "error",
       };
     } finally {
