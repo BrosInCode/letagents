@@ -100,7 +100,7 @@ export const getRoom: import("./core.mjs").ApiMethod<"rooms.get", z.ZodObject<{}
  * Capabilities with a room policy: everything a page may be granted but
  * reads, which every room participant may use in `api: 1`.
  */
-export const POLICY_CAPABILITY_NAMES: ("rooms.read" | "people.read" | "agents.read" | "messages.read" | "tasks.read" | "planning.read" | "work_items.read" | "git.read" | "memory.read" | "data.viewer" | "data.page" | "data.room" | "tasks.propose" | "tickets.propose" | "jobs.start" | "messages.post" | "rooms.admin")[];
+export const POLICY_CAPABILITY_NAMES: ("agents.read" | "rooms.read" | "people.read" | "messages.read" | "tasks.read" | "planning.read" | "work_items.read" | "git.read" | "memory.read" | "data.viewer" | "data.page" | "data.room" | "tasks.propose" | "tickets.propose" | "jobs.start" | "messages.post" | "rooms.admin")[];
 export type RoomApiPolicy = z.infer<typeof RoomApiPolicy>;
 export const RoomApiPolicy: z.ZodObject<{
     capability: z.ZodString;
@@ -162,9 +162,9 @@ export const listRoomPolicies: import("./core.mjs").ApiMethod<"rooms.listPolicie
 }, z.core.$strip>>;
 export const setRoomPolicy: import("./core.mjs").ApiMethod<"rooms.setPolicy", z.ZodObject<{
     capability: z.ZodEnum<{
+        "agents.read": "agents.read";
         "rooms.read": "rooms.read";
         "people.read": "people.read";
-        "agents.read": "agents.read";
         "messages.read": "messages.read";
         "tasks.read": "tasks.read";
         "planning.read": "planning.read";
@@ -258,9 +258,9 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"rooms.get", z.Zo
     }, z.core.$strip>>;
 }, z.core.$strip>>, import("./core.mjs").ApiMethod<"rooms.setPolicy", z.ZodObject<{
     capability: z.ZodEnum<{
+        "agents.read": "agents.read";
         "rooms.read": "rooms.read";
         "people.read": "people.read";
-        "agents.read": "agents.read";
         "messages.read": "messages.read";
         "tasks.read": "tasks.read";
         "planning.read": "planning.read";
