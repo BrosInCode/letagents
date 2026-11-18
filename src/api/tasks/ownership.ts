@@ -2,8 +2,9 @@ import type { TaskStatus } from "../db.js";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 import { RequestValidationError } from "../validation-error.js";
 
-// "mcp_oauth" never reaches task routes: the auth middleware accepts it on /mcp only.
-type RequestAuthKind = "session" | "owner_token" | "agent_session" | "supervisor_grant" | "mcp_oauth" | null | undefined;
+// "mcp_oauth" and "page_grant" never reach task routes: the auth middleware
+// accepts them on /mcp and /api/v1 only.
+type RequestAuthKind = "session" | "owner_token" | "agent_session" | "supervisor_grant" | "mcp_oauth" | "page_grant" | null | undefined;
 
 export const TASK_TITLE_MAX_LENGTH = 512;
 export const TASK_DESCRIPTION_MAX_LENGTH = 100_000;

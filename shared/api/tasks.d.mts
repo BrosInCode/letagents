@@ -14,13 +14,13 @@ export const Task: z.ZodObject<{
     status: z.ZodEnum<{
         blocked: "blocked";
         done: "done";
+        cancelled: "cancelled";
         proposed: "proposed";
         accepted: "accepted";
         assigned: "assigned";
         in_progress: "in_progress";
         in_review: "in_review";
         merged: "merged";
-        cancelled: "cancelled";
     }>;
     assignee: z.ZodNullable<z.ZodObject<{
         name: z.ZodString;
@@ -64,13 +64,13 @@ export const TaskPage: z.ZodObject<{
         status: z.ZodEnum<{
             blocked: "blocked";
             done: "done";
+            cancelled: "cancelled";
             proposed: "proposed";
             accepted: "accepted";
             assigned: "assigned";
             in_progress: "in_progress";
             in_review: "in_review";
             merged: "merged";
-            cancelled: "cancelled";
         }>;
         assignee: z.ZodNullable<z.ZodObject<{
             name: z.ZodString;
@@ -114,13 +114,13 @@ export const listTasks: import("./core.mjs").ApiMethod<"tasks.list", z.ZodObject
     status: z.ZodOptional<z.ZodEnum<{
         blocked: "blocked";
         done: "done";
+        cancelled: "cancelled";
         proposed: "proposed";
         accepted: "accepted";
         assigned: "assigned";
         in_progress: "in_progress";
         in_review: "in_review";
         merged: "merged";
-        cancelled: "cancelled";
     }>>;
     after: z.ZodOptional<z.ZodString>;
     limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
@@ -132,13 +132,13 @@ export const listTasks: import("./core.mjs").ApiMethod<"tasks.list", z.ZodObject
         status: z.ZodEnum<{
             blocked: "blocked";
             done: "done";
+            cancelled: "cancelled";
             proposed: "proposed";
             accepted: "accepted";
             assigned: "assigned";
             in_progress: "in_progress";
             in_review: "in_review";
             merged: "merged";
-            cancelled: "cancelled";
         }>;
         assignee: z.ZodNullable<z.ZodObject<{
             name: z.ZodString;
@@ -184,13 +184,13 @@ export const getTask: import("./core.mjs").ApiMethod<"tasks.get", z.ZodObject<{
     status: z.ZodEnum<{
         blocked: "blocked";
         done: "done";
+        cancelled: "cancelled";
         proposed: "proposed";
         accepted: "accepted";
         assigned: "assigned";
         in_progress: "in_progress";
         in_review: "in_review";
         merged: "merged";
-        cancelled: "cancelled";
     }>;
     assignee: z.ZodNullable<z.ZodObject<{
         name: z.ZodString;
@@ -229,13 +229,13 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"tasks.list", z.Z
     status: z.ZodOptional<z.ZodEnum<{
         blocked: "blocked";
         done: "done";
+        cancelled: "cancelled";
         proposed: "proposed";
         accepted: "accepted";
         assigned: "assigned";
         in_progress: "in_progress";
         in_review: "in_review";
         merged: "merged";
-        cancelled: "cancelled";
     }>>;
     after: z.ZodOptional<z.ZodString>;
     limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
@@ -247,13 +247,13 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"tasks.list", z.Z
         status: z.ZodEnum<{
             blocked: "blocked";
             done: "done";
+            cancelled: "cancelled";
             proposed: "proposed";
             accepted: "accepted";
             assigned: "assigned";
             in_progress: "in_progress";
             in_review: "in_review";
             merged: "merged";
-            cancelled: "cancelled";
         }>;
         assignee: z.ZodNullable<z.ZodObject<{
             name: z.ZodString;
@@ -298,13 +298,13 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"tasks.list", z.Z
     status: z.ZodEnum<{
         blocked: "blocked";
         done: "done";
+        cancelled: "cancelled";
         proposed: "proposed";
         accepted: "accepted";
         assigned: "assigned";
         in_progress: "in_progress";
         in_review: "in_review";
         merged: "merged";
-        cancelled: "cancelled";
     }>;
     assignee: z.ZodNullable<z.ZodObject<{
         name: z.ZodString;

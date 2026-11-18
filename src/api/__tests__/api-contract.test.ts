@@ -4,12 +4,13 @@ import test from "node:test";
 import { z } from "zod";
 
 import { ApiActor, actorKey } from "../../../shared/api/actor.mjs";
-import { CAPABILITIES, CAPABILITY_NAMES, isCapabilityName } from "../../../shared/api/capabilities.mjs";
+import { CAPABILITIES, CAPABILITY_NAMES, GRANTABLE_CAPABILITY_NAMES, isCapabilityName } from "../../../shared/api/capabilities.mjs";
 import {
   API_AREAS,
   API_ERROR_CODES,
   API_ERROR_HTTP_STATUS,
   ApiError,
+  capabilityForCall,
   defineMethod,
   methodMayReturn,
   queryBool,
@@ -57,6 +58,7 @@ test("defineMethod refuses a method that the server could not route or check", (
     [{ errors: ["teapot"] }, /unknown error code "teapot"/],
     [{ response: "html" }, /unknown response kind "html"/],
     [{ input: { parse() {} } }, /must be zod schemas/],
+    [{ capabilityFromInput: "data.room" }, /capabilityFromInput must be a function/],
   ];
   for (const [change, message] of refused) {
     assert.throws(() => defineMethod({ ...spec, ...change } as never), message, JSON.stringify(change));
@@ -109,11 +111,29 @@ test("a GET or DELETE input takes numbers and booleans only through queryInt and
   for (const method of API_METHODS) assert.deepEqual(queryInputProblems(method), [], method.name);
 });
 
+test("capabilityFromInput picks the capability per call, falls back to the method's, and never passes an unknown name", () => {
+  const scoped = defineMethod({
+    ...spec,
+    name: "rooms.scoped",
+    kind: "write",
+    path: "/rooms/:room/scoped",
+    input: z.strictObject({ scope: z.enum(["viewer", "page", "room", "none", "bad"]) }),
+    capabilityFromInput: ({ scope }) => (scope === "none" ? undefined : scope === "bad" ? ("data.everything" as never) : `data.${scope}` as const),
+  });
+  assert.equal(capabilityForCall(scoped, { scope: "room" }), "data.room");
+  assert.equal(capabilityForCall(scoped, { scope: "none" }), "rooms.read");
+  assert.throws(() => capabilityForCall(scoped, { scope: "bad" }), /unknown capability "data\.everything"/);
+  assert.equal(capabilityForCall(defineMethod(spec), { exampleId: "x" }), "rooms.read");
+});
+
 test("the capability registry has every capability the plan names, with a label and a default policy", () => {
   assert.deepEqual([...CAPABILITY_NAMES].sort(), [
-    "agents.read", "data.page", "data.room", "data.viewer", "git.read", "jobs.start", "memory.read", "messages.post",
-    "messages.read", "people.read", "planning.read", "rooms.read", "tasks.propose", "tasks.read", "tickets.propose", "work_items.read",
+    "agents.read", "data.page", "data.room", "data.viewer", "git.read", "jobs.read", "jobs.start", "memory.read", "messages.post",
+    "messages.read", "people.read", "planning.read", "rooms.admin", "rooms.read", "tasks.propose", "tasks.read", "tickets.propose", "work_items.read",
   ]);
+  // Room administration is never a page's: no manifest asks for it, no grant holds it.
+  assert.deepEqual(CAPABILITY_NAMES.filter((name) => !CAPABILITIES[name].grantable), ["rooms.admin"]);
+  assert.equal(GRANTABLE_CAPABILITY_NAMES.includes("rooms.admin"), false);
   for (const name of CAPABILITY_NAMES) assert.ok(CAPABILITIES[name].label.length > 10, name);
   // The plan's default table.
   assert.equal(CAPABILITIES["tasks.read"].defaultPolicy, "allow");
@@ -171,11 +191,13 @@ test("a wrong manifest gets one error per problem, with the field path", () => {
     api: 2, title: "  ", surfaces: [], capabilities: ["tickets.write", "git.read", "git.read"], collections: { team: [] }, theme: "dark",
   });
   assert.equal(parsed.ok, false);
+  const admin = parsePageManifest({ api: 1, title: "Admin", surfaces: ["room.tab"], capabilities: ["rooms.admin"] });
+  assert.equal(admin.ok ? null : admin.errors[0]?.message.startsWith('Unknown capability "rooms.admin"'), true);
   assert.deepEqual(parsed.ok ? [] : parsed.errors, [
     { path: "api", message: "\"api\" must be 1, the API version this page was written for." },
     { path: "title", message: "A title is required." },
     { path: "surfaces", message: "Name at least one surface, for example \"room.tab\"." },
-    { path: "capabilities[0]", message: `Unknown capability "tickets.write". Known capabilities: ${CAPABILITY_NAMES.join(", ")}.` },
+    { path: "capabilities[0]", message: `Unknown capability "tickets.write". Known capabilities: ${GRANTABLE_CAPABILITY_NAMES.join(", ")}.` },
     { path: "capabilities", message: "Capabilities must not repeat." },
     { path: "collections", message: "Unrecognized key: \"team\". Known keys: viewer, page, room." },
     { path: "", message: "Unrecognized key: \"theme\". Known keys: api, title, surfaces, capabilities, workItemFields, collections, owner." },

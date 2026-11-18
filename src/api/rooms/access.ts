@@ -443,13 +443,22 @@ export async function reauthorizeGitRoomParticipant(
 ): Promise<boolean> {
   const humanCredential = req.authKind === "session"
     || req.authKind === "owner_token"
-    || req.authKind === "mcp_oauth";
+    || req.authKind === "mcp_oauth"
+    || req.authKind === "page_grant";
   const fresh = await resolveRequestAuth(req);
   // A session or owner token revoked after entry must not keep a stream
   // alive, and a stream may never move to another account.
   if (
     humanCredential
     && (fresh.authKind !== req.authKind || fresh.account?.account_id !== req.sessionAccount?.account_id)
+  ) {
+    return false;
+  }
+  // A page grant also ends when it expires or is revoked (unpin, sign-out),
+  // and it opens only the one room it was minted for.
+  if (
+    req.authKind === "page_grant"
+    && (fresh.pageGrant?.grant_id !== req.pageGrant?.grant_id || fresh.pageGrant?.room_id !== project.id)
   ) {
     return false;
   }

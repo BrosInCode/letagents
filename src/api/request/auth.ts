@@ -6,6 +6,8 @@ import { getOwnerTokenAccountByTokenHash } from "../db/auth/owner-tokens.js";
 import { getMcpOAuthAccessGrant, getMcpOAuthGrantBySecretHash } from "../db/mcp-oauth.js";
 import { isRemoteMcpRequestPath, mcpOAuthUrls } from "../mcp-oauth/config.js";
 import { grantSecretOf, looksLikeMcpAccessToken, safeEqual, sha256Hex } from "../mcp-oauth/tokens.js";
+import { getLiveApiPageTokenAccount } from "../db/api-page-tokens.js";
+import { isApiV1RequestPath, isWellFormedPageGrantToken, looksLikePageGrantToken, requestPathname } from "../v1/page-grant-token.js";
 import {
   getOwnerTokenAccountByToken,
   getRoomAgentSessionBearerByToken,
@@ -51,6 +53,12 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
   const providerToken = authorization.token;
 
   if (looksLikeMcpAccessToken(providerToken)) return resolveMcpOAuthAccessToken(req, providerToken);
+  if (looksLikePageGrantToken(providerToken)) {
+    // A page token beside a browser session is a confused-deputy envelope,
+    // as with a supervisor grant: choose neither principal.
+    if (sessionToken) return { account: null, authKind: null };
+    return resolvePageGrantToken(req, providerToken);
+  }
 
   const ownerTokenAccount = await getOwnerTokenAccountByToken(providerToken);
   if (ownerTokenAccount) {
@@ -133,5 +141,30 @@ async function resolveMcpOAuthAccessToken(req: Request, token: string): Promise<
     account: grant.account,
     authKind: "mcp_oauth",
     mcpOAuth: { grant_id: grant.grant_id, session_secret: grantSecret },
+  };
+}
+
+/**
+ * A page grant: the person who minted it, limited to one room, one page
+ * version and its capabilities. Accepted on /api/v1 only; any other path gets
+ * the invalid-bearer answer, so a page never reaches a route that checks only
+ * the account and room role.
+ */
+async function resolvePageGrantToken(req: Request, token: string): Promise<ResolvedRequestAuth> {
+  const refused: ResolvedRequestAuth = { account: null, authKind: null };
+  if (!isApiV1RequestPath(requestPathname(req)) || !isWellFormedPageGrantToken(token)) return refused;
+  const grant = await getLiveApiPageTokenAccount(sha256Hex(token));
+  if (!grant) return refused;
+  return {
+    account: grant.account,
+    authKind: "page_grant",
+    pageGrant: {
+      grant_id: grant.token.token_id,
+      room_id: grant.token.room_id,
+      page_id: grant.token.page_id,
+      page_version: grant.token.page_version,
+      capabilities: grant.token.capabilities,
+      expires_at: grant.token.expires_at,
+    },
   };
 }

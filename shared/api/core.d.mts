@@ -18,6 +18,15 @@ export function describeIssues(error: {
  * Describes one API method. Every route is room-scoped: the path starts with
  * `/rooms/:room`, so access always resolves through the room in the URL.
  * Other `:params` in the path are input fields; the route fills them in.
+ *
+ * `capability` is the method's capability. When the capability depends on
+ * the input (a document's scope: `data.viewer`, `data.page` or `data.room`;
+ * an intent's kind: `tasks.propose` or `tickets.propose`), add
+ * `capabilityFromInput(input)`: it gets the parsed input and returns the
+ * capability that this call needs, or undefined for `capability`. The server
+ * checks the returned capability, for the page grant and the room policy
+ * alike. It must return a name from capabilities.mjs; anything else is a
+ * server error, never a pass. The snapshot keeps only `capability`.
  * @template {string} Name
  * @template {z.ZodType} Input
  * @template {z.ZodType} Output
@@ -25,6 +34,14 @@ export function describeIssues(error: {
  * @returns {ApiMethod<Name, Input, Output>}
  */
 export function defineMethod<Name extends string, Input extends z.ZodType, Output extends z.ZodType>(spec: MethodSpec<Name, Input, Output>): ApiMethod<Name, Input, Output>;
+/**
+ * The capability one call of this method needs: `capabilityFromInput` of the
+ * parsed input when the method has it, else `capability`.
+ * @param {AnyApiMethod} method
+ * @param {unknown} input
+ * @returns {CapabilityName}
+ */
+export function capabilityForCall(method: AnyApiMethod, input: unknown): CapabilityName;
 /**
  * Whether a method may answer with this code: its own list or a common one.
  * @param {Pick<AnyApiMethod, "errors">} method
@@ -224,6 +241,7 @@ export type MethodSpec<Name extends string = string, Input extends z.ZodType = z
     area: ApiArea;
     kind: MethodKind;
     capability: CapabilityName;
+    capabilityFromInput?(input: z.output<Input>): CapabilityName | undefined;
     description: string;
     path: string;
     httpMethod?: HttpVerb;
@@ -239,6 +257,7 @@ export type ApiMethod<Name extends string = string, Input extends z.ZodType = z.
     readonly area: ApiArea;
     readonly kind: MethodKind;
     readonly capability: CapabilityName;
+    capabilityFromInput?(input: z.output<Input>): CapabilityName | undefined;
     readonly description: string;
     readonly path: string;
     readonly httpMethod: HttpVerb;

@@ -1,4 +1,5 @@
 import { retireAccountCredentials } from "../../rooms/live-authorization.js";
+import { revokePageGrants } from "../../v1/page-grants.js";
 import crypto from "crypto";
 import type { Express } from "express";
 import { parseBearerAuthorization } from "../../request/bearer-authorization.js";
@@ -61,12 +62,15 @@ export interface AuthLogoutRouteDeps {
   deleteSessionByToken: typeof deleteSessionByToken;
   /** Closes the live streams of the ended credentials. Defaults to the live-authorization event. */
   retireCredentials?: typeof retireAccountCredentials;
+  /** Revokes the person's page grants (and closes their streams). */
+  revokePageGrants?: typeof revokePageGrants;
 }
 
 const defaultAuthLogoutRouteDeps: AuthLogoutRouteDeps = {
   deleteOwnerTokenById,
   deleteSessionByToken,
   retireCredentials: retireAccountCredentials,
+  revokePageGrants,
 };
 
 function consumeWindow(
@@ -441,6 +445,12 @@ export function registerAuthLogoutRoute(
   deps: AuthLogoutRouteDeps = defaultAuthLogoutRouteDeps,
 ): void {
   app.post("/auth/logout", async (req: AuthenticatedRequest, res) => {
+    // Pages this app session opened end with it, on this device only. First,
+    // so their streams close now: deleting the session drops their rows.
+    // An owner token mints no page grants, so its sign-out revokes none.
+    if (req.authKind === "session" && req.sessionAccount && "id" in req.sessionAccount) {
+      await (deps.revokePageGrants ?? revokePageGrants)({ sessionId: req.sessionAccount.id });
+    }
     const cookies = parseCookies(req.headers.cookie);
     const retired: string[] = [];
     if (cookies.letagents_session) {

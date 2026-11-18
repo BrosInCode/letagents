@@ -1,6 +1,7 @@
 // Rooms: what a page may know about the room it runs in.
 import { z } from "zod";
 
+import { CAPABILITY_POLICIES, CAPABILITY_POLICY_RULES, GRANTABLE_CAPABILITY_NAMES } from "./capabilities.mjs";
 import { defineMethod } from "./core.mjs";
 
 export const RoomRepo = z.object({
@@ -55,4 +56,55 @@ export const getRoom = defineMethod({
   agents: "read",
 });
 
-export const methods = /** @type {const} */ ([getRoom]);
+/**
+ * Capabilities with a room policy: everything a page may be granted but
+ * reads, which every room participant may use in `api: 1`.
+ */
+export const POLICY_CAPABILITY_NAMES = GRANTABLE_CAPABILITY_NAMES.filter((name) => !name.endsWith(".read"));
+
+export const RoomApiPolicy = z.object({
+  capability: z.string(),
+  /** What happens when the capability is used: `confirm` asks the viewer, `approve` waits for a room admin. */
+  mode: z.enum(CAPABILITY_POLICIES),
+  /** `room` when a room admin chose the mode, `default` when it is the LetAgents default. */
+  source: z.enum(["room", "default"]),
+  /** A rule that relaxes a default at run time (Board Manager mode, the viewer's own tracker connection). */
+  rule: z.enum(CAPABILITY_POLICY_RULES).nullable(),
+});
+
+export const RoomApiPolicies = z.object({ policies: z.array(RoomApiPolicy) });
+
+/** @typedef {z.infer<typeof RoomApiPolicy>} RoomApiPolicy */
+/** @typedef {z.infer<typeof RoomApiPolicies>} RoomApiPolicies */
+
+export const listRoomPolicies = defineMethod({
+  name: "rooms.listPolicies",
+  area: "rooms",
+  kind: "read",
+  capability: "rooms.admin",
+  description:
+    "The room's API policy for each capability that is not a read: allow, confirm (the viewer confirms in the app), approve (a room admin approves) or deny. Room admins only, signed in as themselves; pages and agents get not_granted.",
+  path: "/rooms/:room/policies",
+  input: z.strictObject({}),
+  output: RoomApiPolicies,
+  rateClass: "read",
+});
+
+export const setRoomPolicy = defineMethod({
+  name: "rooms.setPolicy",
+  area: "rooms",
+  kind: "write",
+  httpMethod: "PUT",
+  capability: "rooms.admin",
+  description:
+    "Sets the room's API policy for one capability; mode null goes back to the LetAgents default. Returns every policy. Room admins only, in the LetAgents app; pages, agents and owner tokens get not_granted.",
+  path: "/rooms/:room/policies",
+  input: z.strictObject({
+    capability: z.enum(POLICY_CAPABILITY_NAMES),
+    mode: z.enum(CAPABILITY_POLICIES).nullable(),
+  }),
+  output: RoomApiPolicies,
+  rateClass: "write",
+});
+
+export const methods = /** @type {const} */ ([getRoom, listRoomPolicies, setRoomPolicy]);

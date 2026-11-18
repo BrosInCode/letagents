@@ -3,6 +3,11 @@
  * @param {unknown} value
  * @returns {value is CapabilityName}
  */
+export function isGrantableCapabilityName(value: unknown): value is CapabilityName;
+/**
+ * @param {unknown} value
+ * @returns {value is CapabilityName}
+ */
 export function isCapabilityName(value: unknown): value is CapabilityName;
 /**
  * @param {CapabilityName} name
@@ -27,12 +32,17 @@ export const CAPABILITY_POLICY_RULES: readonly ["board_manager_mode", "own_track
  *   readonly defaultPolicy: CapabilityPolicy,
  *   readonly policyRule: CapabilityPolicyRule | null,
  *   readonly writeLike: boolean,
+ *   readonly grantable: boolean,
  * }} CapabilitySpec
  */
 /**
  * `writeLike` marks capabilities that act for the viewer (posts, jobs,
  * proposals). A new page version that holds one waits for a room admin when
  * a non-admin made it.
+ *
+ * `grantable: false` marks capabilities only a person acting for themselves
+ * holds (room administration). No manifest may ask for one and no page
+ * grant may hold one, so a page never reaches those methods.
  */
 export const CAPABILITIES: Readonly<{
     "rooms.read": CapabilitySpec;
@@ -44,6 +54,7 @@ export const CAPABILITIES: Readonly<{
     "work_items.read": CapabilitySpec;
     "git.read": CapabilitySpec;
     "memory.read": CapabilitySpec;
+    "jobs.read": CapabilitySpec;
     "data.viewer": CapabilitySpec;
     "data.page": CapabilitySpec;
     "data.room": CapabilitySpec;
@@ -51,10 +62,16 @@ export const CAPABILITIES: Readonly<{
     "tickets.propose": CapabilitySpec;
     "jobs.start": CapabilitySpec;
     "messages.post": CapabilitySpec;
+    "rooms.admin": CapabilitySpec;
 }>;
 /** @typedef {keyof typeof CAPABILITIES} CapabilityName */
 /** @type {readonly CapabilityName[]} */
 export const CAPABILITY_NAMES: readonly CapabilityName[];
+/**
+ * The capabilities a page manifest may ask for and a page grant may hold.
+ * @type {readonly CapabilityName[]}
+ */
+export const GRANTABLE_CAPABILITY_NAMES: readonly CapabilityName[];
 export type CapabilityPolicy = (typeof CAPABILITY_POLICIES)[number];
 export type CapabilityPolicyRule = (typeof CAPABILITY_POLICY_RULES)[number];
 export type CapabilitySpec = {
@@ -62,5 +79,6 @@ export type CapabilitySpec = {
     readonly defaultPolicy: CapabilityPolicy;
     readonly policyRule: CapabilityPolicyRule | null;
     readonly writeLike: boolean;
+    readonly grantable: boolean;
 };
 export type CapabilityName = keyof typeof CAPABILITIES;
