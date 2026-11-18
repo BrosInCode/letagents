@@ -74,7 +74,7 @@ test("deleting a sidebar child removes its row and returns an open child to its 
 test("successful parent deletion navigates away, while a failed deletion keeps the warning", async () => {
   const oldWindow = globalThis.window, oldStorage = globalThis.localStorage;
   let fail = true, navigated = 0;
-  globalThis.window = { letagentsDesktop: { room: { deleteAccountRoom: async () => { if (fail) throw new Error("Agents still active"); } } } } as never;
+  globalThis.window = { letagentsDesktop: { room: { deleteAccountRoom: async () => { if (fail) throw new Error("Error invoking remote method 'desktop:room:delete-account-room': DesktopApiError: RiverFox is still in this room. Disconnect or retire it before deleting the room."); } } } } as never;
   globalThis.localStorage = { setItem() {} } as never;
   try {
     const state = useDesktopAccountRoomSettings({
@@ -86,7 +86,7 @@ test("successful parent deletion navigates away, while a failed deletion keeps t
     state.deleteAccountRoom({ roomIdentifier: "parent", displayName: "Parent" });
     await state.confirmRoomDeletion("parent");
     assert.equal(state.pendingRoomDeletion.value?.roomIdentifier, "parent");
-    assert.equal(state.settingsFeedback.value?.message, "Agents still active");
+    assert.equal(state.settingsFeedback.value?.message, "RiverFox is still in this room. Disconnect or retire it before deleting the room.");
     assert.equal(navigated, 0);
     fail = false;
     await state.confirmRoomDeletion("parent");

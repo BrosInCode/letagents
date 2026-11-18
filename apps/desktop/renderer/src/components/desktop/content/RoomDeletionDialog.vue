@@ -72,6 +72,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import type { DesktopRoomDeletionPreview } from "../../../../../electron/ipc-types/api.js";
 import { desktopIpc } from "../../../ipc/index.js";
 import { trapFocusInDialog } from "./modal-focus";
+import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
 
 type RoomTarget = { roomIdentifier: string; displayName: string };
 type AffectedRow = { title: string; isFocus: boolean; left: number; top: number; width: number; height: number };
@@ -120,7 +121,7 @@ async function loadPreview(): Promise<void> {
     const result = await desktopIpc.room.getRoomDeletionPreview(room.roomIdentifier);
     if (request === previewRequest) impact.value = result;
   } catch (error) {
-    if (request === previewRequest) previewError.value = error instanceof Error ? error.message : "Room details could not be loaded.";
+    if (request === previewRequest) previewError.value = safeUserVisibleErrorDetail(error, "Room details could not be loaded.");
   } finally {
     if (request === previewRequest) previewLoading.value = false;
   }
@@ -210,7 +211,7 @@ async function archive(event: MouseEvent): Promise<void> {
     await desktopIpc.room.updateAccountRoom(target.value.roomIdentifier, { archived: true });
     emit("archived", { ...target.value });
   } catch (error) {
-    localError.value = error instanceof Error ? error.message : "Room could not be archived.";
+    localError.value = safeUserVisibleErrorDetail(error, "Room could not be archived.");
     phase.value = "confirm";
   }
 }
@@ -231,7 +232,7 @@ async function undoArchive(): Promise<void> {
     emit("restored");
     notice.value = null;
   } catch (error) {
-    restoreError.value = error instanceof Error ? error.message : "Room could not be restored. Try again.";
+    restoreError.value = safeUserVisibleErrorDetail(error, "Room could not be restored. Try again.");
   } finally { restoring.value = false; }
 }
 window.addEventListener("resize", measure);

@@ -75,6 +75,8 @@ export function registerTools(
   registerMessageTools(tools, {
     includeDeliveryLoop: surface.deliveryLoop,
     fileAttachments: surface.messageFileAttachments && !options.remote,
+    // Files given as content need no folder, so a remote bot can send them too.
+    fileContents: surface.messageFileAttachments,
   });
   if (profile === "supervised_room_turn") registerReplyThreadTool(tools);
   if (profile === "supervised_room_turn" && supervisedProvider === "cursor") registerSupervisedRoomTurnTools(tools);

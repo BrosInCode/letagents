@@ -303,8 +303,8 @@
     transform: none !important;
   }
 
-  .copy-state[data-changed] .copy-state-unit,
-  .copy-state[data-changed][data-state] .copy-state-unit,
+  /* As specific as the "in" rules above (and later), so reduced motion wins: a plain cross-fade. */
+  .copy-state[data-changed][data-state] .copy-state-unit[data-for],
   .copy-state[data-changed][data-state="done"] .copy-state-check {
     animation: none;
     transition: opacity 150ms ease;

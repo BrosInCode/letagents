@@ -44,6 +44,8 @@ import {
 import { emitProjectMessage } from "./events.js";
 import { workflowEffectBroker } from "../workflow-effects/runtime.js";
 import { sweepAgentAsks } from "../agent-asks/store.js";
+import { endGoneWorkerSessions } from "../db/auth/room-agent-sessions.js";
+import { announceAgentSessionEnded } from "../rooms/agent-process-connections.js";
 
 /** Fence lost inside the failover transaction: roll the announcement back quietly. */
 class BoardManagerFailoverLostRace extends Error {
@@ -364,6 +366,13 @@ export function startLivenessSweep(): void {
       await (await import("../connectors/jev/runtime.js")).pruneJevQuestions();
       } catch (error) {
       console.error("Jev question sweep failed:", error);
+      }
+      try {
+      // Agents that left without saying so: the room shows them offline,
+      // so nothing else should keep counting them as present.
+      for (const sessionId of await endGoneWorkerSessions()) announceAgentSessionEnded(sessionId);
+      } catch (error) {
+      console.error("Gone worker session sweep failed:", error);
       }
       try {
       await sweepAgentAsks();

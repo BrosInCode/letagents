@@ -396,6 +396,8 @@ const required = [
     "shared/api-agent-tools.mjs",
     "shared/agent-codenames.mjs",
     "shared/agent-live-trace.mjs",
+    "shared/attachment-content.mjs",
+    "shared/attachment-download.mjs",
     "shared/codex-owner-isolation.mjs",
     "shared/codex-read-only-room-tools.mjs",
     "shared/credential-paths.mjs",

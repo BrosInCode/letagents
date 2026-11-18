@@ -7,6 +7,7 @@ import { registerWaitForMessagesTool } from "./wait-tool.js";
 import { registerExpressionTools } from "./expressions-tool.js";
 import { registerHistorySummaryTools } from "./history-summary-tool.js";
 import { registerDemoMarksTool } from "./demo-marks-tool.js";
+import { registerReadAttachmentTool } from "./read-attachment-tool.js";
 
 export function registerStatusTools(server: McpServer): void {
   registerPostStatusTool(server);
@@ -15,12 +16,13 @@ export function registerStatusTools(server: McpServer): void {
 
 export function registerMessageTools(
   server: McpServer,
-  options: { includeDeliveryLoop?: boolean; fileAttachments?: boolean } = {},
+  options: { includeDeliveryLoop?: boolean; fileAttachments?: boolean; fileContents?: boolean } = {},
 ): void {
   registerExpressionTools(server);
-  registerSendMessageTool(server, { fileAttachments: options.fileAttachments === true });
+  registerSendMessageTool(server, { fileAttachments: options.fileAttachments === true, fileContents: options.fileContents === true });
   registerReadMessagesTool(server);
   registerHistorySummaryTools(server);
   registerDemoMarksTool(server);
+  registerReadAttachmentTool(server);
   if (options.includeDeliveryLoop !== false) registerWaitForMessagesTool(server);
 }

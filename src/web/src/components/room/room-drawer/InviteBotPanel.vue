@@ -11,15 +11,17 @@
       git-room-hint="Open an invite room and invite the bot there."
       :create-invite="createInvite"
       :cancel-invite="cancelInvite"
+      :invite-state="inviteState"
+      @done="followed.stop()"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import InviteBotSection from '../../../../../../shared/ui/InviteBotSection.vue'
 import { inviteBotConnectorUrl, type InviteBotPlatform } from '../../../../../../shared/ui/invite-bot'
-import { cancelRoomInvite, createRoomInvite } from '@/composables/room/invites'
+import { cancelRoomInvite, createRoomInvite, inviteFromRefusal, useFollowedRoomInvite } from '@/composables/room/invites'
 import type { RoomInfo } from '@/composables/useRoom'
 
 const props = defineProps<{ room: RoomInfo }>()
@@ -48,15 +50,27 @@ const inviteRoom = computed(() => ({
   connectorUrl: inviteBotConnectorUrl(typeof window !== 'undefined' ? window.location.origin : null),
 }))
 
-function createInvite(platform: InviteBotPlatform) {
-  return createRoomInvite(props.room.identifier, platform)
+// The invite Copy made is followed until it ends, so the section says when
+// the bot joined (or asked to) instead of waiting forever.
+const followed = useFollowedRoomInvite(() => props.room.identifier)
+const inviteState = computed(() => followed.invite.value
+  ? { state: followed.invite.value.state, outcome: followed.invite.value.outcome }
+  : null)
+watch(() => props.room.identifier, () => followed.stop())
+
+async function createInvite(platform: InviteBotPlatform) {
+  const made = await createRoomInvite(props.room.identifier, platform)
+  followed.follow(made.invite)
+  return made
 }
 
 async function cancelInvite(inviteId: string): Promise<string | null> {
   try {
-    await cancelRoomInvite(props.room.identifier, inviteId)
+    followed.update(await cancelRoomInvite(props.room.identifier, inviteId))
     return null
   } catch (error) {
+    // Used or cancelled meanwhile: the server says which, and the section shows it.
+    followed.update(inviteFromRefusal(error))
     return error instanceof Error && error.message ? error.message : 'The invite could not be cancelled. Try again.'
   }
 }
