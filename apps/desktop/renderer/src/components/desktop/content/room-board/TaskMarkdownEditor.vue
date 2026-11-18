@@ -22,7 +22,7 @@
 import { computed, nextTick, ref, useId } from 'vue'
 import { applyMarkdownTool, markdownTools, type MarkdownTool } from '../../../../../../../../shared/task-markdown-editing.mjs'
 import { Bold, Italic, Strikethrough, Heading2, List, ListOrdered, ListTodo, Quote, SquareCode, Link } from '@lucide/vue'
-import { renderDesktopMarkdown } from '../formatting/markdown'
+import { renderMarkdown } from '../../../../../../../../shared/ui/markdown/markdown'
 const icons = { bold: Bold, italic: Italic, strike: Strikethrough, heading: Heading2, bullet: List, number: ListOrdered, check: ListTodo, quote: Quote, code: SquareCode, link: Link }
 const props = withDefaults(defineProps<{ modelValue: string; disabled?: boolean; id?: string; label?: string }>(), { disabled: false, label: 'Description' })
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
@@ -30,7 +30,7 @@ const textarea = ref<HTMLTextAreaElement | null>(null)
 const preview = ref(false)
 const generatedId = useId()
 const inputId = computed(() => props.id || 'task-markdown-' + generatedId)
-const rendered = computed(() => renderDesktopMarkdown(props.modelValue, { block: true, mentions: false, preservePaths: true, noCache: true }))
+const rendered = computed(() => renderMarkdown(props.modelValue, { block: true, mentions: false, preservePaths: true, noCache: true }))
 async function format(tool: MarkdownTool) {
   const input = textarea.value
   if (!input || props.disabled || preview.value) return

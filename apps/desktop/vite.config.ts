@@ -29,7 +29,7 @@ export default defineConfig({
     strictPort: true,
   },
   resolve: {
-    dedupe: ["vue", "three"],
+    dedupe: ["vue", "three", "marked", "dompurify", "highlight.js"],
     alias: {
       "@": fileURLToPath(new URL("./renderer/src", import.meta.url)),
     },

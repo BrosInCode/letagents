@@ -10,7 +10,11 @@
     "esModuleInterop": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["vite/client"],
-    "paths": { "vue": ["./node_modules/vue"] }
+    "paths": {
+      "vue": ["./node_modules/vue"],
+      "dompurify": ["./node_modules/dompurify"],
+      "marked": ["./node_modules/marked"]
+    }
   },
   "include": [
     "demos/board/**/*.ts",

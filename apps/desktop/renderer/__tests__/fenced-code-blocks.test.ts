@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import hljs from "highlight.js/lib/core";
 
-import { renderDesktopMarkdown } from "../src/components/desktop/content/formatting/markdown";
+import { renderMarkdown } from "../../../../shared/ui/markdown/markdown";
 import { renderMessageText } from "../src/components/desktop/content/desktop-chat-message/message-rendering";
-import { desktopHighlighter } from "../src/components/desktop/content/formatting/code-highlighter";
+import { codeHighlighter, highlightCode } from "../../../../shared/ui/markdown/code-highlighter";
 import {
   MAX_HIGHLIGHT_CHARS,
   MAX_HIGHLIGHT_LINES,
@@ -20,10 +19,10 @@ import {
 // The sliding-window test below supplies its own advancing clock.
 beforeEach((t) => {
   const highlighter = createCodeHighlighter({
-    highlight: (code, language) => hljs.highlight(code, { language, ignoreIllegals: true }).value,
+    highlight: highlightCode,
     now: () => 0,
   });
-  t.mock.method(desktopHighlighter, "renderCodeBlock", highlighter.renderCodeBlock);
+  t.mock.method(codeHighlighter, "renderCodeBlock", highlighter.renderCodeBlock);
 });
 
 function createMockButton(isConnected = true) {
@@ -45,7 +44,7 @@ function createMockButton(isConnected = true) {
 describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
   it("renders code block with header, language badge, and copy button", () => {
     const input = ["```python", "def hello():", '    return "world"', "```"].join("\n");
-    const html = renderDesktopMarkdown(input, { block: true });
+    const html = renderMarkdown(input, { block: true });
 
     assert.match(html, /<div class="fenced-code-block">/);
     assert.match(html, /<div class="fenced-code-block-header">/);
@@ -61,7 +60,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
 
   it("header elements contain zero text nodes to prevent selection and search hits pollution", () => {
     const input = ["```javascript", "const x = 42;", "```"].join("\n");
-    const html = renderDesktopMarkdown(input, { block: true });
+    const html = renderMarkdown(input, { block: true });
 
     const headerMatch = /<div class="fenced-code-block-header">(.*?)<\/div>/.exec(html);
     assert.ok(headerMatch, "header should exist");
@@ -78,7 +77,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
 
   it("renders alias language tags with matched key as label (e.g. html, not xml)", () => {
     const input = ["```html", "<div>Hello</div>", "```"].join("\n");
-    const html = renderDesktopMarkdown(input, { block: true });
+    const html = renderMarkdown(input, { block: true });
 
     assert.match(html, /data-lang="html"/);
     assert.match(html, /class="fenced-code-block-content language-html"/);
@@ -88,7 +87,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
 
   it("unlabelled fences omit the label span and language class, and remain plain escaped text", () => {
     const input = ["```", "plain text 123", "```"].join("\n");
-    const html = renderDesktopMarkdown(input, { block: true });
+    const html = renderMarkdown(input, { block: true });
 
     assert.match(html, /<div class="fenced-code-block">/);
     assert.match(html, /<button type="button" class="fenced-code-block-copy" data-code-copy aria-label="Copy code"><\/button>/);
@@ -101,7 +100,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
 
   it("unknown language tags omit the label span and language class, without auto-detection", () => {
     const input = ["```unknownlang123", "function test() { return 1; }", "```"].join("\n");
-    const html = renderDesktopMarkdown(input, { block: true });
+    const html = renderMarkdown(input, { block: true });
 
     assert.match(html, /<div class="fenced-code-block">/);
     assert.doesNotMatch(html, /class="fenced-code-block-lang"/);
@@ -116,7 +115,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
       assert.equal(resolveLanguage(prop), null, `${prop} must not resolve as a language`);
 
       const input = ["```" + prop, "const a = 1;", "```"].join("\n");
-      const html = renderDesktopMarkdown(input, { block: true });
+      const html = renderMarkdown(input, { block: true });
       assert.match(html, /<div class="fenced-code-block">/);
       assert.doesNotMatch(html, /class="fenced-code-block-lang"/);
       assert.doesNotMatch(html, /data-lang/);
@@ -127,7 +126,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
   it("safely escapes hostile input and prevents XSS", () => {
     const hostileCode = '</code></pre><script>alert(1)</script><img src=x onerror=alert(2)>';
     const input = ["```javascript", hostileCode, "```"].join("\n");
-    const html = renderDesktopMarkdown(input, { block: true });
+    const html = renderMarkdown(input, { block: true });
 
     assert.doesNotMatch(html, /<script[\s>]/);
     assert.doesNotMatch(html, /<img[\s>]/);
@@ -137,7 +136,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
 
   it('renders malformed fence tag with quotes or handlers as ordinary escaped text', () => {
     const input = '```js" onclick="alert(1)\nconsole.log(1)';
-    const html = renderDesktopMarkdown(input, { block: true });
+    const html = renderMarkdown(input, { block: true });
 
     // Must NOT match fence regex or produce a code block
     assert.doesNotMatch(html, /<div class="fenced-code-block">/);
@@ -153,7 +152,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
       "> print('inside blockquote')",
       "> ```",
     ].join("\n");
-    const html = renderDesktopMarkdown(input, { block: true });
+    const html = renderMarkdown(input, { block: true });
 
     assert.match(html, /<blockquote>/);
     assert.match(html, /<div class="fenced-code-block">/);
@@ -169,7 +168,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
       "+new line",
       "```",
     ].join("\n");
-    const html = renderDesktopMarkdown(input, { block: true });
+    const html = renderMarkdown(input, { block: true });
 
     assert.match(html, /<span class="hljs-meta">@@ -1,2 \+1,2 @@<\/span>/);
     assert.match(html, /<span class="hljs-deletion">-old line<\/span>/);
@@ -180,7 +179,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
     for (const tag of ["markdown", "md"]) {
       assert.equal(resolveLanguage(tag), null);
       const input = ["```" + tag, "# Heading", "[link](url)", "```"].join("\n");
-      const html = renderDesktopMarkdown(input, { block: true });
+      const html = renderMarkdown(input, { block: true });
 
       assert.match(html, /<div class="fenced-code-block">/);
       assert.doesNotMatch(html, /class="fenced-code-block-lang"/);
@@ -216,7 +215,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
     const hugeCode = "const a = 1;\n".repeat(450); // > 5,800 chars
     assert.ok(hugeCode.length > MAX_HIGHLIGHT_CHARS);
 
-    const result = desktopHighlighter.renderCodeBlock(hugeCode, "javascript");
+    const result = codeHighlighter.renderCodeBlock(hugeCode, "javascript");
     assert.match(result, /<div class="fenced-code-block">/);
     assert.match(result, /data-lang="javascript"/);
     // Should NOT contain syntax highlighting spans
@@ -227,13 +226,13 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
     // Exactly 250 lines -> highlighted
     const exact250Lines = Array.from({ length: 250 }, (_, i) => `x = ${i}`).join("\n");
     assert.equal(exact250Lines.split("\n").length, 250);
-    const result250 = desktopHighlighter.renderCodeBlock(exact250Lines, "python");
+    const result250 = codeHighlighter.renderCodeBlock(exact250Lines, "python");
     assert.match(result250, /class="hljs-/);
 
     // 251 lines -> exceeds limit, plain text
     const lines251 = Array.from({ length: 251 }, (_, i) => `x = ${i}`).join("\n");
     assert.equal(lines251.split("\n").length, 251);
-    const result251 = desktopHighlighter.renderCodeBlock(lines251, "python");
+    const result251 = codeHighlighter.renderCodeBlock(lines251, "python");
     assert.doesNotMatch(result251, /class="hljs-/);
   });
 
@@ -242,7 +241,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
     const longLine = "const a = " + "x".repeat(MAX_HIGHLIGHT_LINE_LENGTH);
     assert.ok(longLine.length > MAX_HIGHLIGHT_LINE_LENGTH);
 
-    const result = desktopHighlighter.renderCodeBlock(longLine, "javascript");
+    const result = codeHighlighter.renderCodeBlock(longLine, "javascript");
     assert.match(result, /<div class="fenced-code-block">/);
     assert.doesNotMatch(result, /class="hljs-/);
   });
@@ -305,7 +304,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
     const allowedTags = new Set(["div", "span", "button", "pre", "code"]);
 
     for (const input of hostileCorpus) {
-      const html = renderDesktopMarkdown(input, { block: true });
+      const html = renderMarkdown(input, { block: true });
 
       // Match all opening tags: <tag ...>
       const tagRegex = /<([a-zA-Z0-9]+)([^>]*)>/g;
@@ -377,7 +376,7 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
     for (const lang of supportedLangs) {
       for (const pattern of adversarialPatterns) {
         const t0 = performance.now();
-        desktopHighlighter.renderCodeBlock(pattern, lang);
+        codeHighlighter.renderCodeBlock(pattern, lang);
         const elapsed = performance.now() - t0;
         assert.ok(
           elapsed < 500,

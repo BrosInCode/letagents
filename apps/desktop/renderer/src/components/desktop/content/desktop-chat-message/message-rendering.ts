@@ -1,4 +1,4 @@
-import { renderDesktopMarkdown } from "../formatting/markdown";
+import { renderMarkdown } from "../../../../../../../../shared/ui/markdown/markdown";
 import { formatDate } from "../../../../domain/formatters";
 
 export { isAmbientSystemMessage, stripStatusPrefix } from "../../../../../../../../shared/ui/room-messages";
@@ -24,7 +24,7 @@ export function renderMessageText(
   taskReferenceIds?: ReadonlySet<string>,
   onLink?: (url: string) => void,
 ): string {
-  const rendered = renderDesktopMarkdown(value, { block: true, onLink });
+  const rendered = renderMarkdown(value, { block: true, onLink });
   const linked = linkRenderedMessageReferences(rendered, messageReferenceIds, taskReferenceIds);
   return highlightRenderedMessage(linked, highlightQuery);
 }

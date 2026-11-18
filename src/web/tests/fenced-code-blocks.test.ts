@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict'
 import test, { beforeEach } from 'node:test'
-import hljs from 'highlight.js/lib/core'
 
 import { renderMessageContent } from '../src/components/room/chat-message/formatting'
-import { webHighlighter } from '../src/components/room/chat-message/code-highlighter'
+import { codeHighlighter, highlightCode } from '../../../shared/ui/markdown/code-highlighter'
 import {
   MAX_HIGHLIGHT_CHARS,
   MAX_HIGHLIGHT_LINES,
@@ -19,10 +18,10 @@ import {
 // The sliding-window test below supplies its own advancing clock.
 beforeEach((t) => {
   const highlighter = createCodeHighlighter({
-    highlight: (code, language) => hljs.highlight(code, { language, ignoreIllegals: true }).value,
+    highlight: highlightCode,
     now: () => 0,
   })
-  t.mock.method(webHighlighter, 'renderCodeBlock', highlighter.renderCodeBlock)
+  t.mock.method(codeHighlighter, 'renderCodeBlock', highlighter.renderCodeBlock)
 })
 
 function createMockButton(isConnected = true) {
@@ -198,22 +197,22 @@ test('web: structural test over hostile corpus verifies tag and attribute allowl
 test('web: skips highlighting when exceeding max characters, lines, or line length', () => {
   const hugeChars = 'const a = 1;\n'.repeat(450)
   assert.ok(hugeChars.length > MAX_HIGHLIGHT_CHARS)
-  const resultChars = webHighlighter.renderCodeBlock(hugeChars, 'javascript')
+  const resultChars = codeHighlighter.renderCodeBlock(hugeChars, 'javascript')
   assert.match(resultChars, /<div class="fenced-code-block">/)
   assert.doesNotMatch(resultChars, /class="hljs-/)
 
   const exact250Lines = Array.from({ length: 250 }, (_, i) => `let val${i} = ${i}`).join('\n')
   assert.equal(exact250Lines.split('\n').length, 250)
-  const result250 = webHighlighter.renderCodeBlock(exact250Lines, 'javascript')
+  const result250 = codeHighlighter.renderCodeBlock(exact250Lines, 'javascript')
   assert.match(result250, /class="hljs-/)
 
   const lines251 = Array.from({ length: 251 }, (_, i) => `let val${i} = ${i}`).join('\n')
   assert.equal(lines251.split('\n').length, 251)
-  const result251 = webHighlighter.renderCodeBlock(lines251, 'javascript')
+  const result251 = codeHighlighter.renderCodeBlock(lines251, 'javascript')
   assert.doesNotMatch(result251, /class="hljs-/)
 
   const longLine = 'const a = ' + 'x'.repeat(MAX_HIGHLIGHT_LINE_LENGTH)
-  const resultLong = webHighlighter.renderCodeBlock(longLine, 'javascript')
+  const resultLong = codeHighlighter.renderCodeBlock(longLine, 'javascript')
   assert.doesNotMatch(resultLong, /class="hljs-/)
 })
 
@@ -299,7 +298,7 @@ test('web: adversarial corpus benchmark: all supported languages complete within
   for (const lang of supportedLangs) {
     for (const pattern of adversarialPatterns) {
       const t0 = performance.now()
-      webHighlighter.renderCodeBlock(pattern, lang)
+      codeHighlighter.renderCodeBlock(pattern, lang)
       const elapsed = performance.now() - t0
       assert.ok(
         elapsed < 500,

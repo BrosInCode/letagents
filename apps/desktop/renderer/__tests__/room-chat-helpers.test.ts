@@ -72,7 +72,7 @@ import {
   renderMessageText,
   stripStatusPrefix,
 } from "../src/components/desktop/content/desktop-chat-message/message-rendering";
-import { renderDesktopMarkdown } from "../src/components/desktop/content/formatting/markdown";
+import { renderMarkdown } from "../../../../shared/ui/markdown/markdown";
 import { useDesktopRoomSearch } from "../src/components/desktop/content/room-shell/useDesktopRoomSearch";
 
 describe("room chat helpers", () => {
@@ -997,7 +997,7 @@ describe("room chat helpers", () => {
 
   it("renders reusable block markdown for GitHub event bodies", () => {
     assert.equal(
-      renderDesktopMarkdown('## Summary\n- **Ship** `events`\n- See https://example.com/?q=a&b=c\n\n<script>', {
+      renderMarkdown('## Summary\n- **Ship** `events`\n- See https://example.com/?q=a&b=c\n\n<script>', {
         block: true,
         mentions: false,
       }),
@@ -1027,12 +1027,12 @@ describe("room chat helpers", () => {
   });
 
   it("preserves complete file paths in ticket Markdown without making them links", () => {
-    const html = renderDesktopMarkdown('`src/api/auth.ts` and src/web/auth.ts. [file](</tmp/test/auth.ts>)', {
+    const html = renderMarkdown('`src/api/auth.ts` and src/web/auth.ts. [file](</tmp/test/auth.ts>)', {
       block: true, mentions: false, preservePaths: true,
     });
     assert.equal(html, '<p><code>src/api/auth.ts</code> and src/web/auth.ts. <code>/tmp/test/auth.ts</code></p>');
     assert.doesNotMatch(html, /href=/);
-    assert.equal(renderDesktopMarkdown('`src/api/auth.ts`'), '<code>auth.ts</code>');
+    assert.equal(renderMarkdown('`src/api/auth.ts`'), '<code>auth.ts</code>');
   });
 
   it("bounds adversarial blockquote nesting in desktop messages", () => {
@@ -1229,7 +1229,7 @@ it('keeps contribution prose formatted and never displays a machine path or a cu
   const { readableContributionText } = await import('../../../../shared/contribution-text.mjs');
   const value = readableContributionText('Done.\n\nPath: `/Users/emmy/work tree/src/example.ts`\n\n**Changed**\n- Added a file.\n- Preserved existing work.');
   assert.equal(value, '**Changed**\n- Added a file.\n- Preserved existing work.');
-  assert.match(renderDesktopMarkdown(value!, { block: true }), /<strong>Changed<\/strong>.*<ul><li>Added a file\./);
+  assert.match(renderMarkdown(value!, { block: true }), /<strong>Changed<\/strong>.*<ul><li>Added a file\./);
   const linked = readableContributionText('Created [example.ts](/Users/emmy/repo/example.ts).');
   assert.equal(linked, 'Created `example.ts`.');
   assert.doesNotMatch(linked!, /\/Users|\]\(/);
@@ -1240,5 +1240,5 @@ it('keeps contribution prose formatted and never displays a machine path or a cu
   assert.equal(readableContributionText('See [app.ts](https://github.com/acme/repo/blob/missing/app.ts).'), 'See `app.ts`.');
   assert.equal(readableContributionText('Updated the file. Status: `?? ' + 'x'.repeat(400)), 'Updated the file.');
   const hostile = readableContributionText('<img src=x onerror=alert(1)>\n\n**Text**');
-  assert.doesNotMatch(renderDesktopMarkdown(hostile!, { block: true }), /<img/);
+  assert.doesNotMatch(renderMarkdown(hostile!, { block: true }), /<img/);
 });
