@@ -3,15 +3,32 @@
    invite rooms first; the invite view picks the bot and copies the message.
    The picker, the message and the Copy label are shared with Room settings
    and the web drawer (shared/ui/invite-bot-parts.css). */
+/* A column, so that under the flyout's height cap (the space above the
+   composer) the room list gives up its height first. */
 .desktop-invite-bot {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .desktop-invite-bot-view {
   display: grid;
   gap: 10px;
   min-width: 0;
+  min-height: 0;
+}
+
+/* The rooms view: the title, a search field for a long list, the rooms, and
+   "New invite room" below them, in the GIF panel's spacing. */
+.desktop-invite-bot-rooms {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.desktop-invite-bot-rooms > :not(.desktop-invite-bot-list) {
+  flex: none;
 }
 
 /* A view swap comes from the side it is on: forward from the right, back from the left. */
@@ -75,10 +92,68 @@
   white-space: nowrap;
 }
 
+/* The rooms scroll inside the GIF grid's height (236px), with no visible
+   scrollbar; an edge fades only while more rows are past it. */
 .desktop-invite-bot-list {
   position: relative;
   display: grid;
+  flex: 0 1 auto;
+  align-content: start;
   gap: 2px;
+  min-height: 0;
+  max-height: 236px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.desktop-invite-bot-list::-webkit-scrollbar {
+  display: none;
+}
+
+/* With a search field, the list keeps its height while you type, so the panel does not jump. */
+.desktop-invite-bot-rooms[data-searchable] .desktop-invite-bot-list {
+  height: 236px;
+}
+
+.desktop-invite-bot-list[data-more-below] {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
+}
+
+.desktop-invite-bot-list[data-more-above] {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 22px);
+  mask-image: linear-gradient(to bottom, transparent, #000 22px);
+}
+
+.desktop-invite-bot-list[data-more-above][data-more-below] {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 22px, #000 calc(100% - 22px), transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 22px, #000 calc(100% - 22px), transparent);
+}
+
+/* The search field is the GIF panel's (.desktop-composer-gif-search), with ↵ at its end. */
+.desktop-invite-bot-search kbd {
+  padding: 0 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font: 11px/16px var(--font-sans);
+}
+
+/* The keys move one active row while the focus stays in the search field. */
+.desktop-invite-bot-room[data-active] {
+  background: var(--accent-hover);
+}
+
+/* The part of a name that matches the search is bold. */
+.desktop-invite-bot-match {
+  background: none;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.desktop-invite-bot-foot-rooms {
+  display: grid;
 }
 
 /* The rooms arrive one after another, quickly; the list is short. */
@@ -92,6 +167,11 @@
     opacity: 0;
     transform: translateY(3px);
   }
+}
+
+/* Rows that come back while you type appear at once: typing is too frequent for motion. */
+.desktop-invite-bot-list[data-typed] .desktop-invite-bot-room {
+  animation: none;
 }
 
 /* A room made a moment ago keeps a quiet mark when the list shows again. */

@@ -104,6 +104,7 @@
       :class="{ 'is-narrow': flyoutNarrow }"
       :data-flyout="flyout"
       :data-animate="flyoutAnimate || undefined"
+      :style="flyoutMaxHeight === null ? undefined : { '--desktop-composer-flyout-max': `${flyoutMaxHeight}px` }"
       :role="flyout === 'invite' ? 'dialog' : undefined"
       :aria-label="flyout === 'invite' ? 'Invite a bot' : undefined"
       @keydown="handleFlyoutKey"
@@ -178,6 +179,11 @@ const flyoutNarrow = ref(false);
 const flyoutAnimate = ref(false);
 // The menu is 268px wide; a panel (GIFs, Invite a bot), 340px, sits 6px to its right.
 const FLYOUT_SPAN_PX = 268 + 6 + 340 + 8;
+// The panel grows up from above the composer; it stops this far below the top of the chat area.
+const FLYOUT_TOP_GAP_PX = 12;
+const FLYOUT_MIN_HEIGHT_PX = 120;
+/** The tallest the panel may be: the space above the composer. Null until measured. */
+const flyoutMaxHeight = ref<number | null>(null);
 // Only a pointer-opened menu grows out of "+"; a keyboard-opened one appears at once.
 const animate = ref(false);
 const agentMenu = ref<HTMLElement | null>(null);
@@ -393,6 +399,32 @@ function handleFlyoutKey(event: KeyboardEvent): void {
 function measureFlyout(): void {
   const left = root.value?.getBoundingClientRect?.().left ?? 0;
   flyoutNarrow.value = typeof window !== "undefined" && left + FLYOUT_SPAN_PX > window.innerWidth;
+  measureFlyoutHeight();
+}
+
+/**
+ * The top edge of the nearest box that clips the panel: the chat area under
+ * the room header, which hides anything above it. Without one, the window's top.
+ */
+function clipTopAbove(element: HTMLElement): number {
+  if (typeof window === "undefined" || typeof window.getComputedStyle !== "function") return 0;
+  // The panel is placed by its positioned ancestor; that box and the ones around it clip it.
+  for (let node: Element | null = element.offsetParent ?? element.parentElement; node; node = node.parentElement) {
+    if (window.getComputedStyle(node).overflowY !== "visible") {
+      const top = node.getBoundingClientRect?.().top;
+      return typeof top === "number" && Number.isFinite(top) ? Math.max(0, top) : 0;
+    }
+  }
+  return 0;
+}
+
+/** The panel's bottom edge stays put (it grows upward), so the space above it, up to that clip, is its height cap. */
+function measureFlyoutHeight(): void {
+  const element = flyoutElement.value;
+  const bottom = element?.getBoundingClientRect?.().bottom;
+  if (!element || typeof bottom !== "number" || !Number.isFinite(bottom)) return;
+  const top = clipTopAbove(element);
+  flyoutMaxHeight.value = Math.max(FLYOUT_MIN_HEIGHT_PX, Math.floor(bottom - top - FLYOUT_TOP_GAP_PX));
 }
 
 function closeOnEscape(event: KeyboardEvent): void {
@@ -409,6 +441,8 @@ function setDocumentListeners(listening: boolean): void {
   if (typeof window !== "undefined") window[method]("resize", measureFlyout);
 }
 watch(open, setDocumentListeners);
+// Measured once the panel is in the page, before it is painted.
+watch(flyoutElement, (element) => { if (element) measureFlyoutHeight(); }, { flush: "post" });
 watch(() => props.disabled, (disabled) => { if (disabled) closeMenu(); });
 onBeforeUnmount(() => setDocumentListeners(false));
 

@@ -190,6 +190,41 @@ test('Invite a bot opens its panel beside the menu, and a second click on its ro
   assert.equal(vm.flyout.value, null);
 });
 
+test('the panel beside the menu is never taller than the space above the composer, also in a short window', async t => {
+  const { vm } = mountMenu(t, { inviteAvailable: true });
+  Object.assign(window, { innerWidth: 1400 });
+  vm.openMenu(true);
+  vm.choose(vm.items.value.find((item: any) => item.id === 'invite'), true);
+  await flush();
+  // The panel grows up from 8px above the composer; its bottom edge is where the space ends.
+  // The chat area under the room header (top 66) hides what is above it; the composer box is placed inside it.
+  // (Plain objects in a ref are read through Vue proxies, so each fake box carries its own overflow.)
+  const shell = { overflowY: 'hidden', parentElement: null, getBoundingClientRect: () => ({ top: 0 }) };
+  const chatArea = { overflowY: 'hidden', parentElement: shell, getBoundingClientRect: () => ({ top: 66 }) };
+  const composer = { overflowY: 'visible', parentElement: chatArea, getBoundingClientRect: () => ({ top: 700 }) };
+  Object.assign(window, { getComputedStyle: (node: { overflowY: string }) => ({ overflowY: node.overflowY }) });
+  t.after(() => { delete (window as any).getComputedStyle; });
+  let bottom = 795;
+  vm.flyoutElement.value = { getBoundingClientRect: () => ({ bottom, left: 0 }), offsetParent: composer, parentElement: composer, querySelector: () => null };
+  vm.measureFlyout();
+  assert.equal(vm.flyoutMaxHeight.value, 717, 'the space between the chat area top and the panel, less a 12px gap');
+  bottom = 345.6;
+  window.dispatchEvent(new Event('resize'));
+  assert.equal(vm.flyoutMaxHeight.value, 267, 'a shorter window measures again');
+  bottom = 150;
+  vm.measureFlyout();
+  assert.equal(vm.flyoutMaxHeight.value, 120, 'a tiny window still leaves a usable panel');
+  bottom = Number.NaN;
+  vm.measureFlyout();
+  assert.equal(vm.flyoutMaxHeight.value, 120, 'a reading that is not a number changes nothing');
+  // With nothing that clips, the window's top is the limit.
+  chatArea.overflowY = 'visible';
+  shell.overflowY = 'visible';
+  bottom = 640;
+  vm.measureFlyout();
+  assert.equal(vm.flyoutMaxHeight.value, 628);
+});
+
 test('disabling "+" closes an open menu and keeps it closed', async t => {
   const { vm, props } = mountMenu(t);
   vm.toggle({ detail: 1 });
