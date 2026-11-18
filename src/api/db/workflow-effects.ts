@@ -139,7 +139,8 @@ function isCorrelationConflict(error: unknown): boolean {
 
 async function insertOrLoadEffect(tx: EffectTransaction, input: {
   room_id: string;
-  task_id: string;
+  task_id: string | null;
+  subject?: string | null;
   lease_id: string | null;
   kind: WorkflowEffectKind;
   provider: WorkflowEffect["provider"];
@@ -164,6 +165,7 @@ async function insertOrLoadEffect(tx: EffectTransaction, input: {
       id: `effect_${randomUUID()}`,
       room_id: input.room_id,
       task_id: input.task_id,
+      subject: input.subject ?? null,
       lease_id: input.lease_id,
       kind: input.kind,
       provider: input.provider,
@@ -234,7 +236,10 @@ async function insertOrLoadEffect(tx: EffectTransaction, input: {
 
 export interface ReserveTrackerWorkflowEffectInput {
   room_id: string;
-  task_id: string;
+  /** The board card the write is for; null when it names only a ticket (an API intent). */
+  task_id: string | null;
+  /** The ticket, `<provider>:<key>`; required when `task_id` is null. */
+  subject?: string | null;
   connection_id: string;
   /**
    * The account the caller resolved the connection from (for rules, the

@@ -41,6 +41,7 @@ export const CAPABILITIES = Object.freeze({
   "work_items.read": spec("Read tickets from this room's trackers", "allow"),
   "git.read": spec("See pull requests, checks and reviews for this room's repository", "allow"),
   "memory.read": spec("Read the facts this room remembers", "allow"),
+  "intents.read": spec("See the changes proposed in this room and whether they ran", "allow"),
   "data.viewer": spec("Keep your own settings for this page", "allow"),
   "data.page": spec("Keep data that everyone using this page shares", "allow"),
   "data.room": spec("Read and change data that all pages and agents in this room share", "allow"),

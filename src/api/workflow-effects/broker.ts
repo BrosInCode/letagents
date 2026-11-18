@@ -78,7 +78,8 @@ export interface SubmitGitHubReviewVerdictInput extends GitHubReviewEffectReques
 
 export interface SubmitTrackerEffectInput {
   room_id: string;
-  task_id: string;
+  /** The board card the write is for; null when it names only a ticket (an API intent). */
+  task_id: string | null;
   connection_id: string;
   /**
    * The account that owns the connection, as the caller resolved it from the
@@ -334,6 +335,7 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
       const reserved = await store.reserveTracker({
         room_id: input.room_id,
         task_id: input.task_id,
+        subject: `${input.provider}:${key}`,
         connection_id: input.connection_id,
         connection_account_id: input.connection_account_id,
         kind: input.action.kind,

@@ -7,7 +7,10 @@ export type WorkflowEffectProvider = "github" | "jira" | "linear";
 export interface WorkflowEffect {
   id: string;
   room_id: string;
-  task_id: string;
+  /** Null only for a tracker effect that names a ticket, not a card. */
+  task_id: string | null;
+  /** The ticket a tracker effect writes (`jira:HT-1234`); absent on rows read by older code. */
+  subject?: string | null;
   /** Null only for tracker effects, which rules reserve without a lease. */
   lease_id: string | null;
   kind: WorkflowEffectKind;

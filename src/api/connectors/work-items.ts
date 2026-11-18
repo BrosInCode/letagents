@@ -93,6 +93,20 @@ export interface WorkItemsReader {
   search(roomId: string, input: { query: string; provider?: TrackerProvider; limit: number; fields?: string | string[] }): Promise<WorkItemSearchResult>;
   get(roomId: string, input: { key: string; provider?: TrackerProvider; fields?: string | string[] }): Promise<WorkItem>;
   history(roomId: string, input: { key: string; provider?: TrackerProvider }): Promise<WorkItemHistory>;
+  /**
+   * A ticket inside the room filter and the room source that reads it, for a
+   * write that must stay in the room's scope (an intent). Same checks and
+   * errors as `get`: `not_found` outside the filter, `no_source` without one.
+   */
+  locate(roomId: string, input: { key: string; provider?: TrackerProvider }): Promise<LocatedWorkItem>;
+}
+
+export interface LocatedWorkItem {
+  provider: TrackerProvider;
+  key: string;
+  /** The room filter's connection: the filter owner's credentials. */
+  connectionId: string;
+  item: WorkItem;
 }
 
 interface CacheEntry {
@@ -257,6 +271,14 @@ export function createWorkItemsReader(deps: WorkItemsReaderDeps): WorkItemsReade
       const item = await scopedTicket(roomId, picked, key, fieldList(input.fields));
       if (!item) throw new ApiError("not_found", `No ticket ${key} in this room's Jira filter.`);
       return (await withLinks(roomId, [item]))[0]!;
+    },
+
+    async locate(roomId, input) {
+      const picked = await source(roomId, input.provider);
+      const key = jiraKey(input.key);
+      const item = await scopedTicket(roomId, picked, key, []);
+      if (!item) throw new ApiError("not_found", `No ticket ${key} in this room's Jira filter.`);
+      return { provider: picked.source.provider, key, connectionId: picked.source.connection_id, item: toWorkItem(item, null) };
     },
 
     async history(roomId, input) {

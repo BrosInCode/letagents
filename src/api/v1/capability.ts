@@ -1,6 +1,6 @@
 import type { ApiActor } from "../../../shared/api/actor.mjs";
 import { getCapability, type CapabilityName } from "../../../shared/api/capabilities.mjs";
-import { ApiError } from "../../../shared/api/core.mjs";
+import { ApiError, type AnyApiMethod } from "../../../shared/api/core.mjs";
 import type { PageGrantRequestGrant } from "../http/helpers.js";
 import type { ApiCallContext, ApiCapabilityCheck } from "./context.js";
 import { resolvePolicy, type ResolvedApiPolicy } from "./policy.js";
@@ -10,7 +10,8 @@ import { resolvePolicy, type ResolvedApiPolicy } from "./policy.js";
  * parse, before its handler. Rights are the person's (or agent's) room
  * rights, which the access check already proved, intersected with the grant
  * of what they act through:
- * 1. Through a page: the page grant must hold the capability, for this page
+ * 1. Through a page: the page grant must hold the call's capability (the
+ *    method's, or the one its input picks), for this page
  *    version in this room (`not_granted` otherwise).
  *    Through a job or the remote MCP integration: the principal's own rights;
  *    a job carries no permission and adds none.
@@ -22,8 +23,8 @@ import { resolvePolicy, type ResolvedApiPolicy } from "./policy.js";
  */
 export function createCapabilityCheck(deps: { resolvePolicy?: typeof resolvePolicy } = {}): ApiCapabilityCheck {
   const policyOf = deps.resolvePolicy ?? resolvePolicy;
-  return async (actor, method, _input, call) => {
-    const { capability } = method;
+  return async (actor, method, input, call) => {
+    const capability = methodCapability(method, input);
     if (actor.via?.kind === "page" && !pageGrantHolds(call.req.pageGrant ?? null, actor, capability)) {
       throw new ApiError("not_granted", `This caller does not hold the "${capability}" capability.`);
     }
@@ -36,6 +37,15 @@ export function createCapabilityCheck(deps: { resolvePolicy?: typeof resolvePoli
 }
 
 export const checkCapability: ApiCapabilityCheck = createCapabilityCheck();
+
+/**
+ * The capability one call uses. A method whose input picks it (a data scope,
+ * an intent kind) names it with `capabilityFromInput`; `capability` is the
+ * default the reference shows.
+ */
+export function methodCapability(method: AnyApiMethod, input: unknown): CapabilityName {
+  return method.capabilityFromInput?.(input) ?? method.capability;
+}
 
 function pageGrantHolds(grant: PageGrantRequestGrant | null, actor: ApiActor, capability: CapabilityName): boolean {
   return Boolean(

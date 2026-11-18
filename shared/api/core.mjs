@@ -197,6 +197,7 @@ function formatIssuePath(path) {
  *   area: ApiArea,
  *   kind: MethodKind,
  *   capability: CapabilityName,
+ *   capabilityFromInput?(input: z.output<Input>): CapabilityName,
  *   description: string,
  *   path: string,
  *   httpMethod?: HttpVerb,
@@ -217,6 +218,7 @@ function formatIssuePath(path) {
  *   readonly area: ApiArea,
  *   readonly kind: MethodKind,
  *   readonly capability: CapabilityName,
+ *   capabilityFromInput?(input: z.output<Input>): CapabilityName,
  *   readonly description: string,
  *   readonly path: string,
  *   readonly httpMethod: HttpVerb,
@@ -254,6 +256,9 @@ export function defineMethod(spec) {
   if (!isCapabilityName(spec.capability)) {
     throw new TypeError(`${where}: unknown capability ${JSON.stringify(spec.capability)}; add it to shared/api/capabilities.mjs first.`);
   }
+  if (spec.capabilityFromInput !== undefined && typeof spec.capabilityFromInput !== "function") {
+    throw new TypeError(`${where}: capabilityFromInput must be a function of the parsed input.`);
+  }
   if (typeof spec.description !== "string" || !spec.description.trim()) {
     throw new TypeError(`${where}: a description is required; MCP tools and the page reference are made from it.`);
   }
@@ -285,6 +290,7 @@ export function defineMethod(spec) {
     area: spec.area,
     kind: spec.kind,
     capability: spec.capability,
+    ...(spec.capabilityFromInput ? { capabilityFromInput: spec.capabilityFromInput } : {}),
     description: spec.description.trim(),
     path: spec.path,
     httpMethod,
