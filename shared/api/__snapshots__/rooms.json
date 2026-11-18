@@ -131,5 +131,180 @@
       ],
       "additionalProperties": false
     }
+  },
+  "rooms.listPolicies": {
+    "kind": "read",
+    "capability": "rooms.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/policies",
+    "response": "json",
+    "rateClass": "read",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "policies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "capability": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "confirm",
+                  "approve",
+                  "deny"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "room",
+                  "default"
+                ]
+              },
+              "rule": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "board_manager_mode",
+                      "own_tracker_connection"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "capability",
+              "mode",
+              "source",
+              "rule"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "policies"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "rooms.setPolicy": {
+    "kind": "write",
+    "capability": "rooms.read",
+    "httpMethod": "PUT",
+    "path": "/rooms/:room/policies",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {
+        "capability": {
+          "type": "string",
+          "enum": [
+            "data.viewer",
+            "data.page",
+            "data.room",
+            "tasks.propose",
+            "tickets.propose",
+            "jobs.start",
+            "messages.post"
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "allow",
+                "confirm",
+                "approve",
+                "deny"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "policies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "capability": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "confirm",
+                  "approve",
+                  "deny"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "room",
+                  "default"
+                ]
+              },
+              "rule": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "board_manager_mode",
+                      "own_tracker_connection"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "capability",
+              "mode",
+              "source",
+              "rule"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "policies"
+      ],
+      "additionalProperties": false
+    }
   }
 }

@@ -10,6 +10,8 @@ export interface ApiCaller {
   via?: ActorVia;
   /** The signed-in account behind a person, with the GitHub credential checks may use. */
   account: SessionAccount | OwnerTokenAccount | null;
+  /** The one room this credential opens: a worker bearer's session room, a page grant's room. */
+  roomId?: string;
 }
 
 /** The caller in the room in the URL, after the room access check. */

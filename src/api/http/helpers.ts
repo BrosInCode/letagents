@@ -35,6 +35,8 @@ export interface AuthenticatedRequest extends express.Request {
   supervisorGrant?: SupervisorHostGrant | null;
   /** Set only for an OAuth access token on /mcp (authKind "mcp_oauth"). */
   mcpOAuth?: McpOAuthRequestGrant | null;
+  /** Set only for a page grant on /api/v1 (authKind "page_grant"). */
+  pageGrant?: PageGrantRequestGrant | null;
   rawBody?: Buffer;
 }
 
@@ -42,8 +44,23 @@ export interface AuthenticatedRequest extends express.Request {
  * "mcp_oauth" is an OAuth access token from the remote MCP authorization
  * server. It is accepted only on /mcp; the auth middleware refuses it anywhere
  * else. Inside a remote MCP session the grant acts as "owner_token".
+ *
+ * "page_grant" is a short-lived token for one page version in one room,
+ * minted with a person's app session. It is accepted only on /api/v1, where
+ * every route checks the grant's capabilities; the middleware refuses it
+ * anywhere else.
  */
-export type RequestAuthKind = "session" | "owner_token" | "agent_session" | "supervisor_grant" | "mcp_oauth" | null;
+export type RequestAuthKind = "session" | "owner_token" | "agent_session" | "supervisor_grant" | "mcp_oauth" | "page_grant" | null;
+
+export interface PageGrantRequestGrant {
+  grant_id: string;
+  room_id: string;
+  page_id: string;
+  page_version: number;
+  /** Capability names as stored; the capability check ignores unknown names. */
+  capabilities: string[];
+  expires_at: string;
+}
 
 export interface McpOAuthRequestGrant {
   grant_id: string;
@@ -57,6 +74,7 @@ export interface ResolvedRequestAuth {
   agentSession?: AgentSessionRequestPrincipal | null;
   supervisorGrant?: SupervisorHostGrant | null;
   mcpOAuth?: McpOAuthRequestGrant | null;
+  pageGrant?: PageGrantRequestGrant | null;
 }
 
 export function parsePollTimeout(timeoutValue: string | undefined): number {

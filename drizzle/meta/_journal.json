@@ -1058,6 +1058,13 @@
       "when": 1795000700000,
       "tag": "0150_room_invites",
       "breakpoints": true
+    },
+    {
+      "idx": 151,
+      "version": "7",
+      "when": 1795015100000,
+      "tag": "0151_api_actor_chain",
+      "breakpoints": true
     }
   ]
 }

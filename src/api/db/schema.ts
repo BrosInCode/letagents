@@ -37,3 +37,4 @@ export * from "./schema/agent-asks.js";
 export * from "./schema/remote-mcp-sessions.js";
 export * from "./schema/mcp-oauth.js";
 export * from "./schema/content-deletion.js";
+export * from "./schema/api.js";

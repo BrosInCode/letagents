@@ -22,6 +22,9 @@ the page bridge and MCP tool schemas all come from it. The plan is
 | Caller and room access | `src/api/v1/actor.ts` (`identifyCaller`, `resolveRoomAccess`) |
 | Capability check | `src/api/v1/capability.ts` (`checkCapability`) |
 | Types for those steps | `src/api/v1/context.ts` |
+| Page grants (mint, refresh, revoke) | `src/api/v1/page-grants.ts` |
+| Room policy (`resolvePolicy`, `resolveCallPolicy`) | `src/api/v1/policy.ts`, `src/api/v1/capability.ts` |
+| Action record (`api_actions`) | `src/api/v1/actions.ts` |
 
 ## Add a method
 
@@ -107,6 +110,22 @@ the page bridge and MCP tool schemas all come from it. The plan is
    node --test scripts/build-api-contracts.test.mjs   # declarations and snapshot current, no break
    node --import tsx --test src/api/__tests__/api-contract.test.ts src/api/__tests__/api-v1-router.test.ts
    ```
+
+## Callers, grants and policy
+
+- Callers: an app session or owner token is a person; a remote MCP session's call is a person
+  `via: integration remote-mcp`; a worker bearer is an agent in its own room (GET only); a
+  `page_grant` bearer (`lapg.<hex>`) is the person `via: page` (id and version) in one room.
+  A `page_grant` is refused on every path outside `/api/v1`.
+- The capability check: a page needs the capability in its grant, for its page version and room.
+  Anything that is not a read then reads the room policy; `deny` is `not_granted`. `confirm` and
+  `approve` pass to the handler, which calls `resolveCallPolicy(call, capability)` and acts on
+  `mode` (a confirm sheet, a pending intent). `confirm` applies only to calls through a page.
+- Minting: `requirePageGrantMinter(req)` (an app session only), then `mintPageGrant({ minter,
+  roomId, pageId, pageVersion, capabilities })`. `revokePageGrants({ pageId?, roomId?,
+  accountId?, grantId? })` revokes and closes the grants' streams; sign-out calls it.
+- The router appends every non-read call that passed the room check to `api_actions`. A handler
+  names its target with `setApiActionTarget(call, target)`; otherwise the path parameters are used.
 
 ## Wire format
 

@@ -4,6 +4,7 @@ import { actorKey } from "../../../shared/api/actor.mjs";
 import { ApiError, describeIssues, methodMayReturn, type AnyApiMethod } from "../../../shared/api/core.mjs";
 import { GitHubAccessUnavailableError } from "../github/repo-access.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
+import { apiActionTarget, recordApiAction, type ApiActionRecord } from "./actions.js";
 import { identifyCaller, resolveRoomAccess } from "./actor.js";
 import { API_V1_ROUTES } from "./areas.js";
 import { checkCapability } from "./capability.js";
@@ -19,6 +20,8 @@ export interface ApiV1RouterDeps {
   resolveRoomAccess?: ApiRoomAccessResolver;
   checkCapability?: ApiCapabilityCheck;
   rateLimiter?: ApiRateLimiter;
+  /** Appends a write, intent or job to `api_actions`. */
+  recordAction?: (record: ApiActionRecord) => Promise<void>;
   /**
    * On by default outside production: a handler error code the method does
    * not list becomes `internal`, so the mismatch shows in tests. Output that
@@ -37,8 +40,18 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
   const roomAccess = deps.resolveRoomAccess ?? resolveRoomAccess;
   const capabilityCheck = deps.checkCapability ?? checkCapability;
   const rateLimiter = deps.rateLimiter ?? createApiRateLimiter();
+  const recordAction = deps.recordAction ?? recordApiAction;
   const strict = deps.strictContract ?? process.env.NODE_ENV !== "production";
   const router = express.Router();
+
+  // A lost audit row must not turn a done write into a reported failure.
+  const record = async (entry: ApiActionRecord) => {
+    try {
+      await recordAction(entry);
+    } catch (error) {
+      console.error(`[api v1 ${entry.method}] could not record the action`, error);
+    }
+  };
 
   for (const route of routes) {
     const verb = route.method.httpMethod.toLowerCase() as "get" | "post" | "put" | "patch" | "delete";
@@ -47,8 +60,11 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
       // Only the handler's own refusals must be listed in the contract; the
       // pipeline's (caller, limit, room, input, capability) are common to every method.
       let inHandler = false;
+      // Set once a write, intent or job passed the rate limit and the room
+      // check: from then on its outcome is recorded, refusals included.
+      let recordable: Omit<ApiActionRecord, "outcome" | "target"> | null = null;
+      const { room: roomParam, ...pathParams } = req.params as Record<string, string>;
       try {
-        const { room: roomParam, ...pathParams } = req.params as Record<string, string>;
         // Who, then the limit, before any room or database work, so a
         // flood costs one lookup per call.
         const caller = await identify(req);
@@ -58,6 +74,7 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
           throw new ApiError("rate_limited", "Too many calls. Wait and try again.", { retryAfterMs: rate.retryAfterMs });
         }
         const call: ApiCallContext = { ...(await roomAccess(caller, roomParam ?? "")), account: caller.account, req };
+        if (method.kind !== "read") recordable = { actor: call.actor, method: method.name, capability: method.capability };
         const parsed = method.input.safeParse({ ...readInput(method, req), ...pathParams });
         if (!parsed.success) {
           throw new ApiError("invalid_input", describeIssues(parsed.error).map(({ path, message }) => (path ? `${path}: ${message}` : message)).join("; "));
@@ -67,6 +84,7 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
         inHandler = true;
         if (route.kind === "stream") {
           await route.handler(parsed.data, call, res);
+          if (recordable) await record({ ...recordable, target: actionTarget(req, pathParams), outcome: "ok" });
           return;
         }
         const result = await route.handler(parsed.data, call);
@@ -76,15 +94,19 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
         if (!checked.success) {
           throw new Error(`Contract mismatch: ${method.name} returned output that does not match its contract: ${JSON.stringify(describeIssues(checked.error))}`);
         }
+        if (recordable) await record({ ...recordable, target: actionTarget(req, pathParams), outcome: "ok" });
         res.status(status).json(checked.data);
       } catch (error) {
         if (res.headersSent) {
           // A stream already started: nothing to answer with but the end.
           console.error(`[api v1 ${method.name}] failed after the response started`, error);
+          if (recordable) await record({ ...recordable, target: actionTarget(req, pathParams), outcome: "internal" });
           res.end();
           return;
         }
-        replyApiError(res, toApiError(error, method, strict && inHandler));
+        const apiError = toApiError(error, method, strict && inHandler);
+        if (recordable) await record({ ...recordable, target: actionTarget(req, pathParams), outcome: apiError.code });
+        replyApiError(res, apiError);
       }
     });
   }
@@ -110,6 +132,14 @@ export function registerApiV1Routes(app: Express, deps: ApiV1RouterDeps = {}): v
     console.error("[api v1]", error);
     replyApiError(res, new ApiError("internal", INTERNAL_MESSAGE));
   });
+}
+
+/** The handler's own target, else the path parameters after the room (`taskId=task_7`). */
+function actionTarget(req: Request, pathParams: Record<string, string>): string | null {
+  const own = apiActionTarget(req);
+  if (own) return own;
+  const params = Object.entries(pathParams).map(([key, value]) => `${key}=${value}`);
+  return params.length ? params.join("&").slice(0, 500) : null;
 }
 
 function readInput(method: AnyApiMethod, req: Request): Record<string, unknown> {
