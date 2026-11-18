@@ -11,7 +11,8 @@ import {
   type PageApiAdapter,
   type RoomPageSource,
 } from "../pages/page-adapter.js";
-import { createPageCallHandler } from "../pages/page-bridge.js";
+import { contextOf, createPageCallHandler } from "../pages/page-bridge.js";
+import { createPageWatches } from "../pages/page-watch.js";
 import { createFilePageChoiceStore, createPageConfirmBroker, type PageChoiceStore } from "../pages/page-confirm.js";
 import { recordPageDiagnostic } from "../pages/page-diagnostics.js";
 import { roomPageGrants } from "../pages/page-grants.js";
@@ -22,7 +23,9 @@ import {
   prepareRoomPage,
   releaseRoomPage,
   roomPageLeaseForSender,
+  sendToRoomPage,
   setRoomPageTheme,
+  type RoomPageLease,
   setRoomPageVisible,
 } from "../pages/page-host.js";
 import { PAGE_CALL_CHANNEL } from "../pages/page-policy.js";
@@ -56,16 +59,28 @@ export function registerDesktopPageIpcHandlers(
   const source = backend.source ?? createHttpRoomPageSource();
   // Each lease mints its own page_grant with the app session; page calls carry only that token.
   roomPageGrants.configure((roomId, pageId) => source.grant(roomId, pageId));
+  const adapter = backend.adapter ?? createHttpPageApiAdapter({ grants: roomPageGrants });
+  const methods = backend.methods ?? pageApiMethodNames();
+  const watches = createPageWatches<RoomPageLease>({
+    run: (lease, method, input) => adapter.call(contextOf(lease), method, input),
+    push: (lease, message) => { sendToRoomPage(lease, message); },
+    methods,
+  });
   configureRoomPages({
     source,
     grants: roomPageGrants,
-    onLeaseEnd: (lease) => confirm.declineFor(lease),
+    onLeaseEnd: (lease) => {
+      confirm.declineFor(lease);
+      watches.stopAll(lease);
+    },
     onLeaseHidden: (lease) => confirm.declineFor(lease),
+    onLeasePointer: (lease, resource) => watches.notify(lease, resource),
   });
   const handlePageCall = createPageCallHandler({
     leaseFor: roomPageLeaseForSender,
-    adapter: backend.adapter ?? createHttpPageApiAdapter({ grants: roomPageGrants }),
-    methods: backend.methods ?? pageApiMethodNames(),
+    adapter,
+    methods,
+    watches,
     confirm,
     viewer: async () => {
       const account = (await readStoredAuth()).account;

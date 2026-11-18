@@ -456,6 +456,40 @@ test("a task_remove frame drops the card from the board", async () => {
   }
 });
 
+test("API resource pointers, board changes and stream gaps reach main's pointer listeners for room pages", async () => {
+  const { subscribeRoomStreamPointers } = await import("../main/room-stream-pointers.js");
+  const pointers: unknown[] = [];
+  // Room ids in a stable order; which of the stream's two ids comes first does not matter.
+  const stop = subscribeRoomStreamPointers((pointer) => { pointers.push({ ...pointer, roomIds: [...pointer.roomIds].sort() }); });
+  const router = installFetchRouter();
+  try {
+    const canonicalRoom = `${ROOM}_canonical`;
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    sse.pushRaw(`event: room_sync\ndata: ${JSON.stringify({ room_id: canonicalRoom, checkpoint: "msg_1", gap: false, event_cursor: "c0" })}\n\n`);
+    await starting;
+    assert.deepEqual(pointers, [], "a room_sync without a gap is no pointer");
+    sse.pushRaw(`id: c1\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({ room_id: canonicalRoom, resource: "work_items" })}\n\n`);
+    await waitUntil(() => pointers.length === 1);
+    assert.deepEqual(pointers[0], { roomIds: [ROOM, canonicalRoom], resource: "work_items" });
+    sse.pushRaw(`event: task_remove\ndata: ${JSON.stringify({ task_id: "task_9", room_id: canonicalRoom })}\n\n`);
+    await waitUntil(() => pointers.length === 2);
+    assert.deepEqual(pointers[1], { roomIds: [ROOM, canonicalRoom], resource: "tasks" });
+    // A pointer for another room is malformed: the stream repairs, and pages read everything again.
+    sse.pushRaw(`id: c2\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({ room_id: "room_other", resource: "jobs" })}\n\n`);
+    await waitUntil(() => pointers.length === 3);
+    assert.deepEqual(pointers[2], { roomIds: [ROOM, canonicalRoom], gap: true });
+    sse.close();
+  } finally {
+    stop();
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
 test("SSE sends the snapshot cursor and forwards the revision handshake", async () => {
   const router = installFetchRouter();
   try {

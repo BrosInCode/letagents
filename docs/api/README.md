@@ -157,3 +157,23 @@ import type { ApiErrorBody, ApiErrorCode } from "../../../shared/api/core.mjs";
 This works from the server (`tsconfig.json`), the desktop main process
 (`apps/desktop/tsconfig.electron.json`) and the web app (`src/web`). An MCP tool takes its input
 schema from `toJsonSchema(method).input`.
+
+## The desktop page bridge
+
+A room page in the desktop app reaches the API only through `window.letagents` (preload
+`apps/desktop/electron/page-preload.cts`, one IPC channel `page:call`). Main checks the sender,
+the call rate and the method, sends the call with the lease's own `page_grant` token, and answers
+`ui.*`, `page.get` and `viewer.get` itself. A refusal rejects with `{ code, message, retryAfterMs? }`.
+
+- A method a page may call must be in `PAGE_API_ROUTES` (`apps/desktop/electron/main/pages/page-adapter.ts`)
+  with the contract's route; a desktop test checks the table against `shared/api` and keeps
+  `rooms.admin` out of it. Add new page-callable methods there.
+- `letagents.use(area)`: `work_items` (search, get, history, watch), `board` (tasks, get, planning,
+  onChange), `people`, `agents`, `messages`, `git`, `memory`, `data` (`collection(scope, name)` with
+  list, get, set, update, delete, onSnapshot), `jobs` (start, get, list, cancel, onChange),
+  `intents` (propose, get, list, onChange). Each also has `call(method, input)`.
+- Watches run in main: the read runs at once and again 250 ms after a room stream pointer for its
+  resource (`work_items` at most every 2 minutes), or after a stream gap. The callback gets
+  `(value, null)` or `(null, error)`.
+- `jobs.start` shows an app-drawn confirm sheet (instruction and target agent) before main sends it;
+  a no is `declined` and sends nothing.

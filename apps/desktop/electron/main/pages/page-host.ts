@@ -15,6 +15,8 @@ import { addWebviewRoute } from "../attachments/webview-router.js";
 import { electronMainDir } from "../paths.js";
 import type { RoomPageSource } from "./page-adapter.js";
 import type { PageGrantKeeper } from "./page-grants.js";
+import { PAGE_RELAY_RESOURCES } from "./page-watch.js";
+import { subscribeRoomStreamPointers, type RoomStreamPointer } from "../room-stream-pointers.js";
 import { recordPageDiagnostic } from "./page-diagnostics.js";
 import {
   lockRoomPageWebPreferences,
@@ -79,11 +81,38 @@ let configured: {
   onLeaseEnd?: (lease: RoomPageLease) => void;
   /** Called when a page leaves the active tab, so its open sheets go away. */
   onLeaseHidden?: (lease: RoomPageLease) => void;
+  /** Called for each room stream pointer (or `gap`) in a running page's room, after the page heard it. */
+  onLeasePointer?: (lease: RoomPageLease, resource: string | "gap") => void;
 } | null = null;
+let stopPointerRelay: (() => void) | null = null;
 
 /** Where pages come from, and what else must end with a lease. Set once by the IPC registrar. */
 export function configureRoomPages(input: NonNullable<typeof configured>): void {
   configured = input;
+  // Pages ride the room stream the app already runs for the open room; they never open one.
+  stopPointerRelay ??= subscribeRoomStreamPointers(relayRoomStreamPointer);
+}
+
+/**
+ * Hand one room stream pointer to the running pages of that room, and only
+ * them: `changed` names the resource, `reread` follows a gap in the stream.
+ */
+export function relayRoomStreamPointer(pointer: RoomStreamPointer): void {
+  const resource = "gap" in pointer ? "gap" : pointer.resource;
+  if (resource !== "gap" && !PAGE_RELAY_RESOURCES.has(resource)) return;
+  for (const lease of leases.values()) {
+    if (!lease.guest || lease.stopped || !pointer.roomIds.includes(lease.roomId)) continue;
+    sendToRoomPage(lease, resource === "gap" ? { event: "reread" } : { event: "changed", resource });
+    configured?.onLeasePointer?.(lease, resource);
+  }
+}
+
+/** Push one message to a running page over its one channel; false when it is not running. */
+export function sendToRoomPage(lease: RoomPageLease, message: unknown): boolean {
+  const guest = lease.guest;
+  if (!guest || guest.isDestroyed() || lease.stopped || !isLive(lease)) return false;
+  guest.send(PAGE_CALL_CHANNEL, message);
+  return true;
 }
 
 function cleanId(value: unknown, label: string): string {

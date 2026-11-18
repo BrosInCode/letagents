@@ -5,6 +5,7 @@ import type { PageApiAdapter, PageCallContext } from "./page-adapter.js";
 import type { PageConfirmBroker } from "./page-confirm.js";
 import type { PageDiagnostic, PageDiagnosticsKey } from "./page-diagnostics.js";
 import type { RoomPageLease } from "./page-host.js";
+import type { PageWatches } from "./page-watch.js";
 import {
   isPageMethodName,
   MAX_PAGE_CALL_INPUT_CHARS,
@@ -36,6 +37,8 @@ export interface PageBridgeDeps {
   theme(): PageTheme;
   openExternal(url: string): Promise<void>;
   writeClipboard(text: string): void;
+  /** The page's watches; without them `events.watch` is `not_found`. */
+  watches?: PageWatches<RoomPageLease>;
   /** Keep a failed call in the page's diagnostics. */
   record(key: PageDiagnosticsKey, entry: Omit<Extract<PageDiagnostic, { kind: "call" }>, "at">): void;
   now?: () => number;
@@ -73,6 +76,13 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
         return openLink(lease, input);
       case "ui.copy":
         return copyText(lease, input);
+      case "events.watch":
+        if (!deps.watches) throw new PageCallFailure("not_found", "Watches are not available in this app yet.");
+        deps.watches.start(lease, field(input, "id"), field(input, "method"), field(input, "input") ?? null);
+        return null;
+      case "events.unwatch":
+        deps.watches?.stop(lease, field(input, "id"));
+        return null;
       default:
         throw new PageCallFailure("not_found", `There is no method "${method}".`);
     }
@@ -125,6 +135,33 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
     return null;
   }
 
+  /**
+   * A call that acts as the person (an agent job now; posts and intents when
+   * their routes land) first shows the app-drawn sheet with the exact text and
+   * target. A no sends nothing. Only the page in the open tab may ask.
+   */
+  async function confirmCall(lease: RoomPageLease, method: string, input: unknown): Promise<void> {
+    const describe = CONFIRMED_METHODS[method];
+    if (!describe) return;
+    const sheet = describe(input);
+    if (!sheet) throw new PageCallFailure("invalid_input", `${method} needs its text before it can be confirmed.`);
+    if (!lease.visible) throw new PageCallFailure("not_granted", `${method} works only from the page in the open tab.`);
+    if (confirming.has(lease)) throw new PageCallFailure("rate_limited", "Answer the open question first.", 1_000);
+    confirming.add(lease);
+    try {
+      const viewer = requireViewer(await deps.viewer());
+      const answer = await deps.confirm.ask(lease, scopeOf(lease, viewer), {
+        ...sheet,
+        pageTitle: lease.page.title,
+        rememberable: true,
+        choice: method,
+      });
+      if (answer !== "confirmed") throw new PageCallFailure("declined", "The person said no, so nothing was sent.");
+    } finally {
+      confirming.delete(lease);
+    }
+  }
+
   function copyText(lease: RoomPageLease, input: unknown): null {
     const text = field(input, "text");
     if (typeof text !== "string") throw new PageCallFailure("invalid_input", "ui.copy takes plain text.");
@@ -158,9 +195,13 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
       if (inputChars(input) > MAX_PAGE_CALL_INPUT_CHARS) {
         throw new PageCallFailure("too_large", `A call's input may be at most ${MAX_PAGE_CALL_INPUT_CHARS} characters of JSON.`);
       }
-      const value = PAGE_BUILTIN_METHODS.has(method)
-        ? await builtin(lease, method, input)
-        : await deps.adapter.call(contextOf(lease), method, input);
+      let value: unknown;
+      if (PAGE_BUILTIN_METHODS.has(method)) {
+        value = await builtin(lease, method, input);
+      } else {
+        await confirmCall(lease, method, input);
+        value = await deps.adapter.call(contextOf(lease), method, input);
+      }
       return { ok: true, value: value === undefined ? null : value };
     } catch (error) {
       const failure = error instanceof PageCallFailure
@@ -177,7 +218,17 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
   };
 }
 
-function contextOf(lease: RoomPageLease): PageCallContext {
+/** The sheet each confirmed method shows: the exact text the call sends, and where it goes. */
+const CONFIRMED_METHODS: Readonly<Record<string, (input: unknown) => { kind: "job" | "post"; text: string; target: string } | null>> = {
+  "jobs.start": (input) => {
+    const instruction = field(input, "instruction");
+    if (typeof instruction !== "string" || !instruction.trim()) return null;
+    const agent = field(input, "agent");
+    return { kind: "job", text: instruction, target: typeof agent === "string" && agent.trim() ? agent : "Any online agent" };
+  },
+};
+
+export function contextOf(lease: RoomPageLease): PageCallContext {
   return { leaseId: lease.host, roomId: lease.roomId, pageId: lease.page.id, version: lease.page.version };
 }
 
