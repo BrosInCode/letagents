@@ -22,7 +22,7 @@ test('the room drawer lets a signed-in member invite a bot with a one-use code t
   assert.match(panel, /git-room-hint="Open an invite room and invite the bot there\."/)
   assert.match(panel, /:create-invite="createInvite"\s+:cancel-invite="cancelInvite"/)
   assert.match(panel, /connectorUrl: inviteBotConnectorUrl\(typeof window !== 'undefined' \? window\.location\.origin : null\)/)
-  assert.match(panel, /return createRoomInvite\(props\.room\.identifier, platform\)/)
+  assert.match(panel, /const made = await createRoomInvite\(props\.room\.identifier, platform\)\s*followed\.follow\(made\.invite\)\s*return made/)
   // The shared section: what the invite does, the picker, the message with the code, Copy, and Cancel once made.
   assert.match(section, /data-testid="invite-bot-summary"/)
   assert.match(section, /<InviteBotPicker :model-value="invite\.platform\.value" @update:model-value="pick" \/>/)
@@ -49,9 +49,23 @@ test('the composer "+" menu opens the drawer at the invite, already open on the 
   assert.match(section, /querySelector<HTMLElement>\('\[role="radio"\]\[aria-checked="true"\]'\)\?\.focus/)
 })
 
+test('the drawer follows the invite it made, so it says when the bot joined instead of waiting forever', () => {
+  const panel = source('../src/components/room/room-drawer/InviteBotPanel.vue')
+  assert.match(panel, /:invite-state="inviteState"\s+@done="followed\.stop\(\)"/)
+  assert.match(panel, /const followed = useFollowedRoomInvite\(\(\) => props\.room\.identifier\)/)
+  assert.match(panel, /\{ state: followed\.invite\.value\.state, outcome: followed\.invite\.value\.outcome \}/)
+  assert.match(panel, /watch\(\(\) => props\.room\.identifier, \(\) => followed\.stop\(\)\)/, 'another room stops the follow')
+  // A refused cancel names the invite: used meanwhile shows as joined, beside the server's sentence.
+  assert.match(panel, /followed\.update\(inviteFromRefusal\(error\)\)/)
+  const api = source('../src/composables/room/invites.ts')
+  assert.match(api, /new EventSource\('\/account\/activity\/stream', \{ withCredentials: true \}\)/)
+  assert.match(api, /current\.addEventListener\(ROOM_INVITE_EVENT,/)
+})
+
 test('the web invite calls name the room in the path and the bot in the body, never the code', () => {
   const api = source('../src/composables/room/invites.ts')
   assert.match(api, /apiFetch\(`\$\{roomPath\(room\)\}\/invites`, \{\s*method: 'POST',\s*body: JSON\.stringify\(\{ platform \}\),/)
   assert.match(api, /`\$\{roomPath\(room\)\}\/invites\/\$\{encodeURIComponent\(inviteId\)\}\/cancel`/)
+  assert.match(api, /`\$\{roomPath\(room\)\}\/invites\/\$\{encodeURIComponent\(inviteId\)\}`, undefined, INVITE_ROUTE/)
   assert.match(api, /reportRoomRefusal: false/)
 })

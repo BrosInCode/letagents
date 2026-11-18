@@ -158,6 +158,17 @@ test('an admin\'s invite lets a bot in once, tells the room who let it in, and u
   assert.equal(usedFrame!.data.invite.outcome, 'admitted');
   assert.equal(usedFrame!.data.invite.used_by_login, 'alice');
   assert.deepEqual((await call('GET', `/rooms/${roomId}/invites`, owner.token)).body.invites, [], 'a used invite leaves the list');
+  // The maker reads it again by id after a gap in the stream, and learns that the bot came in.
+  const readAgain = await call('GET', `/rooms/${roomId}/invites/${made.body.invite.id}`, owner.token);
+  assert.equal(readAgain.status, 200, JSON.stringify(readAgain.body));
+  assert.equal(readAgain.body.invite.state, 'used');
+  assert.equal(readAgain.body.invite.outcome, 'admitted');
+  assert.equal('code' in readAgain.body.invite, false, 'a read invite never carries the code');
+  assert.equal((await call('GET', `/rooms/${roomId}/invites/${made.body.invite.id}`, alice.token)).status, 404,
+    'a member who is not the maker cannot read it');
+  assert.equal((await call('GET', `/rooms/${roomId}/invites/${made.body.invite.id}`, bob.token)).status, 403,
+    'a stranger is refused at the room');
+  assert.equal((await call('GET', `/rooms/${roomId}/invites/inv_missing`, owner.token)).status, 404);
 
   // Alice's bot can now join the room itself.
   assert.equal((await call('POST', `/rooms/${roomId}/join`, 'alice_owner_token')).status, 200);

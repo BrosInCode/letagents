@@ -7,7 +7,7 @@
  * The desktop composer panel, Room settings and the web room drawer show one
  * message from here, and the tests check it without a DOM.
  */
-import { computed, ref, type Ref } from "vue";
+import { computed, ref, watch, type Ref } from "vue";
 
 export type InviteBotPlatform = "grok" | "chatgpt" | "claude" | "other";
 
@@ -215,7 +215,110 @@ export function useInviteBotCode(options: InviteBotCodeOptions) {
     return created;
   }
 
-  return { platform, created: current, message, busy, copied, error, pick, reset, copy };
+  /** The invite Copy made last, for whichever bot: a code cancelled elsewhere must go even while another bot is picked. */
+  const lastMade = computed(() => made.value?.created ?? null);
+
+  return { platform, created: current, lastMade, message, busy, copied, error, pick, reset, copy };
 }
 
 export type InviteBotCode = ReturnType<typeof useInviteBotCode>;
+
+/** What became of the invite Copy made, as the host hears it. */
+export interface InviteBotInviteState {
+  state: "open" | "used" | "cancelled" | "expired";
+  outcome: "admitted" | "requested" | null;
+}
+
+export interface InviteBotSectionOptions extends InviteBotCodeOptions {
+  /** Ends the invite Copy made; resolves a sentence when it could not. */
+  cancelInvite: () => ((inviteId: string) => Promise<string | null>) | null;
+  /** The host's word on the invite Copy made (the desktop store, or the web drawer's follow). */
+  inviteState: () => InviteBotInviteState | null;
+  onMade?: (inviteId: string) => void;
+  onDone?: () => void;
+}
+
+/**
+ * The invite section's state, shared by Room settings and the web drawer:
+ * the code (useInviteBotCode), Cancel, and one status.
+ * - One error shows at a time, the newest: Copy clears Cancel's, Cancel clears Copy's.
+ * - "Joined" is about the invite on screen; a closed or new section shows none.
+ * - A code cancelled elsewhere goes, even while another bot is picked, so it never comes back.
+ */
+export function useInviteBotSection(options: InviteBotSectionOptions) {
+  const cancelling = ref(false);
+  const cancelled = ref(false);
+  const cancelError = ref<string | null>(null);
+  const invite = useInviteBotCode({
+    ...options,
+    createInvite: async (platform) => {
+      cancelled.value = false;
+      cancelError.value = null;
+      const made = await options.createInvite(platform);
+      options.onMade?.(made.invite.id);
+      return made;
+    },
+  });
+
+  const joined = computed(() => invite.created.value !== null && options.inviteState()?.state === "used");
+  const error = computed(() => cancelError.value ?? invite.error.value);
+
+  watch(() => options.inviteState()?.state, (state) => {
+    if (state !== "cancelled" || !invite.lastMade.value) return;
+    invite.reset();
+    cancelled.value = true;
+  });
+
+  async function copy(): Promise<void> {
+    cancelError.value = null;
+    if (joined.value) invite.reset();
+    await invite.copy();
+  }
+
+  async function cancel(): Promise<void> {
+    const made = invite.created.value;
+    const cancelInvite = options.cancelInvite();
+    if (!made || !cancelInvite || cancelling.value) return;
+    invite.error.value = null;
+    cancelling.value = true;
+    cancelError.value = await cancelInvite(made.invite.id);
+    cancelling.value = false;
+    if (!cancelError.value) {
+      invite.reset();
+      cancelled.value = true;
+    }
+  }
+
+  function pick(platform: InviteBotPlatform): void {
+    cancelled.value = false;
+    invite.pick(platform);
+  }
+
+  /** Done: everything goes, and the host may stop following the invite. */
+  function close(): void {
+    cancelled.value = false;
+    cancelError.value = null;
+    invite.reset();
+    options.onDone?.();
+  }
+
+  return { invite, cancelling, cancelled, joined, error, copy, cancel, pick, close };
+}
+
+/** What the Copy label shows: "⧉ Copy", the same unit with a spinner, or "✓ Copied". */
+export type CopyStateLook = "idle" | "busy" | "done";
+
+/**
+ * The Copy label's next look. The words animate only from the first time the
+ * shown unit swaps ("⧉ Copy" and "✓ Copied"). A spinner coming or going keeps
+ * the "Copy" unit, so it starts nothing: if it did, the hidden "✓ Copied"
+ * would play its leave animation from full view, a false "Copied" while the
+ * code is still being made.
+ */
+export function nextCopyStateLook(
+  current: { shown: CopyStateLook; changed: boolean },
+  next: CopyStateLook,
+): { shown: CopyStateLook; changed: boolean } {
+  const unit = (look: CopyStateLook) => look === "done" ? "done" : "copy";
+  return { shown: next, changed: current.changed || unit(current.shown) !== unit(next) };
+}

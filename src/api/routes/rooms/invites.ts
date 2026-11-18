@@ -238,6 +238,24 @@ export function registerRoomInviteRoutes(app: Express, deps: RoomInviteRouteDeps
     } catch (error) { fail(res, error); }
   });
 
+  // One of the caller's own invites, in any state: the web drawer reads it
+  // after a gap in the account stream, so "Waiting" never outlives the join.
+  app.get(/^\/rooms\/(.+)\/invites\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const account = requirePerson(req, res);
+      if (!account) return;
+      const project = await routeRoom(req, res);
+      if (!project) return;
+      if (!(await deps.requireParticipant(req, res, project))) return;
+      const invite = await invites.getOwnRoomInvite(account.account_id, project.id, routeParam(req, 1));
+      if (!invite) {
+        res.status(404).json({ error: 'Invite not found', code: 'INVITE_NOT_FOUND' });
+        return;
+      }
+      res.json({ invite });
+    } catch (error) { fail(res, error); }
+  });
+
   app.post(/^\/rooms\/(.+)\/invites\/([^/]+)\/cancel$/, async (req: AuthenticatedRequest, res) => {
     try {
       const account = requirePerson(req, res);
