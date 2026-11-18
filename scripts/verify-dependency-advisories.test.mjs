@@ -12,7 +12,7 @@ import {
 
 const runnerPath = path.resolve("scripts/verify-dependency-advisories.mjs");
 
-async function createAuditFixture(mode, { lockfile = {}, report = null, lsOutput = "", lsExit = 0, shrinkwrap = false } = {}) {
+async function createAuditFixture(mode, { lockfile = {}, report = null, lsOutput = "", lsExit = 0, lsHang = false, shrinkwrap = false } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "letagents-audit-test-"));
   const packageDirectory = path.join(directory, "package");
   const fakeNpmPath = path.join(directory, "fake-npm.mjs");
@@ -38,8 +38,15 @@ if (args[0] === "ls") {
     console.error("unexpected ls arguments: " + JSON.stringify(args));
     process.exit(9);
   }
-  if (${JSON.stringify(lsText)}) console.log(${JSON.stringify(lsText)});
-  process.exit(${JSON.stringify(lsExit)});
+  if (${JSON.stringify(lsHang)}) {
+    // Hangs, then answers "nothing in production" when stopped: the timeout alone must refuse it.
+    process.on("SIGTERM", () => process.exit(0));
+    setInterval(() => {}, 1000);
+    await new Promise(() => {});
+  } else {
+    if (${JSON.stringify(lsText)}) console.log(${JSON.stringify(lsText)});
+    process.exit(${JSON.stringify(lsExit)});
+  }
 }
 if (JSON.stringify(args) !== JSON.stringify([
   "audit",
@@ -79,8 +86,9 @@ if (["vulnerability", "vulnerability-with-transient-text"].includes(${JSON.strin
 if (${JSON.stringify(mode)}.startsWith("report")) {
   console.log(readFileSync(${JSON.stringify(reportPath)}, "utf8"));
   if (${JSON.stringify(mode)} === "report-exit-7") process.exit(7);
-  if (${JSON.stringify(mode)} === "report-hang") {
-    process.on("SIGTERM", () => process.exit(0));
+  if (${JSON.stringify(mode)}.startsWith("report-hang")) {
+    // Stopped by the timeout, it exits 0, or 1 like a normal advisory answer: the timeout alone must refuse it.
+    process.on("SIGTERM", () => process.exit(${JSON.stringify(mode)} === "report-hang-1" ? 1 : 0));
     setInterval(() => {}, 1000);
   } else {
     process.exit(1);
@@ -95,7 +103,7 @@ if (${JSON.stringify(mode)} === "timeout-success") {
   process.on("SIGTERM", () => process.exit(0));
   setInterval(() => {}, 1000);
 }
-console.log("found 0 vulnerabilities");
+if (!${JSON.stringify(mode)}.startsWith("report")) console.log("found 0 vulnerabilities");
 `,
   );
   await chmod(fakeNpmPath, 0o755);
@@ -295,6 +303,10 @@ test("rule 4: the exception ends at 00:00 UTC on its end date, after the dev che
     assert.equal(decision.allowed, false);
     assert.match(decision.blocking.join("\n"), /The exception for GHSA-fc5q-39xc-vjpf in picomatch ended on 2026-12-18\. Upgrade picomatch/);
   }
+  // The dev check comes first, so after the end a non-dev copy is still named.
+  const afterEnd = evaluate(picomatchReport(), devLockfile({ "node_modules/picomatch": { version: "4.0.4" } }), new Date(testEndsAt + 1));
+  assert.match(afterEnd.blocking.join("\n"), /Not dev: node_modules\/picomatch\./);
+  assert.doesNotMatch(afterEnd.blocking.join("\n"), /ended on/);
   const bad = evaluateAdvisoryExceptions(picomatchReport(), devLockfile(), { now: beforeEnd, exceptions: [{ ...TEST_EXCEPTIONS[0], endsOn: "not a date" }] });
   assert.equal(bad.allowed, false, "an unreadable end date fails closed");
 });
@@ -319,6 +331,7 @@ test("a report the exception cannot trust fails closed", () => {
 // The runner uses the real list and the real clock.
 const realEndsAt = Date.parse(`${ADVISORY_EXCEPTIONS.find((exception) => exception.advisory === PICOMATCH)?.endsOn}T00:00:00Z`);
 const realExceptionOpen = Number.isFinite(realEndsAt) && Date.now() < realEndsAt;
+const realHasPicomatch = ADVISORY_EXCEPTIONS.some((exception) => exception.advisory === PICOMATCH);
 
 test("the audit runner passes the excepted picomatch report and logs the end date, until that date", async () => {
   const fixture = await createAuditFixture("report", { lockfile: devLockfile(), report: picomatchReport() });
@@ -340,7 +353,8 @@ test("the audit runner still fails the picomatch advisory on a non-dev path, and
   });
   const runtimeResult = runFixture(runtime);
   assert.equal(runtimeResult.status, 1);
-  assert.match(runtimeResult.stderr, /Not dev: node_modules\/picomatch\./);
+  // With the real entry (before or after its end) the non-dev copy is named; without it, the advisory has no exception.
+  assert.match(runtimeResult.stderr, realHasPicomatch ? /Not dev: node_modules\/picomatch\./ : /GHSA-fc5q-39xc-vjpf has no exception/);
   assert.match(runtimeResult.stderr, /found advisories without an exception/);
 
   const other = await createAuditFixture("report", { lockfile: devLockfile(), report: picomatchReport({ advisoryId: "GHSA-aaaa-bbbb-cccc" }) });
@@ -365,6 +379,11 @@ test("a stale or edited dev flag fails: npm itself must not install picomatch in
   assert.equal(unlistedResult.status, 1);
   assert.match(unlistedResult.stderr, /npm could not list where picomatch is installed in production/);
 
+  const lsHang = await createAuditFixture("report", { lockfile: devLockfile(), report: picomatchReport(), lsHang: true });
+  const lsHangResult = runFixture(lsHang, { timeoutMs: 1500 });
+  assert.equal(lsHangResult.status, 1, "a timed-out npm ls fails closed even when it exits 0");
+  assert.match(lsHangResult.stderr, /npm could not list where picomatch is installed in production/);
+
   // The root path alone (no node_modules) is not a production copy.
   const rootOnly = await createAuditFixture("report", { lockfile: devLockfile(), report: picomatchReport(), lsOutput: "@DIR@" });
   assert.equal(runFixture(rootOnly).status, 0);
@@ -376,11 +395,14 @@ test("only npm's normal advisory answer can meet the exception: other exits, tim
   assert.equal(exit7Result.status, 1);
   assert.match(exit7Result.stderr, /exited with code 7/);
 
-  const hang = await createAuditFixture("report-hang", { lockfile: devLockfile(), report: picomatchReport() });
-  const hangResult = runFixture(hang, { timeoutMs: 1500 });
-  assert.equal(hangResult.status, 1);
-  assert.match(hangResult.stderr, /timed out/);
-  assert.doesNotMatch(hangResult.stderr, /Allowing GHSA-fc5q-39xc-vjpf/);
+  for (const mode of ["report-hang", "report-hang-1"]) {
+    const hang = await createAuditFixture(mode, { lockfile: devLockfile(), report: picomatchReport() });
+    const hangResult = runFixture(hang, { timeoutMs: 1500 });
+    assert.equal(hangResult.status, 1, mode);
+    assert.match(hangResult.stderr, /timed out/);
+    assert.doesNotMatch(hangResult.stderr, /Allowing GHSA-fc5q-39xc-vjpf/);
+    assert.equal(await readFile(hang.countPath, "utf8"), "1", "a full report is read, not retried as a registry failure");
+  }
 
   const shrinkwrap = await createAuditFixture("report", { lockfile: devLockfile(), report: picomatchReport(), shrinkwrap: true });
   const shrinkwrapResult = runFixture(shrinkwrap);
