@@ -188,3 +188,56 @@ test("a refused deletion ends no offline agent, and names up to three agents in 
     return true;
   });
 });
+
+async function supervise(sessionId: string, ownerAccountId: string, grantId: string, expiresIn: string, scopeKey = "owner") {
+  await pool!.query(`INSERT INTO supervisor_host_grants (grant_id,owner_account_id,host_id,installation_id,token_hash,allowed_room_ids,allowed_agent_keys,
+      issued_at,expires_at,created_at,updated_at,scope_key)
+    VALUES ($1,$2,'host_'||$1,'install_'||$1,'hash_'||$1,'{}','{}',now() - interval '2 days',now() + $3::interval,now(),now(),$4)`,
+  [grantId, ownerAccountId, expiresIn, scopeKey]);
+  await pool!.query("UPDATE room_agent_sessions SET supervisor_grant_id = $2 WHERE session_id = $1", [sessionId, grantId]);
+}
+
+test("the sweep keeps desktop agents that may come back, and ends those that cannot", { skip }, async () => {
+  const account = await owner();
+  const room = await dbApi!.createProjectWithName("gone-supervised");
+  const kept: string[] = [];
+  const endedIds: string[] = [];
+  const cases: Array<[string, string, string, "kept" | "ended", boolean?]> = [
+    ["Current", "1 day", "owner", "kept"],
+    // The owner's desktop brings an expired grant back under the same id.
+    ["Closed", "-3 days", "owner", "kept"],
+    ["Abandoned", "-31 days", "owner", "ended"],
+    // A guest's desktop cannot renew an expired grant.
+    ["Guest", "-1 day", "rental:rental_1", "ended"],
+    ["Revoked", "1 day", "owner", "ended", true],
+  ];
+  for (const [name, expiresIn, scopeKey, outcome, revoked] of cases) {
+    const session = await worker(room.id, account.id, name);
+    await silentFor(session.session_id, 120);
+    await supervise(session.session_id, account.id, `grant_${name}`, expiresIn, scopeKey);
+    if (revoked) await pool!.query("UPDATE supervisor_host_grants SET revoked_at = now() WHERE grant_id = $1", [`grant_${name}`]);
+    (outcome === "kept" ? kept : endedIds).push(session.session_id);
+  }
+
+  assert.deepEqual((await sessions!.endGoneWorkerSessions()).sort(), endedIds.sort());
+  for (const sessionId of kept) assert.equal((await endedAt(sessionId)).ended_at, null);
+});
+
+test("room deletion waits for a desktop agent with a current grant, not one whose grant expired", { skip }, async () => {
+  const account = await owner();
+  const room = await dbApi!.createProjectWithName("delete-supervised");
+  const current = await worker(room.id, account.id, "Current");
+  const lapsed = await worker(room.id, account.id, "Lapsed");
+  await silentFor(current.session_id, 120);
+  await silentFor(lapsed.session_id, 120);
+  await supervise(current.session_id, account.id, "grant_current", "1 day");
+  await supervise(lapsed.session_id, account.id, "grant_lapsed", "-1 day");
+
+  await assert.rejects(deletion!.deleteRoomData(room.id), (error: any) => {
+    assert.equal(error.message, "Current is still in this room. Disconnect or retire it before deleting the room.");
+    return true;
+  });
+  await pool!.query("UPDATE supervisor_host_grants SET revoked_at = now() WHERE grant_id = 'grant_current'");
+  await deletion!.deleteRoomData(room.id);
+  assert.equal((await pool!.query("SELECT id FROM rooms WHERE id = $1", [room.id])).rowCount, 0);
+});
