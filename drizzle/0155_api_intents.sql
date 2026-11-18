@@ -52,8 +52,10 @@ ALTER TABLE "workflow_effects" ADD COLUMN IF NOT EXISTS "subject" text;
 --> statement-breakpoint
 ALTER TABLE "workflow_effects" DROP CONSTRAINT IF EXISTS "workflow_effects_target_check";
 --> statement-breakpoint
--- NOT VALID, then VALIDATE in its own statement, as earlier migrations here
--- do: the old-row scan runs under VALIDATE's lighter lock.
+-- NOT VALID, then VALIDATE, as earlier migrations here do. This does not
+-- lighten the lock: drizzle runs all pending migrations in one transaction,
+-- so the ADD's ACCESS EXCLUSIVE lock is held through the old-row scan. The
+-- scan is short (workflow_effects is small) and lock_timeout bounds the wait.
 ALTER TABLE "workflow_effects" ADD CONSTRAINT "workflow_effects_target_check" CHECK ("task_id" IS NOT NULL OR ("kind" IN ('tracker_transition', 'tracker_comment') AND "subject" IS NOT NULL)) NOT VALID;
 --> statement-breakpoint
 ALTER TABLE "workflow_effects" VALIDATE CONSTRAINT "workflow_effects_target_check";

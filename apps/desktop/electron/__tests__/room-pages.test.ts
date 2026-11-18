@@ -4,11 +4,12 @@ import { readFileSync } from "node:fs";
 import test, { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { HTML_DEMO_PARTITION } from "../main/attachments/html-demo-policy.js";
+import { HTML_DEMO_PARTITION, inlineHtmlDemoBucket } from "../main/attachments/html-demo-policy.js";
 import {
   MAX_ROOM_PAGES,
   PAGE_CALL_BURST,
   PAGE_CALL_CHANNEL,
+  PAGE_CALLS_PER_SECOND,
   PAGE_PARTITION,
   pageOpenTarget,
 } from "../main/pages/page-policy.js";
@@ -61,7 +62,7 @@ const {
 } = await import("../main/pages/page-host.js");
 const { createPageGrantKeeper, parsePageGrant, PAGE_GRANT_REFRESH_BEFORE_MS, PAGE_GRANT_RETRY_MS } = await import("../main/pages/page-grants.js");
 const { isRefusedWebviewSender, refuseWebviewSenders } = await import("../main/ipc-sender-guard.js");
-const { contextOf, createPageCallHandler, describeIntent } = await import("../main/pages/page-bridge.js");
+const { contextOf, createPageCallHandler, describeIntent, takePageCall } = await import("../main/pages/page-bridge.js");
 const { createRoomPageAdmin, PAGE_ADMIN_ROUTES } = await import("../main/pages/page-admin.js");
 const { createPageWatches, MAX_PAGE_WATCHES, PAGE_WATCH_DEBOUNCE_MS } = await import("../main/pages/page-watch.js");
 const { publishRoomStreamPointer } = await import("../main/room-stream-pointers.js");
@@ -144,6 +145,7 @@ const watches = createPageWatches<Lease>({
   run: (lease, method, input) => backend.adapter.call(contextOf(lease), method, input),
   push: (lease, message) => { sendToRoomPage(lease, message); },
   methods: PAGE_METHODS,
+  take: (lease) => takePageCall(lease, clock),
 });
 const lastEnded: unknown[] = [];
 grants.configure((roomId, pageId, version) => backend.source.grant(roomId, pageId, version), markRoomPageOutdated);
@@ -991,6 +993,57 @@ test("work item watches: a pointer re-runs after 250 ms, a quiet watch polls eve
   await settle(240_000);
   assert.equal(runs, total, "nothing runs after the page closed");
   assert.ok(pushed.every((message) => (message as { event: string }).event === "watch"));
+});
+
+test("watch re-runs batch per lease and spend the page's call budget: a pointer storm waits, nothing is dropped", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const settle = async (ms: number) => { t.mock.timers.tick(ms); await flushImmediates(); };
+  const runs: Array<{ id: string; at: number }> = [];
+  const methods = new Set(["jobs.list", "tasks.list", "data.list"]);
+  let call = 0;
+  const lease = { calls: inlineHtmlDemoBucket(PAGE_CALL_BURST, PAGE_CALLS_PER_SECOND, Date.now()) };
+  const local = createPageWatches<typeof lease>({
+    run: async (_lease, _method, input) => { runs.push({ id: (input as { id: string }).id, at: Date.now() }); return { call: ++call }; },
+    push: () => {},
+    methods,
+    take: (target) => takePageCall(target, Date.now()),
+  });
+  const ids = Array.from({ length: MAX_PAGE_WATCHES }, (_, index) => `w${index}`);
+  ids.forEach((id, index) => local.start(lease, id, ["jobs.list", "tasks.list", "data.list"][index % 3]!, { id }));
+  await flushImmediates();
+  assert.equal(runs.length, MAX_PAGE_WATCHES, "first runs belong to the events.watch calls");
+  const tokensAfterStart = lease.calls.tokens;
+  assert.equal(tokensAfterStart, PAGE_CALL_BURST, "and take nothing more from the budget");
+
+  // Pointers for different resources inside one wait: one batch, each watch once.
+  runs.length = 0;
+  local.notify(lease, "jobs");
+  await settle(100);
+  local.notify(lease, "tasks");
+  await settle(100);
+  assert.equal(runs.length, 0);
+  await settle(PAGE_WATCH_DEBOUNCE_MS - 200);
+  const jobsAndTasks = ids.filter((_, index) => index % 3 !== 2);
+  assert.deepEqual(runs.map((run) => run.id).sort(), [...jobsAndTasks].sort(), "one batch after the first pointer");
+
+  // A gap every 250 ms for 10 s: without the budget 16 watches would make 640 calls.
+  runs.length = 0;
+  const startAt = Date.now();
+  for (let tick = 0; tick < 40; tick += 1) {
+    local.notify(lease, "gap");
+    await settle(PAGE_WATCH_DEBOUNCE_MS);
+  }
+  const elapsedS = (Date.now() - startAt) / 1000;
+  const allowed = PAGE_CALL_BURST + PAGE_CALLS_PER_SECOND * elapsedS;
+  assert.ok(runs.length <= allowed, `${runs.length} re-runs in ${elapsedS} s, budget ${allowed}`);
+  assert.ok(runs.length >= allowed - MAX_PAGE_WATCHES, `the budget is used, not wasted: ${runs.length}`);
+  // The storm ends: every watch still reads the final state once the budget refills.
+  const lastPointerAt = Date.now();
+  await settle(5_000);
+  for (const id of ids) {
+    assert.ok(runs.some((run) => run.id === id && run.at >= lastPointerAt - PAGE_WATCH_DEBOUNCE_MS), `${id} ran after the last pointer`);
+  }
+  local.stopAll(lease);
 });
 
 test("a lease whose version is no longer live closes as outdated, and never gets a token again", async () => {

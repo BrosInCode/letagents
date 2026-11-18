@@ -119,7 +119,7 @@ test("Jira filters cannot break out of their group", async () => {
 test("an extra Jira filter is checked and grouped on its own, and never runs without a room filter", async () => {
   const { impl, calls } = fakeFetch([at("POST", /\/search\/jql$/, { issues: [], isLast: true })]);
   const jira = createJiraProvider({ fetchImpl: impl, env: {} });
-  for (const extraFilter of [") OR (project = HR", "x) OR (project = SECRET", "summary ~ \"open", "labels = a\\ b"]) {
+  for (const extraFilter of [") OR (project = HR", "x) OR (project = SECRET", "summary ~ \"open", "labels = a\\ b", "labels = a\\"]) {
     await assert.rejects(jira.listItems(jiraConnection(), "project = HT", { extraFilter }), TrackerProviderError, extraFilter);
   }
   for (const filter of [null, "", "ORDER BY rank"]) {
@@ -131,6 +131,9 @@ test("an extra Jira filter is checked and grouped on its own, and never runs wit
   // An empty query leaves the room filter alone.
   await jira.listItems(jiraConnection(), "project = HT", { extraFilter: "" });
   assert.equal((calls[1].body as { jql: string }).jql, "(project = HT) ORDER BY updated DESC");
+  // A saved room filter's trailing backslash is dropped, so it cannot escape its group's ).
+  await jira.listItems(jiraConnection(), "project = HT\\", { extraFilter: "labels = x" });
+  assert.equal((calls[2].body as { jql: string }).jql, "(project = HT) AND (labels = x) ORDER BY updated DESC");
 });
 
 test("a backslash outside quotes escapes the next character, as in Jira, so it cannot hide a ) from the filter check", () => {
@@ -152,11 +155,15 @@ test("a backslash outside quotes escapes the next character, as in Jira, so it c
     assert.throws(() => jiraQueryClause(filter), /backslash/, filter);
   }
   // A trailing backslash escapes nothing; before the ) this provider adds it
-  // would turn that ) into a literal. Refused in a room filter too.
-  for (const filter of ["project = HT\\", "project = HT \\  ", "summary ~ \\\\\\", 'summary ~ "a\\']) {
-    assert.throws(() => jiraFilterClause(filter), /unbalanced/, filter);
+  // would turn that ) into a literal. A caller's query is refused; a saved
+  // room filter (which older servers accepted) loses it and keeps syncing.
+  for (const [filter, kept] of [["project = HT\\", "project = HT"], ["project = HT \\  ", "project = HT "], ["summary ~ \\\\\\", "summary ~ \\\\"], ["a\\ \\", "a\\ "]]) {
+    assert.equal(jiraFilterClause(filter), kept, filter);
     assert.throws(() => jiraQueryClause(filter), TrackerProviderError, filter);
   }
+  // Inside an open quote, dropping it still leaves the quote open: refused.
+  assert.throws(() => jiraFilterClause('summary ~ "a\\'), /unbalanced/);
+  assert.throws(() => jiraQueryClause('summary ~ "a\\'), /unbalanced/);
   // An escaped backslash at the end is a whole escape, and a stripped ORDER BY takes its backslash with it.
   assert.equal(jiraFilterClause("labels = a\\\\"), "labels = a\\\\");
   assert.equal(jiraFilterClause("project = HT ORDER BY rank\\"), "project = HT");

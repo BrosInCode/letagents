@@ -83,20 +83,20 @@ export interface JiraProviderOptions {
  * Reads JQL the way Jira's lexer splits it: a backslash escapes the next
  * character inside a quoted string and in an unquoted word alike (`\'` in a
  * word is a literal quote, not the start of a string). Returns whether the
- * parentheses and quotes balance and whether a backslash appears outside a
- * quoted string.
+ * parentheses and quotes balance, whether a backslash appears outside a
+ * quoted string, and whether the text ends in a backslash that escapes
+ * nothing. Such a backslash never balances: before the ) this provider adds
+ * it would turn that ) into a literal.
  */
-function scanJql(text: string): { balanced: boolean; bareBackslash: boolean } {
+function scanJql(text: string): { balanced: boolean; bareBackslash: boolean; danglingBackslash: boolean } {
   let depth = 0;
   let quote: string | null = null;
   let bareBackslash = false;
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
     if (char === "\\") {
-      // A backslash that escapes nothing: Jira's lexer and this one may
-      // disagree on what it does to the closing group, so it never balances.
-      if (index === text.length - 1) return { balanced: false, bareBackslash: true };
       if (!quote) bareBackslash = true;
+      if (index === text.length - 1) return { balanced: false, bareBackslash, danglingBackslash: true };
       index += 1;
     } else if (quote) {
       if (char === quote) quote = null;
@@ -108,32 +108,43 @@ function scanJql(text: string): { balanced: boolean; bareBackslash: boolean } {
       break;
     }
   }
-  return { balanced: depth === 0 && !quote, bareBackslash };
+  return { balanced: depth === 0 && !quote, bareBackslash, danglingBackslash: false };
 }
+
+const withoutOrderBy = (jql: string | null) => jql?.replace(/\border\s+by\b[\s\S]*$/i, "").trim() || null;
+const unbalanced = () => new TrackerProviderError("definite", "The Jira filter has unbalanced parentheses or quotes.");
 
 /**
  * A room filter's JQL, without a trailing ORDER BY. Parentheses must balance
  * outside quoted strings, so the filter cannot close the group this provider
  * wraps it in and widen the query past the clauses added after it.
+ *
+ * A saved filter that ends in a backslash escaping nothing loses it: older
+ * servers accepted one, and refusing it now would stop that room's sync for
+ * good. Dropped, it can no longer touch the group's ). A caller's query
+ * (jiraQueryClause) is refused instead.
  */
 export function jiraFilterClause(filter: string | null): string | null {
-  const base = filter?.replace(/\border\s+by\b[\s\S]*$/i, "").trim();
+  let base = withoutOrderBy(filter);
+  if (base && scanJql(base).danglingBackslash) base = base.slice(0, -1);
   if (!base) return null;
-  if (!scanJql(base).balanced) throw new TrackerProviderError("definite", "The Jira filter has unbalanced parentheses or quotes.");
+  if (!scanJql(base).balanced) throw unbalanced();
   return base;
 }
 
 /**
- * A caller's query (never a room admin's filter): as `jiraFilterClause`, and
- * no backslash outside a quoted string. An escape in an unquoted word is legal
- * JQL but has no use in a page query, and refusing it leaves no room for a
- * difference between this scanner and Jira's lexer to open a way out.
+ * A caller's query (never a room admin's filter): as `jiraFilterClause`, but
+ * nothing is dropped, and no backslash outside a quoted string. An escape in
+ * an unquoted word is legal JQL but has no use in a page query, and refusing
+ * it leaves no room for a difference between this scanner and Jira's lexer to
+ * open a way out.
  */
 export function jiraQueryClause(query: string): string | null {
-  const clause = jiraFilterClause(query);
-  if (clause && scanJql(clause).bareBackslash) {
-    throw new TrackerProviderError("definite", "The Jira query has a backslash outside a quoted string.");
-  }
+  const clause = withoutOrderBy(query);
+  if (!clause) return null;
+  const scan = scanJql(clause);
+  if (!scan.balanced) throw unbalanced();
+  if (scan.bareBackslash) throw new TrackerProviderError("definite", "The Jira query has a backslash outside a quoted string.");
   return clause;
 }
 

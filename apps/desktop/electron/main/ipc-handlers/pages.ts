@@ -11,7 +11,7 @@ import {
   type PageApiAdapter,
   type RoomPageSource,
 } from "../pages/page-adapter.js";
-import { contextOf, createPageCallHandler } from "../pages/page-bridge.js";
+import { contextOf, createPageCallHandler, takePageCall } from "../pages/page-bridge.js";
 import { createPageWatches } from "../pages/page-watch.js";
 import { createRoomPageAdmin, type RoomPageAdmin } from "../pages/page-admin.js";
 import { createFilePageChoiceStore, createPageConfirmBroker, type PageChoiceStore } from "../pages/page-confirm.js";
@@ -67,6 +67,7 @@ export function registerDesktopPageIpcHandlers(
     run: (lease, method, input) => adapter.call(contextOf(lease), method, input),
     push: (lease, message) => { sendToRoomPage(lease, message); },
     methods,
+    take: (lease) => takePageCall(lease, Date.now()),
   });
   configureRoomPages({
     source,

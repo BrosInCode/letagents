@@ -516,7 +516,7 @@ test("a page made from a message's HTML attachment keeps working after the messa
   assert.equal((await call("POST", pagesPath(roomA), ada, { source })).body.code, "not_found", "the attachment is gone, the page is not");
 });
 
-test("a page is at most 2 MB of HTML, sent inline (even fully escaped) or as an attachment", { skip }, async () => {
+test("a page is at most 2 MB of HTML, sent inline (even escaped to twice its size) or as an attachment", { skip }, async () => {
   const head = pageHtml("Big");
   const fits = head + "x".repeat(2 * 1024 * 1024 - Buffer.byteLength(head));
   assert.equal(Buffer.byteLength(fits), 2 * 1024 * 1024);
@@ -529,11 +529,23 @@ test("a page is at most 2 MB of HTML, sent inline (even fully escaped) or as an 
   const document = await call("GET", pagesPath(roomA, `/${made.body.id}/document`), bob);
   assert.equal(document.body.html.length, fits.length);
 
-  // Control characters travel as \uXXXX: six bytes of JSON for one of HTML.
+  // Quotes and newlines take two bytes of JSON, and a client that escapes
+  // non-ASCII (Python's default) sends a CJK character's three bytes as six:
+  // twice the HTML, about 4 MB of body, read once the caller is known.
+  const room = Math.floor((2 * 1024 * 1024 - Buffer.byteLength(head)) / 5);
+  const doubled = head + "\"\n".repeat(room) + "文".repeat(room);
+  const asciiJson = JSON.stringify({ html: doubled }).replace(/[\u0080-￿]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  assert.ok(Buffer.byteLength(asciiJson) > 3.9 * 1024 * 1024, String(Buffer.byteLength(asciiJson)));
+  const version = await fetch(`${base}${pagesPath(roomA, `/${made.body.id}/versions`)}`, {
+    method: "POST", headers: { cookie: ada.cookie, origin, "content-type": "application/json" }, body: asciiJson,
+  });
+  const versionBody = await version.json();
+  assert.equal(version.status, 201, JSON.stringify(versionBody).slice(0, 300));
+  assert.equal(statusOf(versionBody, 2), "live");
+  // HTML of control characters only travels as \uXXXX, six bytes each: past the body limit.
   const escaped = head + "\u0001".repeat(2 * 1024 * 1024 - Buffer.byteLength(head));
-  assert.ok(Buffer.byteLength(JSON.stringify({ html: escaped })) > 12 * 1024 * 1024 - 1024);
-  const version = await call("POST", pagesPath(roomA, `/${made.body.id}/versions`), ada, { html: escaped });
-  assert.equal(version.status, 201, JSON.stringify(version.body).slice(0, 300));
+  assert.deepEqual(await call("POST", pagesPath(roomA, `/${made.body.id}/versions`), ada, { html: escaped }),
+    { status: 413, body: { code: "too_large", message: "The request body is too large." } });
 
   // Only the page HTML routes take the larger body.
   const padded = await call("POST", pagesPath(roomA, `/${made.body.id}/approve`), ada, { version: 1, capabilities: [], pad: "x".repeat(1536 * 1024) });

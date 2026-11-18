@@ -446,6 +446,25 @@ test("confirm passes for a page call, whose confirm sheet ran in the app; an age
   await assert.rejects(jobPolicy!.requireJobStartAllowed(page, "room", policy("deny")), { code: "not_granted" });
   const agentActor = { principal: { kind: "agent" as const, id: "ada/cedar" }, roomId: "room" };
   await assert.rejects(jobPolicy!.requireJobStartAllowed(agentActor, "room", policy("allow")), { code: "not_granted" });
+  // A token or integration acts for the person but is not the person: the job's post would put words in their mouth.
+  for (const via of [{ kind: "integration" as const, id: "owner-token" }, { kind: "integration" as const, id: "remote-mcp" }, { kind: "job" as const, id: "job_1" }]) {
+    const actor = { principal: { kind: "person" as const, id: "acct" }, via, roomId: "room" };
+    await assert.rejects(jobPolicy!.requireJobStartAllowed(actor, "room", policy("allow")), { code: "not_granted" }, via.id);
+  }
+});
+
+test("an owner token cannot start a job: not_granted, and nothing is posted", { skip }, async () => {
+  const ivy = await member("ivy");
+  const count = async () => (await dbClient!.pool.query("SELECT count(*)::int AS n FROM messages WHERE room_id = $1", [roomId])).rows[0].n as number;
+  const jobs = async () => (await dbClient!.pool.query("SELECT count(*)::int AS n FROM api_jobs WHERE room_id = $1", [roomId])).rows[0].n as number;
+  const [messagesBefore, jobsBefore] = [await count(), await jobs()];
+  const res = await call(v1(roomId), { token: ivy.token, body: { agent: agents[1]!.key, instruction: "Merge PR 12 now" } });
+  assert.equal(res.status, 403);
+  assert.equal(res.body.code, "not_granted");
+  assert.equal(await count(), messagesBefore);
+  assert.equal(await jobs(), jobsBefore);
+  // The same person in the app may.
+  assert.equal((await start(ivy, { agent: agents[1]!.key, instruction: "Merge PR 12 now" })).status, 200);
 });
 
 test("an agent reads jobs through /api/v1 in its own room but cannot start or cancel one", { skip }, async () => {
