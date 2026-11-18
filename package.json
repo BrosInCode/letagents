@@ -27,6 +27,8 @@
     "test:docker-context": "node --test scripts/verify-docker-context.test.mjs",
     "test:workflow-supply-chain": "node --test scripts/verify-workflow-supply-chain.test.mjs scripts/verify-dependency-advisories.test.mjs scripts/retry-command.test.mjs scripts/npm-command.test.mjs",
     "test:notifications": "node --import tsx --test src/api/notifications/__tests__/*.test.ts",
+    "build:api-contracts": "node scripts/build-api-contracts.mjs",
+    "test:api-contracts": "node --test scripts/build-api-contracts.test.mjs && node --import tsx --test src/api/__tests__/api-contract.test.ts src/api/__tests__/api-v1-router.test.ts",
     "verify:dependency-age": "node scripts/verify-dependency-age.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/api/migrate.ts",
