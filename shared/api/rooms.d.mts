@@ -96,6 +96,115 @@ export const getRoom: import("./core.mjs").ApiMethod<"rooms.get", z.ZodObject<{}
         private: "private";
     }>;
 }, z.core.$strip>>;
+/**
+ * Capabilities with a room policy: everything a page may be granted but
+ * reads, which every room participant may use in `api: 1`.
+ */
+export const POLICY_CAPABILITY_NAMES: ("agents.read" | "rooms.read" | "people.read" | "messages.read" | "tasks.read" | "planning.read" | "work_items.read" | "git.read" | "memory.read" | "data.viewer" | "data.page" | "data.room" | "tasks.propose" | "tickets.propose" | "jobs.start" | "messages.post" | "rooms.admin")[];
+export type RoomApiPolicy = z.infer<typeof RoomApiPolicy>;
+export const RoomApiPolicy: z.ZodObject<{
+    capability: z.ZodString;
+    mode: z.ZodEnum<{
+        allow: "allow";
+        confirm: "confirm";
+        approve: "approve";
+        deny: "deny";
+    }>;
+    source: z.ZodEnum<{
+        default: "default";
+        room: "room";
+    }>;
+    rule: z.ZodNullable<z.ZodEnum<{
+        board_manager_mode: "board_manager_mode";
+        own_tracker_connection: "own_tracker_connection";
+    }>>;
+}, z.core.$strip>;
+export type RoomApiPolicies = z.infer<typeof RoomApiPolicies>;
+export const RoomApiPolicies: z.ZodObject<{
+    policies: z.ZodArray<z.ZodObject<{
+        capability: z.ZodString;
+        mode: z.ZodEnum<{
+            allow: "allow";
+            confirm: "confirm";
+            approve: "approve";
+            deny: "deny";
+        }>;
+        source: z.ZodEnum<{
+            default: "default";
+            room: "room";
+        }>;
+        rule: z.ZodNullable<z.ZodEnum<{
+            board_manager_mode: "board_manager_mode";
+            own_tracker_connection: "own_tracker_connection";
+        }>>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+/** @typedef {z.infer<typeof RoomApiPolicy>} RoomApiPolicy */
+/** @typedef {z.infer<typeof RoomApiPolicies>} RoomApiPolicies */
+export const listRoomPolicies: import("./core.mjs").ApiMethod<"rooms.listPolicies", z.ZodObject<{}, z.core.$strict>, z.ZodObject<{
+    policies: z.ZodArray<z.ZodObject<{
+        capability: z.ZodString;
+        mode: z.ZodEnum<{
+            allow: "allow";
+            confirm: "confirm";
+            approve: "approve";
+            deny: "deny";
+        }>;
+        source: z.ZodEnum<{
+            default: "default";
+            room: "room";
+        }>;
+        rule: z.ZodNullable<z.ZodEnum<{
+            board_manager_mode: "board_manager_mode";
+            own_tracker_connection: "own_tracker_connection";
+        }>>;
+    }, z.core.$strip>>;
+}, z.core.$strip>>;
+export const setRoomPolicy: import("./core.mjs").ApiMethod<"rooms.setPolicy", z.ZodObject<{
+    capability: z.ZodEnum<{
+        "agents.read": "agents.read";
+        "rooms.read": "rooms.read";
+        "people.read": "people.read";
+        "messages.read": "messages.read";
+        "tasks.read": "tasks.read";
+        "planning.read": "planning.read";
+        "work_items.read": "work_items.read";
+        "git.read": "git.read";
+        "memory.read": "memory.read";
+        "data.viewer": "data.viewer";
+        "data.page": "data.page";
+        "data.room": "data.room";
+        "tasks.propose": "tasks.propose";
+        "tickets.propose": "tickets.propose";
+        "jobs.start": "jobs.start";
+        "messages.post": "messages.post";
+        "rooms.admin": "rooms.admin";
+    }>;
+    mode: z.ZodNullable<z.ZodEnum<{
+        allow: "allow";
+        confirm: "confirm";
+        approve: "approve";
+        deny: "deny";
+    }>>;
+}, z.core.$strict>, z.ZodObject<{
+    policies: z.ZodArray<z.ZodObject<{
+        capability: z.ZodString;
+        mode: z.ZodEnum<{
+            allow: "allow";
+            confirm: "confirm";
+            approve: "approve";
+            deny: "deny";
+        }>;
+        source: z.ZodEnum<{
+            default: "default";
+            room: "room";
+        }>;
+        rule: z.ZodNullable<z.ZodEnum<{
+            board_manager_mode: "board_manager_mode";
+            own_tracker_connection: "own_tracker_connection";
+        }>>;
+    }, z.core.$strip>>;
+}, z.core.$strip>>;
 export const methods: readonly [import("./core.mjs").ApiMethod<"rooms.get", z.ZodObject<{}, z.core.$strict>, z.ZodObject<{
     id: z.ZodString;
     name: z.ZodString;
@@ -129,5 +238,67 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"rooms.get", z.Zo
         public: "public";
         private: "private";
     }>;
+}, z.core.$strip>>, import("./core.mjs").ApiMethod<"rooms.listPolicies", z.ZodObject<{}, z.core.$strict>, z.ZodObject<{
+    policies: z.ZodArray<z.ZodObject<{
+        capability: z.ZodString;
+        mode: z.ZodEnum<{
+            allow: "allow";
+            confirm: "confirm";
+            approve: "approve";
+            deny: "deny";
+        }>;
+        source: z.ZodEnum<{
+            default: "default";
+            room: "room";
+        }>;
+        rule: z.ZodNullable<z.ZodEnum<{
+            board_manager_mode: "board_manager_mode";
+            own_tracker_connection: "own_tracker_connection";
+        }>>;
+    }, z.core.$strip>>;
+}, z.core.$strip>>, import("./core.mjs").ApiMethod<"rooms.setPolicy", z.ZodObject<{
+    capability: z.ZodEnum<{
+        "agents.read": "agents.read";
+        "rooms.read": "rooms.read";
+        "people.read": "people.read";
+        "messages.read": "messages.read";
+        "tasks.read": "tasks.read";
+        "planning.read": "planning.read";
+        "work_items.read": "work_items.read";
+        "git.read": "git.read";
+        "memory.read": "memory.read";
+        "data.viewer": "data.viewer";
+        "data.page": "data.page";
+        "data.room": "data.room";
+        "tasks.propose": "tasks.propose";
+        "tickets.propose": "tickets.propose";
+        "jobs.start": "jobs.start";
+        "messages.post": "messages.post";
+        "rooms.admin": "rooms.admin";
+    }>;
+    mode: z.ZodNullable<z.ZodEnum<{
+        allow: "allow";
+        confirm: "confirm";
+        approve: "approve";
+        deny: "deny";
+    }>>;
+}, z.core.$strict>, z.ZodObject<{
+    policies: z.ZodArray<z.ZodObject<{
+        capability: z.ZodString;
+        mode: z.ZodEnum<{
+            allow: "allow";
+            confirm: "confirm";
+            approve: "approve";
+            deny: "deny";
+        }>;
+        source: z.ZodEnum<{
+            default: "default";
+            room: "room";
+        }>;
+        rule: z.ZodNullable<z.ZodEnum<{
+            board_manager_mode: "board_manager_mode";
+            own_tracker_connection: "own_tracker_connection";
+        }>>;
+    }, z.core.$strip>>;
 }, z.core.$strip>>];
 import { z } from "zod";
