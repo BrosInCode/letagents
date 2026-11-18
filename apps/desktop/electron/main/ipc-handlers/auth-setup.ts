@@ -37,6 +37,7 @@ import {
 } from "../notifications.js";
 import { clearJoinedRoomInfoCache } from "../rooms.js";
 import { reconnectLiveDemos } from "../rooms/live-demo.js";
+import { dropAllRoomPageGrants } from "../pages/page-grants.js";
 import {
   getDesktopSupervisorGrantMetadata,
   getDesktopSupervisorGrantStorageStatus,
@@ -53,6 +54,8 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
   setAuthAuthorizedHandler(() => {
     clearJoinedRoomInfoCache();
     clearInlineHtmlDemoCache();
+    // A page opened for the previous account must not call as the new one.
+    dropAllRoomPageGrants();
     reconnectLiveDemos();
     if (supervisedAgentsSupported()) supervisorGrantCoordinator.scheduleCredentialRecovery();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
@@ -61,6 +64,7 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
   setAuthInvalidatedHandler(() => {
     clearJoinedRoomInfoCache();
     clearInlineHtmlDemoCache();
+    dropAllRoomPageGrants();
     reconnectLiveDemos();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
     void unregisterDesktopNotificationAccount().catch(() => {});
@@ -96,6 +100,7 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
     async (): Promise<DesktopAuthStatus> => {
       clearJoinedRoomInfoCache();
       clearInlineHtmlDemoCache();
+      dropAllRoomPageGrants();
       await unregisterDesktopNotificationAccount().catch(() => {});
       try {
         await signOutDesktopAuth();

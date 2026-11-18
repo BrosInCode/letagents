@@ -252,7 +252,12 @@ test("full IPC handler registration composes inert rental and daemon observation
   registerDesktopIpcHandlers(fakeIpcMain as never);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(rentalRegistrations.length, before + 1);
-  assert.ok(rentalRegistrations.every((target) => target === fakeIpcMain));
+  // Registrars get the webview-guarded view of the same IPC main: what they register lands in it.
+  for (const target of rentalRegistrations.slice(before)) {
+    (target as typeof fakeIpcMain).handle("test:rental-probe", async () => "probe");
+    assert.equal(await handlers.get("test:rental-probe")?.({}, undefined), "probe");
+    handlers.delete("test:rental-probe");
+  }
   assert.equal(observerConnectionCalls, 1, "the process-wide state bridge observes only the inert client");
   assert.equal(daemonStartupCalls, 0);
 });

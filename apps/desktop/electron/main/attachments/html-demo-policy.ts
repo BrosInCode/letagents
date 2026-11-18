@@ -88,10 +88,12 @@ export const HTML_DEMO_RESPONSE_HEADERS: Readonly<Record<string, string>> = {
 /**
  * The demo's own document and in-page data are the only requests a demo page
  * makes. DevTools opened on a demo (another web contents) may load its own UI.
+ * Room pages use the same rule on their own scheme.
  */
 export function isAllowedHtmlDemoRequest(
   rawUrl: string,
   sender: { fromDemo: boolean; host?: string } = { fromDemo: true },
+  scheme: string = htmlDemoProtocolScheme,
 ): boolean {
   let url: URL;
   try {
@@ -100,7 +102,7 @@ export function isAllowedHtmlDemoRequest(
     return false;
   }
   // A known demo page loads only its own document, never another demo's.
-  return (url.protocol === `${htmlDemoProtocolScheme}:` && (sender.host === undefined || url.hostname === sender.host))
+  return (url.protocol === `${scheme}:` && (sender.host === undefined || url.hostname === sender.host))
     || url.protocol === "data:"
     || url.protocol === "blob:"
     || (url.protocol === "devtools:" && !sender.fromDemo);
@@ -179,9 +181,14 @@ export function inlineHtmlDemoWebPreferences(): WebPreferences & { disablePopups
  * `<webview>` asked for is dropped.
  */
 export function lockInlineHtmlDemoWebPreferences(webPreferences: WebPreferences): WebPreferences {
+  return lockGuestWebPreferences(webPreferences, inlineHtmlDemoWebPreferences());
+}
+
+/** Replace a guest's web preferences, in place, with `locked`; only the app's zoom carries over. */
+export function lockGuestWebPreferences(webPreferences: WebPreferences, locked: WebPreferences): WebPreferences {
   const { zoomFactor } = webPreferences;
   for (const key of Object.keys(webPreferences)) delete (webPreferences as Record<string, unknown>)[key];
-  Object.assign(webPreferences, inlineHtmlDemoWebPreferences());
+  Object.assign(webPreferences, locked);
   if (typeof zoomFactor === "number" && Number.isFinite(zoomFactor) && zoomFactor > 0) webPreferences.zoomFactor = zoomFactor;
   return webPreferences;
 }
