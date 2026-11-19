@@ -886,7 +886,7 @@ test("createFirstRunInviteRoom creates and selects a shareable room", async () =
   }]);
 });
 
-test("room choice survives going back to GitHub and returning", async () => {
+test("room choice survives going back to the theme step and returning", async () => {
   const state = makeSetupState({
     firstRunStage: "room",
     roomBridge: {
@@ -896,6 +896,7 @@ test("room choice survives going back to GitHub and returning", async () => {
 
   await withDesktopBridge(state.windowBridge, () => state.onboarding.joinRoomCode("ABCD-1234"));
   state.onboarding.goBackFirstRun();
+  assert.equal(state.firstRunStage.value, "theme");
   state.onboarding.continueToRoomConfirmation();
 
   assert.equal(state.firstRunStage.value, "room");

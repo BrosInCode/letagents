@@ -1,10 +1,12 @@
 import type { Express, Response } from "express";
+import { roomThemeId } from "../../../../shared/room-themes.mjs";
 
 import {
   getJoinedOrganizationIds,
   getOrganizationsForGitHubIds,
   removeOrganizationMembership,
   saveVerifiedOrganizationMembership,
+  setOrganizationTheme,
 } from "../../db/organizations.js";
 import {
   GitHubOrganizationAccessError,
@@ -22,6 +24,7 @@ export interface OrganizationRouteDeps {
   getJoinedIds: typeof getJoinedOrganizationIds;
   saveMembership: typeof saveVerifiedOrganizationMembership;
   removeMembership: typeof removeOrganizationMembership;
+  setTheme?: typeof setOrganizationTheme;
 }
 
 export const organizationRouteDeps: OrganizationRouteDeps = {
@@ -30,6 +33,7 @@ export const organizationRouteDeps: OrganizationRouteDeps = {
   getJoinedIds: getJoinedOrganizationIds,
   saveMembership: saveVerifiedOrganizationMembership,
   removeMembership: removeOrganizationMembership,
+  setTheme: setOrganizationTheme,
 };
 
 // Company routes are for people in the desktop or web app. Owner tokens,
@@ -97,17 +101,50 @@ export function registerAccountOrganizationRoutes(
       deps.getJoinedIds(req.sessionAccount!.account_id),
     ]);
     const loginById = new Map(organizations.map((org) => [org.github_org_id, org.login]));
-    const configured = new Set(organizations.map((org) => org.github_org_id));
+    const configured = new Map(organizations.map((org) => [org.github_org_id, org]));
     const joined = new Set(joinedIds);
     res.json({
       organizations: memberships.map((membership) => ({
         ...membership,
         setup: configured.has(membership.github_org_id),
+        theme_id: configured.get(membership.github_org_id)?.theme_id ?? null,
         joined: configured.has(membership.github_org_id) && joined.has(membership.github_org_id),
       })),
       invitations,
       sso_required: ssoRequiredOrgIds.map((id) => ({ github_org_id: id, login: loginById.get(id) ?? null })),
     });
+  });
+
+  app.post("/organizations/:organizationId/theme", async (req: AuthenticatedRequest, res) => {
+    const organizationId = String(req.params.organizationId);
+    if (!/^[1-9][0-9]*$/.test(organizationId)) {
+      res.status(400).json({ error: "invalid_organization_id" });
+      return;
+    }
+    if (!isSameOriginCookieWrite(req)) {
+      res.status(403).json({ error: "cross_site_write_refused" });
+      return;
+    }
+    const access = await verifiedOrganizationAccess(req, res, deps);
+    if (!access) return;
+    const membership = access.memberships.find(org => org.github_org_id === organizationId);
+    if (membership?.role !== "owner") {
+      if (!membership && respondIfSsoHidden(access, organizationId, res)) return;
+      res.status(403).json({ error: "organization_owner_required" });
+      return;
+    }
+    const value = req.body?.theme_id;
+    const theme = roomThemeId(value);
+    if (!theme && value !== null) {
+      res.status(400).json({ error: "invalid_room_theme" });
+      return;
+    }
+    const updated = await (deps.setTheme ?? setOrganizationTheme)(organizationId, theme);
+    if (!updated) {
+      res.status(409).json({ error: "organization_setup_required" });
+      return;
+    }
+    res.json({ theme_id: updated.theme });
   });
 
   for (const action of ["setup", "join"] as const) {

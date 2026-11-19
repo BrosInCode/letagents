@@ -1,3 +1,4 @@
+import { roomThemeId } from "../../../../shared/room-themes.mjs";
 import type { IpcMain } from "electron";
 import type {
   DesktopGitHubAccessReason,
@@ -11,6 +12,7 @@ import type {
   DesktopOrganizationSsoBlock,
 } from "../ipc-types/organizations.js";
 import { apiFetch, DesktopApiError, readStoredAuth } from "./auth.js";
+import { clearJoinedRoomInfoCache } from "./rooms/room-info.js";
 import { acknowledgeCompanyLink, getPendingCompanyLink } from "./company-links.js";
 import { openAllowedExternalUrl, openExternalWebUrl } from "./external-url.js";
 import { apiUrl } from "./paths.js";
@@ -108,6 +110,16 @@ export function registerOrganizationIpcHandlers(ipc: IpcMain): void {
   ipc.handle("desktop:organizations:pending", () => getPendingCompanyLink());
   ipc.handle("desktop:organizations:acknowledge", (_event, id: unknown) => acknowledgeCompanyLink(id));
   ipc.handle("desktop:organizations:list", () => listOrganizations());
+  ipc.handle("desktop:organizations:set-theme", async (_event, id: unknown, value: unknown) => {
+    const org = organizationId(id);
+    const theme = roomThemeId(value);
+    if (!theme && value !== null) throw new Error("Choose a valid room theme.");
+    const response = await apiFetch<{ theme_id: unknown }>(`/organizations/${org}/theme`, {
+      method: "POST", body: JSON.stringify({ theme_id: theme }),
+    }, COMPANY_TIMEOUT);
+    clearJoinedRoomInfoCache();
+    return roomThemeId(response.theme_id);
+  });
   ipc.handle("desktop:organizations:join", (_event, id: unknown, setup: unknown) => joinOrganization(id, setup));
   ipc.handle("desktop:organizations:rooms", (_event, id: unknown) => listOrganizationRooms(id));
   ipc.handle("desktop:organizations:open-github", async (_event, page: DesktopOrganizationGitHubPage) => {

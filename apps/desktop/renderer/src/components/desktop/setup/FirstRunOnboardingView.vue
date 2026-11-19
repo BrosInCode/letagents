@@ -89,6 +89,16 @@
                 @open-github="$emit('open-company-github', $event)"
               />
 
+              <RoomThemePicker
+                v-else-if="stage === 'theme'"
+                label="Room theme"
+                :model-value="roomTheme?.personal.value ?? null"
+                :inherited="roomTheme?.company.value?.theme"
+                :company="companyName"
+                preview
+                @update:model-value="roomTheme?.choose($event)"
+              />
+
               <div v-else class="first-run-room-stage">
                 <FirstRunCompanyRooms
                   v-if="companyName"
@@ -207,6 +217,16 @@
               </template>
 
               <button
+                v-else-if="stage === 'theme'"
+                class="primary-button"
+                type="button"
+                data-testid="first-run-theme-continue"
+                @click="$emit('continue-theme')"
+              >
+                Continue
+              </button>
+
+              <button
                 v-else-if="stage === 'room'"
                 class="primary-button"
                 type="button"
@@ -230,6 +250,8 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import RoomThemePicker from "../../../../../../../shared/ui/RoomThemePicker.vue";
+import { useRoomTheme } from "../../../../../../../shared/ui/room-theme";
 import type {
   DesktopAuthStatus,
   DesktopMcpInstallState,
@@ -274,6 +296,8 @@ const props = defineProps<{
   roomNeedsGithubAccess: boolean;
 }>();
 
+const roomTheme = useRoomTheme();
+
 const emit = defineEmits<{
   "select-target": [targetId: DesktopMcpInstallTargetId];
   "select-all-targets": [];
@@ -288,6 +312,7 @@ const emit = defineEmits<{
   "poll-auth": [];
   "sign-out": [];
   "continue-to-room": [];
+  "continue-theme": [];
   "choose-organization": [id: string | null];
   "retry-organizations": [];
   "open-company-github": [page: DesktopOrganizationGitHubPage];
@@ -397,6 +422,7 @@ const actionKey = computed(() => {
 const headline = computed(() => {
   if (props.stage === "github") return "Repositories are rooms.";
   if (props.stage === "organization") return "Where will you work?";
+  if (props.stage === "theme") return "Pick your theme.";
   if (props.stage === "room") return props.companyName ? "Pick your first room." : "Open your first room.";
   if (props.mcpWizardStep === "install") return "Connect your agents.";
   if (props.mcpWizardStep === "done") return "MCP installed.";
@@ -404,6 +430,9 @@ const headline = computed(() => {
 });
 
 const copy = computed(() => {
+  if (props.stage === "theme") return props.companyName
+    ? `Use ${props.companyName}’s theme or choose your own.`
+    : "Choose how your rooms look.";
   if (props.stage === "organization") {
     return "Bring your company’s rooms together, or keep all your rooms in view.";
   }
@@ -437,9 +466,10 @@ const showFeedback = computed(() => {
 
 const progressSteps = computed<Array<{ id: FirstRunWizardStage; step: string; label: string; complete: boolean }>>(() => [
   { id: "mcp", step: "1", label: "MCP", complete: props.stage !== "mcp" },
-  { id: "github", step: "2", label: "GitHub", complete: props.stage === "organization" || props.stage === "room" },
-  { id: "organization", step: "3", label: "Company", complete: props.stage === "room" },
-  { id: "room", step: "4", label: "Room", complete: false },
+  { id: "github", step: "2", label: "GitHub", complete: props.stage === "organization" || props.stage === "theme" || props.stage === "room" },
+  { id: "organization", step: "3", label: "Company", complete: props.stage === "theme" || props.stage === "room" },
+  { id: "theme", step: "4", label: "Theme", complete: props.stage === "room" },
+  { id: "room", step: "5", label: "Room", complete: false },
 ]);
 
 const showBack = computed(() => {
@@ -455,7 +485,8 @@ function navigationRank(key: string): number {
     "mcp-done": 3,
     github: 4,
     organization: 5,
-    room: 6,
+    theme: 6,
+    room: 7,
   };
   return ranks[key] ?? 0;
 }

@@ -1,5 +1,7 @@
 import type { Express, Response } from "express";
 
+import type { RoomCompanyAppearance } from "../../../../shared/room-themes.mjs";
+import { isAppSession } from "../../request/app-session.js";
 import type { GitRoomBinding, Project } from "../../db.js";
 import { parseGitHubRefRoomLocator } from "../../github/git-room-routing.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
@@ -34,6 +36,7 @@ export interface RoomJoinRouteDeps {
   ): Promise<Project | null>;
   getProjectAccessRoomId(project: Project): string;
   getGitRoomBindingForRoom?(roomId: string): Promise<GitRoomBinding | null>;
+  getRoomCompanyAppearance?(roomId: string, accessRoomId: string, repositoryId: string | null): Promise<RoomCompanyAppearance | null>;
   isRepoBackedProject(project: Project): boolean;
   resolveProjectRepoRoomAccessDecision(input: {
     project: Project;
@@ -245,7 +248,11 @@ export function registerRoomJoinRoutes(
       });
     }
 
+    const companyAppearance = isAppSession(req)
+      ? await deps.getRoomCompanyAppearance?.(project.id, accessRoomId, gitRoomBinding?.repository_id ?? null)
+      : undefined;
     res.status(200).json({
+      ...(companyAppearance ? { company_appearance: companyAppearance } : {}),
       ...deps.toRoomResponse(project, {
         role,
         authenticated: Boolean(req.sessionAccount),

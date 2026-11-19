@@ -11,6 +11,7 @@
 
       <details class="drawer-styling">
         <summary>Styling</summary>
+        <RoomThemeSettings />
         <ChatStylingSettings />
       </details>
 
@@ -79,6 +80,7 @@ import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { apiFetch, roomPath } from '@/composables/room/api'
 import { type RoomInfo, type RoomMessage, useRoom } from '@/composables/useRoom'
+import RoomThemeSettings from '../../../../../shared/ui/RoomThemeSettings.vue'
 import ChatStylingSettings from '../../../../../shared/ui/ChatStylingSettings.vue'
 import DrawerBrand from './room-drawer/DrawerBrand.vue'
 import { messageDisplayText } from './chat-message/formatting'

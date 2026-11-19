@@ -1938,3 +1938,27 @@
 .first-run-wizard[data-company-flow="true"] .mcp-wizard-actions { justify-content: space-between; margin-top: 8px; }
 .first-run-wizard[data-company-flow="true"] .first-run-room-step { min-height: 0; }
 .first-run-wizard[data-company-flow="true"] .first-run-room-paths { width: 100%; }
+
+.first-run-wizard[data-stage="theme"] .first-run-card {
+  width: min(100%, 760px);
+  justify-self: center;
+  grid-template-rows: auto auto auto auto;
+  gap: clamp(20px, 3vw, 32px);
+  padding-block: clamp(16px, 4vh, 44px);
+}
+
+.first-run-wizard[data-stage="theme"] .first-run-heading-motion h1 {
+  font-family: "New York", "Iowan Old Style", Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -.045em;
+}
+
+.first-run-wizard[data-stage="theme"] .first-run-stage-viewport {
+  overflow: visible;
+}
+
+.first-run-wizard[data-stage="theme"] .primary-button {
+  background: var(--workspace-composer, var(--setup-surface));
+  border-color: var(--workspace-border, var(--setup-border));
+  color: var(--setup-text);
+}

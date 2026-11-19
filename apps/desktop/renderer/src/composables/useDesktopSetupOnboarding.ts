@@ -292,6 +292,11 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.setupLoadError.value = null;
 
     if (options.firstRunStage.value === "room") {
+      options.firstRunStage.value = "theme";
+      return;
+    }
+
+    if (options.firstRunStage.value === "theme") {
       options.firstRunStage.value = "organization";
       return;
     }

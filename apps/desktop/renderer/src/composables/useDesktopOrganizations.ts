@@ -1,3 +1,4 @@
+import type { RoomThemeId } from "../../../../../shared/room-themes.mjs";
 import { computed, ref, watch, type Ref } from "vue";
 import type { DesktopAuthStatus } from "../../../electron/ipc-types/auth.js";
 import type {
@@ -179,6 +180,14 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
     }
   }
 
+  async function changeTheme(id: string, theme: RoomThemeId | null): Promise<void> {
+    const owner = accountKey.value;
+    const saved = await desktopIpc.organizations.setTheme(id, theme);
+    if (owner !== accountKey.value) return;
+    listGeneration += 1;
+    organizations.value = organizations.value.map(org => org.github_org_id === id ? { ...org, theme_id: saved } : org);
+  }
+
   /** List a room just created in the selected company at once, before the next check with GitHub. */
   function rememberCreatedRoom(room: { roomIdentifier: string; displayName: string; organizationId: string }): void {
     if (room.organizationId !== selectedId.value) return;
@@ -216,7 +225,7 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
   return {
     organizations, invitations, ssoRequired, status, accessReason, rooms, roomsStatus,
     selectedId, selected, activeId, joiningId, busy, error, hasChoices,
-    refresh, refreshIfStale, choose, openOnGitHub, rememberCreatedRoom,
+    refresh, refreshIfStale, choose, changeTheme, openOnGitHub, rememberCreatedRoom,
   };
 }
 

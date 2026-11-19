@@ -62,7 +62,10 @@
         <SupervisedAgentsUnavailableNotice />
       </section>
 
-      <ChatStylingSettings v-else-if="activePane === 'system:styling'" />
+      <template v-else-if="activePane === 'system:styling'">
+        <RoomThemeSettings :save-company-theme="saveCompanyTheme" />
+        <ChatStylingSettings />
+      </template>
 
       <SettingsRentingPane
         v-else-if="activePane === 'account:renting'"
@@ -221,6 +224,8 @@ import SettingsSupervisorGrantPane from "../settings/panes/SettingsSupervisorGra
 import SupervisedAgentsUnavailableNotice from "./SupervisedAgentsUnavailableNotice.vue";
 import { supervisedAgentsSupported } from "../../../domain/supervised-agents-support";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
+import RoomThemeSettings from "../../../../../../../shared/ui/RoomThemeSettings.vue";
+import type { RoomThemeId } from "../../../../../../../shared/room-themes.mjs";
 import ChatStylingSettings from "../../../../../../../shared/ui/ChatStylingSettings.vue";
 import ConnectorsPage from "../../../../../../../shared/ui/connectors/ConnectorsPage.vue";
 import { remoteConnectorUrl } from "../settings/connectors";
@@ -242,6 +247,7 @@ import type { DesktopMcpWizardStep } from "../setup/types";
 import type { AttentionNavigationIntent } from "./room-shell/types";
 
 const props = defineProps<{
+  saveCompanyTheme?: (id: string, theme: RoomThemeId | null) => Promise<void>;
   projectBindings?: import("../../../../../electron/ipc-types").DesktopProjectBinding[];
   accountRooms: DesktopAccountRoomEntry[];
   appInfo: DesktopAppInfo | null;

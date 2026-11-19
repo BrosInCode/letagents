@@ -16,7 +16,7 @@ const { registerAccountOrganizationRoutes } = await import("../routes/account/or
 const { registerOrganizationConsentRoutes } = await import("../routes/auth/organization-consent.js");
 
 const membership = { github_org_id: "42", login: "acme", avatar_url: null, role: "owner" as const };
-const organization = { github_org_id: "42", login: "acme", avatar_url: null, created_at: "now", updated_at: "now" };
+const organization = { github_org_id: "42", login: "acme", avatar_url: null, created_at: "now", updated_at: "now", theme_id: null };
 const account = { account_id: "acct_1", provider: "github", provider_access_token: "test-token" };
 const access = (memberships: unknown[] = [membership], extra: Record<string, unknown> = {}) =>
   async () => ({ memberships, invitations: [], ssoRequiredOrgIds: [], ...extra });
@@ -34,6 +34,7 @@ function harness(overrides: Record<string, unknown> = {}) {
     getJoinedIds: async () => [],
     saveMembership: async (input) => { writes.push(input); return organization; },
     removeMembership: async (_account, id) => { removals.push(id); },
+    setTheme: async (id, theme) => { writes.push({ id, theme }); return { theme }; },
     ...overrides,
   });
   return {
@@ -301,4 +302,24 @@ test("an organization hidden by single sign-on asks for SSO and keeps the stored
   assert.deepEqual(response.body, { error: "organization_sso_required" });
   assert.deepEqual(api.removals, []);
   assert.deepEqual(api.writes, []);
+});
+
+test("company theme is shared with members, and only a verified owner may change it", async () => {
+  const path = "POST /organizations/:organizationId/theme";
+  const owner = harness({ getOrganizations: async () => [{ ...organization, theme_id: "mint" }] });
+  assert.equal((await owner.request("GET /account/organizations")).body.organizations[0].theme_id, "mint");
+  assert.equal((await owner.request(path, { body: { theme_id: "violet" } })).body.theme_id, "violet");
+  assert.equal((await owner.request(path, { body: { theme_id: null } })).body.theme_id, null);
+  assert.equal((await owner.request(path, { body: { theme_id: "#fff" } })).statusCode, 400);
+  assert.equal((await owner.request(path, { body: { theme_id: "mint" }, headers: { origin: "https://other.test" } })).statusCode, 403);
+  assert.equal((await owner.request(path, { body: { theme_id: "mint" }, authKind: "owner" })).statusCode, 403);
+  assert.deepEqual(owner.writes, [{ id: "42", theme: "violet" }, { id: "42", theme: null }]);
+
+  const member = harness({
+    readAccess: access([{ ...membership, role: "member" }]),
+    getOrganizations: async () => [{ ...organization, theme_id: "mint" }],
+  });
+  assert.equal((await member.request("GET /account/organizations")).body.organizations[0].theme_id, "mint");
+  assert.equal((await member.request(path, { body: { theme_id: "rose" } })).body.error, "organization_owner_required");
+  assert.deepEqual(member.writes, []);
 });

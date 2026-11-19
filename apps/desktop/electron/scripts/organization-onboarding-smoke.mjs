@@ -17,7 +17,7 @@ let authenticated = false;
 let completed = false;
 let failOrganizations = false;
 const organizations = [
-  { github_org_id: '42', login: 'Herotel', avatar_url: null, role: 'owner', setup: false, joined: false },
+  { github_org_id: '42', login: 'Herotel', avatar_url: null, theme_id: 'mint', role: 'owner', setup: false, joined: false },
   { github_org_id: '43', login: 'Studio', avatar_url: null, role: 'member', setup: true, joined: false },
   { github_org_id: '44', login: 'WaitingCo', avatar_url: null, role: 'member', setup: false, joined: false },
   { github_org_id: '46', login: 'Northwind', avatar_url: null, role: 'member', setup: true, joined: false },
@@ -36,6 +36,8 @@ function snapshot(identifier = 'github.com/alex/personal') {
   value.roomIdentifier = identifier;
   value.access.roomIdentifier = identifier;
   Object.assign(value.room, { identifier, name: identifier, displayName: identifier.split('/').at(-1), code: identifier });
+  const owningCompany = identifier === companyRoom.room_id ? organizations[0] : null;
+  if (owningCompany) value.room.companyAppearance = { id: owningCompany.github_org_id, name: owningCompany.login, theme: owningCompany.theme_id };
   value.messages = []; value.tasks = []; value.participants = []; value.presence = []; value.focusRooms = []; value.reasoningSessions = []; value.recentActivity = []; value.roomArtifacts = [];
   return value;
 }
@@ -65,6 +67,12 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
         github_repo_id: null, full_name: null, visibility: null,
       })),
     ] };
+    case 'organizations.setTheme': {
+      const org = organizations.find(org => org.github_org_id === args[0]);
+      assert.equal(org?.role, 'owner');
+      org.theme_id = args[1];
+      return org.theme_id;
+    }
     case 'organizations.openOnGitHub': openedGitHubPages.push(args[0]); return;
     case 'room.createInviteRoom': {
       createdRooms.push(args[0] ?? null);
@@ -127,6 +135,13 @@ try {
   await click('[data-testid="company-choice-42"]');
   await waitFor(`(document.querySelector('[data-testid="first-run-company-continue"]')?.textContent || '').includes('Set up Herotel')`);
   await click('[data-testid="first-run-company-continue"]');
+  await waitFor(`document.querySelector('[data-stage="theme"] .theme-choice[data-current="true"] input')?.value === 'mint'`);
+  await capture('01-company-theme.png');
+  await click('[data-stage="theme"] input[value="ice"]');
+  await waitFor(`document.querySelector('[data-stage="theme"] input[value="ice"]')?.checked`);
+  await click('[data-stage="theme"] .theme-inherit');
+  await waitFor(`document.querySelector('[data-stage="theme"] .theme-choice[data-current="true"] input')?.value === 'mint'`);
+  await click('[data-testid="first-run-theme-continue"]');
   await waitFor(`document.querySelector('[data-stage="room"]') && Boolean(document.querySelector('[data-testid="first-run-company-rooms"]'))`);
   await js(`{ const input = document.querySelector('.company-room-search input'); input.value = 'missing'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await waitFor(`document.body.innerText.includes('No rooms match your search.')`);
@@ -138,7 +153,21 @@ try {
   await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);
   // The company filter sits on the Rooms heading.
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').includes('Herotel')`);
+  await waitFor(`document.querySelector('[data-testid="desktop-shell"]')?.dataset.roomTheme === 'mint'`);
   await capture('03-company-sidebar.png');
+  await click('[data-testid="sidebar-account-trigger"]');
+  await click('[data-testid="sidebar-account-settings"]');
+  await click('[data-testid="settings-nav-system:styling"]');
+  await click('.company-theme-settings summary');
+  await click('.company-theme-settings input[value="violet"]');
+  await click('.save-company-theme');
+  await waitFor(`document.querySelector('[data-testid="desktop-shell"]')?.dataset.roomTheme === 'violet'`);
+  await click('.theme-settings > .room-theme-picker input[value="ice"]');
+  await waitFor(`document.querySelector('[data-testid="desktop-shell"]')?.dataset.roomTheme === 'ice'`);
+  await click('.theme-settings > .room-theme-picker .theme-inherit');
+  await waitFor(`document.querySelector('[data-testid="desktop-shell"]')?.dataset.roomTheme === 'violet'`);
+  await capture('03-company-styling.png');
+  await click('[data-testid="settings-back-to-app"]');
   await click('[data-testid="sidebar-company-scope"]');
   await waitFor(`Boolean(document.querySelector('[data-testid="sidebar-company-menu"]'))`);
   await capture('04-company-menu.png');
@@ -236,7 +265,7 @@ try {
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').trim().startsWith('Rooms') && !document.querySelector('[data-testid="company-home"]')`);
   await capture('10-explicit-personal-room.png');
   assert.deepEqual(errors, [], 'renderer must not report uncaught errors');
-  const report = { passed: true, checks: ['first-run owner setup', 'member waiting for owner', 'pending GitHub invitation', 'company repo room on the room step', 'company filter on the Rooms heading', 'empty company home', 'GitHub outage and retry', 'All rooms fallback', 'company link persistence and acknowledgement', 'company link dialog over any view', 'join from a company link', 'new room inside the company', 'pasted company link', 'explicit outside-company room opens in All rooms'], consoleErrors: errors, calls: [...new Set(calls)] };
+  const report = { passed: true, checks: ['first-run owner setup', 'company theme inheritance, owner updates and personal overrides', 'member waiting for owner', 'pending GitHub invitation', 'company repo room on the room step', 'company filter on the Rooms heading', 'empty company home', 'GitHub outage and retry', 'All rooms fallback', 'company link persistence and acknowledgement', 'company link dialog over any view', 'join from a company link', 'new room inside the company', 'pasted company link', 'explicit outside-company room opens in All rooms'], consoleErrors: errors, calls: [...new Set(calls)] };
   writeFileSync(join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ passed: true, output, consoleErrors: errors }, null, 2));
 } catch (error) {

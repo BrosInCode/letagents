@@ -1,3 +1,5 @@
+import type { RoomThemeId } from "../../../../shared/room-themes.mjs";
+
 export interface DesktopOrganization {
   github_org_id: string;
   login: string;
@@ -5,6 +7,7 @@ export interface DesktopOrganization {
   role: "owner" | "member";
   setup: boolean;
   joined: boolean;
+  theme_id?: RoomThemeId | null;
 }
 
 /** A GitHub organization invitation the person has not accepted on GitHub yet. */
@@ -74,6 +77,7 @@ export interface DesktopOrganizationApi {
   /** A company link that arrives while the app runs. */
   onInvited: (callback: (id: string) => void) => () => void;
   list: () => Promise<DesktopOrganizationList>;
+  setTheme: (id: string, theme: RoomThemeId | null) => Promise<RoomThemeId | null>;
   join: (id: string, setup: boolean) => Promise<DesktopOrganizationJoinResult>;
   rooms: (id: string) => Promise<DesktopOrganizationRooms>;
   openOnGitHub: (page: DesktopOrganizationGitHubPage) => Promise<void>;

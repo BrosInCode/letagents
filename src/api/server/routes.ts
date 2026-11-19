@@ -1,3 +1,4 @@
+import { getRoomCompanyAppearance } from "../db/organizations.js";
 import { registerConversationRoutingRoutes } from "../routes/rooms/conversation-routing.js";
 import { registerRoomTrackerFilterRoutes } from "../routes/rooms/tracker-filters.js";
 import { updateTaskLinkingTicket } from "../connectors/card-merge.js";
@@ -537,6 +538,7 @@ export function registerApiRoutes(app: Express): void {
   } satisfies RoomMetadataRouteDeps;
 
   const roomJoinRouteDeps = {
+    getRoomCompanyAppearance,
     resolveCanonicalRoomRequestId,
     isRepoBackedRoomId: isRepoRoomLocator,
     resolveRepoRoomAccessDecision,

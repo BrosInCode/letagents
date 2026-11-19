@@ -1,3 +1,4 @@
+import { roomThemeId } from "../../../../../shared/room-themes.mjs"
 import {
   isRepoBackedRoomId,
   type RoomGitHubEventsError,
@@ -64,6 +65,7 @@ interface RoomJoinResponse {
   concluded_at?: string | null
   conclusion_summary?: string | null
   conclusion_details?: RoomInfo['conclusionDetails']
+  company_appearance?: RoomInfo['companyAppearance']
   git_room?: RoomInfo['gitRoom']
 }
 
@@ -97,6 +99,10 @@ export async function joinRoomSession(
   return {
     requestedIdentifier: roomIdentifier,
     projectId: canonicalIdentifier,
+    ...(project.company_appearance ? { companyAppearance: {
+      ...project.company_appearance,
+      theme: roomThemeId(project.company_appearance.theme),
+    } } : {}),
     identifier: canonicalIdentifier,
     code: project.code || '',
     name: project.name || canonicalIdentifier,

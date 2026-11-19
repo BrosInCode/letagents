@@ -1,7 +1,7 @@
 <template>
   <FirstRunSplashView v-if="showFirstRunSplash" />
 
-  <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" data-testid="desktop-first-run-onboarding">
+  <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" :style="roomTheme.css.value" data-testid="desktop-first-run-onboarding">
     <FirstRunOnboardingView
       :stage="firstRunStage"
       :company-step="companyStep"
@@ -39,6 +39,7 @@
       @cancel-auth="cancelAuthFlow"
       @sign-out="signOut"
       @continue-to-room="firstRunStage = 'organization'"
+      @continue-theme="continueToRoomConfirmation"
       @connect-room-auth="startFirstRunRoomAuth"
       @pick-repo="pickRepoRoom"
       @create-room="createFirstRunInviteRoom"
@@ -68,7 +69,8 @@
     class="desktop-shell"
     :data-sidebar-mode="isSettingsSurface ? 'hidden' : sidebarMode"
     :data-sidebar-resizing="isSidebarResizing"
-    :style="desktopShellStyle"
+    :style="[desktopShellStyle, roomTheme.css.value]"
+    :data-room-theme="roomTheme.effective.value"
     data-testid="desktop-shell"
   >
     <Transition name="desktop-sidebar">
@@ -291,6 +293,7 @@
         :room-action-busy-key="settingsRoomActionBusyKey"
         :selected-mcp-target-ids="selectedMcpTargetIds"
         :selected-room-identifier="selectedRoomIdentifier"
+        :save-company-theme="canSetCompanyTheme ? company.changeTheme : undefined"
         :setup-api-available="setupApiAvailable"
         :workers="workers"
         :update-status="updateStatus"
@@ -475,6 +478,8 @@
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { computed, defineAsyncComponent } from "vue";
+import { roomThemeId, type RoomCompanyAppearance } from "../../../../shared/room-themes.mjs";
+import { provideRoomTheme } from "../../../../shared/ui/room-theme";
 import { useKeyWhileShown } from "./composables/useKeyWhileShown";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
@@ -695,6 +700,30 @@ Object.assign(app, useAppAuthWatchers(app));
 Object.assign(app, useAppLifecycle(app));
 
 const { askAgentOpen, giveAgentToken } = useAppAgentAsks();
+
+const themeAccountKey = computed(() => authStatus.value?.authenticated && authStatus.value.account
+  ? `${authStatus.value.apiUrl}:${authStatus.value.account.id}` : null);
+const roomCompany = computed<RoomCompanyAppearance | null>(() => {
+  if (!themeAccountKey.value) return null;
+  const selectedCompany = company.activeId.value ? company.selected.value : null;
+  const roomAppearance = selectedSnapshot.value?.room?.companyAppearance;
+  if (showFirstRunGate.value || activeEntry.value.type !== "room" || showCompanyHome.value) {
+    if (selectedCompany) return { id: selectedCompany.github_org_id, name: selectedCompany.login, theme: roomThemeId(selectedCompany.theme_id) };
+    if (showFirstRunGate.value) return null;
+  }
+  if (!roomAppearance) {
+    const identifier = normalizeRoomIdentifier(selectedSnapshot.value?.room?.identifier);
+    const listed = identifier && company.rooms.value.some(room => normalizeRoomIdentifier(room.room_id) === identifier);
+    return selectedCompany && listed
+      ? { id: selectedCompany.github_org_id, name: selectedCompany.login, theme: roomThemeId(selectedCompany.theme_id) }
+      : null;
+  }
+  const verified = company.organizations.value.find(org => org.github_org_id === roomAppearance.id);
+  return verified?.theme_id !== undefined ? { ...roomAppearance, theme: roomThemeId(verified.theme_id) } : roomAppearance;
+});
+const roomTheme = provideRoomTheme(themeAccountKey, roomCompany);
+const canSetCompanyTheme = computed(() => company.organizations.value.some(org =>
+  org.github_org_id === roomCompany.value?.id && org.setup && org.role === "owner"));
 
 const roomShellShown = computed(() =>
   !showCompanyHome.value && activeEntry.value.type === "room" && !selectedNeedsAccess.value);

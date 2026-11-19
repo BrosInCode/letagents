@@ -14,6 +14,7 @@
 .room-chat-main {
   position: relative;
   display: grid;
+  background: var(--workspace-canvas, transparent);
   grid-template-rows: minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
