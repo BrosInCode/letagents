@@ -1,10 +1,7 @@
-import type { PresenceChipAgent } from "../../../../domain/presence-chips";
 import type { ComposerEventPreview } from "./composer-event-preview";
 
 /** How long a short notice stays on the activity line. */
 export const ACTIVITY_NOTICE_MS = 4_000;
-/** A join that arrives this soon after a join is shown joins that line. */
-export const ACTIVITY_JOIN_MERGE_MS = 1_500;
 /** After a hover ends, a notice that has run out stays this long. */
 export const ACTIVITY_RESUME_GRACE_MS = 800;
 /** Notices waiting their turn; older ones leave first. */
@@ -28,8 +25,6 @@ export interface CalmNoticeInput {
 }
 
 export type ActivityNotice =
-  | { kind: "join"; id: string; agents: PresenceChipAgent[] }
-  | { kind: "leave"; id: string; agent: PresenceChipAgent }
   | { kind: "github"; id: string; preview: ComposerEventPreview }
   | { kind: "steered"; id: string; displayName: string }
   | ({ kind: "calm"; id: string } & CalmNoticeInput);
@@ -54,32 +49,15 @@ export interface ActivityTimers {
   clear(handle: unknown): void;
 }
 
-/** "Juniper", "Juniper and Kestrel", "Juniper and 2 others". */
-export function joinedNames(agents: readonly Pick<PresenceChipAgent, "displayName">[]): string {
-  const names = agents.map((agent) => agent.displayName);
-  if (names.length <= 1) return names[0] ?? "";
-  if (names.length === 2) return `${names[0]} and ${names[1]}`;
-  return `${names[0]} and ${names.length - 1} others`;
-}
-
-function noticeAgentKeys(notice: ActivityNotice): string[] {
-  if (notice.kind === "join") return notice.agents.map((agent) => agent.key);
-  if (notice.kind === "leave") return [notice.agent.key];
-  return [];
-}
-
 /**
  * Short notices for the activity line, one at a time. Each shows for
- * ACTIVITY_NOTICE_MS; a hover holds it. Joins close together become one
- * notice, and an agent has at most one waiting notice: a newer change for it
- * replaces the older one. A notice the caller cannot show now (a GitHub
+ * ACTIVITY_NOTICE_MS; a hover holds it. A notice the caller cannot show now (a GitHub
  * update while someone writes) is skipped and keeps its place until its
  * source withdraws it.
  */
 export function createActivityNoticeQueue(timers: ActivityTimers, onChange: () => void) {
   let queue: ActivityNotice[] = [];
   let shown: ActivityNotice | null = null;
-  let shownAt = 0;
   let remaining = 0;
   let resumedAt = 0;
   let timer: unknown = null;
@@ -104,41 +82,12 @@ export function createActivityNoticeQueue(timers: ActivityTimers, onChange: () =
     const index = queue.findIndex((notice) => eligible(notice));
     shown = index < 0 ? null : queue.splice(index, 1)[0]!;
     if (shown) {
-      shownAt = timers.now();
       arm(noticeMs(shown));
     }
     onChange();
   }
 
-  /** Drop waiting notices about these agents, so each agent has one. */
-  function dropAgents(keys: readonly string[]): void {
-    if (!keys.length) return;
-    queue = queue.flatMap<ActivityNotice>((notice) => {
-      if (notice.kind === "leave") return keys.includes(notice.agent.key) ? [] : [notice];
-      if (notice.kind !== "join") return [notice];
-      const agents = notice.agents.filter((agent) => !keys.includes(agent.key));
-      return agents.length ? [{ ...notice, agents }] : [];
-    });
-  }
-
   function push(notice: ActivityNotice): void {
-    dropAgents(noticeAgentKeys(notice));
-    if (notice.kind === "join") {
-      const last = queue.at(-1);
-      if (last?.kind === "join") {
-        queue[queue.length - 1] = { ...last, agents: [...last.agents, ...notice.agents] };
-        return;
-      }
-      if (shown?.kind === "join" && timers.now() - shownAt < ACTIVITY_JOIN_MERGE_MS) {
-        const present = new Set(shown.agents.map((agent) => agent.key));
-        shown = { ...shown, agents: [...shown.agents, ...notice.agents.filter((agent) => !present.has(agent.key))] };
-        // The longer line gets its own full time on screen.
-        shownAt = timers.now();
-        arm(ACTIVITY_NOTICE_MS);
-        onChange();
-        return;
-      }
-    }
     queue = [...queue.filter((item) => item.id !== notice.id), notice].slice(-ACTIVITY_NOTICE_LIMIT);
     if (!shown) advance();
   }
@@ -235,19 +184,6 @@ export function pickActivityPill<W extends ActivityWork>(input: {
   if (input.work.length) return { kind: "live", work: input.work };
   if (input.typing.length) return { kind: "typing", names: input.typing };
   return null;
-}
-
-/** A quiet timeline line for a join or a leave, kept only in this window. */
-export interface PresenceTimelineLine {
-  id: string;
-  timestamp: string;
-  kind: "connected" | "disconnected";
-  text: string;
-}
-
-export function presenceTimelineText(kind: PresenceTimelineLine["kind"], agent: PresenceChipAgent): string {
-  if (kind === "disconnected") return `${agent.displayName} left`;
-  return agent.ideLabel ? `${agent.displayName} joined · ${agent.ideLabel}` : `${agent.displayName} joined`;
 }
 
 /** Whole seconds, then minutes: "8s", "2m". */

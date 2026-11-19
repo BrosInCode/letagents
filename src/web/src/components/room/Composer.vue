@@ -1,6 +1,5 @@
 <template>
   <form class="composer" :class="{ 'inline-thread-composer': inlineThread }" @submit.prevent="handleSend">
-    <PresenceChips v-if="!inlineThread" :chips="presenceChips" />
     <div
       class="composer-card"
       :data-drag-active="isDragActive"
@@ -187,8 +186,6 @@ import { MAX_ATTACHMENTS } from './composer/types'
 import { useComposerAttachments } from './composer/useComposerAttachments'
 import { useComposerMentions } from './composer/useComposerMentions'
 import { useComposerPrompts } from './composer/useComposerPrompts'
-import PresenceChips from './composer/PresenceChips.vue'
-import { usePresenceChips } from './composer/usePresenceChips'
 
 const props = withDefaults(defineProps<{
   inlineThread?: boolean
@@ -206,7 +203,6 @@ const props = withDefaults(defineProps<{
   replyTo?: RoomMessage | null
   messages?: readonly RoomMessage[]
   presence?: readonly RoomAgentPresence[]
-  presenceReady?: boolean
   participants?: readonly RoomParticipant[]
   refreshReachability?: () => Promise<unknown> | unknown
 }>(), {
@@ -218,7 +214,6 @@ const props = withDefaults(defineProps<{
   replyTo: null,
   messages: () => [],
   presence: () => [],
-  presenceReady: false,
   participants: () => [],
 })
 
@@ -394,12 +389,6 @@ const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo && {
   ...props.replyTo,
   display_text: messageDisplayText(props.replyTo, attentionResponseAgentNames([...props.participants, ...props.presence])),
 }))
-
-const { chips: presenceChips } = usePresenceChips({
-  presence: () => props.presence,
-  scope: () => props.roomIdentifier,
-  ready: () => props.presenceReady,
-})
 
 const mentionCandidates = computed(() => {
   return buildMentionCandidates({

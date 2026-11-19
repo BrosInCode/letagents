@@ -26,7 +26,7 @@ function mount(t: { after: (fn: () => void) => void }, overrides: { inlineThread
   const events: any[] = [], tasks: string[] = [], sent: any[] = [], searches: string[] = [];
   let vm: any, header: any;
   const headerProps = reactive({ title: 'Room', subtitle: '', activeTab: 'chat', connectionState: 'live', searchQuery: '', matchCount: 0 });
-  const props = reactive({ senderName: 'Ada', roomIdentifier: 'room-a', isSignedIn: true, disabled: false, attachmentsEnabled: true, replyTo: null as any, messages: [], presence: [], presenceReady: true, participants: [],
+  const props = reactive({ senderName: 'Ada', roomIdentifier: 'room-a', isSignedIn: true, disabled: false, attachmentsEnabled: true, replyTo: null as any, messages: [], presence: [], participants: [],
     openSearch: (query: string) => { searches.push(query); return header.openSearch(); },
     createTask: async (title: string) => { tasks.push(title); return true; },
     submitMessage: async (...args: any[]) => { sent.push(args); return true; },
