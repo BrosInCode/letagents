@@ -869,3 +869,216 @@ test("prunes abandoned staged local attachments without touching outbox-referenc
     .get(cloudOutboxId);
   assert.equal(remainingCloud, undefined, "explicit sign-out must clear cloud outbox rows for the signed-out account");
 });
+
+test("committed cloud send with lost ack stays uncertain (never refused/discardable) when a later retry hits 403", async () => {
+  setAccountAuth({ id: "acct_uncertain_403", login: "alice", displayName: "Alice" });
+  await setChatStorageMode("cloud");
+  const roomIdentifier = "crash-cloud-committed-then-403";
+  const namespace = `${roomIdentifier}:cloud:cloud`;
+  const clientMessageId = "desktop-send:90909090-9090-4909-8909-909090909090";
+
+  await saveDesktopOutgoingMessage({
+    clientMessageId,
+    roomIdentifier,
+    messageNamespace: namespace,
+    text: "Committed before crash, then 403 on retry",
+    replyTo: "msg_1",
+    threadRootId: "msg_1",
+    attachments: [],
+    replyPreview: null,
+    timestamp: "2026-11-19T03:10:00.000Z",
+  });
+
+  // Simulate: Attempt 1 committed on server, ack was lost, app restarted.
+  const committedOnServer = {
+    id: "msg_committed_before_403",
+    clientMessageId,
+    sender: "Alice",
+    text: "Committed before crash, then 403 on retry",
+    attachments: [],
+    agentPromptKind: null,
+    source: "browser",
+    timestamp: "2026-11-19T03:10:01.000Z",
+    actorLabel: null,
+    agentIdentity: null,
+    threadRootId: "msg_1",
+    threadReplyToId: "msg_1",
+    thread: null,
+    replyTo: null,
+  };
+  simulateProcessRestart();
+
+  const outboxUrl = new URL("../../renderer/src/domain/message-outbox.ts", import.meta.url).href;
+  const outbox = await import(outboxUrl) as {
+    clearDesktopMessageOutbox: () => void;
+    desktopMessageOutbox: { value: Array<{ clientMessageId: string; hadUncertainAttempt: boolean; message: { outgoing?: { status: string; error: string | null } } }> };
+    discardRefusedDesktopOutgoingMessage: (id: string) => boolean;
+    hydrateDesktopMessageOutbox: () => Promise<void>;
+    reconcileDesktopMessageOutbox: (room: string, messages: readonly unknown[], ns: string | null) => void;
+    retryDesktopOutgoingMessage: (id: string) => Promise<void>;
+  };
+
+  const previousFetch = globalThis.fetch;
+  const previousWindow = (globalThis as { window?: unknown }).window;
+  globalThis.fetch = async () => Response.json({ error: "You were removed from this room." }, { status: 403 });
+  (globalThis as { window?: unknown }).window = {
+    letagentsDesktop: {
+      room: {
+        saveOutgoingMessage: saveDesktopOutgoingMessage,
+        updateOutgoingMessage: updateDesktopOutgoingMessage,
+        deleteOutgoingMessage: deleteDesktopOutgoingMessage,
+        listOutgoingMessages: listDesktopOutgoingMessages,
+        sendMessage: sendDesktopRoomMessage,
+      },
+    },
+  };
+
+  try {
+    outbox.clearDesktopMessageOutbox();
+    await outbox.hydrateDesktopMessageOutbox();
+    assert.equal(outbox.desktopMessageOutbox.value.length, 1);
+    assert.equal(outbox.desktopMessageOutbox.value[0]!.message.outgoing?.status, "uncertain");
+    assert.equal(outbox.desktopMessageOutbox.value[0]!.hadUncertainAttempt, true);
+
+    // Retry hits 403: MUST remain uncertain (NEVER refused/discardable) with original clientMessageId!
+    await outbox.retryDesktopOutgoingMessage(clientMessageId);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(outbox.desktopMessageOutbox.value.length, 1);
+    const entry = outbox.desktopMessageOutbox.value[0]!;
+    assert.equal(entry.clientMessageId, clientMessageId);
+    assert.equal(entry.message.outgoing?.status, "uncertain", "refusal on retry of uncertain send must never become refused");
+    assert.match(entry.message.outgoing?.error ?? "", /removed from this room/);
+    assert.equal(outbox.discardRefusedDesktopOutgoingMessage(clientMessageId), false, "uncertain send must remain non-discardable");
+    assert.equal((await listDesktopOutgoingMessages()).find((r) => r.clientMessageId === clientMessageId)?.status, "uncertain");
+
+    // Once history arrives, reconciliation resolves the original clientMessageId cleanly.
+    outbox.reconcileDesktopMessageOutbox(roomIdentifier, [committedOnServer], namespace);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(outbox.desktopMessageOutbox.value.length, 0);
+    assert.equal((await listDesktopOutgoingMessages()).find((r) => r.clientMessageId === clientMessageId), undefined);
+  } finally {
+    outbox.clearDesktopMessageOutbox();
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete (globalThis as { window?: unknown }).window;
+    else (globalThis as { window?: unknown }).window = previousWindow;
+  }
+});
+
+test("unreadable local-chat.sqlite still delivers fresh cloud sends through real sendDesktopRoomMessage while preserving strict account scoping", async () => {
+  const { mkdirSync } = await import("node:fs");
+  const unreadableDbDir = join(env.tempDir, "unreadable-db-dir");
+  mkdirSync(unreadableDbDir, { recursive: true });
+
+  const childScript = `
+    import assert from "node:assert/strict";
+    import { Buffer } from "node:buffer";
+    import { writeFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { mock } from "node:test";
+    import { installTestSecretStorage, testEncryptedToken } from "./electron/__tests__/harness.ts";
+
+    installTestSecretStorage();
+    const userDir = process.env.LETAGENTS_DESKTOP_USER_DATA_DIR;
+    mock.module("electron", {
+      defaultExport: {
+        app: { getPath: () => userDir },
+        safeStorage: {
+          isEncryptionAvailable: () => true,
+          encryptString: (v) => Buffer.from(v),
+          decryptString: (v) => v.toString(),
+        },
+      },
+    });
+    const { resetStoredAuthCacheForTest } = await import("./electron/main/auth.ts");
+    const { setChatStorageMode } = await import("./electron/main/chat-storage/settings.ts");
+    const { saveDesktopOutgoingMessage } = await import("./electron/main/rooms/outbox-store.ts");
+    const { sendDesktopRoomMessage } = await import("./electron/main/rooms/messages.ts");
+
+    function writeAccount(id, login) {
+      writeFileSync(join(userDir, "letagents-desktop-auth.json"), JSON.stringify({
+        version: 2,
+        encryptedToken: testEncryptedToken("tok-" + id),
+        encryptedAgentToken: null,
+        encryptedAppLoginVerifier: null,
+        ownerTokenId: null,
+        oauthTokenExpiresAt: null,
+        account: { id, login, displayName: login, avatarUrl: null, provider: "github", providerUserId: id },
+        pendingDeviceAuth: null,
+        savedAt: new Date().toISOString(),
+      }), "utf8");
+      resetStoredAuthCacheForTest();
+    }
+
+    await setChatStorageMode("cloud");
+    writeAccount("acct_a", "Alice");
+
+    const room = "cloud-room-unreadable-db";
+    const ns = room + ":cloud:cloud";
+    const cid = "desktop-send:deadbeef-dead-4bee-8bee-deadbeef0001";
+    const unknownCid = "desktop-send:deadbeef-dead-4bee-8bee-deadbeef0002";
+
+    const cloudPosts = [];
+    globalThis.fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      cloudPosts.push(body);
+      return Response.json({
+        id: "msg_cloud_fallback_1",
+        client_message_id: body.client_message_id,
+        sender: body.sender,
+        text: body.text,
+        timestamp: new Date().toISOString(),
+      });
+    };
+
+    // 1. saveDesktopOutgoingMessage fails because local-chat.sqlite is unreadable (it's a directory).
+    await assert.rejects(saveDesktopOutgoingMessage({
+      clientMessageId: cid,
+      roomIdentifier: room,
+      messageNamespace: ns,
+      text: "Cloud message during SQLite outage",
+      replyTo: null,
+      threadRootId: null,
+      attachments: [],
+      replyPreview: null,
+      timestamp: new Date().toISOString(),
+    }), /unable to open database file/i);
+
+    // 2. Account B CANNOT send Account A's fallback clientMessageId even while DB is unreadable!
+    writeAccount("acct_b", "Bob");
+    await assert.rejects(
+      sendDesktopRoomMessage(room, "Cloud message during SQLite outage", null, [], null, cid, ns),
+      /different account/i,
+    );
+    assert.equal(cloudPosts.length, 0);
+
+    // 3. Unknown/unverified clientMessageId fails closed while DB is unreadable!
+    writeAccount("acct_a", "Alice");
+    await assert.rejects(
+      sendDesktopRoomMessage(room, "Unverified ID", null, [], null, unknownCid, ns),
+      /unable to open database file/i,
+    );
+    assert.equal(cloudPosts.length, 0);
+
+    // 4. Account A's direct cloud fallback succeeds and posts the exact client_message_id to the cloud API!
+    const sent = await sendDesktopRoomMessage(room, "Cloud message during SQLite outage", null, [], null, cid, ns);
+    assert.equal(cloudPosts.length, 1);
+    assert.equal(cloudPosts[0].client_message_id, cid);
+    assert.equal(sent.message.id, "msg_cloud_fallback_1");
+    assert.equal(sent.message.clientMessageId, cid);
+  `;
+
+  const child = spawnSync(
+    process.execPath,
+    ["--import", "tsx", "--experimental-test-module-mocks", "--input-type=module", "-e", childScript],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        LETAGENTS_LOCAL_CHAT_DB: unreadableDbDir,
+      },
+      encoding: "utf8",
+    },
+  );
+  assert.equal(child.status, 0, `child failed (status=${child.status}):\nstdout=${child.stdout}\nstderr=${child.stderr}`);
+});

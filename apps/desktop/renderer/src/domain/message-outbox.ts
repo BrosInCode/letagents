@@ -21,6 +21,13 @@ export interface OutgoingMessage {
   message: DesktopRoomMessage;
   inFlight: boolean;
   confirmed: boolean;
+  /**
+   * True once any delivery attempt has had an ambiguous outcome (crash, reload,
+   * lost ack, network/5xx). Once true, a later refusal on retry cannot prove the
+   * earlier attempt did not commit, so the entry must remain `uncertain` with
+   * its original `clientMessageId` and never become discardable.
+   */
+  hadUncertainAttempt: boolean;
   onConfirmed: (message: DesktopRoomMessage) => void;
 }
 
@@ -183,6 +190,7 @@ export async function hydrateDesktopMessageOutbox(): Promise<void> {
       ...(item.gif ? { gif: item.gif } : {}),
       inFlight: false,
       confirmed: false,
+      hadUncertainAttempt: status !== "refused",
       onConfirmed: () => undefined,
       message: buildOutgoingMessage({
         clientMessageId: item.clientMessageId,
@@ -267,6 +275,7 @@ export function enqueueDesktopMessage(input: EnqueueDesktopMessageInput): string
     clientMessageId,
     inFlight: false,
     confirmed: false,
+    hadUncertainAttempt: false,
     message: buildOutgoingMessage({
       clientMessageId,
       text: input.text,
@@ -389,17 +398,23 @@ export async function retryDesktopOutgoingMessage(clientMessageId: string): Prom
     confirm(entry, { ...result.message, clientMessageId: entry.clientMessageId });
   } catch (error) {
     if (!desktopMessageOutbox.value.includes(entry) || entry.confirmed) return;
-    // Definite pre-commit refusals (4xx excluding 408/429, local scope/validation
-    // refusals) never committed and expose a safe Discard exit; ambiguous IPC,
-    // network, timeout, and 5xx failures stay uncertain (Retry-only) with the
-    // exact same idempotency identity.
+    // Definite pre-commit refusals on a never-ambiguous send never committed
+    // and expose a safe Discard exit. Once any attempt has had an ambiguous
+    // outcome (crash, lost ack, network/timeout/5xx), a later refusal on retry
+    // cannot prove the earlier attempt did not commit, so the entry stays
+    // `uncertain` with its original clientMessageId until history resolves it.
     const parsed = parseOutgoingSendError(error);
+    const nextStatus: DesktopOutgoingMessageStatus =
+      parsed.status === "refused" && !entry.hadUncertainAttempt ? "refused" : "uncertain";
+    if (nextStatus === "uncertain") {
+      entry.hadUncertainAttempt = true;
+    }
     entry.message = {
       ...entry.message,
-      outgoing: outgoingMeta(parsed.status, entry.attachments, parsed.message),
+      outgoing: outgoingMeta(nextStatus, entry.attachments, parsed.message),
     };
     void desktopIpc.room?.updateOutgoingMessage?.(clientMessageId, {
-      status: parsed.status,
+      status: nextStatus,
       error: parsed.message,
     }).catch(() => undefined);
   } finally {
@@ -415,6 +430,7 @@ export function discardRefusedDesktopOutgoingMessage(clientMessageId: string): b
     !entry
     || entry.inFlight
     || entry.confirmed
+    || entry.hadUncertainAttempt
     || entry.message.outgoing?.status !== "refused"
   ) {
     return false;
@@ -442,6 +458,7 @@ export async function sendDesktopOutgoingWithoutGif(clientMessageId: string): Pr
     !entry
     || entry.inFlight
     || entry.confirmed
+    || entry.hadUncertainAttempt
     || !entry.gif
     || (!entry.text.trim() && !entry.attachments.length)
     || !entry.message.outgoing?.error?.includes("expressions_disabled:")
@@ -461,6 +478,7 @@ export function discardRefusedDesktopGif(clientMessageId: string): void {
     !entry
     || entry.inFlight
     || entry.confirmed
+    || entry.hadUncertainAttempt
     || !entry.gif
     || Boolean(entry.text.trim())
     || entry.attachments.length > 0

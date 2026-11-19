@@ -770,6 +770,7 @@ describe("desktop chat send crash recovery (renderer)", () => {
     const namespace = `${roomId}:cloud:cloud`;
     const root = roomMessage({ id: "msg_root_refusal", text: "Root" });
     const deletedCalls: Array<{ id: string; options?: { discardAttachments?: boolean } }> = [];
+    let failAmbiguousWith403 = false;
 
     await withWindow({
       letagentsDesktop: {
@@ -782,7 +783,7 @@ describe("desktop chat send crash recovery (renderer)", () => {
           },
           listOutgoingMessages: store.list,
           sendMessage: async (_r: string, text: string) => {
-            if (text.includes("Forbidden")) {
+            if (text.includes("Forbidden") || failAmbiguousWith403) {
               throw new Error("Error invoking remote method 'desktop:room:send-message': Error: precommit_refusal: You were removed from this room.");
             }
             throw new Error("Network disconnected mid-request");
@@ -813,11 +814,14 @@ describe("desktop chat send crash recovery (renderer)", () => {
         assert.equal(refused.message.outgoing?.error, "You were removed from this room.");
         assert.equal(uncertain.message.outgoing?.status, "uncertain");
 
-        // Uncertain entries CANNOT be discarded.
+        // Uncertain entries CANNOT be discarded — even if a later retry receives a 403 refusal!
+        failAmbiguousWith403 = true;
+        await retryDesktopOutgoingMessage(uncertain.clientMessageId);
+        assert.equal(uncertain.message.outgoing?.status, "uncertain", "refusal after ambiguous attempt must keep entry uncertain");
         assert.equal(discardRefusedDesktopOutgoingMessage(uncertain.clientMessageId), false);
         assert.ok(desktopMessageOutbox.value.some((e) => e.clientMessageId === uncertain.clientMessageId));
 
-        // Refused entry CAN be discarded, removes outbox row with discardAttachments, and restores draft to original thread composer.
+        // Refused entry (never ambiguous) CAN be discarded, removes outbox row with discardAttachments, and restores draft to original thread composer.
         assert.equal(discardRefusedDesktopOutgoingMessage(refused.clientMessageId), true);
         assert.equal(desktopMessageOutbox.value.some((e) => e.clientMessageId === refused.clientMessageId), false);
         assert.equal(threadDraft.text.value, "Forbidden thread reply");

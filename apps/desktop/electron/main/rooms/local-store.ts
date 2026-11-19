@@ -309,7 +309,7 @@ export function isLocalGitRoomIdentifier(identifier: string | null | undefined):
   return /^git-room:local:/i.test(identifier?.trim() || "");
 }
 
-function isLocalOnlyRoomIdentifier(identifier: string | null | undefined): boolean {
+export function isLocalOnlyRoomIdentifier(identifier: string | null | undefined): boolean {
   const value = identifier?.trim() || "";
   return /^local[_-]/i.test(value) || isLocalGitRoomIdentifier(value);
 }

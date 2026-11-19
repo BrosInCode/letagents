@@ -6,6 +6,7 @@ import type {
   DesktopOutgoingMessageStatus,
   DesktopPersistedOutgoingMessage,
   DesktopRoomMessageReply,
+  DesktopRoomStorageState,
   DesktopSaveOutgoingMessageInput,
   DesktopUpdateOutgoingMessageInput,
 } from "../../ipc-types.js";
@@ -15,8 +16,9 @@ import {
   pruneOrphanedLocalStagedAttachments,
   releaseCommittedLocalStagedAttachments,
 } from "../attachments.js";
+import { resolveRoomStorageMode } from "../chat-storage/settings.js";
 import { beginImmediate, getLocalChatDatabase, rollback, type SqliteDatabase } from "./local-db.js";
-import { resolveLocalAwareRoomStorageMode } from "./local-store.js";
+import { isLocalOnlyRoomIdentifier, resolveLocalAwareRoomStorageMode } from "./local-store.js";
 import { resolveLocalThreadReaderKey } from "./messages/thread-reader.js";
 
 export const DESKTOP_OUTGOING_CLIENT_ID_PATTERN =
@@ -24,6 +26,31 @@ export const DESKTOP_OUTGOING_CLIENT_ID_PATTERN =
 
 export const INTERRUPTED_DELIVERY_ERROR =
   "Delivery could not be confirmed before the app closed.";
+
+export interface DesktopOutboxScopeRecord {
+  accountScope: string;
+  roomIdentifier: string;
+  storageMode: "local" | "cloud";
+  threadRootId: string | null;
+  replyTo: string | null;
+}
+
+const MAX_TRACKED_OUTBOX_SCOPES = 256;
+const knownOutboxScopes = new Map<string, DesktopOutboxScopeRecord>();
+const unsavedCloudFallbackScopes = new Map<string, DesktopOutboxScopeRecord>();
+
+function rememberBoundedScope(
+  map: Map<string, DesktopOutboxScopeRecord>,
+  clientMessageId: string,
+  scope: DesktopOutboxScopeRecord,
+): void {
+  map.delete(clientMessageId);
+  map.set(clientMessageId, scope);
+  if (map.size > MAX_TRACKED_OUTBOX_SCOPES) {
+    const oldest = map.keys().next().value;
+    if (oldest) map.delete(oldest);
+  }
+}
 
 let currentBootId = randomUUID();
 let schemaInitialized = false;
@@ -33,7 +60,34 @@ let prunedStagedForBootId: string | null = null;
 /** Simulate a process restart in deterministic tests. */
 export function rotateDesktopOutboxBootIdForTest(): string {
   currentBootId = randomUUID();
+  knownOutboxScopes.clear();
+  unsavedCloudFallbackScopes.clear();
   return currentBootId;
+}
+
+/**
+ * Resolve room storage mode without failing cloud rooms when local-chat.sqlite
+ * is unreadable. Local-only rooms and rooms configured for local storage still
+ * rethrow the database error.
+ */
+export async function resolveCloudSafeRoomStorageMode(
+  roomIdentifier: string,
+): Promise<DesktopRoomStorageState> {
+  try {
+    return await resolveLocalAwareRoomStorageMode(roomIdentifier);
+  } catch (error) {
+    const resolved = await resolveRoomStorageMode(roomIdentifier);
+    const trimmed = resolved.roomIdentifier?.trim() || "";
+    if (isLocalOnlyRoomIdentifier(trimmed) || resolved.effectiveMode !== "cloud") {
+      throw error;
+    }
+    return {
+      ...resolved,
+      effectiveMode: "cloud",
+      isLocalRoom: false,
+      localRoom: null,
+    };
+  }
 }
 
 async function getOutboxDb(): Promise<SqliteDatabase> {
@@ -148,7 +202,7 @@ export async function saveDesktopOutgoingMessage(
 
   const storedAuth = await readStoredAuth();
   const accountScope = await resolveLocalThreadReaderKey(storedAuth);
-  const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
+  const storage = await resolveCloudSafeRoomStorageMode(roomIdentifier);
   const expectedNamespace = [
     roomIdentifier,
     storage.effectiveMode,
@@ -166,7 +220,22 @@ export async function saveDesktopOutgoingMessage(
   const messageNamespace = input.messageNamespace ?? expectedNamespace;
   const replyTo = input.replyTo?.trim() || null;
   const threadRootId = input.threadRootId?.trim() || null;
-  const database = await getOutboxDb();
+  const scopeRecord: DesktopOutboxScopeRecord = {
+    accountScope,
+    roomIdentifier,
+    storageMode: storage.effectiveMode,
+    threadRootId,
+    replyTo,
+  };
+  let database: SqliteDatabase;
+  try {
+    database = await getOutboxDb();
+  } catch (error) {
+    if (storage.effectiveMode === "cloud" && storedAuth.account?.id) {
+      rememberBoundedScope(unsavedCloudFallbackScopes, clientMessageId, scopeRecord);
+    }
+    throw error;
+  }
 
   beginImmediate(database);
   try {
@@ -207,8 +276,14 @@ export async function saveDesktopOutgoingMessage(
     database.exec("COMMIT");
   } catch (error) {
     rollback(database);
+    const isAccountCollision = error instanceof Error && error.message.includes("different account");
+    if (!isAccountCollision && storage.effectiveMode === "cloud" && storedAuth.account?.id) {
+      rememberBoundedScope(unsavedCloudFallbackScopes, clientMessageId, scopeRecord);
+    }
     throw error;
   }
+  unsavedCloudFallbackScopes.delete(clientMessageId);
+  rememberBoundedScope(knownOutboxScopes, clientMessageId, scopeRecord);
 
   return {
     clientMessageId,
@@ -274,6 +349,8 @@ export async function deleteDesktopOutgoingMessage(
   database
     .prepare("DELETE FROM desktop_message_outbox WHERE client_message_id = ? AND account_scope = ?")
     .run(trimmedId, accountScope);
+  knownOutboxScopes.delete(trimmedId);
+  unsavedCloudFallbackScopes.delete(trimmedId);
   const attachments = normalizeAttachments(
     parseJsonOrNull<DesktopOutgoingMessageAttachment[]>(existing.attachments_json),
   );
@@ -294,10 +371,17 @@ export async function deleteDesktopOutgoingMessage(
 export async function clearCloudDesktopOutgoingMessagesForAccount(accountId: string): Promise<void> {
   const trimmedId = accountId?.trim() || "";
   if (!trimmedId) return;
+  const scope = `account:${trimmedId}`;
+  for (const [id, record] of knownOutboxScopes) {
+    if (record.accountScope === scope && record.storageMode === "cloud") knownOutboxScopes.delete(id);
+  }
+  for (const [id, record] of unsavedCloudFallbackScopes) {
+    if (record.accountScope === scope && record.storageMode === "cloud") unsavedCloudFallbackScopes.delete(id);
+  }
   const database = await getOutboxDb();
   database
     .prepare("DELETE FROM desktop_message_outbox WHERE account_scope = ? AND storage_mode = 'cloud'")
-    .run(`account:${trimmedId}`);
+    .run(scope);
 }
 
 export async function listDesktopOutgoingMessages(): Promise<DesktopPersistedOutgoingMessage[]> {
@@ -348,4 +432,47 @@ export async function getDesktopOutgoingMessageByClientId(
     .prepare("SELECT * FROM desktop_message_outbox WHERE client_message_id = ?")
     .get(trimmedId);
   return row ? mapOutboxRow(row) : null;
+}
+
+/**
+ * Look up the authoritative outbox scope for `clientMessageId` before dispatch.
+ * When `local-chat.sqlite` is unreadable, falls back ONLY to an in-process scope
+ * record captured during the current session (either a previously persisted row
+ * or a fresh cloud fallback whose local DB write just failed), preserving strict
+ * account/room/storage-mode/thread scoping while failing closed for any unknown
+ * `clientMessageId`.
+ */
+export async function resolveOutboxScopeForSend(
+  clientMessageId: string,
+): Promise<DesktopOutboxScopeRecord | null> {
+  const trimmedId = clientMessageId?.trim() || "";
+  if (!DESKTOP_OUTGOING_CLIENT_ID_PATTERN.test(trimmedId)) return null;
+  try {
+    const persisted = await getDesktopOutgoingMessageByClientId(trimmedId);
+    if (persisted) {
+      const record: DesktopOutboxScopeRecord = {
+        accountScope: persisted.accountScope,
+        roomIdentifier: persisted.roomIdentifier,
+        storageMode: persisted.storageMode,
+        threadRootId: persisted.threadRootId,
+        replyTo: persisted.replyTo,
+      };
+      rememberBoundedScope(knownOutboxScopes, trimmedId, record);
+      return record;
+    }
+    return unsavedCloudFallbackScopes.get(trimmedId) ?? null;
+  } catch (error) {
+    const fallback = knownOutboxScopes.get(trimmedId) ?? unsavedCloudFallbackScopes.get(trimmedId);
+    if (fallback) {
+      return fallback;
+    }
+    throw error;
+  }
+}
+
+export function consumeUnsavedCloudFallbackScope(clientMessageId: string | null | undefined): void {
+  const trimmedId = clientMessageId?.trim() || "";
+  if (trimmedId) {
+    unsavedCloudFallbackScopes.delete(trimmedId);
+  }
 }

@@ -22,7 +22,11 @@ import {
   releaseLocalStagedAttachments,
   publishLocalAttachmentPayload,
 } from "../attachments.js";
-import { getDesktopOutgoingMessageByClientId } from "./outbox-store.js";
+import {
+  consumeUnsavedCloudFallbackScope,
+  resolveCloudSafeRoomStorageMode,
+  resolveOutboxScopeForSend,
+} from "./outbox-store.js";
 import {
   addLocalChatMessage,
   getLocalChatMessageByClientId,
@@ -129,14 +133,14 @@ export async function sendDesktopRoomMessage(
   const storedAuth = await readStoredAuth();
   const sender =
     storedAuth.account?.displayName || storedAuth.account?.login || "Desktop";
-  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  const storage = await resolveCloudSafeRoomStorageMode(trimmedRoomIdentifier);
   if (messageNamespace && messageNamespace !== [trimmedRoomIdentifier, storage.effectiveMode, storage.localRoom?.roomIdentifier || "cloud"].join(":")) {
     throw preCommitRefusalError("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
   }
   const normalizedAttachments = attachments.map((attachment) => ({ upload_id: attachment.upload_id }));
   const readerKey = await resolveLocalThreadReaderKey(storedAuth);
   if (clientId) {
-    const persisted = await getDesktopOutgoingMessageByClientId(clientId);
+    const persisted = await resolveOutboxScopeForSend(clientId);
     if (persisted) {
       if (persisted.accountScope !== readerKey) {
         throw preCommitRefusalError("This message belongs to a different account. Switch back to its original account before retrying.");
@@ -229,6 +233,7 @@ export async function sendDesktopRoomMessage(
     throw error;
   }
 
+  consumeUnsavedCloudFallbackScope(clientId);
   return {
     message: mapCloudRoomMessagePayload(message),
   };
