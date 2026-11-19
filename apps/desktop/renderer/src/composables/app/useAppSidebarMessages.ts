@@ -270,9 +270,9 @@ export function useAppSidebarMessages(context: unknown) {
 
 /** Server-pushed room activity, and the sidebar catch-up when its stream drops. */
 export function useAppAccountActivityFeed(context: unknown) {
-  const app = context as AppContextOf<"useAppSidebarMessages" | "useAppState">;
+  const app = context as AppContextOf<"useAppSessionActions" | "useAppSidebarMessages" | "useAppState">;
   const {
-    accountRooms, authStatus, refreshSidebarRoomMetadata,
+    accountRooms, authStatus, recheckJoinCardAfterAccountStreamReconnect, refreshSidebarRoomMetadata,
   } = app;
   // Who is working in each room, and each room's latest message, pushed by the server.
   const accountActivity = useAccountActivity({
@@ -284,8 +284,14 @@ export function useAppAccountActivityFeed(context: unknown) {
   });
   Object.assign(app, { accountActivity });
   // While the stream was open the sidebar barely polled, so catch up the moment it drops.
+  // A reconnect (not the first connection, which is the app starting) also lets
+  // a join card check its room, since a join decision sent meanwhile is lost.
+  let hadConnection = false;
   watch(() => accountActivity.connected.value, (connected, wasConnected) => {
     if (wasConnected && !connected) void refreshSidebarRoomMetadata();
+    if (!connected) return;
+    if (hadConnection && !wasConnected) recheckJoinCardAfterAccountStreamReconnect();
+    hadConnection = true;
   });
   return {
     accountActivity,

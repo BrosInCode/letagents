@@ -909,6 +909,16 @@ export type DesktopRoomStreamEvent =
     }
   | {
       /**
+       * An admin answered this account's own request to join a members-only
+       * room, from the account activity stream. `roomIdentifier` is the room
+       * whose admins decide (the main room of a focus room).
+       */
+      type: "join_request_decision";
+      roomIdentifier: string;
+      event: import("../../../../shared/room-join-requests.mjs").RoomJoinRequestDecisionEvent;
+    }
+  | {
+      /**
        * An invite this account made was made, cancelled or used, from the
        * account activity stream. `roomIdentifier` is the room the bot joins.
        */
