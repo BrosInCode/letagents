@@ -17,7 +17,7 @@ import {
   processBirth,
   processTreeHelperPath,
   processTreeHelperRefusal,
-  sealedProcessTreeHelperSha256,
+  sealedProcessTreeHelperSha256s,
   signalTree,
   signalTreeOutcome,
   spawnTree,
@@ -476,7 +476,7 @@ test("the app uses a found helper only when its bytes are the sealed build", { s
   // This build, sealed: used.
   assert.equal(found({ builds: { x64: { sha256: built } } }), packaged);
   // The committed seal: used exactly when this runner built the sealed bytes.
-  assert.equal(found(), built === sealedProcessTreeHelperSha256("x64") ? packaged : null);
+  assert.equal(found(), sealedProcessTreeHelperSha256s("x64").includes(built) ? packaged : null);
   // One byte more: refused, with the reason.
   writeFileSync(packaged, Buffer.concat([readFileSync(helperPath), Buffer.from([0])]));
   assert.equal(found({ builds: { x64: { sha256: built } } }), null);
