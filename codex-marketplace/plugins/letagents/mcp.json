@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "letagents": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "letagents"],
+      "env": {
+        "LETAGENTS_API_URL": "https://letagents.chat"
+      }
+    }
+  }
+}
