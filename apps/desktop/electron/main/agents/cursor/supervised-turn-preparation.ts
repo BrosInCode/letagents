@@ -4,7 +4,7 @@
 
 import { withReadOnlyImageFolders } from "../cursor-room-turn-images.js";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS, CURSOR_MCP_CONNECTOR_PARENT, CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS } from "../cursor-provider-constants.js";
@@ -28,6 +28,7 @@ import {
   usesExactScratchWorkspace,
 } from "./launch-arguments.js";
 import type { CursorProviderAdapter } from "./provider-adapter.js";
+import { removeDisposableProfileRoot } from "./disposable-profile-root.js";
 import { cursorWindowsMcpRuntimeEnv } from "./windows-turn.js";
 
 export function throwIfCursorTurnLaunchAborted(signal?: AbortSignal, roomTurnId?: string | null): void {
@@ -128,7 +129,10 @@ export async function prepareSupervisedTurn(
     }
     throw error;
   } finally {
-    rmSync(inspectionProfileRoot, { recursive: true, force: true });
+    // A stopped inspection can return while its process tree is still ending,
+    // and on Windows that tree keeps this root in use for a moment. Wait until
+    // the root is really gone (or fail closed) before pass two is created.
+    await removeDisposableProfileRoot(inspectionProfileRoot);
   }
   throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
 
@@ -188,7 +192,7 @@ export async function prepareSupervisedTurn(
     }
     throw error;
   } finally {
-    rmSync(bridgeProfileRoot, { recursive: true, force: true });
+    await removeDisposableProfileRoot(bridgeProfileRoot);
   }
   throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
   // Prove the live credential-store identity immediately before every
@@ -365,7 +369,7 @@ export async function prepareSupervisedTurn(
     }
     throw error;
   } finally {
-    rmSync(identityProfileRoot, { recursive: true, force: true });
+    await removeDisposableProfileRoot(identityProfileRoot);
   }
   return {
     childEnv,
