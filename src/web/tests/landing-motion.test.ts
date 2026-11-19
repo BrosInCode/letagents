@@ -5,7 +5,7 @@ import { before, test, type TestContext } from 'node:test'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
 import * as Vue from 'vue'
-import * as Three from 'three'
+import * as handoff from '../src/components/landing/room-handoff.js'
 import * as bridge from '../src/components/landing/symbiosisData'
 
 let canvasSource: string
@@ -21,7 +21,7 @@ before(async () => {
   narrativeSource = await compile('SymbiosisSection')
 })
 
-function environment(t: TestContext, { mobile = false, failWebGL = false } = {}) {
+function environment(t: TestContext, { mobile = false, noCanvas = false } = {}) {
   const originals = new Map(['window', 'document', 'ResizeObserver', 'IntersectionObserver'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
   class Events {
     listeners = new Map<string, Set<Function>>()
@@ -72,30 +72,20 @@ function environment(t: TestContext, { mobile = false, failWebGL = false } = {})
     }
     bridge.setHemisphereFocus('fused')
   })
-  const renderers: FakeRenderer[] = []
-  class FakeRenderer {
-    renders: { scene: Three.Scene; camera: Three.PerspectiveCamera; light: number; coreX: number }[] = []
-    dpr = 0
-    width = 0
-    height = 0
-    disposals = 0
-    constructor() { if (failWebGL) throw new Error('WebGL unavailable'); renderers.push(this) }
-    setPixelRatio(dpr: number) { this.dpr = dpr }
-    setSize(width: number, height: number) { this.width = width; this.height = height }
-    setClearColor() {}
-    render(scene: Three.Scene, camera: Three.PerspectiveCamera) {
-      const root = scene.children[0]
-      const core = root.children[0]
-      const material = (core.children[0] as Three.Mesh).material as Three.ShaderMaterial
-      this.renders.push({ scene, camera, light: material.uniforms.uLightMode.value, coreX: core.position.x })
-    }
-    dispose() { this.disposals++ }
-  }
+  const draws: [number, number][] = []
+  const gradient = { addColorStop() {} }
+  const context = new Proxy({}, {
+    get(_target, name) {
+      if (String(name).endsWith('Gradient')) return () => gradient
+      if (name === 'clearRect') return (_x: number, _y: number, width: number, height: number) => draws.push([width, height])
+      return () => {}
+    },
+  })
   function component(source: string) {
     const exports: any = {}
     Function('require', 'exports', source)((name: string) => {
       if (name === 'vue') return Vue
-      if (name === 'three') return { ...Three, WebGLRenderer: FakeRenderer }
+      if (name === './room-handoff.js') return handoff
       if (name === './symbiosisData') return bridge
       if (name.startsWith('@/components/icons/')) return { default: { render: () => Vue.h('svg') } }
       throw new Error(`Unexpected component import: ${name}`)
@@ -107,6 +97,9 @@ function environment(t: TestContext, { mobile = false, failWebGL = false } = {})
     children: HostNode[] = []
     parent: HostNode | null = null
     text = ''
+    width = 0
+    height = 0
+    getContext(kind: string) { assert.equal(kind, '2d'); return noCanvas ? null : context }
     constructor(public tag = '') { super() }
     getBoundingClientRect() { return { left: 0, top: 0, bottom: win.innerHeight, width: win.innerWidth, height: win.innerHeight } }
     closest() { return hero }
@@ -132,67 +125,52 @@ function environment(t: TestContext, { mobile = false, failWebGL = false } = {})
     return { unmount, props, nodes: () => all(root) }
   }
   function frame(now: number) { const pending = [...frames.entries()]; for (const [id, fn] of pending) { frames.delete(id); fn(now) } }
-  function disposalCounts() {
-    const counts = { geometries: 0, materials: 0 }
-    renderers[0].renders[0].scene.traverse(object => {
-      if (!(object instanceof Three.Mesh || object instanceof Three.Points || object instanceof Three.LineSegments)) return
-      object.geometry.addEventListener('dispose', () => { counts.geometries++ })
-      const materials = Array.isArray(object.material) ? object.material : [object.material]
-      for (const material of materials) material.addEventListener('dispose', () => { counts.materials++ })
-    })
-    return counts
-  }
-  return { mount, frame, disposalCounts, win, doc, media, frames, resizeObservers, intersectionObservers, renderers, hero }
+  return { mount, frame, win, doc, media, frames, resizeObservers, intersectionObservers, draws }
 }
 
 const hasClass = (node: any, name: string) => String(node.props.class).split(' ').includes(name)
 
-test('mobile Venom preserves the 3D scene without animation or touch tracking and redraws theme/size once', async t => {
+test('compact screens show a still handoff with bounded pixel density and resize without starting a loop', async t => {
   const env = environment(t, { mobile: true })
   const view = env.mount(canvasSource, Vue.reactive({ theme: 'dark' }))
-  const renderer = env.renderers[0]
-  assert.equal(renderer.renders.length, 1)
-  assert.equal(renderer.dpr, 1.5)
-  assert.equal(Math.abs(renderer.renders[0].coreX), 0)
-  assert.ok(renderer.renders[0].camera.position.z > 20, 'portrait camera fits the core within the screen')
+  const canvas = view.nodes().find(n => n.tag === 'canvas')!
+  env.resizeObservers[0].emit([{ contentRect: { width: 390, height: 220 } }])
+  assert.deepEqual(env.draws, [[390, 220]])
+  assert.equal(canvas.width, 585)
   assert.equal(env.frames.size, 0)
-  assert.equal(env.win.count(), 0, 'static mobile canvas does not listen to touch or scrolling')
-  env.frame(1000)
-  assert.equal(renderer.renders.length, 1)
+  assert.equal(env.win.count(), 0, 'the hero does not track touch or scroll input')
   view.props.theme = 'light'
   await Vue.nextTick()
-  assert.equal(renderer.renders.length, 2)
-  assert.equal(renderer.renders.at(-1)!.light, 1, 'static theme redraw uses the final palette')
-  env.doc.hidden = true
-  view.props.theme = 'dark'
-  await Vue.nextTick()
-  assert.equal(renderer.renders.length, 2, 'hidden theme updates wait until visible')
-  env.doc.hidden = false
-  env.doc.emit('visibilitychange')
-  assert.equal(renderer.renders.at(-1)!.light, 0)
-  const before = renderer.renders.length
-  env.resizeObservers[0].emit([{ contentRect: { width: 390, height: 844 } }])
-  assert.equal(renderer.renders.length, before, 'unchanged dimensions do not repaint')
-  env.resizeObservers[0].emit([{ contentRect: { width: 844, height: 390 } }])
-  assert.equal(renderer.renders.length, before + 1)
+  assert.equal(view.nodes().find(n => hasClass(n, 'handoff-stage'))?.props['data-theme-mode'], 'light')
+  assert.equal(env.draws.length, 1, 'CSS adapts a still frame to the theme')
+  env.resizeObservers[0].emit([{ contentRect: { width: 390, height: 220 } }])
+  assert.equal(env.draws.length, 1, 'unchanged dimensions do not repaint')
+  env.resizeObservers[0].emit([{ contentRect: { width: 530, height: 210 } }])
+  assert.deepEqual(env.draws.at(-1), [530, 210])
   assert.equal(env.frames.size, 0)
 })
 
-test('desktop canvas bounds frame rate and pauses on hero exit, hidden tab, live motion changes, and unmount', async t => {
+test('the handoff bounds frame rate and pauses for the user, visibility, reduced motion, and unmount', async t => {
   const env = environment(t)
   const view = env.mount(canvasSource)
-  const renderer = env.renderers[0]
-  const disposed = env.disposalCounts()
-  assert.equal(env.intersectionObservers[0].targets[0], env.hero, 'observe the hero, not the fixed canvas')
+  env.resizeObservers[0].emit([{ contentRect: { width: 980, height: 300 } }])
   env.frame(100)
-  const before = renderer.renders.length
+  const before = env.draws.length
   env.frame(108); env.frame(116); env.frame(124)
-  assert.equal(renderer.renders.length, before, '120Hz events do not redraw more than 30fps')
+  assert.equal(env.draws.length, before, '120Hz events do not redraw more than 30fps')
   env.frame(134)
-  assert.equal(renderer.renders.length, before + 1)
+  assert.equal(env.draws.length, before + 1)
+  const control = () => view.nodes().find(n => hasClass(n, 'handoff-motion'))!
+  await Vue.nextTick()
+  control().props.onClick()
+  await Vue.nextTick()
+  assert.equal(control().props['aria-label'], 'Play room animation')
+  assert.equal(env.frames.size, 0)
+  control().props.onClick()
+  await Vue.nextTick()
+  assert.equal(env.frames.size, 1)
   env.intersectionObservers[0].emit([{ isIntersecting: false }])
   assert.equal(env.frames.size, 0)
-  assert.equal(env.win.count(), 0)
   env.intersectionObservers[0].emit([{ isIntersecting: true }])
   assert.equal(env.frames.size, 1)
   env.doc.hidden = true; env.doc.emit('visibilitychange')
@@ -200,7 +178,9 @@ test('desktop canvas bounds frame rate and pauses on hero exit, hidden tab, live
   env.doc.hidden = false; env.doc.emit('visibilitychange')
   assert.equal(env.frames.size, 1)
   env.media.reduced.change(true)
+  await Vue.nextTick()
   assert.equal(env.frames.size, 0)
+  assert.equal(control(), undefined)
   env.media.reduced.change(false)
   assert.equal(env.frames.size, 1)
   env.media.fine.change(false)
@@ -211,25 +191,27 @@ test('desktop canvas bounds frame rate and pauses on hero exit, hidden tab, live
   assert.equal(env.win.count() + env.doc.count() + canvas.count(), 0)
   assert.ok(Object.values(env.media).every(media => media.count() === 0))
   assert.ok([...env.resizeObservers, ...env.intersectionObservers].every(observer => observer.disconnected))
-  assert.deepEqual(disposed, { geometries: 3, materials: 3 })
-  assert.equal(renderer.disposals, 1)
 })
 
-test('WebGL failure and context loss render a fallback without scheduling work', async t => {
-  for (const failWebGL of [true, false]) {
-    await t.test(failWebGL ? 'blocked creation' : 'lost context', async t => {
-      const env = environment(t, { failWebGL })
+test('blocked and lost canvas contexts leave the fallback visible without scheduling frames', async t => {
+  for (const noCanvas of [true, false]) {
+    await t.test(noCanvas ? 'no canvas context' : 'context loss and recovery', async t => {
+      const env = environment(t, { noCanvas })
       const view = env.mount(canvasSource)
-      const disposed = failWebGL ? null : env.disposalCounts()
-      if (!failWebGL) view.nodes().find(n => n.tag === 'canvas')!.emit('webglcontextlost', { preventDefault() {} })
+      const canvas = view.nodes().find(n => n.tag === 'canvas')!
+      if (!noCanvas) {
+        env.resizeObservers[0].emit([{ contentRect: { width: 980, height: 300 } }])
+        canvas.emit('contextlost')
+      }
       await Vue.nextTick()
-      assert.ok(view.nodes().some(n => hasClass(n, 'symbiosis-fallback')))
+      assert.ok(hasClass(canvas, 'unavailable'))
       assert.equal(env.frames.size, 0)
-      assert.equal(env.win.count(), 0)
-      env.media.reduced.change(true)
-      env.doc.emit('visibilitychange')
-      assert.equal(env.frames.size, 0)
-      if (disposed) assert.deepEqual(disposed, { geometries: 3, materials: 3 })
+      if (!noCanvas) {
+        canvas.emit('contextrestored')
+        await Vue.nextTick()
+        assert.ok(!hasClass(canvas, 'unavailable'))
+        assert.equal(env.frames.size, 1)
+      }
     })
   }
 })

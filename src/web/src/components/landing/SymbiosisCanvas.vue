@@ -1,6 +1,6 @@
 <template>
   <div class="handoff-stage" :data-theme-mode="theme" ref="stage">
-    <canvas ref="canvas" aria-hidden="true" />
+    <canvas ref="canvas" aria-hidden="true" :class="{ unavailable: !canvasAvailable }" />
     <button v-if="canAnimate" class="handoff-motion" type="button" @click="paused = !paused"
       :aria-label="paused ? 'Play room animation' : 'Pause room animation'">
       <span v-if="paused" aria-hidden="true">▶</span><span v-else aria-hidden="true">Ⅱ</span>
@@ -18,6 +18,7 @@ const stage = ref(null)
 const canvas = ref(null)
 const paused = ref(false)
 const canAnimate = ref(false)
+const canvasAvailable = ref(false)
 let dispose
 
 onMounted(() => {
@@ -27,6 +28,11 @@ onMounted(() => {
 
   const render = createHandoffPainter(context)
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)')
+  const compact = window.matchMedia('(max-width: 768px)')
+  const fine = window.matchMedia('(hover: hover) and (pointer: fine)')
+  const preferences = [reduce, compact, fine]
+  canvasAvailable.value = true
+  const still = () => reduce.matches || compact.matches || !fine.matches
   let width = 0
   let height = 0
   let elapsed = 0
@@ -35,42 +41,47 @@ onMounted(() => {
   let inView = true
 
   function draw() {
-    render(width, height, reduce.matches ? handoffStillTime : elapsed, !reduce.matches)
+    const staticFrame = still()
+    if (canvasAvailable.value) render(width, height, staticFrame ? handoffStillTime : elapsed, !staticFrame)
   }
 
   function tick(now) {
     frame = 0
     if (lastFrame && now - lastFrame < 29) {
-      frame = requestAnimationFrame(tick)
+      frame = window.requestAnimationFrame(tick)
       return
     }
     if (lastFrame) elapsed += Math.min((now - lastFrame) / 1000, .06)
     lastFrame = now
     draw()
-    frame = requestAnimationFrame(tick)
+    frame = window.requestAnimationFrame(tick)
   }
 
   function updatePlayback() {
-    canAnimate.value = !reduce.matches
-    cancelAnimationFrame(frame)
+    canAnimate.value = canvasAvailable.value && !still()
+    window.cancelAnimationFrame(frame)
     frame = 0
     lastFrame = 0
-    if (reduce.matches) draw()
-    else if (!paused.value && inView && !document.hidden && width && height) frame = requestAnimationFrame(tick)
+    if (!canvasAvailable.value) return
+    if (still()) {
+      if (inView && !document.hidden) draw()
+    } else if (!paused.value && inView && !document.hidden && width && height) frame = window.requestAnimationFrame(tick)
   }
 
-  const resize = new ResizeObserver(([entry]) => {
-    width = entry.contentRect.width
-    height = entry.contentRect.height
-    if (!width || !height) {
-      updatePlayback()
-      return
-    }
-    const density = Math.min(window.devicePixelRatio || 1, 1.75, Math.sqrt(3_000_000 / (width * height)))
+  function configureSurface() {
+    if (!width || !height) return
+    const density = Math.min(window.devicePixelRatio || 1, compact.matches ? 1.5 : 1.75, Math.sqrt(3_000_000 / (width * height)))
     surface.width = Math.round(width * density)
     surface.height = Math.round(height * density)
     context.setTransform(density, 0, 0, density, 0, 0)
-    draw()
+  }
+  const resize = new ResizeObserver(([entry]) => {
+    const { width: nextWidth, height: nextHeight } = entry.contentRect
+    if (width === nextWidth && height === nextHeight) return
+    width = nextWidth
+    height = nextHeight
+    configureSurface()
+    if (canAnimate.value && inView && !document.hidden) draw()
     updatePlayback()
   })
   resize.observe(stage.value)
@@ -80,15 +91,29 @@ onMounted(() => {
   })
   visibility.observe(stage.value)
   const stopPause = watch(paused, updatePlayback)
-  reduce.addEventListener('change', updatePlayback)
+  function onContextLost() {
+    canvasAvailable.value = false
+    updatePlayback()
+  }
+  function onContextRestored() {
+    canvasAvailable.value = true
+    configureSurface()
+    if (paused.value && !still() && inView && !document.hidden) draw()
+    updatePlayback()
+  }
+  surface.addEventListener('contextlost', onContextLost)
+  surface.addEventListener('contextrestored', onContextRestored)
+  for (const preference of preferences) preference.addEventListener('change', updatePlayback)
   document.addEventListener('visibilitychange', updatePlayback)
 
   dispose = () => {
-    cancelAnimationFrame(frame)
+    window.cancelAnimationFrame(frame)
     stopPause()
     resize.disconnect()
     visibility.disconnect()
-    reduce.removeEventListener('change', updatePlayback)
+    surface.removeEventListener('contextlost', onContextLost)
+    surface.removeEventListener('contextrestored', onContextRestored)
+    for (const preference of preferences) preference.removeEventListener('change', updatePlayback)
     document.removeEventListener('visibilitychange', updatePlayback)
   }
 })
@@ -115,6 +140,8 @@ onUnmounted(() => dispose?.())
   height: 100%;
   mask-image: radial-gradient(ellipse 77% 79% at 50% 51%, #000 38%, transparent 92%);
 }
+
+.handoff-stage canvas.unavailable { visibility: hidden; }
 
 .handoff-motion {
   position: absolute;
