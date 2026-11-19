@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import type { ProviderActionPort, ProviderRoomTurnRequest, RoomTurnFileAccess } 
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { RoomTurnAttachmentStager } from "../room-turn-attachments.js";
 import { agent, provider, withAttachmentStager } from "./helpers/supervised-agent-delivery-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 // Text files and PDFs, end to end through the delivery loop: a path the agent opens itself.
 
@@ -33,7 +34,7 @@ function port(access: RoomTurnFileAccess, turns: Array<{ request: ProviderRoomTu
 
 async function withRoot(run: (root: string) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), "letagents-turn-files-"));
-  try { await run(root); } finally { await rm(root, { recursive: true, force: true }); }
+  try { await run(root); } finally { removeTestDirectory(root); }
 }
 
 test("a log on the message one before reaches the turn as a file the agent reads, downloaded once, gone after the turn", async () => {

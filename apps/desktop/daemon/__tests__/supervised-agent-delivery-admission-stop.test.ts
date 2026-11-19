@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -38,7 +38,7 @@ test("pending new turns wait for managed runtime admission without claiming the 
     assert.equal(head?.state, "pending");
     assert.equal(head?.attempt_count, 0);
     assert.equal(head?.provider_turn_id, null);
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("a delivery wake during admission survives the active pump and internal restarts retain its demand", async () => {
@@ -71,7 +71,7 @@ test("a delivery wake during admission survives the active pump and internal res
     await delivery.poll(agent);
     assert.notEqual(demands[3], demands[2], "a completed independent poll can retry a deferred native boundary");
     assert.equal((await store.head(agent.agentId))!.state, "pending");
-  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("missing Codex room tools retain the exact inbox item without spending a model attempt", async () => {
@@ -110,7 +110,7 @@ test("missing Codex room tools retain the exact inbox item without spending a mo
     assert.equal(finished.state, "acknowledged");
     assert.equal(finished.attempt_count, 1);
     assert.deepEqual(published, [blocked.reply_client_message_id]);
-  } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await store.close(); removeTestDirectory(root); }
 });
 
 test("room-tool failure after dispatch intent cannot claim that no model turn started", async () => {
@@ -126,18 +126,19 @@ test("room-tool failure after dispatch intent cannot claim that no model turn st
     const blocked = (await store.receipts(agent.agentId))[0]!;
     assert.equal(blocked.state, "blocked");
     assert.match(blocked.last_error!, /provider may have started this work/);
-  } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await store.close(); removeTestDirectory(root); }
 });
 
 test("a typed pre-turn missing conversation restores the same inbox item before one real turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-continuation-restore-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     await ingest(store);
     let providerInvocations = 0;
     let restorations = 0;
     const published: string[] = [];
-    const delivery = new SupervisedAgentDelivery(
+    delivery = new SupervisedAgentDelivery(
       store,
       provider(async (_handle, request, options) => {
         providerInvocations += 1;
@@ -184,17 +185,24 @@ test("a typed pre-turn missing conversation restores the same inbox item before 
     assert.equal(receipt.state, "acknowledged");
     assert.deepEqual(published, [receipt.reply_client_message_id]);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("missing-conversation evidence after a turn starts never invokes automatic restoration", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-continuation-ambiguous-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     await ingest(store);
     let runInvocations = 0;
     let restorations = 0;
-    const delivery = new SupervisedAgentDelivery(
+    delivery = new SupervisedAgentDelivery(
       store,
       provider(async (_handle, _request, options) => {
         runInvocations += 1;
@@ -225,19 +233,26 @@ test("missing-conversation evidence after a turn starts never invokes automatic 
     assert.equal(receipt.attempt_count, 1);
     assert.equal(receipt.failure_code, null);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("manual conversation restoration reports failure instead of falsely acknowledging the control", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-continuation-manual-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const item = await enqueue(store);
     await store.transition(item.inbox_item_id, "blocked", {
       failure_code: "provider_continuation_missing",
       last_error: "thread not found: thread",
     });
-    const delivery = new SupervisedAgentDelivery(
+    delivery = new SupervisedAgentDelivery(
       store,
       provider(async () => { throw new Error("must not run"); }),
       { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } },
@@ -256,13 +271,20 @@ test("manual conversation restoration reports failure instead of falsely acknowl
     );
     assert.equal((await store.get(item.inbox_item_id))?.state, "blocked");
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("manual rematerialization wakes the repaired pending head without waiting for another poll", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-continuation-manual-restored-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const item = await enqueue(store);
     await store.transition(item.inbox_item_id, "blocked", {
       failure_code: "provider_continuation_missing",
@@ -271,7 +293,7 @@ test("manual rematerialization wakes the repaired pending head without waiting f
     let providerTurns = 0;
     let polls = 0;
     const published: string[] = [];
-    const delivery = new SupervisedAgentDelivery(
+    delivery = new SupervisedAgentDelivery(
       store,
       provider(async (_handle, request, options) => {
         providerTurns += 1;
@@ -304,18 +326,25 @@ test("manual rematerialization wakes the repaired pending head without waiting f
     assert.equal(polls, 0, "delivery does not rely on unrelated ingress to wake the pending head");
     assert.deepEqual(published, [item.reply_client_message_id]);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("Stop settles the in-flight turn cancelled_by_user, suppresses its publish, and unblocks the FIFO", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-interrupt-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const turnEntered = deferred<void>();
     const turnRelease = deferred<void>();
     const published: string[] = [];
     let calls = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
       calls += 1;
       if (calls === 1) {
         // The first (soon-to-be-stopped) turn parks mid-flight so the Stop
@@ -353,13 +382,20 @@ test("Stop settles the in-flight turn cancelled_by_user, suppresses its publish,
       assert.equal(calls, 2, "the stopped turn was not rerun; only the next item ran a fresh turn");
     } finally { await delivery.fenceAndDrain().catch(() => undefined); }
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("Cursor Stop settles its reserved FIFO identity after provider cleanup removes the live map", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-stop-reservation-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const recordCompletion = installCursorCompletionProjectionFixture(store);
     let handlePid = agent.handle!.pid;
     let handleContinuation = agent.handle!.providerContinuationId;
@@ -378,7 +414,7 @@ test("Cursor Stop settles its reserved FIFO identity after provider cleanup remo
     const releaseSettlementCheckpoint = deferred<void>();
     const published: string[] = [];
     let calls = 0; let providerStateCheckpoints = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
       calls += 1;
       const providerTurnId = `cursor:${request.inboxItemId}`;
       handleConnection = { kind: "cursor_cli", pid: 7777, processIdentity: `cursor-wrapper-birth:${calls}` };
@@ -478,7 +514,13 @@ test("Cursor Stop settles its reserved FIFO identity after provider cleanup remo
       await delivery.fenceAndDrain().catch(() => undefined);
     }
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("a frozen pre-checkpoint Cursor Stop cannot roll the reserved invocation back to pending", async () => {
@@ -530,7 +572,7 @@ test("a frozen pre-checkpoint Cursor Stop cannot roll the reserved invocation ba
     releaseProvider.resolve();
     await delivery?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    removeTestDirectory(root);
   }
 });
 
@@ -595,7 +637,7 @@ test("a failed Stop cancellation freezes the exact Cursor turn beyond its retry 
     releaseProvider.resolve();
     await delivery?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    removeTestDirectory(root);
   }
 });
 
@@ -662,18 +704,19 @@ test("a stale Stop reservation cannot settle a successor invocation of the same 
     releaseSecond.resolve();
     await delivery?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    removeTestDirectory(root);
   }
 });
 
 test("a Stop that races a committed publication loses: the reply stands and the turn is not settled", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-interrupt-publish-race-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const publishEntered = deferred<void>();
     const publishRelease = deferred<void>();
     const published: string[] = [];
-    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "reply", text: "final reply" })), {
+    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "reply", text: "final reply" })), {
       poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }),
       publish: async (input) => { publishEntered.resolve(); await publishRelease.promise; published.push(input.clientMessageId); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
     }, currentAuthority, 0);
@@ -691,14 +734,21 @@ test("a Stop that races a committed publication loses: the reply stands and the 
       assert.equal(published.length, 1, "the reply is published exactly once");
     } finally { await delivery.fenceAndDrain().catch(() => undefined); }
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("interruptActiveDelivery reports no_active_turn when no daemon turn is running", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-no-active-turn-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+    delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
       poll: async () => ({}), publish: async () => { throw new Error("must not publish"); },
     }, currentAuthority, 0);
     try {
@@ -708,13 +758,20 @@ test("interruptActiveDelivery reports no_active_turn when no daemon turn is runn
       assert.equal(await delivery.interruptActiveDelivery(agent), "no_active_turn");
     } finally { await delivery.fenceAndDrain().catch(() => undefined); }
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("a failed durable cancellation neither aborts the turn nor strands the FIFO", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cancel-failure-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     // A transient cancellation failure must propagate WITHOUT aborting the turn,
     // so the in-flight deliver() stays the sole consumer able to settle it.
     const realCancel = store.cancelInterruptedTurn.bind(store);
@@ -726,7 +783,7 @@ test("a failed durable cancellation neither aborts the turn nor strands the FIFO
     const turnEntered = deferred<void>();
     const turnRelease = deferred<void>();
     const published: string[] = [];
-    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
       turnEntered.resolve();
       await turnRelease.promise;
       return { turnId: request.inboxItemId, outcome: "reply", text: "completed after the failed stop" };
@@ -749,7 +806,13 @@ test("a failed durable cancellation neither aborts the turn nor strands the FIFO
       assert.equal(published.length, 1);
     } finally { await delivery.fenceAndDrain().catch(() => undefined); }
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("a Stop that loses to an interrupt-rejection retryable still settles — it is not reported published and the turn does not rerun", async () => {

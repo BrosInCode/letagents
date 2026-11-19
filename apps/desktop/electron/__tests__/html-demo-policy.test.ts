@@ -3,9 +3,13 @@ import { describe, it, mock } from "node:test";
 
 import {
   assertHtmlDemoAttachmentHref,
+  HTML_DEMO_CDN_HOSTS,
   HTML_DEMO_CONTENT_SECURITY_POLICY,
   HTML_DEMO_PARTITION,
   HTML_DEMO_RESPONSE_HEADERS,
+  htmlDemoContentSecurityPolicy,
+  htmlDemoProxyBypassRules,
+  htmlDemoResponseHeaders,
   htmlDemoWindowTitle,
   INLINE_HTML_DEMO_CACHE_BYTES,
   INLINE_HTML_DEMO_CACHE_ENTRIES,
@@ -73,6 +77,87 @@ describe("HTML demo policy", () => {
     assert.equal(isAllowedHtmlDemoRequest("letagents-demo://fedc9876/", { fromDemo: true, host: "0123abcd" }), false);
     assert.equal(isAllowedHtmlDemoRequest("data:text/plain,x", { fromDemo: true, host: "0123abcd" }), true);
     assert.equal(isAllowedHtmlDemoRequest("file:///etc/hosts", { fromDemo: true, host: "0123abcd" }), false);
+  });
+
+  it("lets a demo load scripts, styles, fonts and images from the CDNs only while CDN loading is on", () => {
+    const get = (resourceType: string) => ({ method: "GET", resourceType });
+    const demo = { fromDemo: true, host: "0123abcd" };
+    const allowed: Array<[string, string]> = [
+      ["https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js", "script"],
+      ["https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js", "script"],
+      ["https://unpkg.com/react@18.3.1/umd/react.production.min.js", "script"],
+      ["https://cdn.jsdelivr.net/npm/water.css@2/out/water.css", "stylesheet"],
+      ["https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/webfonts/fa-solid-900.woff2", "font"],
+      ["https://unpkg.com/twemoji@14.0.2/assets/svg/1f600.svg", "image"],
+      ["https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap", "stylesheet"],
+      ["https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfAZ9hiA.woff2", "font"],
+    ];
+    for (const [url, type] of allowed) {
+      assert.equal(isAllowedHtmlDemoRequest(url, demo, "letagents-demo", get(type)), true, `${type} ${url}`);
+      // Off: the same request is refused.
+      assert.equal(isAllowedHtmlDemoRequest(url, demo, "letagents-demo"), false, `off ${url}`);
+    }
+    const refused: Array<[string, { method: string; resourceType: string }, string]> = [
+      ["https://cdn.jsdelivr.net/npm/d3@7/x.js", { method: "POST", resourceType: "script" }, "a POST"],
+      ["https://cdn.jsdelivr.net/npm/d3@7/x.json", get("xhr"), "fetch or XMLHttpRequest"],
+      ["https://unpkg.com/x", get("ping"), "a beacon"],
+      ["https://unpkg.com/x.mp4", get("media"), "media"],
+      ["https://unpkg.com/x", get("webSocket"), "a WebSocket"],
+      ["https://unpkg.com/x.html", get("subFrame"), "a frame"],
+      ["https://unpkg.com/x", get("other"), "anything else"],
+      ["http://cdn.jsdelivr.net/npm/d3@7/x.js", get("script"), "plain HTTP"],
+      ["https://cdn.jsdelivr.net:8443/npm/d3@7/x.js", get("script"), "another port"],
+      ["https://user:pw@cdn.jsdelivr.net/npm/d3@7/x.js", get("script"), "a user name"],
+      ["https://evil.cdn.jsdelivr.net/x.js", get("script"), "a subdomain"],
+      ["https://cdn.jsdelivr.net.evil.com/x.js", get("script"), "a look-alike host"],
+      ["https://esm.sh/react@18", get("script"), "a CDN not on the list"],
+      ["https://example.com/x.js", get("script"), "any other host"],
+      ["https://fonts.googleapis.com/x.js", get("script"), "a script from the font CSS host"],
+      ["https://fonts.gstatic.com/x.css", get("stylesheet"), "a style from the font file host"],
+      ["https://fonts.gstatic.com/x.png", get("image"), "an image from the font file host"],
+      ["https://fonts.googleapis.com/x.woff2", get("font"), "a font from the font CSS host"],
+      ["https://fonts.googleapis.com/x.png", get("image"), "an image from the font CSS host"],
+      ["https://cdn.jsdelivr.net./npm/d3@7/x.js", get("script"), "a host with a trailing dot"],
+      ["https://unpkg.com/x.html", get("mainFrame"), "a page"],
+      ["https://unpkg.com/x.swf", get("object"), "a plugin"],
+      ["https://unpkg.com/report", get("cspReport"), "a CSP report"],
+      ["https://unpkg.com/x.js", { method: "HEAD", resourceType: "script" }, "a HEAD"],
+      ["https://unpkg.com/x.js", { method: "OPTIONS", resourceType: "script" }, "an OPTIONS"],
+    ];
+    for (const [url, request, why] of refused) {
+      assert.equal(isAllowedHtmlDemoRequest(url, demo, "letagents-demo", request), false, why);
+    }
+    // DevTools or another page is not a demo, so the CDN rule does not apply to it.
+    assert.equal(isAllowedHtmlDemoRequest(allowed[0]![0], { fromDemo: false }, "letagents-demo", get("script")), false);
+    assert.deepEqual([...HTML_DEMO_CDN_HOSTS.keys()], ["cdnjs.cloudflare.com", "cdn.jsdelivr.net", "unpkg.com", "fonts.googleapis.com", "fonts.gstatic.com"]);
+  });
+
+  it("opens only the CDN directives when CDN loading is on, and connections stay blocked", () => {
+    const parse = (policy: string) => new Map(policy.split("; ").map((part) => {
+      const [name, ...sources] = part.split(" ");
+      return [name, sources.join(" ")] as const;
+    }));
+    const off = parse(htmlDemoContentSecurityPolicy(false));
+    const on = parse(htmlDemoContentSecurityPolicy(true));
+    const libraries = "https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com";
+    assert.equal(on.get("script-src"), `'unsafe-inline' 'unsafe-eval' blob: ${libraries}`);
+    assert.equal(on.get("style-src"), `'unsafe-inline' data: blob: ${libraries} https://fonts.googleapis.com`);
+    assert.equal(on.get("font-src"), `data: ${libraries} https://fonts.gstatic.com`);
+    assert.equal(on.get("img-src"), `data: blob: ${libraries}`);
+    assert.deepEqual([...on.keys()], [...off.keys()]);
+    for (const [name, sources] of off) {
+      if (!["script-src", "style-src", "font-src", "img-src"].includes(name)) assert.equal(on.get(name), sources, name);
+    }
+    assert.equal(on.get("connect-src"), "data: blob:");
+    assert.equal(htmlDemoContentSecurityPolicy(false), HTML_DEMO_CONTENT_SECURITY_POLICY);
+    assert.equal(htmlDemoResponseHeaders(true)["Content-Security-Policy"], htmlDemoContentSecurityPolicy(true));
+    assert.deepEqual({ ...htmlDemoResponseHeaders(false) }, { ...HTML_DEMO_RESPONSE_HEADERS });
+    // The dead proxy lets only HTTPS to the CDN hosts go direct, and only while CDN loading is on.
+    assert.equal(htmlDemoProxyBypassRules(false), "<-loopback>");
+    assert.equal(
+      htmlDemoProxyBypassRules(true),
+      "<-loopback>,https://cdnjs.cloudflare.com,https://cdn.jsdelivr.net,https://unpkg.com,https://fonts.googleapis.com,https://fonts.gstatic.com",
+    );
   });
 
   it("blocks every network connection, frame, form and plugin in the page policy", () => {

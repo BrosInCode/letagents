@@ -8,6 +8,24 @@ This page describes the server side. The wire format is `shared/live-demo.mjs`.
 A demo is one attachment of one room message. Its key is
 `<message id>/<attachment id>`, for example `msg_12/att_1`.
 
+## What a demo can load
+
+The desktop app runs a demo with no app sign-in, no Node and no network, with
+one exception: when a person turns on CDN loading (Settings → Demos; it is off
+by default), a demo may load scripts, styles, fonts and images from
+`cdnjs.cloudflare.com`, `cdn.jsdelivr.net` and `unpkg.com`, styles from
+`fonts.googleapis.com` and fonts from `fonts.gstatic.com`. Only HTTPS GET
+requests of those kinds reach them. `fetch`, XMLHttpRequest, WebSocket,
+beacons, media, frames and every other host stay blocked, so a demo cannot
+open a connection to a server of its choosing. It can still leak a little
+through which files it asks for: each CDN sees the viewer's IP address and the
+file, and jsDelivr publishes daily hit counts per file, so a package's author
+can count how often a demo was opened. DNS lookups (DNS prefetch, WebRTC) are
+an older and stronger channel that CDN loading does not change. A library that
+loads more files while it runs (`d3.json`, WASM, a worker from a CDN URL)
+fails. The rules are in
+`apps/desktop/electron/main/attachments/html-demo-policy.ts`.
+
 ## The live socket
 
 `GET /rooms/<room>/live` upgrades to a WebSocket with the subprotocol
