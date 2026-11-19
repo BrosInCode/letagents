@@ -1,52 +1,36 @@
 <template>
   <FirstRunSplashView v-if="showFirstRunSplash" />
 
-  <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" :style="roomTheme.css.value" data-testid="desktop-first-run-onboarding">
+  <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" :data-welcome="firstRunStage === 'welcome'" :style="roomTheme.css.value" data-testid="desktop-first-run-onboarding">
     <FirstRunOnboardingView
       :stage="firstRunStage"
       :company-step="companyStep"
       :invited-company-id="pendingCompanyInvite"
       :company-name="company.selected.value?.login"
-      :company-avatar-url="company.selected.value?.avatar_url"
-      :company-rooms="company.rooms.value"
+      :rooms="firstRunRoomChoices"
       :save-company-theme="canSetCompanyTheme ? company.changeTheme : undefined"
       @choose-organization="chooseOnboardingCompany"
       @retry-organizations="company.refresh"
       @open-company-github="company.openOnGitHub"
-      :mcp-state="visibleMcpInstallState"
-      :selected-mcp-target-ids="selectedMcpTargetIds"
-      :mcp-wizard-step="mcpWizardStep"
       :auth-status="authStatus"
       :busy="mcpInstallBusy || authBusy || loading"
       :auth-busy="authBusy || loading"
-      :can-install="setupApiAvailable"
       :feedback="firstRunFeedback"
-      :room-selected="firstRunRoomSelected"
-      :created-invite-code="firstRunInviteCode"
-      :selected-room-name="firstRunRoomSelected ? (rootRoomSnapshot?.room?.displayName || repoName) : null"
       :selected-room-identifier="firstRunRoomSelected ? (rootRoomSnapshot?.roomIdentifier || null) : null"
-      :selected-room-access-status="firstRunRoomSelected ? (rootRoomSnapshot?.access.status || null) : null"
       :room-needs-github-access="firstRunRoomSelected && rootRoomSnapshot?.access.status === 'auth_required' && !authStatus?.authenticated"
-      @select-target="selectMcpTarget"
-      @select-all-targets="selectAllMcpTargets"
-      @clear-target-selection="clearMcpTargetSelection"
-      @continue-mcp="continueMcpOnboarding"
       @start-setup="startFirstRunSetup"
-      @install-targets="installSelectedMcpTargets"
-      @continue-to-github="completeMcpOnboarding"
       @start-auth="startAuthFlow"
       @open-verification="openVerification"
       @poll-auth="pollAuthFlow"
       @cancel-auth="cancelAuthFlow"
       @sign-out="signOut"
-      @continue-to-room="firstRunStage = 'organization'"
+      @continue-to-room="openOnboardingCompanyStep"
       @continue-theme="continueToRoomConfirmation"
       @connect-room-auth="startFirstRunRoomAuth"
-      @pick-repo="pickRepoRoom"
-      @create-room="createFirstRunInviteRoom"
-      @join-room-code="joinRoomCode"
+      @choose-room="openOnboardingRoom"
+      @new-room="openOnboardingNewRoom"
       @back="goBackFirstRun"
-      @finish="finishFirstRunOnboarding"
+      @finish="finishFirstRunOnboarding()"
     />
   </main>
 
@@ -209,6 +193,8 @@
       <KeepAlive :key="roomShellKeepAliveKey" :max="1">
         <DesktopRoomShell
           :viewer-login="authStatus?.authenticated ? authStatus.account?.login : null"
+          :viewer-name="authStatus?.account?.displayName?.trim().split(/\s+/)[0] || authStatus?.account?.login"
+          :offer-tour="firstRunFinished && Boolean(selectedSnapshot?.messages.length)"
           :api-url="appInfo?.apiUrl ?? null"
           v-if="roomShellShown"
           :key="selectedRoomRenderKey"
@@ -379,48 +365,6 @@
       @action="runCompanyInviteAction"
     />
 
-    <Transition name="new-room-modal">
-      <DesktopNewRoomModal
-        v-if="newRoomModalOpen"
-        v-model:join-code="newRoomJoinCode"
-        v-model:room-name="newRoomName"
-        v-model:storage="newRoomStorage"
-        v-model:company="newRoomCompany"
-        :companies="newRoomCompanies"
-        :step="newRoomStep"
-        :busy="newRoomBusy"
-        :can-dismiss="newRoomCanDismiss"
-        :active-action="newRoomActiveAction"
-        :feedback="newRoomFeedback"
-        :feedback-state="newRoomFeedbackState"
-        v-model:project-path="newRoomProjectPath"
-        v-model:project-name="newRoomProjectName"
-        v-model:project-parent="newRoomProjectParent"
-        :project-creation-error="newRoomProjectCreationError"
-        :project-selection="newRoomProjectSelection"
-        :project-path-error="newRoomProjectPathError"
-        :recent-project-folders="newRoomRecentProjectFolders"
-        :status-message="newRoomStatusMessage"
-        :join-error="newRoomJoinError"
-        :can-submit-join="canSubmitJoin"
-        :can-submit-standalone="canSubmitStandalone"
-        @back="backFromSubstep"
-        @choose-join="chooseJoinIntent"
-        @choose-project="chooseProjectIntent"
-        @choose-new-project="chooseNewProjectIntent"
-        @remove-project="removeProject"
-        @close="closeNewRoomModal"
-        @confirm-project="confirmProjectRoomFromModal"
-        @create-standalone="createStandaloneRoom"
-        @create-project="createProjectRoomFromModal"
-        @pick-project-parent="pickNewProjectParent"
-        @open-project="openProjectRoomFromModal"
-        @open-project-path="openProjectRoomFromPath"
-        @join="joinRoomCodeFromModal"
-        @retry="retryLastAction"
-      />
-    </Transition>
-
     <SidebarFocusRoomConclusionDialog
       :open="Boolean(sidebarFocusRoomConclusionTarget)"
       :entry="sidebarFocusRoomConclusionTarget"
@@ -473,6 +417,49 @@
       </button>
     </div>
   </main>
+
+  <Transition name="new-room-modal">
+    <DesktopNewRoomModal
+      v-if="newRoomModalOpen"
+      :style="roomTheme.css.value"
+      v-model:join-code="newRoomJoinCode"
+      v-model:room-name="newRoomName"
+      v-model:storage="newRoomStorage"
+      v-model:company="newRoomCompany"
+      :companies="newRoomCompanies"
+      :step="newRoomStep"
+      :busy="newRoomBusy"
+      :can-dismiss="newRoomCanDismiss"
+      :active-action="newRoomActiveAction"
+      :feedback="newRoomFeedback"
+      :feedback-state="newRoomFeedbackState"
+      v-model:project-path="newRoomProjectPath"
+      v-model:project-name="newRoomProjectName"
+      v-model:project-parent="newRoomProjectParent"
+      :project-creation-error="newRoomProjectCreationError"
+      :project-selection="newRoomProjectSelection"
+      :project-path-error="newRoomProjectPathError"
+      :recent-project-folders="newRoomRecentProjectFolders"
+      :status-message="newRoomStatusMessage"
+      :join-error="newRoomJoinError"
+      :can-submit-join="canSubmitJoin"
+      :can-submit-standalone="canSubmitStandalone"
+      @back="backFromSubstep"
+      @choose-join="chooseJoinIntent"
+      @choose-project="chooseProjectIntent"
+      @choose-new-project="chooseNewProjectIntent"
+      @remove-project="removeProject"
+      @close="closeNewRoomModal"
+      @confirm-project="confirmProjectRoomFromModal"
+      @create-standalone="createStandaloneRoom"
+      @create-project="createProjectRoomFromModal"
+      @pick-project-parent="pickNewProjectParent"
+      @open-project="openProjectRoomFromModal"
+      @open-project-path="openProjectRoomFromPath"
+      @join="joinRoomCodeFromModal"
+      @retry="retryLastAction"
+    />
+  </Transition>
 </template>
 
 <script setup lang="ts">
@@ -539,7 +526,7 @@ const {
   projectBindings, loading, appInfo, updateStatus, workers, rootRoomSnapshot, selectedSnapshot, authStatus,
   authDialogOpen, sidebarMinWidth, sidebarMaxWidth, selectedRootRoomIdentifier,
   newRoomRecentProjectFolders, sidebarWidth, sidebarRevealRequest, isSidebarResizing,
-  settingsAccountRooms, rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread,
+  accountRooms, settingsAccountRooms, rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread,
   openConversationId, openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
   openAddAgentAfterRepoPick, notificationRevealMessageId, notificationRevealNonce, roomSettingsSectionRequest,
   chatStorageSettings, chatStorageAvailable, chatStorageBusy, chatStorageFeedback,
@@ -609,7 +596,7 @@ const {
 } = Object.assign(app, useAppInboxState(app));
 
 const {
-  activeEntry, collapsedProjects, currentParentRoom, pinnedCollapsed, repoName, roomsCollapsed,
+  activeEntry, collapsedProjects, currentParentRoom, pinnedCollapsed, roomsCollapsed,
   returnFromSettings, selectedAccess, selectedFocusRooms, selectedNeedsAccess,
   selectedRoomIdentifier, selectedRoomInfo, sidebarMode, toggleProject, togglePinnedCollapsed,
   toggleRoomsCollapsed,
@@ -677,9 +664,9 @@ const {
 
 const {
   clearMcpTargetSelection, completeMcpOnboarding, continueMcpOnboarding,
-  continueToRoomConfirmation, createFirstRunInviteRoom, finishFirstRunOnboarding,
-  firstRunInviteCode, firstRunRoomSelected, firstRunFeedback, goBackFirstRun, goBackMcpOnboarding,
-  installSelectedMcpTargets, joinRoomCode, pickRepoRoom, selectAllMcpTargets, selectMcpTarget,
+  continueToRoomConfirmation, finishFirstRunOnboarding, firstRunFinished,
+  firstRunRoomSelected, firstRunFeedback, goBackFirstRun, goBackMcpOnboarding,
+  installSelectedMcpTargets, joinRoomCode, selectAllMcpTargets, selectMcpTarget,
   setupApiAvailable, showFirstRunGate, showFirstRunSplash, visibleMcpInstallState,
   startFirstRunSetup,
 } = Object.assign(app, useAppSetupOnboarding(app));
@@ -730,6 +717,30 @@ const roomCompany = computed<RoomCompanyAppearance | null>(() => {
 const roomTheme = provideRoomTheme(themeAccountKey, roomCompany);
 const canSetCompanyTheme = computed(() => company.organizations.value.some(org =>
   org.github_org_id === roomCompany.value?.id && org.setup && org.role === "owner"));
+
+const firstRunRoomChoices = computed(() => company.activeId.value ? company.rooms.value : accountRooms.value.map(room => ({
+  room_id: room.roomIdentifier,
+  display_name: room.displayName,
+  kind: room.gitRoom ? "repo" as const : "room" as const,
+  full_name: room.gitRoom?.repository.fullName ?? null,
+  visibility: null,
+})));
+
+function openOnboardingCompanyStep() {
+  firstRunStage.value = "organization";
+  void app.refreshAccountRooms();
+}
+
+async function openOnboardingRoom(id: string) {
+  const snapshot = await joinRoomCode(id);
+  if (snapshot?.access.status === "ready") await finishFirstRunOnboarding(snapshot);
+}
+
+function openOnboardingNewRoom(mode: "create" | "join" | "project") {
+  selectNewRoomEntry();
+  if (mode === "join") chooseJoinIntent();
+  if (mode === "project") chooseProjectIntent();
+}
 
 const roomShellShown = computed(() =>
   !showCompanyHome.value && activeEntry.value.type === "room" && !selectedNeedsAccess.value);

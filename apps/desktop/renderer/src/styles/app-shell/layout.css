@@ -195,3 +195,11 @@ html[data-window-chrome="mac"] .desktop-shell[data-sidebar-mode="hidden"]::befor
   background: var(--bg); -webkit-app-region: drag;
 }
 html[data-window-chrome="mac"] .desktop-onboarding-shell { padding-top: 52px; }
+
+.desktop-onboarding-shell[data-welcome="true"] {
+  padding: 0;
+  background: #0c0e0d;
+}
+.desktop-onboarding-shell[data-welcome="true"] .first-run-wizard { width: 100%; min-height: 100dvh; }
+.desktop-onboarding-shell[data-welcome="true"] .welcome-screen { min-height: 100dvh; }
+html[data-window-chrome="mac"] .welcome-top { padding-top: 42px; }

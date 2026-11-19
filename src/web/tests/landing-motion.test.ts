@@ -5,7 +5,7 @@ import { before, test, type TestContext } from 'node:test'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
 import * as Vue from 'vue'
-import * as handoff from '../src/components/landing/room-handoff.js'
+import * as handoff from '../../../shared/ui/room-handoff.mjs'
 import * as bridge from '../src/components/landing/symbiosisData'
 
 let canvasSource: string
@@ -85,7 +85,7 @@ function environment(t: TestContext, { mobile = false, noCanvas = false } = {}) 
     const exports: any = {}
     Function('require', 'exports', source)((name: string) => {
       if (name === 'vue') return Vue
-      if (name === './room-handoff.js') return handoff
+      if (name.endsWith('/room-handoff.mjs')) return handoff
       if (name === './symbiosisData') return bridge
       if (name.startsWith('@/components/icons/')) return { default: { render: () => Vue.h('svg') } }
       throw new Error(`Unexpected component import: ${name}`)

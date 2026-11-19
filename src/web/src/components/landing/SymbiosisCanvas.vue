@@ -10,7 +10,7 @@
 
 <script setup>
 import { onMounted, onUnmounted, ref, watch } from 'vue'
-import { createHandoffPainter, handoffStillTime } from './room-handoff.js'
+import { createHandoffPainter, handoffStillTime } from '../../../../../shared/ui/room-handoff.mjs'
 
 defineProps({ theme: { type: String, default: 'dark' } })
 

@@ -108,7 +108,13 @@
         </div>
       </div>
 
-      <article v-else-if="!messages.length && !displayedAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
+      <Transition name="room-empty">
+        <RoomEmptyWelcome
+          v-if="!roomLoading && !messages.length && !displayedAgentWork.length && roomIdentifier && roomLabel && !hasFilteredRoomActivity"
+          :key="roomIdentifier" :room-name="roomLabel" :viewer-name="viewerName" @tour="emit('open-tour')"
+        />
+      </Transition>
+      <article v-if="!roomLoading && !messages.length && !displayedAgentWork.length && (!roomIdentifier || !roomLabel || hasFilteredRoomActivity)" class="room-empty-card" data-testid="room-chat-empty">
         <h3>{{ emptyStateTitle }}</h3>
         <p>{{ emptyStateDescription }}</p>
       </article>
@@ -166,6 +172,7 @@
 </template>
 
 <script setup lang="ts">
+import RoomEmptyWelcome from "./RoomEmptyWelcome.vue";
 import type { ChatScrollPosition } from "../../../../domain/chat-scroll";
 import RoomGitHubUpdates from "../../../../../../../../shared/ui/RoomGitHubUpdates.vue";
 import { createGitHubTimeline } from "../../../../../../../../shared/grouped-github-updates";
@@ -287,6 +294,8 @@ const props = defineProps<{
   roomDeliverySkipKeys?: ReadonlySet<string>;
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
+  roomLabel?: string | null;
+  viewerName?: string | null;
   githubActivityAvailable: boolean;
   roomLoading: boolean;
   searchQuery: string;
@@ -319,6 +328,7 @@ const emit = defineEmits<{
   "open-task": [taskId: string];
   /** An agent's runtime needs sign-in or installing: the Add agent setup shows how. */
   "open-add-agent": [];
+  "open-tour": [];
 }>();
 
 const emptyStateTitle = computed(() => {
@@ -1708,6 +1718,9 @@ function newestMessage(messages: readonly DesktopRoomMessage[]): DesktopRoomMess
 </script>
 
 <style scoped>
+.room-empty-leave-active { position: absolute; inset: 0; margin-inline: auto; pointer-events: none; transition: opacity 140ms ease, transform 140ms ease; }
+.room-empty-leave-to { opacity: 0; transform: translateY(-5px); }
+@media (prefers-reduced-motion: reduce) { .room-empty-leave-active { transition: none; } .room-empty-leave-to { transform: none; } }
 .room-explicit-unread { display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }
 .room-explicit-unread::before, .room-explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
 /* The open thread root, kept mounted while it is outside the window. */

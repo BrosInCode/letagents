@@ -26,6 +26,7 @@ const invitations = [{ github_org_id: '45', login: 'InvitedCo', avatar_url: null
 const companyRoom = { kind: 'repo', github_repo_id: '100', room_id: 'github.com/herotel/app', display_name: 'app', full_name: 'herotel/app', organization_id: '42', visibility: 'private' };
 const createdRooms = [];
 const openedGitHubPages = [];
+const sentMessages = new Map();
 const account = { id: 'fixture-account', provider: 'github', providerUserId: '1', login: 'alex', displayName: 'Alex', avatarUrl: null };
 const auth = () => ({ authenticated, account: authenticated ? account : null, apiUrl: 'https://letagents.chat', pendingDeviceAuth: null, tokenStored: authenticated, error: null });
 const target = { id: 'codex', name: 'Codex', description: 'Connect your agents.', configPath: '/fixture/config.toml', configPaths: [], configIssue: null, status: 'installed', lastInstalledAt: null, restartHint: 'Restart your agent app.' };
@@ -38,7 +39,7 @@ function snapshot(identifier = 'github.com/alex/personal') {
   Object.assign(value.room, { identifier, name: identifier, displayName: identifier.split('/').at(-1), code: identifier });
   const owningCompany = identifier === companyRoom.room_id ? organizations[0] : null;
   if (owningCompany) value.room.companyAppearance = { id: owningCompany.github_org_id, name: owningCompany.login, theme: owningCompany.theme_id, themeRevision: owningCompany.theme_revision };
-  value.messages = []; value.tasks = []; value.participants = []; value.presence = []; value.focusRooms = []; value.reasoningSessions = []; value.recentActivity = []; value.roomArtifacts = [];
+  value.messages = sentMessages.get(identifier) ?? []; value.tasks = []; value.participants = []; value.presence = []; value.focusRooms = []; value.reasoningSessions = []; value.recentActivity = []; value.roomArtifacts = [];
   return value;
 }
 ipcMain.handle('fixture:call', async (_event, method, args) => {
@@ -88,7 +89,17 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'room.listAccountRooms': return [];
     case 'room.getSourceStates': return {};
     case 'room.getMyWork': return { cards: [], next_cursor: null, has_connections: false, providers: [] };
-    case 'room.getLatestMessages': return [];
+    case 'room.getLatestMessages': return sentMessages.get(args[0]) ?? [];
+    case 'room.sendMessage': {
+      const [identifier, text, , , , clientMessageId] = args;
+      const message = {
+        id: "9001", clientMessageId, sender: account.login, text, timestamp: new Date().toISOString(),
+        source: "human", actorLabel: null, agentPromptKind: null, agentIdentity: null, attachments: [],
+        threadRootId: "9001", threadReplyToId: null, thread: null, replyTo: null,
+      };
+      sentMessages.set(identifier, [...(sentMessages.get(identifier) ?? []), message]);
+      return { message };
+    }
     case 'conversations.list': return { conversations: [], version: '0' };
     case 'conversations.changes': return { version: '0' };
     case 'repos.openRoom': {
@@ -120,13 +131,16 @@ const click = async (selector) => { await waitFor(`Boolean(document.querySelecto
 const capture = async (name) => { await new Promise((resolve) => setTimeout(resolve, 550)); writeFileSync(join(output, name), (await window.webContents.capturePage()).toPNG()); };
 try {
   await window.loadFile(join(root, 'dist-renderer/index.html'));
+  await waitFor(`document.querySelector('[data-testid="first-run-welcome"] canvas')?.width > 300`);
+  assert.match(await js('document.body.innerText'), /Make room to\s+work together/);
+  await new Promise(resolve => setTimeout(resolve, 2900));
+  await capture('00-animated-welcome.png');
   await click('[data-testid="first-run-start-setup"]');
-  await click('[data-testid="first-run-mcp-continue"]');
-  await click('[data-testid="first-run-mcp-install"]');
-  await click('[data-testid="first-run-to-github"]');
   await click('[data-testid="first-run-auth-start"]');
   await click('[data-testid="first-run-auth-poll"]');
-  // Step 3 of setup: one row per GitHub organization, chosen like the other setup steps.
+  await click('[data-testid="first-run-to-room"]');
+  assert.equal(calls.includes('setup.installMcpServer'), false);
+  // One row per GitHub organization.
   await waitFor(`document.querySelector('[data-stage="organization"]') && Boolean(document.querySelector('[data-testid="company-choice-42"]'))`);
   assert.equal(await js(`document.querySelector('[data-testid="company-choice-44"]').getAttribute('aria-disabled')`), 'true', 'a member waits for an owner');
   await click('.company-github-steps summary');
@@ -152,14 +166,33 @@ try {
   await waitFor(`document.body.innerText.includes('No rooms match your search.')`);
   await js(`{ const input = document.querySelector('.company-room-search input'); input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await capture('02-company-repo-room.png');
+  for (const [action, modalStep] of [['create', 'standalone'], ['join', 'join'], ['pick-repo', 'project']]) {
+    await click(`[data-testid="room-choice-${action}"]`);
+    await waitFor(`Boolean(document.querySelector('[data-testid="new-room-${modalStep}-step"]'))`);
+    await click('[aria-label="Close new room dialog"]');
+    await waitFor(`!document.querySelector('[data-testid="new-room-modal"]')`);
+  }
   await click('[data-testid="first-run-company-room-github.com/herotel/app"]');
-  await waitFor(`(document.querySelector('[data-testid="first-run-open-room"]')?.textContent || '').includes('Open herotel/app')`);
-  await click('[data-testid="first-run-open-room"]');
   await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);
   // The company filter sits on the Rooms heading.
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').includes('Herotel')`);
   await waitFor(`document.querySelector('[data-testid="desktop-shell"]')?.dataset.roomTheme === 'mint'`);
+  await waitFor(`document.querySelector('[data-testid="room-chat-empty"]')?.textContent.includes('Alex')`);
+  await click('[data-testid="room-chat-empty"] button');
+  await waitFor(`document.querySelector('[data-testid="room-guided-tour"]')?.open && Boolean(document.querySelector('.room-guide-thread path')?.getAttribute('d'))`);
+  const firstThread = await js(`document.querySelector('.room-guide-thread path').getAttribute('d')`);
+  await click('[data-testid="room-guide-next"]');
+  await waitFor(`document.querySelector('.room-guide-example h2')?.textContent === 'Chat'`);
+  assert.notEqual(await js(`document.querySelector('.room-guide-thread path').getAttribute('d')`), firstThread);
+  await capture('03-room-tour.png');
+  await click('[aria-label="Close quick tour"]');
   await capture('03-company-sidebar.png');
+  await click('[data-testid="desktop-composer-input"]');
+  await window.webContents.insertText('First message from onboarding');
+  await click('[data-testid="desktop-composer-send"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="room-message-9001"]')) && !document.querySelector('[data-testid="room-chat-empty"]')`);
+  assert.equal(sentMessages.get(companyRoom.room_id)?.length, 1);
+  await capture('03-first-message.png');
   await click('[data-testid="sidebar-account-trigger"]');
   await click('[data-testid="sidebar-account-settings"]');
   await click('[data-testid="settings-nav-system:styling"]');
@@ -270,7 +303,7 @@ try {
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').trim().startsWith('Rooms') && !document.querySelector('[data-testid="company-home"]')`);
   await capture('10-explicit-personal-room.png');
   assert.deepEqual(errors, [], 'renderer must not report uncaught errors');
-  const report = { passed: true, checks: ['first-run owner setup', 'company theme inheritance, owner updates and personal overrides', 'member waiting for owner', 'pending GitHub invitation', 'company repo room on the room step', 'company filter on the Rooms heading', 'empty company home', 'GitHub outage and retry', 'All rooms fallback', 'company link persistence and acknowledgement', 'company link dialog over any view', 'join from a company link', 'new room inside the company', 'pasted company link', 'explicit outside-company room opens in All rooms'], consoleErrors: errors, calls: [...new Set(calls)] };
+  const report = { passed: true, checks: ['animated desktop welcome and GitHub without MCP', 'real New Room entry points', 'room arrival, tour and first message', 'first-run owner setup', 'company theme inheritance, owner updates and personal overrides', 'member waiting for owner', 'pending GitHub invitation', 'company repo room on the room step', 'company filter on the Rooms heading', 'empty company home', 'GitHub outage and retry', 'All rooms fallback', 'company link persistence and acknowledgement', 'company link dialog over any view', 'join from a company link', 'new room inside the company', 'pasted company link', 'explicit outside-company room opens in All rooms'], consoleErrors: errors, calls: [...new Set(calls)] };
   writeFileSync(join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ passed: true, output, consoleErrors: errors }, null, 2));
 } catch (error) {

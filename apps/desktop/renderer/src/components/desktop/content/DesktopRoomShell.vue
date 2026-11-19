@@ -9,6 +9,8 @@
       :room="room"
       :storage="storage"
       :tabs="tabs"
+      :offer-tour="offerTour && !roomLoading"
+      @open-tour="openRoomTour"
       :pages-menu="pagesMenu"
       :active-tab="activeTab"
       :attention="attention"
@@ -85,6 +87,8 @@
       :has-filtered-room-activity="hasFilteredRoomActivity"
       :room-identifier="room.identifier"
       :room-label="room.displayName || room.name"
+      :viewer-name="viewerName"
+      @open-tour="openRoomTour"
       :github-events-visible="githubEventsVisible"
       :github-events-available="githubEventsAvailable"
       :room-loading="roomLoading"
@@ -350,6 +354,7 @@
       @choose-worktree="openAgentWorktree"
     />
     <AddAgentUnavailableModal v-else :open="addAgentModalOpen" @close="closeAddAgentModal" />
+    <RoomGuidedTour ref="roomGuide" />
   </section>
 </template>
 
@@ -377,6 +382,7 @@ import { desktopBoardTask } from "./room-board/board-workspace-tasks";
 import { canManageRoomBoard } from "./room-board/board-presentation";
 import { taskForTicketQuery, ticketRefParts } from "./room-board/ticket-ref";
 import RoomChatView from "./RoomChatView.vue";
+import RoomGuidedTour from "./room-chat/RoomGuidedTour.vue";
 import RoomEventsView from "./RoomEventsView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
 import RoomMemoryView from "./RoomMemoryView.vue";
@@ -412,6 +418,10 @@ import { supervisedAgentInspectorRequest } from "../../../domain/agent-inspector
 import { ownerAttribution as backgroundCommandOwner } from "./room-activity/agentTarget";
 const props = defineProps<DesktopRoomShellProps>();
 const emit = defineEmits<DesktopRoomShellEmits>();
+const roomGuide = ref<InstanceType<typeof RoomGuidedTour> | null>(null);
+function openRoomTour() {
+  void roomGuide.value?.open();
+}
 // "Invite a bot" in the composer's "+" menu: for a room on the server. A Git
 // Room's panel lists invite rooms first; the server decides what an invite does.
 const inviteBotContext = computed<RoomInviteBotContext | null>(() => {

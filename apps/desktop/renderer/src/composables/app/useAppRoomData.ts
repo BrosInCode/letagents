@@ -1,4 +1,5 @@
 import { computed, watch } from "vue";
+import type { DesktopRoomSnapshot } from "../../../../electron/ipc-types";
 import { preserveRoomRepoStatistics } from "../../domain/repo-status";
 import { isAuthSnapshotPending } from "../../components/desktop/content/auth-onboarding";
 import { useDesktopAccountRoomSettings } from "../useDesktopAccountRoomSettings";
@@ -109,7 +110,7 @@ export function useAppRoomManagement(context: unknown) {
     | "useAppRoomData"
     | "useAppSidebarEntries"
     | "useAppState"
-  >;
+  > & { finishFirstRunOnboarding?: (openedRoom?: DesktopRoomSnapshot) => Promise<void> };
   const {
     accountRooms, activeEntry, chatStorageSettings, handleRoomRenamed, leaveArchivedRoomIfActive,
     loading, openRoomSnapshot, pushActionToast, recentRootRooms, recentRootRoomsStorageKey,
@@ -160,6 +161,9 @@ export function useAppRoomManagement(context: unknown) {
   } = useDesktopNewRoomModal({
     openRoomSnapshot: (snapshot, options) => {
       openRoomSnapshot(snapshot, options);
+      if (app.firstRunStage.value === "room" && app.mcpInstallState.value?.completed === false) {
+        void app.finishFirstRunOnboarding?.(snapshot);
+      }
       if (options?.kind !== "project") return;
       const entryId = activeEntry.value.id;
       const project = sidebarProjectEntries.value.find((candidate) =>

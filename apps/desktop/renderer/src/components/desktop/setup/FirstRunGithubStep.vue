@@ -49,8 +49,6 @@
           </div>
 
           <div v-else-if="pendingAuth" key="pending" class="github-auth-state">
-            <strong>Finish in your browser.</strong>
-            <p>Confirm that this code matches in your browser.</p>
             <div class="auth-code-block" data-testid="first-run-device-code">
               <strong>{{ pendingAuth.userCode }}</strong>
               <button
@@ -80,7 +78,7 @@
               data-testid="first-run-auth-open"
               @click="$emit('open-verification', pendingAuth.verificationUri)"
             >
-              Open browser
+              Open GitHub
             </button>
 
             <button

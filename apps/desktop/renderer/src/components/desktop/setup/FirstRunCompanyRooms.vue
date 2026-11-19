@@ -1,12 +1,7 @@
 <template>
-  <section class="company-rooms" :aria-label="`${companyName} rooms`" data-testid="first-run-company-rooms">
+  <section class="company-rooms" :aria-label="companyName ? `${companyName} rooms` : 'Your rooms'" data-testid="first-run-company-rooms">
     <div v-if="rooms.length" class="company-rooms-group">
-      <div class="company-rooms-head">
-        <CompanyAvatar :login="companyName" :avatar-url="avatarUrl" size="s" />
-        <span>{{ companyName }} rooms</span>
-        <small>{{ rooms.length }}</small>
-      </div>
-      <label class="company-room-search"><Search aria-hidden="true" /><input v-model="query" type="search" placeholder="Find a room…" aria-label="Search company rooms"></label>
+      <label class="company-room-search"><Search aria-hidden="true" /><input v-model="query" type="search" placeholder="Find a room…" aria-label="Search rooms"></label>
       <button
         v-for="room in filteredRooms"
         :key="room.room_id"
@@ -21,7 +16,7 @@
         <Hash v-else class="company-rooms-icon" aria-hidden="true" />
         <strong>
           {{ roomName(room) }}
-          <span>{{ room.kind === "repo" ? `${companyName} repository` : "Shared room · By invitation" }}</span>
+          <span>{{ room.kind === "repo" ? room.full_name || "Repository" : "Shared room · By invitation" }}</span>
         </strong>
         <span v-if="room.visibility" class="company-rooms-visibility">{{ room.visibility === "private" ? "Private" : "Public" }}</span>
         <span v-else />
@@ -29,10 +24,6 @@
       </button>
       <p v-if="!filteredRooms.length" class="company-rooms-empty" role="status">No rooms match your search.</p>
     </div>
-    <p v-else class="company-rooms-empty">
-      No {{ companyName }} rooms yet. A repo appears here after a {{ companyName }} owner installs the LetAgents GitHub app on it, and you have a role on that repo.
-    </p>
-    <div class="company-rooms-or" aria-hidden="true">or</div>
   </section>
 </template>
 
@@ -40,12 +31,10 @@
 import { computed, ref } from "vue";
 import { BookMarked, Check, Hash, Search } from "@lucide/vue";
 import type { DesktopOrganizationRoom } from "../../../../../electron/ipc-types/organizations.js";
-import CompanyAvatar from "../company/CompanyAvatar.vue";
 
 const props = defineProps<{
-  companyName: string;
-  avatarUrl: string | null;
-  rooms: DesktopOrganizationRoom[];
+  companyName: string | null;
+  rooms: Array<Pick<DesktopOrganizationRoom, "kind" | "room_id" | "display_name" | "full_name" | "visibility">>;
   selectedRoomIdentifier: string | null;
   busy: boolean;
 }>();
@@ -55,11 +44,11 @@ const filteredRooms = computed(() => props.rooms.filter(room => `${roomName(room
 
 defineEmits<{ "choose-room": [roomId: string] }>();
 
-function isSelected(room: DesktopOrganizationRoom): boolean {
+function isSelected(room: Pick<DesktopOrganizationRoom, "room_id" | "display_name" | "full_name">): boolean {
   return room.room_id.toLowerCase() === props.selectedRoomIdentifier?.toLowerCase();
 }
 
-function roomName(room: DesktopOrganizationRoom): string {
+function roomName(room: Pick<DesktopOrganizationRoom, "room_id" | "display_name" | "full_name">): string {
   return room.full_name?.split("/")[1] || room.display_name;
 }
 </script>
@@ -75,23 +64,6 @@ function roomName(room: DesktopOrganizationRoom): string {
   overflow: hidden;
   border: 0;
   background: transparent;
-}
-
-.company-rooms-head {
-  display: flex;
-  gap: 9px;
-  align-items: center;
-  padding: 12px 14px;
-  margin-bottom: 10px;
-  color: var(--setup-text);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.company-rooms-head small {
-  margin-left: auto;
-  color: var(--setup-muted);
-  font-weight: 500;
 }
 
 .company-rooms-row {
@@ -111,10 +83,6 @@ function roomName(room: DesktopOrganizationRoom): string {
   text-align: left;
   cursor: pointer;
   transition: background-color 150ms ease;
-}
-
-.company-rooms-head + .company-rooms-row {
-  border-top: 0;
 }
 
 .company-rooms-row[aria-pressed="true"] {

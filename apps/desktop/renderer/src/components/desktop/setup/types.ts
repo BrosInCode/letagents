@@ -7,7 +7,7 @@ import type {
 import type { CompanyListStatus } from "../../../composables/useDesktopOrganizations";
 
 export type DesktopMcpWizardStep = "choose" | "install" | "done";
-export type FirstRunWizardStage = "welcome" | "mcp" | "github" | "organization" | "theme" | "room";
+export type FirstRunWizardStage = "welcome" | "github" | "organization" | "theme" | "room";
 
 /** What the company step shows: the person's GitHub organizations and where the check stands. */
 export interface FirstRunCompanyStepState {

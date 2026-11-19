@@ -11,9 +11,7 @@ import type { DesktopMcpWizardStep, FirstRunWizardStage } from "../components/de
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import { setupEntry } from "../domain/desktop-navigation";
 import { defaultMcpTargetSelection, fallbackMcpInstallState } from "../domain/mcp-install";
-import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
-import { preserveRoomRepoStatistics } from "../domain/repo-status";
-import { repoPickerErrorMessage } from "../domain/repo-picker-error";
+import type { RecentRootRoomKind } from "../domain/sidebar-rooms";
 import { desktopIpc } from "../ipc/index.js";
 import { isMembershipRefusal } from "../components/desktop/content/auth-onboarding";
 
@@ -47,7 +45,7 @@ interface DesktopSetupOnboardingOptions {
 
 export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions) {
   const firstRunRoomSelected = ref(false);
-  const firstRunInviteCode = ref<string | null>(null);
+  const firstRunFinished = ref(false);
   const initialBootstrapPending = ref(true);
 
   const showFirstRunGate = computed(() => {
@@ -157,10 +155,9 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpInstallFeedback.value = null;
     options.authFeedback.value = null;
     options.setupLoadError.value = null;
-    options.firstRunStage.value = "mcp";
+    options.firstRunStage.value = "github";
     options.mcpWizardStep.value = "choose";
     firstRunRoomSelected.value = false;
-    firstRunInviteCode.value = null;
   }
 
   function goBackMcpOnboarding(): void {
@@ -168,57 +165,15 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpWizardStep.value = "choose";
   }
 
-  async function pickRepoRoom(): Promise<boolean> {
-    options.loading.value = true;
-    options.mcpInstallFeedback.value = null;
-    options.authFeedback.value = "Opening the repo picker...";
-    options.setupLoadError.value = null;
-    try {
-      if (!desktopIpc.repos?.pickRoom) {
-        throw new Error("Restart LetAgents Desktop so the repo picker can open.");
-      }
-      const result = await desktopIpc.repos.pickRoom();
-      if (result.canceled) return false;
-      if (result.error || !result.snapshot) {
-        options.authFeedback.value = repoPickerErrorMessage(result.error, "LetAgents could not open a room from that folder.");
-        return false;
-      }
-      const repoPathLabel = rootPathLabel(result.repoPath);
-      const folderLabel = repoPathLabel || result.repoPath || "Selected project folder";
-      if (!canSelectFirstRunRoom(result.snapshot.access.status)) {
-        options.authFeedback.value = roomAccessFeedback(result.snapshot);
-        return false;
-      }
-      options.repoStatus.value = preserveRoomRepoStatistics(options.repoStatus.value, result.repoStatus);
-      options.openRoomSnapshot(result.snapshot, {
-        displayName: folderLabel,
-        kind: "project",
-        rootPath: result.repoPath,
-        meta: result.repoStatus?.branch || repoPathLabel || result.source || null,
-      });
-      firstRunInviteCode.value = null;
-      options.authFeedback.value = result.warning
-        || (roomNeedsAccessStep(result.snapshot.access.status) ? roomAccessFeedback(result.snapshot) : null);
-      firstRunRoomSelected.value = true;
-      return true;
-    } catch (error) {
-      options.authFeedback.value = repoPickerErrorMessage(error, "LetAgents could not open the repo picker.");
-      return false;
-    } finally {
-      options.loading.value = false;
-    }
-  }
-
-  async function joinRoomCode(roomCode: string): Promise<void> {
+  async function joinRoomCode(roomCode: string): Promise<DesktopRoomSnapshot | undefined> {
     const roomIdentifier = roomCode.trim();
-    if (!roomIdentifier) return;
+    if (!roomIdentifier || options.loading.value) return;
 
     options.loading.value = true;
     options.mcpInstallFeedback.value = null;
     options.authFeedback.value = null;
     options.setupLoadError.value = null;
     firstRunRoomSelected.value = false;
-    firstRunInviteCode.value = null;
     try {
       if (!desktopIpc.room?.getSnapshot) {
         throw new Error("Restart LetAgents Desktop so the room can be joined.");
@@ -240,47 +195,9 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         ? roomAccessFeedback(snapshot)
         : null;
       firstRunRoomSelected.value = true;
+      return snapshot;
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "LetAgents could not join that room.";
-    } finally {
-      options.loading.value = false;
-    }
-  }
-
-  async function createFirstRunInviteRoom(): Promise<void> {
-    if (options.loading.value) return;
-
-    options.loading.value = true;
-    options.mcpInstallFeedback.value = null;
-    options.authFeedback.value = null;
-    options.setupLoadError.value = null;
-    firstRunRoomSelected.value = false;
-    firstRunInviteCode.value = null;
-    try {
-      if (!desktopIpc.room?.createInviteRoom) {
-        throw new Error("Restart LetAgents Desktop so a room can be created.");
-      }
-      const result = await desktopIpc.room.createInviteRoom();
-      if (!canSelectFirstRunRoom(result.snapshot.access.status)) {
-        options.authFeedback.value = roomAccessFeedback(result.snapshot);
-        return;
-      }
-      const roomName = result.snapshot.room?.displayName
-        || result.snapshot.room?.name
-        || result.code;
-      options.repoStatus.value = null;
-      options.openRoomSnapshot(result.snapshot, {
-        displayName: roomName,
-        kind: "room",
-        rootPath: null,
-        meta: result.code,
-      });
-      firstRunInviteCode.value = result.code;
-      firstRunRoomSelected.value = true;
-    } catch (error) {
-      options.authFeedback.value = error instanceof Error
-        ? error.message
-        : "LetAgents could not create a room.";
     } finally {
       options.loading.value = false;
     }
@@ -307,8 +224,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     }
 
     if (options.firstRunStage.value === "github") {
-      options.firstRunStage.value = "mcp";
-      options.mcpWizardStep.value = "done";
+      options.firstRunStage.value = "welcome";
       return;
     }
 
@@ -434,10 +350,15 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.firstRunStage.value = "room";
   }
 
-  async function finishFirstRunOnboarding(): Promise<void> {
-    const roomIdentifier = firstRunRoomSelected.value
+  async function finishFirstRunOnboarding(openedRoom?: DesktopRoomSnapshot): Promise<void> {
+    if (options.mcpInstallBusy.value) return;
+    if (!options.authStatus.value?.authenticated) {
+      options.firstRunStage.value = "github";
+      return;
+    }
+    const roomIdentifier = openedRoom?.roomIdentifier ?? (firstRunRoomSelected.value
       ? options.pinnedRoom.value.roomIdentifier
-      : null;
+      : null);
 
     options.mcpInstallBusy.value = true;
     options.mcpInstallFeedback.value = null;
@@ -450,7 +371,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         if (!desktopIpc.room?.getSnapshot) {
           throw new Error("Restart LetAgents Desktop so the selected room can be verified.");
         }
-        const snapshot = await desktopIpc.room.getSnapshot(roomIdentifier);
+        const snapshot = openedRoom ?? await desktopIpc.room.getSnapshot(roomIdentifier);
         // A members-only room finishes setup like an open one: the main window
         // then shows its card, where the person asks to join.
         if (snapshot.access.status !== "ready" && !isMembershipRefusal(snapshot.access.status)) {
@@ -459,10 +380,11 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
           options.authFeedback.value = roomAccessFeedback(snapshot);
           return;
         }
-        options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
+        if (!openedRoom) options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
         options.authFeedback.value = null;
       }
       options.mcpInstallState.value = await desktopIpc.setup.completeMcpOnboarding();
+      firstRunFinished.value = true;
       await options.refresh();
       options.activeEntry.value = options.pinnedRoom.value;
     } catch (error) {
@@ -477,9 +399,8 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     completeMcpOnboarding,
     continueMcpOnboarding,
     continueToRoomConfirmation,
-    createFirstRunInviteRoom,
     finishFirstRunOnboarding,
-    firstRunInviteCode,
+    firstRunFinished,
     firstRunRoomSelected,
     firstRunFeedback,
     goBackFirstRun,
@@ -487,7 +408,6 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     installSelectedMcpTargets,
     joinRoomCode,
     loadFirstRunSetup,
-    pickRepoRoom,
     selectAllMcpTargets,
     selectMcpTarget,
     setupApiAvailable,

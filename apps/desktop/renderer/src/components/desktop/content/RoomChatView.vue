@@ -21,6 +21,9 @@
           :error="messagePins.state.value.error" @refresh="messagePins.refresh" @reveal="jumpToMessage" />
         <RoomMessageViewport
           ref="messageViewport"
+          :room-label="roomLabel"
+          :viewer-name="viewerName"
+          @open-tour="emit('open-tour')"
           v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="emit('open-agent-detail', workspaceAgentTarget($event, participants))"
           @open-add-agent="emit('open-add-agent')"
           :active-search-message-id="activeTimelineMessageId"
@@ -294,6 +297,7 @@ const props = defineProps<{
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   roomLabel?: string | null;
+  viewerName?: string | null;
   githubEventsVisible: boolean;
   githubEventsAvailable: boolean;
   roomLoading: boolean;
@@ -357,6 +361,7 @@ const emit = defineEmits<{
   "open-person": [target: PersonTarget, position: PersonMenuPosition];
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
   "open-add-agent": [];
+  "open-tour": [];
   "open-ask-agent": [];
   "scroll-position": [scrollTop: ChatScrollPosition];
   "open-github-event": [url: string];
