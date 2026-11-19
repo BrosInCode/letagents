@@ -38,14 +38,16 @@ export function processTreeHelperPath(options?: {
   exists?: (filePath: string) => boolean;
   includeLocalBuild?: boolean;
   /** The seal to check against (default shared/letagents-process-tree.seal.json), for tests. */
-  seal?: { builds?: Record<string, { sha256?: string }> } | null;
+  seal?: ProcessTreeSeal | null;
   /** Reads a candidate's bytes for the seal check, for tests. */
   readFile?: (filePath: string) => Uint8Array;
 }): string | null;
 /** Why the last helper found was not used (its bytes are not the sealed build), or null. */
 export function processTreeHelperRefusal(): string | null;
-/** The sealed sha256 of the helper built for `arch`, or null when no build for it is sealed. */
-export function sealedProcessTreeHelperSha256(arch?: string, seal?: { builds?: Record<string, { sha256?: string }> } | null): string | null;
+/** The sealed digests for `arch`: `builds.<arch>` is one build or a list of builds. Empty when none is sealed. */
+export function sealedProcessTreeHelperSha256s(arch?: string, seal?: ProcessTreeSeal | null): string[];
+/** The helper's seal: `builds.<arch>` is one build or a list of builds. */
+export interface ProcessTreeSeal { builds?: Record<string, { sha256?: string } | { sha256?: string }[]> }
 export function quoteWindowsArgument(argument: string): string;
 export function windowsCommandLine(file: string, args: readonly string[]): string;
 export function parseWindowsCommandLine(line: string): string[];

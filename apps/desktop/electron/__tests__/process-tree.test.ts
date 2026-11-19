@@ -19,7 +19,7 @@ import {
   processTreeHelperRefusal,
   quoteWindowsArgument,
   resolveWindowsCommand,
-  sealedProcessTreeHelperSha256,
+  sealedProcessTreeHelperSha256s,
   signalTree,
   signalTreeOutcome,
   spawnTree,
@@ -363,8 +363,12 @@ test("Windows: a helper found on disk is used only when its bytes are the sealed
   assert.equal(processTreeHelperPath({ platform: "win32", env: {}, resourcesPath, exists, includeLocalBuild: false, arch: "x64", seal: null, readFile: () => SEALED_BYTES }), null);
   // The committed seal is the one the app checks against.
   const committed = JSON.parse(readFileSync(new URL("../../../../shared/letagents-process-tree.seal.json", import.meta.url), "utf8"));
-  assert.equal(sealedProcessTreeHelperSha256("x64"), committed.builds.x64.sha256);
-  assert.match(String(sealedProcessTreeHelperSha256("x64")), /^[0-9a-f]{64}$/);
+  const committedBuilds = Array.isArray(committed.builds.x64) ? committed.builds.x64 : [committed.builds.x64];
+  assert.deepEqual(sealedProcessTreeHelperSha256s("x64"), committedBuilds.map((build: { sha256: string }) => build.sha256));
+  for (const digest of sealedProcessTreeHelperSha256s("x64")) assert.match(digest, /^[0-9a-f]{64}$/);
+  // A list of sealed builds (a runner image rollout): any of them is used.
+  const listed = { builds: { x64: [{ sha256: "0".repeat(64) }, SEAL.builds.x64] } };
+  assert.equal(processTreeHelperPath({ platform: "win32", env: { LETAGENTS_PROCESS_TREE_HELPER: HELPER }, resourcesPath, exists, arch: "x64", seal: listed, readFile: () => SEALED_BYTES }), HELPER);
 });
 
 test("Windows: the helper's bytes are read again on every use, so an edit in place is refused", () => {
