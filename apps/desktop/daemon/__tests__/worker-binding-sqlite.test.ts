@@ -199,7 +199,7 @@ test("synchronized fresh multi-process importers converge through WAL and schema
       await Promise.all(children.map((child) => new Promise<void>((resolve, reject) => child.once("message", (message) => message === "ready" ? resolve() : reject(new Error(`child readiness ${String(message)}`))))));
       for (const child of children) child.send("go");
       const stderr = children.map((child) => { let text = ""; child.stderr?.on("data", (chunk) => { text += String(chunk); }); return () => text; });
-      await Promise.all(children.map((child, index) => new Promise<void>((resolve, reject) => child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`fresh importer exited ${code}: ${stderr[index]!().trim()}`))))));
+      await Promise.all(children.map((child, index) => new Promise<void>((resolve, reject) => child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`fresh importer exited ${code}: ${stderr[index]!().trim()}`))))));
     }
     assertRedactedBackup(await readFile(`${env.legacy}.migrated-backup`, "utf8"), legacyRaw("agent_a"));
     await assertOwnerPrivate(`${env.legacy}.migrated-backup`, "file");

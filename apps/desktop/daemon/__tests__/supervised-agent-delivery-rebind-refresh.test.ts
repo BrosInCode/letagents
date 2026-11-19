@@ -392,8 +392,9 @@ test("rebind waits for an old provider turn, recovers its interrupted FIFO head,
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-rebind-drain-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   let delivery!: SupervisedAgentDelivery;
+  const release = deferred<{ turnId: string; outcome: "reply"; text: string }>();
   try {
-    const entered = deferred<void>(); const release = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+    const entered = deferred<void>();
     let turns = 0; let published = 0;
     delivery = new SupervisedAgentDelivery(store, provider(async () => {
       turns += 1;
@@ -426,6 +427,9 @@ test("rebind waits for an old provider turn, recovers its interrupted FIFO head,
     await delivery.fenceAndDrain();
     await store.close();
   } finally {
+    // Open the gates first: a provider turn or ingest that ignores abort would
+    // otherwise keep fenceAndDrain waiting and hide the failed assertion.
+    release.resolve({ turnId: "turn:1", outcome: "reply", text: "late" });
     // Stop the loop and close the database before the folder goes: on Windows an open
     // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
     await delivery?.fenceAndDrain().catch(() => undefined);
@@ -438,8 +442,9 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-ingest-rebind-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   let delivery!: SupervisedAgentDelivery;
+  const releaseIngest = deferred<void>();
   try {
-    const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>(); const successorPoll = deferred<void>();
+    const ingestEntered = deferred<void>(); const successorPoll = deferred<void>();
     const ingest = store.ingestSuccessfulPoll.bind(store);
     (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
@@ -473,6 +478,9 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
     await delivery.fenceAndDrain();
     await store.close();
   } finally {
+    // Open the gates first: a provider turn or ingest that ignores abort would
+    // otherwise keep fenceAndDrain waiting and hide the failed assertion.
+    releaseIngest.resolve();
     // Stop the loop and close the database before the folder goes: on Windows an open
     // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
     await delivery?.fenceAndDrain().catch(() => undefined);
@@ -597,8 +605,9 @@ test("concurrent refreshes install only the newest epoch and its handle drains r
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-refresh-epoch-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   let delivery!: SupervisedAgentDelivery;
+  const releaseIngest = deferred<void>();
   try {
-    const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>(); const currentPoll = deferred<void>();
+    const ingestEntered = deferred<void>(); const currentPoll = deferred<void>();
     const ingest = store.ingestSuccessfulPoll.bind(store);
     (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
@@ -635,6 +644,9 @@ test("concurrent refreshes install only the newest epoch and its handle drains r
     await delivery.fenceAndDrain();
     await store.close();
   } finally {
+    // Open the gates first: a provider turn or ingest that ignores abort would
+    // otherwise keep fenceAndDrain waiting and hide the failed assertion.
+    releaseIngest.resolve();
     // Stop the loop and close the database before the folder goes: on Windows an open
     // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
     await delivery?.fenceAndDrain().catch(() => undefined);
@@ -647,8 +659,9 @@ test("an external stop invalidates a refresh reservation still waiting on drain"
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-stop-epoch-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   let delivery!: SupervisedAgentDelivery;
+  const releaseIngest = deferred<void>();
   try {
-    const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>();
+    const ingestEntered = deferred<void>();
     const ingest = store.ingestSuccessfulPoll.bind(store);
     (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
@@ -672,6 +685,9 @@ test("an external stop invalidates a refresh reservation still waiting on drain"
     assert.equal(internals.loops.has(agent.agentId), false);
     await store.close();
   } finally {
+    // Open the gates first: a provider turn or ingest that ignores abort would
+    // otherwise keep fenceAndDrain waiting and hide the failed assertion.
+    releaseIngest.resolve();
     // Stop the loop and close the database before the folder goes: on Windows an open
     // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
     await delivery?.fenceAndDrain().catch(() => undefined);
@@ -711,9 +727,10 @@ test("a credential-only rebind clears recovery ownership for the successor conte
 
 test("startup recovery publishes durable work before a hanging first poll settles", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-startup-pump-"));
-  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite")); const item = await enqueue(store);
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   let delivery!: SupervisedAgentDelivery;
   try {
+    const item = await enqueue(store);
     await store.checkpointTurnStarted(item.inbox_item_id, "turn", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(item.inbox_item_id, "awaiting_result", { outcome: JSON.stringify({ kind: "reply", text: "durable" }) });
     await store.transition(item.inbox_item_id, "publishing");
