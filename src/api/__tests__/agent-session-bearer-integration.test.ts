@@ -105,6 +105,9 @@ test("worker bearer route registry is default-deny and semantic", () => {
     ["POST", "/rooms/room_1/attachments/uploads", "messages.write"],
     ["DELETE", "/rooms/room_1/attachments/uploads/upl_1", "messages.write"],
     ["GET", "/rooms/room_1/messages/msg_4/attachments/att_2", "messages.read"],
+    // The text of a PDF attachment, read on the server.
+    ["GET", "/rooms/room_1/messages/msg_4/attachments/att_2/text", "messages.read"],
+    ["GET", "/rooms/github.com/org/repo/messages/msg_4/attachments/att_2/text", "messages.read"],
     ["GET", "/rooms/room_1/artifacts", "artifacts.read"],
     ["POST", "/rooms/room_1/artifacts", "artifacts.self_write"],
     ["GET", "/rooms/room_1/tasks", "coordination.read"],
@@ -131,6 +134,7 @@ test("worker bearer route registry is default-deny and semantic", () => {
     ["GET", "/rental/provider/requests"], ["POST", "/rental/sessions/rental_1/complete"],
     ["DELETE", "/rooms/room_1/messages/msg_4/attachments/att_2"], ["GET", "/rooms/room_1/messages/msg_4/attachments/att_2/extra"],
     ["GET", "/rooms/room_1/messages/msg_4/attachments/upl_2"],
+    ["POST", "/rooms/room_1/messages/msg_4/attachments/att_2/text"], ["GET", "/rooms/room_1/messages/msg_4/attachments/att_2/text/more"],
     ["POST", "/rooms/room_1/demo-marks"], ["DELETE", "/rooms/room_1/demo-marks/dmk_aaaaaaaaaaaaaaaaaaaaaa"],
     ["GET", "/rooms/room_1/demo-marks/dmk_aaaaaaaaaaaaaaaaaaaaaa"],
   ]) assert.equal(requiredAgentSessionRouteCapability(method, route), null, `${method} ${route} must remain default-deny`);
