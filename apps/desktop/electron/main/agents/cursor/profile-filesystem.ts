@@ -22,6 +22,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { openNoFollowSync, ownerPrivatePlatform, protectOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../../../shared/owner-private-fs.mjs";
 import { getLetAgentsLocalStatePath } from "../../paths.js";
@@ -449,4 +450,59 @@ export function readRegularFileNoFollow(path: string, maxBytes: number): Buffer 
 export function normalizePath(value: string | null | undefined): string | null {
   const trimmed = String(value ?? "").trim();
   return trimmed ? resolve(trimmed) : null;
+}
+
+const WINDOWS_TRANSIENT_RM_ERROR_CODES = new Set(["EBUSY", "ENOTEMPTY", "EPERM"]);
+const WINDOWS_DISPOSABLE_ROOT_RM_TIMEOUT_MS = 5_000;
+const WINDOWS_DISPOSABLE_ROOT_RM_INITIAL_DELAY_MS = 25;
+const WINDOWS_DISPOSABLE_ROOT_RM_MAX_DELAY_MS = 250;
+
+export interface RemoveDisposableCursorProfileRootOptions {
+  platform?: NodeJS.Platform;
+  timeoutMs?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  rmImpl?: (targetPath: string, options: { recursive: boolean; force: boolean }) => Promise<void>;
+  wait?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+/**
+ * Remove a disposable Cursor inspection/probe profile root. On Windows, NTFS
+ * delete-pending finalization and antivirus minifilters can briefly return
+ * EPERM, ENOTEMPTY, or EBUSY right after a Job Object drains its processes, so
+ * retry those transient codes boundedly without blocking the event loop. Never
+ * swallow persistent failures: callers enforcing pass-one/pass-two isolation
+ * depend on this resolving only once the root is actually gone.
+ */
+export async function removeDisposableCursorProfileRoot(
+  targetPath: string,
+  options: RemoveDisposableCursorProfileRootOptions = {},
+): Promise<void> {
+  const platform = options.platform ?? process.platform;
+  const rmImpl = options.rmImpl ?? ((path, rmOptions) => rm(path, rmOptions));
+  if (platform !== "win32") {
+    await rmImpl(targetPath, { recursive: true, force: true });
+    return;
+  }
+  const wait = options.wait ?? ((ms) => new Promise<void>((resolveWait) => setTimeout(resolveWait, ms)));
+  const now = options.now ?? Date.now;
+  const timeoutMs = options.timeoutMs ?? WINDOWS_DISPOSABLE_ROOT_RM_TIMEOUT_MS;
+  const maxDelayMs = options.maxDelayMs ?? WINDOWS_DISPOSABLE_ROOT_RM_MAX_DELAY_MS;
+  let delayMs = options.initialDelayMs ?? WINDOWS_DISPOSABLE_ROOT_RM_INITIAL_DELAY_MS;
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    try {
+      await rmImpl(targetPath, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      const remainingMs = deadline - now();
+      if (!code || !WINDOWS_TRANSIENT_RM_ERROR_CODES.has(code) || remainingMs <= 0) {
+        throw error;
+      }
+      await wait(Math.min(delayMs, remainingMs));
+      delayMs = Math.min(delayMs * 2, maxDelayMs);
+    }
+  }
 }

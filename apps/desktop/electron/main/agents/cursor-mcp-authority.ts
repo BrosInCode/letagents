@@ -1,4 +1,8 @@
-import { spawnTree } from "../../../../../shared/process-tree.mjs";
+import {
+  PROCESS_TREE_UNKILLABLE_EXIT_CODE,
+  spawnTree,
+  terminateTreeOutcome,
+} from "../../../../../shared/process-tree.mjs";
 import {
   accessSync,
   constants as fsConstants,
@@ -25,6 +29,7 @@ export type CursorMcpListResult = {
 const CURSOR_MCP_INSPECTION_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 8_000;
 const CURSOR_MCP_INSPECTION_REAP_GRACE_MS = 500;
 const CURSOR_MCP_INSPECTION_PARENT_TERMINAL_GRACE_MS = 3_000;
+const CURSOR_MCP_INSPECTION_WINDOWS_KILL_WAIT_MS = 6_000;
 const CURSOR_MCP_INSPECTION_GROUP_RETIRE_TIMEOUT_MS = 3_000;
 const MAX_CURSOR_MCP_LIST_BYTES = 64 * 1024;
 const ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*m/g;
@@ -80,9 +85,18 @@ let outputWaiters = [];
 let nativeClosed = false;
 let resolveNativeClosed = () => {};
 const nativeClose = new Promise((resolve) => { resolveNativeClosed = resolve; });
+let terminationForced = false;
+let resolveForcedTermination = () => {};
+const forcedTermination = new Promise((resolve) => { resolveForcedTermination = resolve; });
 let hardFailureTimer = null;
 
 function wait(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function requestForcedReap() {
+  terminationForced = true;
+  resolveForcedTermination();
+  if (started) void beginReaping();
+  else process.exit(1);
+}
 function ownGroupMembers() {
   if (process.platform === "win32") return [];
   try {
@@ -140,6 +154,8 @@ function forwardOutput(source, target, chunk) {
   outputBytes += chunk.length;
   if (outputBytes > maxOutputBytes) {
     outputOverflow = true;
+    terminationForced = true;
+    resolveForcedTermination();
     source.pause();
     void reportWrapperError("ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
     void beginReaping();
@@ -177,6 +193,32 @@ function beginReaping() {
   reaping = (async () => {
     if (!started || !native) {
       process.exit(1);
+      return;
+    }
+    if (process.platform === "win32") {
+      // On Windows the wrapper runs inside letagents-process-tree.exe's Job
+      // Object, which ends every descendant and waits for the job to empty as
+      // soon as this wrapper exits. On a normal native exit, wait for inherited
+      // stdio pipes to close under the existing 3 s hardFailureTimer (matching
+      // staging) while waking immediately if forced termination, timeout,
+      // abort, or stdio failure arrives.
+      if (!terminationForced && !outputBroken && !outputOverflow && !nativeClosed) {
+        await Promise.race([nativeClose, forcedTermination]);
+      }
+      if (terminationForced || outputBroken || outputOverflow || !nativeClosed) {
+        signalOwnGroup("SIGTERM");
+        await reportWrapperError(outputOverflow
+          ? "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+          : outputBroken
+            ? "ERR_CHILD_PROCESS_STDIO"
+            : "ERR_CHILD_PROCESS_REAP");
+        if (hardFailureTimer) clearTimeout(hardFailureTimer);
+        process.exit(1);
+        return;
+      }
+      await publishTerminal();
+      if (hardFailureTimer) clearTimeout(hardFailureTimer);
+      process.exit(!outputBroken && !outputOverflow && nativeTerminal && nativeTerminal.type === "exit" && nativeTerminal.code === 0 ? 0 : 1);
       return;
     }
     let members = ownGroupMembers();
@@ -298,14 +340,16 @@ function start() {
 process.on("message", (message) => {
   if (!message || typeof message !== "object") return;
   if (message.type === "start") start();
-  if (message.type === "terminate") { if (started) void beginReaping(); else process.exit(1); }
+  if (message.type === "terminate") requestForcedReap();
 });
-process.on("disconnect", () => { if (started) void beginReaping(); else process.exit(1); });
-process.on("SIGTERM", () => { if (started) void beginReaping(); else process.exit(1); });
-process.on("SIGINT", () => { if (started) void beginReaping(); else process.exit(1); });
+process.on("disconnect", requestForcedReap);
+process.on("SIGTERM", requestForcedReap);
+process.on("SIGINT", requestForcedReap);
 function breakOutput() {
   if (outputBroken) return;
   outputBroken = true;
+  terminationForced = true;
+  resolveForcedTermination();
   const waiters = outputWaiters;
   outputWaiters = [];
   for (const resolve of waiters) resolve();
@@ -571,12 +615,20 @@ function execCursorInspection(
     let wrapperPreparing = false;
     let terminationRequested = false;
     let safeForcedReap = false;
+    let settled = false;
     let nativeTerminal: { type: "exit"; code: number | null; signal: NodeJS.Signals | null } | { type: "error"; error: string } | null = null;
 
-    const settleWithoutClose = () => {
+    const settle = (result: CursorMcpListResult) => {
+      if (settled) return;
+      settled = true;
       if (terminalTimer) clearTimeout(terminalTimer);
       if (commandTimer) clearTimeout(commandTimer);
       signal?.removeEventListener("abort", abort);
+      resolveResult(result);
+    };
+
+    const settleWithoutClose = () => {
+      if (settled) return;
       child.stdout?.destroy();
       child.stderr?.destroy();
       try {
@@ -586,7 +638,7 @@ function execCursorInspection(
         // a nonresponsive wrapper must not retain the caller indefinitely.
       }
       child.unref();
-      resolveResult({
+      settle({
         ok: false,
         stdout,
         stderr,
@@ -594,14 +646,7 @@ function execCursorInspection(
       });
     };
 
-    const requestTermination = (code: string) => {
-      if (!errorCode) errorCode = code;
-      if (terminationRequested) return;
-      terminationRequested = true;
-      terminalTimer = setTimeout(
-        settleWithoutClose,
-        CURSOR_MCP_INSPECTION_PARENT_TERMINAL_GRACE_MS,
-      );
+    const sendTerminate = () => {
       // IPC is an exact capability to this ChildProcess. Unlike a numeric PID,
       // it cannot be recycled between a birth check and signal dispatch.
       const disconnectExactChannel = () => {
@@ -616,9 +661,52 @@ function execCursorInspection(
         child.send({ type: "terminate" }, (error) => {
           if (error) disconnectExactChannel();
         });
-      } catch (error) {
+      } catch {
         disconnectExactChannel();
       }
+    };
+
+    const requestTermination = (code: string) => {
+      if (!errorCode) errorCode = code;
+      if (terminationRequested) return;
+      terminationRequested = true;
+      if (process.platform === "win32") {
+        // On Windows, child is letagents-process-tree.exe holding the wrapper
+        // and all Cursor/MCP descendants in its Job Object. Wait for
+        // terminateTreeOutcome to empty that job before resolving so the caller
+        // never tries to remove the disposable root while the helper or a
+        // descendant still holds it as cwd.
+        void terminateTreeOutcome(child, {
+          graceful: true,
+          graceMs: CURSOR_MCP_INSPECTION_PARENT_TERMINAL_GRACE_MS,
+          killWaitMs: CURSOR_MCP_INSPECTION_WINDOWS_KILL_WAIT_MS,
+          requestStop: sendTerminate,
+        }).finally(() => {
+          if (settled) return;
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          try {
+            if (child.connected) child.disconnect();
+          } catch {
+            // Best-effort channel cleanup after bounded process-tree teardown.
+          }
+          if (child.exitCode === null && child.signalCode === null) {
+            child.unref();
+          }
+          settle({
+            ok: false,
+            stdout,
+            stderr,
+            errorCode: errorCode ?? "ERR_CHILD_PROCESS_REAP",
+          });
+        });
+        return;
+      }
+      terminalTimer = setTimeout(
+        settleWithoutClose,
+        CURSOR_MCP_INSPECTION_PARENT_TERMINAL_GRACE_MS,
+      );
+      sendTerminate();
     };
     const appendOutput = (target: "stdout" | "stderr", chunk: Buffer) => {
       outputBytes += chunk.length;
@@ -696,12 +784,15 @@ function execCursorInspection(
       if (commandTimer) clearTimeout(commandTimer);
       if (terminalTimer) clearTimeout(terminalTimer);
       signal?.removeEventListener("abort", abort);
+      if (process.platform === "win32" && code === PROCESS_TREE_UNKILLABLE_EXIT_CODE && !errorCode) {
+        errorCode = "ERR_CHILD_PROCESS_REAP";
+      }
       void awaitCursorMcpInspectionGroupRetired(
         wrapperPid,
         wrapperStarted ? wrapperIdentity : null,
         dependencies,
       ).then(() => {
-        resolveResult({
+        settle({
           ok: (code === 0 || safeForcedReap)
             && !errorCode
             && nativeTerminal?.type === "exit"
@@ -712,7 +803,7 @@ function execCursorInspection(
           errorCode,
         });
       }, () => {
-        resolveResult({
+        settle({
           ok: false,
           stdout,
           stderr,
