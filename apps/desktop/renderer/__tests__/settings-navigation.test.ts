@@ -63,6 +63,8 @@ test("settings search reaches nested recovery and publishing panes without dupli
   assert.equal(ids("").length, 11);
   assert.deepEqual(ids("styling"), ["system:styling"]);
   assert.deepEqual(ids("demos"), ["system:demos"]);
+  assert.deepEqual(ids("cdn"), ["system:demos"]);
+  assert.deepEqual(ids("google fonts"), ["system:demos"]);
   assert.deepEqual(ids("chat colors"), ["system:styling"]);
   assert.deepEqual(ids("jira"), ["account:connectors"]);
   assert.deepEqual(ids("github issues"), ["account:connectors"]);

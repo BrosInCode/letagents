@@ -1,5 +1,5 @@
 <template>
-  <section class="settings-panel settings-demos-panel" data-testid="settings-demos-panel" :data-cdn="shownOn ? 'on' : 'off'">
+  <section class="settings-panel settings-demos-panel" data-testid="settings-demos-panel" :data-cdn="!settings ? 'unknown' : shownOn ? 'on' : 'off'">
     <div class="settings-control-list">
       <SettingsRow
         class="settings-demos-cdn-row"
@@ -10,11 +10,13 @@
         <ul class="settings-demos-hosts" aria-label="Allowed sites">
           <li v-for="host in hostChips" :key="host.label" :title="host.title"><span>{{ host.label }}</span></li>
         </ul>
-        <div class="settings-demos-state" aria-live="polite">
-          <p :data-shown="state === 'on'">On. Demos you open load their libraries. A demo already open keeps what it has.</p>
-          <p :data-shown="state === 'off'">Off. Demos load nothing from the internet, and open demos stop at once. A demo that needs a library may show empty parts.</p>
-          <p :data-shown="state === 'error'" role="alert">{{ errorText }}</p>
+        <!-- Every line stays in one cell, so a change never moves the layout; screen readers hear the line below instead. -->
+        <div class="settings-demos-state" aria-hidden="true">
+          <p :data-shown="state === 'on'">{{ LINES.on }}</p>
+          <p :data-shown="state === 'off'">{{ LINES.off }}</p>
+          <p :data-shown="state === 'error'" data-tone="error">{{ errorText }}</p>
         </div>
+        <p class="sr-only" role="status">{{ announcement }}</p>
         <template #action>
           <DesktopSwitch
             :checked="shownOn"
@@ -50,6 +52,11 @@ import { desktopIpc } from "../../../../ipc/index.js";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import SettingsRow from "../SettingsRow.vue";
 
+const LINES = {
+  on: "On. Demos you open load their libraries. A demo already open keeps what it has.",
+  off: "Off. Demos load nothing from the internet; a demo already open keeps what it has but loads nothing more. A demo that needs a library may show empty parts.",
+};
+
 /** What main last said; null until it answers. */
 const settings = ref<DesktopDemoSettings | null>(null);
 /** What the switch shows: the new value while a change saves, then what main saved. */
@@ -58,8 +65,14 @@ const busy = ref(false);
 const unavailable = ref(false);
 const state = ref<"loading" | "on" | "off" | "error">("loading");
 const errorText = ref("");
+/** What screen readers hear: empty while a change saves, so the same result twice is heard twice. */
+const announcement = ref("");
 
-/** One chip per CDN; Google's two font hosts are one chip, named in its tooltip. */
+/**
+ * One chip per CDN; Google's two font hosts are one chip, named in its
+ * tooltip. Main's list (HTML_DEMO_CDN_HOSTS) wins; this copy only fills the
+ * row until main answers, so the layout does not jump.
+ */
 const hostChips = computed(() => {
   const hosts = settings.value?.cdnHosts ?? ["cdnjs.cloudflare.com", "cdn.jsdelivr.net", "unpkg.com", "fonts.googleapis.com", "fonts.gstatic.com"];
   const fonts = hosts.filter((host) => host.startsWith("fonts."));
@@ -72,19 +85,23 @@ const hostChips = computed(() => {
 onMounted(async () => {
   const bridge = desktopIpc.demos;
   if (!bridge?.getSettings) {
+    showError("Restart LetAgents to change demo settings.");
     unavailable.value = true;
-    errorText.value = "Restart LetAgents to change demo settings.";
-    state.value = "error";
     return;
   }
   try {
     apply(await bridge.getSettings());
-  } catch (cause) {
+  } catch {
+    showError("Demo settings could not be read. Restart LetAgents and try again.");
     unavailable.value = true;
-    errorText.value = cause instanceof Error ? cause.message : "Demo settings could not be read.";
-    state.value = "error";
   }
 });
+
+function showError(text: string): void {
+  errorText.value = text;
+  state.value = "error";
+  announcement.value = text;
+}
 
 function apply(next: DesktopDemoSettings): void {
   settings.value = next;
@@ -96,15 +113,17 @@ async function toggle(): Promise<void> {
   const bridge = desktopIpc.demos;
   if (!settings.value || busy.value || !bridge) return;
   const saved = settings.value.cdnLibraries;
-  // The switch answers at once; the save follows.
+  // The switch and its line answer at once; the save follows.
   shownOn.value = !saved;
+  state.value = saved ? "off" : "on";
+  announcement.value = "";
   busy.value = true;
   try {
     apply(await bridge.setCdnLibraries(!saved));
+    announcement.value = saved ? LINES.off : LINES.on;
   } catch {
     shownOn.value = saved;
-    errorText.value = "The change was not saved. Demos still follow the switch as shown. Try again.";
-    state.value = "error";
+    showError("The change was not saved. Demos still follow the switch as shown. Try again.");
   } finally {
     busy.value = false;
   }
@@ -180,7 +199,7 @@ async function toggle(): Promise<void> {
   transition: opacity 90ms ease, transform 90ms ease, visibility 0s linear 90ms;
 }
 
-.settings-demos-state > p[role="alert"] {
+.settings-demos-state > p[data-tone="error"] {
   color: var(--red-text);
 }
 

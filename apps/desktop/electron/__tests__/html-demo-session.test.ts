@@ -99,13 +99,14 @@ describe("the demo session and the CDN setting", () => {
   });
 
   it("refuses a value that is not on or off, and changes nothing", async () => {
+    await demo.setDesktopDemoCdnLibraries(true);
     await assert.rejects(demo.setDesktopDemoCdnLibraries("false"), /Choose on or off/);
     await assert.rejects(demo.setDesktopDemoCdnLibraries(undefined), /Choose on or off/);
     assert.equal((await demo.getDesktopDemoSettings()).cdnLibraries, true);
   });
 
   it("keeps room pages offline while demos may use the CDNs", async () => {
-    assert.equal((await demo.getDesktopDemoSettings()).cdnLibraries, true);
+    await demo.setDesktopDemoCdnLibraries(true);
     const ses = await pages.roomPageSession() as unknown as FakeSession;
     assert.notEqual(ses, sessions.get("letagents-html-demos"));
     pages.roomPageContents.set(7, DEMO_HOST);
