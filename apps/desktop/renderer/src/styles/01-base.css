@@ -71,6 +71,16 @@
   color: var(--text);
 }
 
+:root[data-theme="light"] .room-chat-page {
+  color-scheme: light;
+  background: var(--bg);
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .room-chat-page {
+  color-scheme: dark;
+}
+
 .desktop-shell:has(.desktop-board-panel) {
   color-scheme: light dark;
 }

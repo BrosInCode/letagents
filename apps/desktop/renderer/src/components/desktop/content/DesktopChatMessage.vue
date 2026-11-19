@@ -23,6 +23,7 @@
     :style="{ '--message-accent': senderColor, ...chatStyling.styleFor(senderRole) }"
     :data-owner-kind="ownerKind"
     :data-chat-role="senderRole"
+    :data-outgoing-status="message.outgoing?.status || undefined"
     :data-message-id="message.id"
     :data-thread-message-id="threadMessageId || undefined"
     :data-testid="testId || `room-message-${message.id}`"
@@ -123,14 +124,58 @@
         </div>
       </div>
 
-      <div v-if="message.outgoing" class="room-message-outgoing" role="status" aria-live="polite">
-        <span v-if="message.outgoing.attachmentCount">{{ message.outgoing.attachmentCount }} attachment{{ message.outgoing.attachmentCount === 1 ? "" : "s" }} · </span>
-        <span>{{ message.outgoing.status === "pending" ? "Sending…" : message.outgoing.error?.includes('expressions_disabled:') ? "GIF sending is off in this room" : "Delivery not confirmed" }}</span>
-        <button v-if="message.outgoing.status === 'uncertain'" type="button" :title="message.outgoing.error || undefined" @click="retryDesktopOutgoingMessage(message.clientMessageId || '')">Retry safely</button>
-        <template v-if="message.gif && message.outgoing.error?.includes('expressions_disabled:')">
-          <button v-if="message.text.trim() || message.outgoing.attachmentCount" type="button" @click="sendDesktopOutgoingWithoutGif(message.clientMessageId || '')">Send without GIF</button>
-          <button v-else type="button" @click="discardRefusedDesktopGif(message.clientMessageId || '')">Remove unsent GIF</button>
-        </template>
+      <div
+        v-if="message.outgoing"
+        class="room-message-outgoing"
+        :data-status="message.outgoing.status"
+        :data-tone="outgoingTone"
+        role="status"
+        aria-live="polite"
+      >
+        <span class="room-message-outgoing-status">
+          <Clock v-if="message.outgoing.status === 'pending'" class="room-message-outgoing-icon" :size="12" aria-hidden="true" />
+          <CircleAlert v-else class="room-message-outgoing-icon" :size="12" aria-hidden="true" />
+          <span class="room-message-outgoing-label">{{ outgoingStatusText }}</span>
+        </span>
+        <span v-if="outgoingAttachmentSummary" class="room-message-outgoing-meta">{{ outgoingAttachmentSummary }}</span>
+        <div v-if="message.outgoing.status === 'uncertain' || message.outgoing.status === 'refused'" class="room-message-outgoing-actions">
+          <button
+            v-if="message.outgoing.status === 'uncertain'"
+            type="button"
+            class="room-message-outgoing-retry"
+            :title="message.outgoing.error || undefined"
+            data-testid="room-message-outgoing-retry"
+            @click="retryDesktopOutgoingMessage(message.clientMessageId || '')"
+          >
+            <RotateCw :size="12" aria-hidden="true" />
+            <span>Retry safely</span>
+          </button>
+          <template v-else-if="message.gif && message.outgoing.error?.includes('expressions_disabled:')">
+            <button v-if="message.text.trim() || message.outgoing.attachmentCount" type="button" class="room-message-outgoing-secondary" @click="sendDesktopOutgoingWithoutGif(message.clientMessageId || '')">Send without GIF</button>
+            <button v-else type="button" class="room-message-outgoing-secondary" @click="discardRefusedDesktopGif(message.clientMessageId || '')">Remove unsent GIF</button>
+          </template>
+          <template v-else>
+            <button
+              type="button"
+              class="room-message-outgoing-discard"
+              :title="message.outgoing.error || undefined"
+              data-testid="room-message-outgoing-discard"
+              @click="discardRefusedDesktopOutgoingMessage(message.clientMessageId || '')"
+            >
+              <span>{{ message.text.trim() ? "Discard & edit" : "Discard" }}</span>
+            </button>
+            <button
+              type="button"
+              class="room-message-outgoing-secondary"
+              :title="message.outgoing.error || undefined"
+              data-testid="room-message-outgoing-retry"
+              @click="retryDesktopOutgoingMessage(message.clientMessageId || '')"
+            >
+              <RotateCw :size="12" aria-hidden="true" />
+              <span>Retry</span>
+            </button>
+          </template>
+        </div>
       </div>
       <div class="room-message-bubble">
         <button
@@ -156,7 +201,7 @@
         />
 
         <DesktopLongMessageContent
-          v-else-if="(!message.gif || visibleText) && !(message.gif?.text_fallback_only && gifState !== 'unavailable')"
+          v-else-if="(!message.gif || visibleText) && (!message.outgoing?.attachmentCount || visibleText) && !(message.gif?.text_fallback_only && gifState !== 'unavailable')"
           :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
@@ -174,6 +219,17 @@
           compact
         />
         <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @state="gifState = $event" />
+        <ul
+          v-if="message.outgoing && !message.attachments.length && outgoingAttachmentItems.length"
+          class="room-message-outgoing-attachments"
+          aria-label="Queued attachments"
+        >
+          <li v-for="item in outgoingAttachmentItems" :key="item.upload_id" class="room-message-outgoing-attachment">
+            <Paperclip :size="13" aria-hidden="true" />
+            <strong>{{ item.fileName || "Attachment" }}</strong>
+            <small v-if="item.sizeLabel">{{ item.sizeLabel }}</small>
+          </li>
+        </ul>
         <DesktopMessageAttachments
           v-if="message.attachments.length"
           :message-id="message.id"
@@ -200,6 +256,15 @@
             {{ threadSummary.unreadCount }}
           </span>
           <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
+          <span
+            v-if="threadSummary.hasRefusedOutgoing || threadSummary.hasUncertainOutgoing || threadSummary.hasPendingOutgoing"
+            class="room-thread-outgoing-badge"
+            :data-status="threadSummary.hasRefusedOutgoing ? 'refused' : threadSummary.hasUncertainOutgoing ? 'uncertain' : 'pending'"
+          >
+            <CircleAlert v-if="threadSummary.hasRefusedOutgoing || threadSummary.hasUncertainOutgoing" :size="11" aria-hidden="true" />
+            <Clock v-else :size="11" aria-hidden="true" />
+            <span>{{ threadSummary.hasRefusedOutgoing ? "Not sent" : threadSummary.hasUncertainOutgoing ? "Delivery not confirmed" : "Sending…" }}</span>
+          </span>
         </span>
         <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
           <span
@@ -430,10 +495,16 @@ import { visibleReceipt } from "../../../domain/message-receipt-view";
 import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
 import MessageReminderMenu from "./MessageReminderMenu.vue";
 import { reminderAccount } from "../../../composables/useMessageReminders";
-import { discardRefusedDesktopGif, sendDesktopOutgoingWithoutGif, retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
+import {
+  discardRefusedDesktopGif,
+  discardRefusedDesktopOutgoingMessage,
+  sendDesktopOutgoingWithoutGif,
+  retryDesktopOutgoingMessage,
+} from "../../../domain/message-outbox";
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
-import { Check, ChevronDown, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
+import { Check, ChevronDown, CircleAlert, Clock, Copy, CornerUpLeft, LocateFixed, MessageSquare, Paperclip, RotateCw, SmilePlus } from "@lucide/vue";
+import { formatBytes } from "./attachments/formatting";
 import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
@@ -756,6 +827,36 @@ const replyPreviewText = computed(() => truncate((props.message.replyTo
   ? roomMessageVisibleText(props.message.replyTo, attentionResponseAgentNames?.value)
   : "").replace(/\s+/g, " ").trim(), 160));
 const visibleText = computed(() => roomMessageVisibleText(props.message, attentionResponseAgentNames?.value));
+const outgoingStatusText = computed(() => {
+  const outgoing = props.message.outgoing;
+  if (!outgoing) return "";
+  if (outgoing.status === "pending") return "Sending…";
+  if (outgoing.error?.includes("expressions_disabled:")) return "GIF sending is off in this room";
+  if (outgoing.status === "refused") return "Not sent";
+  return "Delivery not confirmed";
+});
+const outgoingTone = computed<"pending" | "warning" | "error">(() => {
+  const outgoing = props.message.outgoing;
+  if (!outgoing || outgoing.status === "pending") return "pending";
+  return outgoing.status === "refused" || outgoing.error?.includes("expressions_disabled:")
+    ? "error"
+    : "warning";
+});
+const outgoingAttachmentItems = computed(() => {
+  const attachments = props.message.outgoing?.attachments ?? [];
+  return attachments
+    .filter((item) => Boolean(item.fileName))
+    .map((item) => ({
+      upload_id: item.upload_id,
+      fileName: item.fileName || "Attachment",
+      sizeLabel: typeof item.sizeBytes === "number" && item.sizeBytes > 0 ? formatBytes(item.sizeBytes) : null,
+    }));
+});
+const outgoingAttachmentSummary = computed(() => {
+  const count = props.message.outgoing?.attachmentCount ?? 0;
+  if (!count) return "";
+  return `${count} attachment${count === 1 ? "" : "s"}`;
+});
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
 const renderedMessage = computed(() => {
   const text = visibleText.value || "No message body.";

@@ -26,6 +26,9 @@ export interface ThreadIndicatorSummary {
   participants: ThreadParticipantSummary[];
   hasPartialHistory: boolean;
   loadingEarlier: boolean;
+  hasPendingOutgoing?: boolean;
+  hasUncertainOutgoing?: boolean;
+  hasRefusedOutgoing?: boolean;
 }
 
 export interface ThreadReadState {
@@ -128,6 +131,9 @@ export function sameThreadIndicatorSummary(left: ThreadIndicatorSummary, right: 
     && left.latestTimestamp === right.latestTimestamp
     && left.hasPartialHistory === right.hasPartialHistory
     && left.loadingEarlier === right.loadingEarlier
+    && Boolean(left.hasPendingOutgoing) === Boolean(right.hasPendingOutgoing)
+    && Boolean(left.hasUncertainOutgoing) === Boolean(right.hasUncertainOutgoing)
+    && Boolean(left.hasRefusedOutgoing) === Boolean(right.hasRefusedOutgoing)
     && sameThreadLatest(left.latest, right.latest)
     && left.participants.length === right.participants.length
     && left.participants.every((participant, index) => {
@@ -176,6 +182,9 @@ export function buildThreadIndicatorSummary(
   const count = Math.max(metadataCount ?? 0, fallbackCount);
   const fallbackIsLatest = Boolean(fallbackLatest && latest?.id === fallbackLatest.id);
   const readUntilId = thread?.lastReadMessageId || null;
+  const hasPendingOutgoing = Boolean(fallback?.replies.some((reply) => reply.outgoing?.status === "pending"));
+  const hasUncertainOutgoing = Boolean(fallback?.replies.some((reply) => reply.outgoing?.status === "uncertain"));
+  const hasRefusedOutgoing = Boolean(fallback?.replies.some((reply) => reply.outgoing?.status === "refused"));
   return {
     count,
     unreadCount: Math.max(
@@ -190,6 +199,9 @@ export function buildThreadIndicatorSummary(
     participants: parseThreadParticipants(thread?.participants ?? []),
     hasPartialHistory: false,
     loadingEarlier: false,
+    ...(hasPendingOutgoing ? { hasPendingOutgoing: true } : {}),
+    ...(hasUncertainOutgoing ? { hasUncertainOutgoing: true } : {}),
+    ...(hasRefusedOutgoing ? { hasRefusedOutgoing: true } : {}),
   };
 }
 

@@ -1,11 +1,12 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { localFilesPath } from "../chat-storage/settings.js";
+import type { SqliteDatabase } from "../rooms/local-db.js";
 import { insideFolder, localAttachmentRelativePath, realLocalAttachmentPath } from "./links.js";
 import type { RoomMessageAttachmentPayload } from "./mappers.js";
 import { stagedAttachment, type AttachmentFile, type AttachmentStore } from "./store.js";
@@ -21,6 +22,54 @@ type LocalStagedAttachment = {
 
 const LOCAL_UPLOAD_PREFIX = "local:";
 const localStagedAttachments = new Map<string, LocalStagedAttachment>();
+let stagedSchemaInitialized = false;
+let stagedSchemaDatabase: SqliteDatabase | null = null;
+
+async function getStagedDb(): Promise<SqliteDatabase> {
+  const { getLocalChatDatabase } = await import("../rooms/local-db.js");
+  const database = await getLocalChatDatabase();
+  if (!stagedSchemaInitialized || stagedSchemaDatabase !== database) {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS local_staged_attachments (
+        upload_id TEXT PRIMARY KEY NOT NULL,
+        room_id TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        file_path TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS local_staged_attachments_room_idx
+        ON local_staged_attachments (room_id);
+    `);
+    stagedSchemaInitialized = true;
+    stagedSchemaDatabase = database;
+  }
+  return database;
+}
+
+function mapStagedRow(row: Record<string, unknown>): LocalStagedAttachment {
+  return {
+    uploadId: String(row.upload_id),
+    roomIdentifier: String(row.room_id),
+    fileName: String(row.file_name),
+    mimeType: String(row.mime_type),
+    sizeBytes: Number(row.size_bytes),
+    filePath: String(row.file_path),
+  };
+}
+
+function queryStagedRowFromOpenDb(uploadId: string): LocalStagedAttachment | null {
+  if (!stagedSchemaInitialized || !stagedSchemaDatabase) return null;
+  const row = stagedSchemaDatabase
+    .prepare("SELECT upload_id, room_id, file_name, mime_type, size_bytes, file_path FROM local_staged_attachments WHERE upload_id = ?")
+    .get(uploadId);
+  return row ? mapStagedRow(row) : null;
+}
+
+export function clearLocalStagedAttachmentsMemoryForTest(): void {
+  localStagedAttachments.clear();
+}
 
 export function isLocalUploadId(uploadId: string): boolean {
   return uploadId.startsWith(LOCAL_UPLOAD_PREFIX);
@@ -38,14 +87,37 @@ export function createLocalAttachmentStore(roomIdentifier: string): AttachmentSt
       await mkdir(roomDir, { recursive: true });
       const filePath = join(roomDir, `${uploadId.slice(LOCAL_UPLOAD_PREFIX.length)}-${safeFileName}`);
       await writeFile(filePath, file.bytes);
-      localStagedAttachments.set(uploadId, {
+      const record: LocalStagedAttachment = {
         uploadId,
         roomIdentifier,
         fileName: file.fileName,
         mimeType: file.mimeType,
         sizeBytes: file.bytes.byteLength,
         filePath,
-      });
+      };
+      try {
+        const database = await getStagedDb();
+        database
+          .prepare(`
+            INSERT OR REPLACE INTO local_staged_attachments (
+              upload_id, room_id, file_name, mime_type, size_bytes, file_path, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `)
+          .run(
+            record.uploadId,
+            record.roomIdentifier,
+            record.fileName,
+            record.mimeType,
+            record.sizeBytes,
+            record.filePath,
+            new Date().toISOString(),
+          );
+      } catch (error) {
+        await rm(filePath, { force: true }).catch(() => undefined);
+        throw error;
+      }
+      localStagedAttachments.set(uploadId, record);
       return stagedAttachment(file, uploadId);
     },
     discard: discardLocalStagedAttachment,
@@ -54,10 +126,93 @@ export function createLocalAttachmentStore(roomIdentifier: string): AttachmentSt
 
 /** A local upload id names its file wherever the room's storage mode has moved since staging. */
 export async function discardLocalStagedAttachment(uploadId: string): Promise<void> {
-  const staged = localStagedAttachments.get(uploadId);
-  if (!staged) return;
+  const database = await getStagedDb();
+  const row = database
+    .prepare("SELECT upload_id, room_id, file_name, mime_type, size_bytes, file_path FROM local_staged_attachments WHERE upload_id = ?")
+    .get(uploadId);
+  const staged = localStagedAttachments.get(uploadId) ?? (row ? mapStagedRow(row) : null);
   localStagedAttachments.delete(uploadId);
+  database.prepare("DELETE FROM local_staged_attachments WHERE upload_id = ?").run(uploadId);
+  if (!staged) return;
+  // Never unlink a file already claimed by a persisted local message row.
+  const attached = database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_chat_attachments'")
+    .get()
+    ? database.prepare("SELECT 1 FROM local_chat_attachments WHERE attachment_id = ? LIMIT 1").get(uploadId)
+    : undefined;
+  if (attached) return;
+  if (insideFolder(resolve(localFilesPath), resolve(staged.filePath)) === null) return;
   await rm(staged.filePath, { force: true }).catch(() => undefined);
+}
+
+/** Discard staged local attachments for a refused/unsent outbox entry without touching committed files. */
+export async function discardLocalStagedAttachments(attachments: Array<{ upload_id: string }>): Promise<void> {
+  const localIds = attachments.map((item) => item.upload_id?.trim()).filter((id): id is string => Boolean(id && isLocalUploadId(id)));
+  for (const uploadId of localIds) {
+    await discardLocalStagedAttachment(uploadId);
+  }
+}
+
+const DEFAULT_ORPHANED_STAGED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Remove stale staged local attachments from abandoned unsent drafts that are
+ * referenced by neither `desktop_message_outbox` nor `local_chat_attachments`.
+ */
+export async function pruneOrphanedLocalStagedAttachments(
+  maxAgeMs = DEFAULT_ORPHANED_STAGED_MAX_AGE_MS,
+): Promise<number> {
+  const database = await getStagedDb();
+  const cutoffIso = new Date(Date.now() - Math.max(0, maxAgeMs)).toISOString();
+  const candidates = database
+    .prepare("SELECT upload_id, room_id, file_name, mime_type, size_bytes, file_path, created_at FROM local_staged_attachments WHERE created_at <= ?")
+    .all(cutoffIso);
+  if (candidates.length === 0) return 0;
+
+  const referencedInOutbox = new Set<string>();
+  const hasOutboxTable = Boolean(
+    database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'desktop_message_outbox'").get(),
+  );
+  if (hasOutboxTable) {
+    const outboxRows = database.prepare("SELECT attachments_json FROM desktop_message_outbox").all();
+    for (const row of outboxRows) {
+      if (typeof row.attachments_json !== "string" || !row.attachments_json.trim()) continue;
+      try {
+        const parsed = JSON.parse(row.attachments_json) as Array<{ upload_id?: unknown }>;
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (typeof item?.upload_id === "string" && item.upload_id.trim()) {
+              referencedInOutbox.add(item.upload_id.trim());
+            }
+          }
+        }
+      } catch {
+        // Ignore malformed JSON rows during cleanup.
+      }
+    }
+  }
+
+  const hasAttachmentsTable = Boolean(
+    database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_chat_attachments'").get(),
+  );
+  const claimedStmt = hasAttachmentsTable
+    ? database.prepare("SELECT 1 FROM local_chat_attachments WHERE attachment_id = ? LIMIT 1")
+    : null;
+  const deleteStmt = database.prepare("DELETE FROM local_staged_attachments WHERE upload_id = ?");
+
+  let pruned = 0;
+  for (const row of candidates) {
+    const staged = mapStagedRow(row);
+    if (referencedInOutbox.has(staged.uploadId)) continue;
+    const isClaimed = Boolean(claimedStmt?.get(staged.uploadId));
+    localStagedAttachments.delete(staged.uploadId);
+    deleteStmt.run(staged.uploadId);
+    if (!isClaimed && insideFolder(resolve(localFilesPath), resolve(staged.filePath)) !== null) {
+      await rm(staged.filePath, { force: true }).catch(() => undefined);
+    }
+    pruned += 1;
+  }
+  return pruned;
 }
 
 /** Turn staged local uploads into message attachment rows; throws when one is gone. */
@@ -69,7 +224,7 @@ export function readLocalStagedAttachments(
   for (const attachment of attachments) {
     const uploadId = attachment.upload_id?.trim();
     if (!uploadId) continue;
-    const staged = localStagedAttachments.get(uploadId);
+    const staged = localStagedAttachments.get(uploadId) ?? queryStagedRowFromOpenDb(uploadId);
     if (!staged || staged.roomIdentifier !== roomIdentifier) {
       throw new Error("One or more local attachments are no longer available.");
     }
@@ -86,9 +241,81 @@ export function readLocalStagedAttachments(
   return consumed;
 }
 
-export function releaseLocalStagedAttachments(roomIdentifier: string, attachments: Array<{ upload_id: string }>): void {
+/** Crash-safe async reader: loads staged local attachment metadata from SQLite and verifies the file on disk. */
+export async function loadLocalStagedAttachments(
+  roomIdentifier: string,
+  attachments: Array<{ upload_id: string }>,
+): Promise<RoomMessageAttachmentPayload[]> {
+  if (attachments.length === 0) return [];
+  const database = await getStagedDb();
+  const consumed: RoomMessageAttachmentPayload[] = [];
+  for (const attachment of attachments) {
+    const uploadId = attachment.upload_id?.trim();
+    if (!uploadId) continue;
+    let staged = localStagedAttachments.get(uploadId);
+    if (!staged) {
+      const row = database
+        .prepare("SELECT upload_id, room_id, file_name, mime_type, size_bytes, file_path FROM local_staged_attachments WHERE upload_id = ?")
+        .get(uploadId);
+      if (row) {
+        staged = mapStagedRow(row);
+        localStagedAttachments.set(uploadId, staged);
+      }
+    }
+    if (!staged || staged.roomIdentifier !== roomIdentifier) {
+      throw new Error("One or more local attachments are no longer available.");
+    }
+    const realPath = await realLocalAttachmentPath(staged.filePath);
+    if (!realPath) {
+      throw new Error("One or more local attachments are no longer available.");
+    }
+    const fileInfo = await stat(realPath).catch(() => null);
+    if (!fileInfo?.isFile()) {
+      throw new Error("One or more local attachments are no longer available.");
+    }
+    const fileUrl = pathToFileURL(staged.filePath).toString();
+    consumed.push({
+      id: staged.uploadId,
+      file_name: staged.fileName,
+      mime_type: staged.mimeType,
+      size_bytes: staged.sizeBytes,
+      url: fileUrl,
+      download_url: fileUrl,
+    });
+  }
+  return consumed;
+}
+
+export async function releaseLocalStagedAttachments(roomIdentifier: string, attachments: Array<{ upload_id: string }>): Promise<void> {
+  if (attachments.length === 0) return;
+  const database = await getStagedDb();
+  const del = database.prepare("DELETE FROM local_staged_attachments WHERE upload_id = ? AND room_id = ?");
   for (const { upload_id } of attachments) {
-    if (localStagedAttachments.get(upload_id)?.roomIdentifier === roomIdentifier) localStagedAttachments.delete(upload_id);
+    const uploadId = upload_id?.trim();
+    if (!uploadId) continue;
+    if (localStagedAttachments.get(uploadId)?.roomIdentifier === roomIdentifier) {
+      localStagedAttachments.delete(uploadId);
+    }
+    del.run(uploadId, roomIdentifier);
+  }
+}
+
+/** Release staged metadata rows for local uploads that are already committed to local_chat_attachments. */
+export async function releaseCommittedLocalStagedAttachments(attachments: Array<{ upload_id: string }>): Promise<void> {
+  const localIds = attachments.map((item) => item.upload_id?.trim()).filter((id): id is string => Boolean(id && isLocalUploadId(id)));
+  if (localIds.length === 0) return;
+  const database = await getStagedDb();
+  const hasAttachmentsTable = Boolean(
+    database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_chat_attachments'").get(),
+  );
+  if (!hasAttachmentsTable) return;
+  const existsStmt = database.prepare("SELECT 1 FROM local_chat_attachments WHERE attachment_id = ? LIMIT 1");
+  const deleteStmt = database.prepare("DELETE FROM local_staged_attachments WHERE upload_id = ?");
+  for (const uploadId of localIds) {
+    if (existsStmt.get(uploadId)) {
+      localStagedAttachments.delete(uploadId);
+      deleteStmt.run(uploadId);
+    }
   }
 }
 
