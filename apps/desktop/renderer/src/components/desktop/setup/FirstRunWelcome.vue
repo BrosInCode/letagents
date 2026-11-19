@@ -200,6 +200,7 @@ watch(() => props.leaving, leaving => {
 watch(paused, updatePlayback);
 onMounted(() => {
   supportsFullscreen.value = document.fullscreenEnabled;
+  fullscreenChanged();
   preference = matchMedia("(prefers-reduced-motion: reduce)");
   reduced.value = preference.matches;
   preference.addEventListener("change", motionPreferenceChanged);
