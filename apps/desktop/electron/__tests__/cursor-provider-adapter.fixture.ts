@@ -35,6 +35,7 @@ import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
 import { cursorSupervisedMcpServerName, type CursorManagedProfile } from "../main/agents/cursor-managed-profile.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import { CURSOR_MCP_CONNECTOR_PARENT } from "../main/agents/cursor-provider-constants.js";
+import { removeCursorProbeRoot } from "../main/agents/cursor/probe-root.js";
 import { cursorMcpPipeConnectorArgs } from "../main/agents/cursor/windows-turn.js";
 import { testDaemonEndpoint, writeFakeProvider } from "./platform.js";
 
@@ -131,6 +132,10 @@ export interface HarnessOptions {
   mcpAttestationWaitForAbort?: boolean;
   /** One-based attestation pass to hold until abort. */
   mcpAttestationWaitForAbortAt?: number;
+  /** Runs at the start of each MCP attestation, with its one-based pass. */
+  onMcpAttestation?: (input: Parameters<CursorProviderAdapterDependencies["attestSupervisedMcp"]>[0], pass: number) => void | Promise<void>;
+  /** Stands in for the removal of an inspection's profile folder. */
+  removeProbeRoot?: CursorProviderAdapterDependencies["removeProbeRoot"];
   beforeLaunch?: CursorProviderAdapterDependencies["launchTurn"] extends (input: infer Input) => unknown ? (input: Input) => void : never;
 }
 
@@ -480,8 +485,10 @@ export function createHarness(options: HarnessOptions = {}) {
         providerAuthorization: "Bearer test-provider-authorization",
       };
     },
+    removeProbeRoot: options.removeProbeRoot ?? removeCursorProbeRoot,
     async attestSupervisedMcp(input) {
       mcpAttestations.push(input);
+      await options.onMcpAttestation?.(input, mcpAttestations.length);
       if (options.mcpAttestationError) throw options.mcpAttestationError;
       if (options.mcpBridgeAttestationError && input.requiredReadableRoots?.length) {
         throw options.mcpBridgeAttestationError;

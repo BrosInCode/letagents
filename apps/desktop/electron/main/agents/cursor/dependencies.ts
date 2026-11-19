@@ -14,6 +14,7 @@ import {
   type CursorSupervisedProfileOptions,
 } from "./managed-profile.js";
 import { assertCursorSupervisedMcpAuthority } from "../cursor-mcp-authority.js";
+import { removeCursorProbeRoot } from "./probe-root.js";
 import { readCursorAccountUsage, readCursorContext, readCursorUsageOwner } from "../cursor-usage.js";
 import {
   createSupervisedWorkspaceGeneration,
@@ -44,6 +45,8 @@ export interface CursorProviderAdapterDependencies {
     signal?: AbortSignal;
   }): Promise<CursorPersonalIdentity>;
   bindPersonalIdentity(profile: CursorManagedProfile, identity: CursorPersonalIdentity): void;
+  /** Remove an inspection's disposable profile folder; resolves only once it is gone. */
+  removeProbeRoot(root: string): Promise<void>;
   /** `identity`: the recorded birth; on Windows a pid this process does not hold is ended only with it. */
   signalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void;
   /** null means verified absent; undefined means liveness could not be verified. */
@@ -117,6 +120,7 @@ export const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   attestSupervisedMcp: assertCursorSupervisedMcpAuthority,
   attestPersonalIdentity: assertCursorPersonalIdentity,
   bindPersonalIdentity: bindCursorSupervisedIdentity,
+  removeProbeRoot: removeCursorProbeRoot,
   signalProcess: defaultCursorSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   prepareTurnState: (path) => writeFileSync(path, "", { flag: "wx", mode: 0o600 }),
