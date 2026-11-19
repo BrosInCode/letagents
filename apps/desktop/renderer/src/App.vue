@@ -715,8 +715,10 @@ const roomCompany = computed<RoomCompanyAppearance | null>(() => {
   return company.resolveRoomAppearance(roomAppearance);
 });
 const roomTheme = provideRoomTheme(themeAccountKey, roomCompany);
+// An older API does not return a revision or expose the company theme write route.
 const canSetCompanyTheme = computed(() => company.organizations.value.some(org =>
-  org.github_org_id === roomCompany.value?.id && org.setup && org.role === "owner"));
+  org.github_org_id === roomCompany.value?.id && org.setup && org.role === "owner"
+  && typeof org.theme_revision === "number" && Number.isSafeInteger(org.theme_revision) && org.theme_revision >= 0));
 
 const firstRunRoomChoices = computed(() => company.activeId.value ? company.rooms.value : accountRooms.value.map(room => ({
   room_id: room.roomIdentifier,

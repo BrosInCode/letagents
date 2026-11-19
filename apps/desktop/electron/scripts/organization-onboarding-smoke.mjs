@@ -16,6 +16,8 @@ let links = await import('../../dist-electron/main/company-links.js');
 let authenticated = false;
 let completed = false;
 let failOrganizations = false;
+let failCompanyTheme = false;
+let legacyThemeApi = false;
 let holdSetupCompletion = false;
 let releaseSetupCompletion;
 let newRoomIdentifier = 'room_q4';
@@ -61,7 +63,13 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
       return setup();
     case 'organizations.list':
       if (failOrganizations) return { status: 'unavailable' };
-      return { status: 'ok', organizations: structuredClone(organizations), invitations, ssoRequired: [] };
+      return { status: 'ok', organizations: structuredClone(organizations).map(org => {
+        if (legacyThemeApi) {
+          delete org.theme_id;
+          delete org.theme_revision;
+        }
+        return org;
+      }), invitations, ssoRequired: [] };
     case 'organizations.join': {
       const org = organizations.find((org) => org.github_org_id === args[0]);
       assert.ok(org && (org.setup || org.role === 'owner'));
@@ -76,6 +84,7 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
       })),
     ] };
     case 'organizations.setTheme': {
+      if (failCompanyTheme) throw new Error('Fixture company default could not save');
       const org = organizations.find(org => org.github_org_id === args[0]);
       assert.equal(org?.role, 'owner');
       org.theme_id = args[1];
@@ -214,7 +223,22 @@ try {
   assert.equal(calls.includes('organizations.setTheme'), false, 'previewing a color does not write a company theme');
   await click('[data-stage="theme"] input[value="mint"]');
   await click('.first-run-share-theme input');
+  failCompanyTheme = true;
   await click('[data-testid="first-run-theme-continue"]');
+  await waitFor(`document.querySelector('[data-testid="first-run-theme-continue"]')?.textContent.includes('Continue with my theme')`);
+  assert.ok(await js(`Boolean(document.querySelector('[data-testid="first-run-theme-retry"]'))`));
+  const failedSaveCalls = calls.filter(method => method === 'organizations.setTheme').length;
+  await click('[data-testid="first-run-theme-continue"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="first-run-company-rooms"]'))`);
+  assert.equal(calls.filter(method => method === 'organizations.setTheme').length, failedSaveCalls, 'continuing with a personal theme does not retry the company write');
+  assert.equal(organizations[0].theme_id, null, 'the company default remains unset when continuing with a personal theme');
+  await click('[data-testid="first-run-back"]');
+  await waitFor(`document.querySelector('[data-stage="theme"] input[value="mint"]')?.checked`);
+  await click('.first-run-share-theme input');
+  await click('[data-testid="first-run-theme-continue"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="first-run-theme-retry"]'))`);
+  failCompanyTheme = false;
+  await click('[data-testid="first-run-theme-retry"]');
   await waitFor(`document.querySelector('[data-stage="room"]') && Boolean(document.querySelector('[data-testid="first-run-company-rooms"]'))`);
   assert.equal(organizations[0].theme_id, 'mint', 'the owner explicitly saved the shared default during onboarding');
   await js(`{ const input = document.querySelector('.company-room-search input'); input.value = 'missing'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
@@ -394,12 +418,26 @@ try {
   // Reopen setup as a signed-in account to exercise successful creation from the wizard.
   completed = false;
   newRoomIdentifier = 'room_onboarding_qa';
+  legacyThemeApi = true;
   const previousWindow = window;
   window = fixtureWindow('onboarding-room-handoff');
   previousWindow.destroy();
   await window.loadFile(join(root, 'dist-renderer/index.html'));
   await click('[data-testid="first-run-start-setup"]');
   await click('[data-testid="first-run-to-room"]');
+  await click('[data-testid="company-choice-42"]');
+  await click('[data-testid="first-run-company-continue"]');
+  await waitFor(`document.querySelector('[data-stage="theme"] .room-theme-picker')`);
+  assert.ok(await js(`!document.querySelector('.first-run-share-theme')`), 'an API without theme revisions does not offer a company write');
+  const legacySaveCalls = calls.filter(method => method === 'organizations.setTheme').length;
+  await click('[data-stage="theme"] input[value="graphite"]');
+  await click('[data-testid="first-run-theme-continue"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="first-run-company-rooms"]'))`);
+  assert.equal(calls.filter(method => method === 'organizations.setTheme').length, legacySaveCalls, 'the personal theme works on the older API');
+  await click('[data-testid="first-run-back"]');
+  await waitFor(`document.querySelector('[data-stage="theme"] input[value="graphite"]')?.checked`);
+  await click('[data-testid="first-run-back"]');
+  await click('[data-testid="company-choice-all"]');
   await click('[data-testid="first-run-company-continue"]');
   await click('[data-testid="first-run-theme-continue"]');
   await click('[data-testid="room-choice-create"]');

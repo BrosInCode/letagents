@@ -31,7 +31,11 @@
                 <input v-model="shareTheme" type="checkbox" :disabled="savingCompanyTheme || !roomTheme?.personal.value">
                 Use this as {{ companyName }}’s default
               </label>
-              <p v-if="themeSaveError" class="onboarding-feedback" role="alert">{{ themeSaveError }}</p>
+              <div v-if="themeSaveFailed" class="theme-save-feedback">
+                <p class="onboarding-feedback" role="alert">Couldn’t save the company default.</p>
+                <button v-if="canShareTheme" type="button" class="onboarding-quiet" :disabled="busy || savingCompanyTheme"
+                  data-testid="first-run-theme-retry" @click="continueTheme(true)">Retry save</button>
+              </div>
             </div>
 
             <template v-else-if="stage === 'room'">
@@ -70,8 +74,8 @@
                 </button>
               </template>
               <button v-else-if="stage === 'theme'" class="primary-button onboarding-primary" type="button" :disabled="busy || savingCompanyTheme"
-                data-testid="first-run-theme-continue" @click="continueTheme">
-                {{ savingCompanyTheme ? "Saving…" : "Continue" }} <ArrowRight aria-hidden="true" />
+                data-testid="first-run-theme-continue" @click="continueTheme(!themeSaveFailed)">
+                {{ savingCompanyTheme ? "Saving…" : themeSaveFailed ? "Continue with my theme" : "Continue" }} <ArrowRight aria-hidden="true" />
               </button>
               <button v-else-if="stage === 'room'" :class="selectedRoomIdentifier ? 'primary-button onboarding-primary' : 'onboarding-quiet'"
                 type="button" :disabled="busy" data-testid="first-run-open-room"
@@ -153,7 +157,8 @@ const headline = computed(() => {
 
 const description = computed(() => {
   if (props.stage === "organization") return "See all your rooms or focus on a company.";
-  if (props.stage === "theme") return props.companyName ? `Use ${props.companyName}’s theme or choose your own.` : "Choose how your rooms look.";
+  if (props.stage === "theme") return props.companyName && roomTheme?.company.value?.theme
+    ? `Use ${props.companyName}’s theme or choose your own.` : "Choose how your rooms look.";
   return "You can switch rooms anytime.";
 });
 
@@ -186,26 +191,27 @@ const roomTheme = useRoomTheme();
 const canShareTheme = computed(() => Boolean(props.saveCompanyTheme && roomTheme?.company.value && !roomTheme.company.value.theme));
 const shareTheme = ref(false);
 const savingCompanyTheme = ref(false);
-const themeSaveError = ref("");
+const themeSaveFailed = ref(false);
 
 watch([() => roomTheme?.company.value?.id, () => props.stage], () => {
   shareTheme.value = false;
-  themeSaveError.value = "";
+  themeSaveFailed.value = false;
 });
+watch([shareTheme, () => roomTheme?.personal.value], () => { themeSaveFailed.value = false; });
 
-async function continueTheme() {
-  if (savingCompanyTheme.value) return;
+async function continueTheme(saveSharedDefault: boolean) {
+  if (props.busy || savingCompanyTheme.value) return;
   const company = roomTheme?.company.value;
   const theme = roomTheme?.personal.value;
-  if (shareTheme.value && canShareTheme.value && company && theme && props.saveCompanyTheme) {
+  if (saveSharedDefault && shareTheme.value && canShareTheme.value && company && theme && props.saveCompanyTheme) {
     savingCompanyTheme.value = true;
-    themeSaveError.value = "";
+    themeSaveFailed.value = false;
     try {
       await props.saveCompanyTheme(company.id, theme);
       if (props.stage !== "theme" || roomTheme.company.value?.id !== company.id) return;
       if (roomTheme.personal.value === theme && roomTheme.company.value.theme === theme) roomTheme.choose(null);
     } catch {
-      themeSaveError.value = "Couldn’t save the company theme. Try again.";
+      if (props.stage === "theme" && roomTheme.company.value?.id === company.id) themeSaveFailed.value = true;
       return;
     } finally {
       savingCompanyTheme.value = false;
@@ -248,6 +254,9 @@ async function continueTheme() {
 .onboarding-heading h1 { margin: 0; font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-size: clamp(38px, 6vw, 66px); font-weight: 500; line-height: 1.04; letter-spacing: -.045em; }
 .onboarding-heading h1:focus { outline: none; }
 .onboarding-heading p, .onboarding-feedback { margin: 9px 0 0; color: var(--setup-muted); line-height: 1.5; }
+.theme-save-feedback { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin-top: 9px; }
+.theme-save-feedback .onboarding-feedback { margin: 0; }
+.theme-save-feedback button { padding: 4px 6px; color: var(--setup-text); }
 .onboarding-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: center; }
 .onboarding-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 12px; min-height: 43px; }
 .onboarding-quiet svg, .onboarding-room-actions svg { width: 16px; height: 16px; color: var(--workspace-accent, var(--setup-accent)); }
