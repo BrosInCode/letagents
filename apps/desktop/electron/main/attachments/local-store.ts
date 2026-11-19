@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { localFilesPath } from "../chat-storage/settings.js";
-import { getLocalChatDatabase, type SqliteDatabase } from "../rooms/local-db.js";
+import type { SqliteDatabase } from "../rooms/local-db.js";
 import { insideFolder, localAttachmentRelativePath, realLocalAttachmentPath } from "./links.js";
 import type { RoomMessageAttachmentPayload } from "./mappers.js";
 import { stagedAttachment, type AttachmentFile, type AttachmentStore } from "./store.js";
@@ -26,6 +26,7 @@ let stagedSchemaInitialized = false;
 let stagedSchemaDatabase: SqliteDatabase | null = null;
 
 async function getStagedDb(): Promise<SqliteDatabase> {
+  const { getLocalChatDatabase } = await import("../rooms/local-db.js");
   const database = await getLocalChatDatabase();
   if (!stagedSchemaInitialized || stagedSchemaDatabase !== database) {
     database.exec(`

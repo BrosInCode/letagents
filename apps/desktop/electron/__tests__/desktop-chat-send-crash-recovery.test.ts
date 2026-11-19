@@ -552,7 +552,14 @@ test("real OS SIGKILL crash after composer persistence preserves local thread re
       encoding: "utf8",
     },
   );
-  assert.equal(child.signal, "SIGKILL", `expected SIGKILL, stderr=${child.stderr}`);
+  if (process.platform === "win32") {
+    assert.ok(
+      child.signal === "SIGKILL" || (child.status !== null && child.status !== 0),
+      `expected abnormal termination on Windows, status=${child.status}, signal=${child.signal}, stderr=${child.stderr}`,
+    );
+  } else {
+    assert.equal(child.signal, "SIGKILL", `expected SIGKILL, stderr=${child.stderr}`);
+  }
 
   // Parent process (different bootId, fresh in-memory staged cache) recovers cleanly from SQLite + local-files.
   clearLocalStagedAttachmentsMemoryForTest();
