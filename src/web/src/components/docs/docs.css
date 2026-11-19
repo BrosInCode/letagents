@@ -340,3 +340,70 @@
 @media (prefers-reduced-motion: reduce) {
   .docs-page .sidebar { transition: none; }
 }
+
+.docs-page .provider-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+
+.docs-page .provider-grid .provider-mark {
+  padding: 6px 12px 6px 8px;
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 999px;
+  background: var(--bg-subtle, rgba(255,255,255,0.03));
+}
+
+.docs-page .provider-grid-note {
+  font-size: 0.85rem;
+  color: var(--text-tertiary, #8b8b96);
+}
+
+.docs-page .provider-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  vertical-align: middle;
+  font-weight: 600;
+  color: var(--text, #fafafa);
+  white-space: nowrap;
+}
+
+.docs-page .provider-mark img,
+.docs-page .provider-mark svg {
+  flex: none;
+  width: var(--mark-size);
+  height: var(--mark-size);
+}
+
+.docs-page .provider-mark img {
+  border-radius: calc(var(--mark-size) * 0.22);
+}
+
+.docs-page .doc-terms {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 10px 20px;
+  margin: 16px 0 24px;
+}
+
+.docs-page .doc-terms dt {
+  font-weight: 700;
+  color: var(--text, #fafafa);
+}
+
+.docs-page .doc-terms dd {
+  margin: 0;
+  color: var(--text-secondary, #a1a1aa);
+}
+
+@media (max-width: 560px) {
+  .docs-page .doc-terms {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .docs-page .doc-terms dd {
+    margin-bottom: 10px;
+  }
+}

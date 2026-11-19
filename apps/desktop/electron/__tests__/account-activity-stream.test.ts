@@ -101,6 +101,20 @@ test("valid join requests are forwarded to the room stream boundary; malformed f
   assert.deepEqual(roomEvents, [{ type: "join_request", roomIdentifier: "design-lounge", event: payload }]);
 });
 
+test("the answer to this account's own join request is forwarded; a pending or malformed one is not", async () => {
+  let send!: (event: string, data: unknown) => void;
+  responders.push((res) => { send = sse(res); });
+  stream.restartAccountActivityStream();
+  await until(() => Boolean(send), "the stream to open");
+  roomEvents.length = 0;
+  const request = { id: "rjr_7", state: "approved", created_at: "2026-11-18T09:00:00.000Z", decided_at: "2026-11-18T09:01:00.000Z", retry_after: null };
+  send("join_request_decision", { room_id: "design-lounge", request: { ...request, state: "pending" } });
+  send("join_request_decision", { room_id: "design-lounge", request: { id: "broken" } });
+  send("join_request_decision", { room_id: "design-lounge", request });
+  await until(() => roomEvents.length > 0, "the forwarded decision");
+  assert.deepEqual(roomEvents, [{ type: "join_request_decision", roomIdentifier: "design-lounge", event: { room_id: "design-lounge", request } }]);
+});
+
 test("the maker's room_invite frames are forwarded to the room stream boundary; malformed frames are ignored", async () => {
   let send!: (event: string, data: unknown) => void;
   responders.push((res) => { send = sse(res); });

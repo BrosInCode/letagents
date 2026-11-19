@@ -68,6 +68,35 @@ export function parseRoomJoinRequestEvent(value) {
   return { room_id: roomId, access_room_id: accessRoomId, request };
 }
 
+/**
+ * The SSE event on the account activity stream that tells the person who
+ * asked that their request was answered (approved, declined or cancelled), so
+ * a waiting screen can open the room at once. It carries the person's own view
+ * of the request only: no admin's name, no other person.
+ */
+export const ROOM_JOIN_REQUEST_DECISION_EVENT = 'join_request_decision';
+
+/** Reads the `join_request_decision` SSE payload: `{ room_id, request }`. */
+export function parseRoomJoinRequestDecisionEvent(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const roomId = text(value.room_id);
+  const request = value.request;
+  if (!roomId || !request || typeof request !== 'object' || Array.isArray(request)) return null;
+  const id = text(request.id);
+  const createdAt = text(request.created_at);
+  if (!id || !createdAt || !ROOM_JOIN_REQUEST_STATES.includes(request.state) || request.state === 'pending') return null;
+  return {
+    room_id: roomId,
+    request: {
+      id,
+      state: request.state,
+      created_at: createdAt,
+      decided_at: optionalText(request.decided_at),
+      retry_after: optionalText(request.retry_after),
+    },
+  };
+}
+
 /** The name the banner and the notification show for the person who asked. */
 export function joinRequesterLabel(request) {
   const name = (request.display_name || '').trim();
