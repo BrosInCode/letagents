@@ -17,6 +17,7 @@ import {
   clearDesktopMessageOutbox,
   desktopMessageOutbox,
   hydrateDesktopMessageOutbox,
+  INTERRUPTED_OUTBOX_DELIVERY_ERROR,
   reconcileDesktopMessageOutbox,
   retryDesktopOutgoingMessage,
 } from "../src/domain/message-outbox";
@@ -487,6 +488,258 @@ describe("desktop chat send crash recovery (renderer)", () => {
       releaseAliceList();
       await Promise.all([aliceHydration, bobHydration]);
       assert.equal(desktopMessageOutbox.value.length, 0, "stale Alice hydration must not land in Bob's outbox");
+    });
+    clearDesktopMessageOutbox();
+  });
+
+  it("renderer-only restart while Electron main process stays alive (same boot_id) recovers saved pending send as uncertain and retryable", async () => {
+    clearDesktopMessageOutbox();
+    const store = new SimulatedDurableOutboxStore();
+    const roomId = "github.com/brosincode/letagents";
+    const namespace = `${roomId}:cloud:cloud`;
+    const root = roomMessage({ id: "msg_root_reload", text: "Thread root for renderer restart" });
+    const clientMessageId = "desktop-send:abababab-abab-4aba-8aba-abababababab";
+
+    // Persist directly (same boot_id — do NOT call simulateCrashAndRestart!).
+    const saved = await store.save({
+      clientMessageId,
+      roomIdentifier: roomId,
+      messageNamespace: namespace,
+      text: "Saved before renderer died prior to dispatch",
+      replyTo: root.id,
+      threadRootId: root.id,
+      attachments: [{
+        upload_id: "upl_reload_1",
+        fileName: "renderer-crash-note.txt",
+        mimeType: "text/plain",
+        sizeBytes: 128,
+      }],
+      replyPreview: {
+        id: root.id,
+        sender: root.sender,
+        text: root.text,
+        source: root.source ?? null,
+        timestamp: root.timestamp,
+        agentIdentity: root.agentIdentity ?? null,
+      },
+      timestamp: "2026-11-19T02:20:00.000Z",
+    });
+    assert.equal(saved.status, "pending");
+
+    // Lose the renderer before dispatch while Electron's main process stays alive.
+    clearDesktopMessageOutbox();
+    const rawStillPending = await store.list();
+    assert.equal(rawStillPending.length, 1);
+    assert.equal(rawStillPending[0]?.status, "pending", "main process still has the current boot_id");
+
+    const dispatched: Array<{ clientMessageId?: string; threadRootId?: string | null; attachments?: unknown }> = [];
+    await withWindow({
+      letagentsDesktop: {
+        room: {
+          saveOutgoingMessage: store.save,
+          updateOutgoingMessage: store.update,
+          deleteOutgoingMessage: store.remove,
+          listOutgoingMessages: store.list,
+          sendMessage: async (
+            _roomIdentifier: string,
+            text: string,
+            replyTo: string | null,
+            attachments: Array<{ upload_id: string }>,
+            threadRootId: string | null,
+            cid: string,
+          ) => {
+            dispatched.push({ clientMessageId: cid, threadRootId, attachments });
+            return {
+              message: roomMessage({
+                id: "msg_reload_confirmed",
+                clientMessageId: cid,
+                sender: "You",
+                text,
+                threadRootId,
+                threadReplyToId: replyTo,
+                attachments: attachments.map((a, idx) => ({
+                  id: `att_reload_${idx}`,
+                  fileName: "renderer-crash-note.txt",
+                  mimeType: "text/plain",
+                  sizeBytes: 128,
+                  href: `https://letagents.chat/att/${a.upload_id}`,
+                })),
+              }),
+            };
+          },
+          getMessagesBefore: async () => ({ messages: [], hasOlder: false }),
+        },
+      },
+    }, async () => {
+      const messages = ref<DesktopRoomMessage[]>([root]);
+      const scope = effectScope();
+      try {
+        const shell = scope.run(() => useDesktopRoomMessages({
+          room: ref(roomInfo({ identifier: roomId })),
+          messageNamespace: ref(namespace),
+          messages,
+          githubEventsVisible: ref(true),
+          playRoomSound: () => undefined,
+          onMessageSent(message) {
+            messages.value = [...messages.value, message];
+          },
+        }))!;
+
+        await hydrateDesktopMessageOutbox();
+        await nextTick();
+
+        assert.equal(desktopMessageOutbox.value.length, 1);
+        const recovered = desktopMessageOutbox.value[0]!;
+        assert.equal(recovered.inFlight, false);
+        assert.equal(recovered.message.outgoing?.status, "uncertain", "orphaned pending row must become uncertain and retryable");
+        assert.equal(recovered.message.outgoing?.error, INTERRUPTED_OUTBOX_DELIVERY_ERROR);
+        assert.equal(recovered.attachments[0]?.fileName, "renderer-crash-note.txt");
+
+        // Persisted store row is also updated to uncertain.
+        await Promise.resolve();
+        const updatedPersisted = await store.list();
+        assert.equal(updatedPersisted[0]?.status, "uncertain");
+
+        // Retry safely delivers once and reconciles cleanly.
+        await retryDesktopOutgoingMessage(clientMessageId);
+        await nextTick();
+
+        assert.equal(dispatched.length, 1);
+        assert.equal(dispatched[0]?.clientMessageId, clientMessageId);
+        assert.equal(dispatched[0]?.threadRootId, root.id);
+        assert.deepEqual(dispatched[0]?.attachments, [{ upload_id: "upl_reload_1" }]);
+        assert.equal(desktopMessageOutbox.value.length, 0);
+        assert.equal((await store.list()).length, 0);
+
+        const uiRows = shell.visibleMessages.value.filter((m) => m.clientMessageId === clientMessageId);
+        assert.equal(uiRows.length, 1);
+        assert.equal(uiRows[0]?.outgoing, undefined);
+        assert.equal(uiRows[0]?.attachments.length, 1);
+      } finally {
+        scope.stop();
+      }
+    });
+    clearDesktopMessageOutbox();
+  });
+
+  it("keeps genuinely active sends pending during concurrent hydration while promoting orphaned pending rows to uncertain", async () => {
+    clearDesktopMessageOutbox();
+    const store = new SimulatedDurableOutboxStore();
+    const roomId = "github.com/brosincode/letagents";
+    const namespace = `${roomId}:cloud:cloud`;
+
+    // Seed an orphaned pending row from an earlier dead renderer (same boot_id).
+    const orphanedId = "desktop-send:cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd";
+    await store.save({
+      clientMessageId: orphanedId,
+      roomIdentifier: roomId,
+      messageNamespace: namespace,
+      text: "Orphaned send from dead renderer",
+      replyTo: null,
+      threadRootId: null,
+      attachments: [],
+      replyPreview: null,
+      timestamp: "2026-11-19T02:21:00.000Z",
+    });
+
+    let releaseSave!: () => void;
+    const holdSave = new Promise<void>((resolve) => { releaseSave = resolve; });
+    let releaseSend!: (msg: DesktopRoomMessage) => void;
+    const holdSend = new Promise<DesktopRoomMessage>((resolve) => { releaseSend = resolve; });
+    let activeClientId = "";
+
+    await withWindow({
+      letagentsDesktop: {
+        room: {
+          saveOutgoingMessage: async (input: DesktopSaveOutgoingMessageInput) => {
+            activeClientId = input.clientMessageId;
+            const saved = await store.save(input);
+            await holdSave;
+            return saved;
+          },
+          updateOutgoingMessage: store.update,
+          deleteOutgoingMessage: store.remove,
+          listOutgoingMessages: store.list,
+          sendMessage: async () => ({ message: await holdSend }),
+          getMessagesBefore: async () => ({ messages: [], hasOlder: false }),
+        },
+      },
+    }, async () => {
+      const messages = ref<DesktopRoomMessage[]>([]);
+      const scope = effectScope();
+      try {
+        const shell = scope.run(() => useDesktopRoomMessages({
+          room: ref(roomInfo({ identifier: roomId })),
+          messageNamespace: ref(namespace),
+          messages,
+          githubEventsVisible: ref(true),
+          playRoomSound: () => undefined,
+          onMessageSent(message) {
+            messages.value = [...messages.value, message];
+          },
+        }))!;
+
+        let composerCleared = false;
+        const sendPromise = shell.sendRoomMessage("Live in-flight message", null, [], null, (sent) => {
+          composerCleared = sent;
+        });
+
+        // Wait until saveOutgoingMessage has written the live row to SQLite (still paused before enqueue).
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.ok(activeClientId, "active save should have started");
+
+        // Hydrate while the live send is still in saveOutgoingMessage:
+        // orphaned row must become uncertain, live row must be skipped (not prematurely marked uncertain).
+        await hydrateDesktopMessageOutbox();
+        const orphanedAfterFirstHydrate = desktopMessageOutbox.value.find((e) => e.clientMessageId === orphanedId);
+        assert.equal(orphanedAfterFirstHydrate?.message.outgoing?.status, "uncertain");
+        assert.equal(
+          desktopMessageOutbox.value.find((e) => e.clientMessageId === activeClientId),
+          undefined,
+          "live save in progress must not be hydrated as uncertain",
+        );
+
+        // Release save -> composer clears and sendMessage enters inFlight=true.
+        releaseSave();
+        await Promise.resolve();
+        await Promise.resolve();
+        await nextTick();
+        assert.equal(composerCleared, true);
+
+        const activeEntry = desktopMessageOutbox.value.find((e) => e.clientMessageId === activeClientId);
+        assert.ok(activeEntry);
+        assert.equal(activeEntry.inFlight, true);
+        assert.equal(activeEntry.message.outgoing?.status, "pending");
+
+        // Hydrate again while sendMessage is genuinely in-flight: must stay pending!
+        await hydrateDesktopMessageOutbox();
+        const activeAfterSecondHydrate = desktopMessageOutbox.value.find((e) => e.clientMessageId === activeClientId);
+        assert.equal(activeAfterSecondHydrate?.inFlight, true);
+        assert.equal(activeAfterSecondHydrate?.message.outgoing?.status, "pending");
+
+        // Finish live send cleanly.
+        releaseSend(roomMessage({
+          id: "msg_live_1",
+          clientMessageId: activeClientId,
+          text: "Live in-flight message",
+          sender: "You",
+        }));
+        await sendPromise;
+        await nextTick();
+        assert.equal(
+          desktopMessageOutbox.value.find((e) => e.clientMessageId === activeClientId),
+          undefined,
+          "confirmed live send is removed from outbox",
+        );
+        assert.equal(
+          desktopMessageOutbox.value.find((e) => e.clientMessageId === orphanedId)?.message.outgoing?.status,
+          "uncertain",
+          "orphaned send remains uncertain until retried",
+        );
+      } finally {
+        scope.stop();
+      }
     });
     clearDesktopMessageOutbox();
   });

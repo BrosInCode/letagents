@@ -35,7 +35,11 @@ type OutboxConfirmationListener = (event: DesktopOutboxConfirmedEvent) => void;
 // accepted submissions here until the authoritative stream has caught up.
 export const desktopMessageOutbox = shallowRef<readonly OutgoingMessage[]>([]);
 
+export const INTERRUPTED_OUTBOX_DELIVERY_ERROR =
+  "Delivery could not be confirmed before the app closed.";
+
 let outboxGeneration = 0;
+const pendingLocalPersists = new Set<string>();
 const confirmationHandlers = new Map<string, { token: symbol; listener: OutboxConfirmationListener }>();
 
 function roomOutboxKey(roomIdentifier: string, messageNamespace: string | null): string {
@@ -44,6 +48,11 @@ function roomOutboxKey(roomIdentifier: string, messageNamespace: string | null):
 
 function changed(): void {
   desktopMessageOutbox.value = [...desktopMessageOutbox.value];
+}
+
+function clonePlain<T>(value: T): T {
+  if (value === null || value === undefined || typeof value !== "object") return value;
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function normalizeAttachments(
@@ -121,6 +130,7 @@ export function registerDesktopOutboxConfirmationListener(
 
 export function clearDesktopMessageOutbox(): void {
   outboxGeneration += 1;
+  pendingLocalPersists.clear();
   desktopMessageOutbox.value = [];
 }
 
@@ -138,7 +148,26 @@ export async function hydrateDesktopMessageOutbox(): Promise<void> {
   const existingIds = new Set(desktopMessageOutbox.value.map((entry) => entry.clientMessageId));
   const restored: OutgoingMessage[] = [];
   for (const item of persisted) {
-    if (!item?.clientMessageId || existingIds.has(item.clientMessageId)) continue;
+    if (
+      !item?.clientMessageId
+      || existingIds.has(item.clientMessageId)
+      || pendingLocalPersists.has(item.clientMessageId)
+    ) {
+      continue;
+    }
+    // Any row hydrated from SQLite that is not already tracked by an active
+    // send in this renderer has no live delivery attempt (for example after a
+    // full crash OR a renderer-only reload while Electron's main process stayed
+    // alive). Surface it as uncertain with a usable Retry action instead of
+    // leaving "Sending…" stuck forever.
+    const orphanedPending = item.status === "pending";
+    const error = item.error ?? (orphanedPending ? INTERRUPTED_OUTBOX_DELIVERY_ERROR : null);
+    if (orphanedPending) {
+      void desktopIpc.room?.updateOutgoingMessage?.(item.clientMessageId, {
+        status: "uncertain",
+        error,
+      }).catch(() => undefined);
+    }
     const attachments = normalizeAttachments(item.attachments || []);
     restored.push({
       roomIdentifier: item.roomIdentifier,
@@ -162,8 +191,8 @@ export async function hydrateDesktopMessageOutbox(): Promise<void> {
         replyPreview: item.replyPreview ?? null,
         sender: item.sender || "You",
         timestamp: item.timestamp || new Date().toISOString(),
-        status: item.status === "pending" ? "pending" : "uncertain",
-        error: item.error ?? null,
+        status: "uncertain",
+        error,
       }),
     });
   }
@@ -264,26 +293,43 @@ export async function persistAndEnqueueDesktopMessage(
   const attachments = normalizeAttachments(input.attachments);
   const generation = outboxGeneration;
   const saveOutgoingMessage = desktopIpc.room?.saveOutgoingMessage;
+  const plainGif = input.gif ? clonePlain(input.gif) : undefined;
+  const plainReplyPreview = clonePlain(input.replyPreview);
   if (typeof saveOutgoingMessage === "function") {
-    await saveOutgoingMessage({
-      clientMessageId,
-      roomIdentifier: input.roomIdentifier,
-      messageNamespace: input.messageNamespace,
-      text: input.text,
-      replyTo: input.replyTo,
-      threadRootId: input.threadRootId,
-      attachments,
-      ...(input.gif ? { gif: input.gif } : {}),
-      replyPreview: input.replyPreview,
-      timestamp,
-    });
-    if (generation !== outboxGeneration) {
-      return null;
+    pendingLocalPersists.add(clientMessageId);
+    try {
+      await saveOutgoingMessage({
+        clientMessageId,
+        roomIdentifier: input.roomIdentifier,
+        messageNamespace: input.messageNamespace,
+        text: input.text,
+        replyTo: input.replyTo,
+        threadRootId: input.threadRootId,
+        attachments,
+        ...(plainGif ? { gif: plainGif } : {}),
+        replyPreview: plainReplyPreview,
+        timestamp,
+      });
+      if (generation !== outboxGeneration) {
+        return null;
+      }
+      return enqueueDesktopMessage({
+        ...input,
+        attachments,
+        ...(plainGif ? { gif: plainGif } : {}),
+        replyPreview: plainReplyPreview,
+        clientMessageId,
+        timestamp,
+      });
+    } finally {
+      pendingLocalPersists.delete(clientMessageId);
     }
   }
   return enqueueDesktopMessage({
     ...input,
     attachments,
+    ...(plainGif ? { gif: plainGif } : {}),
+    replyPreview: plainReplyPreview,
     clientMessageId,
     timestamp,
   });

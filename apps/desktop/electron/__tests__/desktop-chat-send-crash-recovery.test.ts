@@ -45,6 +45,7 @@ const {
   listDesktopOutgoingMessages,
   rotateDesktopOutboxBootIdForTest,
   saveDesktopOutgoingMessage,
+  updateDesktopOutgoingMessage,
 } = await import("../main/rooms/outbox-store.js");
 
 const PNG_BYTES = Buffer.from("\x89PNG\r\n\x1a\ncrash-recovery-image-payload", "latin1");
@@ -580,4 +581,136 @@ test("real OS SIGKILL crash after composer persistence preserves local thread re
   const served = await handleAttachmentProtocolRequest(new Request(delivered.message.attachments[0]!.href!));
   assert.equal(served.status, 200);
   assert.equal(Buffer.from(await served.arrayBuffer()).toString("base64"), PNG_BASE64);
+});
+
+test("renderer-only restart while Electron main process stays alive (same boot_id) recovers saved local thread send as uncertain and retryable through real SQLite and renderer outbox", async () => {
+  setAccountAuth({ id: "acct_renderer_reload", login: "alice", displayName: "Alice" });
+  await setChatStorageMode("local");
+  const roomIdentifier = "crash-local-renderer-only-restart";
+  const messageNamespace = `${roomIdentifier}:local:cloud`;
+
+  const root = await addLocalChatMessage(roomIdentifier, {
+    sender: "Alice",
+    text: "Root before renderer reload",
+    source: "browser",
+  });
+  const [staged] = await stageDroppedDesktopAttachmentContents(roomIdentifier, [{
+    fileName: "renderer-reload.png",
+    mimeType: "image/png",
+    sizeBytes: PNG_BYTES.byteLength,
+    contentBase64: PNG_BASE64,
+  }]);
+  assert.ok(staged);
+
+  const clientMessageId = "desktop-send:77777777-7777-4777-8777-777777777777";
+  const saved = await saveDesktopOutgoingMessage({
+    clientMessageId,
+    roomIdentifier,
+    messageNamespace,
+    text: "Saved before renderer died without main-process restart",
+    replyTo: root.id,
+    threadRootId: root.id,
+    attachments: [{
+      upload_id: staged.uploadId,
+      fileName: staged.fileName,
+      mimeType: staged.mimeType,
+      sizeBytes: staged.sizeBytes,
+    }],
+    replyPreview: {
+      id: root.id,
+      sender: root.sender,
+      text: root.text,
+      source: root.source ?? null,
+      timestamp: root.timestamp,
+      agentIdentity: null,
+    },
+    timestamp: "2026-11-19T02:30:00.000Z",
+  });
+  assert.equal(saved.status, "pending");
+
+  // Main process stays alive (do NOT rotate boot_id): raw SQLite still sees status='pending'.
+  const rawRows = await listDesktopOutgoingMessages();
+  assert.equal(rawRows.length, 1);
+  assert.equal(rawRows[0]!.status, "pending");
+
+  // Load real renderer outbox module and wire window.letagentsDesktop.room to the real Electron store functions.
+  const outboxUrl = new URL("../../renderer/src/domain/message-outbox.ts", import.meta.url).href;
+  const outbox = await import(outboxUrl) as {
+    clearDesktopMessageOutbox: () => void;
+    desktopMessageOutbox: { value: Array<{ clientMessageId: string; inFlight: boolean; message: { outgoing?: { status: string; error: string | null } } }> };
+    hydrateDesktopMessageOutbox: () => Promise<void>;
+    registerDesktopOutboxConfirmationListener: (
+      room: string,
+      ns: string | null,
+      listener: (event: { message: { id: string; clientMessageId: string | null; threadRootId: string | null; attachments: Array<{ fileName: string; href: string | null }> } }) => void,
+    ) => () => void;
+    retryDesktopOutgoingMessage: (id: string) => Promise<void>;
+  };
+
+  const previousWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = {
+    letagentsDesktop: {
+      room: {
+        saveOutgoingMessage: saveDesktopOutgoingMessage,
+        updateOutgoingMessage: updateDesktopOutgoingMessage,
+        deleteOutgoingMessage: deleteDesktopOutgoingMessage,
+        listOutgoingMessages: listDesktopOutgoingMessages,
+        sendMessage: sendDesktopRoomMessage,
+      },
+    },
+  };
+  const confirmedMessages: Array<{ id: string; clientMessageId: string | null; threadRootId: string | null; attachments: Array<{ fileName: string; href: string | null }> }> = [];
+  const unregisterListener = outbox.registerDesktopOutboxConfirmationListener(
+    roomIdentifier,
+    messageNamespace,
+    (event) => {
+      confirmedMessages.push(event.message);
+    },
+  );
+  try {
+    // New renderer starts empty and hydrates against live main-process SQLite.
+    outbox.clearDesktopMessageOutbox();
+    await outbox.hydrateDesktopMessageOutbox();
+
+    assert.equal(outbox.desktopMessageOutbox.value.length, 1);
+    const recovered = outbox.desktopMessageOutbox.value[0]!;
+    assert.equal(recovered.clientMessageId, clientMessageId);
+    assert.equal(recovered.inFlight, false);
+    assert.equal(recovered.message.outgoing?.status, "uncertain");
+    assert.equal(recovered.message.outgoing?.error, INTERRUPTED_DELIVERY_ERROR);
+
+    // Give the async SQLite status persistence a tick and verify SQLite updated to uncertain.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const persistedAfterHydrate = await listDesktopOutgoingMessages();
+    assert.equal(persistedAfterHydrate[0]!.status, "uncertain");
+
+    // Retry safely dispatches once and commits exactly one local thread reply + one attachment.
+    await outbox.retryDesktopOutgoingMessage(clientMessageId);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal((await listDesktopOutgoingMessages()).length, 0);
+    assert.equal(confirmedMessages.length, 1, "room confirmation listener must receive the retried message");
+    const confirmedMessage = confirmedMessages[0]!;
+    assert.equal(confirmedMessage.clientMessageId, clientMessageId);
+    assert.equal(confirmedMessage.threadRootId, root.id);
+    assert.equal(confirmedMessage.attachments.length, 1);
+    assert.equal(confirmedMessage.attachments[0]!.fileName, "renderer-reload.png");
+
+    const thread = await getLocalMessageThread(roomIdentifier, root.id);
+    assert.ok(thread);
+    const replies = thread.replies.filter((m) => m.client_message_id === clientMessageId);
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0]!.thread_root_id, root.id);
+    assert.equal(replies[0]!.attachments?.length, 1);
+    assert.equal(replies[0]!.attachments?.[0]?.file_name, "renderer-reload.png");
+
+    const served = await handleAttachmentProtocolRequest(new Request(confirmedMessage.attachments[0]!.href!));
+    assert.equal(served.status, 200);
+    assert.equal(Buffer.from(await served.arrayBuffer()).toString("base64"), PNG_BASE64);
+  } finally {
+    unregisterListener();
+    outbox.clearDesktopMessageOutbox();
+    if (previousWindow === undefined) delete (globalThis as { window?: unknown }).window;
+    else (globalThis as { window?: unknown }).window = previousWindow;
+  }
 });
