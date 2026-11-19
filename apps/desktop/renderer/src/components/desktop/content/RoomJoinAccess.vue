@@ -12,7 +12,7 @@
 
     <template v-else-if="joinState.kind === 'pending'">
       <h1>Waiting for an admin</h1>
-      <p>You asked to join {{ askedLabel }}. A room admin can let you in. The room opens when you check again after that.</p>
+      <p>You asked to join {{ askedLabel }}. A room admin can let you in. The room opens here as soon as they do.</p>
     </template>
 
     <template v-else-if="joinState.kind === 'declined'">

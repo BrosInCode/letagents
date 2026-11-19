@@ -1,6 +1,8 @@
 import type { DesktopInviteRoomCreation, DesktopInviteRoomOptions } from "../../ipc-types.js";
 import { apiFetch, DesktopApiError } from "../auth.js";
+import { setLocalAwareRoomStorageMode } from "./local-store.js";
 import { fetchRoomSnapshot } from "./snapshot.js";
+import { createUnavailableRoomSnapshot } from "./snapshot/snapshots.js";
 
 /** Plain words for the refusals of a room created inside a company. */
 const COMPANY_ROOM_REFUSALS: Record<string, string> = {
@@ -35,7 +37,21 @@ export async function createDesktopInviteRoom(options?: DesktopInviteRoomOptions
   }
   const roomIdentifier = room.id;
   const code = room.code || room.id;
-  const snapshot = await fetchRoomSnapshot(code);
+  // A shared room must open in the cloud even when this device defaults to local.
+  try {
+    await setLocalAwareRoomStorageMode(roomIdentifier, "cloud");
+  } catch {
+    // The server already created the room. Keep its identifier and invite so a
+    // local settings error doesn't send the user back to Create room.
+    return {
+      roomIdentifier,
+      code,
+      snapshot: createUnavailableRoomSnapshot(roomIdentifier, new Error(
+        `The shared room was created (invite code ${code}), but LetAgents could not save its storage setting.`,
+      )),
+    };
+  }
+  const snapshot = await fetchRoomSnapshot(roomIdentifier);
   return {
     roomIdentifier,
     code,

@@ -1,9 +1,10 @@
 export const DAEMON_PIPE_ADDON_NAME: "letagents-daemon-pipe.node";
 export const DAEMON_PIPE_ADDON_ENV: "LETAGENTS_DAEMON_PIPE_ADDON";
 export const DAEMON_PIPE_ADDON_ERROR: "ERR_LETAGENTS_DAEMON_PIPE_ADDON";
+export interface DaemonPipeSealedBuild { sha256: string; vcToolsVersion?: string; windowsSdkVersion?: string }
 export interface DaemonPipeSeal {
   sourceSha256?: string;
-  builds?: Partial<Record<"x64" | "arm64", { sha256: string; vcToolsVersion?: string; windowsSdkVersion?: string }>>;
+  builds?: Partial<Record<"x64" | "arm64", DaemonPipeSealedBuild | DaemonPipeSealedBuild[]>>;
 }
 export interface DaemonPipeAddonOptions {
   env?: NodeJS.ProcessEnv;
@@ -17,7 +18,8 @@ export interface DaemonPipeAddonOptions {
   exists?: (path: string) => boolean;
   readFile?: (path: string) => Buffer;
 }
-export function sealedDaemonPipeAddonSha256(arch?: string, seal?: DaemonPipeSeal | null): string | null;
+/** The sealed digests for `arch`: `builds.<arch>` is one build or a list of builds. Empty when none is sealed. */
+export function sealedDaemonPipeAddonSha256s(arch?: string, seal?: DaemonPipeSeal | null): string[];
 /** InstallLocation from a `reg export` file (UTF-16LE with a byte-order mark), or null. */
 export function parseInstallLocation(bytes: Buffer): string | null;
 export function daemonPipeAddonCandidates(options?: DaemonPipeAddonOptions): string[];

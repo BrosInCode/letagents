@@ -1,5 +1,10 @@
 import { ROOM_INVITE_EVENT, parseRoomInviteEvent } from "../../../../shared/room-invites.mjs";
-import { ROOM_JOIN_REQUEST_EVENT, parseRoomJoinRequestEvent } from "../../../../shared/room-join-requests.mjs";
+import {
+  ROOM_JOIN_REQUEST_DECISION_EVENT,
+  ROOM_JOIN_REQUEST_EVENT,
+  parseRoomJoinRequestDecisionEvent,
+  parseRoomJoinRequestEvent,
+} from "../../../../shared/room-join-requests.mjs";
 import { ROOM_MENTION_EVENT, parseRoomMentionEvent } from "../../../../shared/room-mention-events.mjs";
 import { readStoredAuth } from "./auth.js";
 import { apiUrl } from "./paths.js";
@@ -170,6 +175,11 @@ function handleFrame(current: Stream, frame: string): void {
     // The server sends it to the room's admins only.
     const parsed = parseRoomJoinRequestEvent(payload);
     if (parsed) emitRoomStreamEvent({ type: "join_request", roomIdentifier: parsed.room_id, event: parsed });
+  } else if (event === ROOM_JOIN_REQUEST_DECISION_EVENT) {
+    // An admin answered this account's own request to join a room: a waiting
+    // screen for that room opens it, or shows the decline, at once.
+    const parsed = parseRoomJoinRequestDecisionEvent(payload);
+    if (parsed) emitRoomStreamEvent({ type: "join_request_decision", roomIdentifier: parsed.room_id, event: parsed });
   } else if (event === ROOM_INVITE_EVENT) {
     // An invite this account made was made, cancelled or used: the pill above
     // the composer follows it, on every device of the maker.

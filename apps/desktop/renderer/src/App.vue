@@ -178,7 +178,7 @@
         :rooms="company.rooms.value"
         @open-room="openCompanyRoom"
         :access-reason="company.accessReason.value"
-        @new-room="selectNewRoomEntry(); chooseStandaloneIntent()"
+        @new-room="selectNewRoomEntry()"
         @show-all="chooseSidebarCompany(null)"
         @retry="company.refresh"
         @open-github="company.openOnGitHub"
@@ -381,7 +381,8 @@
         v-model:join-code="newRoomJoinCode"
         v-model:room-name="newRoomName"
         v-model:storage="newRoomStorage"
-        :company="newRoomCompany"
+        v-model:company="newRoomCompany"
+        :companies="newRoomCompanies"
         :step="newRoomStep"
         :busy="newRoomBusy"
         :can-dismiss="newRoomCanDismiss"
@@ -395,7 +396,6 @@
         :project-selection="newRoomProjectSelection"
         :project-path-error="newRoomProjectPathError"
         :recent-project-folders="newRoomRecentProjectFolders"
-        :success="newRoomSuccess"
         :status-message="newRoomStatusMessage"
         :join-error="newRoomJoinError"
         :can-submit-join="canSubmitJoin"
@@ -404,17 +404,14 @@
         @choose-join="chooseJoinIntent"
         @choose-project="chooseProjectIntent"
         @choose-new-project="chooseNewProjectIntent"
-        @choose-standalone="chooseStandaloneIntent"
+        @remove-project="removeProject"
         @close="closeNewRoomModal"
         @confirm-project="confirmProjectRoomFromModal"
-        @copy-code="copyInviteCode"
         @create-standalone="createStandaloneRoom"
         @create-project="createProjectRoomFromModal"
         @pick-project-parent="pickNewProjectParent"
-        @dismiss-success="dismissSuccess"
         @open-project="openProjectRoomFromModal"
         @open-project-path="openProjectRoomFromPath"
-        @open-success="openSuccessRoom"
         @join="joinRoomCodeFromModal"
         @retry="retryLastAction"
       />
@@ -659,14 +656,14 @@ const {
 
 const {
   backFromSubstep, canSubmitJoin, canSubmitStandalone, chooseJoinIntent, chooseProjectIntent,
-  chooseNewProjectIntent, chooseStandaloneIntent, closeNewRoomModal, confirmProjectRoomFromModal,
-  copyInviteCode, createStandaloneRoom, createProjectRoomFromModal, dismissSuccess,
+  chooseNewProjectIntent, closeNewRoomModal, confirmProjectRoomFromModal,
+  createStandaloneRoom, createProjectRoomFromModal,
   joinRoomCodeFromModal, newRoomActiveAction, newRoomBusy, newRoomCanDismiss, newRoomFeedback,
   newRoomFeedbackState, newRoomJoinCode, newRoomJoinError, newRoomModalOpen, newRoomName,
   newRoomProjectPath, newRoomProjectName, newRoomProjectParent, newRoomProjectCreationError,
   newRoomProjectPathError, newRoomProjectSelection, newRoomStatusMessage, newRoomStep,
-  newRoomStorage, newRoomCompany, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
-  pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
+  newRoomStorage, newRoomCompany, newRoomCompanies, removeProject, openProjectRoomFromModal, openProjectRoomFromPath,
+  pickNewProjectParent, retryLastAction, selectNewRoomEntry,
   archiveSidebarFocusRoom, archiveSidebarRoom, deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion, finishRoomArchive, leaveAccountRoom,
   openAccountRoomFromSettings, renameSidebarRoom, restoreAccountRoom, settingsFeedback,
   settingsRoomActionBusyKey, toggleAccountRoomPin, togglePinSidebarRoom,

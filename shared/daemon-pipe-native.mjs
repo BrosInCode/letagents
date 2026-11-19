@@ -30,10 +30,17 @@ function daemonPipeSeal() {
   return loadedSeal;
 }
 
-/** The sealed sha256 of the addon built for `arch`, or null when no build for it is sealed. */
-export function sealedDaemonPipeAddonSha256(arch = process.arch, seal = daemonPipeSeal()) {
-  const digest = seal?.builds?.[arch === "arm64" ? "arm64" : "x64"]?.sha256;
-  return typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest) ? digest : null;
+/**
+ * The sealed sha256 digests of the addon built for `arch`; empty when no
+ * build for it is sealed. `builds.<arch>` is one build or a list of builds:
+ * a list while GitHub's runner images carry two MSVC versions, each of which
+ * makes its own reproducible bytes.
+ */
+export function sealedDaemonPipeAddonSha256s(arch = process.arch, seal = daemonPipeSeal()) {
+  const sealed = seal?.builds?.[arch === "arm64" ? "arm64" : "x64"];
+  return (Array.isArray(sealed) ? sealed : [sealed])
+    .map((build) => build?.sha256)
+    .filter((digest) => typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest));
 }
 
 function isFile(filePath) {
@@ -121,7 +128,7 @@ function addonError(message) {
  */
 export function findDaemonPipeAddon(options = {}) {
   const arch = options.arch ?? process.arch;
-  const expected = sealedDaemonPipeAddonSha256(arch, options.seal === undefined ? daemonPipeSeal() : options.seal);
+  const expected = sealedDaemonPipeAddonSha256s(arch, options.seal === undefined ? daemonPipeSeal() : options.seal);
   const exists = options.exists ?? isFile;
   const read = options.readFile ?? readFileSync;
   const candidates = daemonPipeAddonCandidates(options);
@@ -130,13 +137,13 @@ export function findDaemonPipeAddon(options = {}) {
     throw addonError(`${DAEMON_PIPE_ADDON_NAME} was not found (looked in ${candidates.join(", ") || "no folder"}); `
       + "reinstall LetAgents, or build it with apps/desktop/native/win-daemon-pipe/build.mjs.");
   }
-  if (!expected) throw addonError(`No ${arch} build of ${DAEMON_PIPE_ADDON_NAME} is sealed in shared/letagents-daemon-pipe.seal.json.`);
+  if (expected.length === 0) throw addonError(`No ${arch} build of ${DAEMON_PIPE_ADDON_NAME} is sealed in shared/letagents-daemon-pipe.seal.json.`);
   let sha256;
   try { sha256 = createHash("sha256").update(read(found)).digest("hex"); } catch (error) {
     throw addonError(`${found} could not be read: ${error?.message ?? error}`);
   }
-  if (sha256 !== expected) {
-    throw addonError(`${found} (sha256 ${sha256}) is not the sealed ${DAEMON_PIPE_ADDON_NAME} (${expected}); refusing to load it.`);
+  if (!expected.includes(sha256)) {
+    throw addonError(`${found} (sha256 ${sha256}) is not the sealed ${DAEMON_PIPE_ADDON_NAME} (${expected.join(" or ")}); refusing to load it.`);
   }
   return { path: found, sha256 };
 }

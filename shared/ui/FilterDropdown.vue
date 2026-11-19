@@ -22,6 +22,7 @@
       ref="menu"
       class="work-filter-menu"
       popover="auto"
+      @beforetoggle="clearPlacement"
       @toggle="toggled"
       @keydown="keydown"
       @focusout="focusout"
@@ -122,9 +123,13 @@ function position() {
   const below = window.innerHeight - box.bottom - gap - edge,
     above = box.top - gap - edge;
   const flip = below < popup.offsetHeight && above > below;
+  popup.dataset.placement = flip ? "above" : "below";
   popup.style.maxHeight = `${Math.max(0, flip ? above : below)}px`;
   popup.style.left = `${Math.max(edge, Math.min(box.left, window.innerWidth - popup.offsetWidth - edge))}px`;
   popup.style.top = `${Math.max(edge, flip ? box.top - gap - popup.offsetHeight : box.bottom + gap)}px`;
+}
+function clearPlacement(event: ToggleEvent) {
+  if (event.newState === "open" && menu.value) delete menu.value.dataset.placement;
 }
 function reposition(event: Event) {
   if (!(event.target instanceof Node) || !menu.value?.contains(event.target))
