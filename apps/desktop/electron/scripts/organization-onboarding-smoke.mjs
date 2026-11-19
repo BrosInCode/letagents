@@ -138,25 +138,24 @@ try {
   assert.match(await js('document.body.innerText'), /Make room to\s+work together/);
   await new Promise(resolve => setTimeout(resolve, 2900));
   await capture('00-animated-welcome.png');
-  if (await js(`document.fullscreenEnabled && !matchMedia('(prefers-reduced-motion: reduce)').matches`)) {
+  const runFullscreen = await js(`document.fullscreenEnabled && !matchMedia('(prefers-reduced-motion: reduce)').matches`);
+  if (runFullscreen) {
     await click('[data-testid="first-run-welcome"] [aria-label="Full screen"]');
-    await waitFor(`document.fullscreenElement?.dataset.testid === 'first-run-wizard'`);
+    await waitFor(`document.fullscreenElement === document.documentElement`);
     await click('.welcome-controls button:first-child');
     await waitFor(`document.querySelector('.welcome-controls button:first-child')?.textContent.trim() === 'Play'`);
     await click('.welcome-controls button:nth-child(2)');
     await waitFor(`document.querySelector('.welcome-controls button:first-child')?.textContent.trim() === 'Pause'`);
-    assert.equal(await js(`document.fullscreenElement?.dataset.testid`), 'first-run-wizard', 'replay stays full screen');
+    assert.ok(await js(`document.fullscreenElement === document.documentElement`), 'replay stays full screen');
     // The macOS Space transition can outlast the DOM fullscreenchange event.
     if (process.platform === 'darwin') {
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
     await click('[data-testid="first-run-start-setup"]');
     await waitFor(`document.querySelector('[data-testid="first-run-welcome"]')?.dataset.handoffState === 'moving'`);
-    assert.equal(await js(`document.fullscreenElement?.dataset.testid`), 'first-run-wizard', 'the particles land in GitHub while full screen');
+    assert.ok(await js(`document.fullscreenElement === document.documentElement`), 'the particles land in GitHub while full screen');
     await click('[data-testid="first-run-back"]');
     await waitFor(`document.querySelector('[data-testid="first-run-welcome"]')?.dataset.handoffState === 'idle'`);
-    await click('[data-testid="first-run-welcome"] [aria-label="Exit full screen"]');
-    await waitFor(`!document.fullscreenElement`);
   }
   window.webContents.debugger.attach();
   await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
@@ -220,8 +219,16 @@ try {
   await click('[data-testid="first-run-company-room-github.com/herotel/app"]');
   if (await js(`Boolean(document.startViewTransition) && !matchMedia('(prefers-reduced-motion: reduce)').matches`)) {
     await waitFor(`document.documentElement.dataset.firstRoomEntry === 'true'`);
+    await waitFor(`document.getAnimations().some(animation => animation.animationName === 'first-room-icon-in')`);
   }
   await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);
+  if (runFullscreen) {
+    assert.ok(await js(`document.fullscreenElement === document.documentElement`), 'room arrival stays full screen');
+    await waitFor(`!document.documentElement.dataset.firstRoomEntry`);
+    await js(`document.exitFullscreen()`);
+    await waitFor(`!document.fullscreenElement`);
+    if (process.platform === 'darwin') await new Promise(resolve => setTimeout(resolve, 1000));
+  }
   // The company filter sits on the Rooms heading.
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').includes('Herotel')`);
   await waitFor(`document.querySelector('[data-testid="desktop-shell"]')?.dataset.roomTheme === 'mint'`);

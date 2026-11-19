@@ -390,13 +390,28 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         firstRunFinished.value = true;
         return nextTick();
       };
-      if (roomIdentifier && typeof document !== "undefined" && document.startViewTransition && !document.fullscreenElement
+      if (roomIdentifier && typeof document !== "undefined" && document.startViewTransition
         && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
         const root = document.documentElement;
+        const departingIcon = document.querySelector<SVGElement>('.company-rooms-row[aria-pressed="true"] .company-rooms-icon');
+        let arrivingIcon: ElementCSSInlineStyle | undefined;
+        if (departingIcon) departingIcon.style.viewTransitionName = "first-room-icon";
         root.dataset.firstRoomEntry = "true";
-        const transition = document.startViewTransition(showWorkspace);
-        void transition.finished.finally(() => { delete root.dataset.firstRoomEntry; }).catch(() => undefined);
-        await transition.updateCallbackDone;
+        const transition = document.startViewTransition(async () => {
+          await showWorkspace();
+          if (!departingIcon) return;
+          const activeIcons = document.querySelectorAll<HTMLElement | SVGElement>(
+            '[data-sidebar-entry-id][data-active="true"] :is(.pin-mark, .project-icon), .desktop-room-tab[data-active="true"] .desktop-room-tab-icon',
+          );
+          arrivingIcon = Array.from(activeIcons).find(icon => icon.getClientRects().length);
+          if (arrivingIcon) arrivingIcon.style.viewTransitionName = "first-room-icon";
+        });
+        void transition.finished.finally(() => {
+          delete root.dataset.firstRoomEntry;
+          departingIcon?.style.removeProperty("view-transition-name");
+          arrivingIcon?.style.removeProperty("view-transition-name");
+        }).catch(() => undefined);
+        await Promise.all([transition.updateCallbackDone, transition.ready.catch(() => undefined)]);
       } else {
         await showWorkspace();
       }

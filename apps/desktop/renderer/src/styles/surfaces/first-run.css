@@ -1760,7 +1760,6 @@
   color: var(--setup-text);
 }
 
-.first-run-wizard:fullscreen { width: 100%; background: var(--setup-bg); }
 .first-run-wizard .primary-button.onboarding-primary {
   --action-accent: var(--onboarding-accent, var(--workspace-accent, var(--setup-accent)));
   position: relative;

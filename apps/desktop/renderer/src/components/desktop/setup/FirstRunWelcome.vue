@@ -159,13 +159,13 @@ function motionPreferenceChanged() {
 }
 
 function fullscreenChanged() {
-  fullScreen.value = document.fullscreenElement === frame.value?.parentElement;
+  fullScreen.value = document.fullscreenElement === document.documentElement;
 }
 
 async function toggleFullscreen() {
   try {
     if (fullScreen.value) await document.exitFullscreen();
-    else await frame.value?.parentElement?.requestFullscreen();
+    else await document.documentElement.requestFullscreen();
   } catch { /* The OS can deny full screen while a window is transitioning. */ }
 }
 
