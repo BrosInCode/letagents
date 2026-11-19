@@ -952,10 +952,14 @@ describe("recovery UI accessibility, theming and thread-panel contract", () => {
   it("defines visible focus styling and light/dark theme tokens for outgoing recovery controls", async () => {
     const baseCss = await readFile(fileURLToPath(new URL("../src/styles/01-base.css", import.meta.url)), "utf8");
     const metaCss = await readFile(fileURLToPath(new URL("../src/styles/message-content/message-meta-reply.css", import.meta.url)), "utf8");
+    const threadCss = await readFile(fileURLToPath(new URL("../src/styles/message-content/thread-panel.css", import.meta.url)), "utf8");
     assert.match(baseCss, /:root\[data-theme="light"\]\s*\{\s*color-scheme:\s*light;/);
     assert.match(baseCss, /:root\[data-theme="dark"\]\s*\{\s*color-scheme:\s*dark;/);
     assert.match(metaCss, /\.room-message-outgoing button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--blue-text\)/);
     assert.match(metaCss, /\.room-message-outgoing\[data-tone="warning"\]/);
     assert.match(metaCss, /\.room-chat-message\[data-outgoing-status="uncertain"\]/);
+    assert.match(threadCss, /\.room-message-bubble > \.room-thread-marker strong\s*\{[^}]*color:\s*var\(--chat-foreground/);
+    assert.match(threadCss, /\.room-thread-panel \.room-chat-message\.is-thread-context \.room-message-author-block strong[\s\S]*?color:\s*var\(--chat-foreground/);
+    assert.match(threadCss, /\.room-thread-composer textarea\s*\{[^}]*color:\s*var\(--chat-foreground/);
   });
 });
