@@ -38,6 +38,7 @@ onMounted(() => {
   let elapsed = 0
   let lastFrame = 0
   let frame = 0
+  let scrollIdle
   let inView = true
   let needsDraw = true
 
@@ -65,16 +66,35 @@ onMounted(() => {
     window.cancelAnimationFrame(frame)
     frame = 0
     lastFrame = 0
+    const playing = canAnimate.value && !paused.value && !document.hidden
+    if (playing) {
+      window.addEventListener('scroll', onScroll, { passive: true })
+    } else {
+      window.removeEventListener('scroll', onScroll)
+      clearTimeout(scrollIdle)
+      scrollIdle = undefined
+    }
     if (!canvasAvailable.value || document.hidden || !width || !height) return
     if (needsDraw) draw()
-    if (inView && !still() && !paused.value) frame = window.requestAnimationFrame(tick)
+    if (playing && scrollIdle === undefined) frame = window.requestAnimationFrame(tick)
+  }
+
+  function onScroll() {
+    const wasScrolling = scrollIdle !== undefined
+    clearTimeout(scrollIdle)
+    // Leave the last frame in place and give scrolling the frame budget.
+    scrollIdle = setTimeout(() => {
+      scrollIdle = undefined
+      updatePlayback()
+    }, 180)
+    if (!wasScrolling) updatePlayback()
   }
 
   function configureSurface() {
     if (!width || !height) return
-    const density = Math.min(window.devicePixelRatio || 1, compact.matches ? 1.5 : 1.75, Math.sqrt(3_000_000 / (width * height)))
-    surface.width = Math.round(width * density)
-    surface.height = Math.round(height * density)
+    const density = Math.min(window.devicePixelRatio || 1, 1.5, Math.sqrt(1_500_000 / (width * height)))
+    surface.width = Math.max(1, Math.floor(width * density))
+    surface.height = Math.max(1, Math.floor(height * density))
     context.setTransform(density, 0, 0, density, 0, 0)
     needsDraw = true
   }
@@ -115,6 +135,8 @@ onMounted(() => {
 
   dispose = () => {
     window.cancelAnimationFrame(frame)
+    window.removeEventListener('scroll', onScroll)
+    clearTimeout(scrollIdle)
     stopPause()
     resize.disconnect()
     visibility.disconnect()

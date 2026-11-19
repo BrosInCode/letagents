@@ -43,6 +43,20 @@ export function createHandoffPainter(paint) {
     };
   }
 
+  // Only the projection changes from frame to frame. Keep the room mesh in model space.
+  function edgePoints(level, start, end) {
+    return Array.from({ length: 73 }, (_, step) => roomEdge(mix(start, end, step / 72), level));
+  }
+  const first = -3.94;
+  const last = -.30;
+  const floorLines = Array.from({ length: 5 }, (_, band) => edgePoints(-band * .028, 0, tau));
+  const wallRows = Array.from({ length: 25 }, (_, row) => edgePoints(row / 24 * .96, first, last));
+  const wallColumns = Array.from({ length: 58 }, (_, column) => {
+    const angle = mix(first, last, column / 57);
+    return Array.from({ length: 21 }, (_, step) => roomEdge(angle, step / 20 * .96));
+  });
+  const wallBaseReversed = [...wallRows[0]].reverse();
+
   function generatePoints() {
     const particles = [];
     const count = 176;
@@ -220,20 +234,19 @@ export function createHandoffPainter(paint) {
     paint.restore();
   }
 
-  function projectRoom(point, room) {
+  function projectRoom(point, room, projected = {}) {
     const depth = point.x * room.sine + point.z * room.cosine;
     const span = room.size / (1 - depth * .07);
-    return {
-      x: room.x + (point.x * room.cosine - point.z * room.sine) * span,
-      y: room.y + (depth * .43 - point.y * .93) * span,
-      depth,
-    };
+    projected.x = room.x + (point.x * room.cosine - point.z * room.sine) * span;
+    projected.y = room.y + (depth * .43 - point.y * .93) * span;
+    projected.depth = depth;
+    return projected;
   }
 
-  function traceEdge(room, height, start, end, move = true) {
-    for (let step = 0; step <= 72; step++) {
-      const angle = mix(start, end, step / 72);
-      const point = projectRoom(roomEdge(angle, height), room);
+  const projectedPoint = {};
+  function traceLine(room, points, move = true) {
+    for (let step = 0; step < points.length; step++) {
+      const point = projectRoom(points[step], room, projectedPoint);
       if (step === 0 && move) paint.moveTo(point.x, point.y);
       else paint.lineTo(point.x, point.y);
     }
@@ -241,8 +254,6 @@ export function createHandoffPainter(paint) {
 
   function drawRoom(room, assembly, opacity) {
     if (assembly < .02 || opacity < .01) return;
-    const first = -3.94;
-    const last = -.30;
     const floor = ease(assembly * 1.9);
     const walls = smooth((assembly - .16) / .84);
     paint.save();
@@ -254,7 +265,7 @@ export function createHandoffPainter(paint) {
     paint.globalAlpha = floor * opacity;
     paint.fillStyle = floorTint;
     paint.beginPath();
-    traceEdge(room, 0, 0, tau);
+    traceLine(room, floorLines[0]);
     paint.closePath();
     paint.fill();
 
@@ -267,7 +278,7 @@ export function createHandoffPainter(paint) {
     for (let band = 0; band < 5; band++) {
       paint.globalAlpha = floor * opacity * (band === 0 ? .67 : .16 - .023 * band);
       paint.beginPath();
-      traceEdge(room, -band * .028, 0, tau);
+      traceLine(room, floorLines[band]);
       paint.closePath();
       paint.stroke();
     }
@@ -279,8 +290,8 @@ export function createHandoffPainter(paint) {
     veil.addColorStop(1, '#23433408');
     paint.fillStyle = veil;
     paint.beginPath();
-    traceEdge(room, .96, first, last);
-    traceEdge(room, 0, last, first, false);
+    traceLine(room, wallRows[24]);
+    traceLine(room, wallBaseReversed, false);
     paint.closePath();
     paint.fill();
 
@@ -289,20 +300,15 @@ export function createHandoffPainter(paint) {
       paint.globalAlpha = walls * opacity * (row === 24 ? .68 : .11 + .12 * level);
       paint.lineWidth = row === 24 ? 1.2 : .65;
       paint.beginPath();
-      traceEdge(room, level, first, last);
+      traceLine(room, wallRows[row]);
       paint.stroke();
     }
     for (let column = 0; column <= 57; column++) {
-      const angle = mix(first, last, column / 57);
       const edge = column === 0 || column === 57;
       paint.globalAlpha = walls * opacity * (edge ? .53 : .10);
       paint.lineWidth = edge ? .96 : .55;
       paint.beginPath();
-      for (let step = 0; step <= 20; step++) {
-        const point = projectRoom(roomEdge(angle, step / 20 * .96), room);
-        if (step === 0) paint.moveTo(point.x, point.y);
-        else paint.lineTo(point.x, point.y);
-      }
+      traceLine(room, wallColumns[column]);
       paint.stroke();
     }
     paint.restore();
@@ -488,6 +494,7 @@ export function createHandoffPainter(paint) {
     const cy = sculptureY;
     const density = width < 520 ? 2 : 1;
     const assembly = moving ? smooth((t - .56) / (roomReady - .56)) : 1;
+    const gathering = moving && assembly < 1;
     const roomScale = Math.min(size, width * .32);
     const yaw = .72 + Math.sin(t * .47) * .052;
     const room = {
@@ -507,15 +514,15 @@ export function createHandoffPainter(paint) {
       const point = points[index];
       const strand = point.strand;
       const tint = strand < 11 ? 0 : 1;
-      const formed = projectRoom(point.roomPoint, room);
-      const laid = smooth((assembly - point.delay * .40) / (1 - point.delay * .40));
+      const formed = projectRoom(point.roomPoint, room, projectedPoint);
+      const laid = assembly === 1 ? 1 : smooth((assembly - point.delay * .40) / (1 - point.delay * .40));
       let shellX = formed.x;
       let shellY = formed.y;
       let perspective = 1 / (1 - formed.depth * .07);
       let depth = formed.depth * .34;
       const ribbon = (strand % 11 - 5) * .033;
       const angle = point.u + t * (tint ? -.11 : .08);
-      const gathered = moving ? ease((t - point.delay) / (arrivalDuration - .33)) : 1;
+      const gathered = gathering ? ease((t - point.delay) / (arrivalDuration - .33)) : 1;
       if (laid < 1) {
         const curl = angle * 3 + tint * .39 + t * .25;
         const beat = Math.sin(angle * 5 - t * 1.06);

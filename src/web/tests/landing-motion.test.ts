@@ -204,6 +204,32 @@ test('the handoff bounds frame rate and pauses for the user, visibility, reduced
   assert.ok([...env.resizeObservers, ...env.intersectionObservers].every(observer => observer.disconnected))
 })
 
+test('the fixed backdrop keeps a still frame during scrolling and resumes when it settles', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const env = environment(t)
+  const view = env.mount(canvasSource)
+  const canvas = view.nodes().find(n => n.tag === 'canvas')!
+  env.resizeObservers[0].emit([{ contentRect: { width: 1440, height: 900 } }])
+  assert.ok(canvas.width * canvas.height <= 1_500_000, 'bound the Retina backing surface')
+  env.frame(100)
+  const beforeScroll = env.draws.length
+  env.win.emit('scroll')
+  assert.equal(env.frames.size, 0)
+  t.mock.timers.tick(130)
+  env.win.emit('scroll')
+  t.mock.timers.tick(130)
+  assert.equal(env.frames.size, 0)
+  assert.equal(env.draws.length, beforeScroll)
+  t.mock.timers.tick(50)
+  assert.equal(env.frames.size, 1)
+  env.frame(500)
+  assert.equal(env.draws.length, beforeScroll + 1)
+  env.win.emit('scroll')
+  view.unmount()
+  t.mock.timers.tick(180)
+  assert.equal(env.frames.size, 0)
+})
+
 test('blocked and lost canvas contexts leave the fallback visible without scheduling frames', async t => {
   for (const noCanvas of [true, false]) {
     await t.test(noCanvas ? 'no canvas context' : 'context loss and recovery', async t => {
