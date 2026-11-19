@@ -194,4 +194,35 @@ html[data-window-chrome="mac"] .desktop-shell[data-sidebar-mode="hidden"]::befor
   content: ""; position: absolute; inset: 0 0 auto; height: 36px; z-index: 80;
   background: var(--bg); -webkit-app-region: drag;
 }
-html[data-window-chrome="mac"] .desktop-onboarding-shell { padding-top: 52px; }
+html[data-window-chrome="mac"] .desktop-onboarding-shell:not([data-cinematic="true"]) { padding-top: 52px; }
+
+.desktop-onboarding-shell[data-cinematic="true"] {
+  padding: 0;
+  background: #0c0e0d;
+}
+.desktop-onboarding-shell[data-cinematic="true"] .first-run-wizard { width: 100%; min-height: 100dvh; }
+.desktop-onboarding-shell[data-cinematic="true"] .welcome-screen { min-height: 100dvh; }
+html[data-window-chrome="mac"] .first-run-wizard { --welcome-brand-top: 42px; }
+
+:root[data-first-room-entry]::view-transition-old(root) {
+  animation: first-room-setup-out 230ms ease-in both;
+}
+:root[data-first-room-entry]::view-transition-new(root) {
+  animation: first-room-workspace-in 430ms cubic-bezier(.16, 1, .3, 1) both;
+}
+:root[data-first-room-entry]::view-transition { pointer-events: none; }
+:root[data-first-room-entry]::view-transition-group(first-room-icon) {
+  animation-duration: 530ms;
+  animation-timing-function: cubic-bezier(.52, .07, .14, 1);
+}
+:root[data-first-room-entry]::view-transition-old(first-room-icon) { animation: first-room-icon-out 530ms linear both; }
+:root[data-first-room-entry]::view-transition-new(first-room-icon) { animation: first-room-icon-in 530ms ease both; }
+@keyframes first-room-setup-out { to { opacity: 0; transform: scale(.986); } }
+@keyframes first-room-workspace-in { from { opacity: 0; transform: translateY(7px) scale(1.004); } }
+@keyframes first-room-icon-out { 0%, 18% { opacity: 1; } 60%, 100% { opacity: 0; } }
+@keyframes first-room-icon-in { 0%, 18% { opacity: 0; } 70%, 100% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  :root[data-first-room-entry]::view-transition-group(*),
+  :root[data-first-room-entry]::view-transition-old(*),
+  :root[data-first-room-entry]::view-transition-new(*) { animation-duration: 0s; }
+}

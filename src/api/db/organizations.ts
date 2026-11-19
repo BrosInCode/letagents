@@ -1,7 +1,8 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
-import { organizations, organization_memberships } from "./schema.js";
+import { github_app_installations, github_app_repositories, organizations, organization_memberships, rooms } from "./schema.js";
+import { roomThemeId, type RoomCompanyAppearance, type RoomThemeId } from "../../../shared/room-themes.mjs";
 import type { GitHubOrganizationMembership } from "../github/organization-memberships.js";
 
 export async function getOrganizationsForGitHubIds(ids: string[]) {
@@ -59,4 +60,53 @@ export async function removeOrganizationMembership(accountId: string, organizati
     eq(organization_memberships.account_id, accountId),
     eq(organization_memberships.organization_id, organizationId),
   ));
+}
+
+
+export async function setOrganizationTheme(id: string, theme: RoomThemeId | null) {
+  const [organization] = await db.update(organizations).set({
+    theme_id: theme,
+    theme_revision: sql`${organizations.theme_revision} + 1`,
+    updated_at: new Date().toISOString(),
+  }).where(eq(organizations.github_org_id, id)).returning({ theme: organizations.theme_id, themeRevision: organizations.theme_revision });
+  return organization ?? null;
+}
+
+const companyAppearanceColumns = {
+  id: organizations.github_org_id,
+  name: organizations.login,
+  theme: organizations.theme_id,
+  themeRevision: organizations.theme_revision,
+};
+
+/** Resolve the actual room's company, including focus rooms and connected GitHub repositories. */
+export async function getRoomCompanyAppearance(
+  roomId: string,
+  accessRoomId: string,
+  repositoryId: string | null,
+): Promise<RoomCompanyAppearance | null> {
+  const explicit = await db.select({ ...companyAppearanceColumns, room: rooms.id })
+    .from(rooms)
+    .innerJoin(organizations, eq(organizations.github_org_id, rooms.organization_id))
+    .where(inArray(rooms.id, roomId === accessRoomId ? [roomId] : [roomId, accessRoomId]));
+  const owningCompany = explicit.find(company => company.room === roomId) ?? explicit[0];
+  if (owningCompany) {
+    const { id, name, theme, themeRevision } = owningCompany;
+    return { id, name, theme: roomThemeId(theme), themeRevision };
+  }
+  if (!repositoryId) return null;
+
+  const [company] = await db.select(companyAppearanceColumns)
+    .from(github_app_repositories)
+    .innerJoin(github_app_installations, eq(github_app_installations.installation_id, github_app_repositories.installation_id))
+    .innerJoin(organizations, eq(organizations.github_org_id, github_app_installations.target_github_id))
+    .where(and(
+      eq(github_app_repositories.github_repo_id, repositoryId),
+      isNull(github_app_repositories.removed_at),
+      isNull(github_app_installations.suspended_at),
+      isNull(github_app_installations.uninstalled_at),
+      ne(github_app_installations.target_type, "User"),
+    ))
+    .limit(1);
+  return company ? { ...company, theme: roomThemeId(company.theme) } : null;
 }

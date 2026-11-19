@@ -1,3 +1,4 @@
+import type { RoomCompanyAppearance } from "../../../../../../shared/room-themes.mjs"
 import type {
   FocusActivityScope,
   FocusGitHubEventRouting,
@@ -46,6 +47,7 @@ export interface GitRoomInfo {
 }
 
 export interface RoomInfo {
+  companyAppearance?: RoomCompanyAppearance | null
   /** Route locator accepted by the join, before resolving aliases to identifier. */
   requestedIdentifier?: string
   projectId: string

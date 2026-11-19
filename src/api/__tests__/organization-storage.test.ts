@@ -18,19 +18,25 @@ test("verified joins are atomic, idempotent, and keyed by immutable organization
     await admin.query(`CREATE SCHEMA ${schema}`);
     await pool.query("CREATE TABLE accounts (id text PRIMARY KEY); CREATE TABLE rooms (id text PRIMARY KEY, display_name text, kind text); INSERT INTO accounts VALUES ('alice'), ('bob')");
     await pool.query(await readFile(new URL("../../../drizzle/0143_organizations.sql", import.meta.url), "utf8"));
+    await pool.query(await readFile(new URL("../../../drizzle/0156_company_theme.sql", import.meta.url), "utf8"));
     const membership = { github_org_id: "42", login: "acme", avatar_url: null, role: "owner" as const };
     assert.equal(await store.saveVerifiedOrganizationMembership({ accountId: "alice", membership, create: false }), null);
     const setup = { accountId: "alice", membership, create: true };
     await Promise.all([store.saveVerifiedOrganizationMembership(setup), store.saveVerifiedOrganizationMembership(setup)]);
     assert.equal((await pool.query("SELECT * FROM organizations")).rowCount, 1);
     assert.equal((await pool.query("SELECT * FROM organization_memberships")).rowCount, 1);
+    assert.equal((await store.getOrganizationsForGitHubIds(["42"]))[0].theme_id, null);
+    assert.deepEqual(await store.setOrganizationTheme("42", "mint"), { theme: "mint", themeRevision: 1 });
     const before = (await pool.query("SELECT joined_at FROM organization_memberships")).rows[0].joined_at;
     await store.saveVerifiedOrganizationMembership({ ...setup, membership: { ...membership, login: "renamed", role: "member" }, create: false });
     const row = (await pool.query("SELECT * FROM organization_memberships")).rows[0];
     assert.equal(row.role, "member");
     assert.deepEqual(row.joined_at, before);
-    assert.equal((await store.getOrganizationsForGitHubIds(["42"]))[0].login, "renamed");
-    await store.saveVerifiedOrganizationMembership({ accountId: "bob", membership, create: false });
+    const [company] = await store.getOrganizationsForGitHubIds(["42"]);
+    assert.equal(company.login, "renamed");
+    assert.equal(company.theme_id, "mint");
+    assert.equal(company.theme_revision, 1);
+    await store.saveVerifiedOrganizationMembership({ accountId: "bob", membership: { ...membership, login: "renamed" }, create: false });
     assert.deepEqual(await store.getJoinedOrganizationIds("bob"), ["42"]);
     await pool.query(`
       CREATE TABLE github_app_installations (
@@ -72,7 +78,7 @@ test("verified joins are atomic, idempotent, and keyed by immutable organization
     await pool.query(`
       CREATE TABLE room_members (room_id text, account_id text);
       CREATE TABLE project_admins (project_id text, account_id text);
-      INSERT INTO organizations VALUES ('99', 'other', NULL, now(), now()) ON CONFLICT DO NOTHING;
+      INSERT INTO organizations (github_org_id, login, created_at, updated_at) VALUES ('99', 'other', now(), now()) ON CONFLICT DO NOTHING;
       INSERT INTO rooms (id, display_name, kind, organization_id) VALUES
         ('co-b', 'Beta', 'main', '42'), ('co-a', 'Alpha', 'main', '42'), ('co-admin', 'Gamma', 'main', '42'),
         ('co-hidden', 'Hidden', 'main', '42'), ('co-focus', 'Focus', 'focus', '42'),
@@ -83,6 +89,15 @@ test("verified joins are atomic, idempotent, and keyed by immutable organization
     assert.deepEqual((await getMemberOrganizationRooms("42", "alice")).map((room) => room.room_id), ["co-a", "co-b", "co-admin"]);
     assert.deepEqual((await getMemberOrganizationRooms("42", "bob")).map((room) => room.room_id), ["co-hidden"]);
     assert.deepEqual(await getMemberOrganizationRooms("99", "bob"), []);
+    const appearance = { id: "42", name: "renamed", theme: "mint", themeRevision: 1 };
+    assert.deepEqual(await store.getRoomCompanyAppearance("co-a", "co-a", null), appearance);
+    assert.deepEqual(await store.getRoomCompanyAppearance("focus-child", "co-a", null), appearance);
+    assert.deepEqual(await store.getRoomCompanyAppearance("repo-100", "repo-100", "100"), appearance);
+    for (const repo of ["101", "102", "104", "105"]) {
+      assert.equal(await store.getRoomCompanyAppearance(`repo-${repo}`, `repo-${repo}`, repo), null);
+    }
+    assert.deepEqual(await store.setOrganizationTheme("42", null), { theme: null, themeRevision: 2 });
+    assert.deepEqual(await store.getRoomCompanyAppearance("co-a", "co-a", null), { ...appearance, theme: null, themeRevision: 2 });
     await store.removeOrganizationMembership("alice", "42");
     assert.deepEqual(await store.getJoinedOrganizationIds("alice"), []);
     assert.deepEqual(await store.getJoinedOrganizationIds("bob"), ["42"]);

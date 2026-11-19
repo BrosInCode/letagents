@@ -6,7 +6,7 @@
     @signIn="handleSignIn"
   />
 
-  <div v-else class="web-room-layout" :data-sidebar-open="sidebarOpen">
+  <div v-else class="web-room-layout" :style="roomTheme.css.value" :data-sidebar-open="sidebarOpen">
     <button v-if="sidebarOpen && sidebarCompact" class="web-sidebar-scrim" type="button" aria-label="Close sidebar" @click="closeSidebar" />
     <RoomSidebar :open="sidebarOpen" :compact="sidebarCompact" :active-room-id="room?.identifier || String(route.params.roomId || '')" @close="closeSidebar" @settings="openSidebarSettings" @active-room-visible="sidebarHasActiveRoom = $event" />
   <div class="room-shell" :inert="sidebarOpen && sidebarCompact" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :data-compact-composer="compactComposer" :style="roomViewportStyle" @focusin="syncRoomViewport">
@@ -259,6 +259,7 @@ import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
+import { provideRoomTheme } from '../../../../shared/ui/room-theme'
 import { getGitHubSupportIdentifier } from '@/composables/room/data'
 import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
 import { provideRoomMessagePins, useRoomMessagePins } from '@/composables/roomMessagePins'
@@ -362,6 +363,10 @@ const {
   loadOlderGitHubEvents,
 } = useRoom()
 const auth = useAuth()
+const roomTheme = provideRoomTheme(
+  computed(() => auth.user.value?.id ?? null),
+  computed(() => room.value?.companyAppearance ?? null),
+)
 const roomAttention = useRoomAttention(
   computed(() => isConnected.value && room.value && (!route.params.roomId || route.params.roomId === room.value.requestedIdentifier || route.params.roomId === room.value.identifier) ? room.value.identifier : null),
   computed(() => auth.isSignedIn.value ? auth.user.value?.id || null : null),
@@ -801,7 +806,7 @@ watch(
   grid-template-rows: auto minmax(0, 1fr) auto auto auto;
   height: 100vh;
   height: var(--room-viewport-height, 100dvh);
-  background: var(--bg-0, #09090b);
+  background: var(--workspace-canvas, var(--bg-0, #09090b));
   color: var(--text, #fafafa);
 }
 

@@ -17,7 +17,7 @@
 .app-sidebar {
   --sidebar-hover: var(--accent-hover);
   --sidebar-selected: var(--accent-active);
-  --sidebar-selection: var(--blue);
+  --sidebar-selection: var(--workspace-selection, var(--blue));
 
   display: grid;
   align-content: start;
@@ -30,7 +30,7 @@
   overscroll-behavior: contain;
   padding: 12px 12px 10px;
   border-right: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--workspace-sidebar, var(--bg));
 }
 
 .desktop-shell[data-sidebar-mode="expanded"] .app-sidebar {

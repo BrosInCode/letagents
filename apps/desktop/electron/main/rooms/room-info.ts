@@ -1,3 +1,4 @@
+import { roomThemeId, type RoomCompanyAppearance } from "../../../../../shared/room-themes.mjs";
 import type {
   DesktopFocusActivityScope,
   DesktopFocusGitHubEventRouting,
@@ -12,6 +13,7 @@ import { mapDesktopGitRoomPayload } from "./git-room.js";
 
 export type RoomInfoPayload = {
   room_id?: string;
+  company_appearance?: RoomCompanyAppearance | null;
   code?: string;
   name?: string | null;
   display_name?: string | null;
@@ -207,6 +209,10 @@ export function mapDesktopRoomInfoPayload(
   const focusSettings = normalizeRoomFocusSettings(payload);
   return {
     identifier: canonicalIdentifier,
+    ...(payload.company_appearance ? { companyAppearance: {
+      ...payload.company_appearance,
+      theme: roomThemeId(payload.company_appearance.theme),
+    } } : {}),
     code: payload.code || "",
     name: payload.name || canonicalIdentifier,
     displayName: payload.display_name || payload.name || canonicalIdentifier,

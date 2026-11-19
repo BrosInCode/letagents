@@ -348,7 +348,7 @@ export function useAppAuthFlow(context: unknown) {
     | "useAppState"
   >;
   const {
-    authStatus, clearDesktopSessionState, firstRunStage, getAuthRoomIdentifier, mcpInstallState,
+    authStatus, clearDesktopSessionState, getAuthRoomIdentifier, mcpInstallState,
     refresh,
   } = app;
   const {
@@ -366,9 +366,7 @@ export function useAppAuthFlow(context: unknown) {
     authStatus,
     getRoomIdentifier: () => getAuthRoomIdentifier(),
     isFirstRunGate: () => Boolean(mcpInstallState.value && !mcpInstallState.value.completed),
-    onFirstRunAuthorized: async () => {
-      firstRunStage.value = "organization";
-    },
+    onFirstRunAuthorized: async () => undefined,
     onAuthorized: () => refresh(),
     onSigningOut: clearDesktopSessionState,
     onSignedOut: async () => undefined,

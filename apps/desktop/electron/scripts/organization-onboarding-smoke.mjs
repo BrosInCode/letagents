@@ -17,7 +17,7 @@ let authenticated = false;
 let completed = false;
 let failOrganizations = false;
 const organizations = [
-  { github_org_id: '42', login: 'Herotel', avatar_url: null, role: 'owner', setup: false, joined: false },
+  { github_org_id: '42', login: 'Herotel', avatar_url: null, theme_id: null, theme_revision: 0, role: 'owner', setup: false, joined: false },
   { github_org_id: '43', login: 'Studio', avatar_url: null, role: 'member', setup: true, joined: false },
   { github_org_id: '44', login: 'WaitingCo', avatar_url: null, role: 'member', setup: false, joined: false },
   { github_org_id: '46', login: 'Northwind', avatar_url: null, role: 'member', setup: true, joined: false },
@@ -26,6 +26,7 @@ const invitations = [{ github_org_id: '45', login: 'InvitedCo', avatar_url: null
 const companyRoom = { kind: 'repo', github_repo_id: '100', room_id: 'github.com/herotel/app', display_name: 'app', full_name: 'herotel/app', organization_id: '42', visibility: 'private' };
 const createdRooms = [];
 const openedGitHubPages = [];
+const sentMessages = new Map();
 const account = { id: 'fixture-account', provider: 'github', providerUserId: '1', login: 'alex', displayName: 'Alex', avatarUrl: null };
 const auth = () => ({ authenticated, account: authenticated ? account : null, apiUrl: 'https://letagents.chat', pendingDeviceAuth: null, tokenStored: authenticated, error: null });
 const target = { id: 'codex', name: 'Codex', description: 'Connect your agents.', configPath: '/fixture/config.toml', configPaths: [], configIssue: null, status: 'installed', lastInstalledAt: null, restartHint: 'Restart your agent app.' };
@@ -36,7 +37,9 @@ function snapshot(identifier = 'github.com/alex/personal') {
   value.roomIdentifier = identifier;
   value.access.roomIdentifier = identifier;
   Object.assign(value.room, { identifier, name: identifier, displayName: identifier.split('/').at(-1), code: identifier });
-  value.messages = []; value.tasks = []; value.participants = []; value.presence = []; value.focusRooms = []; value.reasoningSessions = []; value.recentActivity = []; value.roomArtifacts = [];
+  const owningCompany = identifier === companyRoom.room_id ? organizations[0] : null;
+  if (owningCompany) value.room.companyAppearance = { id: owningCompany.github_org_id, name: owningCompany.login, theme: owningCompany.theme_id, themeRevision: owningCompany.theme_revision };
+  value.messages = sentMessages.get(identifier) ?? []; value.tasks = []; value.participants = []; value.presence = []; value.focusRooms = []; value.reasoningSessions = []; value.recentActivity = []; value.roomArtifacts = [];
   return value;
 }
 ipcMain.handle('fixture:call', async (_event, method, args) => {
@@ -65,6 +68,13 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
         github_repo_id: null, full_name: null, visibility: null,
       })),
     ] };
+    case 'organizations.setTheme': {
+      const org = organizations.find(org => org.github_org_id === args[0]);
+      assert.equal(org?.role, 'owner');
+      org.theme_id = args[1];
+      org.theme_revision += 1;
+      return { theme: org.theme_id, themeRevision: org.theme_revision };
+    }
     case 'organizations.openOnGitHub': openedGitHubPages.push(args[0]); return;
     case 'room.createInviteRoom': {
       createdRooms.push(args[0] ?? null);
@@ -79,7 +89,17 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'room.listAccountRooms': return [];
     case 'room.getSourceStates': return {};
     case 'room.getMyWork': return { cards: [], next_cursor: null, has_connections: false, providers: [] };
-    case 'room.getLatestMessages': return [];
+    case 'room.getLatestMessages': return sentMessages.get(args[0]) ?? [];
+    case 'room.sendMessage': {
+      const [identifier, text, , , , clientMessageId] = args;
+      const message = {
+        id: "9001", clientMessageId, sender: account.login, text, timestamp: new Date().toISOString(),
+        source: "human", actorLabel: null, agentPromptKind: null, agentIdentity: null, attachments: [],
+        threadRootId: "9001", threadReplyToId: null, thread: null, replyTo: null,
+      };
+      sentMessages.set(identifier, [...(sentMessages.get(identifier) ?? []), message]);
+      return { message };
+    }
     case 'conversations.list': return { conversations: [], version: '0' };
     case 'conversations.changes': return { version: '0' };
     case 'repos.openRoom': {
@@ -111,13 +131,60 @@ const click = async (selector) => { await waitFor(`Boolean(document.querySelecto
 const capture = async (name) => { await new Promise((resolve) => setTimeout(resolve, 550)); writeFileSync(join(output, name), (await window.webContents.capturePage()).toPNG()); };
 try {
   await window.loadFile(join(root, 'dist-renderer/index.html'));
+  await js("document.documentElement.dataset.windowChrome = 'mac'");
+  await waitFor(`document.querySelector('[data-testid="first-run-welcome"] canvas')?.width > 300`);
+  assert.equal(await js(`document.querySelector('[data-testid="first-run-welcome"]').getBoundingClientRect().top`), 0);
+  assert.ok(await js(`document.querySelector('[data-testid="first-run-start-setup"]').getBoundingClientRect().bottom <= innerHeight`));
+  assert.match(await js('document.body.innerText'), /Make room to\s+work together/);
+  await new Promise(resolve => setTimeout(resolve, 2900));
+  await capture('00-animated-welcome.png');
+  const runFullscreen = await js(`document.fullscreenEnabled && !matchMedia('(prefers-reduced-motion: reduce)').matches`);
+  if (runFullscreen) {
+    await click('[data-testid="first-run-welcome"] [aria-label="Full screen"]');
+    await waitFor(`document.fullscreenElement === document.documentElement`);
+    await click('.welcome-controls button:first-child');
+    await waitFor(`document.querySelector('.welcome-controls button:first-child')?.textContent.trim() === 'Play'`);
+    await click('.welcome-controls button:nth-child(2)');
+    await waitFor(`document.querySelector('.welcome-controls button:first-child')?.textContent.trim() === 'Pause'`);
+    assert.ok(await js(`document.fullscreenElement === document.documentElement`), 'replay stays full screen');
+    // The macOS Space transition can outlast the DOM fullscreenchange event.
+    if (process.platform === 'darwin') {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    await click('[data-testid="first-run-start-setup"]');
+    await waitFor(`document.querySelector('[data-testid="first-run-welcome"]')?.dataset.handoffState === 'moving'`);
+    assert.ok(await js(`document.fullscreenElement === document.documentElement`), 'the particles land in GitHub while full screen');
+    await click('[data-testid="first-run-back"]');
+    await waitFor(`document.querySelector('[data-testid="first-run-welcome"]')?.dataset.handoffState === 'idle'`);
+  }
+  window.webContents.debugger.attach();
+  await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  await waitFor(`matchMedia('(prefers-reduced-motion: reduce)').matches && !document.querySelector('.welcome-controls button:first-child svg.lucide-pause')`);
   await click('[data-testid="first-run-start-setup"]');
-  await click('[data-testid="first-run-mcp-continue"]');
-  await click('[data-testid="first-run-mcp-install"]');
-  await click('[data-testid="first-run-to-github"]');
+  assert.equal(await js(`document.querySelector('[data-testid="first-run-welcome"]')?.dataset.handoffState`), 'settled');
+  assert.equal(await js(`getComputedStyle(document.querySelector('.connection-origin')).animationName`), 'none');
+  await click('[data-testid="first-run-back"]');
+  await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [] });
+  window.webContents.debugger.detach();
+
+  await click('[data-testid="first-run-start-setup"]');
+  await waitFor(`document.querySelector('[data-testid="first-run-welcome"]')?.dataset.handoffState === 'settled'`);
+  assert.equal(await js(`document.querySelector('.setup-brand').getBoundingClientRect().top`), 42, 'the wordmark keeps its macOS inset');
+  await capture('00-github-sign-in.png');
+  const logoTop = await js(`document.querySelector('[data-onboarding-logo-seat]').getBoundingClientRect().top`);
   await click('[data-testid="first-run-auth-start"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="first-run-device-code"]'))`);
+  assert.equal(await js(`document.querySelector('.thread-signal')?.tagName`), 'circle');
+  assert.ok(Math.abs(logoTop - await js(`document.querySelector('[data-onboarding-logo-seat]').getBoundingClientRect().top`)) < 2, 'the connection stays in place during browser approval');
+  await waitFor(`document.querySelector('.github-heading h1')?.textContent === 'Finish in your browser' && !document.querySelector('.github-phase-enter-active')`);
+  await capture('00-github-pending.png');
   await click('[data-testid="first-run-auth-poll"]');
-  // Step 3 of setup: one row per GitHub organization, chosen like the other setup steps.
+  await waitFor(`Boolean(document.querySelector('[data-testid="first-run-auth-account"]'))`);
+  assert.equal(await js(`document.querySelector('.thread-check')?.tagName`), 'path');
+  await capture('00-github-connected.png');
+  await click('[data-testid="first-run-to-room"]');
+  assert.equal(calls.includes('setup.installMcpServer'), false);
+  // One row per GitHub organization.
   await waitFor(`document.querySelector('[data-stage="organization"]') && Boolean(document.querySelector('[data-testid="company-choice-42"]'))`);
   assert.equal(await js(`document.querySelector('[data-testid="company-choice-44"]').getAttribute('aria-disabled')`), 'true', 'a member waits for an owner');
   await click('.company-github-steps summary');
@@ -127,18 +194,93 @@ try {
   await click('[data-testid="company-choice-42"]');
   await waitFor(`(document.querySelector('[data-testid="first-run-company-continue"]')?.textContent || '').includes('Set up Herotel')`);
   await click('[data-testid="first-run-company-continue"]');
+  await waitFor(`document.querySelector('[data-stage="theme"] .theme-inherited-status')?.textContent === 'Using default theme'`);
+  await capture('01-company-theme.png');
+  await click('[data-stage="theme"] input[value="ice"]');
+  await waitFor(`document.querySelector('[data-stage="theme"] input[value="ice"]')?.checked`);
+  await click('[data-stage="theme"] .theme-inherit');
+  await waitFor(`document.querySelector('[data-stage="theme"] .theme-inherited-status')?.textContent === 'Using default theme'`);
+  assert.equal(calls.includes('organizations.setTheme'), false, 'previewing a color does not write a company theme');
+  await click('[data-stage="theme"] input[value="mint"]');
+  await click('.first-run-share-theme input');
+  await click('[data-testid="first-run-theme-continue"]');
   await waitFor(`document.querySelector('[data-stage="room"]') && Boolean(document.querySelector('[data-testid="first-run-company-rooms"]'))`);
+  assert.equal(organizations[0].theme_id, 'mint', 'the owner explicitly saved the shared default during onboarding');
   await js(`{ const input = document.querySelector('.company-room-search input'); input.value = 'missing'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await waitFor(`document.body.innerText.includes('No rooms match your search.')`);
   await js(`{ const input = document.querySelector('.company-room-search input'); input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await capture('02-company-repo-room.png');
+  for (const [action, modalStep] of [['create', 'standalone'], ['join', 'join'], ['pick-repo', 'project']]) {
+    await click(`[data-testid="room-choice-${action}"]`);
+    await waitFor(`Boolean(document.querySelector('[data-testid="new-room-${modalStep}-step"]'))`);
+    await click('[aria-label="Close new room dialog"]');
+    await waitFor(`!document.querySelector('[data-testid="new-room-modal"]')`);
+  }
   await click('[data-testid="first-run-company-room-github.com/herotel/app"]');
-  await waitFor(`(document.querySelector('[data-testid="first-run-open-room"]')?.textContent || '').includes('Open herotel/app')`);
-  await click('[data-testid="first-run-open-room"]');
+  if (await js(`Boolean(document.startViewTransition) && !matchMedia('(prefers-reduced-motion: reduce)').matches`)) {
+    await waitFor(`document.documentElement.dataset.firstRoomEntry === 'true'`);
+    await waitFor(`document.getAnimations().some(animation => animation.animationName === 'first-room-icon-in')`);
+  }
   await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);
+  if (runFullscreen) {
+    assert.ok(await js(`document.fullscreenElement === document.documentElement`), 'room arrival stays full screen');
+    await waitFor(`!document.documentElement.dataset.firstRoomEntry`);
+    await js(`document.exitFullscreen()`);
+    await waitFor(`!document.fullscreenElement`);
+    if (process.platform === 'darwin') await new Promise(resolve => setTimeout(resolve, 1000));
+  }
   // The company filter sits on the Rooms heading.
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').includes('Herotel')`);
+  await waitFor(`document.querySelector('[data-testid="desktop-shell"]')?.dataset.roomTheme === 'mint'`);
+  await waitFor(`document.querySelector('[data-testid="room-chat-empty"]')?.textContent.includes('Alex')`);
+  await click('[data-testid="room-chat-empty"] button');
+  await waitFor(`document.querySelector('[data-testid="room-guided-tour"]')?.open && Boolean(document.querySelector('.room-guide-thread path')?.getAttribute('d'))`);
+  const firstThread = await js(`document.querySelector('.room-guide-thread path').getAttribute('d')`);
+  await click('[data-testid="room-guide-next"]');
+  await waitFor(`document.querySelector('.room-guide-example h2')?.textContent === 'Chat'`);
+  assert.notEqual(await js(`document.querySelector('.room-guide-thread path').getAttribute('d')`), firstThread);
+  await capture('03-room-tour.png');
+  await click('[aria-label="Close quick tour"]');
   await capture('03-company-sidebar.png');
+  await js(`{
+    const composer = document.querySelector('[data-testid="desktop-composer-input"]');
+    composer.focus();
+    composer.value = 'First message from onboarding';
+    composer.dispatchEvent(new InputEvent('input', { bubbles: true, data: composer.value }));
+  }`);
+  await waitFor(`document.querySelector('[data-testid="desktop-composer-send"]')?.disabled === false`);
+  const leaveDistance = await js(`new Promise(resolve => {
+    const welcome = document.querySelector('[data-testid="room-chat-empty"]');
+    const title = welcome.querySelector('h3');
+    const previous = title.getBoundingClientRect();
+    const observer = new MutationObserver(() => {
+      if (!welcome.classList.contains('room-empty-leave-active')) return;
+      const after = title.getBoundingClientRect();
+      observer.disconnect();
+      clearTimeout(deadline);
+      resolve(Math.hypot(after.top - previous.top, after.left - previous.left));
+    });
+    const deadline = setTimeout(() => { observer.disconnect(); resolve(null); }, 800);
+    observer.observe(welcome, { attributes: true, attributeFilter: ['class'] });
+    document.querySelector('[data-testid="desktop-composer-send"]').click();
+  })`);
+  assert.ok(leaveDistance !== null && leaveDistance < 6, `the welcome stays in place while fading (shift: ${leaveDistance})`);
+  await waitFor(`Boolean(document.querySelector('[data-testid="room-message-9001"]')) && !document.querySelector('[data-testid="room-chat-empty"]')`);
+  assert.equal(sentMessages.get(companyRoom.room_id)?.length, 1);
+  await capture('03-first-message.png');
+  await click('[data-testid="sidebar-account-trigger"]');
+  await click('[data-testid="sidebar-account-settings"]');
+  await click('[data-testid="settings-nav-system:styling"]');
+  await click('.company-theme-settings summary');
+  await click('.company-theme-settings input[value="violet"]');
+  await click('.save-company-theme');
+  await waitFor(`document.querySelector('[data-testid="desktop-shell"]')?.dataset.roomTheme === 'violet'`);
+  await click('.theme-settings > .room-theme-picker input[value="ice"]');
+  await waitFor(`document.querySelector('[data-testid="desktop-shell"]')?.dataset.roomTheme === 'ice'`);
+  await click('.theme-settings > .room-theme-picker .theme-inherit');
+  await waitFor(`document.querySelector('[data-testid="desktop-shell"]')?.dataset.roomTheme === 'violet'`);
+  await capture('03-company-styling.png');
+  await click('[data-testid="settings-back-to-app"]');
   await click('[data-testid="sidebar-company-scope"]');
   await waitFor(`Boolean(document.querySelector('[data-testid="sidebar-company-menu"]'))`);
   await capture('04-company-menu.png');
@@ -236,7 +378,7 @@ try {
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').trim().startsWith('Rooms') && !document.querySelector('[data-testid="company-home"]')`);
   await capture('10-explicit-personal-room.png');
   assert.deepEqual(errors, [], 'renderer must not report uncaught errors');
-  const report = { passed: true, checks: ['first-run owner setup', 'member waiting for owner', 'pending GitHub invitation', 'company repo room on the room step', 'company filter on the Rooms heading', 'empty company home', 'GitHub outage and retry', 'All rooms fallback', 'company link persistence and acknowledgement', 'company link dialog over any view', 'join from a company link', 'new room inside the company', 'pasted company link', 'explicit outside-company room opens in All rooms'], consoleErrors: errors, calls: [...new Set(calls)] };
+  const report = { passed: true, checks: ['animated desktop welcome and GitHub without MCP', 'real New Room entry points', 'room arrival, tour and first message', 'first-run owner setup', 'company theme inheritance, owner updates and personal overrides', 'member waiting for owner', 'pending GitHub invitation', 'company repo room on the room step', 'company filter on the Rooms heading', 'empty company home', 'GitHub outage and retry', 'All rooms fallback', 'company link persistence and acknowledgement', 'company link dialog over any view', 'join from a company link', 'new room inside the company', 'pasted company link', 'explicit outside-company room opens in All rooms'], consoleErrors: errors, calls: [...new Set(calls)] };
   writeFileSync(join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ passed: true, output, consoleErrors: errors }, null, 2));
 } catch (error) {

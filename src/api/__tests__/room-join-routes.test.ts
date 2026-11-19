@@ -57,7 +57,7 @@ test("registerRoomJoinRoutes preserves canonical join route order", () => {
   ]);
 });
 
-test("join route can resolve existing rooms without creating missing ones", async () => {
+test("join route can resolve existing rooms without creating them and includes the company theme after access", async () => {
   let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
   const app = {
     post(_path: RegExp, registeredHandler: typeof handler) {
@@ -77,6 +77,7 @@ test("join route can resolve existing rooms without creating missing ones", asyn
     },
   };
   const resolveOptions: unknown[] = [];
+  const company = { id: "42", name: "Herotel", theme: "mint" };
   const project = {
     id: "focus_37",
     display_name: "Branch: codex",
@@ -92,7 +93,11 @@ test("join route can resolve existing rooms without creating missing ones", asyn
       return project as never;
     },
     resolveExistingRoomRequest: async () => project as never,
-    getProjectAccessRoomId: () => project.id,
+    getProjectAccessRoomId: () => "parent_room",
+    getRoomCompanyAppearance: async (roomId, parentId, repositoryId) => {
+      assert.deepEqual([roomId, parentId, repositoryId], [project.id, "parent_room", null]);
+      return company;
+    },
     resolveProjectRole: async () => "participant",
     toRoomResponse: () => ({ room_id: project.id }),
   } as never);
@@ -104,6 +109,7 @@ test("join route can resolve existing rooms without creating missing ones", asyn
       query: { create: "false" },
       headers: {},
       socket: { remoteAddress: "192.0.2.21" },
+      authKind: "session",
       sessionAccount: { account_id: "acct_member" },
     },
     response as never
@@ -111,7 +117,7 @@ test("join route can resolve existing rooms without creating missing ones", asyn
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(resolveOptions, [{ allowCreate: false }]);
-  assert.deepEqual(response.body, { room_id: project.id });
+  assert.deepEqual(response.body, { room_id: project.id, company_appearance: company });
 });
 
 test("join route denies binding-backed projects after room resolution", async () => {
