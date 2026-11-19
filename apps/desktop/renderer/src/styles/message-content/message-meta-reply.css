@@ -687,6 +687,11 @@
   outline-offset: -1.5px;
 }
 
+.room-chat-message[data-outgoing-status="refused"] > .room-chat-message-content > .room-message-bubble {
+  outline: 1.5px dashed color-mix(in srgb, var(--red) 55%, var(--border-strong));
+  outline-offset: -1.5px;
+}
+
 .room-message-outgoing-attachments {
   display: grid;
   gap: 6px;
@@ -755,6 +760,12 @@
   color: var(--amber-text);
 }
 
+.room-thread-outgoing-badge[data-status="refused"] {
+  border-color: color-mix(in srgb, var(--red) 48%, var(--border-strong));
+  background: color-mix(in srgb, var(--red) 14%, var(--bg-elevated));
+  color: var(--red-text);
+}
+
 .room-thread-panel .room-chat-message.is-thread-context .room-message-outgoing {
   gap: 5px;
   margin: 2px 0 5px;
@@ -767,6 +778,11 @@
 .room-thread-panel .room-chat-message.is-thread-context .room-message-outgoing-status,
 .room-thread-panel .room-chat-message.is-thread-context .room-message-outgoing button {
   font-size: 0.7rem;
+}
+
+.room-thread-panel .room-chat-message.is-thread-context .room-message-outgoing .room-message-outgoing-secondary {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
 }
 
 @media (prefers-reduced-motion: reduce) {

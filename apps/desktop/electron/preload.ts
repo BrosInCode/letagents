@@ -231,8 +231,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:save-outgoing-message", input),
     updateOutgoingMessage: (clientMessageId, input) =>
       ipcRenderer.invoke("desktop:room:update-outgoing-message", clientMessageId, input),
-    deleteOutgoingMessage: (clientMessageId) =>
-      ipcRenderer.invoke("desktop:room:delete-outgoing-message", clientMessageId),
+    deleteOutgoingMessage: (clientMessageId, options) =>
+      ipcRenderer.invoke("desktop:room:delete-outgoing-message", clientMessageId, options),
     listOutgoingMessages: () =>
       ipcRenderer.invoke("desktop:room:list-outgoing-messages"),
     addTask: (roomIdentifier: string, input) =>

@@ -513,8 +513,8 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle(
     "desktop:room:delete-outgoing-message",
-    async (_event, clientMessageId: string): Promise<void> =>
-      deleteDesktopOutgoingMessage(clientMessageId),
+    async (_event, clientMessageId: string, options?: { discardAttachments?: boolean }): Promise<void> =>
+      deleteDesktopOutgoingMessage(clientMessageId, options),
   );
   targetIpcMain.handle(
     "desktop:room:list-outgoing-messages",

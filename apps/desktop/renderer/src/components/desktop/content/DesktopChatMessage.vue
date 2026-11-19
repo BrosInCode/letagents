@@ -138,8 +138,9 @@
           <span class="room-message-outgoing-label">{{ outgoingStatusText }}</span>
         </span>
         <span v-if="outgoingAttachmentSummary" class="room-message-outgoing-meta">{{ outgoingAttachmentSummary }}</span>
-        <div v-if="message.outgoing.status === 'uncertain'" class="room-message-outgoing-actions">
+        <div v-if="message.outgoing.status === 'uncertain' || message.outgoing.status === 'refused'" class="room-message-outgoing-actions">
           <button
+            v-if="message.outgoing.status === 'uncertain'"
             type="button"
             class="room-message-outgoing-retry"
             :title="message.outgoing.error || undefined"
@@ -149,9 +150,30 @@
             <RotateCw :size="12" aria-hidden="true" />
             <span>Retry safely</span>
           </button>
-          <template v-if="message.gif && message.outgoing.error?.includes('expressions_disabled:')">
+          <template v-else-if="message.gif && message.outgoing.error?.includes('expressions_disabled:')">
             <button v-if="message.text.trim() || message.outgoing.attachmentCount" type="button" class="room-message-outgoing-secondary" @click="sendDesktopOutgoingWithoutGif(message.clientMessageId || '')">Send without GIF</button>
             <button v-else type="button" class="room-message-outgoing-secondary" @click="discardRefusedDesktopGif(message.clientMessageId || '')">Remove unsent GIF</button>
+          </template>
+          <template v-else>
+            <button
+              type="button"
+              class="room-message-outgoing-discard"
+              :title="message.outgoing.error || undefined"
+              data-testid="room-message-outgoing-discard"
+              @click="discardRefusedDesktopOutgoingMessage(message.clientMessageId || '')"
+            >
+              <span>{{ message.text.trim() ? "Discard & edit" : "Discard" }}</span>
+            </button>
+            <button
+              type="button"
+              class="room-message-outgoing-secondary"
+              :title="message.outgoing.error || undefined"
+              data-testid="room-message-outgoing-retry"
+              @click="retryDesktopOutgoingMessage(message.clientMessageId || '')"
+            >
+              <RotateCw :size="12" aria-hidden="true" />
+              <span>Retry</span>
+            </button>
           </template>
         </div>
       </div>
@@ -235,13 +257,13 @@
           </span>
           <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
           <span
-            v-if="threadSummary.hasUncertainOutgoing || threadSummary.hasPendingOutgoing"
+            v-if="threadSummary.hasRefusedOutgoing || threadSummary.hasUncertainOutgoing || threadSummary.hasPendingOutgoing"
             class="room-thread-outgoing-badge"
-            :data-status="threadSummary.hasUncertainOutgoing ? 'uncertain' : 'pending'"
+            :data-status="threadSummary.hasRefusedOutgoing ? 'refused' : threadSummary.hasUncertainOutgoing ? 'uncertain' : 'pending'"
           >
-            <CircleAlert v-if="threadSummary.hasUncertainOutgoing" :size="11" aria-hidden="true" />
+            <CircleAlert v-if="threadSummary.hasRefusedOutgoing || threadSummary.hasUncertainOutgoing" :size="11" aria-hidden="true" />
             <Clock v-else :size="11" aria-hidden="true" />
-            <span>{{ threadSummary.hasUncertainOutgoing ? "Delivery not confirmed" : "Sending…" }}</span>
+            <span>{{ threadSummary.hasRefusedOutgoing ? "Not sent" : threadSummary.hasUncertainOutgoing ? "Delivery not confirmed" : "Sending…" }}</span>
           </span>
         </span>
         <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
@@ -473,7 +495,12 @@ import { visibleReceipt } from "../../../domain/message-receipt-view";
 import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
 import MessageReminderMenu from "./MessageReminderMenu.vue";
 import { reminderAccount } from "../../../composables/useMessageReminders";
-import { discardRefusedDesktopGif, sendDesktopOutgoingWithoutGif, retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
+import {
+  discardRefusedDesktopGif,
+  discardRefusedDesktopOutgoingMessage,
+  sendDesktopOutgoingWithoutGif,
+  retryDesktopOutgoingMessage,
+} from "../../../domain/message-outbox";
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
 import { Check, ChevronDown, CircleAlert, Clock, Copy, CornerUpLeft, LocateFixed, MessageSquare, Paperclip, RotateCw, SmilePlus } from "@lucide/vue";
@@ -805,12 +832,15 @@ const outgoingStatusText = computed(() => {
   if (!outgoing) return "";
   if (outgoing.status === "pending") return "Sending…";
   if (outgoing.error?.includes("expressions_disabled:")) return "GIF sending is off in this room";
+  if (outgoing.status === "refused") return "Not sent";
   return "Delivery not confirmed";
 });
 const outgoingTone = computed<"pending" | "warning" | "error">(() => {
   const outgoing = props.message.outgoing;
   if (!outgoing || outgoing.status === "pending") return "pending";
-  return outgoing.error?.includes("expressions_disabled:") ? "error" : "warning";
+  return outgoing.status === "refused" || outgoing.error?.includes("expressions_disabled:")
+    ? "error"
+    : "warning";
 });
 const outgoingAttachmentItems = computed(() => {
   const attachments = props.message.outgoing?.attachments ?? [];

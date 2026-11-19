@@ -71,11 +71,13 @@
   color: var(--text);
 }
 
-:root[data-theme="light"] {
+:root[data-theme="light"] .room-chat-page {
   color-scheme: light;
+  background: var(--bg);
+  color: var(--text);
 }
 
-:root[data-theme="dark"] {
+:root[data-theme="dark"] .room-chat-page {
   color-scheme: dark;
 }
 

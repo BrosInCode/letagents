@@ -27,10 +27,11 @@ mock.module("electron", {
 
 const {
   handleAttachmentProtocolRequest,
+  pruneOrphanedLocalStagedAttachments,
   stageDroppedDesktopAttachmentContents,
 } = await import("../main/attachments.js");
 const { clearLocalStagedAttachmentsMemoryForTest } = await import("../main/attachments/local-store.js");
-const { resetStoredAuthCacheForTest } = await import("../main/auth.js");
+const { resetStoredAuthCacheForTest, signOutDesktopAuth } = await import("../main/auth.js");
 const { localFilesPath, setChatStorageMode } = await import("../main/chat-storage/settings.js");
 const { getLocalChatDatabase } = await import("../main/rooms/local-db.js");
 const {
@@ -720,4 +721,151 @@ test("renderer-only restart while Electron main process stays alive (same boot_i
     if (previousWindow === undefined) delete (globalThis as { window?: unknown }).window;
     else (globalThis as { window?: unknown }).window = previousWindow;
   }
+});
+
+test("definite pre-commit refusals persist as refused and discard safely, while ambiguous errors stay uncertain", async () => {
+  setAccountAuth({ id: "acct_refusal", login: "alice", displayName: "Alice" });
+  await setChatStorageMode("cloud");
+  const roomIdentifier = "crash-cloud-refusal";
+  const namespace = `${roomIdentifier}:cloud:cloud`;
+
+  const refusedId = "desktop-send:12121212-1212-4121-8121-121212121212";
+  const uncertainId = "desktop-send:34343434-3434-4343-8343-343434343434";
+  await saveDesktopOutgoingMessage({
+    clientMessageId: refusedId,
+    roomIdentifier,
+    messageNamespace: namespace,
+    text: "Will be refused with 403",
+    replyTo: null,
+    threadRootId: null,
+    attachments: [],
+    replyPreview: null,
+    timestamp: "2026-11-19T03:00:00.000Z",
+  });
+  await saveDesktopOutgoingMessage({
+    clientMessageId: uncertainId,
+    roomIdentifier,
+    messageNamespace: namespace,
+    text: "Will hit 503 ambiguous error",
+    replyTo: null,
+    threadRootId: null,
+    attachments: [],
+    replyPreview: null,
+    timestamp: "2026-11-19T03:00:01.000Z",
+  });
+
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { client_message_id?: string };
+    if (body.client_message_id === refusedId) {
+      return Response.json({ error: "You were removed from this room." }, { status: 403 });
+    }
+    return Response.json({ error: "Upstream unavailable" }, { status: 503 });
+  };
+
+  try {
+    await assert.rejects(
+      sendDesktopRoomMessage(roomIdentifier, "Will be refused with 403", null, [], null, refusedId, namespace),
+      /precommit_refusal:.*removed from this room/,
+    );
+    await assert.rejects(
+      sendDesktopRoomMessage(roomIdentifier, "Will hit 503 ambiguous error", null, [], null, uncertainId, namespace),
+      (error: unknown) => error instanceof Error && !error.message.includes("precommit_refusal:"),
+    );
+
+    // Persisting refused status survives process restart as refused (never silently converted to pending/uncertain).
+    await updateDesktopOutgoingMessage(refusedId, {
+      status: "refused",
+      error: "You were removed from this room.",
+    });
+    simulateProcessRestart();
+    const afterRestart = await listDesktopOutgoingMessages();
+    assert.equal(afterRestart.find((r) => r.clientMessageId === refusedId)?.status, "refused");
+    assert.equal(afterRestart.find((r) => r.clientMessageId === uncertainId)?.status, "uncertain");
+
+    // Clean up test rows.
+    await deleteDesktopOutgoingMessage(refusedId, { discardAttachments: true });
+    await deleteDesktopOutgoingMessage(uncertainId);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("prunes abandoned staged local attachments without touching outbox-referenced files, and clears cloud outbox on explicit sign-out", async () => {
+  const { existsSync } = await import("node:fs");
+  setAccountAuth({ id: "acct_cleanup", login: "alice", displayName: "Alice" });
+  await setChatStorageMode("local");
+  const localRoom = "crash-local-cleanup";
+  const localNamespace = `${localRoom}:local:cloud`;
+
+  const [keptStaged, abandonedStaged] = await stageDroppedDesktopAttachmentContents(localRoom, [
+    { fileName: "kept.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength, contentBase64: PNG_BASE64 },
+    { fileName: "abandoned.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength, contentBase64: PNG_BASE64 },
+  ]);
+  assert.ok(keptStaged && abandonedStaged);
+
+  const localOutboxId = "desktop-send:56565656-5656-4565-8565-565656565656";
+  await saveDesktopOutgoingMessage({
+    clientMessageId: localOutboxId,
+    roomIdentifier: localRoom,
+    messageNamespace: localNamespace,
+    text: "Still queued with local attachment",
+    replyTo: null,
+    threadRootId: null,
+    attachments: [{
+      upload_id: keptStaged.uploadId,
+      fileName: keptStaged.fileName,
+      mimeType: keptStaged.mimeType,
+      sizeBytes: keptStaged.sizeBytes,
+    }],
+    replyPreview: null,
+    timestamp: "2026-11-19T03:05:00.000Z",
+  });
+
+  const db = await getLocalChatDatabase();
+  const oldIso = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+  db.prepare("UPDATE local_staged_attachments SET created_at = ?").run(oldIso);
+  const abandonedRow = db
+    .prepare("SELECT file_path FROM local_staged_attachments WHERE upload_id = ?")
+    .get(abandonedStaged.uploadId) as { file_path: string } | undefined;
+  const keptRow = db
+    .prepare("SELECT file_path FROM local_staged_attachments WHERE upload_id = ?")
+    .get(keptStaged.uploadId) as { file_path: string } | undefined;
+  assert.ok(abandonedRow && existsSync(abandonedRow.file_path));
+  assert.ok(keptRow && existsSync(keptRow.file_path));
+
+  const pruned = await pruneOrphanedLocalStagedAttachments();
+  assert.equal(pruned, 1);
+  assert.equal(existsSync(abandonedRow.file_path), false, "abandoned unsent draft file must be deleted");
+  assert.equal(existsSync(keptRow.file_path), true, "outbox-referenced attachment must be preserved");
+
+  // Discarding the refused outbox entry deletes its staged attachment file cleanly.
+  await deleteDesktopOutgoingMessage(localOutboxId, { discardAttachments: true });
+  assert.equal(existsSync(keptRow.file_path), false, "discarding refused outbox entry must unlink uncommitted staged file");
+
+  // Sign-out clears cloud outbox rows for the signed-out account while preserving local-profile rows.
+  await setChatStorageMode("cloud");
+  const cloudOutboxId = "desktop-send:78787878-7878-4787-8787-787878787878";
+  await saveDesktopOutgoingMessage({
+    clientMessageId: cloudOutboxId,
+    roomIdentifier: "cloud-room-signout",
+    messageNamespace: "cloud-room-signout:cloud:cloud",
+    text: "Private cloud message removed on sign-out",
+    replyTo: null,
+    threadRootId: null,
+    attachments: [],
+    replyPreview: null,
+    timestamp: "2026-11-19T03:06:00.000Z",
+  });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(null, { status: 204 });
+  try {
+    await signOutDesktopAuth();
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  const remainingCloud = db
+    .prepare("SELECT client_message_id FROM desktop_message_outbox WHERE client_message_id = ?")
+    .get(cloudOutboxId);
+  assert.equal(remainingCloud, undefined, "explicit sign-out must clear cloud outbox rows for the signed-out account");
 });

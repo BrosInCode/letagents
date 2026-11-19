@@ -88,6 +88,7 @@ import type {
   DesktopAccountRoomListOptions,
   DesktopDroppedAttachmentContent,
   DesktopFocusRoomConclusionDetails,
+  DesktopDeleteOutgoingMessageOptions,
   DesktopPersistedOutgoingMessage,
   DesktopSaveOutgoingMessageInput,
   DesktopUpdateOutgoingMessageInput,
@@ -333,7 +334,7 @@ export interface DesktopApi {
     ) => Promise<DesktopSendRoomMessageResult>;
     saveOutgoingMessage?: (input: DesktopSaveOutgoingMessageInput) => Promise<DesktopPersistedOutgoingMessage>;
     updateOutgoingMessage?: (clientMessageId: string, input: DesktopUpdateOutgoingMessageInput) => Promise<void>;
-    deleteOutgoingMessage?: (clientMessageId: string) => Promise<void>;
+    deleteOutgoingMessage?: (clientMessageId: string, options?: DesktopDeleteOutgoingMessageOptions) => Promise<void>;
     listOutgoingMessages?: () => Promise<DesktopPersistedOutgoingMessage[]>;
     addTask: (roomIdentifier: string, input: DesktopTaskCreateInput) => Promise<DesktopTaskMutationResult>;
     updateTask: (

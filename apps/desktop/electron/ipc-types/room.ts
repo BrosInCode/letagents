@@ -432,19 +432,25 @@ export interface DesktopSaveOutgoingMessageInput {
   timestamp: string;
 }
 
+export type DesktopOutgoingMessageStatus = "pending" | "uncertain" | "refused";
+
 export interface DesktopPersistedOutgoingMessage extends DesktopSaveOutgoingMessageInput {
   accountScope: string;
   storageMode: "local" | "cloud";
-  status: "pending" | "uncertain";
+  status: DesktopOutgoingMessageStatus;
   error: string | null;
   sender: string;
   updatedAt: string;
 }
 
 export interface DesktopUpdateOutgoingMessageInput {
-  status?: "pending" | "uncertain";
+  status?: DesktopOutgoingMessageStatus;
   error?: string | null;
   gif?: RoomGif | null;
+}
+
+export interface DesktopDeleteOutgoingMessageOptions {
+  discardAttachments?: boolean;
 }
 
 export interface DesktopRoomMessage {
@@ -455,7 +461,7 @@ export interface DesktopRoomMessage {
   clientMessageId?: string | null;
   /** Renderer-only submission state; never a server message identity. */
   outgoing?: {
-    status: "pending" | "uncertain";
+    status: DesktopOutgoingMessageStatus;
     attachmentCount: number;
     attachments?: DesktopOutgoingMessageAttachment[];
     error: string | null;

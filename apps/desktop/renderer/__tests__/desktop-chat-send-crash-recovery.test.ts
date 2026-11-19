@@ -16,11 +16,17 @@ import type {
 import {
   clearDesktopMessageOutbox,
   desktopMessageOutbox,
+  discardRefusedDesktopOutgoingMessage,
   hydrateDesktopMessageOutbox,
   INTERRUPTED_OUTBOX_DELIVERY_ERROR,
   reconcileDesktopMessageOutbox,
   retryDesktopOutgoingMessage,
 } from "../src/domain/message-outbox";
+import {
+  clearDesktopMessageDrafts,
+  setDesktopMessageDraftAccount,
+  useDesktopMessageDraft,
+} from "../src/domain/desktop-message-drafts";
 import { useDesktopRoomMessages } from "../src/components/desktop/content/room-shell/useDesktopRoomMessages";
 import {
   buildThreadIndicatorSummary,
@@ -207,25 +213,36 @@ describe("desktop chat send crash recovery (renderer)", () => {
       assert.equal(state.visibleMessages.value.length, 2);
       assert.equal(store.size(), 2);
 
-      // Persistence failure does NOT clear the composer.
-      store.failNextSave = new Error("Disk full");
+      // Validation/scope persistence failure fails closed and does NOT clear the composer.
+      store.failNextSave = new Error("This message belongs to a different room storage mode.");
       await state.sendRoomMessage("Should stay in composer", null, [], null, (ok) => completions.push(ok));
       assert.deepEqual(completions, [true, true, false]);
-      assert.match(state.sendError.value ?? "", /Disk full/);
+      assert.match(state.sendError.value ?? "", /different room storage mode/);
       assert.equal(state.visibleMessages.value.length, 2);
 
+      // Local SQLite fault on a cloud room does NOT deadlock cloud sending and NEVER clears the composer before cloud confirmation.
+      store.failNextSave = new Error("SQLITE_FULL: database or disk is full");
+      const fallbackSend = state.sendRoomMessage("Cloud fallback message", null, [], null, (ok) => completions.push(ok));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(completions.length, 3, "composer must NOT clear before cloud fallback confirms");
+      assert.equal(resolvers.length, 3, "cloud sendMessage runs directly when local SQLite fails");
+      resolvers[2]!({ message: roomMessage({ id: "msg_12", text: "Cloud fallback message" }) });
+      await fallbackSend;
+      assert.deepEqual(completions, [true, true, false, true]);
+      assert.equal(state.sendError.value, null);
+
       // Confirm both pending sends cleanly.
-      const id1 = state.visibleMessages.value[0]!.clientMessageId!;
-      const id2 = state.visibleMessages.value[1]!.clientMessageId!;
+      const id1 = state.visibleMessages.value.find((m) => m.text === "First message")!.clientMessageId!;
+      const id2 = state.visibleMessages.value.find((m) => m.text === "Second message")!.clientMessageId!;
       resolvers[0]!({ message: roomMessage({ id: "msg_10", text: "First message", clientMessageId: id1 }) });
       resolvers[1]!({ message: roomMessage({ id: "msg_11", text: "Second message", clientMessageId: id2 }) });
       await Promise.all([firstSend, secondSend]);
       await nextTick();
 
-      assert.equal(sentEvents.length, 2);
+      assert.equal(sentEvents.length, 3);
       assert.equal(desktopMessageOutbox.value.length, 0);
       assert.equal(store.size(), 0);
-      assert.deepEqual(state.visibleMessages.value.map((m) => m.id), ["msg_10", "msg_11"]);
+      assert.deepEqual(state.visibleMessages.value.map((m) => m.id), ["msg_10", "msg_11", "msg_12"]);
       scope.stop();
     });
     clearDesktopMessageOutbox();
@@ -743,6 +760,75 @@ describe("desktop chat send crash recovery (renderer)", () => {
     });
     clearDesktopMessageOutbox();
   });
+
+  it("marks definite pre-commit refusals as refused with Discard restoring text to original room/thread draft, while keeping ambiguous failures Retry-only", async () => {
+    clearDesktopMessageOutbox();
+    clearDesktopMessageDrafts();
+    setDesktopMessageDraftAccount("acct_1");
+    const store = new SimulatedDurableOutboxStore();
+    const roomId = "github.com/brosincode/letagents";
+    const namespace = `${roomId}:cloud:cloud`;
+    const root = roomMessage({ id: "msg_root_refusal", text: "Root" });
+    const deletedCalls: Array<{ id: string; options?: { discardAttachments?: boolean } }> = [];
+
+    await withWindow({
+      letagentsDesktop: {
+        room: {
+          saveOutgoingMessage: store.save,
+          updateOutgoingMessage: store.update,
+          deleteOutgoingMessage: async (id: string, options?: { discardAttachments?: boolean }) => {
+            deletedCalls.push({ id, options });
+            await store.remove(id);
+          },
+          listOutgoingMessages: store.list,
+          sendMessage: async (_r: string, text: string) => {
+            if (text.includes("Forbidden")) {
+              throw new Error("Error invoking remote method 'desktop:room:send-message': Error: precommit_refusal: You were removed from this room.");
+            }
+            throw new Error("Network disconnected mid-request");
+          },
+          getMessagesBefore: async () => ({ messages: [], hasOlder: false }),
+        },
+      },
+    }, async () => {
+      const messages = ref<DesktopRoomMessage[]>([root]);
+      const scope = effectScope();
+      try {
+        const shell = scope.run(() => useDesktopRoomMessages({
+          room: ref(roomInfo({ identifier: roomId })),
+          messageNamespace: ref(namespace),
+          messages,
+          githubEventsVisible: ref(true),
+          playRoomSound: () => undefined,
+          onMessageSent(message) { messages.value = [...messages.value, message]; },
+        }))!;
+        const threadDraft = scope.run(() => useDesktopMessageDraft(() => namespace, () => root.id))!;
+
+        await shell.sendRoomMessage("Forbidden thread reply", root.id, [], root.id);
+        await shell.sendRoomMessage("Ambiguous network drop", root.id, [], root.id);
+
+        const refused = desktopMessageOutbox.value.find((e) => e.text === "Forbidden thread reply")!;
+        const uncertain = desktopMessageOutbox.value.find((e) => e.text === "Ambiguous network drop")!;
+        assert.equal(refused.message.outgoing?.status, "refused");
+        assert.equal(refused.message.outgoing?.error, "You were removed from this room.");
+        assert.equal(uncertain.message.outgoing?.status, "uncertain");
+
+        // Uncertain entries CANNOT be discarded.
+        assert.equal(discardRefusedDesktopOutgoingMessage(uncertain.clientMessageId), false);
+        assert.ok(desktopMessageOutbox.value.some((e) => e.clientMessageId === uncertain.clientMessageId));
+
+        // Refused entry CAN be discarded, removes outbox row with discardAttachments, and restores draft to original thread composer.
+        assert.equal(discardRefusedDesktopOutgoingMessage(refused.clientMessageId), true);
+        assert.equal(desktopMessageOutbox.value.some((e) => e.clientMessageId === refused.clientMessageId), false);
+        assert.equal(threadDraft.text.value, "Forbidden thread reply");
+        assert.deepEqual(deletedCalls, [{ id: refused.clientMessageId, options: { discardAttachments: true } }]);
+      } finally {
+        scope.stop();
+      }
+    });
+    clearDesktopMessageOutbox();
+    clearDesktopMessageDrafts();
+  });
 });
 
 interface HostNode {
@@ -939,12 +1025,49 @@ describe("recovery UI accessibility, theming and thread-panel contract", () => {
         assert.equal(retryButton.props.disabled, undefined);
         assert.equal(retryButton.props.tabindex, undefined);
         assert.ok(nodeText(retryButton).includes("Retry safely"));
+        const discardOnUncertain = all.find((n) => n.type === "button" && n.props["data-testid"] === "room-message-outgoing-discard");
+        assert.equal(discardOnUncertain, undefined, `${context}: uncertain send must never offer Discard`);
         const fullText = nodeText(uncertainView.root);
         assert.ok(fullText.includes("Delivery not confirmed"));
         assert.ok(fullText.includes("Recover me after crash"));
         assert.ok(fullText.includes("report.pdf"));
       } finally {
         uncertainView.app.unmount();
+      }
+
+      // Definite pre-commit refusal: explicit "Not sent" status + keyboard-accessible Discard & edit + Retry.
+      const refusedMsg = roomMessage({
+        id: "pending:desktop-send:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        clientMessageId: "desktop-send:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        sender: "You",
+        text: "Refused draft text",
+        outgoing: {
+          status: "refused",
+          attachmentCount: 0,
+          error: "You were removed from this room.",
+        },
+      });
+      const refusedView = mountMessage({
+        context,
+        message: refusedMsg,
+        threadSummary: emptyThreadSummary,
+        deliveryReceipts: [],
+        activeThreadRoot: false,
+        highlightQuery: "",
+      });
+      try {
+        const all = collectNodes(refusedView.root);
+        const article = all.find((n) => n.type === "article");
+        assert.equal(article?.props["data-outgoing-status"], "refused");
+        const discardBtn = all.find((n) => n.type === "button" && n.props["data-testid"] === "room-message-outgoing-discard");
+        assert.ok(discardBtn, `${context}: refused send must render Discard button`);
+        assert.equal(discardBtn.props.type, "button");
+        assert.ok(nodeText(discardBtn).includes("Discard & edit"));
+        const fullText = nodeText(refusedView.root);
+        assert.ok(fullText.includes("Not sent"));
+        assert.ok(fullText.includes("Refused draft text"));
+      } finally {
+        refusedView.app.unmount();
       }
     }
   });
@@ -953,11 +1076,13 @@ describe("recovery UI accessibility, theming and thread-panel contract", () => {
     const baseCss = await readFile(fileURLToPath(new URL("../src/styles/01-base.css", import.meta.url)), "utf8");
     const metaCss = await readFile(fileURLToPath(new URL("../src/styles/message-content/message-meta-reply.css", import.meta.url)), "utf8");
     const threadCss = await readFile(fileURLToPath(new URL("../src/styles/message-content/thread-panel.css", import.meta.url)), "utf8");
-    assert.match(baseCss, /:root\[data-theme="light"\]\s*\{\s*color-scheme:\s*light;/);
-    assert.match(baseCss, /:root\[data-theme="dark"\]\s*\{\s*color-scheme:\s*dark;/);
+    assert.match(baseCss, /:root\[data-theme="light"\] \.room-chat-page\s*\{[^}]*color-scheme:\s*light;/);
+    assert.match(baseCss, /:root\[data-theme="dark"\] \.room-chat-page\s*\{[^}]*color-scheme:\s*dark;/);
+    assert.doesNotMatch(baseCss, /:root\[data-theme="light"\]\s*\{/, "color-scheme: light must stay scoped to chat/opt-in surfaces, not app-wide :root");
     assert.match(metaCss, /\.room-message-outgoing button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--blue-text\)/);
     assert.match(metaCss, /\.room-message-outgoing\[data-tone="warning"\]/);
     assert.match(metaCss, /\.room-chat-message\[data-outgoing-status="uncertain"\]/);
+    assert.match(metaCss, /\.room-chat-message\[data-outgoing-status="refused"\]/);
     assert.match(threadCss, /\.room-message-bubble > \.room-thread-marker strong\s*\{[^}]*color:\s*var\(--chat-foreground/);
     assert.match(threadCss, /\.room-thread-panel \.room-chat-message\.is-thread-context \.room-message-author-block strong[\s\S]*?color:\s*var\(--chat-foreground/);
     assert.match(threadCss, /\.room-thread-composer textarea\s*\{[^}]*color:\s*var\(--chat-foreground/);

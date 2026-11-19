@@ -87,6 +87,22 @@ type RoomThreadInboxPayload = {
   unread_thread_count: number;
 };
 
+export const DESKTOP_SEND_REFUSAL_PREFIX = "precommit_refusal:";
+
+function preCommitRefusalError(message: string): Error {
+  return new Error(`${DESKTOP_SEND_REFUSAL_PREFIX} ${message}`);
+}
+
+function isDefiniteCloudRefusal(error: unknown): error is DesktopApiError {
+  return (
+    error instanceof DesktopApiError
+    && error.status >= 400
+    && error.status < 500
+    && error.status !== 408
+    && error.status !== 429
+  );
+}
+
 export async function sendDesktopRoomMessage(
   roomIdentifier: string,
   text: string,
@@ -101,13 +117,13 @@ export async function sendDesktopRoomMessage(
   const trimmedText = text.trim();
   const clientId = clientMessageId?.trim() || null;
   if (clientId && !/^desktop-send:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientId)) {
-    throw new Error("Invalid outgoing message identity.");
+    throw preCommitRefusalError("Invalid outgoing message identity.");
   }
   if (!trimmedRoomIdentifier) {
-    throw new Error("Choose a room before sending a message.");
+    throw preCommitRefusalError("Choose a room before sending a message.");
   }
   if (!trimmedText && !gif && attachments.length === 0) {
-    throw new Error("Write a message before sending.");
+    throw preCommitRefusalError("Write a message before sending.");
   }
 
   const storedAuth = await readStoredAuth();
@@ -115,7 +131,7 @@ export async function sendDesktopRoomMessage(
     storedAuth.account?.displayName || storedAuth.account?.login || "Desktop";
   const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
   if (messageNamespace && messageNamespace !== [trimmedRoomIdentifier, storage.effectiveMode, storage.localRoom?.roomIdentifier || "cloud"].join(":")) {
-    throw new Error("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
+    throw preCommitRefusalError("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
   }
   const normalizedAttachments = attachments.map((attachment) => ({ upload_id: attachment.upload_id }));
   const readerKey = await resolveLocalThreadReaderKey(storedAuth);
@@ -123,21 +139,21 @@ export async function sendDesktopRoomMessage(
     const persisted = await getDesktopOutgoingMessageByClientId(clientId);
     if (persisted) {
       if (persisted.accountScope !== readerKey) {
-        throw new Error("This message belongs to a different account. Switch back to its original account before retrying.");
+        throw preCommitRefusalError("This message belongs to a different account. Switch back to its original account before retrying.");
       }
       if (persisted.roomIdentifier !== trimmedRoomIdentifier) {
-        throw new Error("This message belongs to a different room.");
+        throw preCommitRefusalError("This message belongs to a different room.");
       }
       if (persisted.storageMode !== storage.effectiveMode) {
-        throw new Error("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
+        throw preCommitRefusalError("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
       }
       if ((persisted.threadRootId || null) !== (threadRootId || null) || (persisted.replyTo || null) !== (replyTo || null)) {
-        throw new Error("This message belongs to a different thread.");
+        throw preCommitRefusalError("This message belongs to a different thread.");
       }
     }
   }
   if (storage.effectiveMode === "local") {
-    if (gif) throw new Error("GIFs require a cloud room.");
+    if (gif) throw preCommitRefusalError("GIFs require a cloud room.");
     const localRoomIdentifier = localRoomIdentifierForStorage(
       storage,
       trimmedRoomIdentifier,
@@ -147,15 +163,24 @@ export async function sendDesktopRoomMessage(
       if (existing.sender !== sender || existing.source !== "browser" || existing.text !== trimmedText || (existing.thread_reply_to_id || null) !== (replyTo || null)
         || (threadRootId ? existing.thread_root_id !== threadRootId : existing.thread_root_id !== existing.id)
         || existing.attachments?.map(item => item.id).sort().join("|") !== normalizedAttachments.map(item => item.upload_id).sort().join("|")) {
-        throw new Error("Outgoing message identity was reused with different content.");
+        throw preCommitRefusalError("Outgoing message identity was reused with different content.");
       }
       await releaseLocalStagedAttachments(localRoomIdentifier, normalizedAttachments);
       return { message: mapRoomMessagePayload(existing) };
     }
-    const localAttachments = await loadLocalStagedAttachments(
-      localRoomIdentifier,
-      normalizedAttachments,
-    );
+    let localAttachments;
+    try {
+      localAttachments = await loadLocalStagedAttachments(
+        localRoomIdentifier,
+        normalizedAttachments,
+      );
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "One or more local attachments are no longer available.";
+      if (msg.includes("no longer available")) {
+        throw preCommitRefusalError(msg);
+      }
+      throw error;
+    }
     const message = await addLocalChatMessage(localRoomIdentifier, {
       sender,
       text: trimmedText,
@@ -177,22 +202,32 @@ export async function sendDesktopRoomMessage(
     storage,
     trimmedRoomIdentifier,
   );
-  const message = await apiFetch<RoomMessagePayload>(
-    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sender,
-        text: trimmedText,
-        ...(gif ? { gif } : {}),
-        reply_to: replyTo || null,
-        thread_root_id: threadRootId || null,
-        attachments: normalizedAttachments,
-        ...(clientId ? { client_message_id: clientId } : {}),
-      }),
-    },
-  );
+  let message: RoomMessagePayload;
+  try {
+    message = await apiFetch<RoomMessagePayload>(
+      `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sender,
+          text: trimmedText,
+          ...(gif ? { gif } : {}),
+          reply_to: replyTo || null,
+          thread_root_id: threadRootId || null,
+          attachments: normalizedAttachments,
+          ...(clientId ? { client_message_id: clientId } : {}),
+        }),
+      },
+    );
+  } catch (error) {
+    if (isDefiniteCloudRefusal(error)) {
+      const codePrefix = error.payload?.code ? `${error.payload.code}: ` : "";
+      const detail = error.message.startsWith(codePrefix) ? error.message : `${codePrefix}${error.message}`;
+      throw preCommitRefusalError(detail);
+    }
+    throw error;
+  }
 
   return {
     message: mapCloudRoomMessagePayload(message),

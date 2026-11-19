@@ -1,14 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { normalizeRoomGif, type RoomGif } from "../../../../../shared/room-expressions.mjs";
 import type {
+  DesktopDeleteOutgoingMessageOptions,
   DesktopOutgoingMessageAttachment,
+  DesktopOutgoingMessageStatus,
   DesktopPersistedOutgoingMessage,
   DesktopRoomMessageReply,
   DesktopSaveOutgoingMessageInput,
   DesktopUpdateOutgoingMessageInput,
 } from "../../ipc-types.js";
 import { readStoredAuth } from "../auth.js";
-import { releaseCommittedLocalStagedAttachments } from "../attachments.js";
+import {
+  discardLocalStagedAttachments,
+  pruneOrphanedLocalStagedAttachments,
+  releaseCommittedLocalStagedAttachments,
+} from "../attachments.js";
 import { beginImmediate, getLocalChatDatabase, rollback, type SqliteDatabase } from "./local-db.js";
 import { resolveLocalAwareRoomStorageMode } from "./local-store.js";
 import { resolveLocalThreadReaderKey } from "./messages/thread-reader.js";
@@ -22,6 +28,7 @@ export const INTERRUPTED_DELIVERY_ERROR =
 let currentBootId = randomUUID();
 let schemaInitialized = false;
 let schemaDatabase: SqliteDatabase | null = null;
+let prunedStagedForBootId: string | null = null;
 
 /** Simulate a process restart in deterministic tests. */
 export function rotateDesktopOutboxBootIdForTest(): string {
@@ -90,8 +97,13 @@ function parseJsonOrNull<T>(value: unknown): T | null {
   }
 }
 
+function normalizeStatus(value: unknown): DesktopOutgoingMessageStatus {
+  if (value === "pending" || value === "refused") return value;
+  return "uncertain";
+}
+
 function mapOutboxRow(row: Record<string, unknown>): DesktopPersistedOutgoingMessage {
-  const status = row.status === "pending" ? "pending" : "uncertain";
+  const status = normalizeStatus(row.status);
   const storageMode = row.storage_mode === "local" ? "local" : "cloud";
   const parsedAttachments = parseJsonOrNull<DesktopOutgoingMessageAttachment[]>(row.attachments_json);
   const parsedGif = parseJsonOrNull<RoomGif>(row.gif_json);
@@ -231,7 +243,7 @@ export async function updateDesktopOutgoingMessage(
     .get(trimmedId, accountScope);
   if (!existing) return;
 
-  const nextStatus = input.status ?? (existing.status === "pending" ? "pending" : "uncertain");
+  const nextStatus = input.status ?? normalizeStatus(existing.status);
   const nextError = input.error !== undefined ? input.error : (typeof existing.error === "string" ? existing.error : null);
   const nextGifJson = input.gif !== undefined
     ? (input.gif ? JSON.stringify(normalizeRoomGif(input.gif)) : null)
@@ -247,7 +259,10 @@ export async function updateDesktopOutgoingMessage(
     .run(nextStatus, nextError, nextGifJson, currentBootId, now, trimmedId, accountScope);
 }
 
-export async function deleteDesktopOutgoingMessage(clientMessageId: string): Promise<void> {
+export async function deleteDesktopOutgoingMessage(
+  clientMessageId: string,
+  options: DesktopDeleteOutgoingMessageOptions = {},
+): Promise<void> {
   const trimmedId = clientMessageId?.trim() || "";
   if (!DESKTOP_OUTGOING_CLIENT_ID_PATTERN.test(trimmedId)) return;
   const accountScope = await resolveLocalThreadReaderKey();
@@ -263,13 +278,35 @@ export async function deleteDesktopOutgoingMessage(clientMessageId: string): Pro
     parseJsonOrNull<DesktopOutgoingMessageAttachment[]>(existing.attachments_json),
   );
   if (attachments.length > 0) {
-    await releaseCommittedLocalStagedAttachments(attachments);
+    if (options.discardAttachments) {
+      await discardLocalStagedAttachments(attachments);
+    } else {
+      await releaseCommittedLocalStagedAttachments(attachments);
+    }
   }
+}
+
+/**
+ * Remove persisted cloud-room outbox rows for an account that explicitly signed
+ * out so cloud message text does not linger on disk. Local-profile entries are
+ * unaffected.
+ */
+export async function clearCloudDesktopOutgoingMessagesForAccount(accountId: string): Promise<void> {
+  const trimmedId = accountId?.trim() || "";
+  if (!trimmedId) return;
+  const database = await getOutboxDb();
+  database
+    .prepare("DELETE FROM desktop_message_outbox WHERE account_scope = ? AND storage_mode = 'cloud'")
+    .run(`account:${trimmedId}`);
 }
 
 export async function listDesktopOutgoingMessages(): Promise<DesktopPersistedOutgoingMessage[]> {
   const accountScope = await resolveLocalThreadReaderKey();
   const database = await getOutboxDb();
+  if (prunedStagedForBootId !== currentBootId) {
+    prunedStagedForBootId = currentBootId;
+    void pruneOrphanedLocalStagedAttachments().catch(() => undefined);
+  }
   const rows = database
     .prepare("SELECT * FROM desktop_message_outbox WHERE account_scope = ? ORDER BY created_at ASC")
     .all(accountScope);

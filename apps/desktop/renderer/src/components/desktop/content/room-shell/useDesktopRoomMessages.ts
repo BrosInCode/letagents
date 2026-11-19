@@ -20,6 +20,7 @@ import { desktopIpc } from "../../../../ipc/index.js";
 import {
   desktopMessageOutbox,
   enqueueDesktopMessage,
+  parseOutgoingSendError,
   persistAndEnqueueDesktopMessage,
   reconcileDesktopMessageOutbox,
   registerDesktopOutboxConfirmationListener,
@@ -199,14 +200,60 @@ export function useDesktopRoomMessages(options: {
       onConfirmed: () => undefined,
     };
 
+    const isScopeOrValidationFailure = (error: unknown): boolean => {
+      const message = error instanceof Error ? error.message : String(error ?? "");
+      return (
+        message.includes("precommit_refusal:")
+        || message.includes("Invalid outgoing message identity.")
+        || message.includes("Choose a room before sending a message.")
+        || message.includes("Write a message before sending.")
+        || message.includes("different room storage mode")
+        || message.includes("different account")
+        || message.includes("GIFs require a cloud room.")
+      );
+    };
+
+    const generatedClientMessageId = `desktop-send:${crypto.randomUUID()}`;
     let clientMessageId: string | null;
     if (typeof desktopIpc.room?.saveOutgoingMessage === "function") {
       persistingSubmission = true;
       try {
-        clientMessageId = await persistAndEnqueueDesktopMessage(enqueueInput);
+        clientMessageId = await persistAndEnqueueDesktopMessage({
+          ...enqueueInput,
+          clientMessageId: generatedClientMessageId,
+        });
       } catch (error) {
-        sendError.value = error instanceof Error ? error.message : "Could not save outgoing message.";
-        complete(false);
+        const isLocalStorage = Boolean(messageNamespace && /:local:/i.test(messageNamespace));
+        if (isLocalStorage || isScopeOrValidationFailure(error)) {
+          sendError.value = parseOutgoingSendError(error).message;
+          complete(false);
+          return;
+        }
+        // Cloud room + local SQLite fault: keep the draft intact in the composer
+        // (never clear before either durable save or server confirmation) and
+        // deliver directly so a broken local DB does not deadlock cloud chat.
+        try {
+          const wireAttachments = attachments.map(({ upload_id }) => ({ upload_id }));
+          const result = await desktopIpc.room.sendMessage(
+            roomIdentifier,
+            trimmedText,
+            replyTo,
+            wireAttachments,
+            threadRootId,
+            generatedClientMessageId,
+            messageNamespace,
+            gif,
+          );
+          const confirmed = { ...result.message, clientMessageId: generatedClientMessageId };
+          ownMessageIds.add(confirmed.id);
+          options.onMessageSent(confirmed);
+          sendError.value = null;
+          complete(true);
+          options.playRoomSound("send");
+        } catch (sendFailure) {
+          sendError.value = parseOutgoingSendError(sendFailure).message;
+          complete(false);
+        }
         return;
       } finally {
         persistingSubmission = false;
@@ -216,7 +263,10 @@ export function useDesktopRoomMessages(options: {
         return;
       }
     } else {
-      clientMessageId = enqueueDesktopMessage(enqueueInput);
+      clientMessageId = enqueueDesktopMessage({
+        ...enqueueInput,
+        clientMessageId: generatedClientMessageId,
+      });
     }
     ownMessageIds.add(`pending:${clientMessageId}`);
     sendError.value = null;
