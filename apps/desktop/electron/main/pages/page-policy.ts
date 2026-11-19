@@ -5,8 +5,9 @@ import { inlineHtmlDemoWebPreferences, lockGuestWebPreferences } from "../attach
 import { pageProtocolScheme } from "../paths.js";
 
 /**
- * A room page is one HTML file a team pinned in its room. It runs in the same
- * locks as an HTML demo (no network, no permissions, no Node, the demo CSP),
+ * A room page is one HTML file a team pinned in its room. It runs in the
+ * locks of an HTML demo with CDN loading off (no network, no permissions, no
+ * Node, the offline demo CSP), whatever the demo setting says,
  * in its own session and on its own scheme. Unlike a demo it gets one preload,
  * which gives it `window.letagents` and talks to main over one channel.
  */

@@ -16,7 +16,7 @@ import {
 test("every existing settings pane is reachable from the grouped navigation", () => {
   const all = new Set(settingsNavGroups.flatMap(group => group.items.flatMap(item =>
     (settingsSubsections[item.id] ?? [item]).map(child => child.id))));
-  assert.equal(all.size, 19);
+  assert.equal(all.size, 20);
   for (const pane of all) {
     const section = settingsSectionFor(pane);
     assert.ok(settingsNavGroups.some(group => group.items.some(item => item.id === section)));
@@ -31,7 +31,7 @@ test("trackers, agent apps and remote sign-ins are one Connectors page under You
   assert.deepEqual(titles, [
     ["You", ["Account", "Renting", "Connectors"]],
     ["Workspace", ["Rooms", "Storage", "Agents"]],
-    ["Application", ["Styling", "Assistant", "Updates", "Troubleshooting"]],
+    ["Application", ["Styling", "Demos", "Assistant", "Updates", "Troubleshooting"]],
   ], "no top-level Ticket trackers or Connections");
   assert.equal(settingsNavGroups[0]!.items[2]!.id, "account:connectors", "the old id keeps deep links working");
   assert.deepEqual(visibleSettingsSubsections("account:connectors").map(item => item.title), ["Trackers", "Agent apps", "Remote sign-ins"]);
@@ -60,8 +60,11 @@ test("settings search reaches nested recovery and publishing panes without dupli
   assert.deepEqual(ids("publish local"), ["storage:sync"]);
   assert.deepEqual(ids(" CONNECT an AGENT app "), ["account:connectors-setup"]);
   assert.deepEqual(ids("no such preference"), []);
-  assert.equal(ids("").length, 10);
+  assert.equal(ids("").length, 11);
   assert.deepEqual(ids("styling"), ["system:styling"]);
+  assert.deepEqual(ids("demos"), ["system:demos"]);
+  assert.deepEqual(ids("cdn"), ["system:demos"]);
+  assert.deepEqual(ids("google fonts"), ["system:demos"]);
   assert.deepEqual(ids("chat colors"), ["system:styling"]);
   assert.deepEqual(ids("jira"), ["account:connectors"]);
   assert.deepEqual(ids("github issues"), ["account:connectors"]);

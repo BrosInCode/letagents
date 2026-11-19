@@ -130,6 +130,7 @@ import type {
   DesktopDemoMark,
   DesktopDemoMarkInput,
   DesktopLiveDemoAnchor,
+  DesktopDemoSettings,
   DesktopLiveDemoClientFrame,
   DesktopLiveDemoEvent,
   DesktopWindowRect,
@@ -179,6 +180,10 @@ export interface DesktopApi {
   ui: {
     onOpenSettings: (callback: () => void) => () => void;
     onOpenUpdates?: (callback: () => void) => () => void;
+  };
+  demos?: {
+    getSettings: () => Promise<DesktopDemoSettings>;
+    setCdnLibraries: (enabled: boolean) => Promise<DesktopDemoSettings>;
   };
   notifications: {
     activate?: (target: DesktopNotificationTarget) => Promise<boolean>;
