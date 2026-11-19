@@ -9,6 +9,8 @@ export interface AgentModalTarget {
   workSourceMessageId?: string;
   /** Optional exact room contribution to open in Workspace. */
   workspaceSourceMessageId?: string;
+  /** Optional file of that contribution to select first in its review. */
+  workspaceFilePath?: string;
   /** Exact room message whose participant affordance opened the Inspector. */
   messageId: string | null;
   /** Exact publisher idempotency identity for the selected room message. */

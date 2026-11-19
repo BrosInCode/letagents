@@ -21,7 +21,7 @@
           :error="messagePins.state.value.error" @refresh="messagePins.refresh" @reveal="jumpToMessage" />
         <RoomMessageViewport
           ref="messageViewport"
-          v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="emit('open-agent-detail', workspaceAgentTarget($event, participants))"
+          v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="(work, filePath) => emit('open-agent-detail', workspaceAgentTarget(work, participants, filePath))"
           @open-add-agent="emit('open-add-agent')"
           :active-search-message-id="activeTimelineMessageId"
           :active-thread-parent-id="activeThreadParentId"

@@ -21,6 +21,7 @@
 // independent of the daemon's three-axis `ObservedState` (separate compilation
 // unit / process): the daemon/reconciler maps this to its own vocabulary at the
 // control-socket boundary. Deliberately no cross-rootDir import into the daemon.
+import type { AgentEditEvidence } from "../../../../../shared/agent-edit-evidence.mjs";
 import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
 export type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
 
@@ -412,6 +413,12 @@ export interface ProviderStreamEvent {
   liveDisplayOnly?: true;
   /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
   summary?: string | null;
+  /**
+   * The files this event's edit tool call changed, read from the RAW provider
+   * event before it was bounded (Claude Code, Codex). A side channel to the
+   * daemon's per-turn edit ledger only: never activity, never the live feed.
+   */
+  editEvidence?: readonly AgentEditEvidence[];
   payload: unknown;
   payloadTruncated: boolean;
   payloadRedacted: boolean;

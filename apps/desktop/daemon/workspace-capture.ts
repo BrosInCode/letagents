@@ -17,7 +17,8 @@ export class WorkspaceCapture {
   }
 
   settle(...args: Parameters<typeof captureWorkspacePair>): ReturnType<typeof captureWorkspacePair> {
-    return this.run("settle", [args[0], args[1], args[2], args[3], args[4] ?? null], args[5]);
+    // The remote's answer follows by message; the edit candidates travel with the other arguments.
+    return this.run("settle", [args[0], args[1], args[2], args[3], args[4] ?? null, args[6] ?? null], args[5]);
   }
 
   close(): void {

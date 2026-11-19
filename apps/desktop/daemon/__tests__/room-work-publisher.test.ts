@@ -19,6 +19,9 @@ import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { TurnEditLedger } from "../turn-edit-ledger.js";
+import { parseRoomAgentWorkSummary } from "../../../../shared/room-agent-work.mjs";
+import type { AgentEditEvidence } from "../../../../shared/agent-edit-evidence.mjs";
 
 /**
  * The publisher arms its own flush timer (1 s after a change, at once after a settled hint). When that
@@ -1515,4 +1518,193 @@ test("ordinary completed work uploads before an awaited grouped receipt and each
     assert.equal(f.row(1).acknowledgedRevision, f.row(1).revision);
   } finally { release(); await flushing; }
   assert.equal(pendingGrouped(f.db).length, 1, "only one grouped report was attempted in this pass");
+});
+
+/** One delivered turn with the provider's edit events: the ledger sees the turn start, the edits, then the capture reads it. */
+async function editTurn(f: Awaited<ReturnType<typeof fixture>>, ledger: TurnEditLedger, id: number, work: () => Promise<void> | void, edits: AgentEditEvidence[]) {
+  f.publisher.observeNewSources(f.agent)?.([`msg_${id}`]);
+  ledger.turnStarted("agent", `inbox-${id}`);
+  const baseline = await f.publisher.beginWorkspace(f.agent, `msg_${id}`, `inbox-${id}`);
+  assert.ok(baseline);
+  await work();
+  ledger.observe("agent", edits);
+  const attemptId = f.captureMessage(id);
+  f.fact(id, { state: "terminal", turnOutcome: "completed" });
+  await f.publisher.captureWorkspace(f.agent, `msg_${id}`, `inbox-${id}`, null, baseline);
+  ledger.turnEnded("agent", `inbox-${id}`);
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attemptId);
+  f.publisher.changed("agent"); await f.publisher.flush();
+  const summary = f.sent.filter(sent => sent.sourceMessageId === `msg_${id}`).at(-1)?.summary;
+  assert.ok(summary);
+  assert.equal(JSON.stringify(parseRoomAgentWorkSummary(summary)), JSON.stringify(summary), "the published summary is canonical");
+  return summary;
+}
+
+async function editFixture(t: TestContext, provider: "claude-code" | "codex" | "cursor") {
+  const f = await fixture(t, provider);
+  const ledger = new TurnEditLedger();
+  f.options.workspaceLocation = async () => f.location;
+  f.options.turnEdits = ledger;
+  const workspace = f.location.path;
+  const git = (args: string[], env: Record<string, string> = {}) => execFileSync("git", args, { cwd: workspace, encoding: "utf8", env: { ...process.env, ...env } }).trim();
+  await writeFile(join(workspace, ".gitignore"), ".env\n"); git(["add", "."]); git(["commit", "-qm", "ignore"]);
+  return { f, ledger, workspace, git };
+}
+
+const appEdit = (path: string): AgentEditEvidence => ({ path, additions: 1, deletions: 0, patch: "@@ -1,1 +1,2 @@\n original\n+new line", patch_truncated: false });
+
+test("a Claude Code turn publishes v4 with its edited file; ignored, outside and .git paths are not in it", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "claude-code");
+  const outside = await mkdtemp(join(tmpdir(), "publisher-outside-"));
+  t.after(() => removeTestDirectory(outside));
+  const summary = await editTurn(f, ledger, 1, async () => {
+    await writeFile(join(workspace, "app.ts"), "original\nnew line\n");
+    await writeFile(join(workspace, ".env"), "TOKEN=private\n");
+    await writeFile(join(outside, "x.ts"), "x\n");
+  }, [
+    appEdit(join(workspace, "app.ts")),
+    { path: join(workspace, ".env"), additions: 1, deletions: 0, patch: "@@ -0,0 +1,1 @@\n+TOKEN=private", patch_truncated: false },
+    { path: join(outside, "x.ts"), additions: 1, deletions: 0, patch: "@@ -0,0 +1,1 @@\n+x", patch_truncated: false },
+    { path: join(workspace, "..", "elsewhere.ts"), additions: 1, deletions: 0, patch: "", patch_truncated: false },
+    { path: join(workspace, ".git", "config"), additions: 1, deletions: 0, patch: "", patch_truncated: false },
+  ]);
+  assert.equal(summary.version, 4);
+  assert.deepEqual(summary.contribution!.edits, { hidden_files: 0, files: [{ path: "app.ts", additions: 1, deletions: 0, patch: "@@ -1,1 +1,2 @@\n original\n+new line", patch_truncated: false }] });
+  assert.deepEqual(summary.contribution!.changes.files.map(file => file.path), ["app.ts"], "the comparison stays the record");
+  assert.equal(summary.contribution!.start?.in_history, true);
+  assert.match(summary.contribution!.start?.committed_at ?? "", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/);
+  assert.doesNotMatch(JSON.stringify(summary), /TOKEN=private|elsewhere|publisher-outside/);
+  assertStagingReadable(f.db);
+  f.restart(); await f.publisher.flush();
+  assert.equal(f.sent.at(-1)!.summary.version, 4, "the edits kept beside the capture survive a restart");
+});
+
+/** What a daemon of the previous release (parser v1–v3, the same table definitions) reads from this database. */
+function assertStagingReadable(db: DatabaseSync) {
+  const stagingParse = (value: unknown) => [1, 2, 3].includes((value as { version?: unknown })?.version as number) ? parseRoomAgentWorkSummary(value) : null;
+  const rows = [
+    ...db.prepare("SELECT settled_json AS json FROM room_workspace_captures WHERE settled_json IS NOT NULL").all(),
+    ...db.prepare("SELECT summary_json AS json FROM room_work_publications WHERE summary_json IS NOT NULL").all(),
+  ].map(row => String(row.json));
+  assert.ok(rows.length >= 2);
+  for (const json of rows) {
+    const value = JSON.parse(json);
+    assert.ok(stagingParse(value), "an earlier daemon's parser accepts every stored summary");
+    assert.equal(JSON.stringify(stagingParse(value)), json, "and reads it back byte for byte");
+    if (value.contribution) assert.deepEqual(Object.keys(value.contribution), ["changes", "summary"]);
+  }
+  assert.equal(db.prepare("SELECT count(*) AS n FROM room_work_edit_evidence").get()!.n, 1, "the edits are in their own table");
+}
+
+test("a Codex turn's relative edit path resolves against the workspace", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "codex");
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), "original\nnew line\n"), [appEdit("app.ts")]);
+  assert.equal(summary.version, 4);
+  assert.deepEqual(summary.contribution!.edits?.files.map(file => [file.path, file.additions]), [["app.ts", 1]]);
+});
+
+test("a Cursor turn publishes v3 exactly as before, whatever the ledger holds", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "cursor");
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), "original\nnew line\n"), [appEdit(join(workspace, "app.ts"))]);
+  assert.equal(summary.version, 3);
+  assert.deepEqual(Object.keys(summary.contribution!), ["changes", "summary"]);
+});
+
+test("start.in_history: false after a checkout without the start commit, true after a plain commit on top", async t => {
+  const { f, ledger, workspace, git } = await editFixture(t, "claude-code");
+  await writeFile(join(workspace, "later.ts"), "later\n"); git(["add", "."]);
+  git(["commit", "-qm", "later"], { GIT_COMMITTER_DATE: "2026-09-20T08:00:00+02:00" });
+  const old = await editTurn(f, ledger, 1, () => {
+    git(["checkout", "-q", "-b", "old", "HEAD~1"]);
+  }, []);
+  assert.equal(old.version, 4);
+  assert.deepEqual(old.contribution!.start, { committed_at: "2026-09-20T06:00:00.000Z", in_history: false });
+  assert.deepEqual(old.contribution!.edits, { files: [], hidden_files: 0 }, "the provider reports edits and reported none");
+  const plain = await editTurn(f, ledger, 2, async () => {
+    await writeFile(join(workspace, "app.ts"), "original\nnew line\n"); git(["commit", "-qam", "own"]);
+  }, [appEdit(join(workspace, "app.ts"))]);
+  assert.equal(plain.contribution!.start?.in_history, true);
+});
+
+test("a patch that credential redaction would change is withheld; its counts stay", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "claude-code");
+  const secret = 'const token = "ghp_0123456789abcdefghijABCDEFGHIJ012345";';
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), `original\n${secret}\n`),
+    [{ path: join(workspace, "app.ts"), additions: 1, deletions: 0, patch: `@@ -1,1 +1,2 @@\n original\n+${secret}`, patch_truncated: false }]);
+  assert.deepEqual(summary.contribution!.edits?.files, [{ path: "app.ts", additions: 1, deletions: 0, patch: "", patch_truncated: true }]);
+  assert.doesNotMatch(JSON.stringify(summary.contribution!.edits), /ghp_/);
+});
+
+test("a failure in the edit path keeps the v3 card", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "claude-code");
+  f.options.turnEdits = { take: () => { throw new Error("ledger broke"); } };
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), "original\nnew line\n"), [appEdit(join(workspace, "app.ts"))]);
+  assert.equal(summary.version, 3);
+  assert.ok(f.diagnostics.includes("edit_evidence_unavailable"));
+});
+
+test("an edit through a link is reported at the link's target inside the workspace, and dropped when the target is outside", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "claude-code");
+  const outside = await mkdtemp(join(tmpdir(), "publisher-outside-"));
+  t.after(() => removeTestDirectory(outside));
+  await writeFile(join(outside, "creds"), "secret context\n");
+  const { symlink } = await import("node:fs/promises");
+  await symlink(join(outside, "creds"), join(workspace, "notes.txt"));
+  await symlink(join(workspace, "app.ts"), join(workspace, "alias.ts"));
+  const summary = await editTurn(f, ledger, 1, async () => {
+    await writeFile(join(outside, "creds"), "secret context\nmore\n");
+    await writeFile(join(workspace, "app.ts"), "original\nnew line\n");
+  }, [
+    { path: join(workspace, "notes.txt"), additions: 1, deletions: 0, patch: "@@ -1,1 +1,2 @@\n secret context\n+more", patch_truncated: false },
+    appEdit(join(workspace, "alias.ts")),
+  ]);
+  assert.deepEqual(summary.contribution!.edits?.files.map(file => [file.path, file.additions]), [["app.ts", 1]]);
+  assert.doesNotMatch(JSON.stringify(summary), /secret context/);
+});
+
+test("a path that differs only in letter case resolves to the file's true case on a case-insensitive volume", async t => {
+  const { f, ledger, workspace, git } = await editFixture(t, "claude-code");
+  await writeFile(join(workspace, "Notes.txt"), "a\n"); git(["add", "."]); git(["commit", "-qm", "notes"]);
+  const { access } = await import("node:fs/promises");
+  const caseInsensitive = await access(join(workspace, "notes.txt")).then(() => true, () => false);
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "Notes.txt"), "a\nb\n"),
+    [{ path: join(workspace, caseInsensitive ? "notes.txt" : "Notes.txt"), additions: 1, deletions: 0, patch: "@@ -1,1 +1,2 @@\n a\n+b", patch_truncated: false }]);
+  assert.deepEqual(summary.contribution!.edits?.files.map(file => file.path), ["Notes.txt"]);
+});
+
+// Windows has no file name with a colon, so no such file can exist there.
+test("a file named like pathspec magic is only itself", { skip: process.platform === "win32" }, async t => {
+  const { f, ledger, workspace } = await editFixture(t, "codex");
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, ":(glob)x"), "x\n"),
+    [{ path: ":(glob)x", additions: 1, deletions: 0, patch: "@@ -0,0 +1,1 @@\n+x", patch_truncated: false }]);
+  assert.equal(summary.version, 4, "the settlement did not fail");
+  assert.deepEqual(summary.contribution!.edits?.files.map(file => file.path), [":(glob)x"]);
+});
+
+test("a server that refuses v4 as invalid gets the same card once as v3, and the receipt is acknowledged", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "claude-code");
+  const { RoomWorkSummaryRejectedError } = await import("../cloud-http.js");
+  const versions: number[] = [];
+  f.options.publish = async (input) => {
+    versions.push(input.summary.version);
+    if (input.summary.version === 4) throw new RoomWorkSummaryRejectedError(400, "Room work publication");
+    f.sent.push(input); return "acknowledged";
+  };
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), "original\nnew line\n"), [appEdit(join(workspace, "app.ts"))]);
+  assert.equal(summary.version, 3);
+  assert.deepEqual(Object.keys(summary.contribution!), ["changes", "summary"]);
+  assert.equal(JSON.stringify(summary), JSON.stringify(f.row().summary), "byte for byte the stored v3 card");
+  assert.deepEqual(versions.filter(version => version === 4).length, 1, "exactly one downgrade");
+  assert.equal(f.row().revision, f.row().acknowledgedRevision, "acknowledged as a normal v3 publication");
+  assert.ok(f.diagnostics.includes("edit_evidence_refused"));
+  f.publisher.changed("agent"); await f.publisher.flush();
+  f.restart(); f.publisher.changed("agent"); await f.publisher.flush();
+  assert.equal(versions.filter(version => version === 4).length, 1, "no v4 again, also after a restart");
+  // A refused v3 card is retried as before, never downgraded.
+  const rejected: number[] = [];
+  f.options.publish = async (input) => { rejected.push(input.summary.version); throw new RoomWorkSummaryRejectedError(400, "Room work publication"); };
+  const before = f.diagnostics.filter(code => code === "publication_unavailable").length;
+  await editTurn(f, ledger, 2, () => writeFile(join(workspace, "app.ts"), "original\nnew line\nthird\n"), [appEdit(join(workspace, "app.ts"))]).catch(() => null);
+  assert.ok(rejected.length >= 2 && rejected.every((version, index) => index === 0 ? version === 4 : version === 3));
+  assert.ok(f.diagnostics.filter(code => code === "publication_unavailable").length > before);
 });

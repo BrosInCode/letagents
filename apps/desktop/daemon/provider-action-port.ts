@@ -4,6 +4,7 @@
  * outside Electron's failure domain.
  */
 import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
+import type { AgentEditEvidence } from "../../../shared/agent-edit-evidence.mjs";
 import { nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import type { ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 export type ProviderActionCapabilities = {
@@ -146,6 +147,12 @@ export type ProviderActionStreamEvent = {
   liveDisplayOnly?: true;
   /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
   summary?: string | null;
+  /**
+   * The files this event's edit tool call changed, read from the RAW provider
+   * event before it was bounded (Claude Code, Codex). A side channel to the
+   * daemon's per-turn edit ledger only: never activity, never the live feed.
+   */
+  editEvidence?: readonly AgentEditEvidence[];
   payload: unknown;
   payloadTruncated: boolean;
   payloadRedacted: boolean;

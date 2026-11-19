@@ -1,4 +1,5 @@
 import { ClaudeCompaction } from "../claude-compaction.js";
+import { claudeEditEvidence } from "../../../../../../shared/agent-edit-evidence.mjs";
 import { randomUUID } from "node:crypto";
 import { ProviderUsageTracker } from "../provider-usage.js";
 import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
@@ -174,6 +175,8 @@ export class ClaudeAdapterCore {
     nativeLifecyclePhase: "turn_active" | "turn_terminal" | null = null,
     summary: string | null = null,
   ): void {
+    // Read from the raw message: the bounded payload may have lost the patch.
+    const editEvidence = claudeEditEvidenceOf(providerPayload);
     const safe = safeStreamPayload(providerPayload);
     const event: ProviderStreamEvent = {
       workAttemptId: handle.workAttemptId,
@@ -186,6 +189,7 @@ export class ClaudeAdapterCore {
       ...(nativeEventId ? { nativeEventId } : {}),
       ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
       ...(summary ? { summary } : {}),
+      ...(editEvidence ? { editEvidence } : {}),
       ...safe,
       durablePayloadRef: null,
     };
@@ -332,4 +336,9 @@ export class ClaudeAdapterCore {
     if (!promise) throw new Error("Claude provider handle is missing its exit observation.");
     return promise;
   }
+}
+
+/** Optional evidence: a strange message has none, and never stops its publication. */
+function claudeEditEvidenceOf(message: unknown) {
+  try { return claudeEditEvidence(message); } catch { return null; }
 }

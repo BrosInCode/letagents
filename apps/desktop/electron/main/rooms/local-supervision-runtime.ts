@@ -47,7 +47,7 @@ async function publishLocalWork(grant: ObjectValue, sessionId: string, body: Obj
     || !Number.isSafeInteger(body.revision) || Number(body.revision) < 1) throw new Error("Invalid local work identity.");
   const summary = parseRoomAgentWorkSummary(body.summary);
   const review = body.review_page === undefined ? null : parseWorkspaceReviewPage(body.review_page);
-  if (!summary || (body.review_page !== undefined && (!review || summary.version !== 3))) throw new Error("Invalid local work summary or review page.");
+  if (!summary || (body.review_page !== undefined && (!review || (summary.version !== 3 && summary.version !== 4)))) throw new Error("Invalid local work summary or review page.");
   const db = await localSupervisionDatabase();
   const conflict = new Error("Local work revision conflict.");
   db.exec("BEGIN IMMEDIATE");

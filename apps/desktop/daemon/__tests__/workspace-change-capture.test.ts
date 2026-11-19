@@ -225,3 +225,30 @@ test('full review decoding keeps gzip integrity checks with bounded output alloc
   assert.throws(() => decodeWorkspaceReview(changed, createHash('sha256').update(changed).digest('hex')));
   assert.equal(decodeWorkspaceReview(encoded.data, encoded.digest).workspace.patch, snapshot.patch);
 });
+
+test('the start commit of a turn is never given to the signature program of the repository', { skip: process.platform === 'win32' }, async () => {
+  const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../../../../shared/workspace-turn-capture.mjs');
+  const { chmodSync, existsSync } = await import('node:fs');
+  const root = mkdtempSync(join(tmpdir(), 'workspace-signature-'));
+  const directory = join(root, 'repository'); mkdirSync(directory);
+  try {
+    git(directory, 'init', '-q'); git(directory, 'config', 'user.name', 'Test'); git(directory, 'config', 'user.email', 'test@example.com');
+    writeFileSync(join(directory, 'app.ts'), 'one\n'); git(directory, 'add', '.'); git(directory, 'commit', '-qm', 'base');
+    // Anyone can write a commit with a signature header; Git calls the program without a key.
+    const signed = execFileSync('git', ['hash-object', '-t', 'commit', '-w', '--stdin'], { cwd: directory, encoding: 'utf8',
+      input: git(directory, 'cat-file', 'commit', 'HEAD').replace('\n\n', '\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n iQfake\n -----END PGP SIGNATURE-----\n\n') + '\n' }).trim();
+    git(directory, 'update-ref', 'HEAD', signed);
+    writeFileSync(join(root, 'gpg'), `#!/bin/sh\ntouch "${join(root, 'GPG_EXECUTED')}"\nexit 1\n`); chmodSync(join(root, 'gpg'), 0o755);
+    git(directory, 'config', 'gpg.program', join(root, 'gpg')); git(directory, 'config', 'log.showSignature', 'true');
+    try { git(directory, 'show', '-s', signed); } catch { /* The trap fails the command. */ }
+    assert.equal(existsSync(join(root, 'GPG_EXECUTED')), true, 'the trap is live for a plain Git command');
+    rmSync(join(root, 'GPG_EXECUTED'));
+    const start = await captureWorkspaceTree(directory, 'signed');
+    writeFileSync(join(directory, 'app.ts'), 'one\ntwo\n');
+    const pair = await captureWorkspacePair(directory, signed, start, 'signed', signed, null, [join(directory, 'app.ts')]);
+    await releaseWorkspaceTree(directory, 'signed');
+    assert.match(String(pair.editSettlement?.start?.committed_at), /^\d{4}-\d\d-\d\dT/);
+    assert.equal(pair.editSettlement?.start?.in_history, true);
+    assert.equal(existsSync(join(root, 'GPG_EXECUTED')), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

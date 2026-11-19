@@ -27,7 +27,7 @@ function publicWork(row: typeof room_agent_work.$inferSelect): RoomAgentWork {
 type WorkTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 async function saveRoomWorkReviewPage(tx: WorkTransaction, work: typeof room_agent_work.$inferSelect, summary: NonNullable<ReturnType<typeof parseRoomAgentWorkSummary>>, reviewPage: ReturnType<typeof parseWorkspaceReviewPage>): Promise<void> {
   if (!reviewPage || isClearedRoomAgentWorkSummary(work.summary)) return;
-  if (summary.version !== 3) throw new RoomAgentWorkError("invalid_summary");
+  if (summary.version !== 3 && summary.version !== 4) throw new RoomAgentWorkError("invalid_summary");
   // The work lock serializes all pages and clearing. A retry cannot replace
   // captured bytes, mix two captures, or resurrect a cleared review.
   const [prior] = await tx.select().from(room_agent_work_review_pages)
@@ -255,7 +255,7 @@ export async function clearRoomAgentWork(input: {
 }
 
 /** Authorized human room readers only; the route performs current membership checks. */
-export async function readRoomAgentWork(input: { room_id: string; attempt_id?: string; include_workspace?: boolean; include_contribution?: boolean }): Promise<RoomAgentWorkSnapshot> {
+export async function readRoomAgentWork(input: { room_id: string; attempt_id?: string; include_workspace?: boolean; include_contribution?: boolean; include_edits?: boolean }): Promise<RoomAgentWorkSnapshot> {
   const rows = await db.select({ work: room_agent_work }).from(room_agent_work)
     .innerJoin(messages, and(eq(messages.room_id, room_agent_work.room_id), eq(messages.number, room_agent_work.source_message_number)))
     .where(and(eq(room_agent_work.room_id, input.room_id),
@@ -264,7 +264,13 @@ export async function readRoomAgentWork(input: { room_id: string; attempt_id?: s
     .orderBy(desc(room_agent_work.updated_at), asc(room_agent_work.attempt_id)).limit(input.attempt_id ? 1 : 51);
   return { work: rows.slice(0, 50).map((row) => {
     const work = publicWork(row.work);
-    if (!input.include_contribution && work.summary.version === 3 && "contribution" in work.summary) {
+    // A reader that does not ask for edit evidence gets the v3 card it knows: an
+    // older client's strict parser rejects the whole poll on one v4 summary.
+    if (!input.include_edits && work.summary.version === 4 && "contribution" in work.summary && work.summary.contribution) {
+      const { edits: _edits, start: _start, ...contribution } = work.summary.contribution;
+      work.summary = { ...work.summary, version: 3, contribution };
+    }
+    if (!input.include_contribution && (work.summary.version === 3 || work.summary.version === 4) && "contribution" in work.summary) {
       const { contribution: _contribution, ...workspace } = work.summary;
       work.summary = { ...workspace, version: 2 };
     }

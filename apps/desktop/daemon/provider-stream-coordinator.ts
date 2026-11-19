@@ -1,3 +1,4 @@
+import type { AgentEditEvidence } from "../../../shared/agent-edit-evidence.mjs";
 import { ProviderLiveDisplay, liveDisplayFeedPlacement } from "./provider-live-display.js";
 import { publishWorkerNativeActivity } from "./cloud-http.js";
 import { liveActivitySummaryForEvent, type LiveActivitySummaryStatus } from "./live-activity-summary-relay.js";
@@ -250,6 +251,12 @@ export type ProviderStreamCoordinatorOptions = {
   ): Promise<unknown>;
   /** The line the owner sees in the live strip, for every room member; null when the turn ends. */
   observeActivitySummary?(entryId: string, summary: string | null, status: LiveActivitySummaryStatus): void;
+  /**
+   * The files one event's edit call changed (Claude Code, Codex), for the turn's
+   * edit ledger only. Called synchronously when the event arrives, so every edit
+   * of a turn is observed before the provider's turn result can settle the turn.
+   */
+  observeEditEvidence?(entryId: string, evidence: readonly AgentEditEvidence[]): void;
   handleTerminal(
     installation: ProviderInstallationToken,
     bindingIdentity: LiveBindingIdentity | undefined,
@@ -1267,6 +1274,7 @@ export class ProviderStreamCoordinator {
       this.markLifecycleProjectionUnavailableForEvent(event, true);
       return;
     }
+    this.observeEditEvidence(installation, event);
     const entryId = installation.entryId;
     const previous = this.streamQueues.get(entryId) ?? Promise.resolve();
     const next = previous
@@ -1292,7 +1300,18 @@ export class ProviderStreamCoordinator {
       this.markLifecycleProjectionUnavailableForEvent(event);
       return;
     }
+    this.observeEditEvidence(installation, event);
     return this.handleInstalled(installation, event);
+  }
+
+  /**
+   * Before the queued, awaited handling of the event: the delivery reads the
+   * ledger when the provider's turn result arrives, and that result comes after
+   * every event of the turn, but the queue can still hold some of them then.
+   */
+  private observeEditEvidence(installation: ProviderInstallationToken, event: ProviderActionStreamEvent): void {
+    if (!event.editEvidence?.length || !this.options.observeEditEvidence || !this.isCurrentInstallation(installation)) return;
+    try { this.options.observeEditEvidence(installation.entryId, event.editEvidence); } catch { /* Optional evidence. */ }
   }
 
   /**

@@ -61,6 +61,9 @@ const props = defineProps<{
   partialLabel?: string;
   showFileCounts?: boolean;
   countsUnavailable?: boolean;
+  /** A file to select once per request key, as soon as the preview or the full review lists it. */
+  initialPath?: string | null;
+  initialPathKey?: string;
 }>();
 const emit = defineEmits<{ escape: [] }>();
 const selectedPath = ref('');
@@ -68,7 +71,10 @@ const fileOffset = ref(0);
 const fileNav = ref<HTMLElement | null>(null);
 watch(fileOffset, () => { fileNav.value?.scrollTo({ top: 0, left: 0 }); }, { flush: 'post' });
 const visibleFiles = computed(() => props.snapshot.files.slice(fileOffset.value, fileOffset.value + 100));
-watch(() => props.snapshot, value => {
+let appliedInitialPath = '';
+watch([() => props.snapshot, () => props.initialPath, () => props.initialPathKey], ([value]) => {
+  const initial = props.initialPath ? `${props.initialPathKey}\n${props.initialPath}` : '';
+  if (initial && initial !== appliedInitialPath && value.files.some(file => file.path === props.initialPath)) { appliedInitialPath = initial; selectedPath.value = props.initialPath!; }
   if (!value.files.some(file => file.path === selectedPath.value)) selectedPath.value = value.files[0]?.path ?? '';
   fileOffset.value = Math.floor(Math.max(0, value.files.findIndex(file => file.path === selectedPath.value)) / 100) * 100;
 }, { immediate: true });
@@ -167,7 +173,7 @@ const statusLetter = (status: string) => status === 'untracked' ? 'A' : status =
 .workspace-partial svg { flex-shrink: 0; }
 .workspace-escape-hint kbd { font: inherit; padding: 1px 4px; border: 1px solid var(--border); border-radius: 4px; }
 
-.workspace-diff { --workspace-positive: light-dark(#167544, #88d9a2); --workspace-negative: light-dark(#bd3548, #ef9ba5); display: flex; flex-direction: column; min-height: 320px; flex: 1; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; }
+.workspace-diff { --workspace-positive: var(--diff-added-text); --workspace-negative: var(--diff-deleted-text); display: flex; flex-direction: column; min-height: 320px; flex: 1; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; }
 .workspace-diff .workspace-review-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(220px, 1fr); min-height: 0; }
 .workspace-diff .workspace-file-nav { display: flex; gap: 4px; max-height: 110px; padding: 8px; border-right: 0; border-bottom: 1px solid var(--border); overflow: auto; }
 .workspace-diff .workspace-files-heading { display: none; }

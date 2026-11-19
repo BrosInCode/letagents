@@ -69,7 +69,7 @@
           @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
           @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
         />
-        <RoomContribution v-for="work in contributionsFor(reply.id)" :key="work.attemptId" :work="work" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="$emit('open-agent', workspaceAgentTarget($event, participants))" />
+        <RoomContribution v-for="work in contributionsFor(reply.id)" :key="work.attemptId" :work="work" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="(work, filePath) => $emit('open-agent', workspaceAgentTarget(work, participants, filePath))" />
       </template>
 
       <div v-if="!replies.length" class="room-thread-empty" data-testid="room-thread-empty">

@@ -8,7 +8,7 @@ try {
     ? new Promise(resolve => parentPort.once('message', resolve)) : null;
   const result = workerData.operation === 'begin'
     ? await captureWorkspaceTree(...workerData.args)
-    : await captureWorkspacePair(...workerData.args, remoteTips);
+    : await captureWorkspacePair(...workerData.args.slice(0, 5), remoteTips, workerData.args[5] ?? null);
   parentPort.postMessage({ result });
 } catch {
   parentPort.postMessage({ error: 'Workspace observation failed.' });

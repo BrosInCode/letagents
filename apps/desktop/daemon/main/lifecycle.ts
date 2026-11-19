@@ -64,6 +64,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
           ({ path, revision: workspace_identity.resolved_revision, remote: recordedRemote(workspace_identity) })),
         custody: this.workerRuntimeCustody, daemonGeneration: () => this.singleton.currentGeneration,
         isClosing: () => this.handoffScheduled, assertCurrent: () => this.singleton.assertCurrent(),
+        turnEdits: this.turnEdits,
       });
       this.executionCapture = ExecutionCaptureCoordinator.open(this.stateDatabasePath, this.providerPort, {
         currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,

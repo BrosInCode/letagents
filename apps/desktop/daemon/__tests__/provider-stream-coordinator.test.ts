@@ -23,6 +23,8 @@ import { LiveActivitySummaryRelay } from "../live-activity-summary-relay.js";
 import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { LifecycleProjectionObservation } from "../lifecycle-projection-ledger.js";
 import { setTurnStartLatencyReporter, turnStartLatency, type StartLatencyRecord } from "../turn-start-latency.js";
+import { TurnEditLedger } from "../turn-edit-ledger.js";
+import { providerEditEvidence } from "../../../../shared/agent-edit-evidence.mjs";
 
 const cleanLifecycleProjection = () => ({
   available: true,
@@ -171,6 +173,7 @@ function coordinatorHarness(input: {
   heartbeat?: Partial<ProviderStreamCoordinatorOptions["heartbeat"]>;
   publishNativeActivity?: (entryId?: string, method?: string, status?: "working" | "idle") => Promise<void>;
   observeActivitySummary?: ProviderStreamCoordinatorOptions["observeActivitySummary"];
+  observeEditEvidence?: ProviderStreamCoordinatorOptions["observeEditEvidence"];
   requestConvergence?: (entryId: string) => void;
   serializeManifest?: <T>(operation: () => Promise<T>) => Promise<T>;
   setTimeout?: typeof setTimeout;
@@ -266,6 +269,7 @@ function coordinatorHarness(input: {
     },
     publishNativeActivity: async (entryId, method, status) => input.publishNativeActivity?.(entryId, method, status),
     observeActivitySummary: input.observeActivitySummary,
+    observeEditEvidence: input.observeEditEvidence,
     handleTerminal: async () => {},
     streams: {
       reset: () => {},
@@ -2319,3 +2323,47 @@ test("stopping waits for stream callbacks no longer than its deadline, then goes
   assert.match(String(failure), /activity storage fault/);
   await failed;
 });
+
+// The raw events as the adapters receive them; the adapters attach providerEditEvidence(raw) as editEvidence.
+const rawEditEvents = {
+  "claude-code": { method: "user", kind: "tool_lifecycle", raw: { type: "user", session_id: "continuation-1", parent_tool_use_id: null,
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "The file /w/app.ts has been updated." }] },
+    tool_use_result: { filePath: "/w/app.ts", oldString: "a", newString: "b", originalFile: "a\n", replaceAll: false, userModified: false,
+      structuredPatch: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ["-a", "+b"] }] } } },
+  codex: { method: "item/completed", kind: "item_lifecycle", raw: { threadId: "continuation-1", turnId: "turn-1",
+    item: { type: "fileChange", id: "item-1", status: "completed", changes: [{ path: "/w/app.ts", kind: { type: "update", move_path: null }, diff: "@@ -1 +1 @@\n-a\n+b\n" }] } } },
+} as const;
+
+for (const provider of ["claude-code", "codex"] as const) {
+  test(`${provider}: edit evidence from a raw event reaches the turn's ledger, and the feed and activity are unchanged`, async () => {
+    const { method, kind, raw } = rawEditEvents[provider];
+    const evidence = providerEditEvidence(provider, method, raw);
+    assert.equal(evidence?.length, 1);
+    const run = async (withEvidence: boolean) => {
+      const ledger = new TurnEditLedger();
+      const activity: DaemonActivityEvent[] = [];
+      const feed: DaemonActivityEvent[] = [];
+      const harness = coordinatorHarness({ observeEditEvidence: (entryId, files) => ledger.observe(entryId, files),
+        appendedActivity: event => activity.push(event), pushStream: event => feed.push(event) });
+      harness.setManifest({ ...entry(), provider });
+      await harness.coordinator.install("agent-1", handle, "generation-2");
+      ledger.turnStarted("agent-1", "inbox-1");
+      const event: ProviderActionStreamEvent = { ...streamEvent(1, method), provider, kind, payload: raw,
+        ...(withEvidence ? { editEvidence: evidence! } : {}) };
+      // Observed as the event arrives, before its queued handling has run.
+      const handled = harness.coordinator.enqueue("agent-1", handle, event);
+      const observed = ledger.take("agent-1", "inbox-1", provider);
+      await handled;
+      await harness.coordinator.disposeAll();
+      return { observed, activity, feed };
+    };
+    const withEvidence = await run(true);
+    const without = await run(false);
+    assert.deepEqual(withEvidence.observed, { hidden_files: 0, files: [{ path: "/w/app.ts", additions: 1, deletions: 1, patch: provider === "codex" ? "@@ -1 +1 @@\n-a\n+b" : "@@ -1,1 +1,1 @@\n-a\n+b", patch_truncated: false }] });
+    assert.deepEqual(without.observed?.files, []);
+    assert.ok(withEvidence.activity.length > 0, "the event became activity");
+    assert.deepEqual(withEvidence.activity, without.activity, "the stored activity event is the same with or without evidence");
+    assert.deepEqual(withEvidence.feed, without.feed, "the owner's feed is the same with or without evidence");
+    assert.doesNotMatch(JSON.stringify([withEvidence.activity, withEvidence.feed]), /editEvidence|patch_truncated/);
+  });
+}

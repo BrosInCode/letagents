@@ -111,6 +111,7 @@ const props = defineProps<{
   roomAgentWork?: DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
+  workspaceFilePath?: string | null;
   reasoningSessions: readonly DesktopReasoningSession[];
   /** Agents' turns their owners share with the room. */
   liveActivitySessions?: readonly DesktopReasoningSession[];
@@ -170,7 +171,7 @@ const liveAnnouncement = computed(() => {
 });
 function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
   const workspace = { roomAgentWork: props.roomAgentWork ?? [], roomAgentWorkStatus: props.roomAgentWorkStatus ?? 'idle',
-    workspaceSourceMessageId: props.workspaceSourceMessageId, workspaceAgentKey: props.selection.agentKey,
+    workspaceSourceMessageId: props.workspaceSourceMessageId, workspaceFilePath: props.workspaceFilePath, workspaceAgentKey: props.selection.agentKey,
     initialTab: props.initialTab };
   if (props.projection) {
     return {

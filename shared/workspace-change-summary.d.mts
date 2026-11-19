@@ -22,3 +22,5 @@ export type WorkspaceChangeSummary = {
   patch_truncated: boolean;
 };
 export function parseWorkspaceChangeSummary(value: unknown, fullReview?: boolean): WorkspaceChangeSummary | null;
+/** A workspace-relative path as a summary may hold it: no host root, no `..`, no control characters. */
+export function isWorkspaceChangePath(value: unknown): value is string;
