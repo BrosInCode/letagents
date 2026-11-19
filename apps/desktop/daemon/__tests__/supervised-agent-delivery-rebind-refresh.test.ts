@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,6 +16,7 @@ import {
   enqueue,
   ingest,
 } from "./helpers/supervised-agent-delivery-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 for (const phase of ["preflight", "admitted"] as const) {
   test(`duplicate same-owner start preserves Codex ${phase} and publishes exactly once`, async () => {
@@ -64,7 +65,7 @@ for (const phase of ["preflight", "admitted"] as const) {
       assert.equal(calls, 1); assert.equal(recovered, 0); assert.equal(published, 1);
     } finally {
       release.resolve(); await delivery.fenceAndDrain(); await store.close();
-      await rm(root, { recursive: true, force: true });
+      removeTestDirectory(root);
     }
   });
 }
@@ -111,7 +112,7 @@ test("refresh still replaces changed ownership, including provider-less lanes, b
         assert.equal(pollSignals.length, 2, "the new exact owner is idempotent too");
       } finally {
         await delivery.fenceAndDrain(); await store.close();
-        await rm(root, { recursive: true, force: true });
+        removeTestDirectory(root);
       }
     });
   }
@@ -187,7 +188,7 @@ test("a same-session bearer rotation keeps the in-flight turn, its approvals and
         authorityGate = Promise.resolve();
         release.resolve({ turnId: "turn:rotation", outcome: "reply", text: "cleanup" });
         await delivery.fenceAndDrain(); await store.close();
-        await rm(root, { recursive: true, force: true });
+        removeTestDirectory(root);
       }
     });
   }
@@ -241,7 +242,7 @@ test("a turn that ends before delivery adopts a rotated bearer is recovered inst
   } finally {
     release.resolve({ turnId: "turn:rotation", outcome: "reply", text: "cleanup" });
     await delivery.fenceAndDrain(); await store.close();
-    await rm(root, { recursive: true, force: true });
+    removeTestDirectory(root);
   }
 });
 
@@ -289,7 +290,7 @@ test("an older rotation that finishes its authority check last cannot replace a 
     firstCheck.resolve();
     release.resolve({ turnId: "turn:rotation-order", outcome: "reply", text: "cleanup" });
     await delivery.fenceAndDrain(); await store.close();
-    await rm(root, { recursive: true, force: true });
+    removeTestDirectory(root);
   }
 });
 
@@ -326,7 +327,7 @@ test("a stop or ingress pause during a refresh's authority check is not undone b
       } finally {
         gate.resolve();
         await delivery.fenceAndDrain(); await store.close();
-        await rm(root, { recursive: true, force: true });
+        removeTestDirectory(root);
       }
     });
   }
@@ -383,17 +384,18 @@ test("a task ownership lookup revoked by a same-session rotation is retried with
   } finally {
     rotated.resolve();
     await delivery.fenceAndDrain(); await store.close();
-    await rm(root, { recursive: true, force: true });
+    removeTestDirectory(root);
   }
 });
 
 test("rebind waits for an old provider turn, recovers its interrupted FIFO head, then processes it and the next item", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-rebind-drain-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const entered = deferred<void>(); const release = deferred<{ turnId: string; outcome: "reply"; text: string }>();
     let turns = 0; let published = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+    delivery = new SupervisedAgentDelivery(store, provider(async () => {
       turns += 1;
       if (turns === 1) { entered.resolve(); return release.promise; }
       return { turnId: `turn:${turns}`, outcome: "no_reply", text: null };
@@ -423,20 +425,27 @@ test("rebind waits for an old provider turn, recovers its interrupted FIFO head,
     assert.equal(turns, 3, "the explicit recovery processes the blocked head before the next FIFO item");
     await delivery.fenceAndDrain();
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("refresh fences a poll paused in ingest and lets the successor recover before its first hanging poll", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-ingest-rebind-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>(); const successorPoll = deferred<void>();
     const ingest = store.ingestSuccessfulPoll.bind(store);
     (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
     };
     let polls = 0; let turns = 0; const turnHandles: unknown[] = [];
-    const delivery = new SupervisedAgentDelivery(store, provider(async (handle) => {
+    delivery = new SupervisedAgentDelivery(store, provider(async (handle) => {
       turns += 1;
       turnHandles.push(handle);
       return { turnId: `turn:${turns}`, outcome: "no_reply", text: null };
@@ -463,7 +472,13 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply", "successor recovery and delivery finish independently of its hanging poll");
     await delivery.fenceAndDrain();
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("refresh joins a start paused in its health write before installing the successor loop", async () => {
@@ -516,7 +531,7 @@ test("refresh joins a start paused in its health write before installing the suc
     releaseStarting.resolve();
     await delivery?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    removeTestDirectory(root);
   }
 });
 
@@ -574,21 +589,22 @@ test("convergence ensure never joins or replaces a mismatched loop and fills the
   } finally {
     await delivery?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    removeTestDirectory(root);
   }
 });
 
 test("concurrent refreshes install only the newest epoch and its handle drains recovered FIFO work", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-refresh-epoch-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>(); const currentPoll = deferred<void>();
     const ingest = store.ingestSuccessfulPoll.bind(store);
     (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
     };
     let polls = 0; const turnHandles: unknown[] = [];
-    const delivery = new SupervisedAgentDelivery(store, provider(async (handle) => {
+    delivery = new SupervisedAgentDelivery(store, provider(async (handle) => {
       turnHandles.push(handle);
       return { turnId: `turn:${turnHandles.length}`, outcome: "no_reply", text: null };
     }), {
@@ -618,20 +634,27 @@ test("concurrent refreshes install only the newest epoch and its handle drains r
     assert.equal((await store.receipts(agent.agentId)).every((item) => item.state === "acknowledged_no_reply"), true);
     await delivery.fenceAndDrain();
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("an external stop invalidates a refresh reservation still waiting on drain", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-stop-epoch-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>();
     const ingest = store.ingestSuccessfulPoll.bind(store);
     (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
     };
     let polls = 0; let turns = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+    delivery = new SupervisedAgentDelivery(store, provider(async () => {
       turns += 1;
       return { turnId: "unexpected", outcome: "no_reply", text: null };
     }), {
@@ -648,20 +671,27 @@ test("an external stop invalidates a refresh reservation still waiting on drain"
     assert.equal(turns, 0);
     assert.equal(internals.loops.has(agent.agentId), false);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("a credential-only rebind clears recovery ownership for the successor context", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-credential-rebind-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     let normalizations = 0;
     const normalize = store.normalizeStartupRecovery.bind(store);
     store.normalizeStartupRecovery = async (agentId) => {
       normalizations += 1;
       return normalize(agentId);
     };
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+    delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
       poll: ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true })),
       publish: async () => { throw new Error("must not publish"); },
     }, currentAuthority);
@@ -670,18 +700,25 @@ test("a credential-only rebind clears recovery ownership for the successor conte
     await waitFor(() => normalizations === 2);
     await delivery.fenceAndDrain();
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("startup recovery publishes durable work before a hanging first poll settles", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-startup-pump-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite")); const item = await enqueue(store);
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite")); const item = await enqueue(store);
     await store.checkpointTurnStarted(item.inbox_item_id, "turn", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(item.inbox_item_id, "awaiting_result", { outcome: JSON.stringify({ kind: "reply", text: "durable" }) });
     await store.transition(item.inbox_item_id, "publishing");
     const pollEntered = deferred<void>(); let published = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => { throw new Error("provider must not rerun"); }), {
+    delivery = new SupervisedAgentDelivery(store, provider(async () => { throw new Error("provider must not rerun"); }), {
       poll: ({ signal }) => new Promise((resolve) => {
         pollEntered.resolve(); signal.addEventListener("abort", () => resolve({}), { once: true });
       }),
@@ -693,5 +730,11 @@ test("startup recovery publishes durable work before a hanging first poll settle
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
     await delivery.fenceAndDrain();
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });

@@ -18,6 +18,7 @@ import {
   recordThreadIntent,
   recordReplyIntent,
 } from "./helpers/supervised-agent-delivery-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("task continuity survives restart after native failure, preserves files and deduplicates completed effects", async () => {
   const root = await mkdtemp(join(tmpdir(), "continuity-restart-"));
@@ -77,7 +78,7 @@ test("task continuity survives restart after native failure, preserves files and
     const receipts = await store.receipts(agent.agentId);
     assert.deepEqual(receipts.map(r => r.state), ["acknowledged_failed", "acknowledged"]);
     assert.equal((await store.taskContinuation(receipts[1]!.inbox_item_id))?.agentSessionId, "session-1");
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("recovering a failed turn under a replacement worker session cannot inherit its task", async () => {
@@ -104,7 +105,7 @@ test("recovering a failed turn under a replacement worker session cannot inherit
     assert.equal(ownershipReads, 0);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_failed");
     assert.equal(await store.head(agent.agentId), null);
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("task continuity persists its delay and three-continuation budget across restarts", async () => {
@@ -144,7 +145,7 @@ test("task continuity persists its delay and three-continuation budget across re
         assert.equal(runs, 4, "the original turn plus three automatic continuations is the hard bound");
       }
     }
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 for (const [error, explanation] of [["HTTP 402 insufficient credits", /credit/], ["HTTP 401 unauthorized", /authentication/],
@@ -168,7 +169,7 @@ for (const [error, explanation] of [["HTTP 402 insufficient credits", /credit/],
       await store.retryBlocked(head.inbox_item_id); await delivery.pump(agent);
       assert.equal(runs, 2);
       assert.equal(await store.head(agent.agentId), null);
-    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   });
 }
 
@@ -200,7 +201,7 @@ test("continuation survives an unavailable ownership snapshot and drops only tas
     owned = [second];
     await delivery.pump(agent);
     assert.equal(runs, 2);
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 for (const changed of ["session", "workAttempt", "conversation", "lease", "epoch", "finished", "agentInstance"] as const) {
@@ -234,7 +235,7 @@ for (const changed of ["session", "workAttempt", "conversation", "lease", "epoch
       owned = [{ ...continuityTask, id: "task-new" }];
       await delivery.pump(nextAgent);
       assert.equal(runs, 1, "an old failure cannot acquire subsequently assigned work");
-    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   });
 }
 
@@ -270,7 +271,7 @@ test("an uncertain mutation prevents automatic continuation across restart witho
     await ingest(store, "2"); await delivery.pump(agent);
     assert.equal(runs, 2, "the uncertain result cannot silently replay work or deadlock later human instructions");
     assert.equal(await store.head(agent.agentId), null);
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("supervised reply targets inherit true threads but not top-level quote replies", () => {
@@ -363,7 +364,7 @@ test("reply attachments are uploaded with the worker's bearer just before the re
     }]);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
     assert.deepEqual(await readdir(join(root, "spool")), [], "a published reply's copies are removed");
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("staged reply attachments are discarded when the post fails or the lane loses the reply, and retried uploads still attach", async () => {
@@ -413,7 +414,7 @@ test("staged reply attachments are discarded when the post fails or the lane los
       assert.equal(discarded.includes("upl_2"), true, `${ending}: the unused upload is discarded`);
       if (ending === "post_fails") assert.deepEqual(posted[0], [{ upload_id: "upl_2" }], "the retried upload was attached");
       else assert.deepEqual(posted, [], "a lane that lost the reply posts nothing");
-    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   }
 });
 
@@ -473,7 +474,7 @@ test("an intercepted thread choice survives publication failure and restart with
       assert.equal(runs, 1);
       assert.deepEqual(publications, [publications[0], publications[0]]);
       assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
-    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   }
 });
 
@@ -513,17 +514,18 @@ test("unrelated or non-thread message effects cannot redirect the daemon's activ
     try {
       await ingest(store, "msg_72"); await delivery.pump(agent);
       assert.equal(published, true, variation);
-    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   }
 });
 
 test("worker-authenticated activation ingress deduplicates replay and publishes one bounded reply", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const polls: unknown[] = [];
     const published: Array<{ clientMessageId: string; replyTo: string | null; threadRootId: string | null }> = [];
-    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: `turn:${request.inboxItemId}`, outcome: "reply", text: "hello" })), {
+    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: `turn:${request.inboxItemId}`, outcome: "reply", text: "hello" })), {
       poll: async (input) => { polls.push(input); return { messages: [{ id: "1", thread_root_id: "root", thread: { root_message_id: "root", is_thread_reply: true }, activation: { for_current_agent: { decision: "activate", reason: "server" } }, text: "hi" }, { id: "2", text: "ignored" }] }; },
       publish: async (input) => {
         published.push({ clientMessageId: input.clientMessageId, replyTo: input.replyTo, threadRootId: input.threadRootId });
@@ -540,7 +542,13 @@ test("worker-authenticated activation ingress deduplicates replay and publishes 
       threadRootId: "root",
     }]);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
 });
 
 test("a publish response without a nonempty matching canonical room identity never checkpoints publication", async () => {
@@ -565,7 +573,7 @@ test("a publish response without a nonempty matching canonical room identity nev
       assert.equal(detail.receipt?.state, "blocked");
       assert.match(detail.receipt?.last_error ?? "", /canonical message id.*matching room/);
       await store.close();
-    } finally { await rm(root, { recursive: true, force: true }); }
+    } finally { removeTestDirectory(root); }
   }
 });
 
@@ -598,6 +606,6 @@ test("bounded room turns never resolve or inject the legacy charter", async () =
     assert.deepEqual(seen.map((turn) => (turn.source as { id?: string }).id), ["1", "2"]);
   } finally {
     await store.close();
-    await rm(root, { recursive: true, force: true });
+    removeTestDirectory(root);
   }
 });
