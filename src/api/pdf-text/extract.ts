@@ -11,8 +11,10 @@ import { Worker } from "node:worker_threads";
  * server image installs it without its optional native canvas.
  *
  * A PDF is untrusted input, so each one is read in its own worker thread with
- * a memory cap and a deadline, few at a time, and the text is kept for a while
- * because attachments never change.
+ * a memory cap and a deadline, few at a time and one per requester, with none
+ * of the server's environment. The text is kept for a while because
+ * attachments never change; a PDF that could not be read is remembered too,
+ * so the same hostile file does not take a slot again at once.
  */
 export const PDF_TEXT_LIMITS = Object.freeze({
   /** Attachments are at most 25 MB; a larger PDF is not read. */
@@ -25,12 +27,23 @@ export const PDF_TEXT_LIMITS = Object.freeze({
   timeoutMs: 20_000,
   /** The worker's heap; a PDF that needs more is refused. */
   memoryMb: 256,
-  /** PDFs read at once in this process. */
+  /**
+   * Memory outside that heap: pdf.js keeps decoded streams in typed arrays,
+   * which the heap limit does not count (a 3 MB PDF can inflate to GBs). The
+   * worker is stopped once it holds more, checked this often.
+   */
+  externalMemoryMb: 512,
+  memoryCheckMs: 50,
+  /** PDFs read at once in this process, and for one requester. */
   concurrent: 2,
+  concurrentPerRequester: 1,
   /** Texts kept, by attachment, and for how long. */
   cacheEntries: 16,
   cacheChars: 8_000_000,
   cacheMs: 30 * 60_000,
+  /** A PDF that could not be read is answered from memory this long. */
+  failureCacheMs: 10 * 60_000,
+  failureEntries: 256,
 });
 
 export type PdfTextFailure = "encrypted" | "invalid" | "too_complex" | "busy" | "unavailable";
@@ -91,8 +104,12 @@ export function isPdfTextAvailable(): boolean {
 }
 
 let running = 0;
+const runningByRequester = new Map<string, number>();
 const inFlight = new Map<string, Promise<PdfText>>();
 const cache = new Map<string, { text: PdfText; chars: number; at: number }>();
+const failures = new Map<string, { reason: PdfTextFailure; at: number }>();
+/** Failures that say something about the PDF itself, not about this moment. */
+const KEPT_FAILURES = new Set<PdfTextFailure>(["encrypted", "invalid", "too_complex"]);
 
 function cached(key: string, now: number): PdfText | null {
   const entry = cache.get(key);
@@ -121,30 +138,56 @@ function remember(key: string, text: PdfText, now: number): void {
   }
 }
 
-/** Drop every kept text (tests). */
+function rememberFailure(key: string, reason: PdfTextFailure, now: number): void {
+  if (!KEPT_FAILURES.has(reason)) return;
+  failures.delete(key);
+  failures.set(key, { reason, at: now });
+  while (failures.size > PDF_TEXT_LIMITS.failureEntries) failures.delete(failures.keys().next().value!);
+}
+
+/** Drop every kept text and failure (tests). */
 export function clearPdfTextCache(): void {
   cache.clear();
+  failures.clear();
 }
 
 /**
  * The text of the PDF that `key` names (an attachment's storage key: the
  * bytes behind it never change). `load` gives its bytes and runs only when
- * the text is not kept and no other call is reading the same PDF.
+ * the text is not kept and no other call is reading the same PDF. Each
+ * `requester` (an account, or an agent session without one) reads one PDF at
+ * a time, so one cannot hold every slot.
  */
-export async function pdfTextFor(key: string, load: () => Promise<Uint8Array>, now = Date.now()): Promise<PdfText> {
+export async function pdfTextFor(
+  key: string,
+  load: () => Promise<Uint8Array>,
+  options: { requester?: string; now?: number } = {},
+): Promise<PdfText> {
+  const now = options.now ?? Date.now();
   const kept = cached(key, now);
   if (kept) return kept;
+  const failed = failures.get(key);
+  if (failed && now - failed.at <= PDF_TEXT_LIMITS.failureCacheMs) throw new PdfTextError(failed.reason);
   const pending = inFlight.get(key);
   if (pending) return pending;
-  if (running >= PDF_TEXT_LIMITS.concurrent) throw new PdfTextError("busy");
+  const requester = options.requester ?? "";
+  const mine = runningByRequester.get(requester) ?? 0;
+  if (running >= PDF_TEXT_LIMITS.concurrent || mine >= PDF_TEXT_LIMITS.concurrentPerRequester) throw new PdfTextError("busy");
   running += 1;
+  runningByRequester.set(requester, mine + 1);
   const reading = (async () => {
     try {
       const text = await extractPdfText(await load());
       remember(key, text, Date.now());
       return text;
+    } catch (error) {
+      if (error instanceof PdfTextError) rememberFailure(key, error.reason, Date.now());
+      throw error;
     } finally {
       running -= 1;
+      const left = (runningByRequester.get(requester) ?? 1) - 1;
+      if (left > 0) runningByRequester.set(requester, left);
+      else runningByRequester.delete(requester);
       inFlight.delete(key);
     }
   })();
@@ -162,6 +205,8 @@ export function extractPdfText(bytes: Uint8Array, limits: Partial<typeof PDF_TEX
     const file = workerFile();
     const worker = new Worker(file.url, {
       ...(file.execArgv ? { execArgv: file.execArgv } : {}),
+      // The worker is not a sandbox: it gets none of the server's environment (database URL, storage keys).
+      env: {},
       workerData: { bytes, ...location, maxPages: options.maxPages, maxChars: options.maxChars },
       resourceLimits: { maxOldGenerationSizeMb: options.memoryMb, maxYoungGenerationSizeMb: 32, stackSizeMb: 4 },
       stdout: true,
@@ -175,10 +220,20 @@ export function extractPdfText(bytes: Uint8Array, limits: Partial<typeof PDF_TEX
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
+      clearInterval(memoryWatch);
       void worker.terminate().catch(() => undefined);
       outcome();
     };
     const deadline = setTimeout(() => finish(() => reject(new PdfTextError("too_complex"))), options.timeoutMs);
+    const externalLimit = options.externalMemoryMb * 1024 * 1024;
+    let checking = false;
+    const memoryWatch = setInterval(() => {
+      if (checking || settled) return;
+      checking = true;
+      worker.getHeapStatistics().then((stats) => {
+        if (stats.external_memory > externalLimit) finish(() => reject(new PdfTextError("too_complex")));
+      }, () => undefined).finally(() => { checking = false; });
+    }, options.memoryCheckMs);
     worker.once("message", (message: unknown) => finish(() => {
       const answer = message as { ok?: boolean; reason?: PdfTextFailure; pageCount?: unknown; pages?: unknown; truncated?: unknown };
       if (answer?.ok === true && typeof answer.pageCount === "number" && Array.isArray(answer.pages)

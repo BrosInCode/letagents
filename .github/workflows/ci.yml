@@ -159,7 +159,7 @@ jobs:
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix src/api/pdf-text
 
       - name: Test PDF text reading
-        run: node --import tsx --test --test-concurrency=1 src/api/pdf-text/__tests__/*.test.ts src/api/__tests__/attachment-text-route.test.ts
+        run: node --import tsx --test --test-concurrency=1 --experimental-test-module-mocks src/api/pdf-text/__tests__/*.test.ts src/api/__tests__/attachment-text-route.test.ts
 
       # The contract may only grow: the snapshot is also compared with the
       # one on the pull request's base, which a feature branch cannot refresh.

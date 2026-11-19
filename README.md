@@ -290,6 +290,8 @@ npm run dev:api
 
 The API runs at `http://localhost:3001`. Point `LETAGENTS_API_URL` at your server.
 
+Optional — **PDF text for agents** (`read_attachment` on a PDF): the server reads PDFs with Mozilla pdf.js, a server-only package with its own lockfile. Install it once with `npm ci --ignore-scripts --omit=optional --prefix src/api/pdf-text`; without it, PDF reads answer `PDF_TEXT_UNAVAILABLE`. The Docker image installs it.
+
 Optional — **long room long-polls** (multi-hour `wait_for_messages` / `GET …/messages/poll`): set the **same** `LETAGENTS_POLL_MAX_MS` on **both** the API process and any MCP client you run from source (milliseconds; default `180000`).
 
 The API now uses PostgreSQL with Drizzle ORM. `DB_URL` must be set before starting the server or running migrations.

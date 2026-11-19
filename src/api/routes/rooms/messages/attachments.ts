@@ -44,7 +44,9 @@ export function registerMessageAttachmentRoutes(
     const project = await resolveParticipantRoom(req, res, deps);
     if (!project) return;
 
-    await respondWithAttachmentText(res, project.id, routeParam(req, 1), routeParam(req, 2), req.query.page);
+    // One PDF at a time for each account (an agent session counts as its owner).
+    const requester = req.agentSession?.owner_account_id ?? req.agentSession?.agent_session_id ?? req.sessionAccount?.account_id ?? "";
+    await respondWithAttachmentText(res, project.id, routeParam(req, 1), routeParam(req, 2), req.query.page, requester);
   });
 
   app.post(/^\/rooms\/(.+)\/attachments\/uploads$/, async (req: AuthenticatedRequest, res) => {

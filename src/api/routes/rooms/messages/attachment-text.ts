@@ -1,9 +1,9 @@
 import type { Response } from "express";
 
-import { readBoundedBody } from "../../../../../shared/attachment-download.mjs";
+import { AttachmentDownloadError, readBoundedBody } from "../../../../../shared/attachment-download.mjs";
 import { getMessageAttachment } from "../../../db.js";
 import { createPresignedAttachmentDownload, isAttachmentStorageConfigured } from "../../../messages/attachment-storage.js";
-import { PDF_TEXT_LIMITS, PdfTextError, pdfTextFor, type PdfTextFailure } from "../../../pdf-text/extract.js";
+import { isPdfTextAvailable, PDF_TEXT_LIMITS, PdfTextError, pdfTextFor, type PdfTextFailure } from "../../../pdf-text/extract.js";
 
 /** Characters of text in one answer; `page` reads on. The MCP tool pages text files the same way. */
 export const ATTACHMENT_TEXT_PAGE_CHARS = 50_000;
@@ -18,6 +18,15 @@ const FAILURES: Record<PdfTextFailure, { status: number; code: string; message: 
   unavailable: { status: 503, code: "PDF_TEXT_UNAVAILABLE", message: "This LetAgents server cannot read PDFs." },
 };
 
+/** Storage did not give the PDF. */
+class StorageFetchError extends Error {}
+
+function respondWithFailure(res: Response, reason: PdfTextFailure): void {
+  const failure = FAILURES[reason];
+  if (reason === "busy") res.setHeader("Retry-After", "5");
+  res.status(failure.status).json({ error: failure.message, code: failure.code });
+}
+
 function isPdfAttachment(attachment: { content_type: string; filename: string }): boolean {
   return attachment.content_type.toLowerCase().split(";")[0]!.trim() === "application/pdf" || /\.pdf$/i.test(attachment.filename);
 }
@@ -27,6 +36,7 @@ function isPdfAttachment(attachment: { content_type: string; filename: string })
  * pages at a time: from `page` (default 1) on, whole pages until about
  * ATTACHMENT_TEXT_PAGE_CHARS characters. A page longer than that is cut, and
  * the answer says so. The PDF is read on the server, once, and kept a while.
+ * `requester` (an account) reads one PDF at a time.
  */
 export async function respondWithAttachmentText(
   res: Response,
@@ -34,6 +44,7 @@ export async function respondWithAttachmentText(
   messageId: string,
   attachmentId: string,
   rawPage: unknown,
+  requester: string,
 ): Promise<void> {
   const page = rawPage === undefined ? 1 : typeof rawPage === "string" && /^[1-9]\d{0,6}$/.test(rawPage) ? Number(rawPage) : null;
   if (page === null) {
@@ -57,6 +68,11 @@ export async function respondWithAttachmentText(
     res.status(413).json({ error: "The PDF is larger than the server reads.", code: "PDF_TOO_LARGE" });
     return;
   }
+  // Before any download: a server without pdf.js says so at once.
+  if (!isPdfTextAvailable()) {
+    respondWithFailure(res, "unavailable");
+    return;
+  }
 
   let text;
   try {
@@ -65,24 +81,29 @@ export async function respondWithAttachmentText(
       const stored = await fetch(createPresignedAttachmentDownload(attachment), {
         redirect: "error",
         signal: AbortSignal.timeout(STORAGE_TIMEOUT_MS),
-      });
+      }).catch((error: unknown) => { throw new StorageFetchError(String(error)); });
       if (!stored.ok) {
         await stored.body?.cancel().catch(() => undefined);
-        throw new Error(`storage answered ${stored.status}`);
+        throw new StorageFetchError(`storage answered ${stored.status}`);
       }
-      const bytes = await readBoundedBody(stored, PDF_TEXT_LIMITS.maxBytes);
+      const bytes = await readBoundedBody(stored, PDF_TEXT_LIMITS.maxBytes).catch((error: unknown) => {
+        // More bytes than the limit is the file's size, not a storage failure.
+        throw error instanceof AttachmentDownloadError && error.reason === "too_large" ? error : new StorageFetchError(String(error));
+      });
       // A file named .pdf that is something else is not handed to the reader.
       if (new TextDecoder("latin1").decode(bytes.subarray(0, 1024)).indexOf("%PDF-") === -1) throw new PdfTextError("invalid");
       return bytes;
-    });
+    }, { requester });
   } catch (error) {
     if (error instanceof PdfTextError) {
-      const failure = FAILURES[error.reason];
-      if (error.reason === "busy") res.setHeader("Retry-After", "5");
-      res.status(failure.status).json({ error: failure.message, code: failure.code });
-      return;
+      respondWithFailure(res, error.reason);
+    } else if (error instanceof AttachmentDownloadError && error.reason === "too_large") {
+      res.status(413).json({ error: "The PDF is larger than the server reads.", code: "PDF_TOO_LARGE" });
+    } else if (error instanceof StorageFetchError) {
+      res.status(502).json({ error: "The PDF could not be fetched from storage. Try again shortly.", code: "PDF_FETCH_FAILED" });
+    } else {
+      res.status(500).json({ error: "The PDF could not be read here. Try again shortly.", code: "PDF_TEXT_FAILED" });
     }
-    res.status(502).json({ error: "The PDF could not be fetched from storage. Try again shortly.", code: "PDF_FETCH_FAILED" });
     return;
   }
 

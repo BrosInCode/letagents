@@ -22,6 +22,13 @@ add("att_6", "huge-page.pdf", "application/pdf", makePdf([lines(600, "h"), "afte
 add("att_7", "gone.pdf", "application/pdf", makePdf(["x"]));
 add("att_8", "SCAN.PDF", "application/octet-stream", makePdf([""]));
 attachments.att_9 = { ...attachments.att_1!, object_key: "room/att_9", byte_size: 30 * 1024 * 1024 };
+add("att_10", "slow-a.pdf", "application/pdf", makePdf(["a"]));
+add("att_11", "slow-b.pdf", "application/pdf", makePdf(["b"]));
+add("att_12", "third.pdf", "application/pdf", makePdf(["c"]));
+
+/** Storage answers for these keys wait until the test lets them go. */
+const held = new Set(["room/att_10", "room/att_11"]);
+const waiting: Array<() => void> = [];
 
 const storageHits: string[] = [];
 let storageConfigured = true;
@@ -34,8 +41,12 @@ const storage = createServer((req, res) => {
     res.end("storage error");
     return;
   }
-  res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": String(file.bytes.byteLength) });
-  res.end(Buffer.from(file.bytes));
+  const send = () => {
+    res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": String(file.bytes.byteLength) });
+    res.end(Buffer.from(file.bytes));
+  };
+  if (held.has(key)) waiting.push(send);
+  else send();
 });
 
 interface Answer { status: number; body: Record<string, unknown>; headers: Record<string, string> }
@@ -68,14 +79,14 @@ describe("the PDF text view of a message attachment", () => {
     storage.close();
   });
 
-  async function ask(attachmentId: string, page?: string): Promise<Answer> {
+  async function ask(attachmentId: string, page?: string, requester = "acct_emmy"): Promise<Answer> {
     const answer: Answer = { status: 0, body: {}, headers: {} };
     const res = {
       status(code: number) { answer.status = code; return res; },
       json(value: Record<string, unknown>) { answer.body = value; return res; },
       setHeader(name: string, value: string) { answer.headers[name] = value; },
     };
-    await respond(res as never, "room_1", "msg_1", attachmentId, page);
+    await respond(res as never, "room_1", "msg_1", attachmentId, page, requester);
     return answer;
   }
 
@@ -110,6 +121,18 @@ describe("the PDF text view of a message attachment", () => {
     const answer = await ask("att_8");
     assert.equal(answer.status, 200);
     assert.equal(answer.body.has_text, false);
+  });
+
+  it("answers busy with Retry-After when every slot is reading, and one account holds one slot", async () => {
+    const first = ask("att_10", undefined, "acct_a");
+    const second = ask("att_11", undefined, "acct_b");
+    while (waiting.length < 2) await new Promise((resolve) => setTimeout(resolve, 10));
+    const busy = await ask("att_12", undefined, "acct_c");
+    assert.deepEqual([busy.status, busy.body.code, busy.headers["Retry-After"]], [503, "PDF_BUSY", "5"]);
+    held.clear();
+    for (const send of waiting.splice(0)) send();
+    assert.deepEqual([(await first).status, (await second).status], [200, 200]);
+    assert.equal((await ask("att_12", undefined, "acct_c")).status, 200);
   });
 
   it("refuses with a reason the MCP tool can show", async () => {

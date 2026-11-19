@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
 import { clearPdfTextCache, extractPdfText, PDF_TEXT_LIMITS, PdfTextError, pdfTextFor } from "../extract.js";
-import { makePdf } from "./make-pdf.js";
+import { makeInflatingPdf, makeNestedFormsPdf, makePdf } from "./make-pdf.js";
 
 const reason = (error: unknown) => error instanceof PdfTextError ? error.reason : String(error);
 
@@ -25,6 +25,22 @@ describe("PDF text extraction (pdf.js in a worker thread)", () => {
     await assert.rejects(extractPdfText(makePdf(["big"]), { maxBytes: 10 }), (error) => reason(error) === "too_complex");
   });
 
+  it("stops a running worker at its deadline: a few KB of nested forms that would draw 10^8 times", async () => {
+    const pdf = makeNestedFormsPdf(9, 10);
+    assert.ok(pdf.byteLength < 4096, `${pdf.byteLength} bytes`);
+    const started = Date.now();
+    await assert.rejects(extractPdfText(pdf, { timeoutMs: 1_000 }), (error) => reason(error) === "too_complex");
+    assert.ok(Date.now() - started < 5_000, `stopped after ${Date.now() - started} ms`);
+  });
+
+  it("stops a PDF whose streams inflate past the memory outside the heap", async () => {
+    const pdf = makeInflatingPdf(256);
+    assert.ok(pdf.byteLength < 1024 * 1024, `${pdf.byteLength} bytes`);
+    const started = Date.now();
+    await assert.rejects(extractPdfText(pdf, { externalMemoryMb: 64 }), (error) => reason(error) === "too_complex");
+    assert.ok(Date.now() - started < 10_000, `stopped after ${Date.now() - started} ms`);
+  });
+
   it("reads only so many pages and characters, and says so", async () => {
     const pages = Array.from({ length: 5 }, (_, index) => `page ${index + 1} ${"z".repeat(20)}`);
     assert.deepEqual(await extractPdfText(makePdf(pages), { maxPages: 2 }), { pageCount: 5, pages: pages.slice(0, 2), truncated: true });
@@ -43,24 +59,34 @@ describe("PDF text extraction (pdf.js in a worker thread)", () => {
     await pdfTextFor("bucket/one", load);
     assert.equal(loads, 1, "a kept text is not read again");
     // Past the time it is kept, it is read again.
-    await pdfTextFor("bucket/one", load, Date.now() + PDF_TEXT_LIMITS.cacheMs + 1);
+    await pdfTextFor("bucket/one", load, { now: Date.now() + PDF_TEXT_LIMITS.cacheMs + 1 });
     assert.equal(loads, 2);
 
-    // Only PDF_TEXT_LIMITS.concurrent different PDFs are read at once.
+    // Only PDF_TEXT_LIMITS.concurrent different PDFs are read at once, and one per requester.
     const gates: Array<() => void> = [];
     const slow = () => new Promise<Uint8Array>((resolve) => gates.push(() => resolve(pdf)));
-    const running = Array.from({ length: PDF_TEXT_LIMITS.concurrent }, (_, index) => pdfTextFor(`bucket/slow-${index}`, slow));
-    await assert.rejects(pdfTextFor("bucket/other", load), (error) => reason(error) === "busy");
+    const first = pdfTextFor("bucket/slow-0", slow, { requester: "acct_a" });
+    await assert.rejects(pdfTextFor("bucket/slow-1", slow, { requester: "acct_a" }), (error) => reason(error) === "busy", "one account, one PDF at a time");
+    const second = pdfTextFor("bucket/slow-1", slow, { requester: "acct_b" });
+    await assert.rejects(pdfTextFor("bucket/other", load, { requester: "acct_c" }), (error) => reason(error) === "busy", "every slot is taken");
     for (const open of gates) open();
-    await Promise.all(running);
-    await pdfTextFor("bucket/other", load);
+    await Promise.all([first, second]);
+    await pdfTextFor("bucket/other", load, { requester: "acct_a" });
   });
 
-  it("does not keep a failure", async () => {
+  it("remembers a PDF that cannot be read, so it does not take a slot again at once", async () => {
     let loads = 0;
     const broken = async () => { loads += 1; return new TextEncoder().encode("%PDF-1.7 broken"); };
-    await assert.rejects(pdfTextFor("bucket/broken", broken));
-    await assert.rejects(pdfTextFor("bucket/broken", broken));
-    assert.equal(loads, 2);
+    await assert.rejects(pdfTextFor("bucket/broken", broken), (error) => reason(error) === "invalid");
+    await assert.rejects(pdfTextFor("bucket/broken", broken), (error) => reason(error) === "invalid");
+    assert.equal(loads, 1);
+    await assert.rejects(pdfTextFor("bucket/broken", broken, { now: Date.now() + PDF_TEXT_LIMITS.failureCacheMs + 1 }));
+    assert.equal(loads, 2, "after a while it is tried again");
+    // A storage failure says nothing about the PDF, so it is not remembered.
+    let fetches = 0;
+    const storageDown = async (): Promise<Uint8Array> => { fetches += 1; throw new Error("storage down"); };
+    await assert.rejects(pdfTextFor("bucket/flaky", storageDown));
+    await assert.rejects(pdfTextFor("bucket/flaky", storageDown));
+    assert.equal(fetches, 2);
   });
 });
