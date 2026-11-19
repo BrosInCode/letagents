@@ -22,6 +22,8 @@ let holdSetupCompletion = false;
 let releaseSetupCompletion;
 let holdFirstRoomRead = false;
 let releaseFirstRoomRead;
+let holdWorkspaceMetadata = false;
+let releaseWorkspaceMetadata;
 let newRoomIdentifier = 'room_q4';
 const organizations = [
   { github_org_id: '42', login: 'Herotel', avatar_url: null, theme_id: null, theme_revision: 0, role: 'owner', setup: false, joined: false },
@@ -109,7 +111,12 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
         await new Promise(resolve => { releaseFirstRoomRead = resolve; });
       }
       return snapshot(args[0] || undefined);
-    case 'room.listAccountRooms': return [];
+    case 'room.listAccountRooms':
+      if (holdWorkspaceMetadata) {
+        holdWorkspaceMetadata = false;
+        await new Promise(resolve => { releaseWorkspaceMetadata = resolve; });
+      }
+      return [];
     case 'room.getSourceStates': return {};
     case 'room.getMyWork': return { cards: [], next_cursor: null, has_connections: false, providers: [] };
     case 'room.getLatestMessages': return sentMessages.get(args[0]) ?? [];
@@ -271,7 +278,24 @@ try {
   // A changed list may remove the clicked row while the room opens.
   await js(`{ const input = document.querySelector('.company-room-search input'); input.value = 'missing'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await waitFor(`!document.querySelector('${roomChoice}')`);
+  await js(`{
+    const style = document.createElement('style');
+    style.id = 'defer-sidebar-room-row';
+    style.textContent = '.desktop-sidebar-frame [data-sidebar-entry-id][data-active="true"] { display: none !important; }';
+    document.head.append(style);
+  }`);
+  holdWorkspaceMetadata = true;
   releaseFirstRoomRead();
+  await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);
+  for (let attempt = 0; !releaseWorkspaceMetadata && attempt < 100; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(releaseWorkspaceMetadata, 'workspace metadata starts loading while the landing row is missing');
+  await new Promise(resolve => setTimeout(resolve, 2650));
+  await js(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  assert.ok(await js(`!document.querySelector('.first-room-flight')`), 'room arrival waits while the sidebar row is still loading');
+  await js(`document.getElementById('defer-sidebar-room-row').remove()`);
+  releaseWorkspaceMetadata();
   if (hasMotion) {
     await waitFor(`Boolean(document.querySelector('.first-room-flight'))`);
     const flight = await js(`{
@@ -295,6 +319,30 @@ try {
     assert.ok(distance(flight.from, origin) < 2, 'the flight starts at the exact clicked room icon');
     assert.ok(distance(flight.halfway, origin) > 10 && distance(flight.halfway, flight.destination) > 10, 'the icon visibly travels between the two positions');
     assert.ok(distance(flight.to, flight.destination) < 2, 'the flight ends at the sidebar icon');
+    await js(`window.dispatchEvent(new Event('resize'))`);
+    assert.ok(await js(`Boolean(document.querySelector('.first-room-flight'))`), 'a layout notification does not cancel the flight');
+    const retargeted = await js(`new Promise(resolve => {
+      const flight = document.querySelector('.first-room-flight');
+      const animation = flight.getAnimations()[0];
+      const style = document.createElement('style');
+      const row = '.desktop-sidebar-frame [data-sidebar-entry-id][data-active="true"]';
+      style.textContent = row + ' { display: none !important; }';
+      document.head.append(style);
+      const finish = result => { clearTimeout(deadline); style.remove(); resolve(result); };
+      const deadline = setTimeout(() => finish(null), 1200);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const paused = animation.playState === 'paused';
+        style.textContent = row + ' { margin-top: 24px; }';
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const target = document.querySelector('[data-first-room-landing]')?.getBoundingClientRect();
+          if (!target) { finish(null); return; }
+          const end = new DOMMatrix(animation.effect.getKeyframes().at(-1).transform);
+          const error = Math.hypot(parseFloat(flight.style.left) + end.e - target.left, parseFloat(flight.style.top) + end.f - target.top);
+          animation.finished.then(() => finish({ paused, error }), () => finish(null));
+        }));
+      }));
+    })`);
+    assert.ok(retargeted?.paused && retargeted.error < 2, 'the flight pauses while the row is missing, then lands at its new position');
     await waitFor(`!document.querySelector('.first-room-flight, [data-first-room-landing]')`);
   }
   await js(`delete document.startViewTransition`);

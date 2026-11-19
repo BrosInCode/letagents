@@ -26,7 +26,7 @@ interface OpenRoomOptions {
 
 export interface FirstRunWorkspaceReveal {
   dismissModal?: () => void;
-  animateArrival?: () => Promise<void> | undefined;
+  animateArrival?: (metadataReady: Promise<void>) => Promise<void> | undefined;
 }
 
 interface DesktopSetupOnboardingOptions {
@@ -395,12 +395,13 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       // The creation dialog fades away over chat as the workspace mounts.
       reveal?.dismissModal?.();
       await nextTick();
-      await reveal?.animateArrival?.();
       if (reveal?.dismissModal) {
         // Chat already has the newly opened room. Refresh account and room metadata in the background.
         void options.refresh().catch(() => undefined);
       } else {
-        await options.refresh();
+        // The landing row may depend on metadata fetched by this refresh.
+        const metadataReady = options.refresh();
+        await Promise.all([metadataReady, reveal?.animateArrival?.(metadataReady)]);
       }
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "Could not close setup.";

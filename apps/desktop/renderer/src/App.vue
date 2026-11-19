@@ -739,7 +739,16 @@ async function openOnboardingRoom(id: string, icon?: HTMLElement) {
   const flyRoomIcon = prepareFirstRoomFlight(icon);
   const snapshot = await joinRoomCode(id);
   if (snapshot?.access.status === "ready") {
-    await finishFirstRunOnboarding(snapshot, { animateArrival: () => flyRoomIcon?.(activeEntry.value.id) });
+    const openedEntryId = activeEntry.value.id;
+    const openedRoomId = normalizeRoomIdentifier(snapshot.roomIdentifier);
+    await finishFirstRunOnboarding(snapshot, {
+      animateArrival: metadataReady => flyRoomIcon?.(() => {
+        const entry = activeEntry.value;
+        if (entry.type !== "room") return null;
+        return entry.id === openedEntryId || normalizeRoomIdentifier(entry.roomIdentifier) === openedRoomId
+          ? entry.id : null;
+      }, metadataReady),
+    });
   }
 }
 
