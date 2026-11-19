@@ -60,6 +60,15 @@
 import { computed, ref, useId, watch } from 'vue'
 import AgentChanges from '../../../../../../shared/ui/agents/AgentChanges.vue'
 import { agentChange } from '../../../../../../shared/ui/agents/changes'
+import {
+  CHANGE_SUMMARY_FILE_COLLAPSED_LIMIT,
+  changeSummaryHeadline,
+  findLinkedPullRequest,
+  retainExpandableChangeArtifacts,
+  splitChangeSummaryFiles,
+  type ChangeArtifactRef,
+  type LinkedPullRequest,
+} from '../../../../../../shared/ui/change-artifacts'
 import type {
   RoomSharedArtifact,
   RoomTask,
@@ -72,7 +81,6 @@ const props = defineProps<{
   prRepo?: { host: string; owner: string; name: string } | null
 }>()
 
-const CHANGE_FILE_COLLAPSED_LIMIT = 3
 const artifactsById = computed(() => new Map(props.artifacts.map(artifact => [artifact.identity_key, artifact])))
 const records = computed(() => props.artifacts.map(artifact => agentChange({
   id: artifact.identity_key, kind: artifact.kind, provider: artifact.provider,
@@ -98,17 +106,15 @@ function toggleChange(artifact: RoomSharedArtifact): void {
   expandedChanges.value = next
 }
 function visibleChangeFiles(artifact: RoomSharedArtifact): ChangeSummaryDetail['files'] {
-  const files = changeFiles(artifact)
-  return isChangeExpanded(artifact) ? files : files.slice(0, CHANGE_FILE_COLLAPSED_LIMIT)
+  return splitChangeSummaryFiles(changeFiles(artifact), isChangeExpanded(artifact)).visible
 }
 function collapsedHiddenCount(artifact: RoomSharedArtifact): number {
-  if (isChangeExpanded(artifact)) return 0
-  return Math.max(0, changeFiles(artifact).length - CHANGE_FILE_COLLAPSED_LIMIT)
+  return splitChangeSummaryFiles(changeFiles(artifact), isChangeExpanded(artifact)).hiddenCount
 }
 // The disclosure only makes sense when there are more files than the collapsed
 // limit; a shrink to <= limit removes it even if the row was previously expanded.
 function changeToggleVisible(artifact: RoomSharedArtifact): boolean {
-  return changeFiles(artifact).length > CHANGE_FILE_COLLAPSED_LIMIT
+  return changeFiles(artifact).length > CHANGE_SUMMARY_FILE_COLLAPSED_LIMIT
 }
 // Globally-unique, collision-safe DOM ids: an SSR-stable per-instance base
 // (useId) plus a per-artifact counter keyed by the full unique identity_key —
@@ -139,85 +145,34 @@ function changeToggleLabel(artifact: RoomSharedArtifact): string {
 watch(
   () => props.artifacts,
   (artifacts) => {
-    const next = new Set<string>()
-    for (const artifact of artifacts) {
-      if (
-        expandedChanges.value.has(artifact.identity_key) &&
-        artifact.kind === 'change_summary' &&
-        changeFiles(artifact).length > CHANGE_FILE_COLLAPSED_LIMIT
-      ) {
-        next.add(artifact.identity_key)
-      }
-    }
+    const next = retainExpandableChangeArtifacts(expandedChanges.value, artifacts.map(changeArtifactRef))
     if (next.size !== expandedChanges.value.size) expandedChanges.value = next
   },
 )
 function filePathLabel(file: ChangeSummaryDetail['files'][number]): string {
   return file.previousPath ? `${file.previousPath} → ${file.path}` : file.path
 }
-// Associate a change_summary with a PR on the same branch (ref), scoped to the
-// room's known repository since branch names aren't globally unique. Candidates
-// must be same-branch PRs whose URL structurally verifies against the repo and
-// carry a usable number+URL. Selection fails closed on ambiguity: a unique open
-// PR, or (when none are open) a single lone candidate; otherwise no link.
-// Suppressed when the repo is unknown. Computed once, keyed by identity_key.
-interface LinkedPr {
-  number: number
-  url: string
-  state: string | null
-}
-// Structurally verify a PR URL against the room repo + number (not a substring —
-// a deceptive host or a /pull/N that disagrees with the number must fail).
-function pullRequestUrlMatches(
-  url: string,
-  scope: { host: string; owner: string; name: string },
-  n: number,
-): boolean {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    return false
+/** The web (API) artifact in the shape the shared helpers read. */
+function changeArtifactRef(artifact: RoomSharedArtifact): ChangeArtifactRef {
+  return {
+    id: artifact.identity_key,
+    kind: artifact.kind,
+    ref: artifact.ref,
+    url: artifact.url,
+    number: artifact.artifact_number,
+    state: artifact.state,
+    fileCount: artifact.kind === 'change_summary' ? changeFiles(artifact).length : 0,
   }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false
-  if (parsed.host.toLowerCase() !== scope.host.toLowerCase()) return false
-  const segments = parsed.pathname.split('/').filter(Boolean)
-  return (
-    segments.length >= 4 &&
-    segments[0].toLowerCase() === scope.owner.toLowerCase() &&
-    segments[1].toLowerCase() === scope.name.toLowerCase() &&
-    segments[2] === 'pull' &&
-    segments[3] === String(n)
-  )
 }
+type LinkedPr = LinkedPullRequest
+// Each change summary's pull request, by branch, verified against the room's
+// repository (fails closed on ambiguity; see the shared helper).
 const changeSummaryPrLinks = computed(() => {
   const map = new Map<string, LinkedPr>()
-  const scope = props.prRepo
-  if (!scope?.host || !scope.owner || !scope.name) return map
-  for (const artifact of props.artifacts) {
-    if (artifact.kind !== 'change_summary') continue
-    const ref = artifact.ref?.trim()
-    if (!ref) continue
-    const candidates = props.artifacts.filter(
-      (c): c is RoomSharedArtifact & { url: string; artifact_number: number } =>
-        c.kind === 'pull_request' &&
-        c.ref?.trim() === ref &&
-        c.artifact_number !== null &&
-        typeof c.url === 'string' &&
-        pullRequestUrlMatches(c.url, scope, c.artifact_number),
-    )
-    if (!candidates.length) continue
-    const open = candidates.filter((c) => (c.state ?? '').toLowerCase() === 'open')
-    // Fail closed on ambiguity (fork / differing base branch can share a head ref):
-    // a unique open PR, or a single lone candidate when none are open; else no link.
-    const chosen =
-      open.length === 1
-        ? open[0]
-        : open.length === 0 && candidates.length === 1
-          ? candidates[0]
-          : null
-    if (!chosen) continue
-    map.set(artifact.identity_key, { number: chosen.artifact_number, url: chosen.url, state: chosen.state })
+  const refs = props.artifacts.map(changeArtifactRef)
+  for (const ref of refs) {
+    const link = findLinkedPullRequest(ref, refs, props.prRepo ?? null)
+    if (link) map.set(ref.id, link)
   }
   return map
 })
@@ -227,13 +182,6 @@ function linkedPr(artifact: RoomSharedArtifact): LinkedPr | null {
 function prStateSuffix(link: LinkedPr): string {
   const state = link.state?.trim()
   return state && state.toLowerCase() !== 'open' ? ` (${state})` : ''
-}
-
-function changeSummaryHeadline(detail: ChangeSummaryDetail): string {
-  const parts = [`${detail.changedFileCount} ${detail.changedFileCount === 1 ? 'file' : 'files'}`]
-  if (detail.additions) parts.push(`+${detail.additions}`)
-  if (detail.deletions) parts.push(`−${detail.deletions}`)
-  return parts.join('  ')
 }
 
 </script>
