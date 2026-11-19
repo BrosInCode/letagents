@@ -1,4 +1,4 @@
-import type { RoomJoinRequest } from './room-membership.mjs';
+import type { RoomJoinRequest, RoomJoinRequestSummary } from './room-membership.mjs';
 
 export declare const ROOM_JOIN_REQUEST_EVENT: 'join_request';
 export declare const JOIN_REQUEST_HIDDEN_SOUND_INTERVAL_MS: number;
@@ -18,6 +18,15 @@ export interface RoomJoinRequestEvent {
   request: RoomJoinRequestAlert;
 }
 
+/** The `join_request_decision` SSE payload, sent only to the person who asked. */
+export interface RoomJoinRequestDecisionEvent {
+  /** The room whose admins decided: the parent of a focus room, else the room. */
+  room_id: string;
+  request: RoomJoinRequestSummary;
+}
+
+export declare const ROOM_JOIN_REQUEST_DECISION_EVENT: 'join_request_decision';
+export declare function parseRoomJoinRequestDecisionEvent(value: unknown): RoomJoinRequestDecisionEvent | null;
 export declare function parseRoomJoinRequest(value: unknown): RoomJoinRequestAlert | null;
 export declare function parseRoomJoinRequestEvent(value: unknown): RoomJoinRequestEvent | null;
 export declare function joinRequesterLabel(request: Pick<RoomJoinRequest, 'login' | 'display_name'>): string;

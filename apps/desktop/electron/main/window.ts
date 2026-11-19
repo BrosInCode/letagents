@@ -408,49 +408,92 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           setUpAnother.click();
           await waitFor(label, () => document.querySelector('[data-testid="desktop-add-agent-modal"]'));
         };
+        // The window has two steps: 01 Identity (name, avatar, first message)
+        // and 02 Brain (provider, setup status, model, access). The footer
+        // action bar, with the install and start actions, exists only on Brain.
+        const modalSelector = '[data-testid="desktop-add-agent-modal"]';
+        const modalText = () => document.querySelector(modalSelector)?.textContent || "";
+        const onStep = (label) => Array.from(document.querySelectorAll(modalSelector + " .agent-refresh-steps button"))
+          .some((button) => button.textContent?.includes(label) && button.getAttribute("aria-current") === "step");
+        const continueToBrain = async (label) => {
+          const continueButton = await waitFor(label + " on identity step", () =>
+            onStep("Identity") && document.querySelector(modalSelector + " .agent-refresh-continue")
+          );
+          continueButton.click();
+          await waitFor(label + " on brain step", () =>
+            onStep("Brain") &&
+            document.querySelector(modalSelector + " .agent-refresh-body")?.getAttribute("data-turning") !== "true" &&
+            document.querySelector(modalSelector + " .agent-refresh-footer .desktop-add-agent-actions")
+          );
+        };
+
         await openAddAgentWindow("add-agent modal");
         result.addAgentModal = true;
         result.addAgentRoomLabel = (document.querySelector('[data-testid="desktop-add-agent-room-label"]')?.textContent || "")
           .includes("Smoke Room");
-        result.addAgentModalLayout = (() => {
-          const modal = document.querySelector('[data-testid="desktop-add-agent-modal"]');
-          const providers = modal?.querySelector(".desktop-add-agent-providers");
-          const status = modal?.querySelector(".desktop-add-agent-status");
-          const primary = modal?.querySelector(".desktop-add-agent-primary");
-          return rectInsideViewport(modal) &&
-            rectInsideViewport(providers) &&
-            rectInsideViewport(status) &&
-            (!primary || rectInsideViewport(primary)) &&
-            rectsDoNotOverlap(providers, status);
-        })();
 
         await waitFor("codex provider", () => document.querySelector('[data-testid="desktop-add-agent-provider-codex"]'));
         result.codexProvider = true;
-        const modalText = () => document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "";
+        // The first message (supervised charter) is part of the agent's identity.
+        // It can sit below the fold of the Identity panel, which scrolls.
+        const charter = await waitFor("supervised charter on identity step", () =>
+          onStep("Identity") &&
+          document.querySelector(modalSelector + ' .agent-refresh-identity [data-testid="desktop-add-agent-supervised-charter"]')
+        );
+        const identityPanel = document.querySelector(modalSelector + " .agent-refresh-identity");
+        charter.scrollIntoView({ block: "nearest" });
+        const charterRect = rectFor(charter);
+        const identityRect = rectFor(identityPanel);
+        result.supervisedCharter = rectInsideViewport(charter) &&
+          Boolean(charterRect && identityRect && charterRect.top >= identityRect.top && charterRect.bottom <= identityRect.bottom);
+        if (identityPanel instanceof HTMLElement) identityPanel.scrollTop = 0;
+
+        await continueToBrain("add-agent modal");
         await waitFor("codex missing runtime", () =>
           modalText().includes("Codex is not installed.") &&
           modalText().includes("Copy install command") &&
           modalText().includes("Install command")
         );
         result.codexMissingRuntime = true;
-        await waitFor("supervised charter", () =>
-          Boolean(document.querySelector('[data-testid="desktop-add-agent-supervised-charter"]'))
-        );
-        result.supervisedCharter = true;
+        const brainParts = () => {
+          const dialog = document.querySelector(modalSelector + " .desktop-add-agent-modal");
+          const brain = dialog?.querySelector(".agent-refresh-brain");
+          return {
+            dialog,
+            brain,
+            providers: brain?.querySelector(".desktop-add-agent-providers"),
+            status: brain?.querySelector(".desktop-add-agent-status"),
+            copyInstall: Array.from(dialog?.querySelectorAll(".agent-refresh-footer button") || [])
+              .find((button) => button.textContent?.trim() === "Copy install command"),
+          };
+        };
+        result.addAgentModalLayout = (() => {
+          const { dialog, brain, providers, status, copyInstall } = brainParts();
+          const brainRect = rectFor(brain);
+          const statusRect = rectFor(status);
+          return rectInsideViewport(dialog) &&
+            rectInsideViewport(brain) &&
+            rectInsideViewport(providers) &&
+            rectInsideViewport(copyInstall) &&
+            rectsDoNotOverlap(providers, status) &&
+            rectsDoNotOverlap(brain, copyInstall) &&
+            Boolean(brainRect && statusRect && statusRect.top < brainRect.bottom);
+        })();
+        // The Brain panel scrolls inside a short window; the footer actions stay put.
         result.addAgentModalScroll = (() => {
-          const dialog = document.querySelector(".desktop-add-agent-modal");
-          const status = dialog?.querySelector(".desktop-add-agent-status");
-          if (!(dialog instanceof HTMLElement) || !(status instanceof HTMLElement)) return false;
+          const { dialog, brain } = brainParts();
+          if (!(dialog instanceof HTMLElement) || !(brain instanceof HTMLElement)) return false;
           const previousHeight = dialog.style.height;
-          const previousScrollTop = status.scrollTop;
+          const previousScrollTop = brain.scrollTop;
           dialog.style.height = "360px";
-          status.scrollTop = 0;
-          const overflows = status.scrollHeight > status.clientHeight + 1;
-          status.scrollTop = status.scrollHeight;
-          const scrolled = status.scrollTop > 0;
-          status.scrollTop = previousScrollTop;
+          brain.scrollTop = 0;
+          const overflows = brain.scrollHeight > brain.clientHeight + 1;
+          brain.scrollTop = brain.scrollHeight;
+          const scrolled = brain.scrollTop > 0;
+          const reachable = rectInsideViewport(brain) && rectInsideViewport(brainParts().copyInstall);
+          brain.scrollTop = previousScrollTop;
           dialog.style.height = previousHeight;
-          return overflows && scrolled && rectInsideViewport(status);
+          return overflows && scrolled && reachable;
         })();
 
         result.codexInstallGuidance = modalText().includes("Open installation guide") &&
@@ -513,9 +556,10 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         await waitFor("add-agent modal closed", () => !document.querySelector('[data-testid="desktop-add-agent-modal"]'));
         await chooseAddAgent();
         await openAddAgentWindow("add-agent modal reopened");
+        await continueToBrain("add-agent modal reopened");
         await waitFor("Open Model install confirmation cleared on close", () =>
-          (document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Install Open Model") &&
-          !(document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Confirm install Open Model")
+          modalText().includes("Install Open Model") &&
+          !modalText().includes("Confirm install Open Model")
         );
         result.setupConfirmationClearsOnClose = true;
         document.querySelector('[data-testid="desktop-add-agent-modal"] button.desktop-modal-close[aria-label="Close add agent dialog"]')?.click();
