@@ -14,6 +14,7 @@ import {
   type CursorSupervisedProfileOptions,
 } from "./managed-profile.js";
 import { assertCursorSupervisedMcpAuthority } from "../cursor-mcp-authority.js";
+import { removeDisposableCursorProfileRoot } from "./profile-filesystem.js";
 import { readCursorAccountUsage, readCursorContext, readCursorUsageOwner } from "../cursor-usage.js";
 import {
   createSupervisedWorkspaceGeneration,
@@ -49,6 +50,7 @@ export interface CursorProviderAdapterDependencies {
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
   prepareTurnState(path: string): void;
+  removeDisposableProfileRoot: typeof removeDisposableCursorProfileRoot;
   relocateConversationNamespace: typeof relocateCursorConversationNamespace;
   openWorkspaceGeneration: typeof openSupervisedWorkspaceGeneration;
   createWorkspaceGeneration: typeof createSupervisedWorkspaceGeneration;
@@ -120,6 +122,7 @@ export const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   signalProcess: defaultCursorSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   prepareTurnState: (path) => writeFileSync(path, "", { flag: "wx", mode: 0o600 }),
+  removeDisposableProfileRoot: removeDisposableCursorProfileRoot,
   relocateConversationNamespace: relocateCursorConversationNamespace,
   openWorkspaceGeneration: openSupervisedWorkspaceGeneration,
   createWorkspaceGeneration: createSupervisedWorkspaceGeneration,

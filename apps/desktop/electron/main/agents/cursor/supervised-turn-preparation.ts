@@ -4,7 +4,7 @@
 
 import { withReadOnlyImageFolders } from "../cursor-room-turn-images.js";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS, CURSOR_MCP_CONNECTOR_PARENT, CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS } from "../cursor-provider-constants.js";
@@ -96,6 +96,7 @@ export async function prepareSupervisedTurn(
   // MCP and no turn/provider capability. The authority wrapper denies
   // direct networking and confines readable data/process execution.
   const inspectionProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-inspection-"));
+  let inspectionFailed = false;
   try {
     const enumerationProfile = adapter.supervisedProfileFactory({
       apiBaseUrl,
@@ -120,6 +121,7 @@ export async function prepareSupervisedTurn(
       signal: launchSignal,
     });
   } catch (error) {
+    inspectionFailed = true;
     if (launchSignal?.aborted) {
       throw new CursorRoomTurnNotDispatchedError(
         "Cursor MCP attestation was interrupted and reaped before native dispatch.",
@@ -128,7 +130,11 @@ export async function prepareSupervisedTurn(
     }
     throw error;
   } finally {
-    rmSync(inspectionProfileRoot, { recursive: true, force: true });
+    try {
+      await adapter.deps.removeDisposableProfileRoot(inspectionProfileRoot);
+    } catch (cleanupError) {
+      if (!inspectionFailed) throw cleanupError;
+    }
   }
   throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
 
@@ -136,6 +142,7 @@ export async function prepareSupervisedTurn(
   // afterward so an escaped pass-one descendant never had path authority
   // over the profile that exercises the packaged bridge.
   const bridgeProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-bridge-"));
+  let bridgeFailed = false;
   try {
     const bridgeProfile = adapter.supervisedProfileFactory({
       apiBaseUrl,
@@ -176,6 +183,7 @@ export async function prepareSupervisedTurn(
       signal: launchSignal,
     });
   } catch (error) {
+    bridgeFailed = true;
     if (supervisedRuntimeDataDir) {
       removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir);
       supervisedRuntimeDataDir = undefined;
@@ -188,7 +196,11 @@ export async function prepareSupervisedTurn(
     }
     throw error;
   } finally {
-    rmSync(bridgeProfileRoot, { recursive: true, force: true });
+    try {
+      await adapter.deps.removeDisposableProfileRoot(bridgeProfileRoot);
+    } catch (cleanupError) {
+      if (!bridgeFailed) throw cleanupError;
+    }
   }
   throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
   // Prove the live credential-store identity immediately before every
@@ -198,6 +210,7 @@ export async function prepareSupervisedTurn(
   // fails closed for team-managed identities. The attested auth-only files
   // then overwrite stale metadata in the stable attempt profile.
   const identityProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-identity-"));
+  let identityFailed = false;
   try {
     let identityProfile = adapter.supervisedProfileFactory({
       apiBaseUrl,
@@ -353,6 +366,11 @@ export async function prepareSupervisedTurn(
       ...cursorWindowsMcpRuntimeEnv(mcpRuntimeRoot, supervisorMcpEnv.LETAGENTS_SUPERVISOR_DAEMON_SOCKET),
     };
   } catch (error) {
+    identityFailed = true;
+    if (supervisedRuntimeDataDir) {
+      removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir);
+      supervisedRuntimeDataDir = undefined;
+    }
     if (workspaceGeneration) {
       await adapter.abandonTurnWorkspaceGeneration(workspaceGeneration);
       workspaceGeneration = null;
@@ -365,7 +383,21 @@ export async function prepareSupervisedTurn(
     }
     throw error;
   } finally {
-    rmSync(identityProfileRoot, { recursive: true, force: true });
+    try {
+      await adapter.deps.removeDisposableProfileRoot(identityProfileRoot);
+    } catch (cleanupError) {
+      if (!identityFailed) {
+        if (supervisedRuntimeDataDir) {
+          removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir);
+          supervisedRuntimeDataDir = undefined;
+        }
+        if (workspaceGeneration) {
+          await adapter.abandonTurnWorkspaceGeneration(workspaceGeneration);
+          workspaceGeneration = null;
+        }
+        throw cleanupError;
+      }
+    }
   }
   return {
     childEnv,

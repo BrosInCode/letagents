@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,6 +8,7 @@ import type { ProviderSpawnRequest } from "./provider-adapter.js";
 import type { CursorManagedProfile } from "./cursor-managed-profile.js";
 import type { assertCursorPersonalIdentity } from "./cursor-identity.js";
 import { cursorDaemonChildEnv } from "./cursor-runner.js";
+import { removeDisposableCursorProfileRoot } from "./cursor/profile-filesystem.js";
 import { emptyProviderUsage } from "./provider-usage.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
 
@@ -220,7 +221,7 @@ export function createCursorUsageReader(
         || !identity.providerAuthorization) return null;
       const account = await deps.readUsageAccount(identity.providerAuthorization, deps.now());
       return current() && deps.readUsageOwner(profile.configDir) === ownerId ? account : null;
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally { await removeDisposableCursorProfileRoot(root); }
   }
 
   return async (handle) => {

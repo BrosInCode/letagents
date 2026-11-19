@@ -36,6 +36,7 @@ import { cursorSupervisedMcpServerName, type CursorManagedProfile } from "../mai
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import { CURSOR_MCP_CONNECTOR_PARENT } from "../main/agents/cursor-provider-constants.js";
 import { cursorMcpPipeConnectorArgs } from "../main/agents/cursor/windows-turn.js";
+import { removeDisposableCursorProfileRoot } from "../main/agents/cursor/profile-filesystem.js";
 import { testDaemonEndpoint, writeFakeProvider } from "./platform.js";
 
 /** Where Cursor's private folders go: /tmp on POSIX (the sandbox profile names it), the temporary folder on Windows. */
@@ -465,6 +466,7 @@ export function createHarness(options: HarnessOptions = {}) {
     readUsageOwner: () => null,
     readUsageContext: () => null,
     readUsageAccount: async () => ({ state: "unavailable", windows: [] }),
+    removeDisposableProfileRoot: removeDisposableCursorProfileRoot,
     relocateConversationNamespace() {},
     async openWorkspaceGeneration(path) {
       const generation = generations.get(path);
