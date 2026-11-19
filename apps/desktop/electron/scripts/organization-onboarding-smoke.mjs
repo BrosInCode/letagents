@@ -20,6 +20,8 @@ let failCompanyTheme = false;
 let legacyThemeApi = false;
 let holdSetupCompletion = false;
 let releaseSetupCompletion;
+let holdFirstRoomRead = false;
+let releaseFirstRoomRead;
 let newRoomIdentifier = 'room_q4';
 const organizations = [
   { github_org_id: '42', login: 'Herotel', avatar_url: null, theme_id: null, theme_revision: 0, role: 'owner', setup: false, joined: false },
@@ -101,7 +103,12 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'organizations.acknowledgeInvite': links.acknowledgeCompanyLink(args[0]); return;
     case 'app.getInfo': return { appName: 'LetAgents', appVersion: 'test', platform: 'darwin', versions: process.versions, workspaceRoot: profile, homePath: profile, apiUrl: 'https://letagents.chat' };
     case 'rental.getMarketplace': return { providers: [] };
-    case 'room.getSnapshot': return snapshot(args[0] || undefined);
+    case 'room.getSnapshot':
+      if (holdFirstRoomRead && args[0] === companyRoom.room_id) {
+        holdFirstRoomRead = false;
+        await new Promise(resolve => { releaseFirstRoomRead = resolve; });
+      }
+      return snapshot(args[0] || undefined);
     case 'room.listAccountRooms': return [];
     case 'room.getSourceStates': return {};
     case 'room.getMyWork': return { cards: [], next_cursor: null, has_connections: false, providers: [] };
@@ -251,15 +258,49 @@ try {
     await click('[aria-label="Close new room dialog"]');
     await waitFor(`!document.querySelector('[data-testid="new-room-modal"]')`);
   }
-  await click('[data-testid="first-run-company-room-github.com/herotel/app"]');
-  if (await js(`Boolean(document.startViewTransition) && !matchMedia('(prefers-reduced-motion: reduce)').matches`)) {
-    await waitFor(`document.documentElement.dataset.firstRoomEntry === 'true'`);
-    await waitFor(`document.getAnimations().some(animation => animation.animationName === 'first-room-icon-in')`);
+  const roomChoice = '[data-testid="first-run-company-room-github.com/herotel/app"]';
+  const origin = await js(`document.querySelector('${roomChoice} .company-rooms-icon').getBoundingClientRect().toJSON()`);
+  const hasMotion = await js(`!matchMedia('(prefers-reduced-motion: reduce)').matches`);
+  await js(`void Object.defineProperty(document, 'startViewTransition', { value: undefined, configurable: true })`);
+  holdFirstRoomRead = true;
+  await click(roomChoice);
+  for (let attempt = 0; !releaseFirstRoomRead && attempt < 100; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 25));
   }
+  assert.ok(releaseFirstRoomRead, 'room access is being checked');
+  // A changed list may remove the clicked row while the room opens.
+  await js(`{ const input = document.querySelector('.company-room-search input'); input.value = 'missing'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
+  await waitFor(`!document.querySelector('${roomChoice}')`);
+  releaseFirstRoomRead();
+  if (hasMotion) {
+    await waitFor(`Boolean(document.querySelector('.first-room-flight'))`);
+    const flight = await js(`{
+      const element = document.querySelector('.first-room-flight');
+      const target = document.querySelector('[data-first-room-landing]');
+      const destination = target.getBoundingClientRect().toJSON();
+      const sameRoom = target.closest('[data-sidebar-entry-id][data-active="true"]')?.textContent.includes('app');
+      const animation = element.getAnimations()[0];
+      animation.pause();
+      const positionAt = fraction => {
+        animation.currentTime = animation.effect.getTiming().duration * fraction;
+        return element.getBoundingClientRect().toJSON();
+      };
+      const from = positionAt(0), halfway = positionAt(.5), to = positionAt(1);
+      animation.currentTime = .5 * animation.effect.getTiming().duration;
+      animation.play();
+      ({ from, halfway, to, destination, sameRoom });
+    }`);
+    const distance = (a, b) => Math.hypot(a.left - b.left, a.top - b.top);
+    assert.ok(flight.sameRoom, 'the icon lands on the active room in the sidebar');
+    assert.ok(distance(flight.from, origin) < 2, 'the flight starts at the exact clicked room icon');
+    assert.ok(distance(flight.halfway, origin) > 10 && distance(flight.halfway, flight.destination) > 10, 'the icon visibly travels between the two positions');
+    assert.ok(distance(flight.to, flight.destination) < 2, 'the flight ends at the sidebar icon');
+    await waitFor(`!document.querySelector('.first-room-flight, [data-first-room-landing]')`);
+  }
+  await js(`delete document.startViewTransition`);
   await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);
   if (runFullscreen) {
     assert.ok(await js(`document.fullscreenElement === document.documentElement`), 'room arrival stays full screen');
-    await waitFor(`!document.documentElement.dataset.firstRoomEntry`);
     await js(`document.exitFullscreen()`);
     await waitFor(`!document.fullscreenElement`);
     if (process.platform === 'darwin') await new Promise(resolve => setTimeout(resolve, 1000));

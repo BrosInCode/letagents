@@ -42,7 +42,7 @@
               <FirstRunCompanyRooms v-if="rooms.length"
                 :company-name="companyName ?? null" :rooms="rooms"
                 :selected-room-identifier="selectedRoomIdentifier" :busy="busy"
-                @choose-room="emit('choose-room', $event)" />
+                @choose-room="(id, icon) => emit('choose-room', id, icon)" />
               <div class="onboarding-room-actions" aria-label="Open another room">
                 <button type="button" :disabled="busy" data-testid="room-choice-create" @click="emit('new-room', 'create')">
                   <Plus aria-hidden="true" /><span>New room</span><ArrowRight aria-hidden="true" />
@@ -134,7 +134,7 @@ const emit = defineEmits<{
   "open-company-github": [page: DesktopOrganizationGitHubPage];
   "connect-room-auth": [];
   "new-room": [mode: "create" | "join" | "project"];
-  "choose-room": [id: string];
+  "choose-room": [id: string, icon?: HTMLElement];
   back: [];
   finish: [];
 }>();

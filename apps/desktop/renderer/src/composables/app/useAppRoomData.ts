@@ -5,6 +5,7 @@ import { isAuthSnapshotPending } from "../../components/desktop/content/auth-onb
 import { useDesktopAccountRoomSettings } from "../useDesktopAccountRoomSettings";
 import { useDesktopAppData } from "../useDesktopAppData";
 import { useDesktopNewRoomModal } from "../useDesktopNewRoomModal";
+import type { FirstRunWorkspaceReveal } from "../useDesktopSetupOnboarding";
 import { useDesktopRoomLiveSync } from "../useDesktopRoomLiveSync";
 import { settingsEntry } from "../../domain/desktop-navigation";
 import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
@@ -110,7 +111,7 @@ export function useAppRoomManagement(context: unknown) {
     | "useAppRoomData"
     | "useAppSidebarEntries"
     | "useAppState"
-  > & { finishFirstRunOnboarding?: (openedRoom?: DesktopRoomSnapshot, dismissModal?: () => void) => Promise<void> };
+  > & { finishFirstRunOnboarding?: (openedRoom?: DesktopRoomSnapshot, reveal?: FirstRunWorkspaceReveal) => Promise<void> };
   const {
     accountRooms, activeEntry, chatStorageSettings, handleRoomRenamed, leaveArchivedRoomIfActive,
     loading, openRoomSnapshot, pushActionToast, recentRootRooms, recentRootRoomsStorageKey,
@@ -181,7 +182,7 @@ export function useAppRoomManagement(context: unknown) {
     },
     finishOnboarding: (snapshot, dismissModal) => {
       if (app.firstRunStage.value === "room" && app.mcpInstallState.value?.completed === false) {
-        return app.finishFirstRunOnboarding?.(snapshot, dismissModal);
+        return app.finishFirstRunOnboarding?.(snapshot, { dismissModal });
       }
     },
     setRepoStatus: (status) => {

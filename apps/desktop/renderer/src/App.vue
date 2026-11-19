@@ -469,6 +469,7 @@ import { computed, defineAsyncComponent, watch } from "vue";
 import { roomThemeId, type RoomCompanyAppearance } from "../../../../shared/room-themes.mjs";
 import { provideRoomTheme } from "../../../../shared/ui/room-theme";
 import { useKeyWhileShown } from "./composables/useKeyWhileShown";
+import { prepareFirstRoomFlight } from "./composables/first-run-room-motion";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
@@ -734,9 +735,12 @@ function openOnboardingCompanyStep() {
   void app.refreshAccountRooms();
 }
 
-async function openOnboardingRoom(id: string) {
+async function openOnboardingRoom(id: string, icon?: HTMLElement) {
+  const flyRoomIcon = prepareFirstRoomFlight(icon);
   const snapshot = await joinRoomCode(id);
-  if (snapshot?.access.status === "ready") await finishFirstRunOnboarding(snapshot);
+  if (snapshot?.access.status === "ready") {
+    await finishFirstRunOnboarding(snapshot, { animateArrival: () => flyRoomIcon?.(activeEntry.value.id) });
+  }
 }
 
 function openOnboardingNewRoom(mode: "create" | "join" | "project") {

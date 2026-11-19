@@ -11,10 +11,12 @@
           :aria-pressed="isSelected(room)"
           :disabled="busy"
           :data-testid="`first-run-company-room-${room.room_id}`"
-          @click="$emit('choose-room', room.room_id)"
+          @click="chooseRoom(room.room_id, $event)"
         >
-          <BookMarked v-if="room.kind === 'repo'" class="company-rooms-icon" aria-hidden="true" />
-          <Hash v-else class="company-rooms-icon" aria-hidden="true" />
+          <span class="company-rooms-icon" aria-hidden="true">
+            <BookMarked v-if="room.kind === 'repo'" />
+            <Hash v-else />
+          </span>
           <strong>
             {{ roomName(room) }}
             <span>{{ room.local ? "On this device" : room.kind === "repo" ? room.full_name || "Repository" : "Shared room" }}</span>
@@ -47,7 +49,12 @@ const props = defineProps<{
 const query = ref("");
 const filteredRooms = computed(() => props.rooms.filter(room => `${roomName(room)} ${room.full_name ?? ""}`.toLowerCase().includes(query.value.trim().toLowerCase())));
 
-defineEmits<{ "choose-room": [roomId: string] }>();
+const emit = defineEmits<{ "choose-room": [roomId: string, icon?: HTMLElement] }>();
+
+function chooseRoom(roomId: string, event: MouseEvent): void {
+  const row = event.currentTarget as HTMLButtonElement | null;
+  emit("choose-room", roomId, row?.querySelector<HTMLElement>(".company-rooms-icon") ?? undefined);
+}
 
 function isSelected(room: FirstRunRoomChoice): boolean {
   return room.room_id.toLowerCase() === props.selectedRoomIdentifier?.toLowerCase();
@@ -123,10 +130,12 @@ function roomName(room: FirstRunRoomChoice): string {
 }
 
 .company-rooms-icon {
+  display: block;
   width: 16px;
   height: 16px;
   color: var(--setup-muted-strong);
 }
+.company-rooms-icon svg { display: block; width: 100%; height: 100%; }
 
 .company-rooms-visibility {
   padding: 0;
