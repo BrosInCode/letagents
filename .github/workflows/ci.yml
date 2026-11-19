@@ -99,6 +99,15 @@ jobs:
       - name: Audit desktop dependency advisories
         run: node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents
 
+      - name: Install server PDF reader dependencies without lifecycle scripts
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix src/api/pdf-text
+
+      - name: Verify server PDF reader dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures --prefix src/api/pdf-text
+
+      - name: Audit server PDF reader dependency advisories
+        run: node scripts/verify-dependency-advisories.mjs src/api/pdf-text
+
   # Everything the required "build" check covers except the desktop test
   # suites, which run in parallel in desktop-tests below.
   build-checks:
@@ -145,6 +154,12 @@ jobs:
 
       - name: Test packed MCP runtime
         run: npm run test:package-runtime
+
+      - name: Install server PDF reader dependencies without lifecycle scripts
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix src/api/pdf-text
+
+      - name: Test PDF text reading
+        run: node --import tsx --test --test-concurrency=1 --experimental-test-module-mocks src/api/pdf-text/__tests__/*.test.ts src/api/__tests__/attachment-text-route.test.ts
 
       # The contract may only grow: the snapshot is also compared with the
       # one on the pull request's base, which a feature branch cannot refresh.

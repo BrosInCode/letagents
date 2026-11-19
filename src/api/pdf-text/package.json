@@ -1,0 +1,13 @@
+{
+  "name": "letagents-server-pdf-text",
+  "private": true,
+  "type": "module",
+  "description": "Server-only: Mozilla pdf.js for reading the text of PDF attachments. Kept out of the root package so the npm letagents package does not install it.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "pdfjs-dist": "6.5.438"
+  },
+  "overrides": {
+    "@napi-rs/canvas": "1.1.0"
+  }
+}

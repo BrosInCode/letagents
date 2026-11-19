@@ -48,6 +48,11 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
+# Server-only PDF reader (Mozilla pdf.js), kept out of the npm package's
+# dependencies; its optional native canvas is not needed to read text.
+COPY src/api/pdf-text/package.json src/api/pdf-text/package-lock.json pdf-text/
+RUN cd pdf-text && npm ci --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+
 # Copy compiled server from builder
 COPY --from=builder /app/dist/ dist/
 COPY --from=builder /app/shared/ shared/

@@ -26,6 +26,7 @@ const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSes
   { method: "GET", path: /^\/rooms\/.+\/messages\/(?:poll|stream|threads|msg_\d+|msg_\d+\/thread|msg_\d+\/info)$/, capability: "messages.read" },
   // The daemon downloads images on the message that wakes its agent; the route redirects to object storage.
   { method: "GET", path: /^\/rooms\/.+\/messages\/msg_\d+\/attachments\/att_\d+$/, capability: "messages.read" },
+  { method: "GET", path: /^\/rooms\/.+\/messages\/msg_\d+\/attachments\/att_\d+\/text$/, capability: "messages.read" },
   { method: "PUT", path: /^\/rooms\/.+\/messages\/read$/, capability: "messages.read" },
   { method: "POST", path: /^\/rooms\/.+\/messages$/, capability: "messages.write" },
   // A supervised agent's reply can carry files: the daemon stages each one first.

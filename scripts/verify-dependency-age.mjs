@@ -7,6 +7,7 @@ const DEFAULT_LOCKFILES = [
   "package-lock.json",
   "apps/desktop/package-lock.json",
   "src/web/package-lock.json",
+  "src/api/pdf-text/package-lock.json",
 ];
 const DEFAULT_POLICY = ".github/dependency-age-policy.json";
 const NPM_REGISTRY = "https://registry.npmjs.org/";
