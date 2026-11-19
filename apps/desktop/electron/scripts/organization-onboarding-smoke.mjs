@@ -125,9 +125,13 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
   }
 });
 app.whenReady().then(async () => {
-const window = new BrowserWindow({ width: 1280, height: 900, show: true, webPreferences: { backgroundThrottling: false, contextIsolation: false, nodeIntegration: false, sandbox: false, preload: join(root, 'electron/scripts/fixtures/organization-preload.cjs') } });
 const errors = [];
-window.webContents.on('console-message', (event) => { if (event.level === 'error') errors.push(`${event.message} (${event.sourceId}:${event.lineNumber})`); });
+function fixtureWindow(partition) {
+  const window = new BrowserWindow({ width: 1280, height: 900, show: true, webPreferences: { partition, backgroundThrottling: false, contextIsolation: false, nodeIntegration: false, sandbox: false, preload: join(root, 'electron/scripts/fixtures/organization-preload.cjs') } });
+  window.webContents.on('console-message', (event) => { if (event.level === 'error') errors.push(`${event.message} (${event.sourceId}:${event.lineNumber})`); });
+  return window;
+}
+let window = fixtureWindow();
 const js = (source) => window.webContents.executeJavaScript(source, true);
 async function waitFor(expression) {
   const until = Date.now() + 15000;
@@ -388,6 +392,9 @@ try {
   // Reopen setup as a signed-in account to exercise successful creation from the wizard.
   completed = false;
   newRoomIdentifier = 'room_onboarding_qa';
+  const previousWindow = window;
+  window = fixtureWindow('onboarding-room-handoff');
+  previousWindow.destroy();
   await window.loadFile(join(root, 'dist-renderer/index.html'));
   await click('[data-testid="first-run-start-setup"]');
   await click('[data-testid="first-run-to-room"]');
@@ -428,9 +435,9 @@ try {
   writeFileSync(join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ passed: true, output, consoleErrors: errors }, null, 2));
 } catch (error) {
-  await capture('failure.png');
   console.error(error);
   process.exitCode = 1;
+  await capture('failure.png').catch(() => undefined);
 } finally {
   window.destroy();
   rmSync(profile, { recursive: true, force: true });
