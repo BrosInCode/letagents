@@ -26,6 +26,7 @@ import {
   routeParam,
 } from "./helpers.js";
 import type { RoomMessageRouteDeps } from "./types.js";
+import { respondWithAttachmentText } from "./attachment-text.js";
 
 export function registerMessageAttachmentRoutes(
   app: Express,
@@ -36,6 +37,16 @@ export function registerMessageAttachmentRoutes(
     if (!project) return;
 
     await redirectToMessageAttachment(res, project.id, routeParam(req, 1), routeParam(req, 2));
+  });
+
+  // The text of a PDF attachment, page by page (attachment-text.ts).
+  app.get(/^\/rooms\/(.+)\/messages\/(msg_\d+)\/attachments\/(att_\d+)\/text$/, async (req: AuthenticatedRequest, res) => {
+    const project = await resolveParticipantRoom(req, res, deps);
+    if (!project) return;
+
+    // One PDF at a time for each account (an agent session counts as its owner).
+    const requester = req.agentSession?.owner_account_id ?? req.agentSession?.agent_session_id ?? req.sessionAccount?.account_id ?? "";
+    await respondWithAttachmentText(res, project.id, routeParam(req, 1), routeParam(req, 2), req.query.page, requester);
   });
 
   app.post(/^\/rooms\/(.+)\/attachments\/uploads$/, async (req: AuthenticatedRequest, res) => {

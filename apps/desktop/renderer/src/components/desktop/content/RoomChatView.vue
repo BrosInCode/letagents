@@ -273,6 +273,8 @@ import { roomMessageRevealDestination } from "../../../domain/room-message-revea
 import { attentionResponseAgentNames, attentionResponseAgentNamesKey } from "../../../domain/attention-response";
 import { buildRoomMentionDirectory, roomMentionDirectoryKey } from "../../../domain/room-mention-links";
 import { roomThreadOpenKey, roomThreadReplyKey } from "../../../composables/roomThreadReply";
+import { desktopMessageOutbox, reconcileDesktopMessageOutbox } from "../../../domain/message-outbox";
+import type { DesktopOutgoingMessageAttachment } from "../../../../../electron/ipc-types";
 
 import { deleteRoomContentKey } from "./room-chat/content-deletion";
 
@@ -347,7 +349,7 @@ const timelineSupervisorEntries = computed<DesktopSupervisorManifestEntry[]>((pr
   supervisorEntriesIgnoringActivity(previous, roomSupervisorEntries.value));
 
 const emit = defineEmits<{
-  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId: string | null, complete: (sent: boolean) => void, gif?: RoomGif | null];
+  "send-message": [text: string, replyTo: string | null, attachments: DesktopOutgoingMessageAttachment[], threadRootId: string | null, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "load-older": [];
   "content-deleted": [roomIdentifier: string];
   "discard-attachment": [uploadId: string];
@@ -623,7 +625,18 @@ function sendThreadMessage(
   gif?: RoomGif | null,
 ): void {
   const namespace = props.messageNamespace;
-  emit("send-message", text, replyToId, attachments, threadRootId, (sent) => {
+  const outgoingAttachments: DesktopOutgoingMessageAttachment[] = attachments.map((attachment) => {
+    const draft = threadAttachmentDrafts.value.find((item) => item.uploadId === attachment.upload_id);
+    return draft
+      ? {
+          upload_id: attachment.upload_id,
+          fileName: draft.fileName,
+          mimeType: draft.mimeType,
+          sizeBytes: draft.sizeBytes,
+        }
+      : { upload_id: attachment.upload_id };
+  });
+  emit("send-message", text, replyToId, outgoingAttachments, threadRootId, (sent) => {
     if (namespace !== props.messageNamespace) return;
     if (sent) threadAttachmentDrafts.value = threadAttachmentDrafts.value.filter((draft) => !attachments.some((attachment) => attachment.upload_id === draft.uploadId));
     complete(sent);
@@ -639,6 +652,7 @@ async function loadThread(threadRootId: string): Promise<void> {
   try {
     const page = await roomApi.getThread(roomIdentifier, threadRootId);
     if (!isActiveThreadContext(threadRootId, roomIdentifier, messageNamespace)) return;
+    reconcileDesktopMessageOutbox(roomIdentifier, page.replies, messageNamespace);
     fetchedThreadRootId.value = threadRootId;
     rememberOpenedThreadSummary(threadRootId, page.root.thread ?? page.summary);
     applyThreadSummary(threadRootId, page.summary);
@@ -670,6 +684,7 @@ async function loadOlderThreadReplies(): Promise<void> {
   try {
     const page = await roomApi.getThread(roomIdentifier, threadRootId, beforeMessageId);
     if (!isActiveThreadContext(threadRootId, roomIdentifier, messageNamespace)) return;
+    reconcileDesktopMessageOutbox(roomIdentifier, page.replies, messageNamespace);
     applyThreadSummary(threadRootId, page.summary);
     fetchedThreadRootId.value = threadRootId;
     fetchedThreadRoot.value = applyThreadSummaryOverride(page.root);
@@ -857,7 +872,18 @@ function handleComposerSend(
 ): void {
   const namespace = props.messageNamespace;
   const submittedReply = replyTarget.value;
-  emit("send-message", text, replyToId, attachments, null, (sent) => {
+  const outgoingAttachments: DesktopOutgoingMessageAttachment[] = attachments.map((attachment) => {
+    const draft = attachmentDrafts.value.find((item) => item.uploadId === attachment.upload_id);
+    return draft
+      ? {
+          upload_id: attachment.upload_id,
+          fileName: draft.fileName,
+          mimeType: draft.mimeType,
+          sizeBytes: draft.sizeBytes,
+        }
+      : { upload_id: attachment.upload_id };
+  });
+  emit("send-message", text, replyToId, outgoingAttachments, null, (sent) => {
     if (namespace !== props.messageNamespace) return;
     if (sent) {
       if (replyTarget.value === submittedReply) clearReplyTarget();
@@ -890,6 +916,14 @@ watch(
       openThread(parentId);
       void nextTick(() => messageViewport.value?.scrollToMessage(parentId));
     }
+  },
+);
+
+watch(
+  [() => fetchedThreadReplies.value, () => desktopMessageOutbox.value.length],
+  ([replies]) => {
+    if (!props.roomIdentifier || replies.length === 0) return;
+    reconcileDesktopMessageOutbox(props.roomIdentifier, replies, props.messageNamespace);
   },
 );
 

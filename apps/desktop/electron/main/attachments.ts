@@ -34,7 +34,11 @@ export {
 } from "./attachments/mappers.js";
 export { handleAttachmentProtocolRequest } from "./attachments/protocol.js";
 export {
+  discardLocalStagedAttachments,
+  loadLocalStagedAttachments,
+  pruneOrphanedLocalStagedAttachments,
   readLocalStagedAttachments,
+  releaseCommittedLocalStagedAttachments,
   releaseLocalStagedAttachments,
 } from "./attachments/local-store.js";
 export type { AttachmentStore } from "./attachments/store.js";

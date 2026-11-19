@@ -1,4 +1,4 @@
-import { Activity, ArchiveRestore, Bot, CircleUser, Cloud, CloudUpload, Database, GitBranch, Handshake, KeyRound, Palette, Plug, ServerCog, SlidersHorizontal, Sparkles, Ticket, Trash2, Wrench } from "@lucide/vue";
+import { Activity, AppWindow, ArchiveRestore, Bot, CircleUser, Cloud, CloudUpload, Database, GitBranch, Handshake, KeyRound, Palette, Plug, ServerCog, SlidersHorizontal, Sparkles, Ticket, Trash2, Wrench } from "@lucide/vue";
 import type { LegacySettingsPaneId, SettingsNavGroup, SettingsNavItem, SettingsPaneId } from "./types";
 
 export const settingsNavGroups: SettingsNavGroup[] = [
@@ -14,6 +14,7 @@ export const settingsNavGroups: SettingsNavGroup[] = [
   ] },
   { label: "Application", items: [
     { id: "system:styling", title: "Styling", description: "Personalize chat colors and message appearance", icon: Palette },
+    { id: "system:demos", title: "Demos", description: "How HTML demos in messages run on this computer", icon: AppWindow, keywords: "CDN libraries Google Fonts cdnjs jsDelivr unpkg" },
     { id: "system:app-agent", title: "Assistant", description: "Choose how the app assistant helps you", icon: Sparkles },
     { id: "system:updates", title: "Updates", description: "Version and available updates", icon: CloudUpload },
     { id: "system:diagnostics", title: "Troubleshooting", description: "Health, technical details, and recovery", icon: Activity },
@@ -89,7 +90,7 @@ export function filterSettingsNavigation(query: string): SettingsNavGroup[] {
     if (matches([group.label, item.title])) return [item];
     const children = (settingsSubsections[item.id] ?? []).filter(child =>
       matches([group.label, item.title, child.title, child.description]));
-    return children.length ? children : matches([group.label, item.title, item.description]) ? [item] : [];
+    return children.length ? children : matches([group.label, item.title, item.description, item.keywords ?? ""]) ? [item] : [];
   }) })).filter(group => group.items.length);
 }
 

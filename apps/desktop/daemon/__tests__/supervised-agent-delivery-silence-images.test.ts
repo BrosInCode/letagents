@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -23,6 +23,7 @@ import {
   pngAttachment,
   withAttachmentStager,
 } from "./helpers/supervised-agent-delivery-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("silence yields at its first durable checkpoint before the adapter returns", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-silent-checkpoint-"));
@@ -48,7 +49,7 @@ test("silence yields at its first durable checkpoint before the adapter returns"
     assert.notEqual((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
     adapterDone.resolve(); await pumping;
     assert.equal(yields, 1); assert.equal(captures, 1);
-  } finally { adapterDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { adapterDone.resolve(); await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("a busy older native turn yields only the new human speaking position", async () => {
@@ -84,7 +85,7 @@ test("a busy older native turn yields only the new human speaking position", asy
     captureDone.resolve(); await pumping;
     assert.deepEqual(nativeSources, ["msg_81", "msg_82"]);
     assert.ok((await store.receipts(agent.agentId)).every(row => row.state === "acknowledged_no_reply"));
-  } finally { nativeDone.resolve(); captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { nativeDone.resolve(); captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 for (const mode of ["agent-source", "spoofed-human", "unordered", "single-recipient", "control-history", "old-completed",
@@ -178,7 +179,7 @@ for (const mode of ["agent-source", "spoofed-human", "unordered", "single-recipi
       if (mode.startsWith("stop-")) assert.equal((await store.getBySourceMessage(current.agentId, current.roomId, "msg_81"))?.state, "cancelled_by_user");
     } finally {
       checkDone.resolve(); nativeDone.resolve(); captureDone.resolve(); cleanup.resolve();
-      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+      await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root);
     }
   });
 }
@@ -220,7 +221,7 @@ test("durable silence yields the remote speaking slot while capture still owns l
     assert.equal(yields, 1, "duplicate native checkpoints and an unsequenced successor cannot duplicate the hint");
     assert.equal(turns, 2);
     assert.ok((await store.receipts(agent.agentId)).every(row => row.state === "acknowledged_no_reply"));
-  } finally { captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 for (const mode of ["stop-before-dispatch", "replacement-before-dispatch", "handle-replaced", "connection-mutated",
@@ -313,7 +314,7 @@ for (const mode of ["stop-before-dispatch", "replacement-before-dispatch", "hand
       if (mode.startsWith("stop-")) assert.equal((await store.receipts(agent.agentId))[0]?.state, "cancelled_by_user");
     } finally {
       checkDone.resolve(); captureDone.resolve(); httpCleanup.resolve();
-      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+      await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root);
     }
   });
 }
@@ -359,7 +360,7 @@ test("settled no-reply hints do not wait for report upload or retry a provider a
       assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
     } finally {
       captureDone.resolve(); reportDone.resolve();
-      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+      await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root);
     }
   }
 });
@@ -393,7 +394,7 @@ test("settled no-reply requests remain cancellable and joined after their pump f
       assert.equal(drained, false, "drain must join request cleanup after abort");
       cleanup.resolve(); await draining;
       assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
-    } finally { aborted.resolve(); cleanup.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { aborted.resolve(); cleanup.resolve(); await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   }
 });
 
@@ -419,7 +420,7 @@ test("no-reply hint is suppressed when Stop or authority replacement wins during
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(reports, 0);
       if (action === "stop") assert.equal((await store.receipts(agent.agentId))[0]?.state, "cancelled_by_user");
-    } finally { captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   }
 });
 
@@ -439,7 +440,7 @@ test("no-reply hints skip synthetic messages and local-room transport", async ()
       await delivery.pump({ ...agent, apiUrl: variant === "local" ? "letagents-local://rooms" : agent.apiUrl });
       assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
       assert.equal(reports, 0);
-    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   }
 });
 
@@ -476,7 +477,7 @@ test('every provider waits for the workspace snapshot before advancing to its ne
         assert.deepEqual((await store.receipts(agent.agentId)).map(row => row.state), ['acknowledged_no_reply', 'acknowledged_no_reply']);
       } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); }
     }
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { removeTestDirectory(root); }
 });
 
 
@@ -570,7 +571,7 @@ for (const variant of ['success', 'capture_failure', 'http_failure', 'stop', 'au
       }
     } finally {
       captureRelease.resolve(); publishRelease.resolve();
-      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+      await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root);
     }
   });
 }
@@ -598,7 +599,7 @@ test("recorded reply-thread intent cannot publish a stopped, failed, silent or a
       release.resolve(); await pumping;
       assert.equal(publications, 0, outcome);
       if (outcome === "stop") assert.equal((await store.receipts(agent.agentId))[0]?.state, "cancelled_by_user");
-    } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   }
 });
 
@@ -625,7 +626,7 @@ for (const change of ["authority", "handoff", "epoch"] as const) {
       await pending;
       assert.equal(calls, 0);
       assert.equal((await store.head(agent.agentId))!.state, "pending");
-    } finally { gate.resolve(false); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { gate.resolve(false); await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   });
 }
 
@@ -663,7 +664,7 @@ for (const kind of ["exact-turn", "publication", "ambiguous"] as const) {
         assert.equal(receipt.provider_turn_id, null);
         assert.match(receipt.last_error!, /without authoritative terminal/);
       }
-    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   });
 }
 
@@ -710,7 +711,7 @@ for (const race of ["retry", "arrival", "successor"] as const) {
       assert.equal(calls, 0);
       assert.equal(gates, 1, "the changed pending head must pass admission");
       assert.equal((await head(agent.agentId))!.state, "pending");
-    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
   });
 }
 
@@ -751,7 +752,7 @@ test("the activating message's images reach that turn only, and a staged file st
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
     const detail = await store.detail(agent.agentId, agent.roomId, "msg_5");
     assert.ok(!JSON.stringify(detail.prepared_context).includes(stagedRoot), "no staged path is saved with the turn");
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("a refused attachment download leaves the room accepted and the turn runs with a note", async () => {
@@ -774,7 +775,7 @@ test("a refused attachment download leaves the room accepted and the turn runs w
     assert.deepEqual(statuses, [["unavailable"]]);
     assert.equal(delivery.roomRefusesAccess(agent.agentId), false);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("an agent whose provider takes no images downloads nothing and is told so", async () => {
@@ -796,7 +797,7 @@ test("an agent whose provider takes no images downloads nothing and is told so",
     await delivery.poll(agent);
     assert.deepEqual(statuses, [["provider_unsupported"], []]);
     assert.equal(downloads, 0);
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("recovering a saved turn never downloads its images again", async () => {
@@ -824,7 +825,7 @@ test("recovering a saved turn never downloads its images again", async () => {
     assert.equal(recoveryRequests.length, 1);
     assert.equal((recoveryRequests[0] as Record<string, unknown>).attachments, undefined);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("a turn whose observation ends early keeps its staged file for the native turn until the sweep", async () => {
@@ -855,7 +856,7 @@ test("a turn whose observation ends early keeps its staged file for the native t
     now += STAGED_FOLDER_MAX_AGE_MS + 60_000;
     await stager.sweep();
     assert.deepEqual(await readdir(stagedRoot), [], "the age sweep removes it once no turn can still read it");
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("an agent's first turn on a continuation carries the room history summary, later turns do not", async () => {
@@ -903,7 +904,7 @@ test("an agent's first turn on a continuation carries the room history summary, 
     assert.deepEqual(seen.slice(2), [{ source: "msg_12", summary: undefined }, { source: "msg_13", summary }],
       "a failed read gives the turn none and is asked again on the next turn");
     assert.equal(reads, 3);
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });
 
 test("the history summary counts as given under every id its continuation had during the turn", async () => {
@@ -935,5 +936,5 @@ test("the history summary counts as given under every id its continuation had du
     next = 11;
     await delivery.poll(moving);
     assert.deepEqual(seen.map((turn) => [turn.source, Boolean(turn.summary)]), [["msg_10", true], ["msg_11", false]]);
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root); }
 });

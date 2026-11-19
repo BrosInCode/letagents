@@ -346,6 +346,7 @@ test("registerRoomMessageRoutes preserves canonical message route order", () => 
     { method: "post", path: "/^\\/rooms\\/(.+)\\/messages$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/messages\\/link-previews$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/([^/]+)\\/attachments\\/([^/]+)$/" },
+    { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/attachments\\/(att_\\d+)\\/text$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/attachments\\/uploads$/" },
     { method: "delete", path: "/^\\/rooms\\/(.+)\\/attachments\\/uploads\\/([^/]+)$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages$/" },

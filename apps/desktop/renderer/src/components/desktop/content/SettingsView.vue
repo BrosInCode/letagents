@@ -14,7 +14,7 @@
           <p>{{ activePaneDescription }}</p>
         </div>
         <button
-          v-if="activePane !== 'system:styling'"
+          v-if="activePane !== 'system:styling' && activePane !== 'system:demos'"
           class="ghost-button settings-header-button"
           type="button"
           :disabled="busy || diagnosticsPane?.busy || agentsPane?.busy"
@@ -63,6 +63,8 @@
       </section>
 
       <ChatStylingSettings v-else-if="activePane === 'system:styling'" />
+
+      <SettingsDemosPane v-else-if="activePane === 'system:demos'" />
 
       <SettingsRentingPane
         v-else-if="activePane === 'account:renting'"
@@ -209,6 +211,7 @@ import type {
 } from "../../../../../electron/ipc-types";
 import SettingsAgentsPane from "../settings/panes/SettingsAgentsPane.vue";
 import SettingsAppAgentPane from "../settings/panes/SettingsAppAgentPane.vue";
+import SettingsDemosPane from "../settings/panes/SettingsDemosPane.vue";
 import SettingsDiagnosticsPane from "../settings/panes/SettingsDiagnosticsPane.vue";
 import SettingsProfilePane from "../settings/panes/SettingsProfilePane.vue";
 import SettingsRentingPane from "../settings/panes/SettingsRentingPane.vue";

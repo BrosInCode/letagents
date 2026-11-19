@@ -3,7 +3,7 @@
   display: block;
   width: 100%;
   max-width: 100%;
-  border-color: color-mix(in srgb, var(--text-secondary) 26%, transparent);
+  border-color: color-mix(in srgb, var(--chat-foreground, var(--text-secondary)) 26%, transparent);
 }
 
 .room-message-bubble > .room-thread-marker {
@@ -19,17 +19,23 @@
   border-radius: 4px;
   background: transparent;
   box-shadow: none;
+  color: color-mix(in srgb, var(--chat-foreground, var(--text)) 82%, transparent);
   font-size: 0.72rem;
+}
+.room-message-bubble > .room-thread-marker:hover,
+.room-message-bubble > .room-thread-marker:focus-visible,
+.room-message-bubble > .room-thread-marker.is-active {
+  color: var(--chat-foreground, var(--text));
 }
 .room-message-bubble > .room-thread-marker .room-thread-marker-preview { display: none; }
 .room-thread-marker-chevron { display: block; flex: 0 0 14px; width: 14px; height: 14px; margin-left: 3px; }
 .room-thread-marker[aria-expanded="true"] > .room-thread-marker-chevron { transform: rotate(180deg); }
-.room-message-bubble > .room-thread-marker strong { font-weight: 600; }
+.room-message-bubble > .room-thread-marker strong { color: var(--chat-foreground, var(--text)); font-weight: 600; }
 .room-message-bubble > .room-thread-marker .room-thread-participants { align-items: center; gap: 4px; height: auto; min-width: 0; }
 .room-thread-participant-avatar { font-size: 0; width: 6px; height: 6px; margin: 0; border: 0; }
 
 .room-inline-thread { min-width: 0; }
-.room-thread-panel { display: flow-root; position: relative; min-width: 0; outline: none; }
+.room-thread-panel { display: flow-root; position: relative; min-width: 0; outline: none; color: var(--chat-foreground, var(--text)); }
 .room-thread-body {
   max-height: clamp(240px, 42dvh, 440px);
   min-height: 0;
@@ -37,10 +43,10 @@
   overscroll-behavior: contain;
   overflow-anchor: none;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--text-tertiary) 40%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--chat-foreground, var(--text-tertiary)) 38%, transparent) transparent;
   margin-top: 6px;
   padding: 14px 8px 14px 0;
-  border-top: 1px solid var(--border, rgba(127, 127, 127, 0.18));
+  border-top: 1px solid color-mix(in srgb, var(--chat-foreground, var(--text)) 16%, transparent);
   outline-offset: -2px;
 }
 .room-thread-conversation { min-width: 0; }
@@ -58,6 +64,20 @@
 .room-thread-panel .room-chat-message.is-thread-context .room-message-author-block {
   min-width: 0; max-width: 100%;
 }
+.room-thread-panel .room-chat-message.is-thread-context .room-message-author-block strong,
+.room-thread-panel .room-chat-message.is-thread-context .room-message-author-button {
+  color: var(--chat-foreground, var(--text));
+}
+.room-thread-panel .room-chat-message.is-thread-context.is-compact-continuation .room-message-author-block strong,
+.room-thread-panel .room-chat-message.is-thread-context.is-compact-continuation .room-message-author-button {
+  color: color-mix(in srgb, var(--chat-foreground, var(--text)) 74%, transparent);
+}
+.room-thread-panel .room-chat-message.is-thread-context .room-message-author-block time,
+.room-thread-panel .room-chat-message.is-thread-context .room-message-meta time,
+.room-thread-panel .room-chat-message.is-thread-context .room-message-owner,
+.room-thread-panel .room-chat-message.is-thread-context .room-message-reply-label {
+  color: color-mix(in srgb, var(--chat-foreground, var(--text)) 68%, transparent);
+}
 .room-thread-panel .room-message-owner { font-size: 0.7rem; }
 .room-thread-panel .room-chat-message.is-thread-context .desktop-long-message-html {
   max-width: 68ch; font-size: 0.875rem; line-height: 1.6;
@@ -65,58 +85,73 @@
 .room-thread-panel .room-chat-message.is-thread-context .room-message-reply {
   display: flex; align-items: baseline; gap: 6px; min-width: 0; width: 100%;
   padding: 0; margin: 0 0 8px; border: 0; border-radius: 0; background: transparent;
-  color: var(--text-tertiary); text-align: left;
+  color: color-mix(in srgb, var(--chat-foreground, var(--text)) 68%, transparent); text-align: left;
 }
 .room-thread-panel .room-message-reply-label { flex: 0 0 auto; font-size: 0.72rem; font-weight: 500; }
 .room-thread-panel .room-message-reply-text {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.72rem;
 }
-.room-thread-history-state, .room-thread-empty { padding: 12px 0; color: var(--text-tertiary); font-size: 0.8rem; }
+.room-thread-history-state, .room-thread-empty { padding: 12px 0; color: color-mix(in srgb, var(--chat-foreground, var(--text)) 68%, transparent); font-size: 0.8rem; }
 .room-thread-history-state { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.room-thread-history-state button { background: transparent; color: var(--text-secondary); cursor: pointer; }
+.room-thread-history-state button { background: transparent; color: color-mix(in srgb, var(--chat-foreground, var(--text)) 82%, transparent); cursor: pointer; }
 .room-thread-empty { display: flex; align-items: center; gap: 10px; }
 .room-thread-empty div { display: grid; gap: 4px; }
-.room-thread-new-divider { display: flex; align-items: center; gap: 10px; margin: 4px 0 16px; color: var(--text-tertiary); font-size: 0.72rem; }
-.room-thread-new-divider::after { content: ''; flex: 1; height: 1px; background: var(--border, rgba(127,127,127,.18)); }
+.room-thread-new-divider { display: flex; align-items: center; gap: 10px; margin: 4px 0 16px; color: color-mix(in srgb, var(--chat-foreground, var(--text)) 68%, transparent); font-size: 0.72rem; }
+.room-thread-new-divider::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--chat-foreground, var(--text)) 18%, transparent); }
 /* Keep the composer width stable when scrolling reveals the latest control. */
 .room-thread-latest {
   visibility: hidden;
   flex: 0 0 auto; align-self: center; margin-right: 8px;
   padding: 6px 0; border: 0;
-  background: transparent; color: var(--text-secondary);
+  background: transparent; color: color-mix(in srgb, var(--chat-foreground, var(--text)) 82%, transparent);
   font-size: 0.72rem; cursor: pointer;
 }
 .room-thread-latest.available { visibility: visible; }
 .room-thread-composer {
   position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto;
   align-items: end; gap: 8px; margin-top: 0; padding-top: 10px;
-  border-top: 1px solid var(--border, rgba(127,127,127,.18));
+  border-top: 1px solid color-mix(in srgb, var(--chat-foreground, var(--text)) 18%, transparent);
 }
 .room-thread-composer textarea {
   width: 100%; min-height: 34px; max-height: 120px; field-sizing: content; resize: none;
-  padding: 7px 0; border: 0; border-radius: 0; background: transparent; color: var(--text);
+  padding: 7px 0; border: 0; border-radius: 0; background: transparent;
+  color: var(--chat-foreground, var(--text));
+  caret-color: var(--chat-foreground, var(--text));
   font: inherit; font-size: 0.85rem; line-height: 1.5; outline: none;
 }
+.room-thread-composer textarea::placeholder {
+  color: color-mix(in srgb, var(--chat-foreground, var(--text)) 56%, transparent);
+}
 .room-thread-composer textarea:focus { box-shadow: none; }
-.room-thread-composer:focus-within { border-top-color: color-mix(in srgb, var(--text-secondary) 40%, transparent); }
+.room-thread-composer:focus-within { border-top-color: color-mix(in srgb, var(--chat-foreground, var(--text)) 38%, transparent); }
 .room-thread-composer-footer { grid-column: 2; grid-row: 1; display: flex; align-items: center; }
 .room-thread-composer-actions {
   display: flex; align-items: center; gap: 4px;
   /* Size the shared GIF trigger like the other thread action buttons. */
   --room-gif-trigger-size: 32px; --room-gif-trigger-radius: 8px;
-  --room-gif-trigger-hover-bg: color-mix(in srgb, var(--text) 7%, transparent);
+  --room-gif-trigger-hover-bg: color-mix(in srgb, var(--chat-foreground, var(--text)) 10%, transparent);
 }
 .room-thread-composer-actions button, .room-thread-quote-preview button {
   display: grid; place-items: center; width: 32px; height: 32px; padding: 0;
-  border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer;
+  border: 0; border-radius: 8px; background: transparent;
+  color: color-mix(in srgb, var(--chat-foreground, var(--text)) 78%, transparent); cursor: pointer;
 }
-.room-thread-composer-actions button[type="submit"] { background: var(--bg-elevated, #202020); }
+.room-thread-composer-actions button[type="submit"] {
+  background: color-mix(in srgb, var(--chat-foreground, var(--text)) 16%, transparent);
+  color: var(--chat-foreground, var(--text));
+}
 .room-thread-composer-actions button:disabled { opacity: .4; cursor: default; }
-.room-thread-composer-actions button:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 7%, transparent); }
+.room-thread-composer-actions button:hover:not(:disabled) {
+  color: var(--chat-foreground, var(--text));
+  background: color-mix(in srgb, var(--chat-foreground, var(--text)) 12%, transparent);
+}
+.room-thread-composer-actions button[type="submit"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--chat-foreground, var(--text)) 24%, transparent);
+}
 .room-thread-composer button:focus-visible, .room-thread-latest:focus-visible { outline: 2px solid var(--accent, #60a5fa); outline-offset: 2px; }
 .room-thread-quote-preview { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; }
 .room-thread-quote-preview div { min-width: 0; display: grid; gap: 3px; }
-.room-thread-quote-preview strong, .room-thread-quote-preview span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: .75rem; color: var(--text-secondary); }
+.room-thread-quote-preview strong, .room-thread-quote-preview span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: .75rem; color: color-mix(in srgb, var(--chat-foreground, var(--text)) 78%, transparent); }
 .room-thread-composer:has(.room-thread-quote-preview) .room-thread-composer-footer { grid-row: 2; }
 .room-thread-composer-error { color: #f87171; font-size: .72rem; max-width: 24ch; }
 .room-thread-mention-panel { right: 0; left: 0; bottom: 100%; width: auto; }

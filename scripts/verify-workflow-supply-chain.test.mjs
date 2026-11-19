@@ -390,6 +390,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "node scripts/verify-dependency-advisories.mjs .",
     "node scripts/verify-dependency-advisories.mjs src/web",
     "node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents",
+    "node scripts/verify-dependency-advisories.mjs src/api/pdf-text",
     "node scripts/verify-dependency-advisories.mjs .",
     "node scripts/verify-dependency-advisories.mjs .",
   ];
@@ -408,6 +409,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "node scripts/retry-command.mjs npm audit signatures",
     "cd src/web && node ../../scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures --prefix src/api/pdf-text",
     "node scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
     "node scripts/retry-command.mjs npm audit signatures",
@@ -428,7 +430,9 @@ test("dependency advisory checks use the pinned supported audit client", () => {
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
       "cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix src/api/pdf-text",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix src/api/pdf-text",
       "cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit\nnode scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
@@ -578,7 +582,7 @@ test("the dependency gates run once, in dependency-audit, before every check job
 test("the retry wrapper only wraps the pinned npm ci installs and signature checks", () => {
   // scripts/retry-command.mjs runs any command, so a step could use it to hide
   // an install or audit the npm ci and npm audit checks above would not see.
-  const wrapperLine = /^(?:cd src\/web && node \.\.\/\.\.\/|node )scripts\/retry-command\.mjs (?:npm ci --ignore-scripts --no-audit|npm audit signatures)(?: --prefix apps\/desktop)?$/;
+  const wrapperLine = /^(?:cd src\/web && node \.\.\/\.\.\/|node )scripts\/retry-command\.mjs (?:npm ci --ignore-scripts --no-audit|npm audit signatures)(?: --prefix (?:apps\/desktop|src\/api\/pdf-text))?$/;
   for (const path of workflowPaths) {
     const commands = workflowRunScripts(workflowJobs(path))
       .flatMap((script) => script.split("\n"))

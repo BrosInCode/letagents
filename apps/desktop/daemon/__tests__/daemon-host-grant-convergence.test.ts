@@ -55,7 +55,13 @@ test("host grant renewal retries transient failures, rotates the bearer in place
     stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
     onExit: async () => () => {}, onStream: async () => () => {},
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, { nowMs: () => clock }, {
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, {
+    nowMs: () => clock,
+    // The test measures the retry sequence, not the real mint backoff (1 s, jittered). Without this the second
+    // child-session mint sleeps 0.7-1 s, which leaves almost no margin in the 2 s wait on a loaded runner.
+    sleep: async () => undefined,
+    random: () => 0,
+  }, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
     renewHostGrant: async (input) => {

@@ -14,6 +14,7 @@ export type SettingsPaneId =
   | "storage:sync"
   | "storage:database"
   | "system:styling"
+  | "system:demos"
   | "system:app-agent"
   | "system:supervisor"
   | "system:runtime"
@@ -29,6 +30,8 @@ export interface SettingsNavItem {
   title: string;
   description: string;
   icon: Component;
+  /** More words search finds it by, beyond its title and description. */
+  keywords?: string;
   /** Reached from search and from links in the page, not from the sub-navigation. */
   hidden?: boolean;
   /** The sub-navigation item to mark as current while this hidden pane is open. */

@@ -88,6 +88,10 @@ import type {
   DesktopAccountRoomListOptions,
   DesktopDroppedAttachmentContent,
   DesktopFocusRoomConclusionDetails,
+  DesktopDeleteOutgoingMessageOptions,
+  DesktopPersistedOutgoingMessage,
+  DesktopSaveOutgoingMessageInput,
+  DesktopUpdateOutgoingMessageInput,
   DesktopFocusRoomMutationResult,
   DesktopFocusRoomSettingsPatch,
   DesktopGitHubEventsPage,
@@ -130,6 +134,7 @@ import type {
   DesktopDemoMark,
   DesktopDemoMarkInput,
   DesktopLiveDemoAnchor,
+  DesktopDemoSettings,
   DesktopLiveDemoClientFrame,
   DesktopLiveDemoEvent,
   DesktopWindowRect,
@@ -179,6 +184,10 @@ export interface DesktopApi {
   ui: {
     onOpenSettings: (callback: () => void) => () => void;
     onOpenUpdates?: (callback: () => void) => () => void;
+  };
+  demos?: {
+    getSettings: () => Promise<DesktopDemoSettings>;
+    setCdnLibraries: (enabled: boolean) => Promise<DesktopDemoSettings>;
   };
   notifications: {
     activate?: (target: DesktopNotificationTarget) => Promise<boolean>;
@@ -323,6 +332,10 @@ export interface DesktopApi {
       messageNamespace?: string | null,
       gif?: RoomGif | null
     ) => Promise<DesktopSendRoomMessageResult>;
+    saveOutgoingMessage?: (input: DesktopSaveOutgoingMessageInput) => Promise<DesktopPersistedOutgoingMessage>;
+    updateOutgoingMessage?: (clientMessageId: string, input: DesktopUpdateOutgoingMessageInput) => Promise<void>;
+    deleteOutgoingMessage?: (clientMessageId: string, options?: DesktopDeleteOutgoingMessageOptions) => Promise<void>;
+    listOutgoingMessages?: () => Promise<DesktopPersistedOutgoingMessage[]>;
     addTask: (roomIdentifier: string, input: DesktopTaskCreateInput) => Promise<DesktopTaskMutationResult>;
     updateTask: (
       roomIdentifier: string,

@@ -412,6 +412,47 @@ export interface DesktopMessageReceipt {
   noWake: DesktopMessageNoWake | null;
 }
 
+export interface DesktopOutgoingMessageAttachment {
+  upload_id: string;
+  fileName?: string | null;
+  mimeType?: string | null;
+  sizeBytes?: number | null;
+}
+
+export interface DesktopSaveOutgoingMessageInput {
+  clientMessageId: string;
+  roomIdentifier: string;
+  messageNamespace: string | null;
+  text: string;
+  replyTo: string | null;
+  threadRootId: string | null;
+  attachments: DesktopOutgoingMessageAttachment[];
+  gif?: RoomGif | null;
+  replyPreview: DesktopRoomMessageReply | null;
+  timestamp: string;
+}
+
+export type DesktopOutgoingMessageStatus = "pending" | "uncertain" | "refused";
+
+export interface DesktopPersistedOutgoingMessage extends DesktopSaveOutgoingMessageInput {
+  accountScope: string;
+  storageMode: "local" | "cloud";
+  status: DesktopOutgoingMessageStatus;
+  error: string | null;
+  sender: string;
+  updatedAt: string;
+}
+
+export interface DesktopUpdateOutgoingMessageInput {
+  status?: DesktopOutgoingMessageStatus;
+  error?: string | null;
+  gif?: RoomGif | null;
+}
+
+export interface DesktopDeleteOutgoingMessageOptions {
+  discardAttachments?: boolean;
+}
+
 export interface DesktopRoomMessage {
   gif?: RoomGif | null;
   senderProfile?: { login: string; avatarUrl: string | null } | null;
@@ -419,7 +460,12 @@ export interface DesktopRoomMessage {
   /** Exact idempotency identity supplied by the message publisher. */
   clientMessageId?: string | null;
   /** Renderer-only submission state; never a server message identity. */
-  outgoing?: { status: "pending" | "uncertain"; attachmentCount: number; error: string | null };
+  outgoing?: {
+    status: DesktopOutgoingMessageStatus;
+    attachmentCount: number;
+    attachments?: DesktopOutgoingMessageAttachment[];
+    error: string | null;
+  };
   /** Renderer-only arrival sequence from a live event/send, never history backfill. */
   liveArrival?: number;
   sender: string;
@@ -805,6 +851,13 @@ export type DesktopLiveDemoClientFrame = import("../../../../shared/live-demo.mj
 export type DesktopDemoMark = import("../../../../shared/live-demo.mjs").DemoMark;
 export type DesktopDemoMarkInput = import("../../../../shared/live-demo.mjs").DemoMarkInput;
 export type DesktopLiveDemoAnchor = import("../../../../shared/live-demo.mjs").LiveDemoAnchor;
+
+/** How demos run on this computer. */
+export interface DesktopDemoSettings {
+  /** Demos may load libraries, styles, fonts and images from `cdnHosts`. */
+  cdnLibraries: boolean;
+  cdnHosts: string[];
+}
 
 /** The state of this app's live connection to one room. */
 export type DesktopLiveDemoStatus = "connecting" | "live" | "reconnecting" | "offline" | "refused";
