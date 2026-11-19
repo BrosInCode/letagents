@@ -110,7 +110,7 @@ export function useAppRoomManagement(context: unknown) {
     | "useAppRoomData"
     | "useAppSidebarEntries"
     | "useAppState"
-  > & { finishFirstRunOnboarding?: (openedRoom?: DesktopRoomSnapshot) => Promise<void> };
+  > & { finishFirstRunOnboarding?: (openedRoom?: DesktopRoomSnapshot, dismissModal?: () => void) => Promise<void> };
   const {
     accountRooms, activeEntry, chatStorageSettings, handleRoomRenamed, leaveArchivedRoomIfActive,
     loading, openRoomSnapshot, pushActionToast, recentRootRooms, recentRootRoomsStorageKey,
@@ -161,9 +161,6 @@ export function useAppRoomManagement(context: unknown) {
   } = useDesktopNewRoomModal({
     openRoomSnapshot: (snapshot, options) => {
       openRoomSnapshot(snapshot, options);
-      if (app.firstRunStage.value === "room" && app.mcpInstallState.value?.completed === false) {
-        void app.finishFirstRunOnboarding?.(snapshot);
-      }
       if (options?.kind !== "project") return;
       const entryId = activeEntry.value.id;
       const project = sidebarProjectEntries.value.find((candidate) =>
@@ -181,6 +178,11 @@ export function useAppRoomManagement(context: unknown) {
         entryId,
         sequence: (sidebarRevealRequest.value?.sequence || 0) + 1,
       };
+    },
+    finishOnboarding: (snapshot, dismissModal) => {
+      if (app.firstRunStage.value === "room" && app.mcpInstallState.value?.completed === false) {
+        return app.finishFirstRunOnboarding?.(snapshot, dismissModal);
+      }
     },
     setRepoStatus: (status) => {
       if (status) repoStatus.value = preserveRoomRepoStatistics(repoStatus.value, status);

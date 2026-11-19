@@ -350,7 +350,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.firstRunStage.value = "room";
   }
 
-  async function finishFirstRunOnboarding(openedRoom?: DesktopRoomSnapshot): Promise<void> {
+  async function finishFirstRunOnboarding(openedRoom?: DesktopRoomSnapshot, dismissModal?: () => void): Promise<void> {
     if (options.mcpInstallBusy.value) return;
     if (!options.authStatus.value?.authenticated) {
       options.firstRunStage.value = "github";
@@ -388,9 +388,11 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         options.activeEntry.value = options.pinnedRoom.value;
         options.mcpInstallState.value = completed;
         firstRunFinished.value = true;
+        dismissModal?.();
         return nextTick();
       };
-      if (roomIdentifier && typeof document !== "undefined" && document.startViewTransition
+      // The creation dialog fades away over live chat in the same render as the shell swap.
+      if (!dismissModal && roomIdentifier && typeof document !== "undefined" && document.startViewTransition
         && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
         const root = document.documentElement;
         const departingIcon = document.querySelector<SVGElement>('.company-rooms-row[aria-pressed="true"] .company-rooms-icon');
@@ -415,7 +417,12 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       } else {
         await showWorkspace();
       }
-      await options.refresh();
+      if (dismissModal) {
+        // Chat already has the newly opened room. Refresh account and room metadata in the background.
+        void options.refresh().catch(() => undefined);
+      } else {
+        await options.refresh();
+      }
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "Could not close setup.";
     } finally {

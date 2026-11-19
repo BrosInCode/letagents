@@ -16,6 +16,9 @@ const links = await import('../../dist-electron/main/company-links.js');
 let authenticated = false;
 let completed = false;
 let failOrganizations = false;
+let holdSetupCompletion = false;
+let releaseSetupCompletion;
+let newRoomIdentifier = 'room_q4';
 const organizations = [
   { github_org_id: '42', login: 'Herotel', avatar_url: null, theme_id: null, theme_revision: 0, role: 'owner', setup: false, joined: false },
   { github_org_id: '43', login: 'Studio', avatar_url: null, role: 'member', setup: true, joined: false },
@@ -27,6 +30,7 @@ const companyRoom = { kind: 'repo', github_repo_id: '100', room_id: 'github.com/
 const createdRooms = [];
 const openedGitHubPages = [];
 const sentMessages = new Map();
+const renamedRooms = new Map();
 const account = { id: 'fixture-account', provider: 'github', providerUserId: '1', login: 'alex', displayName: 'Alex', avatarUrl: null };
 const auth = () => ({ authenticated, account: authenticated ? account : null, apiUrl: 'https://letagents.chat', pendingDeviceAuth: null, tokenStored: authenticated, error: null });
 const target = { id: 'codex', name: 'Codex', description: 'Connect your agents.', configPath: '/fixture/config.toml', configPaths: [], configIssue: null, status: 'installed', lastInstalledAt: null, restartHint: 'Restart your agent app.' };
@@ -36,7 +40,7 @@ function snapshot(identifier = 'github.com/alex/personal') {
   const value = desktopSmokeRoomSnapshot();
   value.roomIdentifier = identifier;
   value.access.roomIdentifier = identifier;
-  Object.assign(value.room, { identifier, name: identifier, displayName: identifier.split('/').at(-1), code: identifier });
+  Object.assign(value.room, { identifier, name: identifier, displayName: renamedRooms.get(identifier) || identifier.split('/').at(-1), code: identifier });
   const owningCompany = identifier === companyRoom.room_id ? organizations[0] : null;
   if (owningCompany) value.room.companyAppearance = { id: owningCompany.github_org_id, name: owningCompany.login, theme: owningCompany.theme_id, themeRevision: owningCompany.theme_revision };
   value.messages = sentMessages.get(identifier) ?? []; value.tasks = []; value.participants = []; value.presence = []; value.focusRooms = []; value.reasoningSessions = []; value.recentActivity = []; value.roomArtifacts = [];
@@ -51,7 +55,10 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'auth.signOut': authenticated = false; return auth();
     case 'setup.getMcpInstallState': return setup();
     case 'setup.installMcpServer': return { success: true, target, installState: setup(), message: 'Installed' };
-    case 'setup.completeMcpOnboarding': completed = true; return setup();
+    case 'setup.completeMcpOnboarding':
+      if (holdSetupCompletion) await new Promise(resolve => { releaseSetupCompletion = resolve; });
+      completed = true;
+      return setup();
     case 'organizations.list':
       if (failOrganizations) return { status: 'unavailable' };
       return { status: 'ok', organizations: structuredClone(organizations), invitations, ssoRequired: [] };
@@ -78,9 +85,9 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'organizations.openOnGitHub': openedGitHubPages.push(args[0]); return;
     case 'room.createInviteRoom': {
       createdRooms.push(args[0] ?? null);
-      return { roomIdentifier: 'room_q4', code: 'ROOM-Q4AB', snapshot: snapshot('room_q4') };
+      return { roomIdentifier: newRoomIdentifier, code: 'ROOM-Q4AB', snapshot: snapshot(newRoomIdentifier) };
     }
-    case 'room.rename': return { identifier: 'room_q4', name: 'room_q4', displayName: 'Q4 launch' };
+    case 'room.rename': renamedRooms.set(args[0], args[1]); return { identifier: args[0], name: args[0], displayName: args[1] };
     case 'organizations.pendingInvite': return links.getPendingCompanyLink();
     case 'organizations.acknowledgeInvite': links.acknowledgeCompanyLink(args[0]); return;
     case 'app.getInfo': return { appName: 'LetAgents', appVersion: 'test', platform: 'darwin', versions: process.versions, workspaceRoot: profile, homePath: profile, apiUrl: 'https://letagents.chat' };
@@ -377,8 +384,47 @@ try {
   await click('[data-testid="new-room-join-submit"]');
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').trim().startsWith('Rooms') && !document.querySelector('[data-testid="company-home"]')`);
   await capture('10-explicit-personal-room.png');
+
+  // Reopen setup as a signed-in account to exercise successful creation from the wizard.
+  completed = false;
+  newRoomIdentifier = 'room_onboarding_qa';
+  await window.loadFile(join(root, 'dist-renderer/index.html'));
+  await click('[data-testid="first-run-start-setup"]');
+  await click('[data-testid="first-run-to-room"]');
+  await click('[data-testid="first-run-company-continue"]');
+  await click('[data-testid="first-run-theme-continue"]');
+  await click('[data-testid="room-choice-create"]');
+  await js(`{
+    const name = document.querySelector('[data-testid="new-room-name-input"]');
+    name.value = 'Onboarding QA';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    window.onboardingRoomFrames = new Set();
+    const sample = () => {
+      const surface = document.querySelector('[data-testid="desktop-first-run-splash"]') ? 'startup'
+        : document.querySelector('[data-testid="room-chat-empty"]') ? 'chat'
+        : document.querySelector('[data-testid="new-room-modal"]:not(.new-room-modal-leave-active)') ? 'creation'
+        : 'intermediate';
+      window.onboardingRoomFrames.add(surface);
+      if (surface !== 'chat') requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  }`);
+  holdSetupCompletion = true;
+  await click('[data-testid="new-room-create-standalone"]');
+  for (let attempt = 0; !releaseSetupCompletion && attempt < 100; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(releaseSetupCompletion, 'creation has reached the slow setup save');
+  await js('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  assert.ok(await js(`Boolean(document.querySelector('[data-testid="new-room-modal"]:not(.new-room-modal-leave-active)'))`), 'the creation dialog stays until chat can mount');
+  releaseSetupCompletion();
+  await waitFor(`document.querySelector('[data-testid="room-chat-empty"]')?.textContent.includes('Onboarding QA') && !document.querySelector('[data-testid="new-room-modal"]')`);
+  assert.deepEqual(await js('[...window.onboardingRoomFrames]'), ['creation', 'chat'], 'creation reveals chat directly, without a startup or room-picker frame');
+  assert.ok(await js(`Boolean(document.querySelector('[data-testid="desktop-composer-input"]'))`));
+  assert.equal(createdRooms.length, 2, 'the onboarding handoff creates the new room once');
+  await capture('11-onboarding-created-room.png');
   assert.deepEqual(errors, [], 'renderer must not report uncaught errors');
-  const report = { passed: true, checks: ['animated desktop welcome and GitHub without MCP', 'real New Room entry points', 'room arrival, tour and first message', 'first-run owner setup', 'company theme inheritance, owner updates and personal overrides', 'member waiting for owner', 'pending GitHub invitation', 'company repo room on the room step', 'company filter on the Rooms heading', 'empty company home', 'GitHub outage and retry', 'All rooms fallback', 'company link persistence and acknowledgement', 'company link dialog over any view', 'join from a company link', 'new room inside the company', 'pasted company link', 'explicit outside-company room opens in All rooms'], consoleErrors: errors, calls: [...new Set(calls)] };
+  const report = { passed: true, checks: ['animated desktop welcome and GitHub without MCP', 'real New Room entry points', 'room arrival, tour and first message', 'first-run owner setup', 'company theme inheritance, owner updates and personal overrides', 'member waiting for owner', 'pending GitHub invitation', 'company repo room on the room step', 'company filter on the Rooms heading', 'empty company home', 'GitHub outage and retry', 'All rooms fallback', 'company link persistence and acknowledgement', 'company link dialog over any view', 'join from a company link', 'new room inside the company', 'pasted company link', 'explicit outside-company room opens in All rooms', 'first-run creation transitions directly to chat with a slow setup save'], consoleErrors: errors, calls: [...new Set(calls)] };
   writeFileSync(join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ passed: true, output, consoleErrors: errors }, null, 2));
 } catch (error) {

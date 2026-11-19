@@ -42,6 +42,7 @@ interface OpenRoomOptions {
 
 interface DesktopNewRoomModalOptions {
   openRoomSnapshot: (snapshot: DesktopRoomSnapshot, options?: OpenRoomOptions) => void;
+  finishOnboarding?: (snapshot: DesktopRoomSnapshot, dismissModal: () => void) => Promise<void> | undefined;
   setRepoStatus: (status: RepoStatus | null) => void;
   getDefaultStorageMode?: () => NewRoomStorageChoice;
   /** The company selected in the sidebar; a new shared room is created in it by default. */
@@ -241,7 +242,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       }
       newRoomProjectSelection.value = projectSelectionFromResult(result, result.snapshot);
       newRoomBusy.value = false;
-      confirmProjectRoomFromModal();
+      await confirmProjectRoomFromModal();
     } catch (error) {
       if (!isCurrentProjectRequest(request)) return;
       newRoomProjectCreationError.value = repoPickerErrorMessage(error, "LetAgents could not create that project.");
@@ -319,7 +320,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
           throw new Error("Restart LetAgents Desktop to enable local rooms.");
         }
         const result = await bridge.createLocalRoom({ displayName });
-        finishRoom(result.snapshot, {
+        await finishRoom(result.snapshot, {
           displayName,
           kind: "room",
           rootPath: null,
@@ -364,7 +365,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
         if (company) {
           options.onCompanyRoomCreated?.({ roomIdentifier: result.roomIdentifier, displayName: roomName, organizationId: company.id });
         }
-        finishRoom(snapshot, {
+        await finishRoom(snapshot, {
           displayName: roomName,
           kind: "room",
           rootPath: null,
@@ -475,10 +476,10 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     }
   }
 
-  function confirmProjectRoomFromModal(): void {
+  async function confirmProjectRoomFromModal(): Promise<void> {
     const selection = newRoomProjectSelection.value;
     if (!selection || newRoomBusy.value) return;
-    finishRoom(selection.snapshot, {
+    await finishRoom(selection.snapshot, {
       displayName: selection.roomName,
       kind: "project",
       rootPath: selection.repoPath,
@@ -517,7 +518,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       if (isMembershipRefusal(snapshot.access.status)) {
         // A members-only room: open it, so its card offers the request to join
         // (or says to ask a repository admin, or for the main room's link).
-        finishRoom(snapshot, {
+        await finishRoom(snapshot, {
           displayName: snapshot.access.displayName || null,
           kind: "room",
           rootPath: null,
@@ -531,7 +532,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
         newRoomStep.value = "error";
         return;
       }
-      finishRoom(snapshot, {
+      await finishRoom(snapshot, {
         kind: "room",
         rootPath: null,
         meta: snapshot.room?.code || "Joined room",
@@ -547,11 +548,26 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     }
   }
 
-  function finishRoom(snapshot: DesktopRoomSnapshot, openOptions: OpenRoomOptions, repoStatus?: RepoStatus | null): void {
+  async function finishRoom(snapshot: DesktopRoomSnapshot, openOptions: OpenRoomOptions, repoStatus?: RepoStatus | null): Promise<void> {
     if (repoStatus) options.setRepoStatus(repoStatus);
     options.openRoomSnapshot(snapshot, openOptions);
-    newRoomBusy.value = false;
-    closeNewRoomModal();
+
+    let dismissed = false;
+    const dismissModal = () => {
+      if (dismissed) return;
+      dismissed = true;
+      newRoomBusy.value = false;
+      closeNewRoomModal();
+    };
+    try {
+      const finishingSetup = options.finishOnboarding?.(snapshot, dismissModal);
+      if (finishingSetup) {
+        newRoomBusy.value = true;
+        await finishingSetup;
+      }
+    } finally {
+      dismissModal();
+    }
   }
 
   return {
