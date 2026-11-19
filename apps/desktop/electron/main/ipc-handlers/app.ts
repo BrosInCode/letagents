@@ -23,6 +23,7 @@ import {
   getManagedAgentCommitIdentitySettings,
   setManagedAgentCommitUsesHostIdentity,
 } from "../agents/managed-agent-commit-identity.js";
+import { getDesktopDemoSettings, setDesktopDemoCdnLibraries } from "../attachments/html-demo-session.js";
 import { openDesktopCredentialStorage } from "../credential-storage.js";
 import { openAllowedExternalUrl, openExternalWebUrl } from "../external-url.js";
 import { getGitHubPullRequestStats } from "../github-pr-stats.js";
@@ -109,6 +110,11 @@ export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:notifications:activate", (event, target: unknown) => {
     assertHostApprovalSender(event);
     return activateDesktopNotificationTarget(target);
+  });
+  targetIpcMain.handle("desktop:demos:get-settings", async () => getDesktopDemoSettings());
+  targetIpcMain.handle("desktop:demos:set-cdn-libraries", async (event, enabled: unknown) => {
+    assertHostApprovalSender(event);
+    return setDesktopDemoCdnLibraries(enabled);
   });
   targetIpcMain.handle("desktop:notifications:get-status", async () => getDesktopNotificationStatus());
   targetIpcMain.handle(

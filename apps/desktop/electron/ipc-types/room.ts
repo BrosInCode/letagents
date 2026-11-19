@@ -806,6 +806,13 @@ export type DesktopDemoMark = import("../../../../shared/live-demo.mjs").DemoMar
 export type DesktopDemoMarkInput = import("../../../../shared/live-demo.mjs").DemoMarkInput;
 export type DesktopLiveDemoAnchor = import("../../../../shared/live-demo.mjs").LiveDemoAnchor;
 
+/** How demos run on this computer. */
+export interface DesktopDemoSettings {
+  /** Demos may load libraries, styles, fonts and images from `cdnHosts`. */
+  cdnLibraries: boolean;
+  cdnHosts: string[];
+}
+
 /** The state of this app's live connection to one room. */
 export type DesktopLiveDemoStatus = "connecting" | "live" | "reconnecting" | "offline" | "refused";
 

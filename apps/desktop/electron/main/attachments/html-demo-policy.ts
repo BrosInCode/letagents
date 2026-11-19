@@ -6,10 +6,11 @@ import { attachmentProtocolScheme, htmlDemoProtocolScheme } from "../paths.js";
 /**
  * An HTML demo is a single file someone attached to a room message. It runs
  * inside its message or in its own window, with no preload, no Node and no app
- * sign-in, and nothing loads over the network: scripts and styles must be
- * inline, and images must be data: or blob: URLs. Known limits: the page can
- * still cause DNS lookups (DNS prefetch, WebRTC), and it can read a file the
- * person drops or picks in it.
+ * sign-in. Nothing loads over the network except, while the person allows it,
+ * libraries, styles, fonts and images from a few public CDNs
+ * (HTML_DEMO_CDN_HOSTS); everything else must be inline or a data: or blob:
+ * URL. Known limits: the page can still cause DNS lookups (DNS prefetch,
+ * WebRTC), and it can read a file the person drops or picks in it.
  */
 export const MAX_HTML_DEMO_BYTES = 10 * 1024 * 1024;
 export const MAX_OPEN_HTML_DEMOS = 6;
@@ -58,42 +59,105 @@ export const INLINE_HTML_DEMO_FOCUS_GRACE_MS = 1_000;
 
 const INLINE_HTML_DEMO_HOST = /^[0-9a-f]{32}$/;
 
-export const HTML_DEMO_CONTENT_SECURITY_POLICY = [
-  "default-src 'none'",
-  "script-src 'unsafe-inline' 'unsafe-eval' blob:",
-  "style-src 'unsafe-inline' data: blob:",
-  "img-src data: blob:",
-  "media-src data: blob:",
-  "font-src data:",
-  "connect-src data: blob:",
-  "worker-src blob:",
-  "frame-src 'none'",
-  "object-src 'none'",
-  "manifest-src 'none'",
-  "form-action 'none'",
-  "base-uri 'none'",
-  // Scripts and its own storage only: no dialogs, printing, forms, pop-ups, downloads or top navigation.
-  "sandbox allow-scripts allow-same-origin",
-].join("; ");
+/** Electron webRequest resource types: what a CDN may serve a demo, by host. */
+type HtmlDemoCdnResource = "script" | "stylesheet" | "font" | "image";
+const LIBRARY_RESOURCES: readonly HtmlDemoCdnResource[] = ["script", "stylesheet", "font", "image"];
 
-export const HTML_DEMO_RESPONSE_HEADERS: Readonly<Record<string, string>> = {
-  "Content-Type": "text/html; charset=utf-8",
-  "Content-Security-Policy": HTML_DEMO_CONTENT_SECURITY_POLICY,
-  "X-Content-Type-Options": "nosniff",
-  "Cache-Control": "no-store",
-  "Referrer-Policy": "no-referrer",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=(), fullscreen=(), picture-in-picture=()",
-};
+/**
+ * The public CDNs a demo may load from while the person allows it (on by
+ * default; Settings turns it off), and what each may serve. Only GET requests
+ * of these kinds reach them, over HTTPS on the default port: fetch, WebSocket,
+ * beacons, media and every other host stay blocked, so a demo can load code
+ * but cannot send what it collects anywhere it chooses. Each CDN sees the
+ * viewer's IP address and the file asked for.
+ */
+export const HTML_DEMO_CDN_HOSTS: ReadonlyMap<string, readonly HtmlDemoCdnResource[]> = new Map([
+  ["cdnjs.cloudflare.com", LIBRARY_RESOURCES],
+  ["cdn.jsdelivr.net", LIBRARY_RESOURCES],
+  ["unpkg.com", LIBRARY_RESOURCES],
+  ["fonts.googleapis.com", ["stylesheet"]],
+  ["fonts.gstatic.com", ["font"]],
+]);
+
+function cdnSources(resource: HtmlDemoCdnResource, cdn: boolean): string {
+  if (!cdn) return "";
+  const hosts = [...HTML_DEMO_CDN_HOSTS].filter(([, resources]) => resources.includes(resource)).map(([host]) => ` https://${host}`);
+  return hosts.join("");
+}
+
+/** The demo CSP; with `cdn`, scripts, styles, fonts and images may also come from HTML_DEMO_CDN_HOSTS. */
+export function htmlDemoContentSecurityPolicy(cdn: boolean): string {
+  return [
+    "default-src 'none'",
+    `script-src 'unsafe-inline' 'unsafe-eval' blob:${cdnSources("script", cdn)}`,
+    `style-src 'unsafe-inline' data: blob:${cdnSources("stylesheet", cdn)}`,
+    `img-src data: blob:${cdnSources("image", cdn)}`,
+    "media-src data: blob:",
+    `font-src data:${cdnSources("font", cdn)}`,
+    "connect-src data: blob:",
+    "worker-src blob:",
+    "frame-src 'none'",
+    "object-src 'none'",
+    "manifest-src 'none'",
+    "form-action 'none'",
+    "base-uri 'none'",
+    // Scripts and its own storage only: no dialogs, printing, forms, pop-ups, downloads or top navigation.
+    "sandbox allow-scripts allow-same-origin",
+  ].join("; ");
+}
+
+/** The fully offline CSP: room pages always, and demos while CDN loading is off. */
+export const HTML_DEMO_CONTENT_SECURITY_POLICY = htmlDemoContentSecurityPolicy(false);
+
+export function htmlDemoResponseHeaders(cdn: boolean): Readonly<Record<string, string>> {
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": htmlDemoContentSecurityPolicy(cdn),
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=(), fullscreen=(), picture-in-picture=()",
+  };
+}
+
+export const HTML_DEMO_RESPONSE_HEADERS: Readonly<Record<string, string>> = htmlDemoResponseHeaders(false);
+
+/**
+ * The session proxy is a closed port, so a connection that skips the request
+ * filter (WebRTC over TCP, preconnect) goes nowhere; loopback too. With `cdn`,
+ * HTTPS to the CDN hosts goes direct, and the filter still decides each request.
+ */
+export const HTML_DEMO_DEAD_PROXY = "http://127.0.0.1:9";
+export function htmlDemoProxyBypassRules(cdn: boolean): string {
+  return cdn ? ["<-loopback>", ...[...HTML_DEMO_CDN_HOSTS.keys()].map((host) => `https://${host}`)].join(",") : "<-loopback>";
+}
+
+/** What the request filter knows about a request, beyond its URL. */
+export interface HtmlDemoRequestKind {
+  method: string;
+  resourceType: string;
+}
+
+/** A GET for a script, style, font or image a CDN host may serve, over HTTPS on the default port, with no user name. */
+export function isHtmlDemoCdnRequest(url: URL, request: HtmlDemoRequestKind): boolean {
+  if (url.protocol !== "https:" || url.port !== "" || url.username !== "" || url.password !== "") return false;
+  if (request.method !== "GET") return false;
+  const resources = HTML_DEMO_CDN_HOSTS.get(url.hostname);
+  return resources !== undefined && (resources as readonly string[]).includes(request.resourceType);
+}
 
 /**
  * The demo's own document and in-page data are the only requests a demo page
- * makes. DevTools opened on a demo (another web contents) may load its own UI.
- * Room pages use the same rule on their own scheme.
+ * makes, and, when `cdn` describes the request (CDN loading is on), what
+ * `isHtmlDemoCdnRequest` allows. DevTools opened on a demo (another web
+ * contents) may load its own UI. Room pages use the same rule on their own
+ * scheme, never with `cdn`.
  */
 export function isAllowedHtmlDemoRequest(
   rawUrl: string,
   sender: { fromDemo: boolean; host?: string } = { fromDemo: true },
   scheme: string = htmlDemoProtocolScheme,
+  cdn?: HtmlDemoRequestKind,
 ): boolean {
   let url: URL;
   try {
@@ -105,7 +169,8 @@ export function isAllowedHtmlDemoRequest(
   return (url.protocol === `${scheme}:` && (sender.host === undefined || url.hostname === sender.host))
     || url.protocol === "data:"
     || url.protocol === "blob:"
-    || (url.protocol === "devtools:" && !sender.fromDemo);
+    || (url.protocol === "devtools:" && !sender.fromDemo)
+    || (cdn !== undefined && sender.fromDemo && isHtmlDemoCdnRequest(url, cdn));
 }
 
 /** Only attachment links the app itself made may open as a demo. */

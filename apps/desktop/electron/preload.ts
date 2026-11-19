@@ -50,6 +50,10 @@ const api: DesktopApi = {
       };
     },
   },
+  demos: {
+    getSettings: () => ipcRenderer.invoke("desktop:demos:get-settings"),
+    setCdnLibraries: (enabled) => ipcRenderer.invoke("desktop:demos:set-cdn-libraries", enabled),
+  },
   notifications: {
     activate: (target) => ipcRenderer.invoke("desktop:notifications:activate", target),
     getStatus: () => ipcRenderer.invoke("desktop:notifications:get-status"),
