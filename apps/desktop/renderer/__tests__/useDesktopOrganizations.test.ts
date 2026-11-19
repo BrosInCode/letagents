@@ -201,3 +201,23 @@ test("a theme save preserves a list retry and wins over older theme data in that
     assert.equal(state.organizations.value[0].theme_id, null);
   });
 });
+
+test("a fresh room theme survives reopening a cached company room for the same account", async () => {
+  await harness({ list: async () => listed([]) }, async (state, auth) => {
+    const oldRoom = { id: "42", name: "Herotel", theme: "mint" as const, themeRevision: 1 };
+    const newRoom = { ...oldRoom, theme: "violet" as const, themeRevision: 2 };
+    state.rememberRoomAppearance(oldRoom);
+    assert.deepEqual(state.resolveRoomAppearance(oldRoom), oldRoom);
+    state.rememberRoomAppearance(newRoom);
+    assert.deepEqual(state.resolveRoomAppearance(newRoom), newRoom);
+    state.rememberRoomAppearance(oldRoom);
+    assert.deepEqual(state.resolveRoomAppearance(oldRoom), newRoom);
+    assert.equal(state.resolveRoomAppearance({ ...oldRoom, id: "another" }).theme, "mint");
+
+    const cleared = { ...newRoom, theme: null, themeRevision: 3 };
+    state.rememberRoomAppearance(cleared);
+    assert.deepEqual(state.resolveRoomAppearance(oldRoom), cleared);
+    auth.value = status("bob");
+    assert.deepEqual(state.resolveRoomAppearance(oldRoom), oldRoom);
+  });
+});

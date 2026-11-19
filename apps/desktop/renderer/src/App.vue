@@ -478,7 +478,7 @@
 <script setup lang="ts">
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
-import { computed, defineAsyncComponent } from "vue";
+import { computed, defineAsyncComponent, watch } from "vue";
 import { roomThemeId, type RoomCompanyAppearance } from "../../../../shared/room-themes.mjs";
 import { provideRoomTheme } from "../../../../shared/ui/room-theme";
 import { useKeyWhileShown } from "./composables/useKeyWhileShown";
@@ -524,7 +524,6 @@ import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
 import { useAppMessageNotifications } from "./composables/app/useAppMessageNotifications";
 import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
-import { newestCompanyAppearance } from "./domain/company-navigation";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
 
 const RentMarketplaceView = defineAsyncComponent(
@@ -705,23 +704,28 @@ const { askAgentOpen, giveAgentToken } = useAppAgentAsks();
 
 const themeAccountKey = computed(() => authStatus.value?.authenticated && authStatus.value.account
   ? `${authStatus.value.apiUrl}:${authStatus.value.account.id}` : null);
+const selectedRoomAppearance = computed(() => selectedSnapshot.value?.room?.companyAppearance);
+watch(selectedRoomAppearance, company.rememberRoomAppearance);
 const roomCompany = computed<RoomCompanyAppearance | null>(() => {
   if (!themeAccountKey.value) return null;
   const selectedCompany = company.activeId.value ? company.selected.value : null;
-  const roomAppearance = selectedSnapshot.value?.room?.companyAppearance;
+  const selectedCompanyAppearance = selectedCompany ? company.resolveRoomAppearance({
+    id: selectedCompany.github_org_id,
+    name: selectedCompany.login,
+    theme: roomThemeId(selectedCompany.theme_id),
+    themeRevision: selectedCompany.theme_revision,
+  }) : null;
+  const roomAppearance = selectedRoomAppearance.value;
   if (showFirstRunGate.value || activeEntry.value.type !== "room" || showCompanyHome.value) {
-    if (selectedCompany) return { id: selectedCompany.github_org_id, name: selectedCompany.login, theme: roomThemeId(selectedCompany.theme_id) };
+    if (selectedCompanyAppearance) return selectedCompanyAppearance;
     if (showFirstRunGate.value) return null;
   }
   if (!roomAppearance) {
     const identifier = normalizeRoomIdentifier(selectedSnapshot.value?.room?.identifier);
     const listed = identifier && company.rooms.value.some(room => normalizeRoomIdentifier(room.room_id) === identifier);
-    return selectedCompany && listed
-      ? { id: selectedCompany.github_org_id, name: selectedCompany.login, theme: roomThemeId(selectedCompany.theme_id) }
-      : null;
+    return listed ? selectedCompanyAppearance : null;
   }
-  const verified = company.organizations.value.find(org => org.github_org_id === roomAppearance.id);
-  return newestCompanyAppearance(roomAppearance, verified);
+  return company.resolveRoomAppearance(roomAppearance);
 });
 const roomTheme = provideRoomTheme(themeAccountKey, roomCompany);
 const canSetCompanyTheme = computed(() => company.organizations.value.some(org =>
