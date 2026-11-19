@@ -12,7 +12,7 @@ mkdirSync(output, { recursive: true });
 app.setPath('userData', profile);
 process.env.LETAGENTS_STATE_PATH = join(profile, 'mcp-state.json');
 const { desktopSmokeRoomSnapshot } = await import('../../dist-electron/main/smoke.js');
-const links = await import('../../dist-electron/main/company-links.js');
+let links = await import('../../dist-electron/main/company-links.js');
 let authenticated = false;
 let completed = false;
 let failOrganizations = false;
@@ -312,14 +312,16 @@ try {
   // A company link opens a dialog over any view, and survives a restart until it is answered.
   await click('[data-testid="sidebar-my-work"]');
   await waitFor(`Boolean(document.querySelector('[data-testid="my-work-view"]'))`);
-  links.acceptCompanyLink('letagents://company/46');
+  // Restore a persisted invite without asking the production dispatcher to open
+  // its own window. This process only has the fixture window and IPC bridge.
+  writeFileSync(join(profile, 'pending-company-link.json'), JSON.stringify({ organizationId: '46' }), { mode: 0o600 });
+  links = await import('../../dist-electron/main/company-links.js?restart');
   assert.equal(links.getPendingCompanyLink(), '46');
-  const reloadedLinks = await import(`../../dist-electron/main/company-links.js?restart=${Date.now()}`);
-  assert.equal(reloadedLinks.getPendingCompanyLink(), '46');
   links.acknowledgeCompanyLink('43');
   assert.equal(links.getPendingCompanyLink(), '46');
   window.webContents.send('fixture:invite', '46');
   await waitFor(`Boolean(document.querySelector('[data-testid="company-invite-join"]'))`);
+  assert.deepEqual(BrowserWindow.getAllWindows().map(candidate => candidate.id), [window.id], 'an invite stays in the fixture window');
   assert.ok((await js('document.body.innerText')).includes('Join Northwind'));
   await capture('07-company-invitation.png');
   window.setSize(600, 800);
