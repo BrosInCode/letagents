@@ -146,6 +146,10 @@ try {
     await click('.welcome-controls button:nth-child(2)');
     await waitFor(`document.querySelector('.welcome-controls button:first-child')?.textContent.trim() === 'Pause'`);
     assert.equal(await js(`document.fullscreenElement?.dataset.testid`), 'first-run-welcome', 'replay stays full screen');
+    // The macOS Space transition can outlast the DOM fullscreenchange event.
+    if (process.platform === 'darwin') {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
     await click('[data-testid="first-run-welcome"] [aria-label="Exit full screen"]');
     await waitFor(`!document.fullscreenElement`);
   }
