@@ -113,7 +113,11 @@ export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
   });
   targetIpcMain.handle("desktop:demos:get-settings", async () => getDesktopDemoSettings());
   targetIpcMain.handle("desktop:demos:set-cdn-libraries", async (event, enabled: unknown) => {
-    assertHostApprovalSender(event);
+    try {
+      assertHostApprovalSender(event);
+    } catch {
+      throw new Error("Only the LetAgents window can change demo settings.");
+    }
     return setDesktopDemoCdnLibraries(enabled);
   });
   targetIpcMain.handle("desktop:notifications:get-status", async () => getDesktopNotificationStatus());

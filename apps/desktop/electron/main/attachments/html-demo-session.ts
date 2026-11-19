@@ -42,18 +42,23 @@ export async function getDesktopDemoSettings(): Promise<DesktopDemoSettings> {
 /**
  * Save whether demos may load from the CDNs. The request filter reads the new
  * value at once, so a running demo's next CDN request follows it; the proxy
- * follows here; a demo's CSP follows when the demo next opens.
+ * follows here; a demo's CSP follows when the demo next opens. A save that
+ * fails changes nothing and throws.
  */
 export async function setDesktopDemoCdnLibraries(enabled: unknown): Promise<DesktopDemoSettings> {
   if (typeof enabled !== "boolean") throw new Error("Choose on or off.");
-  const settings = await htmlDemoSettings().setCdnLibraries(enabled);
-  const prepared = demoSession;
-  if (prepared) {
-    const ses = await prepared.catch(() => null);
-    // Off must not wait on, or fail with, the proxy: the request filter already refuses CDN requests.
-    await ses?.setProxy({ proxyRules: HTML_DEMO_DEAD_PROXY, proxyBypassRules: htmlDemoProxyBypassRules(htmlDemoSettings().cdnLibraries()) }).catch(() => undefined);
+  try {
+    return desktopDemoSettings(await htmlDemoSettings().setCdnLibraries(enabled));
+  } finally {
+    // The proxy always follows the saved value, after a failed save too.
+    await applyHtmlDemoProxy();
   }
-  return desktopDemoSettings(settings);
+}
+
+async function applyHtmlDemoProxy(): Promise<void> {
+  const ses = await demoSession?.catch(() => null);
+  // A proxy that cannot be set must not fail the save: the request filter already decides each request.
+  await ses?.setProxy({ proxyRules: HTML_DEMO_DEAD_PROXY, proxyBypassRules: htmlDemoProxyBypassRules(htmlDemoSettings().cdnLibraries()) }).catch(() => undefined);
 }
 
 /** The decoded HTML behind a room attachment link, read up to the demo size limit. */

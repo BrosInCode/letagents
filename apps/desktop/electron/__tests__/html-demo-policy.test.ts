@@ -115,6 +115,14 @@ describe("HTML demo policy", () => {
       ["https://fonts.googleapis.com/x.js", get("script"), "a script from the font CSS host"],
       ["https://fonts.gstatic.com/x.css", get("stylesheet"), "a style from the font file host"],
       ["https://fonts.gstatic.com/x.png", get("image"), "an image from the font file host"],
+      ["https://fonts.googleapis.com/x.woff2", get("font"), "a font from the font CSS host"],
+      ["https://fonts.googleapis.com/x.png", get("image"), "an image from the font CSS host"],
+      ["https://cdn.jsdelivr.net./npm/d3@7/x.js", get("script"), "a host with a trailing dot"],
+      ["https://unpkg.com/x.html", get("mainFrame"), "a page"],
+      ["https://unpkg.com/x.swf", get("object"), "a plugin"],
+      ["https://unpkg.com/report", get("cspReport"), "a CSP report"],
+      ["https://unpkg.com/x.js", { method: "HEAD", resourceType: "script" }, "a HEAD"],
+      ["https://unpkg.com/x.js", { method: "OPTIONS", resourceType: "script" }, "an OPTIONS"],
     ];
     for (const [url, request, why] of refused) {
       assert.equal(isAllowedHtmlDemoRequest(url, demo, "letagents-demo", request), false, why);

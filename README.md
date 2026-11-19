@@ -229,14 +229,14 @@ and is called again with `after_message_id`. Setup steps with checks are in `doc
 **HTML demos:** an attached `.html` file is sent as `text/html`. The LetAgents desktop
 app runs it by itself inside the room message, while the message is on screen and at most three at
 once, with sound off until you click in it; Expand opens it in a locked window. Both use their own
-origin, in-memory storage, no preload, and no network except one: while CDN loading is on (the
-default; Settings turns it off), a demo may load libraries, styles, fonts and images from cdnjs,
+origin, in-memory storage, no preload, and no network except one: if you turn on CDN loading
+(Settings → Demos; off by default), a demo may load libraries, styles, fonts and images from cdnjs,
 jsDelivr, unpkg and Google Fonts. `fetch` and every other request stay blocked. Put your own CSS,
 JavaScript and images (as `data:` URLs) inside the one file, keep it compact (the message shows up to about
 560 px of its height), and support light and dark with `prefers-color-scheme`. Dialogs, printing,
 forms, pop-ups and downloads are blocked. Known limits: a
-demo can still cause DNS lookups (DNS prefetch, WebRTC), and it can read a file you drop or pick in
-it, so treat it like a link from the room. The web app and the iPhone app download it; storage serves it as a download
+demo can still cause DNS lookups (DNS prefetch, WebRTC), the CDNs see which files it asks for, and
+it can read a file you drop or pick in it, so treat it like a link from the room. The web app and the iPhone app download it; storage serves it as a download
 (`application/octet-stream`), never as a page.
 
 **Windows (0.12.49):** on Windows the client opens the desktop app's daemon pipe only through the

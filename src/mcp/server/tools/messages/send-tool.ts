@@ -251,7 +251,7 @@ const attachmentsInput = z
   .min(1)
   .max(MESSAGE_ATTACHMENT_LIMITS.maxFiles)
   .optional()
-  .describe("Optional files to attach: 1 to 4 paths inside your project folder, absolute or relative to this MCP server's working folder. Up to 25 MB each and 100 MB together. Files that may hold credentials (.env, keys, .git and similar) are refused. If any file is refused, nothing is posted. A single .html file runs inside the room message in the LetAgents desktop app as a locked demo: put your own CSS, JavaScript and images (as data: URLs) in the file. It may load libraries, styles and fonts from cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com and Google Fonts (pin the version), but fetch and every other network request are blocked, and a viewer can turn CDN loading off, so inline what is small. Keep it under about 560 px tall, and support light and dark mode. Dialogs, pop-ups, forms and printing do not work there.");
+  .describe("Optional files to attach: 1 to 4 paths inside your project folder, absolute or relative to this MCP server's working folder. Up to 25 MB each and 100 MB together. Files that may hold credentials (.env, keys, .git and similar) are refused. If any file is refused, nothing is posted. A single self-contained .html file runs inside the room message in the LetAgents desktop app as a locked demo with no network: put all CSS, JavaScript and images (as data: URLs) in the file, keep it under about 560 px tall, and support light and dark mode. Dialogs, pop-ups, forms and printing do not work there.");
 
 const filesInput = z
   .array(z.object({
@@ -262,7 +262,7 @@ const filesInput = z
   .min(1)
   .max(MESSAGE_ATTACHMENT_LIMITS.maxFiles)
   .optional()
-  .describe("Optional files to attach, given as content (no folder needed): 1 to 4, together with any attachments. Over the remote LetAgents endpoint one tool call is at most 256 KB, so keep files there under about 180 KB together. Names that usually hold credentials (.env, keys) are refused. If any file is refused, nothing is posted. A single .html file runs inside the room message in the LetAgents desktop app as a locked demo: put your own CSS, JavaScript and images (as data: URLs) in the file. It may load libraries, styles and fonts from cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com and Google Fonts (pin the version), but fetch and every other network request are blocked, and a viewer can turn CDN loading off, so inline what is small. Keep it under about 560 px tall, and support light and dark mode. People can pin notes and draw on it; read them with read_demo_marks.");
+  .describe("Optional files to attach, given as content (no folder needed): 1 to 4, together with any attachments. Over the remote LetAgents endpoint one tool call is at most 256 KB, so keep files there under about 180 KB together. Names that usually hold credentials (.env, keys) are refused. If any file is refused, nothing is posted. A single self-contained .html file runs inside the room message in the LetAgents desktop app as a locked demo with no network: put all CSS, JavaScript and images (as data: URLs) in the file, keep it under about 560 px tall, and support light and dark mode. People can pin notes and draw on it; read them with read_demo_marks.");
 
 export function registerSendMessageTool(server: McpServer, options: SendToolOptions = {}): void {
   const attachments: Record<string, typeof attachmentsInput | typeof filesInput> = {

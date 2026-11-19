@@ -6,7 +6,7 @@ import { attachmentProtocolScheme, htmlDemoProtocolScheme } from "../paths.js";
 /**
  * An HTML demo is a single file someone attached to a room message. It runs
  * inside its message or in its own window, with no preload, no Node and no app
- * sign-in. Nothing loads over the network except, while the person allows it,
+ * sign-in. Nothing loads over the network except, once the person allows it,
  * libraries, styles, fonts and images from a few public CDNs
  * (HTML_DEMO_CDN_HOSTS); everything else must be inline or a data: or blob:
  * URL. Known limits: the page can still cause DNS lookups (DNS prefetch,
@@ -64,12 +64,15 @@ type HtmlDemoCdnResource = "script" | "stylesheet" | "font" | "image";
 const LIBRARY_RESOURCES: readonly HtmlDemoCdnResource[] = ["script", "stylesheet", "font", "image"];
 
 /**
- * The public CDNs a demo may load from while the person allows it (on by
- * default; Settings turns it off), and what each may serve. Only GET requests
+ * The public CDNs a demo may load from once the person allows it (off by
+ * default; Settings → Demos turns it on), and what each may serve. Only GET requests
  * of these kinds reach them, over HTTPS on the default port: fetch, WebSocket,
- * beacons, media and every other host stay blocked, so a demo can load code
- * but cannot send what it collects anywhere it chooses. Each CDN sees the
- * viewer's IP address and the file asked for.
+ * beacons, media and every other host stay blocked, so a demo cannot open a
+ * connection to a server of its choosing. It can still leak a little through
+ * which files it asks for: each CDN sees the viewer's IP address and the file,
+ * and jsDelivr publishes daily hit counts for each file of each package, so
+ * the author of a package can count how often a demo was opened. DNS lookups
+ * (DNS prefetch) were already a stronger channel before CDN loading.
  */
 export const HTML_DEMO_CDN_HOSTS: ReadonlyMap<string, readonly HtmlDemoCdnResource[]> = new Map([
   ["cdnjs.cloudflare.com", LIBRARY_RESOURCES],

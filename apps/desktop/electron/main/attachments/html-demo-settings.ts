@@ -5,12 +5,16 @@ import { dirname } from "node:path";
 import type { DesktopDemoSettings } from "../../ipc-types.js";
 import { HTML_DEMO_CDN_HOSTS } from "./html-demo-policy.js";
 
-/** What the person chose for demos on this computer. A missing or broken file means the defaults. */
+/** What the person chose for demos on this computer. */
 export interface PersistedHtmlDemoSettings {
   cdnLibraries: boolean;
 }
 
-const DEFAULT_SETTINGS: PersistedHtmlDemoSettings = { cdnLibraries: true };
+/**
+ * CDN loading is off until the person turns it on. A file that is missing,
+ * cannot be read or makes no sense means off too.
+ */
+const DEFAULT_SETTINGS: PersistedHtmlDemoSettings = { cdnLibraries: false };
 
 /**
  * The demo settings file. Main reads it once, before the first demo opens, and
@@ -35,24 +39,32 @@ export class HtmlDemoSettingsStore {
     return (this.current ?? DEFAULT_SETTINGS).cdnLibraries;
   }
 
+  /**
+   * Save the choice, then use it. A save that fails throws and changes
+   * nothing, so the value in memory is always what the file holds.
+   */
   async setCdnLibraries(enabled: boolean): Promise<PersistedHtmlDemoSettings> {
     await this.read();
     const next = { cdnLibraries: enabled };
-    this.current = next;
-    // Saves run one at a time, so the file ends with the last choice.
-    const write = this.writes.then(() => this.persist(next));
+    // Saves run one at a time, so the file and the value end with the last choice that was saved.
+    const write = this.writes.then(async () => {
+      await this.persist(next);
+      this.current = next;
+    });
     this.writes = write.catch(() => undefined);
     await write;
     return { ...next };
   }
 
   private async load(): Promise<PersistedHtmlDemoSettings> {
-    let loaded = DEFAULT_SETTINGS;
+    let loaded: PersistedHtmlDemoSettings;
     try {
       const parsed = JSON.parse(await readFile(this.path, "utf8")) as Partial<PersistedHtmlDemoSettings> | null;
-      if (parsed && typeof parsed === "object" && typeof parsed.cdnLibraries === "boolean") loaded = { cdnLibraries: parsed.cdnLibraries };
+      loaded = parsed && typeof parsed === "object" && typeof parsed.cdnLibraries === "boolean"
+        ? { cdnLibraries: parsed.cdnLibraries }
+        : DEFAULT_SETTINGS;
     } catch {
-      // Missing or unreadable: the defaults.
+      loaded = DEFAULT_SETTINGS;
     }
     // A save that finished while the file loaded wins.
     this.current ??= loaded;

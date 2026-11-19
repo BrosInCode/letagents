@@ -50,7 +50,8 @@ export async function openHtmlDemo(input: {
 
 /**
  * Show an HTML document in a locked window: its own origin, no preload, and
- * nothing loads over the network. The page can still cause DNS lookups (DNS
+ * nothing loads over the network except files from the demo CDNs while they
+ * are allowed (html-demo-policy.ts). The page can still cause DNS lookups (DNS
  * prefetch, WebRTC) and read a file the person drops or picks in it; Electron
  * has no per-window switch for those.
  */

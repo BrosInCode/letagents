@@ -14,6 +14,7 @@ export type SettingsPaneId =
   | "storage:sync"
   | "storage:database"
   | "system:styling"
+  | "system:demos"
   | "system:app-agent"
   | "system:supervisor"
   | "system:runtime"
