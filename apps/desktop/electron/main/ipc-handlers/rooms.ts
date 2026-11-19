@@ -55,6 +55,9 @@ import type {
   DesktopChatStorageSettings,
   DesktopDroppedAttachmentContent,
   DesktopFocusRoomConclusionDetails,
+  DesktopPersistedOutgoingMessage,
+  DesktopSaveOutgoingMessageInput,
+  DesktopUpdateOutgoingMessageInput,
   DesktopFocusRoomMutationResult,
   DesktopFocusRoomSettingsPatch,
   DesktopGitHubEventsPage,
@@ -171,6 +174,12 @@ import {
 } from "../rooms.js";
 import { desktopSmokeBoardGovernance, isDesktopSmokeCheck } from "../smoke.js";
 import { liveSupervisorStateEntries } from "../supervisor-daemon.js";
+import {
+  deleteDesktopOutgoingMessage,
+  listDesktopOutgoingMessages,
+  saveDesktopOutgoingMessage,
+  updateDesktopOutgoingMessage,
+} from "../rooms/outbox-store.js";
 import { getDesktopAccountUnread, reportDesktopRoomRead } from "../rooms/account-unread.js";
 
 export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
@@ -491,6 +500,26 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       gif?: RoomGif | null,
     ): Promise<DesktopSendRoomMessageResult> =>
       sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId, clientMessageId, messageNamespace, gif),
+  );
+  targetIpcMain.handle(
+    "desktop:room:save-outgoing-message",
+    async (_event, input: DesktopSaveOutgoingMessageInput): Promise<DesktopPersistedOutgoingMessage> =>
+      saveDesktopOutgoingMessage(input),
+  );
+  targetIpcMain.handle(
+    "desktop:room:update-outgoing-message",
+    async (_event, clientMessageId: string, input: DesktopUpdateOutgoingMessageInput): Promise<void> =>
+      updateDesktopOutgoingMessage(clientMessageId, input),
+  );
+  targetIpcMain.handle(
+    "desktop:room:delete-outgoing-message",
+    async (_event, clientMessageId: string, options?: { discardAttachments?: boolean }): Promise<void> =>
+      deleteDesktopOutgoingMessage(clientMessageId, options),
+  );
+  targetIpcMain.handle(
+    "desktop:room:list-outgoing-messages",
+    async (): Promise<DesktopPersistedOutgoingMessage[]> =>
+      listDesktopOutgoingMessages(),
   );
   targetIpcMain.handle(
     "desktop:room:add-task",

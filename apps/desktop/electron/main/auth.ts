@@ -445,8 +445,15 @@ export async function signOutDesktopAuth(): Promise<void> {
   // Capture the outgoing session before clearing local state. Do not let a
   // slow logout response clear a replacement sign-in started in the meantime.
   const stored = await readStoredAuth();
+  const signedOutAccountId = stored.account?.id || null;
   const revocation = revokeAuthTokens([stored.token, stored.agentToken]);
   await clearStoredAuth();
+  if (signedOutAccountId) {
+    await import("./rooms/outbox-store.js")
+      .then(({ clearCloudDesktopOutgoingMessagesForAccount }) =>
+        clearCloudDesktopOutgoingMessagesForAccount(signedOutAccountId))
+      .catch(() => undefined);
+  }
   await revocation;
 }
 

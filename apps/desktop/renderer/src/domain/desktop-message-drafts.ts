@@ -59,6 +59,26 @@ export function captureDesktopMessageDraftRestore(namespace: string | null): (te
   };
 }
 
+/**
+ * Restore a refused outgoing send's text back into its original room or thread
+ * composer draft under the current account scope.
+ */
+export function restoreDesktopMessageDraftText(
+  namespace: string | null,
+  threadRootId: string | null,
+  text: string,
+): boolean {
+  if (!text.trim()) return false;
+  const key = messageDraftKey(namespace, threadRootId);
+  const saved = drafts.get(key) ?? emptyDraft();
+  drafts.set(key, {
+    ...saved,
+    text: saved.text.trim() ? `${saved.text}\n\n${text}` : text,
+    textRevision: ++revision,
+  });
+  return true;
+}
+
 export function useDesktopMessageDraft(namespace: () => string | null, threadRootId: () => string | null = () => null) {
   const key = computed(() => messageDraftKey(namespace(), threadRootId()));
   const empty = emptyDraft;

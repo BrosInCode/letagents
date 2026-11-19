@@ -1,38 +1,227 @@
 import type { RoomGif } from "../../../../../shared/room-expressions.mjs";
 import { shallowRef } from "vue";
-import type { DesktopRoomMessage } from "../../../electron/ipc-types";
+import type {
+  DesktopOutgoingMessageAttachment,
+  DesktopOutgoingMessageStatus,
+  DesktopPersistedOutgoingMessage,
+  DesktopRoomMessage,
+} from "../../../electron/ipc-types";
 import { desktopIpc } from "../ipc/index.js";
+import { restoreDesktopMessageDraftText } from "./desktop-message-drafts.js";
 
-interface OutgoingMessage {
+export interface OutgoingMessage {
   roomIdentifier: string;
   messageNamespace: string | null;
   clientMessageId: string;
   text: string;
   replyTo: string | null;
   threadRootId: string | null;
-  attachments: Array<{ upload_id: string }>;
+  attachments: DesktopOutgoingMessageAttachment[];
   gif?: RoomGif | null;
   message: DesktopRoomMessage;
   inFlight: boolean;
   confirmed: boolean;
+  /**
+   * True once any delivery attempt has had an ambiguous outcome (crash, reload,
+   * lost ack, network/5xx). Once true, a later refusal on retry cannot prove the
+   * earlier attempt did not commit, so the entry must remain `uncertain` with
+   * its original `clientMessageId` and never become discardable.
+   */
+  hadUncertainAttempt: boolean;
   onConfirmed: (message: DesktopRoomMessage) => void;
 }
+
+export interface DesktopOutboxConfirmedEvent {
+  roomIdentifier: string;
+  messageNamespace: string | null;
+  clientMessageId: string;
+  message: DesktopRoomMessage;
+}
+
+type OutboxConfirmationListener = (event: DesktopOutboxConfirmedEvent) => void;
 
 // App-session state: a room shell is remounted on every room switch. Keep
 // accepted submissions here until the authoritative stream has caught up.
 export const desktopMessageOutbox = shallowRef<readonly OutgoingMessage[]>([]);
 
+export const INTERRUPTED_OUTBOX_DELIVERY_ERROR =
+  "Delivery could not be confirmed before the app closed.";
+
+let outboxGeneration = 0;
+const pendingLocalPersists = new Set<string>();
+const confirmationHandlers = new Map<string, { token: symbol; listener: OutboxConfirmationListener }>();
+
+function roomOutboxKey(roomIdentifier: string, messageNamespace: string | null): string {
+  return `${roomIdentifier}\0${messageNamespace ?? ""}`;
+}
+
 function changed(): void {
   desktopMessageOutbox.value = [...desktopMessageOutbox.value];
 }
 
+function clonePlain<T>(value: T): T {
+  if (value === null || value === undefined || typeof value !== "object") return value;
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function normalizeAttachments(
+  attachments: readonly DesktopOutgoingMessageAttachment[],
+): DesktopOutgoingMessageAttachment[] {
+  return attachments.map((attachment) => ({
+    upload_id: attachment.upload_id,
+    ...(attachment.fileName ? { fileName: attachment.fileName } : {}),
+    ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
+    ...(typeof attachment.sizeBytes === "number" ? { sizeBytes: attachment.sizeBytes } : {}),
+  }));
+}
+
+function outgoingMeta(
+  status: DesktopOutgoingMessageStatus,
+  attachments: readonly DesktopOutgoingMessageAttachment[],
+  error: string | null,
+): NonNullable<DesktopRoomMessage["outgoing"]> {
+  return {
+    status,
+    attachmentCount: attachments.length,
+    ...(attachments.length > 0 ? { attachments: normalizeAttachments(attachments) } : {}),
+    error,
+  };
+}
+
+function buildOutgoingMessage(input: {
+  clientMessageId: string;
+  text: string;
+  replyTo: string | null;
+  threadRootId: string | null;
+  attachments: readonly DesktopOutgoingMessageAttachment[];
+  gif?: RoomGif | null;
+  replyPreview: DesktopRoomMessage["replyTo"];
+  sender?: string;
+  timestamp: string;
+  status: DesktopOutgoingMessageStatus;
+  error: string | null;
+}): DesktopRoomMessage {
+  const id = `pending:${input.clientMessageId}`;
+  return {
+    id,
+    clientMessageId: input.clientMessageId,
+    sender: input.sender || "You",
+    text: input.text,
+    ...(input.gif ? { gif: input.gif } : {}),
+    attachments: [],
+    agentPromptKind: null,
+    source: "browser",
+    timestamp: input.timestamp,
+    actorLabel: null,
+    agentIdentity: null,
+    threadRootId: input.threadRootId || id,
+    threadReplyToId: input.replyTo,
+    thread: null,
+    replyTo: input.replyPreview,
+    outgoing: outgoingMeta(input.status, input.attachments, input.error),
+  };
+}
+
+export function registerDesktopOutboxConfirmationListener(
+  roomIdentifier: string,
+  messageNamespace: string | null,
+  listener: OutboxConfirmationListener,
+): () => void {
+  const key = roomOutboxKey(roomIdentifier, messageNamespace);
+  const token = Symbol(key);
+  confirmationHandlers.set(key, { token, listener });
+  return () => {
+    if (confirmationHandlers.get(key)?.token === token) {
+      confirmationHandlers.delete(key);
+    }
+  };
+}
+
 export function clearDesktopMessageOutbox(): void {
+  outboxGeneration += 1;
+  pendingLocalPersists.clear();
   desktopMessageOutbox.value = [];
 }
 
-export function reconcileDesktopMessageOutbox(roomIdentifier: string, messages: readonly DesktopRoomMessage[], messageNamespace: string | null = null): void {
-  const byClientId = new Map(messages.filter(message => message.clientMessageId).map(message => [message.clientMessageId, message]));
-  desktopMessageOutbox.value = desktopMessageOutbox.value.filter(entry => {
+export async function hydrateDesktopMessageOutbox(): Promise<void> {
+  if (typeof desktopIpc.room?.listOutgoingMessages !== "function") return;
+  const generation = outboxGeneration;
+  let persisted: DesktopPersistedOutgoingMessage[];
+  try {
+    persisted = await desktopIpc.room.listOutgoingMessages();
+  } catch {
+    return;
+  }
+  if (generation !== outboxGeneration || !Array.isArray(persisted) || persisted.length === 0) return;
+
+  const existingIds = new Set(desktopMessageOutbox.value.map((entry) => entry.clientMessageId));
+  const restored: OutgoingMessage[] = [];
+  for (const item of persisted) {
+    if (
+      !item?.clientMessageId
+      || existingIds.has(item.clientMessageId)
+      || pendingLocalPersists.has(item.clientMessageId)
+    ) {
+      continue;
+    }
+    // Any row hydrated from SQLite that is not already tracked by an active
+    // send in this renderer has no live delivery attempt (for example after a
+    // full crash OR a renderer-only reload while Electron's main process stayed
+    // alive). Preserve definite pre-commit refusals as "refused" (discardable);
+    // surface interrupted pending/uncertain rows as "uncertain" (Retry-only).
+    const orphanedPending = item.status === "pending";
+    const status: DesktopOutgoingMessageStatus = item.status === "refused" ? "refused" : "uncertain";
+    const error = item.error ?? (orphanedPending ? INTERRUPTED_OUTBOX_DELIVERY_ERROR : null);
+    if (orphanedPending) {
+      void desktopIpc.room?.updateOutgoingMessage?.(item.clientMessageId, {
+        status: "uncertain",
+        error,
+      }).catch(() => undefined);
+    }
+    const attachments = normalizeAttachments(item.attachments || []);
+    restored.push({
+      roomIdentifier: item.roomIdentifier,
+      messageNamespace: item.messageNamespace ?? null,
+      clientMessageId: item.clientMessageId,
+      text: item.text,
+      replyTo: item.replyTo ?? null,
+      threadRootId: item.threadRootId ?? null,
+      attachments,
+      ...(item.gif ? { gif: item.gif } : {}),
+      inFlight: false,
+      confirmed: false,
+      hadUncertainAttempt: status !== "refused",
+      onConfirmed: () => undefined,
+      message: buildOutgoingMessage({
+        clientMessageId: item.clientMessageId,
+        text: item.text,
+        replyTo: item.replyTo ?? null,
+        threadRootId: item.threadRootId ?? null,
+        attachments,
+        gif: item.gif,
+        replyPreview: item.replyPreview ?? null,
+        sender: item.sender || "You",
+        timestamp: item.timestamp || new Date().toISOString(),
+        status,
+        error,
+      }),
+    });
+  }
+  if (restored.length === 0) return;
+  desktopMessageOutbox.value = [...restored, ...desktopMessageOutbox.value];
+}
+
+export function reconcileDesktopMessageOutbox(
+  roomIdentifier: string,
+  messages: readonly DesktopRoomMessage[],
+  messageNamespace: string | null = null,
+): void {
+  const byClientId = new Map(
+    messages
+      .filter((message) => message.clientMessageId)
+      .map((message) => [message.clientMessageId, message]),
+  );
+  desktopMessageOutbox.value = desktopMessageOutbox.value.filter((entry) => {
     if (entry.roomIdentifier !== roomIdentifier || entry.messageNamespace !== messageNamespace) return true;
     const message = byClientId.get(entry.clientMessageId);
     if (!message) return true;
@@ -45,83 +234,262 @@ function confirm(entry: OutgoingMessage, message: DesktopRoomMessage): void {
   if (entry.confirmed) return;
   entry.confirmed = true;
   entry.message = message;
+  void desktopIpc.room?.deleteOutgoingMessage?.(entry.clientMessageId).catch(() => undefined);
   entry.onConfirmed(message);
+  const handler = confirmationHandlers.get(roomOutboxKey(entry.roomIdentifier, entry.messageNamespace));
+  handler?.listener({
+    roomIdentifier: entry.roomIdentifier,
+    messageNamespace: entry.messageNamespace,
+    clientMessageId: entry.clientMessageId,
+    message,
+  });
 }
 
-export function enqueueDesktopMessage(input: {
+export interface EnqueueDesktopMessageInput {
   roomIdentifier: string;
   messageNamespace: string | null;
   text: string;
   replyTo: string | null;
   threadRootId: string | null;
-  attachments: Array<{ upload_id: string }>;
+  attachments: DesktopOutgoingMessageAttachment[];
   gif?: RoomGif | null;
   replyPreview: DesktopRoomMessage["replyTo"];
   onConfirmed: (message: DesktopRoomMessage) => void;
-}): string {
-  const clientMessageId = `desktop-send:${crypto.randomUUID()}`;
-  const id = `pending:${clientMessageId}`;
+  clientMessageId?: string;
+  timestamp?: string;
+}
+
+export function enqueueDesktopMessage(input: EnqueueDesktopMessageInput): string {
+  const clientMessageId = input.clientMessageId || `desktop-send:${crypto.randomUUID()}`;
+  const timestamp = input.timestamp || new Date().toISOString();
+  const attachments = normalizeAttachments(input.attachments);
   const entry: OutgoingMessage = {
-    ...input,
-    attachments: input.attachments.map(attachment => ({ ...attachment })),
+    roomIdentifier: input.roomIdentifier,
+    messageNamespace: input.messageNamespace,
+    text: input.text,
+    replyTo: input.replyTo,
+    threadRootId: input.threadRootId,
+    attachments,
+    ...(input.gif ? { gif: input.gif } : {}),
+    onConfirmed: input.onConfirmed,
     clientMessageId,
     inFlight: false,
     confirmed: false,
-    message: {
-      id, clientMessageId, sender: "You", text: input.text,
-      ...(input.gif ? { gif: input.gif } : {}),
-      attachments: [], agentPromptKind: null, source: "browser",
-      timestamp: new Date().toISOString(), actorLabel: null, agentIdentity: null,
-      threadRootId: input.threadRootId || id, threadReplyToId: input.replyTo,
-      thread: null, replyTo: input.replyPreview,
-      outgoing: { status: "pending", attachmentCount: input.attachments.length, error: null },
-    },
+    hadUncertainAttempt: false,
+    message: buildOutgoingMessage({
+      clientMessageId,
+      text: input.text,
+      replyTo: input.replyTo,
+      threadRootId: input.threadRootId,
+      attachments,
+      gif: input.gif,
+      replyPreview: input.replyPreview,
+      timestamp,
+      status: "pending",
+      error: null,
+    }),
   };
   desktopMessageOutbox.value = [...desktopMessageOutbox.value, entry];
   return clientMessageId;
 }
 
+/**
+ * Durably persist an outgoing send before the composer clears. If the app is
+ * killed at any point after this resolves, reopening restores the send.
+ */
+export async function persistAndEnqueueDesktopMessage(
+  input: EnqueueDesktopMessageInput,
+): Promise<string | null> {
+  const clientMessageId = input.clientMessageId || `desktop-send:${crypto.randomUUID()}`;
+  const timestamp = input.timestamp || new Date().toISOString();
+  const attachments = normalizeAttachments(input.attachments);
+  const generation = outboxGeneration;
+  const saveOutgoingMessage = desktopIpc.room?.saveOutgoingMessage;
+  const plainGif = input.gif ? clonePlain(input.gif) : undefined;
+  const plainReplyPreview = clonePlain(input.replyPreview);
+  if (typeof saveOutgoingMessage === "function") {
+    pendingLocalPersists.add(clientMessageId);
+    try {
+      await saveOutgoingMessage({
+        clientMessageId,
+        roomIdentifier: input.roomIdentifier,
+        messageNamespace: input.messageNamespace,
+        text: input.text,
+        replyTo: input.replyTo,
+        threadRootId: input.threadRootId,
+        attachments,
+        ...(plainGif ? { gif: plainGif } : {}),
+        replyPreview: plainReplyPreview,
+        timestamp,
+      });
+      if (generation !== outboxGeneration) {
+        return null;
+      }
+      return enqueueDesktopMessage({
+        ...input,
+        attachments,
+        ...(plainGif ? { gif: plainGif } : {}),
+        replyPreview: plainReplyPreview,
+        clientMessageId,
+        timestamp,
+      });
+    } finally {
+      pendingLocalPersists.delete(clientMessageId);
+    }
+  }
+  return enqueueDesktopMessage({
+    ...input,
+    attachments,
+    ...(plainGif ? { gif: plainGif } : {}),
+    replyPreview: plainReplyPreview,
+    clientMessageId,
+    timestamp,
+  });
+}
+
+const ELECTRON_IPC_ERROR_PREFIX = /^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/;
+const PRECOMMIT_REFUSAL_MARKER = "precommit_refusal:";
+
+export function parseOutgoingSendError(error: unknown): {
+  status: "uncertain" | "refused";
+  message: string;
+} {
+  const raw = error instanceof Error ? error.message : "Could not confirm delivery.";
+  const withoutIpc = raw.replace(ELECTRON_IPC_ERROR_PREFIX, "").trim();
+  const refusalIndex = withoutIpc.indexOf(PRECOMMIT_REFUSAL_MARKER);
+  if (refusalIndex >= 0) {
+    const cleaned = withoutIpc.slice(refusalIndex + PRECOMMIT_REFUSAL_MARKER.length).trim()
+      || "Message could not be sent.";
+    return { status: "refused", message: cleaned };
+  }
+  if (withoutIpc.includes("expressions_disabled:")) {
+    return { status: "refused", message: withoutIpc };
+  }
+  return {
+    status: "uncertain",
+    message: withoutIpc || "Could not confirm delivery.",
+  };
+}
+
 export async function retryDesktopOutgoingMessage(clientMessageId: string): Promise<void> {
-  const entry = desktopMessageOutbox.value.find(item => item.clientMessageId === clientMessageId);
+  const entry = desktopMessageOutbox.value.find((item) => item.clientMessageId === clientMessageId);
   if (!entry || entry.inFlight || entry.confirmed) return;
   entry.inFlight = true;
-  entry.message = { ...entry.message, outgoing: { status: "pending", attachmentCount: entry.attachments.length, error: null } };
+  entry.message = { ...entry.message, outgoing: outgoingMeta("pending", entry.attachments, null) };
   changed();
+  void desktopIpc.room?.updateOutgoingMessage?.(clientMessageId, {
+    status: "pending",
+    error: null,
+  }).catch(() => undefined);
   try {
+    const wireAttachments = entry.attachments.map(({ upload_id }) => ({ upload_id }));
     const result = await desktopIpc.room.sendMessage(
-      entry.roomIdentifier, entry.text, entry.replyTo, entry.attachments, entry.threadRootId, entry.clientMessageId, entry.messageNamespace, entry.gif,
+      entry.roomIdentifier,
+      entry.text,
+      entry.replyTo,
+      wireAttachments,
+      entry.threadRootId,
+      entry.clientMessageId,
+      entry.messageNamespace,
+      entry.gif,
     );
     // Sign-out or a stream acknowledgement may have removed the entry.
     if (!desktopMessageOutbox.value.includes(entry)) return;
     confirm(entry, { ...result.message, clientMessageId: entry.clientMessageId });
   } catch (error) {
     if (!desktopMessageOutbox.value.includes(entry) || entry.confirmed) return;
-    // IPC/network failures cannot establish whether the server committed. A
-    // retry uses the same identity, never a second logical message.
-    entry.message = { ...entry.message, outgoing: {
-      status: "uncertain", attachmentCount: entry.attachments.length,
-      error: error instanceof Error ? error.message : "Could not confirm delivery.",
-    } };
+    // Definite pre-commit refusals on a never-ambiguous send never committed
+    // and expose a safe Discard exit. Once any attempt has had an ambiguous
+    // outcome (crash, lost ack, network/timeout/5xx), a later refusal on retry
+    // cannot prove the earlier attempt did not commit, so the entry stays
+    // `uncertain` with its original clientMessageId until history resolves it.
+    const parsed = parseOutgoingSendError(error);
+    const nextStatus: DesktopOutgoingMessageStatus =
+      parsed.status === "refused" && !entry.hadUncertainAttempt ? "refused" : "uncertain";
+    if (nextStatus === "uncertain") {
+      entry.hadUncertainAttempt = true;
+    }
+    entry.message = {
+      ...entry.message,
+      outgoing: outgoingMeta(nextStatus, entry.attachments, parsed.message),
+    };
+    void desktopIpc.room?.updateOutgoingMessage?.(clientMessageId, {
+      status: nextStatus,
+      error: parsed.message,
+    }).catch(() => undefined);
   } finally {
     entry.inFlight = false;
     changed();
   }
 }
 
+/** Only a known pre-commit refusal permits discarding an outbox entry and restoring its draft. */
+export function discardRefusedDesktopOutgoingMessage(clientMessageId: string): boolean {
+  const entry = desktopMessageOutbox.value.find((item) => item.clientMessageId === clientMessageId);
+  if (
+    !entry
+    || entry.inFlight
+    || entry.confirmed
+    || entry.hadUncertainAttempt
+    || entry.message.outgoing?.status !== "refused"
+  ) {
+    return false;
+  }
+  desktopMessageOutbox.value = desktopMessageOutbox.value.filter(
+    (item) => item.clientMessageId !== clientMessageId,
+  );
+  if (entry.text.trim()) {
+    restoreDesktopMessageDraftText(
+      entry.messageNamespace ?? entry.roomIdentifier,
+      entry.threadRootId,
+      entry.text,
+    );
+  }
+  void desktopIpc.room?.deleteOutgoingMessage?.(clientMessageId, {
+    discardAttachments: true,
+  }).catch(() => undefined);
+  return true;
+}
+
 /** Only a known pre-commit refusal permits changing an accepted send. */
 export async function sendDesktopOutgoingWithoutGif(clientMessageId: string): Promise<void> {
-  const entry = desktopMessageOutbox.value.find(item => item.clientMessageId === clientMessageId);
-  if (!entry || entry.inFlight || entry.confirmed || !entry.gif || (!entry.text.trim() && !entry.attachments.length)
-    || !entry.message.outgoing?.error?.includes("expressions_disabled:")) return;
+  const entry = desktopMessageOutbox.value.find((item) => item.clientMessageId === clientMessageId);
+  if (
+    !entry
+    || entry.inFlight
+    || entry.confirmed
+    || entry.hadUncertainAttempt
+    || !entry.gif
+    || (!entry.text.trim() && !entry.attachments.length)
+    || !entry.message.outgoing?.error?.includes("expressions_disabled:")
+  ) {
+    return;
+  }
   entry.gif = null;
   entry.message = { ...entry.message, gif: null };
+  void desktopIpc.room?.updateOutgoingMessage?.(clientMessageId, { gif: null }).catch(() => undefined);
   await retryDesktopOutgoingMessage(clientMessageId);
 }
 
 /** An explicitly refused GIF-only send is safe to discard; an uncertain send is not. */
 export function discardRefusedDesktopGif(clientMessageId: string): void {
-  desktopMessageOutbox.value = desktopMessageOutbox.value.filter(entry =>
-    entry.clientMessageId !== clientMessageId || entry.inFlight || entry.confirmed || !entry.gif
-    || Boolean(entry.text.trim()) || entry.attachments.length > 0
-    || !entry.message.outgoing?.error?.includes("expressions_disabled:"));
+  const entry = desktopMessageOutbox.value.find((item) => item.clientMessageId === clientMessageId);
+  if (
+    !entry
+    || entry.inFlight
+    || entry.confirmed
+    || entry.hadUncertainAttempt
+    || !entry.gif
+    || Boolean(entry.text.trim())
+    || entry.attachments.length > 0
+    || !entry.message.outgoing?.error?.includes("expressions_disabled:")
+  ) {
+    return;
+  }
+  desktopMessageOutbox.value = desktopMessageOutbox.value.filter(
+    (item) => item.clientMessageId !== clientMessageId,
+  );
+  void desktopIpc.room?.deleteOutgoingMessage?.(clientMessageId, {
+    discardAttachments: true,
+  }).catch(() => undefined);
 }

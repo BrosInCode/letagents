@@ -1,6 +1,7 @@
 import type { RoomGif } from "../../../../../../../../shared/room-expressions.mjs";
-import { computed, provide, ref, watch, type Ref } from "vue";
+import { computed, getCurrentScope, onScopeDispose, provide, ref, watch, type Ref } from "vue";
 import type {
+  DesktopOutgoingMessageAttachment,
   DesktopRoomInfo,
   DesktopRoomMessage,
 } from "../../../../../../electron/ipc-types";
@@ -16,7 +17,15 @@ import {
 import { roomTimelineMessages } from "../room-chat/thread-utils";
 import { desktopIpc } from "../../../../ipc/index.js";
 
-import { desktopMessageOutbox, enqueueDesktopMessage, reconcileDesktopMessageOutbox, retryDesktopOutgoingMessage } from "../../../../domain/message-outbox";
+import {
+  desktopMessageOutbox,
+  enqueueDesktopMessage,
+  parseOutgoingSendError,
+  persistAndEnqueueDesktopMessage,
+  reconcileDesktopMessageOutbox,
+  registerDesktopOutboxConfirmationListener,
+  retryDesktopOutgoingMessage,
+} from "../../../../domain/message-outbox";
 
 import { unreadRevealKey } from "../../../../composables/roomUnread";
 
@@ -46,6 +55,35 @@ export function useDesktopRoomMessages(options: {
   let olderMessagesRequest: Promise<void> | null = null;
   const autoHistoryBackfillCount = ref(0);
   const ownMessageIds = new Set<string>();
+  let persistingSubmission = false;
+  let stopConfirmationListener: (() => void) | null = null;
+
+  watch(
+    () => [options.room.value.identifier, options.messageNamespace?.value ?? null] as const,
+    ([roomIdentifier, messageNamespace]) => {
+      stopConfirmationListener?.();
+      stopConfirmationListener = roomIdentifier
+        ? registerDesktopOutboxConfirmationListener(roomIdentifier, messageNamespace, (event) => {
+            if (
+              event.roomIdentifier !== options.room.value.identifier
+              || event.messageNamespace !== (options.messageNamespace?.value ?? null)
+            ) {
+              return;
+            }
+            ownMessageIds.add(event.message.id);
+            options.onMessageSent(event.message);
+          })
+        : null;
+    },
+    { immediate: true, flush: "sync" },
+  );
+
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      stopConfirmationListener?.();
+      stopConfirmationListener = null;
+    });
+  }
 
   const loadedServerMessages = computed(() => {
     return mergeRoomMessages(olderMessages.value, options.messages.value);
@@ -77,9 +115,16 @@ export function useDesktopRoomMessages(options: {
 
   const messageIdentityVersion = createMessageIdentityVersion();
   watch(
-    () => messageIdentityVersion(options.messages.value),
-    () => {
-      autoHistoryBackfillCount.value = 0;
+    [
+      () => messageIdentityVersion(options.messages.value),
+      () => desktopMessageOutbox.value.length,
+      () => options.room.value.identifier,
+      () => options.messageNamespace?.value ?? null,
+    ],
+    ([version], [previousVersion]) => {
+      if (version !== previousVersion) {
+        autoHistoryBackfillCount.value = 0;
+      }
       reconcileDesktopMessageOutbox(options.room.value.identifier, options.messages.value, options.messageNamespace?.value ?? null);
     },
     { immediate: true },
@@ -122,7 +167,7 @@ export function useDesktopRoomMessages(options: {
   async function sendRoomMessage(
     text: string,
     replyTo: string | null = null,
-    attachments: Array<{ upload_id: string }> = [],
+    attachments: DesktopOutgoingMessageAttachment[] = [],
     threadRootId: string | null = null,
     complete: (sent: boolean) => void = () => undefined,
     gif?: RoomGif | null,
@@ -134,25 +179,99 @@ export function useDesktopRoomMessages(options: {
       complete(false);
       return;
     }
-    const generation = roomGeneration;
+    if (persistingSubmission) {
+      complete(false);
+      return;
+    }
     const messageNamespace = options.messageNamespace?.value ?? null;
     const reply = visibleMessages.value.find(message => message.id === replyTo);
-    const clientMessageId = enqueueDesktopMessage({
-      roomIdentifier, messageNamespace, text: trimmedText, replyTo, threadRootId, attachments, gif,
+    const enqueueInput = {
+      roomIdentifier,
+      messageNamespace,
+      text: trimmedText,
+      replyTo,
+      threadRootId,
+      attachments,
+      gif,
       replyPreview: reply ? {
         id: reply.id, sender: reply.sender, text: reply.text, source: reply.source,
         timestamp: reply.timestamp, agentIdentity: reply.agentIdentity,
       } : null,
-      onConfirmed: (message) => {
-        if (generation !== roomGeneration || roomIdentifier !== options.room.value.identifier || messageNamespace !== (options.messageNamespace?.value ?? null)) return;
-        ownMessageIds.add(message.id);
-        options.onMessageSent(message);
-      },
-    });
+      onConfirmed: () => undefined,
+    };
+
+    const isScopeOrValidationFailure = (error: unknown): boolean => {
+      const message = error instanceof Error ? error.message : String(error ?? "");
+      return (
+        message.includes("precommit_refusal:")
+        || message.includes("Invalid outgoing message identity.")
+        || message.includes("Choose a room before sending a message.")
+        || message.includes("Write a message before sending.")
+        || message.includes("different room storage mode")
+        || message.includes("different account")
+        || message.includes("GIFs require a cloud room.")
+      );
+    };
+
+    const generatedClientMessageId = `desktop-send:${crypto.randomUUID()}`;
+    let clientMessageId: string | null;
+    if (typeof desktopIpc.room?.saveOutgoingMessage === "function") {
+      persistingSubmission = true;
+      try {
+        clientMessageId = await persistAndEnqueueDesktopMessage({
+          ...enqueueInput,
+          clientMessageId: generatedClientMessageId,
+        });
+      } catch (error) {
+        const isLocalStorage = Boolean(messageNamespace && /:local:/i.test(messageNamespace));
+        if (isLocalStorage || isScopeOrValidationFailure(error)) {
+          sendError.value = parseOutgoingSendError(error).message;
+          complete(false);
+          return;
+        }
+        // Cloud room + local SQLite fault: keep the draft intact in the composer
+        // (never clear before either durable save or server confirmation) and
+        // deliver directly so a broken local DB does not deadlock cloud chat.
+        try {
+          const wireAttachments = attachments.map(({ upload_id }) => ({ upload_id }));
+          const result = await desktopIpc.room.sendMessage(
+            roomIdentifier,
+            trimmedText,
+            replyTo,
+            wireAttachments,
+            threadRootId,
+            generatedClientMessageId,
+            messageNamespace,
+            gif,
+          );
+          const confirmed = { ...result.message, clientMessageId: generatedClientMessageId };
+          ownMessageIds.add(confirmed.id);
+          options.onMessageSent(confirmed);
+          sendError.value = null;
+          complete(true);
+          options.playRoomSound("send");
+        } catch (sendFailure) {
+          sendError.value = parseOutgoingSendError(sendFailure).message;
+          complete(false);
+        }
+        return;
+      } finally {
+        persistingSubmission = false;
+      }
+      if (!clientMessageId) {
+        complete(false);
+        return;
+      }
+    } else {
+      clientMessageId = enqueueDesktopMessage({
+        ...enqueueInput,
+        clientMessageId: generatedClientMessageId,
+      });
+    }
     ownMessageIds.add(`pending:${clientMessageId}`);
     sendError.value = null;
-    // Local acceptance releases the composer synchronously. Delivery progress
-    // belongs to its message row, so the next draft remains editable.
+    // Durable local acceptance releases the composer right away. Delivery progress
+    // belongs to its message row, so the next draft remains editable while sending.
     complete(true);
     options.playRoomSound("send");
     await retryDesktopOutgoingMessage(clientMessageId);
