@@ -15,7 +15,7 @@
         <div class="preview-composer"><span>Message #Product</span><i>↑</i></div>
       </div>
     </div>
-    <fieldset>
+    <fieldset :disabled="disabled" :aria-describedby="modelValue === null && !inheritLabel ? inheritedStatusId : undefined">
       <legend class="theme-picker-legend">{{ label }}</legend>
       <div class="theme-choice-grid">
         <label v-for="theme in roomThemePresets" :key="theme.id" class="theme-choice" :data-current="activeTheme === theme.id">
@@ -27,16 +27,17 @@
         </label>
       </div>
     </fieldset>
-    <button type="button" class="theme-inherit" :disabled="modelValue === null" @click="emit('update:modelValue', null)">
-      {{ inheritLabel || (company ? (modelValue ? 'Use company theme' : 'Using company theme') : (modelValue ? 'Use default theme' : 'Using default theme')) }}
+    <button v-if="modelValue !== null || inheritLabel" type="button" class="theme-inherit" :disabled="disabled || modelValue === null" @click="emit('update:modelValue', null)">
+      {{ inheritLabel || (inherited ? 'Use company theme' : 'Use default theme') }}
     </button>
+    <p v-else :id="inheritedStatusId" class="theme-inherited-status" role="status">{{ inheritedStatus }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, useId } from "vue";
 import { chatBubbleStyle, defaultChatColors } from "../chat-colors";
-import { roomThemePresets, type RoomThemeId } from "../room-themes.mjs";
+import { roomThemePreset, roomThemePresets, type RoomThemeId } from "../room-themes.mjs";
 import { roomThemeStyle, themeChatBubble } from "./room-theme";
 
 const props = defineProps<{
@@ -44,11 +45,17 @@ const props = defineProps<{
   inherited?: RoomThemeId | null;
   company?: string | null;
   inheritLabel?: string;
+  disabled?: boolean;
   label: string;
   preview?: boolean;
 }>();
 const emit = defineEmits<{ "update:modelValue": [theme: RoomThemeId | null] }>();
 const group = useId();
+const inheritedStatusId = `${group}-inherited`;
+const inheritedStatus = computed(() => {
+  const preset = roomThemePreset(props.inherited);
+  return preset ? `Using company theme · ${preset.label}` : "Using default theme";
+});
 const activeTheme = computed(() => props.modelValue ?? props.inherited ?? null);
 const previewStyle = computed(() => roomThemeStyle(activeTheme.value));
 const humanStyle = computed(() => activeTheme.value ? themeChatBubble(activeTheme.value, "human") : chatBubbleStyle(defaultChatColors.human));
@@ -68,6 +75,7 @@ const selfStyle = computed(() => activeTheme.value ? themeChatBubble(activeTheme
 .theme-swatch i { width: 9px; height: 5px; margin-inline-start: 25%; border-inline-start: 2px solid; border-bottom: 2px solid; transform: rotate(-45deg); }
 .theme-inherit { border: 0; border-radius: 7px; background: transparent; color: var(--workspace-accent, currentColor); cursor: pointer; font: inherit; font-size: 12px; justify-self: start; min-height: 36px; padding: 5px 8px; margin-inline-start: -8px; }
 .theme-inherit:disabled { opacity: .65; cursor: default; }
+.theme-inherited-status { margin: 0; align-content: center; min-height: 36px; font-size: 12px; color: var(--text-secondary, currentColor); }
 .theme-inherit:focus-visible { outline: 2px solid var(--workspace-accent, currentColor); }
 @media (hover: hover) and (pointer: fine) {
   .theme-choice:hover, .theme-inherit:not(:disabled):hover { background: color-mix(in srgb, currentColor 8%, transparent); }

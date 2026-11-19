@@ -39,10 +39,13 @@ onMounted(() => {
   let lastFrame = 0
   let frame = 0
   let inView = true
+  let needsDraw = true
 
   function draw() {
     const staticFrame = still()
-    if (canvasAvailable.value) render(width, height, staticFrame ? handoffStillTime : elapsed, !staticFrame)
+    if (!canvasAvailable.value || !width || !height) return
+    render(width, height, staticFrame ? handoffStillTime : elapsed, !staticFrame)
+    needsDraw = false
   }
 
   function tick(now) {
@@ -58,14 +61,13 @@ onMounted(() => {
   }
 
   function updatePlayback() {
-    canAnimate.value = canvasAvailable.value && !still()
+    canAnimate.value = inView && canvasAvailable.value && !still()
     window.cancelAnimationFrame(frame)
     frame = 0
     lastFrame = 0
-    if (!canvasAvailable.value) return
-    if (still()) {
-      if (inView && !document.hidden) draw()
-    } else if (!paused.value && inView && !document.hidden && width && height) frame = window.requestAnimationFrame(tick)
+    if (!canvasAvailable.value || document.hidden || !width || !height) return
+    if (needsDraw) draw()
+    if (inView && !still() && !paused.value) frame = window.requestAnimationFrame(tick)
   }
 
   function configureSurface() {
@@ -74,6 +76,7 @@ onMounted(() => {
     surface.width = Math.round(width * density)
     surface.height = Math.round(height * density)
     context.setTransform(density, 0, 0, density, 0, 0)
+    needsDraw = true
   }
   const resize = new ResizeObserver(([entry]) => {
     const { width: nextWidth, height: nextHeight } = entry.contentRect
@@ -81,15 +84,16 @@ onMounted(() => {
     width = nextWidth
     height = nextHeight
     configureSurface()
-    if (canAnimate.value && inView && !document.hidden) draw()
     updatePlayback()
   })
   resize.observe(stage.value)
+  // The fixed canvas never leaves the viewport. Stop its loop when the hero leaves.
+  const hero = stage.value.closest('.hero')
   const visibility = new IntersectionObserver(([entry]) => {
     inView = entry.isIntersecting
     updatePlayback()
-  })
-  visibility.observe(stage.value)
+  }, { threshold: .01 })
+  if (hero) visibility.observe(hero)
   const stopPause = watch(paused, updatePlayback)
   function onContextLost() {
     canvasAvailable.value = false
@@ -98,12 +102,15 @@ onMounted(() => {
   function onContextRestored() {
     canvasAvailable.value = true
     configureSurface()
-    if (paused.value && !still() && inView && !document.hidden) draw()
+    updatePlayback()
+  }
+  function onMotionPreference() {
+    configureSurface()
     updatePlayback()
   }
   surface.addEventListener('contextlost', onContextLost)
   surface.addEventListener('contextrestored', onContextRestored)
-  for (const preference of preferences) preference.addEventListener('change', updatePlayback)
+  for (const preference of preferences) preference.addEventListener('change', onMotionPreference)
   document.addEventListener('visibilitychange', updatePlayback)
 
   dispose = () => {
@@ -113,7 +120,7 @@ onMounted(() => {
     visibility.disconnect()
     surface.removeEventListener('contextlost', onContextLost)
     surface.removeEventListener('contextrestored', onContextRestored)
-    for (const preference of preferences) preference.removeEventListener('change', updatePlayback)
+    for (const preference of preferences) preference.removeEventListener('change', onMotionPreference)
     document.removeEventListener('visibilitychange', updatePlayback)
   }
 })
@@ -123,12 +130,12 @@ onUnmounted(() => dispose?.())
 
 <style scoped>
 .handoff-stage {
-  position: relative;
-  width: min(100%, 980px);
-  height: clamp(190px, 36svh, 410px);
-  flex: none;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
   overflow: hidden;
-  background: radial-gradient(ellipse 45% 50% at 50% 53%, #5dba9817, transparent 100%);
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 50%, #5dba9817, transparent 65%);
 }
 
 .handoff-stage canvas {
@@ -138,14 +145,16 @@ onUnmounted(() => dispose?.())
   inset: 0;
   width: 100%;
   height: 100%;
-  mask-image: radial-gradient(ellipse 77% 79% at 50% 51%, #000 38%, transparent 92%);
+  opacity: .62;
+  mask-image: radial-gradient(ellipse 70% 74% at 50% 46%, #000 30%, transparent 82%);
 }
 
 .handoff-stage canvas.unavailable { visibility: hidden; }
 
 .handoff-motion {
   position: absolute;
-  inset: auto 5px 5px auto;
+  inset: auto max(24px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) auto;
+  pointer-events: auto;
   display: grid;
   place-items: center;
   width: 36px;
@@ -161,6 +170,7 @@ onUnmounted(() => dispose?.())
 .handoff-motion:focus-visible { outline: 2px solid currentColor; }
 
 .handoff-stage[data-theme-mode="light"] canvas {
+  opacity: .56;
   filter: brightness(.59) saturate(1.4);
 }
 </style>

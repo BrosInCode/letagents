@@ -17,7 +17,7 @@ let authenticated = false;
 let completed = false;
 let failOrganizations = false;
 const organizations = [
-  { github_org_id: '42', login: 'Herotel', avatar_url: null, theme_id: 'mint', role: 'owner', setup: false, joined: false },
+  { github_org_id: '42', login: 'Herotel', avatar_url: null, theme_id: null, theme_revision: 0, role: 'owner', setup: false, joined: false },
   { github_org_id: '43', login: 'Studio', avatar_url: null, role: 'member', setup: true, joined: false },
   { github_org_id: '44', login: 'WaitingCo', avatar_url: null, role: 'member', setup: false, joined: false },
   { github_org_id: '46', login: 'Northwind', avatar_url: null, role: 'member', setup: true, joined: false },
@@ -37,7 +37,7 @@ function snapshot(identifier = 'github.com/alex/personal') {
   value.access.roomIdentifier = identifier;
   Object.assign(value.room, { identifier, name: identifier, displayName: identifier.split('/').at(-1), code: identifier });
   const owningCompany = identifier === companyRoom.room_id ? organizations[0] : null;
-  if (owningCompany) value.room.companyAppearance = { id: owningCompany.github_org_id, name: owningCompany.login, theme: owningCompany.theme_id };
+  if (owningCompany) value.room.companyAppearance = { id: owningCompany.github_org_id, name: owningCompany.login, theme: owningCompany.theme_id, themeRevision: owningCompany.theme_revision };
   value.messages = []; value.tasks = []; value.participants = []; value.presence = []; value.focusRooms = []; value.reasoningSessions = []; value.recentActivity = []; value.roomArtifacts = [];
   return value;
 }
@@ -71,7 +71,8 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
       const org = organizations.find(org => org.github_org_id === args[0]);
       assert.equal(org?.role, 'owner');
       org.theme_id = args[1];
-      return org.theme_id;
+      org.theme_revision += 1;
+      return { theme: org.theme_id, themeRevision: org.theme_revision };
     }
     case 'organizations.openOnGitHub': openedGitHubPages.push(args[0]); return;
     case 'room.createInviteRoom': {
@@ -135,14 +136,18 @@ try {
   await click('[data-testid="company-choice-42"]');
   await waitFor(`(document.querySelector('[data-testid="first-run-company-continue"]')?.textContent || '').includes('Set up Herotel')`);
   await click('[data-testid="first-run-company-continue"]');
-  await waitFor(`document.querySelector('[data-stage="theme"] .theme-choice[data-current="true"] input')?.value === 'mint'`);
+  await waitFor(`document.querySelector('[data-stage="theme"] .theme-inherited-status')?.textContent === 'Using default theme'`);
   await capture('01-company-theme.png');
   await click('[data-stage="theme"] input[value="ice"]');
   await waitFor(`document.querySelector('[data-stage="theme"] input[value="ice"]')?.checked`);
   await click('[data-stage="theme"] .theme-inherit');
-  await waitFor(`document.querySelector('[data-stage="theme"] .theme-choice[data-current="true"] input')?.value === 'mint'`);
+  await waitFor(`document.querySelector('[data-stage="theme"] .theme-inherited-status')?.textContent === 'Using default theme'`);
+  assert.equal(calls.includes('organizations.setTheme'), false, 'previewing a color does not write a company theme');
+  await click('[data-stage="theme"] input[value="mint"]');
+  await click('.first-run-share-theme input');
   await click('[data-testid="first-run-theme-continue"]');
   await waitFor(`document.querySelector('[data-stage="room"]') && Boolean(document.querySelector('[data-testid="first-run-company-rooms"]'))`);
+  assert.equal(organizations[0].theme_id, 'mint', 'the owner explicitly saved the shared default during onboarding');
   await js(`{ const input = document.querySelector('.company-room-search input'); input.value = 'missing'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await waitFor(`document.body.innerText.includes('No rooms match your search.')`);
   await js(`{ const input = document.querySelector('.company-room-search input'); input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); }`);

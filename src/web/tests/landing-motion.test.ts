@@ -125,7 +125,7 @@ function environment(t: TestContext, { mobile = false, noCanvas = false } = {}) 
     return { unmount, props, nodes: () => all(root) }
   }
   function frame(now: number) { const pending = [...frames.entries()]; for (const [id, fn] of pending) { frames.delete(id); fn(now) } }
-  return { mount, frame, win, doc, media, frames, resizeObservers, intersectionObservers, draws }
+  return { mount, frame, win, doc, media, frames, resizeObservers, intersectionObservers, draws, hero }
 }
 
 const hasClass = (node: any, name: string) => String(node.props.class).split(' ').includes(name)
@@ -153,7 +153,8 @@ test('compact screens show a still handoff with bounded pixel density and resize
 test('the handoff bounds frame rate and pauses for the user, visibility, reduced motion, and unmount', async t => {
   const env = environment(t)
   const view = env.mount(canvasSource)
-  env.resizeObservers[0].emit([{ contentRect: { width: 980, height: 300 } }])
+  assert.equal(env.intersectionObservers[0].targets[0], env.hero, 'observe the hero rather than the fixed canvas')
+  env.resizeObservers[0].emit([{ contentRect: { width: 980, height: 700 } }])
   env.frame(100)
   const before = env.draws.length
   env.frame(108); env.frame(116); env.frame(124)
@@ -165,6 +166,16 @@ test('the handoff bounds frame rate and pauses for the user, visibility, reduced
   control().props.onClick()
   await Vue.nextTick()
   assert.equal(control().props['aria-label'], 'Play room animation')
+  assert.equal(env.frames.size, 0)
+  const pausedAt = env.draws.length
+  env.intersectionObservers[0].emit([{ isIntersecting: false }])
+  env.resizeObservers[0].emit([{ contentRect: { width: 1000, height: 750 } }])
+  assert.deepEqual(env.draws.at(-1), [1000, 750])
+  assert.equal(env.draws.length, pausedAt + 1)
+  assert.equal(env.frames.size, 0)
+  env.intersectionObservers[0].emit([{ isIntersecting: true }])
+  await Vue.nextTick()
+  assert.equal(env.draws.length, pausedAt + 1)
   assert.equal(env.frames.size, 0)
   control().props.onClick()
   await Vue.nextTick()

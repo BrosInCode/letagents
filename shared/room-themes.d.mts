@@ -1,9 +1,15 @@
 export type RoomThemeId = "mint" | "fern" | "emerald" | "teal" | "ice" | "blue" | "indigo" | "violet" | "lilac" | "berry" | "rose" | "coral" | "amber" | "gold" | "stone" | "graphite";
 
+export interface CompanyThemePreference {
+  theme: RoomThemeId | null;
+  themeRevision: number;
+}
+
 export interface RoomCompanyAppearance {
   id: string;
   name: string;
   theme: RoomThemeId | null;
+  themeRevision?: number;
 }
 
 export interface RoomThemePreset {

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
+import { check, index, integer, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
 
 import type { RoomThemeId } from "../../../../shared/room-themes.mjs";
 import { accounts } from "./core.js";
@@ -11,6 +11,7 @@ export const organizations = pgTable("organizations", {
   login: text("login").notNull(),
   avatar_url: text("avatar_url"),
   theme_id: text("theme_id").$type<RoomThemeId>(),
+  theme_revision: integer("theme_revision").notNull().default(0),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
   updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
 });

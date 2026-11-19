@@ -810,10 +810,6 @@ watch(
   color: var(--text, #fafafa);
 }
 
-.room-shell :deep(.chat-header) { background: var(--workspace-canvas, var(--bg-0, #09090b)); }
-.web-room-layout :deep(.web-room-sidebar) { background: var(--workspace-sidebar, var(--bg-0, #09090b)); }
-.room-shell :deep(.composer-card) { background: var(--workspace-composer, var(--surface, #18181b)); }
-
 .room-shell[data-compact-viewport="true"] :deep(.chat-header) { min-height: 44px; padding-block: 0; }
 .room-shell[data-compact-viewport="true"] :deep(.room-toolbar) { height: 44px; }
 .room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }

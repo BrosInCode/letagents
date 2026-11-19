@@ -108,6 +108,7 @@ export function registerAccountOrganizationRoutes(
         ...membership,
         setup: configured.has(membership.github_org_id),
         theme_id: configured.get(membership.github_org_id)?.theme_id ?? null,
+        theme_revision: configured.get(membership.github_org_id)?.theme_revision ?? 0,
         joined: configured.has(membership.github_org_id) && joined.has(membership.github_org_id),
       })),
       invitations,
@@ -144,7 +145,7 @@ export function registerAccountOrganizationRoutes(
       res.status(409).json({ error: "organization_setup_required" });
       return;
     }
-    res.json({ theme_id: updated.theme });
+    res.json({ theme_id: updated.theme, theme_revision: updated.themeRevision });
   });
 
   for (const action of ["setup", "join"] as const) {

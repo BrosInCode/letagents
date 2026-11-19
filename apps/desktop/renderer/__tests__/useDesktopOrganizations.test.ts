@@ -174,3 +174,30 @@ test("a saved company filters the app only after GitHub confirms it", async () =
     assert.equal(state.activeId.value, "42");
   } finally { scope.stop(); globalThis.window = previous; }
 });
+
+test("a theme save preserves a list retry and wins over older theme data in that response", async () => {
+  let answer: () => Promise<unknown> = async () => listed([{ ...org, setup: true, joined: true, theme_id: "mint", theme_revision: 1 }]);
+  let finishRetry!: (result: unknown) => void;
+  await harness({
+    list: () => answer(),
+    setTheme: async () => ({ theme: "violet", themeRevision: 2 }),
+  }, async (state) => {
+    answer = async () => ({ status: "unavailable" });
+    await state.refresh();
+    assert.equal(state.status.value, "unavailable");
+
+    answer = () => new Promise(resolve => { finishRetry = resolve; });
+    const retry = state.refreshIfStale(0);
+    assert.equal(state.status.value, "loading");
+    await state.changeTheme("42", "violet");
+    finishRetry(listed([{ ...org, role: "member", setup: true, joined: true, theme_id: "mint", theme_revision: 1 }]));
+    await retry;
+    assert.equal(state.status.value, "ready");
+    assert.equal(state.organizations.value[0].role, "member");
+    assert.equal(state.organizations.value[0].theme_id, "violet");
+
+    answer = async () => listed([{ ...org, theme_id: null, theme_revision: 3 }]);
+    await state.refresh();
+    assert.equal(state.organizations.value[0].theme_id, null);
+  });
+});

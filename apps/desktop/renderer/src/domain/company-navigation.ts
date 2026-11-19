@@ -1,5 +1,6 @@
 import type { DesktopAccountRoomEntry } from "../../../electron/ipc-types/room.js";
-import type { DesktopOrganizationRoom } from "../../../electron/ipc-types/organizations.js";
+import { roomThemeId, type RoomCompanyAppearance } from "../../../../../shared/room-themes.mjs";
+import type { DesktopOrganization, DesktopOrganizationRoom } from "../../../electron/ipc-types/organizations.js";
 import type { ProjectGroup } from "../components/desktop/types.js";
 
 /**
@@ -96,4 +97,13 @@ export function showsCompanyHome(input: {
 }): boolean {
   if (input.activeEntry.type !== "room" || !input.selectedId) return false;
   return !projectsListEntry(input.sidebarProjects, input.activeEntry);
+}
+
+/** An old list must not replace a fresher theme carried by the room snapshot. */
+export function newestCompanyAppearance(
+  room: RoomCompanyAppearance,
+  organization?: Pick<DesktopOrganization, "github_org_id" | "theme_id" | "theme_revision">,
+): RoomCompanyAppearance {
+  if (organization?.github_org_id !== room.id || (organization.theme_revision ?? 0) <= (room.themeRevision ?? 0)) return room;
+  return { ...room, theme: roomThemeId(organization.theme_id), themeRevision: organization.theme_revision };
 }

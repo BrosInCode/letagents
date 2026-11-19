@@ -9,6 +9,7 @@
       :company-name="company.selected.value?.login"
       :company-avatar-url="company.selected.value?.avatar_url"
       :company-rooms="company.rooms.value"
+      :save-company-theme="canSetCompanyTheme ? company.changeTheme : undefined"
       @choose-organization="chooseOnboardingCompany"
       @retry-organizations="company.refresh"
       @open-company-github="company.openOnGitHub"
@@ -523,6 +524,7 @@ import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
 import { useAppMessageNotifications } from "./composables/app/useAppMessageNotifications";
 import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
+import { newestCompanyAppearance } from "./domain/company-navigation";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
 
 const RentMarketplaceView = defineAsyncComponent(
@@ -719,7 +721,7 @@ const roomCompany = computed<RoomCompanyAppearance | null>(() => {
       : null;
   }
   const verified = company.organizations.value.find(org => org.github_org_id === roomAppearance.id);
-  return verified?.theme_id !== undefined ? { ...roomAppearance, theme: roomThemeId(verified.theme_id) } : roomAppearance;
+  return newestCompanyAppearance(roomAppearance, verified);
 });
 const roomTheme = provideRoomTheme(themeAccountKey, roomCompany);
 const canSetCompanyTheme = computed(() => company.organizations.value.some(org =>

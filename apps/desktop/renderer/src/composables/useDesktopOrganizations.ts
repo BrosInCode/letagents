@@ -112,7 +112,13 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
         else status.value = "unavailable";
         return;
       }
-      organizations.value = result.organizations;
+      const cached = new Map(organizations.value.map(org => [org.github_org_id, org]));
+      organizations.value = result.organizations.map(org => {
+        const current = cached.get(org.github_org_id);
+        return current && (current.theme_revision ?? 0) > (org.theme_revision ?? 0)
+          ? { ...org, theme_id: current.theme_id, theme_revision: current.theme_revision }
+          : org;
+      });
       invitations.value = result.invitations;
       ssoRequired.value = result.ssoRequired;
       status.value = "ready";
@@ -184,8 +190,10 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
     const owner = accountKey.value;
     const saved = await desktopIpc.organizations.setTheme(id, theme);
     if (owner !== accountKey.value) return;
-    listGeneration += 1;
-    organizations.value = organizations.value.map(org => org.github_org_id === id ? { ...org, theme_id: saved } : org);
+    organizations.value = organizations.value.map(org =>
+      org.github_org_id === id && saved.themeRevision > (org.theme_revision ?? 0)
+        ? { ...org, theme_id: saved.theme, theme_revision: saved.themeRevision }
+        : org);
   }
 
   /** List a room just created in the selected company at once, before the next check with GitHub. */

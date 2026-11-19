@@ -1957,6 +1957,18 @@
   overflow: visible;
 }
 
+.first-run-share-theme {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+.first-run-share-theme input {
+  accent-color: var(--workspace-accent, auto);
+}
+
 .first-run-wizard[data-stage="theme"] .primary-button {
   background: var(--workspace-composer, var(--setup-surface));
   border-color: var(--workspace-border, var(--setup-border));

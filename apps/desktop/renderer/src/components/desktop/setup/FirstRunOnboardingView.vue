@@ -89,15 +89,22 @@
                 @open-github="$emit('open-company-github', $event)"
               />
 
-              <RoomThemePicker
-                v-else-if="stage === 'theme'"
-                label="Room theme"
-                :model-value="roomTheme?.personal.value ?? null"
-                :inherited="roomTheme?.company.value?.theme"
-                :company="companyName"
-                preview
-                @update:model-value="roomTheme?.choose($event)"
-              />
+              <div v-else-if="stage === 'theme'" :aria-busy="savingCompanyTheme">
+                <RoomThemePicker
+                  label="Room theme"
+                  :model-value="roomTheme?.personal.value ?? null"
+                  :inherited="roomTheme?.company.value?.theme"
+                  :company="companyName"
+                  :disabled="savingCompanyTheme"
+                  preview
+                  @update:model-value="roomTheme?.choose($event)"
+                />
+                <label v-if="canShareTheme" class="first-run-share-theme">
+                  <input v-model="shareTheme" type="checkbox" :disabled="savingCompanyTheme || !roomTheme?.personal.value">
+                  Use this as {{ companyName }}’s default
+                </label>
+                <p v-if="themeSaveError" class="mcp-feedback" role="alert">{{ themeSaveError }}</p>
+              </div>
 
               <div v-else class="first-run-room-stage">
                 <FirstRunCompanyRooms
@@ -133,7 +140,7 @@
                 v-if="showBack && !(stage === 'github' && authStatus?.pendingDeviceAuth)"
                 class="ghost-button"
                 type="button"
-                :disabled="busy"
+                :disabled="busy || savingCompanyTheme"
                 data-testid="first-run-back"
                 @click="$emit('back')"
               >
@@ -220,10 +227,11 @@
                 v-else-if="stage === 'theme'"
                 class="primary-button"
                 type="button"
+                :disabled="busy || savingCompanyTheme"
                 data-testid="first-run-theme-continue"
-                @click="$emit('continue-theme')"
+                @click="continueTheme"
               >
-                Continue
+                {{ savingCompanyTheme ? "Saving…" : "Continue" }}
               </button>
 
               <button
@@ -252,6 +260,7 @@
 import { computed, ref, watch } from "vue";
 import RoomThemePicker from "../../../../../../../shared/ui/RoomThemePicker.vue";
 import { useRoomTheme } from "../../../../../../../shared/ui/room-theme";
+import type { RoomThemeId } from "../../../../../../../shared/room-themes.mjs";
 import type {
   DesktopAuthStatus,
   DesktopMcpInstallState,
@@ -279,6 +288,7 @@ const props = defineProps<{
   companyName?: string | null;
   companyAvatarUrl?: string | null;
   companyRooms?: DesktopOrganizationRoom[];
+  saveCompanyTheme?: (id: string, theme: RoomThemeId) => Promise<void>;
   stage: FirstRunWizardStage;
   mcpState: DesktopMcpInstallState;
   selectedMcpTargetIds: DesktopMcpInstallTargetId[];
@@ -297,6 +307,36 @@ const props = defineProps<{
 }>();
 
 const roomTheme = useRoomTheme();
+const canShareTheme = computed(() => Boolean(props.saveCompanyTheme && roomTheme?.company.value && !roomTheme.company.value.theme));
+const shareTheme = ref(false);
+const savingCompanyTheme = ref(false);
+const themeSaveError = ref("");
+
+watch([() => roomTheme?.company.value?.id, () => props.stage], () => {
+  shareTheme.value = false;
+  themeSaveError.value = "";
+});
+
+async function continueTheme() {
+  if (savingCompanyTheme.value) return;
+  const company = roomTheme?.company.value;
+  const theme = roomTheme?.personal.value;
+  if (shareTheme.value && canShareTheme.value && company && theme && props.saveCompanyTheme) {
+    savingCompanyTheme.value = true;
+    themeSaveError.value = "";
+    try {
+      await props.saveCompanyTheme(company.id, theme);
+      if (props.stage !== "theme" || roomTheme.company.value?.id !== company.id) return;
+      if (roomTheme.personal.value === theme && roomTheme.company.value.theme === theme) roomTheme.choose(null);
+    } catch {
+      themeSaveError.value = "Couldn’t save the company theme. Try again.";
+      return;
+    } finally {
+      savingCompanyTheme.value = false;
+    }
+  }
+  emit("continue-theme");
+}
 
 const emit = defineEmits<{
   "select-target": [targetId: DesktopMcpInstallTargetId];

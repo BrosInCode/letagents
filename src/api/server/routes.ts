@@ -528,6 +528,7 @@ export function registerApiRoutes(app: Express): void {
   } satisfies RoomBoardRouteDeps;
 
   const roomMetadataRouteDeps = {
+    getRoomCompanyAppearance,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,

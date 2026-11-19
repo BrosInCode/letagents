@@ -114,11 +114,11 @@ export function registerOrganizationIpcHandlers(ipc: IpcMain): void {
     const org = organizationId(id);
     const theme = roomThemeId(value);
     if (!theme && value !== null) throw new Error("Choose a valid room theme.");
-    const response = await apiFetch<{ theme_id: unknown }>(`/organizations/${org}/theme`, {
+    const response = await apiFetch<{ theme_id: unknown; theme_revision: number }>(`/organizations/${org}/theme`, {
       method: "POST", body: JSON.stringify({ theme_id: theme }),
     }, COMPANY_TIMEOUT);
     clearJoinedRoomInfoCache();
-    return roomThemeId(response.theme_id);
+    return { theme: roomThemeId(response.theme_id), themeRevision: response.theme_revision };
   });
   ipc.handle("desktop:organizations:join", (_event, id: unknown, setup: unknown) => joinOrganization(id, setup));
   ipc.handle("desktop:organizations:rooms", (_event, id: unknown) => listOrganizationRooms(id));

@@ -133,28 +133,27 @@ onUnmounted(() => {
   position: relative;
   min-height: 92svh;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: calc(88px + env(safe-area-inset-top, 0px)) max(32px, env(safe-area-inset-right, 0px)) 96px max(32px, env(safe-area-inset-left, 0px));
+  padding: calc(156px + env(safe-area-inset-top, 0px)) max(32px, env(safe-area-inset-right, 0px)) 96px max(32px, env(safe-area-inset-left, 0px));
   text-align: center;
 }
 
 .hero-content {
   position: relative;
   z-index: 2;
-  max-width: 1060px;
+  max-width: 820px;
   width: 100%;
   margin: 0 auto;
 }
 
 .hero-headline {
-  font-size: clamp(2.8rem, 5.6vw, 4.55rem);
+  font-size: clamp(3.2rem, 7vw, 5.6rem);
   font-weight: 800;
   letter-spacing: -0.04em;
   line-height: 1.03;
   color: var(--l-text);
-  margin: 0 auto 16px;
+  margin: 0 auto 24px;
   text-wrap: balance;
 }
 
@@ -172,7 +171,7 @@ onUnmounted(() => {
   font-size: clamp(1.12rem, 1.6vw, 1.35rem);
   color: var(--l-text-sub);
   max-width: 520px;
-  margin: 0 auto 24px;
+  margin: 0 auto 40px;
   line-height: 1.5;
   font-weight: 450;
   letter-spacing: -0.01em;
@@ -294,7 +293,7 @@ onUnmounted(() => {
 
 @media (max-width: 768px) {
   .hero {
-    padding: calc(92px + env(safe-area-inset-top, 0px)) max(20px, env(safe-area-inset-right, 0px)) 64px max(20px, env(safe-area-inset-left, 0px));
+    padding: calc(112px + env(safe-area-inset-top, 0px)) max(20px, env(safe-area-inset-right, 0px)) 64px max(20px, env(safe-area-inset-left, 0px));
     min-height: auto;
   }
 
