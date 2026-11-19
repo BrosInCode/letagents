@@ -10,7 +10,7 @@ import {
   daemonPipeAddonCandidates,
   findDaemonPipeAddon,
   parseInstallLocation,
-  sealedDaemonPipeAddonSha256,
+  sealedDaemonPipeAddonSha256s,
 } from "../../../../shared/daemon-pipe-native.mjs";
 
 const seal = JSON.parse(readFileSync(new URL("../../../../shared/letagents-daemon-pipe.seal.json", import.meta.url), "utf8"));
@@ -36,6 +36,34 @@ test("a build is checked against the seal of its compiler", () => {
   assert.equal(newer.level, "warning");
   assert.match(newer.message, /"sha256":"e"/);
   assert.equal(checkDaemonPipeSeal(sealed, { ...build, arch: "arm64" }).level, "warning");
+});
+
+test("a seal may name one build for each compiler while a runner image rolls out", () => {
+  const old = { sha256: "d", vcToolsVersion: "14.44.1", windowsSdkVersion: "10.0.1" };
+  const sealed = { sourceSha256: "s", builds: { x64: [old, { sha256: "e", vcToolsVersion: "14.45.0", windowsSdkVersion: "10.0.1" }] } };
+  const build = { arch: "x64", sourceSha256: "s", ...old };
+  assert.equal(checkDaemonPipeSeal(sealed, build).level, "ok");
+  assert.equal(checkDaemonPipeSeal(sealed, { ...build, sha256: "e", vcToolsVersion: "14.45.0" }).level, "ok");
+  // Each build is checked against its own compiler's bytes, not any sealed bytes.
+  assert.equal(checkDaemonPipeSeal(sealed, { ...build, sha256: "e" }).level, "error");
+  assert.equal(checkDaemonPipeSeal(sealed, { ...build, sha256: "d", vcToolsVersion: "14.45.0" }).level, "error");
+  const third = checkDaemonPipeSeal(sealed, { ...build, sha256: "f", vcToolsVersion: "14.46.0" });
+  assert.equal(third.level, "warning");
+  assert.match(third.message, /14\.44\.1.*14\.45\.0/);
+});
+
+test("the committed seal has a well-formed build for each compiler it names", () => {
+  for (const [arch, entry] of Object.entries(seal.builds)) {
+    const builds = Array.isArray(entry) ? entry : [entry];
+    assert.ok(builds.length > 0, arch);
+    for (const build of builds) {
+      assert.match(build.sha256, /^[0-9a-f]{64}$/);
+      assert.match(build.vcToolsVersion, /^\d+\.\d+\.\d+$/);
+      assert.match(build.windowsSdkVersion, /^\d+\.\d+\.\d+\.\d+$/);
+    }
+    const pairs = builds.map((build) => `${build.vcToolsVersion} ${build.windowsSdkVersion}`);
+    assert.equal(new Set(pairs).size, pairs.length, `${arch}: one build for each compiler and SDK`);
+  }
 });
 
 test("the app looks for the addon where it ships it, or only where it is told", () => {
@@ -84,5 +112,12 @@ test("only the sealed bytes are accepted; other bytes are an error, not a reason
   assert.throws(() => findDaemonPipeAddon({ ...options, seal: { builds: {} } }), /No x64 build/);
   files.clear();
   assert.throws(() => findDaemonPipeAddon(options), /was not found/);
-  assert.equal(sealedDaemonPipeAddonSha256("x64", { builds: { x64: { sha256: "not-hex" } } }), null);
+  assert.deepEqual(sealedDaemonPipeAddonSha256s("x64", { builds: { x64: { sha256: "not-hex" } } }), []);
+  // A list of sealed builds: any of them is accepted, other bytes still are not.
+  const listed = { builds: { x64: [{ sha256: "0".repeat(64) }, { sha256: digest }] } };
+  files.set("C:\\app\\resources\\app\\runtime\\letagents-daemon-pipe.node", bytes);
+  assert.deepEqual(findDaemonPipeAddon({ ...options, seal: listed }).sha256, digest);
+  assert.deepEqual(sealedDaemonPipeAddonSha256s("x64", listed), ["0".repeat(64), digest]);
+  files.set("C:\\app\\resources\\app\\runtime\\letagents-daemon-pipe.node", Buffer.from("other bytes"));
+  assert.throws(() => findDaemonPipeAddon({ ...options, seal: listed }), /not the sealed/);
 });

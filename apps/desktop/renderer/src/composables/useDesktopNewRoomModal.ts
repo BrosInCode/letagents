@@ -1,6 +1,5 @@
 import { computed, ref } from "vue";
 import type { DesktopRepoRoomSelection, DesktopRoomSnapshot, RepoStatus } from "../../../electron/ipc-types";
-import { copyTextToClipboard } from "../../../../../shared/ui/clipboard";
 import { companyLinkIdFromInput, normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
 import { projectRoomName } from "../domain/project-room-name";
 import { repoPickerErrorMessage } from "../domain/repo-picker-error";
@@ -9,13 +8,11 @@ import { desktopIpc } from "../ipc/index.js";
 import { isMembershipRefusal } from "../components/desktop/content/auth-onboarding";
 
 export type NewRoomStep =
-  | "chooser"
   | "project"
   | "new_project"
   | "standalone"
   | "join"
   | "working"
-  | "success"
   | "error";
 
 /** Where a blank room lives: shared online, inside the selected company (shared online), or only on this device. */
@@ -32,24 +29,9 @@ export type NewRoomActiveAction =
   | "pick_project_parent"
   | "create_project"
   | "open_project_path"
-  | "confirm_project"
   | "create_standalone"
   | "join"
-  | "open_success"
-  | "copy_code"
   | null;
-
-export type NewRoomSuccessKind = "shared" | "local" | "project" | "joined";
-
-export interface NewRoomSuccessState {
-  kind: NewRoomSuccessKind;
-  roomName: string;
-  storageLabel: string;
-  inviteCode: string | null;
-  snapshot: DesktopRoomSnapshot;
-  openOptions: OpenRoomOptions;
-  repoStatus?: RepoStatus | null;
-}
 
 interface OpenRoomOptions {
   displayName?: string | null;
@@ -64,6 +46,7 @@ interface DesktopNewRoomModalOptions {
   getDefaultStorageMode?: () => NewRoomStorageChoice;
   /** The company selected in the sidebar; a new shared room is created in it by default. */
   getCompany?: () => NewRoomCompany | null;
+  onCreationWarning?: (message: string) => void;
   /** A pasted company link opens the company dialog instead of joining a room. */
   onCompanyLink?: (organizationId: string) => void;
   /** Called before the new company room opens, so the company lists it at once. */
@@ -113,8 +96,8 @@ function generateDefaultRoomName(): string {
 
 export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   const newRoomModalOpen = ref(false);
-  const newRoomStep = ref<NewRoomStep>("chooser");
-  const newRoomReturnStep = ref<Exclude<NewRoomStep, "working" | "success" | "error">>("chooser");
+  const newRoomStep = ref<NewRoomStep>("standalone");
+  const newRoomReturnStep = ref<Exclude<NewRoomStep, "working" | "error">>("standalone");
   const newRoomBusy = ref(false);
   const newRoomActiveAction = ref<NewRoomActiveAction>(null);
   const newRoomFeedback = ref<string | null>(null);
@@ -130,7 +113,6 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   const newRoomProjectName = ref("");
   const newRoomProjectParent = ref("");
   const newRoomProjectCreationError = ref<string | null>(null);
-  const newRoomSuccess = ref<NewRoomSuccessState | null>(null);
   const newRoomStatusMessage = ref<string | null>(null);
 
   const canSubmitJoin = computed(() => {
@@ -159,11 +141,11 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   function selectNewRoomEntry() {
     projectRequest += 1;
     newRoomModalOpen.value = true;
-    newRoomStep.value = "new_project";
-    newRoomReturnStep.value = "new_project";
+    newRoomStep.value = "standalone";
+    newRoomReturnStep.value = "standalone";
     newRoomJoinCode.value = "";
     newRoomJoinError.value = null;
-    newRoomName.value = generateDefaultRoomName();
+    newRoomName.value = "";
     newRoomCompany.value = options.getCompany?.() ?? null;
     newRoomStorage.value = options.getDefaultStorageMode?.() === "local"
       ? "local"
@@ -172,7 +154,6 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomProjectPath.value = "";
     newRoomProjectName.value = "";
     newRoomProjectParent.value = "";
-    newRoomSuccess.value = null;
     resetTransientState();
   }
 
@@ -180,7 +161,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     if (!newRoomCanDismiss.value) return;
     projectRequest += 1;
     newRoomModalOpen.value = false;
-    newRoomStep.value = "new_project";
+    newRoomStep.value = "standalone";
     newRoomJoinCode.value = "";
     newRoomJoinError.value = null;
     newRoomName.value = "";
@@ -188,16 +169,12 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomProjectPath.value = "";
     newRoomProjectName.value = "";
     newRoomProjectParent.value = "";
-    newRoomSuccess.value = null;
     resetTransientState();
   }
 
-  function goToChooser(): void {
+  function removeProject(): void {
     if (newRoomBusy.value) return;
-    newRoomStep.value = "new_project";
-    newRoomReturnStep.value = "new_project";
     newRoomProjectSelection.value = null;
-    newRoomSuccess.value = null;
     resetTransientState();
   }
 
@@ -205,7 +182,6 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     if (newRoomBusy.value) return;
     newRoomStep.value = "project";
     newRoomReturnStep.value = "project";
-    newRoomSuccess.value = null;
     resetTransientState();
   }
 
@@ -213,10 +189,6 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     if (newRoomBusy.value) return;
     newRoomStep.value = "standalone";
     newRoomReturnStep.value = "standalone";
-    if (!newRoomName.value.trim()) {
-      newRoomName.value = generateDefaultRoomName();
-    }
-    newRoomSuccess.value = null;
     resetTransientState();
   }
 
@@ -224,7 +196,6 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     if (newRoomBusy.value) return;
     newRoomStep.value = "new_project";
     newRoomReturnStep.value = "new_project";
-    newRoomSuccess.value = null;
     resetTransientState();
   }
 
@@ -286,7 +257,6 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     if (newRoomBusy.value) return;
     newRoomStep.value = "join";
     newRoomReturnStep.value = "join";
-    newRoomSuccess.value = null;
     resetTransientState();
   }
 
@@ -297,7 +267,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       resetTransientState();
       return;
     }
-    goToChooser();
+    chooseStandaloneIntent();
   }
 
   function retryLastAction(): void {
@@ -349,19 +319,12 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
           throw new Error("Restart LetAgents Desktop to enable local rooms.");
         }
         const result = await bridge.createLocalRoom({ displayName });
-        newRoomSuccess.value = {
-          kind: "local",
-          roomName: result.snapshot.room?.displayName || displayName,
-          storageLabel: "Local / private on this device",
-          inviteCode: null,
-          snapshot: result.snapshot,
-          openOptions: {
-            displayName,
-            kind: "room",
-            rootPath: null,
-            meta: "Local on this device",
-          },
-        };
+        finishRoom(result.snapshot, {
+          displayName,
+          kind: "room",
+          rootPath: null,
+          meta: "Local on this device",
+        });
       } else {
         const result = await desktopIpc.room.createInviteRoom(company ? { organizationId: company.id } : undefined);
         let snapshot = result.snapshot;
@@ -401,34 +364,18 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
         if (company) {
           options.onCompanyRoomCreated?.({ roomIdentifier: result.roomIdentifier, displayName: roomName, organizationId: company.id });
         }
-        newRoomSuccess.value = {
-          kind: "shared",
-          roomName,
-          storageLabel: company ? `${company.login} · shared online` : "Cloud / shared",
-          inviteCode: result.code,
-          snapshot,
-          openOptions: {
-            displayName: roomName,
-            kind: "room",
-            rootPath: null,
-            meta: result.code || "Shared room",
-          },
-        };
-        if (namingWarning) {
-          newRoomFeedback.value = namingWarning;
-          newRoomFeedbackState.value = "info";
-        } else {
-          newRoomFeedback.value = null;
-          newRoomFeedbackState.value = "success";
+        finishRoom(snapshot, {
+          displayName: roomName,
+          kind: "room",
+          rootPath: null,
+          meta: result.code || "Shared room",
+        });
+        if (snapshot.access.status !== "ready") {
+          options.onCreationWarning?.(`Room created, but it couldn’t open. Invite code: ${result.code}.`);
+        } else if (namingWarning) {
+          options.onCreationWarning?.(namingWarning);
         }
       }
-      newRoomStep.value = "success";
-      if (newRoomStorage.value === "local") {
-        newRoomFeedback.value = null;
-        newRoomFeedbackState.value = "success";
-      }
-      newRoomJoinCode.value = "";
-      newRoomProjectSelection.value = null;
     } catch (error) {
       newRoomFeedback.value =
         error instanceof Error
@@ -471,7 +418,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       newRoomProjectSelection.value = projectSelectionFromResult(result, result.snapshot);
       newRoomFeedback.value = result.warning || null;
       newRoomFeedbackState.value = result.warning ? "info" : "success";
-      newRoomStep.value = "project";
+      newRoomStep.value = "standalone";
     } catch (error) {
       if (!isCurrentProjectRequest(request)) return;
       newRoomFeedback.value = repoPickerErrorMessage(error, "LetAgents could not open the project picker.");
@@ -504,8 +451,6 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomActiveAction.value = "open_project_path";
     newRoomReturnStep.value = "project";
     newRoomProjectPathError.value = null;
-    // The preview always describes the latest folder asked for.
-    newRoomProjectSelection.value = null;
     newRoomFeedback.value = null;
     newRoomFeedbackState.value = "info";
     try {
@@ -518,6 +463,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       newRoomProjectSelection.value = projectSelectionFromResult(result, result.snapshot);
       newRoomFeedback.value = result.warning || null;
       newRoomFeedbackState.value = result.warning ? "info" : "success";
+      newRoomStep.value = "standalone";
     } catch (error) {
       if (!isCurrentProjectRequest(request)) return;
       newRoomProjectPathError.value = repoPickerErrorMessage(error, "LetAgents could not open that folder.");
@@ -532,22 +478,12 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   function confirmProjectRoomFromModal(): void {
     const selection = newRoomProjectSelection.value;
     if (!selection || newRoomBusy.value) return;
-    newRoomActiveAction.value = "confirm_project";
-    newRoomSuccess.value = {
+    finishRoom(selection.snapshot, {
+      displayName: selection.roomName,
       kind: "project",
-      roomName: selection.roomName,
-      storageLabel: selection.sourceLabel,
-      inviteCode: null,
-      snapshot: selection.snapshot,
-      repoStatus: selection.repoStatus,
-      openOptions: {
-        displayName: selection.roomName,
-        kind: "project",
-        rootPath: selection.repoPath,
-        meta: selection.repoStatus?.branch || rootPathLabel(selection.repoPath) || selection.source || null,
-      },
-    };
-    openSuccessRoom();
+      rootPath: selection.repoPath,
+      meta: selection.repoStatus?.branch || rootPathLabel(selection.repoPath) || selection.source || null,
+    }, selection.repoStatus);
   }
 
   async function joinRoomCodeFromModal(): Promise<void> {
@@ -581,15 +517,12 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       if (isMembershipRefusal(snapshot.access.status)) {
         // A members-only room: open it, so its card offers the request to join
         // (or says to ask a repository admin, or for the main room's link).
-        newRoomSuccess.value = {
-          kind: "joined",
-          roomName: snapshot.access.displayName || validation.normalized,
-          storageLabel: "Members only",
-          inviteCode: null,
-          snapshot,
-          openOptions: { displayName: snapshot.access.displayName || null, kind: "room", rootPath: null, meta: "Members only" },
-        };
-        openSuccessRoom();
+        finishRoom(snapshot, {
+          displayName: snapshot.access.displayName || null,
+          kind: "room",
+          rootPath: null,
+          meta: "Members only",
+        });
         return;
       }
       if (snapshot.access.status !== "ready") {
@@ -598,24 +531,11 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
         newRoomStep.value = "error";
         return;
       }
-      const roomName =
-        snapshot.room?.displayName ||
-        snapshot.room?.name ||
-        snapshot.room?.code ||
-        validation.normalized;
-      newRoomSuccess.value = {
-        kind: "joined",
-        roomName,
-        storageLabel: snapshot.room?.code ? `Invite ${snapshot.room.code}` : "Joined room",
-        inviteCode: snapshot.room?.code || (looksLikeInviteCodeValue(validation.normalized) ? validation.normalized : null),
-        snapshot,
-        openOptions: {
-          kind: "room",
-          rootPath: null,
-          meta: snapshot.room?.code || "Joined room",
-        },
-      };
-      openSuccessRoom();
+      finishRoom(snapshot, {
+        kind: "room",
+        rootPath: null,
+        meta: snapshot.room?.code || "Joined room",
+      });
     } catch (error) {
       newRoomFeedback.value = error instanceof Error ? error.message : "LetAgents could not join that room.";
       newRoomFeedbackState.value = "error";
@@ -627,47 +547,11 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     }
   }
 
-  function openSuccessRoom(): void {
-    const success = newRoomSuccess.value;
-    if (!success) return;
-    newRoomActiveAction.value = "open_success";
-    if (success.repoStatus) {
-      options.setRepoStatus(success.repoStatus);
-    }
-    options.openRoomSnapshot(success.snapshot, success.openOptions);
-    newRoomModalOpen.value = false;
-    newRoomStep.value = "new_project";
-    newRoomJoinCode.value = "";
-    newRoomProjectSelection.value = null;
-    newRoomSuccess.value = null;
-    resetTransientState();
-  }
-
-  function dismissSuccess(): void {
-    if (newRoomBusy.value) return;
-    newRoomModalOpen.value = false;
-    newRoomStep.value = "new_project";
-    newRoomSuccess.value = null;
-    resetTransientState();
-  }
-
-  async function copyInviteCode(): Promise<boolean> {
-    const code = newRoomSuccess.value?.inviteCode;
-    if (!code) return false;
-    newRoomActiveAction.value = "copy_code";
-    try {
-      const copied = await copyTextToClipboard(code);
-      if (copied) {
-        newRoomFeedback.value = "Invite code copied.";
-        newRoomFeedbackState.value = "success";
-        return true;
-      }
-      newRoomFeedback.value = "Could not copy the invite code. Select it and copy manually.";
-      newRoomFeedbackState.value = "error";
-      return false;
-    } finally {
-      newRoomActiveAction.value = null;
-    }
+  function finishRoom(snapshot: DesktopRoomSnapshot, openOptions: OpenRoomOptions, repoStatus?: RepoStatus | null): void {
+    if (repoStatus) options.setRepoStatus(repoStatus);
+    options.openRoomSnapshot(snapshot, openOptions);
+    newRoomBusy.value = false;
+    closeNewRoomModal();
   }
 
   return {
@@ -680,14 +564,11 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     chooseStandaloneIntent,
     closeNewRoomModal,
     confirmProjectRoomFromModal,
-    copyInviteCode,
     newRoomCompany,
     createInviteRoom,
     createLocalRoomFromModal,
     createProjectRoomFromModal,
     createStandaloneRoom,
-    dismissSuccess,
-    goToChooser,
     joinRoomCodeFromModal,
     newRoomActiveAction,
     newRoomBusy,
@@ -707,18 +588,13 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomStatusMessage,
     newRoomStep,
     newRoomStorage,
-    newRoomSuccess,
     openProjectRoomFromModal,
     openProjectRoomFromPath,
     pickNewProjectParent,
-    openSuccessRoom,
+    removeProject,
     retryLastAction,
     selectNewRoomEntry,
   };
-}
-
-function looksLikeInviteCodeValue(value: string): boolean {
-  return /^[A-Z0-9]{4}(?:-[A-Z0-9]{4})+$/.test(value.trim().toUpperCase());
 }
 
 function projectSelectionFromResult(

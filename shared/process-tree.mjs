@@ -118,10 +118,17 @@ function processTreeSeal() {
   return loadedSeal;
 }
 
-/** The sealed sha256 of the helper built for `arch`, or null when no build for it is sealed. */
-export function sealedProcessTreeHelperSha256(arch = process.arch, seal = processTreeSeal()) {
-  const digest = seal?.builds?.[arch === "arm64" ? "arm64" : "x64"]?.sha256;
-  return typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest) ? digest : null;
+/**
+ * The sealed sha256 digests of the helper built for `arch`; empty when no
+ * build for it is sealed. `builds.<arch>` is one build or a list of builds:
+ * a list while GitHub's runner images carry two MSVC versions, each of which
+ * makes its own reproducible bytes.
+ */
+export function sealedProcessTreeHelperSha256s(arch = process.arch, seal = processTreeSeal()) {
+  const sealed = seal?.builds?.[arch === "arm64" ? "arm64" : "x64"];
+  return (Array.isArray(sealed) ? sealed : [sealed])
+    .map((build) => build?.sha256)
+    .filter((digest) => typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest));
 }
 
 /**
@@ -144,16 +151,16 @@ export function processTreeHelperRefusal() {
 }
 
 function helperMatchesSeal(filePath, options) {
-  const expected = sealedProcessTreeHelperSha256(options.arch, options.seal === undefined ? processTreeSeal() : options.seal);
+  const expected = sealedProcessTreeHelperSha256s(options.arch, options.seal === undefined ? processTreeSeal() : options.seal);
   let actual = null;
   if (options.readFile) {
     try { actual = createHash("sha256").update(options.readFile(filePath)).digest("hex"); } catch { actual = null; }
   } else {
     actual = fileSha256(filePath);
   }
-  if (expected && actual === expected) return true;
-  helperRefusal = expected
-    ? `${filePath} is not the sealed ${PROCESS_TREE_HELPER_NAME} (sha256 ${actual ?? "unreadable"}, sealed ${expected}), so it is not used.`
+  if (actual && expected.includes(actual)) return true;
+  helperRefusal = expected.length > 0
+    ? `${filePath} is not the sealed ${PROCESS_TREE_HELPER_NAME} (sha256 ${actual ?? "unreadable"}, sealed ${expected.join(" or ")}), so it is not used.`
     : `No ${options.arch} build of ${PROCESS_TREE_HELPER_NAME} is sealed, so ${filePath} is not used.`;
   if (!reportedRefusals.has(helperRefusal)) {
     reportedRefusals.add(helperRefusal);

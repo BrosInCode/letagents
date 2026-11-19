@@ -7,8 +7,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { desktopAssetNames } from "./release-metadata.mjs";
-import { sealedDaemonPipeAddonSha256 } from "../../../../shared/daemon-pipe-native.mjs";
-import { PROCESS_TREE_HELPER_NAME, sealedProcessTreeHelperSha256 } from "../../../../shared/process-tree.mjs";
+import { sealedDaemonPipeAddonSha256s } from "../../../../shared/daemon-pipe-native.mjs";
+import { PROCESS_TREE_HELPER_NAME, sealedProcessTreeHelperSha256s } from "../../../../shared/process-tree.mjs";
 import {
   DAEMON_PIPE_ADDON_APP_PATH,
   PROCESS_TREE_HELPER_APP_PATH,
@@ -120,8 +120,8 @@ const installedHelper = join(installDirectory, "resources", "app", ...PROCESS_TR
 assert(existsSync(installedHelper), `The install has no ${PROCESS_TREE_HELPER_APP_PATH}.`);
 const installedHelperSha256 = createHash("sha256").update(readFileSync(installedHelper)).digest("hex");
 assert(
-  installedHelperSha256 === sealedProcessTreeHelperSha256("x64"),
-  `The installed helper is ${installedHelperSha256}; the seal names ${sealedProcessTreeHelperSha256("x64")}.`,
+  sealedProcessTreeHelperSha256s("x64").includes(installedHelperSha256),
+  `The installed helper is ${installedHelperSha256}; the seal names ${sealedProcessTreeHelperSha256s("x64").join(" or ")}.`,
 );
 const helperProbe = run(executable, ["-e", [
   "(async () => {",
@@ -151,8 +151,8 @@ const installedAddon = join(installDirectory, "resources", "app", ...DAEMON_PIPE
 assert(existsSync(installedAddon), `The install has no ${DAEMON_PIPE_ADDON_APP_PATH}.`);
 const installedAddonSha256 = createHash("sha256").update(readFileSync(installedAddon)).digest("hex");
 assert(
-  installedAddonSha256 === sealedDaemonPipeAddonSha256("x64"),
-  `The installed daemon pipe addon is ${installedAddonSha256}; the seal names ${sealedDaemonPipeAddonSha256("x64")}.`,
+  sealedDaemonPipeAddonSha256s("x64").includes(installedAddonSha256),
+  `The installed daemon pipe addon is ${installedAddonSha256}; the seal names ${sealedDaemonPipeAddonSha256s("x64").join(" or ")}.`,
 );
 const pipeProbe = run(executable, ["-e", [
   "(async () => {",
