@@ -294,10 +294,20 @@ try {
   await new Promise(resolve => setTimeout(resolve, 2650));
   await js(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
   assert.ok(await js(`!document.querySelector('.first-room-flight')`), 'room arrival waits while the sidebar row is still loading');
+  if (hasMotion) {
+    assert.ok(await js(`{
+      const picker = document.querySelector('[data-testid="desktop-first-run-onboarding"][data-room-arrival="waiting"]');
+      picker && getComputedStyle(picker).opacity === '1'
+        && picker.getBoundingClientRect().height >= innerHeight
+        && document.querySelector('[data-testid="desktop-shell"]').inert;
+    }`), 'the picker still covers the workspace while the landing is unavailable');
+  }
   await js(`document.getElementById('defer-sidebar-room-row').remove()`);
   releaseWorkspaceMetadata();
   if (hasMotion) {
     await waitFor(`Boolean(document.querySelector('.first-room-flight'))`);
+    assert.ok(await js(`document.querySelector('[data-testid="desktop-first-run-onboarding"]')?.dataset.roomArrival === 'moving'
+      && !document.querySelector('[data-testid="desktop-shell"]').inert`), 'the picker fades as the flight begins');
     const flight = await js(`{
       const element = document.querySelector('.first-room-flight');
       const target = document.querySelector('[data-first-room-landing]');
@@ -343,7 +353,7 @@ try {
       }));
     })`);
     assert.ok(retargeted?.paused && retargeted.error < 2, 'the flight pauses while the row is missing, then lands at its new position');
-    await waitFor(`!document.querySelector('.first-room-flight, [data-first-room-landing]')`);
+    await waitFor(`!document.querySelector('.first-room-flight, [data-first-room-landing], [data-testid="desktop-first-run-onboarding"]')`);
   }
   await js(`delete document.startViewTransition`);
   await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);

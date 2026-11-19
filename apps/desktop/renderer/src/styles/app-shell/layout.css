@@ -204,6 +204,17 @@ html[data-window-chrome="mac"] .desktop-onboarding-shell:not([data-cinematic="tr
 .desktop-onboarding-shell[data-cinematic="true"] .welcome-screen { min-height: 100dvh; }
 html[data-window-chrome="mac"] .first-run-wizard { --welcome-brand-top: 42px; }
 
+/* Keep the picker on screen while the real sidebar lays out beneath it. */
+.desktop-onboarding-shell[data-room-arrival] {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+}
+.desktop-onboarding-shell[data-room-arrival="moving"] {
+  opacity: 0;
+  transition: opacity 280ms var(--ease-out);
+}
+
 .first-room-flight {
   position: fixed;
   display: grid;
@@ -222,10 +233,4 @@ html[data-window-chrome="mac"] .first-run-wizard { --welcome-brand-top: 42px; }
 .first-room-flight svg:last-child { animation: first-room-glyph-in 600ms linear both; }
 @keyframes first-room-glyph-out { 75% { opacity: 1; } to { opacity: 0; } }
 @keyframes first-room-glyph-in { 0%, 75% { opacity: 0; } to { opacity: 1; } }
-[data-first-room-landing] { opacity: 0; }
-@media (prefers-reduced-motion: no-preference) {
-  body:has(> .first-room-flight) .desktop-shell .app-main {
-    animation: first-room-chat-in 320ms var(--ease-out) both;
-  }
-}
-@keyframes first-room-chat-in { from { opacity: .62; } }
+[data-first-room-landing], [data-first-room-departure] { opacity: 0; }

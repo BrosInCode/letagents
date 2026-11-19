@@ -1,7 +1,15 @@
 <template>
   <FirstRunSplashView v-if="showFirstRunSplash" />
 
-  <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" :data-cinematic="firstRunStage === 'welcome' || firstRunStage === 'github'" :style="roomTheme.css.value" data-testid="desktop-first-run-onboarding">
+  <main
+    v-if="!showFirstRunSplash && (showFirstRunGate || (roomArrival && !showSignedOutGate))"
+    class="desktop-onboarding-shell"
+    :data-cinematic="firstRunStage === 'welcome' || firstRunStage === 'github'"
+    :data-room-arrival="showFirstRunGate ? null : roomArrival"
+    :inert="!showFirstRunGate"
+    :style="roomTheme.css.value"
+    data-testid="desktop-first-run-onboarding"
+  >
     <FirstRunOnboardingView
       :stage="firstRunStage"
       :company-step="companyStep"
@@ -35,7 +43,7 @@
   </main>
 
   <main
-    v-else-if="showSignedOutGate"
+    v-if="!showFirstRunSplash && !showFirstRunGate && showSignedOutGate"
     class="desktop-onboarding-shell desktop-signed-out-shell"
     data-testid="desktop-signed-out-gate"
   >
@@ -50,12 +58,13 @@
   </main>
 
   <main
-    v-else
+    v-else-if="!showFirstRunSplash && !showFirstRunGate"
     class="desktop-shell"
     :data-sidebar-mode="isSettingsSurface ? 'hidden' : sidebarMode"
     :data-sidebar-resizing="isSidebarResizing"
     :style="[desktopShellStyle, roomTheme.css.value]"
     :data-room-theme="roomTheme.effective.value"
+    :inert="roomArrival === 'waiting'"
     data-testid="desktop-shell"
   >
     <Transition name="desktop-sidebar">
@@ -465,7 +474,7 @@
 <script setup lang="ts">
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
-import { computed, defineAsyncComponent, watch } from "vue";
+import { computed, defineAsyncComponent, ref, watch } from "vue";
 import { roomThemeId, type RoomCompanyAppearance } from "../../../../shared/room-themes.mjs";
 import { provideRoomTheme } from "../../../../shared/ui/room-theme";
 import { useKeyWhileShown } from "./composables/useKeyWhileShown";
@@ -735,20 +744,27 @@ function openOnboardingCompanyStep() {
   void app.refreshAccountRooms();
 }
 
+const roomArrival = ref<"waiting" | "moving" | null>(null);
+
 async function openOnboardingRoom(id: string, icon?: HTMLElement) {
-  const flyRoomIcon = prepareFirstRoomFlight(icon);
-  const snapshot = await joinRoomCode(id);
-  if (snapshot?.access.status === "ready") {
+  const clearArrival = () => { roomArrival.value = null; };
+  const flyRoomIcon = prepareFirstRoomFlight(icon, () => { roomArrival.value = "moving"; });
+  if (flyRoomIcon) roomArrival.value = "waiting";
+  try {
+    const snapshot = await joinRoomCode(id);
+    if (snapshot?.access.status !== "ready") return;
     const openedEntryId = activeEntry.value.id;
     const openedRoomId = normalizeRoomIdentifier(snapshot.roomIdentifier);
-    await finishFirstRunOnboarding(snapshot, {
-      animateArrival: metadataReady => flyRoomIcon?.(() => {
+    await finishFirstRunOnboarding(snapshot, flyRoomIcon && {
+      animateArrival: metadataReady => flyRoomIcon(() => {
         const entry = activeEntry.value;
         if (entry.type !== "room") return null;
         return entry.id === openedEntryId || normalizeRoomIdentifier(entry.roomIdentifier) === openedRoomId
           ? entry.id : null;
-      }, metadataReady),
+      }, metadataReady).finally(clearArrival),
     });
+  } finally {
+    clearArrival();
   }
 }
 

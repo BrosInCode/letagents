@@ -1,5 +1,6 @@
 const reducedMotion = "(prefers-reduced-motion: reduce)";
 const landingWait = 2_500;
+const maxLandingWait = 5_000;
 const flightDuration = 600;
 
 type ActiveEntry = () => string | null;
@@ -40,9 +41,11 @@ function waitForLanding(activeEntry: ActiveEntry, preference: MediaQueryList, me
     const finish = (landing?: Landing) => {
       finished = true;
       clearTimeout(deadline);
+      clearTimeout(fallback);
       cancelAnimationFrame(frame);
       resolve(landing);
     };
+    const fallback = window.setTimeout(finish, maxLandingWait);
     const startGracePeriod = () => {
       if (!finished) deadline = window.setTimeout(finish, landingWait);
     };
@@ -59,20 +62,22 @@ function waitForLanding(activeEntry: ActiveEntry, preference: MediaQueryList, me
   });
 }
 
-export function prepareFirstRoomFlight(icon?: HTMLElement): ((activeEntry: ActiveEntry, metadataReady: Promise<void>) => Promise<void>) | undefined {
+export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: () => void) {
   if (!icon || window.matchMedia(reducedMotion).matches) return;
   const glyph = icon.querySelector("svg");
-  const origin = icon.getBoundingClientRect();
-  if (!glyph || !origin.width || !origin.height) return;
+  const clickedBounds = icon.getBoundingClientRect();
+  if (!glyph || !clickedBounds.width || !clickedBounds.height) return;
   const copy = glyph.cloneNode(true);
   const style = getComputedStyle(icon);
   const color = style.getPropertyValue("--workspace-accent").trim() || style.color;
 
-  return async (activeEntry, metadataReady) => {
+  return async (activeEntry: ActiveEntry, metadataReady: Promise<void>) => {
     const preference = window.matchMedia(reducedMotion);
     const initialLanding = await waitForLanding(activeEntry, preference, metadataReady);
     if (!initialLanding) return;
     let landing = initialLanding;
+    const sourceBounds = icon.getBoundingClientRect();
+    const origin = sourceBounds.width && sourceBounds.height ? sourceBounds : clickedBounds;
 
     const flight = document.createElement("span");
     flight.className = "first-room-flight";
@@ -83,6 +88,7 @@ export function prepareFirstRoomFlight(icon?: HTMLElement): ((activeEntry: Activ
     });
     flight.append(copy, landing.icon.cloneNode(true));
     document.body.append(flight);
+    icon.dataset.firstRoomDeparture = "";
     landing.icon.dataset.firstRoomLanding = "";
 
     function landingFrame(target: Landing): Keyframe {
@@ -127,6 +133,7 @@ export function prepareFirstRoomFlight(icon?: HTMLElement): ((activeEntry: Activ
     frame = requestAnimationFrame(followSidebar);
     const deadline = window.setTimeout(cancel, landingWait);
     preference.addEventListener("change", cancel);
+    onStart();
     try {
       await animation.finished;
     } catch { /* Cancellation leaves the real room available. */ }
@@ -135,6 +142,7 @@ export function prepareFirstRoomFlight(icon?: HTMLElement): ((activeEntry: Activ
       cancelAnimationFrame(frame);
       preference.removeEventListener("change", cancel);
       delete landing.icon.dataset.firstRoomLanding;
+      delete icon.dataset.firstRoomDeparture;
       flight.remove();
     }
   };

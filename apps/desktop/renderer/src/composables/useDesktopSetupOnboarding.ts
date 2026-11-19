@@ -401,7 +401,13 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       } else {
         // The landing row may depend on metadata fetched by this refresh.
         const metadataReady = options.refresh();
-        await Promise.all([metadataReady, reveal?.animateArrival?.(metadataReady)]);
+        const arrival = reveal?.animateArrival?.(metadataReady);
+        try {
+          await Promise.all([metadataReady, arrival]);
+        } finally {
+          // A failed refresh can still leave a valid landing in the cached sidebar.
+          await arrival?.catch(() => undefined);
+        }
       }
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "Could not close setup.";
