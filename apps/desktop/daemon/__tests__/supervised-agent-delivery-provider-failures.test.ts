@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -23,6 +23,7 @@ import {
   STOPPED_AFTER_THREE,
   runFailingLeaseHolder,
 } from "./helpers/supervised-agent-delivery-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("a transient provider failure continues its unfinished task without another room message", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-task-continuity-"));
@@ -59,7 +60,7 @@ test("a transient provider failure continues its unfinished task without another
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_failed");
     assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "1");
   } finally {
-    await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root);
   }
 });
 
@@ -489,7 +490,7 @@ test("a refused credential that Claude names `invalid_request` blocks the follow
     await waitForAsync(async () => (await store.receipts(agent.agentId))[1]?.state === "acknowledged_no_reply");
     assert.deepEqual(sources, ["1", "continuation"]);
   } finally {
-    await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root);
   }
 });
 
@@ -534,7 +535,7 @@ for (const [ending, claudeApiFailure] of Object.entries({
       "the task is not continued by itself in the new conversation");
     assert.deepEqual(sources, ["1 in thread", "2 in thread-2"], "the next message runs in the new conversation, and the follow-up runs nowhere");
   } finally {
-    await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    await delivery.fenceAndDrain(); await store.close(); removeTestDirectory(root);
   }
 });
 

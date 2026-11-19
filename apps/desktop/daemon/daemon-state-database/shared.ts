@@ -371,6 +371,20 @@ export function schemaMethods<T>(methods: T & ThisType<DaemonStateSchema>): T { 
 
 /** Presentation metadata is optional; old identities acquire no invented portrait. */
 export function applyAgentAvatarColumn(database: DatabaseSync): void {
+  if (database.isTransaction) { applyAgentAvatarColumnInTransaction(database); return; }
+  // createSchema runs this after its version step has committed. Fresh sibling
+  // daemons reach it together: without the write lock both see no column and
+  // the second ALTER fails with "duplicate column name". Check under the lock.
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applyAgentAvatarColumnInTransaction(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+function applyAgentAvatarColumnInTransaction(database: DatabaseSync): void {
   const columns = database.prepare("PRAGMA table_info(agent_profiles)").all();
   if (!columns.some(column => column.name === "avatar_json")) {
     database.exec("ALTER TABLE agent_profiles ADD COLUMN avatar_json TEXT CHECK(avatar_json IS NULL OR (json_valid(avatar_json) AND length(avatar_json) <= 44000))");
