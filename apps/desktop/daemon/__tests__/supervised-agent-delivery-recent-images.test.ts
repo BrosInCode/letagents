@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { RoomTurnAttachmentStager } from "../room-turn-attachments.js";
 import { SupervisedRoomAuthorizationError } from "../supervised-agent-delivery.js";
 import { agent, provider, STAGED_PNG, pngAttachment, withAttachmentStager } from "./helpers/supervised-agent-delivery-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 // Images on recent messages before the activating one, end to end through the delivery loop.
 
@@ -32,7 +33,7 @@ async function withStore(run: (root: string, open: () => SupervisedAgentInboxSto
     await run(root, () => { const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite")); stores.push(store); return store; });
   } finally {
     for (const store of stores) await store.close().catch(() => {});
-    await rm(root, { recursive: true, force: true });
+    removeTestDirectory(root);
   }
 }
 
