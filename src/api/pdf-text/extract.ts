@@ -41,15 +41,19 @@ export const PDF_TEXT_LIMITS = Object.freeze({
   cacheEntries: 16,
   cacheChars: 8_000_000,
   cacheMs: 30 * 60_000,
-  /** A PDF that could not be read is answered from memory this long. */
+  /**
+   * A PDF that could not be read is answered from memory this long; one that
+   * ran out of time, which a busy server can cause, for less.
+   */
   failureCacheMs: 10 * 60_000,
+  timeoutCacheMs: 2 * 60_000,
   failureEntries: 256,
 });
 
 export type PdfTextFailure = "encrypted" | "invalid" | "too_complex" | "busy" | "unavailable";
 
 export class PdfTextError extends Error {
-  constructor(readonly reason: PdfTextFailure) {
+  constructor(readonly reason: PdfTextFailure, readonly timedOut = false) {
     super(`The PDF could not be read (${reason}).`);
     this.name = "PdfTextError";
   }
@@ -99,15 +103,20 @@ function workerFile(): { url: URL; execArgv?: string[] } {
   return existsSync(fileURLToPath(compiled)) ? { url: compiled, execArgv: [] } : { url: new URL("./worker.ts", import.meta.url) };
 }
 
+/** Node 22.16 and later can measure a worker's memory; without that, no PDF is read. */
+function canWatchWorkerMemory(): boolean {
+  return typeof (Worker.prototype as { getHeapStatistics?: unknown }).getHeapStatistics === "function";
+}
+
 export function isPdfTextAvailable(): boolean {
-  return pdfjsLocation() !== null;
+  return canWatchWorkerMemory() && pdfjsLocation() !== null;
 }
 
 let running = 0;
 const runningByRequester = new Map<string, number>();
 const inFlight = new Map<string, Promise<PdfText>>();
 const cache = new Map<string, { text: PdfText; chars: number; at: number }>();
-const failures = new Map<string, { reason: PdfTextFailure; at: number }>();
+const failures = new Map<string, { reason: PdfTextFailure; until: number }>();
 /** Failures that say something about the PDF itself, not about this moment. */
 const KEPT_FAILURES = new Set<PdfTextFailure>(["encrypted", "invalid", "too_complex"]);
 
@@ -138,10 +147,10 @@ function remember(key: string, text: PdfText, now: number): void {
   }
 }
 
-function rememberFailure(key: string, reason: PdfTextFailure, now: number): void {
-  if (!KEPT_FAILURES.has(reason)) return;
+function rememberFailure(key: string, error: PdfTextError, now: number): void {
+  if (!KEPT_FAILURES.has(error.reason)) return;
   failures.delete(key);
-  failures.set(key, { reason, at: now });
+  failures.set(key, { reason: error.reason, until: now + (error.timedOut ? PDF_TEXT_LIMITS.timeoutCacheMs : PDF_TEXT_LIMITS.failureCacheMs) });
   while (failures.size > PDF_TEXT_LIMITS.failureEntries) failures.delete(failures.keys().next().value!);
 }
 
@@ -167,7 +176,7 @@ export async function pdfTextFor(
   const kept = cached(key, now);
   if (kept) return kept;
   const failed = failures.get(key);
-  if (failed && now - failed.at <= PDF_TEXT_LIMITS.failureCacheMs) throw new PdfTextError(failed.reason);
+  if (failed && now <= failed.until) throw new PdfTextError(failed.reason);
   const pending = inFlight.get(key);
   if (pending) return pending;
   const requester = options.requester ?? "";
@@ -176,12 +185,14 @@ export async function pdfTextFor(
   running += 1;
   runningByRequester.set(requester, mine + 1);
   const reading = (async () => {
+    // Nothing below runs before this read is registered in inFlight.
+    await null;
     try {
       const text = await extractPdfText(await load());
       remember(key, text, Date.now());
       return text;
     } catch (error) {
-      if (error instanceof PdfTextError) rememberFailure(key, error.reason, Date.now());
+      if (error instanceof PdfTextError) rememberFailure(key, error, Date.now());
       throw error;
     } finally {
       running -= 1;
@@ -199,7 +210,7 @@ export async function pdfTextFor(
 export function extractPdfText(bytes: Uint8Array, limits: Partial<typeof PDF_TEXT_LIMITS> = {}): Promise<PdfText> {
   const options = { ...PDF_TEXT_LIMITS, ...limits };
   const location = pdfjsLocation();
-  if (!location) return Promise.reject(new PdfTextError("unavailable"));
+  if (!location || !canWatchWorkerMemory()) return Promise.reject(new PdfTextError("unavailable"));
   if (bytes.byteLength > options.maxBytes) return Promise.reject(new PdfTextError("too_complex"));
   return new Promise<PdfText>((resolve, reject) => {
     const file = workerFile();
@@ -224,14 +235,22 @@ export function extractPdfText(bytes: Uint8Array, limits: Partial<typeof PDF_TEX
       void worker.terminate().catch(() => undefined);
       outcome();
     };
-    const deadline = setTimeout(() => finish(() => reject(new PdfTextError("too_complex"))), options.timeoutMs);
+    const deadline = setTimeout(() => finish(() => reject(new PdfTextError("too_complex", true))), options.timeoutMs);
     const externalLimit = options.externalMemoryMb * 1024 * 1024;
     let checking = false;
     const memoryWatch = setInterval(() => {
       if (checking || settled) return;
       checking = true;
-      worker.getHeapStatistics().then((stats) => {
-        if (stats.external_memory > externalLimit) finish(() => reject(new PdfTextError("too_complex")));
+      let stats;
+      try {
+        stats = worker.getHeapStatistics();
+      } catch {
+        // A worker that cannot be measured is not left running.
+        finish(() => reject(new PdfTextError("too_complex")));
+        return;
+      }
+      stats.then((heap) => {
+        if (heap.external_memory > externalLimit) finish(() => reject(new PdfTextError("too_complex")));
       }, () => undefined).finally(() => { checking = false; });
     }, options.memoryCheckMs);
     worker.once("message", (message: unknown) => finish(() => {

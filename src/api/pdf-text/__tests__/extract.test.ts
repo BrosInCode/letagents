@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { clearPdfTextCache, extractPdfText, PDF_TEXT_LIMITS, PdfTextError, pdfTextFor } from "../extract.js";
+import { Worker } from "node:worker_threads";
+
+import { clearPdfTextCache, extractPdfText, isPdfTextAvailable, PDF_TEXT_LIMITS, PdfTextError, pdfTextFor } from "../extract.js";
 import { makeInflatingPdf, makeNestedFormsPdf, makePdf } from "./make-pdf.js";
 
 const reason = (error: unknown) => error instanceof PdfTextError ? error.reason : String(error);
@@ -39,6 +41,19 @@ describe("PDF text extraction (pdf.js in a worker thread)", () => {
     const started = Date.now();
     await assert.rejects(extractPdfText(pdf, { externalMemoryMb: 64 }), (error) => reason(error) === "too_complex");
     assert.ok(Date.now() - started < 10_000, `stopped after ${Date.now() - started} ms`);
+  });
+
+  it("reads no PDF on a Node that cannot measure a worker's memory", async () => {
+    const prototype = Worker.prototype as { getHeapStatistics?: unknown };
+    const original = prototype.getHeapStatistics;
+    assert.equal(isPdfTextAvailable(), true);
+    delete prototype.getHeapStatistics;
+    try {
+      assert.equal(isPdfTextAvailable(), false);
+      await assert.rejects(extractPdfText(makePdf(["x"])), (error) => reason(error) === "unavailable");
+    } finally {
+      prototype.getHeapStatistics = original;
+    }
   });
 
   it("reads only so many pages and characters, and says so", async () => {
@@ -82,11 +97,20 @@ describe("PDF text extraction (pdf.js in a worker thread)", () => {
     assert.equal(loads, 1);
     await assert.rejects(pdfTextFor("bucket/broken", broken, { now: Date.now() + PDF_TEXT_LIMITS.failureCacheMs + 1 }));
     assert.equal(loads, 2, "after a while it is tried again");
+    // Out of time, which a busy server can cause, is marked so it is remembered for less.
+    await assert.rejects(extractPdfText(makeNestedFormsPdf(9, 10), { timeoutMs: 1 }), (error) => error instanceof PdfTextError && error.timedOut);
+    assert.ok(PDF_TEXT_LIMITS.timeoutCacheMs < PDF_TEXT_LIMITS.failureCacheMs);
     // A storage failure says nothing about the PDF, so it is not remembered.
     let fetches = 0;
     const storageDown = async (): Promise<Uint8Array> => { fetches += 1; throw new Error("storage down"); };
     await assert.rejects(pdfTextFor("bucket/flaky", storageDown));
     await assert.rejects(pdfTextFor("bucket/flaky", storageDown));
     assert.equal(fetches, 2);
+    // A loader that throws before it awaits anything leaves nothing behind.
+    let syncLoads = 0;
+    const throwsAtOnce = (): Promise<Uint8Array> => { syncLoads += 1; throw new Error("bad key"); };
+    await assert.rejects(pdfTextFor("bucket/sync", throwsAtOnce));
+    await assert.rejects(pdfTextFor("bucket/sync", throwsAtOnce));
+    assert.equal(syncLoads, 2, "the second call runs its own loader");
   });
 });
