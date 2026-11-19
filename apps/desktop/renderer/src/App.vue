@@ -723,6 +723,7 @@ const firstRunRoomChoices = computed(() => company.activeId.value ? company.room
   display_name: room.displayName,
   kind: room.gitRoom ? "repo" as const : "room" as const,
   full_name: room.gitRoom?.repository.fullName ?? null,
+  local: room.source === "local",
   visibility: null,
 })));
 

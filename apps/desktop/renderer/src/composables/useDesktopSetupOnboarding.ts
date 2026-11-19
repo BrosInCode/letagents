@@ -383,10 +383,11 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         if (!openedRoom) options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
         options.authFeedback.value = null;
       }
-      options.mcpInstallState.value = await desktopIpc.setup.completeMcpOnboarding();
+      const completed = await desktopIpc.setup.completeMcpOnboarding();
+      options.activeEntry.value = options.pinnedRoom.value;
+      options.mcpInstallState.value = completed;
       firstRunFinished.value = true;
       await options.refresh();
-      options.activeEntry.value = options.pinnedRoom.value;
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "Could not close setup.";
     } finally {

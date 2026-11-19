@@ -2,6 +2,7 @@ import type {
   DesktopGitHubAccessReason,
   DesktopOrganization,
   DesktopOrganizationInvitation,
+  DesktopOrganizationRoom,
   DesktopOrganizationSsoBlock,
 } from "../../../../../electron/ipc-types/organizations.js";
 import type { CompanyListStatus } from "../../../composables/useDesktopOrganizations";
@@ -20,3 +21,5 @@ export interface FirstRunCompanyStepState {
   selectedId: string | null;
   joiningId: string | null;
 }
+
+export type FirstRunRoomChoice = Pick<DesktopOrganizationRoom, "kind" | "room_id" | "display_name" | "full_name" | "visibility"> & { local?: boolean };

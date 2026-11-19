@@ -131,10 +131,24 @@ const click = async (selector) => { await waitFor(`Boolean(document.querySelecto
 const capture = async (name) => { await new Promise((resolve) => setTimeout(resolve, 550)); writeFileSync(join(output, name), (await window.webContents.capturePage()).toPNG()); };
 try {
   await window.loadFile(join(root, 'dist-renderer/index.html'));
+  await js("document.documentElement.dataset.windowChrome = 'mac'");
   await waitFor(`document.querySelector('[data-testid="first-run-welcome"] canvas')?.width > 300`);
+  assert.equal(await js(`document.querySelector('[data-testid="first-run-welcome"]').getBoundingClientRect().top`), 0);
+  assert.ok(await js(`document.querySelector('[data-testid="first-run-start-setup"]').getBoundingClientRect().bottom <= innerHeight`));
   assert.match(await js('document.body.innerText'), /Make room to\s+work together/);
   await new Promise(resolve => setTimeout(resolve, 2900));
   await capture('00-animated-welcome.png');
+  if (await js(`document.fullscreenEnabled && !matchMedia('(prefers-reduced-motion: reduce)').matches`)) {
+    await click('[data-testid="first-run-welcome"] [aria-label="Full screen"]');
+    await waitFor(`document.fullscreenElement?.dataset.testid === 'first-run-welcome'`);
+    await click('.welcome-controls button:first-child');
+    await waitFor(`document.querySelector('.welcome-controls button:first-child')?.textContent.trim() === 'Play'`);
+    await click('.welcome-controls button:nth-child(2)');
+    await waitFor(`document.querySelector('.welcome-controls button:first-child')?.textContent.trim() === 'Pause'`);
+    assert.equal(await js(`document.fullscreenElement?.dataset.testid`), 'first-run-welcome', 'replay stays full screen');
+    await click('[data-testid="first-run-welcome"] [aria-label="Exit full screen"]');
+    await waitFor(`!document.fullscreenElement`);
+  }
   await click('[data-testid="first-run-start-setup"]');
   await click('[data-testid="first-run-auth-start"]');
   await click('[data-testid="first-run-auth-poll"]');
@@ -187,9 +201,29 @@ try {
   await capture('03-room-tour.png');
   await click('[aria-label="Close quick tour"]');
   await capture('03-company-sidebar.png');
-  await click('[data-testid="desktop-composer-input"]');
-  await window.webContents.insertText('First message from onboarding');
-  await click('[data-testid="desktop-composer-send"]');
+  await js(`{
+    const composer = document.querySelector('[data-testid="desktop-composer-input"]');
+    composer.focus();
+    composer.value = 'First message from onboarding';
+    composer.dispatchEvent(new InputEvent('input', { bubbles: true, data: composer.value }));
+  }`);
+  await waitFor(`document.querySelector('[data-testid="desktop-composer-send"]')?.disabled === false`);
+  const leaveDistance = await js(`new Promise(resolve => {
+    const welcome = document.querySelector('[data-testid="room-chat-empty"]');
+    const title = welcome.querySelector('h3');
+    const previous = title.getBoundingClientRect();
+    const observer = new MutationObserver(() => {
+      if (!welcome.classList.contains('room-empty-leave-active')) return;
+      const after = title.getBoundingClientRect();
+      observer.disconnect();
+      clearTimeout(deadline);
+      resolve(Math.hypot(after.top - previous.top, after.left - previous.left));
+    });
+    const deadline = setTimeout(() => { observer.disconnect(); resolve(null); }, 800);
+    observer.observe(welcome, { attributes: true, attributeFilter: ['class'] });
+    document.querySelector('[data-testid="desktop-composer-send"]').click();
+  })`);
+  assert.ok(leaveDistance !== null && leaveDistance < 6, `the welcome stays in place while fading (shift: ${leaveDistance})`);
   await waitFor(`Boolean(document.querySelector('[data-testid="room-message-9001"]')) && !document.querySelector('[data-testid="room-chat-empty"]')`);
   assert.equal(sentMessages.get(companyRoom.room_id)?.length, 1);
   await capture('03-first-message.png');

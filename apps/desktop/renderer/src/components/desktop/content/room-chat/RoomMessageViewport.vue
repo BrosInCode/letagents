@@ -1718,7 +1718,8 @@ function newestMessage(messages: readonly DesktopRoomMessage[]): DesktopRoomMess
 </script>
 
 <style scoped>
-.room-empty-leave-active { position: absolute; inset: 0; margin-inline: auto; pointer-events: none; transition: opacity 140ms ease, transform 140ms ease; }
+.room-empty-leave-active { transition: opacity 140ms ease, transform 140ms ease; }
+.room-empty-leave-active :deep(.room-tour-start) { pointer-events: none; }
 .room-empty-leave-to { opacity: 0; transform: translateY(-5px); }
 @media (prefers-reduced-motion: reduce) { .room-empty-leave-active { transition: none; } .room-empty-leave-to { transform: none; } }
 .room-explicit-unread { display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }

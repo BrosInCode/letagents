@@ -2,27 +2,29 @@
   <section class="company-rooms" :aria-label="companyName ? `${companyName} rooms` : 'Your rooms'" data-testid="first-run-company-rooms">
     <div v-if="rooms.length" class="company-rooms-group">
       <label class="company-room-search"><Search aria-hidden="true" /><input v-model="query" type="search" placeholder="Find a room…" aria-label="Search rooms"></label>
-      <button
-        v-for="room in filteredRooms"
-        :key="room.room_id"
-        class="company-rooms-row"
-        type="button"
-        :aria-pressed="isSelected(room)"
-        :disabled="busy"
-        :data-testid="`first-run-company-room-${room.room_id}`"
-        @click="$emit('choose-room', room.room_id)"
-      >
-        <BookMarked v-if="room.kind === 'repo'" class="company-rooms-icon" aria-hidden="true" />
-        <Hash v-else class="company-rooms-icon" aria-hidden="true" />
-        <strong>
-          {{ roomName(room) }}
-          <span>{{ room.kind === "repo" ? room.full_name || "Repository" : "Shared room · By invitation" }}</span>
-        </strong>
-        <span v-if="room.visibility" class="company-rooms-visibility">{{ room.visibility === "private" ? "Private" : "Public" }}</span>
-        <span v-else />
-        <Check class="company-rooms-check" aria-hidden="true" />
-      </button>
-      <p v-if="!filteredRooms.length" class="company-rooms-empty" role="status">No rooms match your search.</p>
+      <div class="company-room-results">
+        <button
+          v-for="room in filteredRooms"
+          :key="room.room_id"
+          class="company-rooms-row"
+          type="button"
+          :aria-pressed="isSelected(room)"
+          :disabled="busy"
+          :data-testid="`first-run-company-room-${room.room_id}`"
+          @click="$emit('choose-room', room.room_id)"
+        >
+          <BookMarked v-if="room.kind === 'repo'" class="company-rooms-icon" aria-hidden="true" />
+          <Hash v-else class="company-rooms-icon" aria-hidden="true" />
+          <strong>
+            {{ roomName(room) }}
+            <span>{{ room.local ? "On this device" : room.kind === "repo" ? room.full_name || "Repository" : "Shared room" }}</span>
+          </strong>
+          <span v-if="room.visibility" class="company-rooms-visibility">{{ room.visibility === "private" ? "Private" : "Public" }}</span>
+          <span v-else />
+          <Check class="company-rooms-check" aria-hidden="true" />
+        </button>
+        <p v-if="!filteredRooms.length" class="company-rooms-empty" role="status">No rooms match your search.</p>
+      </div>
     </div>
   </section>
 </template>
@@ -30,11 +32,11 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { BookMarked, Check, Hash, Search } from "@lucide/vue";
-import type { DesktopOrganizationRoom } from "../../../../../electron/ipc-types/organizations.js";
+import type { FirstRunRoomChoice } from "./types";
 
 const props = defineProps<{
   companyName: string | null;
-  rooms: Array<Pick<DesktopOrganizationRoom, "kind" | "room_id" | "display_name" | "full_name" | "visibility">>;
+  rooms: FirstRunRoomChoice[];
   selectedRoomIdentifier: string | null;
   busy: boolean;
 }>();
@@ -44,11 +46,11 @@ const filteredRooms = computed(() => props.rooms.filter(room => `${roomName(room
 
 defineEmits<{ "choose-room": [roomId: string] }>();
 
-function isSelected(room: Pick<DesktopOrganizationRoom, "room_id" | "display_name" | "full_name">): boolean {
+function isSelected(room: FirstRunRoomChoice): boolean {
   return room.room_id.toLowerCase() === props.selectedRoomIdentifier?.toLowerCase();
 }
 
-function roomName(room: Pick<DesktopOrganizationRoom, "room_id" | "display_name" | "full_name">): string {
+function roomName(room: FirstRunRoomChoice): string {
   return room.full_name?.split("/")[1] || room.display_name;
 }
 </script>
@@ -65,6 +67,8 @@ function roomName(room: Pick<DesktopOrganizationRoom, "room_id" | "display_name"
   border: 0;
   background: transparent;
 }
+
+.company-room-results { max-height: min(36vh, 360px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 
 .company-rooms-row {
   display: grid;

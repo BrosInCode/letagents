@@ -102,20 +102,20 @@ import RoomThemePicker from "../../../../../../../shared/ui/RoomThemePicker.vue"
 import { useRoomTheme } from "../../../../../../../shared/ui/room-theme";
 import type { RoomThemeId } from "../../../../../../../shared/room-themes.mjs";
 import type { DesktopAuthStatus } from "../../../../../electron/ipc-types";
-import type { DesktopOrganizationGitHubPage, DesktopOrganizationRoom } from "../../../../../electron/ipc-types/organizations";
+import type { DesktopOrganizationGitHubPage } from "../../../../../electron/ipc-types/organizations";
 import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
 import FirstRunCompanyRooms from "./FirstRunCompanyRooms.vue";
 import FirstRunGithubStep from "./FirstRunGithubStep.vue";
 import FirstRunOrganizationStep from "./FirstRunOrganizationStep.vue";
 import FirstRunWelcome from "./FirstRunWelcome.vue";
-import type { FirstRunCompanyStepState, FirstRunWizardStage } from "./types";
+import type { FirstRunCompanyStepState, FirstRunRoomChoice, FirstRunWizardStage } from "./types";
 
 const props = defineProps<{
   stage: FirstRunWizardStage;
   companyStep?: FirstRunCompanyStepState | null;
   invitedCompanyId?: string | null;
   companyName?: string | null;
-  rooms: Array<Pick<DesktopOrganizationRoom, "kind" | "room_id" | "display_name" | "full_name" | "visibility">>;
+  rooms: FirstRunRoomChoice[];
   saveCompanyTheme?: (id: string, theme: RoomThemeId) => Promise<void>;
   authStatus: DesktopAuthStatus | null;
   busy: boolean;
