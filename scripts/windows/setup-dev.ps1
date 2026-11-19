@@ -66,8 +66,9 @@ $GhSha256 = @{
   arm64 = '197211c98687d7770ac331fe8a3b6c198c389108c1536cdbedf659fe4703e484'
 }
 $CodexVersion = '0.166.0'
-# What shared/letagents-*.seal.json name; the native builds use the default toolset.
-$SealedVcTools = '14.51.36231'
+# What shared/letagents-*.seal.json name (one build for each MSVC while a
+# runner image rolls out); the native builds use the default toolset.
+$SealedVcTools = @('14.51.36231', '14.52.37025')
 $SealedWindowsSdk = '10.0.26100.0'
 $VsBootstrapper = 'https://aka.ms/vs/18/stable/vs_BuildTools.exe'
 $VsComponents = @(
@@ -260,8 +261,8 @@ function Install-BuildTools {
   $selected = & $env:ComSpec /d /c "`"$vcvarsall`" x64 >nul && set VCToolsVersion && set WindowsSDKVersion"
   $vcTools = ($selected | Where-Object { $_ -like 'VCToolsVersion=*' } | Select-Object -First 1) -replace '^VCToolsVersion=', ''
   $windowsSdk = ($selected | Where-Object { $_ -like 'WindowsSDKVersion=*' } | Select-Object -First 1) -replace '^WindowsSDKVersion=', '' -replace '\\$', ''
-  if ($vcTools -ne $SealedVcTools -or $windowsSdk -ne $SealedWindowsSdk) {
-    Write-Warning ("Visual Studio's x64 build gets MSVC '$vcTools' and SDK '$windowsSdk'; the native seals name MSVC $SealedVcTools" +
+  if ($SealedVcTools -notcontains $vcTools -or $windowsSdk -ne $SealedWindowsSdk) {
+    Write-Warning ("Visual Studio's x64 build gets MSVC '$vcTools' and SDK '$windowsSdk'; the native seals name MSVC $($SealedVcTools -join ' or ')" +
       " with SDK $SealedWindowsSdk. Local builds of the process-tree helper and the daemon pipe addon will not match their" +
       ' seals: use the CI-built pieces, or reseal in a pull request.')
   } else {
