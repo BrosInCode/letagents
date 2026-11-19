@@ -1,17 +1,19 @@
 <template>
   <section class="first-run-wizard" :data-stage="stage" data-testid="first-run-wizard">
+    <FirstRunWelcome v-if="stage === 'welcome' || stage === 'github'" :leaving="stage === 'github'"
+      :busy="busy" :feedback="feedback" @start="emit('start-setup')" @settle="handoffActive = false" />
     <Transition name="first-run-shell" @after-enter="focusHeading">
-      <FirstRunWelcome v-if="stage === 'welcome'" key="welcome" :busy="busy" :feedback="feedback" @start="emit('start-setup')" />
-      <article v-else ref="card" key="setup" class="onboarding-card" :data-step="stage" data-testid="first-run-card">
+      <article v-if="stage !== 'welcome'" ref="card" key="setup" class="onboarding-card" :data-step="stage" :data-handoff="handoffActive" data-testid="first-run-card">
         <span class="setup-brand"><LetAgentsLogoMark aria-hidden="true" />LetAgents</span>
         <Transition name="setup-step" mode="out-in" @after-enter="focusHeading">
           <div :key="stage" class="onboarding-content">
-            <header class="onboarding-heading" :aria-live="stage === 'github' ? 'polite' : undefined">
+            <header v-if="stage !== 'github'" class="onboarding-heading">
               <h1 tabindex="-1">{{ headline }}</h1>
               <p v-if="description">{{ description }}</p>
             </header>
 
-            <FirstRunGithubStep v-if="stage === 'github'" :auth-status="authStatus" :busy="authBusy"
+            <FirstRunGithubStep v-if="stage === 'github'" :auth-status="authStatus" :busy="authBusy" :setup-busy="busy"
+              @start-auth="emit('start-auth')" @back="emit('back')" @continue="emit('continue-to-room')"
               @cancel-auth="emit('cancel-auth')" @open-verification="emit('open-verification', $event)"
               @poll-auth="emit('poll-auth')" @sign-out="emit('sign-out')" />
 
@@ -52,36 +54,26 @@
 
             <p v-if="feedback" class="onboarding-feedback" role="status" data-testid="first-run-feedback">{{ feedback }}</p>
 
-            <footer class="onboarding-actions">
-              <button v-if="!authStatus?.pendingDeviceAuth || stage !== 'github'" class="onboarding-quiet"
+            <footer v-if="stage !== 'github'" class="onboarding-actions">
+              <button class="onboarding-quiet"
                 :disabled="busy || savingCompanyTheme" type="button" data-testid="first-run-back" @click="emit('back')">
                 <ArrowLeft aria-hidden="true" /> Back
               </button>
-              <template v-if="stage === 'github'">
-                <button v-if="authStatus?.authenticated" class="primary-button" type="button" :disabled="busy"
-                  data-testid="first-run-to-room" @click="emit('continue-to-room')">
-                  Continue <ArrowRight aria-hidden="true" />
-                </button>
-                <button v-else-if="!authStatus?.pendingDeviceAuth" class="primary-button" type="button" :disabled="authBusy"
-                  data-testid="first-run-auth-start" @click="emit('start-auth')">
-                  {{ authBusy ? "Opening GitHub…" : "Sign in with GitHub" }} <ArrowUpRight aria-hidden="true" />
-                </button>
-              </template>
-              <template v-else-if="stage === 'organization' && companyStep">
+              <template v-if="stage === 'organization' && companyStep">
                 <button v-if="companyStep.status === 'github_access_required'" class="onboarding-quiet" type="button"
                   :disabled="busy" data-testid="first-run-company-skip" @click="emit('choose-organization', null)">
                   Skip for now
                 </button>
-                <button class="primary-button" type="button" :disabled="companyAction.disabled || busy"
+                <button class="primary-button onboarding-primary" type="button" :disabled="companyAction.disabled || busy"
                   data-testid="first-run-company-continue" @click="runCompanyAction">
                   {{ companyAction.label }} <ArrowRight aria-hidden="true" />
                 </button>
               </template>
-              <button v-else-if="stage === 'theme'" class="primary-button" type="button" :disabled="busy || savingCompanyTheme"
+              <button v-else-if="stage === 'theme'" class="primary-button onboarding-primary" type="button" :disabled="busy || savingCompanyTheme"
                 data-testid="first-run-theme-continue" @click="continueTheme">
                 {{ savingCompanyTheme ? "Saving…" : "Continue" }} <ArrowRight aria-hidden="true" />
               </button>
-              <button v-else-if="stage === 'room'" :class="selectedRoomIdentifier ? 'primary-button' : 'onboarding-quiet'"
+              <button v-else-if="stage === 'room'" :class="selectedRoomIdentifier ? 'primary-button onboarding-primary' : 'onboarding-quiet'"
                 type="button" :disabled="busy" data-testid="first-run-open-room"
                 @click="roomNeedsGithubAccess ? emit('connect-room-auth') : emit('finish')">
                 {{ roomNeedsGithubAccess ? "Connect GitHub" : selectedRoomIdentifier ? "Open room" : "Skip for now" }}
@@ -96,8 +88,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import { ArrowLeft, ArrowRight, ArrowUpRight, FolderGit2, KeyRound, Plus } from "@lucide/vue";
+import { computed, nextTick, ref, watch } from "vue";
+import { ArrowLeft, ArrowRight, FolderGit2, KeyRound, Plus } from "@lucide/vue";
 import RoomThemePicker from "../../../../../../../shared/ui/RoomThemePicker.vue";
 import { useRoomTheme } from "../../../../../../../shared/ui/room-theme";
 import type { RoomThemeId } from "../../../../../../../shared/room-themes.mjs";
@@ -144,25 +136,22 @@ const emit = defineEmits<{
 }>();
 
 const card = ref<HTMLElement | null>(null);
+const handoffActive = ref(false);
+watch(() => props.stage, (stage, previous) => {
+  handoffActive.value = previous === "welcome" && stage === "github";
+  if (stage === "github") void nextTick(focusHeading);
+});
 function focusHeading() {
   card.value?.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
 }
 
 const headline = computed(() => {
-  if (props.stage === "github") {
-    if (props.authStatus?.authenticated) return "GitHub connected";
-    return props.authStatus?.pendingDeviceAuth ? "Finish in your browser" : "Sign in to LetAgents";
-  }
   if (props.stage === "organization") return "Where will you work?";
   if (props.stage === "theme") return "Pick your theme.";
   return "Find your first room.";
 });
 
 const description = computed(() => {
-  if (props.stage === "github") {
-    if (props.authStatus?.authenticated) return "Choose where you’ll work.";
-    return props.authStatus?.pendingDeviceAuth ? "Confirm that this code matches on GitHub." : "Use GitHub to open rooms for your repositories.";
-  }
   if (props.stage === "organization") return "See all your rooms or focus on a company.";
   if (props.stage === "theme") return props.companyName ? `Use ${props.companyName}’s theme or choose your own.` : "Choose how your rooms look.";
   return "You can switch rooms anytime.";
@@ -227,6 +216,7 @@ async function continueTheme() {
 </script>
 
 <style scoped>
+.first-run-wizard { position: relative; }
 .onboarding-card {
   grid-area: 1 / 1;
   position: relative;
@@ -241,34 +231,58 @@ async function continueTheme() {
 .setup-brand svg { width: 23px; height: 23px; }
 .onboarding-content { display: grid; gap: 24px; width: min(100%, 580px); margin: 0 auto; }
 [data-step="theme"] .onboarding-content { width: min(100%, 760px); gap: 28px; }
-[data-step="github"] .onboarding-content { width: min(100%, 420px); gap: 14px; }
+[data-step="github"] {
+  z-index: 1;
+  min-height: 100dvh;
+  padding: 88px clamp(24px, 6vw, 104px) 48px;
+  background: transparent;
+  --onboarding-accent: #a8dec7;
+}
+[data-step="github"] .setup-brand { top: var(--welcome-brand-top, 16px); left: clamp(16px, 4vw, 56px); min-height: 36px; font-weight: 640; }
+[data-step="github"] .setup-brand svg { width: 24px; height: 24px; }
+[data-step="github"] .onboarding-content { width: min(100%, 382px); gap: 14px; }
+[data-step="github"].first-run-shell-enter-active,
+[data-step="github"].first-run-shell-leave-active { transition: none; }
+[data-step="github"].first-run-shell-enter-from,
+[data-step="github"].first-run-shell-leave-to { opacity: 1; transform: none; }
 .onboarding-heading h1 { margin: 0; font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-size: clamp(38px, 6vw, 66px); font-weight: 500; line-height: 1.04; letter-spacing: -.045em; }
-[data-step="github"] h1 { font-family: inherit; font-size: clamp(28px, 5vw, 40px); font-weight: 630; }
 .onboarding-heading h1:focus { outline: none; }
 .onboarding-heading p, .onboarding-feedback { margin: 9px 0 0; color: var(--setup-muted); line-height: 1.5; }
 .onboarding-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: center; }
 .onboarding-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 12px; min-height: 43px; }
-.onboarding-actions .primary-button, .onboarding-card :deep(.auth-actions .primary-button) { padding: 0 17px; border: 1px solid var(--workspace-border, var(--setup-border)); border-radius: 11px; background: color-mix(in srgb, var(--workspace-accent, var(--setup-accent)) 16%, var(--setup-surface)); color: var(--setup-text); }
-.onboarding-actions svg, .onboarding-room-actions svg { width: 16px; height: 16px; color: var(--workspace-accent, var(--setup-accent)); }
-.onboarding-actions .primary-button svg { transition: transform 210ms cubic-bezier(.22,.84,.32,1.25); }
-.onboarding-actions .primary-button:hover svg { transform: translateX(3px); }
+.onboarding-quiet svg, .onboarding-room-actions svg { width: 16px; height: 16px; color: var(--workspace-accent, var(--setup-accent)); }
 .onboarding-quiet { border: 0; border-radius: 8px; background: transparent; color: var(--setup-muted); font: inherit; cursor: pointer; }
 .onboarding-room-actions { display: grid; gap: 4px; }
 .onboarding-room-actions button { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; min-height: 48px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: var(--setup-text); text-align: left; font: inherit; cursor: pointer; }
 .onboarding-room-actions button:hover, .onboarding-quiet:hover { background: var(--setup-surface-muted); }
-.onboarding-card :deep(.first-run-github-step) { min-height: 0; }
-.onboarding-card :deep(.github-access-panel) { place-items: start; }
-.onboarding-card :deep(.github-signin-card) { width: 100%; padding: 0; align-items: stretch; justify-items: stretch; text-align: start; border: 0; background: none; box-shadow: none; }
-.onboarding-card :deep(.github-auth-state) { justify-items: start; }
-.onboarding-card :deep(.auth-actions) { justify-content: flex-start; }
-.onboarding-card button:focus-visible { outline: 2px solid var(--workspace-accent, var(--setup-accent)); outline-offset: 3px; }
+.onboarding-room-actions button { transition: background-color 150ms ease, transform 230ms var(--first-run-motion-ease); }
+.onboarding-room-actions button svg:last-child { opacity: .55; transition: transform 230ms var(--first-run-motion-ease), opacity 150ms ease; }
+.onboarding-room-actions button:enabled:is(:hover, :focus-visible) svg:last-child { opacity: 1; transform: translateX(4px); }
+.onboarding-room-actions button:enabled:active { transform: scale(.985); transition-duration: 80ms; }
+[data-step="theme"] :deep(.theme-swatch) { transition: transform 230ms cubic-bezier(.22,.84,.32,1.22); }
+[data-step="theme"] :deep(.theme-choice:has(input:enabled):is(:hover, :focus-within) .theme-swatch) { transform: translateY(-2px); }
+[data-step="theme"] :deep(.theme-choice:has(input:enabled):active .theme-swatch) { transform: scale(.95); transition-duration: 80ms; }
+[data-step="theme"] :deep(.theme-swatch i) { animation: theme-selection-in 230ms cubic-bezier(.22,.84,.32,1.22) both; }
+[data-step="theme"] :deep(.room-theme-preview),
+[data-step="theme"] :deep(.preview-sidebar),
+[data-step="theme"] :deep(.preview-sidebar span),
+[data-step="theme"] :deep(.preview-room header),
+[data-step="theme"] :deep(.preview-room header span),
+[data-step="theme"] :deep(.preview-composer),
+[data-step="theme"] :deep(.preview-composer i) { transition: background-color 260ms ease, border-color 260ms ease, color 260ms ease; }
+@keyframes theme-selection-in { from { opacity: 0; transform: rotate(-45deg) scale(.55); } }
+.onboarding-card button:focus-visible { outline: 2px solid var(--onboarding-accent, var(--workspace-accent, var(--setup-accent))); outline-offset: 3px; }
 .onboarding-card button:disabled { opacity: .58; cursor: default; }
 .setup-step-enter-active { transition: opacity 200ms ease, transform 240ms var(--first-run-motion-ease); }
 .setup-step-leave-active { transition: opacity 120ms ease; }
 .setup-step-enter-from { opacity: 0; transform: translateY(7px); }
 .setup-step-leave-to { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {
-  .setup-step-enter-active, .setup-step-leave-active, .onboarding-actions .primary-button svg { transition: none; }
-  .setup-step-enter-from, .onboarding-actions .primary-button:hover svg { transform: none; }
+  .setup-step-enter-active, .setup-step-leave-active { transition: none; }
+  .setup-step-enter-from { transform: none; }
+  .onboarding-room-actions button, .onboarding-room-actions button svg:last-child,
+  [data-step="theme"] :deep(.theme-swatch), [data-step="theme"] :deep(.theme-swatch i) { transition: none !important; animation: none !important; }
+  .onboarding-room-actions button:active, .onboarding-room-actions button svg:last-child,
+  [data-step="theme"] :deep(.theme-choice .theme-swatch) { transform: none !important; }
 }
 </style>

@@ -21,7 +21,10 @@
           </strong>
           <span v-if="room.visibility" class="company-rooms-visibility">{{ room.visibility === "private" ? "Private" : "Public" }}</span>
           <span v-else />
-          <Check class="company-rooms-check" aria-hidden="true" />
+          <span class="company-rooms-trailing" aria-hidden="true">
+            <ArrowRight class="company-rooms-arrow" />
+            <Check class="company-rooms-check" />
+          </span>
         </button>
         <p v-if="!filteredRooms.length" class="company-rooms-empty" role="status">No rooms match your search.</p>
       </div>
@@ -31,7 +34,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { BookMarked, Check, Hash, Search } from "@lucide/vue";
+import { ArrowRight, BookMarked, Check, Hash, Search } from "@lucide/vue";
 import type { FirstRunRoomChoice } from "./types";
 
 const props = defineProps<{
@@ -86,7 +89,7 @@ function roomName(room: FirstRunRoomChoice): string {
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background-color 150ms ease;
+  transition: background-color 150ms ease, transform 210ms cubic-bezier(.22,.84,.32,1.22);
 }
 
 .company-rooms-row[aria-pressed="true"] {
@@ -131,16 +134,26 @@ function roomName(room: FirstRunRoomChoice): string {
   font-size: 11.5px;
 }
 
-.company-rooms-check {
+.company-rooms-trailing { display: grid; color: var(--workspace-accent, var(--setup-accent)); }
+.company-rooms-trailing svg {
+  grid-area: 1 / 1;
   width: 18px;
   height: 18px;
+  transition: opacity 170ms ease, transform 240ms cubic-bezier(.22,.84,.32,1.22);
+}
+.company-rooms-check {
   opacity: 0;
-  transition: opacity 150ms ease;
+  transform: scale(.75);
 }
 
 .company-rooms-row[aria-pressed="true"] .company-rooms-check {
   opacity: 1;
+  transform: none;
 }
+.company-rooms-arrow { opacity: .45; }
+.company-rooms-row[aria-pressed="true"] .company-rooms-arrow { opacity: 0; transform: translateX(3px); }
+.company-rooms-row:enabled:not([aria-pressed="true"]):is(:hover, :focus-visible) .company-rooms-arrow { opacity: 1; transform: translateX(3px); }
+.company-rooms-row:enabled:active { transform: scale(.988); transition-duration: 80ms; }
 
 .company-rooms-empty {
   margin: 0;
@@ -179,4 +192,7 @@ function roomName(room: FirstRunRoomChoice): string {
 .company-room-search input { min-width: 0; width: 100%; border: 0; background: transparent; color: var(--setup-text); font: inherit; font-size: 14px; }
 .company-room-search:focus-within { outline: 2px solid var(--setup-accent); outline-offset: 2px; }
 .company-room-search input:focus { outline: none; }
+@media (prefers-reduced-motion: reduce) {
+  .company-rooms-row, .company-rooms-trailing svg { transform: none !important; transition: none; }
+}
 </style>

@@ -1,5 +1,6 @@
 <template>
-  <article ref="frame" class="welcome-screen" data-testid="first-run-welcome">
+  <article ref="frame" class="welcome-screen" :data-leaving="leaving" :data-handoff-state="handoffState"
+    :inert="leaving || undefined" :aria-hidden="leaving || undefined" data-testid="first-run-welcome">
     <canvas ref="canvas" aria-hidden="true" />
     <header class="welcome-top">
       <span class="welcome-brand"><LetAgentsLogoMark aria-hidden="true" />LetAgents</span>
@@ -19,10 +20,10 @@
     </header>
     <div class="welcome-content">
       <div>
-        <h1>Make room to<br>work together.</h1>
+        <h1 ref="heading" tabindex="-1">Make room to<br>work together.</h1>
         <p>One room for your team and your agents.</p>
       </div>
-      <button type="button" class="primary-button welcome-start" :disabled="busy"
+      <button type="button" class="primary-button onboarding-primary welcome-start" :disabled="busy"
         data-testid="first-run-start-setup" @click="start">
         Get started <ArrowRight aria-hidden="true" />
       </button>
@@ -34,33 +35,80 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import { ArrowRight, Maximize, Minimize, Pause, Play, RotateCcw } from "@lucide/vue";
-import { createHandoffPainter, handoffStillTime } from "../../../../../../../shared/ui/room-handoff.mjs";
+import { createHandoffPainter, handoffStillTime, type HandoffMark } from "../../../../../../../shared/ui/room-handoff.mjs";
 import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
 
-defineProps<{ busy: boolean; feedback: string | null }>();
-const emit = defineEmits<{ start: [] }>();
+const props = defineProps<{ busy: boolean; feedback: string | null; leaving: boolean }>();
+const emit = defineEmits<{ start: []; settle: [] }>();
 const frame = ref<HTMLElement | null>(null);
 const canvas = ref<HTMLCanvasElement | null>(null);
+const heading = ref<HTMLElement | null>(null);
 const available = ref(false);
 const paused = ref(false);
 const reduced = ref(false);
 const fullScreen = ref(false);
 const supportsFullscreen = ref(false);
+const handoffState = ref(props.leaving ? "settled" : "idle");
+const handoffDuration = 800;
 let paint: ReturnType<typeof createHandoffPainter> | undefined;
 let observer: ResizeObserver | undefined;
 let preference: MediaQueryList | undefined;
 let width = 0, height = 0, elapsed = 0, last = 0, animation = 0;
+let startedAt = 0;
+let mark: HandoffMark | undefined;
+
+function placeMark() {
+  const surface = canvas.value?.getBoundingClientRect();
+  const logo = frame.value?.parentElement?.querySelector<SVGSVGElement>("[data-onboarding-logo-seat]");
+  if (!surface || !logo) return undefined;
+  const seat = logo.getBoundingClientRect();
+  if (!seat.width || !seat.height) return undefined;
+  const view = logo.viewBox.baseVal;
+  const centerX = view.x + view.width / 2;
+  const centerY = view.y + view.height / 2;
+  const points = mark?.points ?? Array.from(logo.querySelectorAll("path, circle")).flatMap(path => {
+    const segment = path as SVGGeometryElement;
+    const length = segment.getTotalLength();
+    const count = Math.max(2, Math.ceil(length / 2.6));
+    return Array.from({ length: count }, (_, index) => {
+      const point = segment.getPointAtLength(length * index / (count - 1));
+      return { x: point.x - centerX, y: point.y - centerY, accent: path.localName === "circle" };
+    });
+  });
+  if (!points.length) return undefined;
+  return {
+    x: seat.left + seat.width / 2 - surface.left,
+    y: seat.top + seat.height / 2 - surface.top,
+    scale: Math.min(seat.width / view.width, seat.height / view.height),
+    progress: mark?.progress ?? 0,
+    points,
+  };
+}
+
+function settleHandoff() {
+  handoffState.value = "settled";
+  mark = undefined;
+  canvas.value?.getContext("2d")?.clearRect(0, 0, width, height);
+  emit("settle");
+}
 
 function draw() {
-  if (available.value && width && height) {
-    paint?.(width, height, reduced.value ? handoffStillTime : elapsed, !reduced.value);
+  if (available.value && width && height && handoffState.value !== "settled") {
+    paint?.(width, height, reduced.value ? handoffStillTime : elapsed, !reduced.value, mark);
   }
 }
 
 function tick(now: number) {
   if (!last || now - last >= 29) {
-    if (last) elapsed += Math.min((now - last) / 1000, .06);
+    if (last && !paused.value) elapsed += Math.min((now - last) / 1000, .06);
     last = now;
+    if (mark) {
+      mark.progress = Math.min(1, (now - startedAt) / handoffDuration);
+      if (mark.progress === 1) {
+        settleHandoff();
+        return;
+      }
+    }
     draw();
   }
   animation = requestAnimationFrame(tick);
@@ -69,7 +117,9 @@ function tick(now: number) {
 function updatePlayback() {
   cancelAnimationFrame(animation);
   last = 0;
-  if (available.value && !reduced.value && !paused.value && !document.hidden) animation = requestAnimationFrame(tick);
+  if (props.leaving && (reduced.value || !available.value || document.hidden) && handoffState.value === "moving") settleHandoff();
+  if (!available.value || reduced.value || document.hidden || (props.leaving ? !mark : paused.value)) return;
+  animation = requestAnimationFrame(tick);
 }
 
 function resize() {
@@ -84,6 +134,7 @@ function resize() {
   surface.width = Math.max(1, Math.floor(width * density));
   surface.height = Math.max(1, Math.floor(height * density));
   context.setTransform(density, 0, 0, density, 0, 0);
+  if (mark) mark = placeMark() ?? mark;
   draw();
 }
 
@@ -108,13 +159,13 @@ function motionPreferenceChanged() {
 }
 
 function fullscreenChanged() {
-  fullScreen.value = document.fullscreenElement === frame.value;
+  fullScreen.value = document.fullscreenElement === frame.value?.parentElement;
 }
 
 async function toggleFullscreen() {
   try {
     if (fullScreen.value) await document.exitFullscreen();
-    else await frame.value?.requestFullscreen();
+    else await frame.value?.parentElement?.requestFullscreen();
   } catch { /* The OS can deny full screen while a window is transitioning. */ }
 }
 
@@ -125,10 +176,26 @@ function replay() {
   updatePlayback();
 }
 
-async function start() {
-  if (fullScreen.value) await document.exitFullscreen().catch(() => undefined);
+function start() {
   emit("start");
 }
+
+watch(() => props.leaving, leaving => {
+  if (leaving) {
+    mark = available.value && !reduced.value && !document.hidden ? placeMark() : undefined;
+    if (!mark) settleHandoff();
+    else {
+      startedAt = performance.now();
+      handoffState.value = "moving";
+    }
+  } else {
+    mark = undefined;
+    handoffState.value = "idle";
+    draw();
+    heading.value?.focus({ preventScroll: true });
+  }
+  updatePlayback();
+}, { flush: "post" });
 
 watch(paused, updatePlayback);
 onMounted(() => {
@@ -169,23 +236,25 @@ onUnmounted(() => {
   background: radial-gradient(ellipse at 50% 32%, #182620, transparent 68%), #0c0e0d;
   overflow: clip;
 }
-.welcome-screen:fullscreen { min-height: 100dvh; }
 .welcome-screen canvas { position: absolute; z-index: -1; inset: 0; width: 100%; height: 100%; pointer-events: none; mask-image: linear-gradient(black 60%, transparent 100%); }
-.welcome-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px clamp(16px, 4vw, 56px); }
+.welcome-screen[data-leaving="true"] { position: absolute; inset: 0; min-height: 0; pointer-events: none; }
+.welcome-screen[data-leaving="true"] canvas { mask-image: none; }
+.welcome-screen[data-leaving="true"] .welcome-top,
+.welcome-screen[data-leaving="true"] .welcome-content { opacity: 0; }
+.welcome-top, .welcome-content { transition: opacity 180ms ease; }
+.welcome-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: var(--welcome-brand-top, 16px) clamp(16px, 4vw, 56px) 16px; }
 .welcome-brand, .welcome-controls, .welcome-control { display: flex; align-items: center; gap: 8px; }
-.welcome-brand { font-weight: 640; }
+.welcome-brand { min-height: 36px; font-weight: 640; }
 .welcome-brand svg { width: 24px; height: 24px; }
 .welcome-control { min-height: 36px; border: 0; border-radius: 8px; padding: 0 8px; background: transparent; color: #b9bfba; font: inherit; font-size: 12px; cursor: pointer; }
 .welcome-control:hover { background: #ffffff10; color: #f3f5ef; }
 .welcome-control svg, .welcome-start svg { width: 15px; height: 15px; }
 .welcome-content { grid-row: 3; display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 22px; padding: 0 clamp(24px, 6vw, 104px) clamp(32px, 7vh, 86px); }
 .welcome-content h1 { margin: 0; font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-size: clamp(48px, min(8vw, 12vh), 112px); font-weight: 500; line-height: .93; letter-spacing: -.06em; }
+.welcome-content h1:focus { outline: none; }
 .welcome-content p { margin: 16px 0 0; color: #b0b9b2; line-height: 1.5; }
-.welcome-content .welcome-start { display: inline-flex; align-items: center; gap: 20px; min-height: 48px; padding: 0 17px; border: 1px solid #42534c; border-radius: 12px; color: #eef4ef; background: #2a3630; }
-.welcome-start svg { color: #a8dec7; transition: transform 220ms cubic-bezier(.22,.84,.32,1.25); }
-.welcome-start:hover svg, .welcome-start:focus-visible svg { transform: translateX(3px); }
-.welcome-start:active { transform: scale(.97); }
+.welcome-content .welcome-start { gap: 20px; min-height: 48px; --onboarding-accent: #a8dec7; }
 .welcome-error { flex: 1 0 100%; }
 button:focus-visible { outline: 2px solid #a8dec7; outline-offset: 3px; }
-@media (prefers-reduced-motion: reduce) { .welcome-start, .welcome-start svg { transition: none; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .welcome-top, .welcome-content { transition: none; } }
 </style>

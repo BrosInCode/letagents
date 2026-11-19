@@ -140,22 +140,49 @@ try {
   await capture('00-animated-welcome.png');
   if (await js(`document.fullscreenEnabled && !matchMedia('(prefers-reduced-motion: reduce)').matches`)) {
     await click('[data-testid="first-run-welcome"] [aria-label="Full screen"]');
-    await waitFor(`document.fullscreenElement?.dataset.testid === 'first-run-welcome'`);
+    await waitFor(`document.fullscreenElement?.dataset.testid === 'first-run-wizard'`);
     await click('.welcome-controls button:first-child');
     await waitFor(`document.querySelector('.welcome-controls button:first-child')?.textContent.trim() === 'Play'`);
     await click('.welcome-controls button:nth-child(2)');
     await waitFor(`document.querySelector('.welcome-controls button:first-child')?.textContent.trim() === 'Pause'`);
-    assert.equal(await js(`document.fullscreenElement?.dataset.testid`), 'first-run-welcome', 'replay stays full screen');
+    assert.equal(await js(`document.fullscreenElement?.dataset.testid`), 'first-run-wizard', 'replay stays full screen');
     // The macOS Space transition can outlast the DOM fullscreenchange event.
     if (process.platform === 'darwin') {
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
+    await click('[data-testid="first-run-start-setup"]');
+    await waitFor(`document.querySelector('[data-testid="first-run-welcome"]')?.dataset.handoffState === 'moving'`);
+    assert.equal(await js(`document.fullscreenElement?.dataset.testid`), 'first-run-wizard', 'the particles land in GitHub while full screen');
+    await click('[data-testid="first-run-back"]');
+    await waitFor(`document.querySelector('[data-testid="first-run-welcome"]')?.dataset.handoffState === 'idle'`);
     await click('[data-testid="first-run-welcome"] [aria-label="Exit full screen"]');
     await waitFor(`!document.fullscreenElement`);
   }
+  window.webContents.debugger.attach();
+  await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  await waitFor(`matchMedia('(prefers-reduced-motion: reduce)').matches && !document.querySelector('.welcome-controls button:first-child svg.lucide-pause')`);
   await click('[data-testid="first-run-start-setup"]');
+  assert.equal(await js(`document.querySelector('[data-testid="first-run-welcome"]')?.dataset.handoffState`), 'settled');
+  assert.equal(await js(`getComputedStyle(document.querySelector('.connection-origin')).animationName`), 'none');
+  await click('[data-testid="first-run-back"]');
+  await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [] });
+  window.webContents.debugger.detach();
+
+  await click('[data-testid="first-run-start-setup"]');
+  await waitFor(`document.querySelector('[data-testid="first-run-welcome"]')?.dataset.handoffState === 'settled'`);
+  assert.equal(await js(`document.querySelector('.setup-brand').getBoundingClientRect().top`), 42, 'the wordmark keeps its macOS inset');
+  await capture('00-github-sign-in.png');
+  const logoTop = await js(`document.querySelector('[data-onboarding-logo-seat]').getBoundingClientRect().top`);
   await click('[data-testid="first-run-auth-start"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="first-run-device-code"]'))`);
+  assert.equal(await js(`document.querySelector('.thread-signal')?.tagName`), 'circle');
+  assert.ok(Math.abs(logoTop - await js(`document.querySelector('[data-onboarding-logo-seat]').getBoundingClientRect().top`)) < 2, 'the connection stays in place during browser approval');
+  await waitFor(`document.querySelector('.github-heading h1')?.textContent === 'Finish in your browser' && !document.querySelector('.github-phase-enter-active')`);
+  await capture('00-github-pending.png');
   await click('[data-testid="first-run-auth-poll"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="first-run-auth-account"]'))`);
+  assert.equal(await js(`document.querySelector('.thread-check')?.tagName`), 'path');
+  await capture('00-github-connected.png');
   await click('[data-testid="first-run-to-room"]');
   assert.equal(calls.includes('setup.installMcpServer'), false);
   // One row per GitHub organization.
@@ -191,6 +218,9 @@ try {
     await waitFor(`!document.querySelector('[data-testid="new-room-modal"]')`);
   }
   await click('[data-testid="first-run-company-room-github.com/herotel/app"]');
+  if (await js(`Boolean(document.startViewTransition) && !matchMedia('(prefers-reduced-motion: reduce)').matches`)) {
+    await waitFor(`document.documentElement.dataset.firstRoomEntry === 'true'`);
+  }
   await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);
   // The company filter sits on the Rooms heading.
   await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').includes('Herotel')`);

@@ -1,7 +1,7 @@
 <template>
   <FirstRunSplashView v-if="showFirstRunSplash" />
 
-  <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" :data-welcome="firstRunStage === 'welcome'" :style="roomTheme.css.value" data-testid="desktop-first-run-onboarding">
+  <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" :data-cinematic="firstRunStage === 'welcome' || firstRunStage === 'github'" :style="roomTheme.css.value" data-testid="desktop-first-run-onboarding">
     <FirstRunOnboardingView
       :stage="firstRunStage"
       :company-step="companyStep"

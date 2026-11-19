@@ -474,7 +474,7 @@ export function createHandoffPainter(paint) {
     paint.restore();
   }
 
-  function render(width, height, t, moving) {
+  function render(width, height, t, moving, mark) {
     if (!paint || !width || !height) return;
     paint.clearRect(0, 0, width, height);
     const sculptureX = width * .5;
@@ -504,12 +504,15 @@ export function createHandoffPainter(paint) {
       sine: Math.sin(yaw),
       cosine: Math.cos(yaw),
     };
+    const collapse = mark ? 1 - (1 - clamp(mark.progress)) ** 2.25 : 0;
+    const sceneOpacity = (1 - collapse) ** 2;
+    const particleOpacity = 1 - smooth((collapse - .84) / .16);
 
-    drawCurrents(t, (moving ? ease(t / .95) : 1) * (1 - assembly * .45), width, height);
-    drawOrbit(cx, cy, size, arrival * (1 - assembly));
+    drawCurrents(t, (moving ? ease(t / .95) : 1) * (1 - assembly * .45) * sceneOpacity, width, height);
+    drawOrbit(cx, cy, size, arrival * (1 - assembly) * sceneOpacity);
     drawCore(cx + size * .02, cy - size * .01, size * (.48 + arrival * .075), t,
-      ease((arrival - .16) / .84) * (1 - assembly) ** 2);
-    drawRoom(room, assembly, 1);
+      ease((arrival - .16) / .84) * (1 - assembly) ** 2 * sceneOpacity);
+    drawRoom(room, assembly, sceneOpacity);
     for (let index = 0; index < points.length; index += density) {
       const point = points[index];
       const strand = point.strand;
@@ -548,12 +551,20 @@ export function createHandoffPainter(paint) {
       const face = clamp((depth + .47) / .96);
       const glint = .58 + .42 * Math.sin(angle * 4 + t * 1.75 + ribbon * 5) ** 2;
       const orbitShine = clamp(.21 + face * .67 + point.variation * .12);
-      const alpha = (Math.min(1, gathered * 2.5 + .13) * glint * orbitShine) * (1 - laid * .32);
+      const alpha = (Math.min(1, gathered * 2.5 + .13) * glint * orbitShine) * (1 - laid * .32) * particleOpacity;
       if (alpha < .028) continue;
       const shimmer = point.variation > .985;
       const diameter = (shimmer ? 2.3 : .65 + point.variation * .91) * perspective * (density === 2 ? 1.05 : 1);
       paint.globalAlpha = alpha;
-      const cool = laid > .5 ? formed.x > cx + room.size * (point.variation - .5) * .7 : tint;
+      let cool = laid > .5 ? formed.x > cx + room.size * (point.variation - .5) * .7 : tint;
+      if (mark) {
+        const destination = mark.points[Math.floor(point.variation * mark.points.length)];
+        const progress = clamp(collapse + Math.sin(point.u * 2) * Math.sin(collapse * Math.PI) * .13);
+        const curl = Math.sin(progress * Math.PI) * (1 - point.variation) * size * .54;
+        shellX = mix(shellX, mark.x + destination.x * mark.scale, progress) + Math.cos(point.u * 2) * curl;
+        shellY = mix(shellY, mark.y + destination.y * mark.scale, progress) + Math.sin(point.u * 2) * curl;
+        if (progress > .72) cool = destination.accent;
+      }
       paint.fillStyle = cool
         ? (shimmer ? '#d7fff3' : '#77e4c2')
         : (shimmer ? '#fffdf4' : '#f3edda');
@@ -564,7 +575,7 @@ export function createHandoffPainter(paint) {
       }
     }
 
-    paint.globalAlpha = arrival * .26;
+    paint.globalAlpha = arrival * .26 * sceneOpacity;
     for (let index = 2; index < 73; index++) {
       const point = points[index * 23];
       const a = index * 2.399963 + t * .08;
@@ -573,7 +584,7 @@ export function createHandoffPainter(paint) {
       paint.fillRect(cx + Math.cos(a) * r, cy + Math.sin(a) * r * .57 - Math.cos(a) * r * .12, 1, 1);
     }
     paint.globalAlpha = 1;
-    drawExchange(room, t, 1, moving);
+    drawExchange(room, t, sceneOpacity, moving);
   }
 
   return render;

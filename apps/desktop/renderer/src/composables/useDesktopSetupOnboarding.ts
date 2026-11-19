@@ -384,9 +384,22 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         options.authFeedback.value = null;
       }
       const completed = await desktopIpc.setup.completeMcpOnboarding();
-      options.activeEntry.value = options.pinnedRoom.value;
-      options.mcpInstallState.value = completed;
-      firstRunFinished.value = true;
+      const showWorkspace = () => {
+        options.activeEntry.value = options.pinnedRoom.value;
+        options.mcpInstallState.value = completed;
+        firstRunFinished.value = true;
+        return nextTick();
+      };
+      if (roomIdentifier && typeof document !== "undefined" && document.startViewTransition && !document.fullscreenElement
+        && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        const root = document.documentElement;
+        root.dataset.firstRoomEntry = "true";
+        const transition = document.startViewTransition(showWorkspace);
+        void transition.finished.finally(() => { delete root.dataset.firstRoomEntry; }).catch(() => undefined);
+        await transition.updateCallbackDone;
+      } else {
+        await showWorkspace();
+      }
       await options.refresh();
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "Could not close setup.";

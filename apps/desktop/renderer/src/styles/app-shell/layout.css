@@ -194,12 +194,21 @@ html[data-window-chrome="mac"] .desktop-shell[data-sidebar-mode="hidden"]::befor
   content: ""; position: absolute; inset: 0 0 auto; height: 36px; z-index: 80;
   background: var(--bg); -webkit-app-region: drag;
 }
-html[data-window-chrome="mac"] .desktop-onboarding-shell:not([data-welcome="true"]) { padding-top: 52px; }
+html[data-window-chrome="mac"] .desktop-onboarding-shell:not([data-cinematic="true"]) { padding-top: 52px; }
 
-.desktop-onboarding-shell[data-welcome="true"] {
+.desktop-onboarding-shell[data-cinematic="true"] {
   padding: 0;
   background: #0c0e0d;
 }
-.desktop-onboarding-shell[data-welcome="true"] .first-run-wizard { width: 100%; min-height: 100dvh; }
-.desktop-onboarding-shell[data-welcome="true"] .welcome-screen { min-height: 100dvh; }
-html[data-window-chrome="mac"] .welcome-top { padding-top: 42px; }
+.desktop-onboarding-shell[data-cinematic="true"] .first-run-wizard { width: 100%; min-height: 100dvh; }
+.desktop-onboarding-shell[data-cinematic="true"] .welcome-screen { min-height: 100dvh; }
+html[data-window-chrome="mac"] .first-run-wizard { --welcome-brand-top: 42px; }
+
+:root[data-first-room-entry]::view-transition-old(root) {
+  animation: first-room-setup-out 230ms ease-in both;
+}
+:root[data-first-room-entry]::view-transition-new(root) {
+  animation: first-room-workspace-in 430ms cubic-bezier(.16, 1, .3, 1) both;
+}
+@keyframes first-room-setup-out { to { opacity: 0; transform: scale(.986); } }
+@keyframes first-room-workspace-in { from { opacity: 0; transform: translateY(7px) scale(1.004); } }
