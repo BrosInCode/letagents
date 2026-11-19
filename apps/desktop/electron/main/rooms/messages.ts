@@ -18,10 +18,11 @@ import type {
 import { parsePositivePgIntegerScopedId } from "../../../../../shared/message-contracts.mjs";
 import { agentApiFetch, apiFetch, DesktopApiError, readStoredAuth } from "../auth.js";
 import {
-  readLocalStagedAttachments,
+  loadLocalStagedAttachments,
   releaseLocalStagedAttachments,
   publishLocalAttachmentPayload,
 } from "../attachments.js";
+import { getDesktopOutgoingMessageByClientId } from "./outbox-store.js";
 import {
   addLocalChatMessage,
   getLocalChatMessageByClientId,
@@ -116,25 +117,44 @@ export async function sendDesktopRoomMessage(
   if (messageNamespace && messageNamespace !== [trimmedRoomIdentifier, storage.effectiveMode, storage.localRoom?.roomIdentifier || "cloud"].join(":")) {
     throw new Error("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
   }
+  const normalizedAttachments = attachments.map((attachment) => ({ upload_id: attachment.upload_id }));
+  const readerKey = await resolveLocalThreadReaderKey(storedAuth);
+  if (clientId) {
+    const persisted = await getDesktopOutgoingMessageByClientId(clientId);
+    if (persisted) {
+      if (persisted.accountScope !== readerKey) {
+        throw new Error("This message belongs to a different account. Switch back to its original account before retrying.");
+      }
+      if (persisted.roomIdentifier !== trimmedRoomIdentifier) {
+        throw new Error("This message belongs to a different room.");
+      }
+      if (persisted.storageMode !== storage.effectiveMode) {
+        throw new Error("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
+      }
+      if ((persisted.threadRootId || null) !== (threadRootId || null) || (persisted.replyTo || null) !== (replyTo || null)) {
+        throw new Error("This message belongs to a different thread.");
+      }
+    }
+  }
   if (storage.effectiveMode === "local") {
     if (gif) throw new Error("GIFs require a cloud room.");
     const localRoomIdentifier = localRoomIdentifierForStorage(
       storage,
       trimmedRoomIdentifier,
     );
-    const readerKey = await resolveLocalThreadReaderKey(storedAuth);
     const existing = clientId ? await getLocalChatMessageByClientId(localRoomIdentifier, clientId, { readerKey }) : null;
     if (existing) {
       if (existing.sender !== sender || existing.source !== "browser" || existing.text !== trimmedText || (existing.thread_reply_to_id || null) !== (replyTo || null)
-        || (threadRootId && existing.thread_root_id !== threadRootId)
-        || existing.attachments?.map(item => item.id).sort().join("|") !== attachments.map(item => item.upload_id).sort().join("|")) {
+        || (threadRootId ? existing.thread_root_id !== threadRootId : existing.thread_root_id !== existing.id)
+        || existing.attachments?.map(item => item.id).sort().join("|") !== normalizedAttachments.map(item => item.upload_id).sort().join("|")) {
         throw new Error("Outgoing message identity was reused with different content.");
       }
+      await releaseLocalStagedAttachments(localRoomIdentifier, normalizedAttachments);
       return { message: mapRoomMessagePayload(existing) };
     }
-    const localAttachments = readLocalStagedAttachments(
+    const localAttachments = await loadLocalStagedAttachments(
       localRoomIdentifier,
-      attachments,
+      normalizedAttachments,
     );
     const message = await addLocalChatMessage(localRoomIdentifier, {
       sender,
@@ -147,7 +167,7 @@ export async function sendDesktopRoomMessage(
       readerKey,
       idempotency_key: clientId,
     });
-    releaseLocalStagedAttachments(localRoomIdentifier, attachments);
+    await releaseLocalStagedAttachments(localRoomIdentifier, normalizedAttachments);
     return {
       message: mapRoomMessagePayload(message),
     };
@@ -168,7 +188,7 @@ export async function sendDesktopRoomMessage(
         ...(gif ? { gif } : {}),
         reply_to: replyTo || null,
         thread_root_id: threadRootId || null,
-        attachments,
+        attachments: normalizedAttachments,
         ...(clientId ? { client_message_id: clientId } : {}),
       }),
     },

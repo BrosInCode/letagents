@@ -223,6 +223,14 @@ const api: DesktopApi = {
       gif?: RoomGif | null,
     ) =>
       ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? [], threadRootId ?? null, clientMessageId ?? null, messageNamespace ?? null, gif ?? null),
+    saveOutgoingMessage: (input) =>
+      ipcRenderer.invoke("desktop:room:save-outgoing-message", input),
+    updateOutgoingMessage: (clientMessageId, input) =>
+      ipcRenderer.invoke("desktop:room:update-outgoing-message", clientMessageId, input),
+    deleteOutgoingMessage: (clientMessageId) =>
+      ipcRenderer.invoke("desktop:room:delete-outgoing-message", clientMessageId),
+    listOutgoingMessages: () =>
+      ipcRenderer.invoke("desktop:room:list-outgoing-messages"),
     addTask: (roomIdentifier: string, input) =>
       ipcRenderer.invoke("desktop:room:add-task", roomIdentifier, input),
     updateTask: (roomIdentifier: string, taskId: string, updates) =>

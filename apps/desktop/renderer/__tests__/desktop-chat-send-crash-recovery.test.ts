@@ -1,0 +1,708 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { after, before, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import * as Vue from "vue";
+import { createRenderer, effectScope, nextTick, ref, ssrContextKey, type App } from "vue";
+import { parse, compileScript, compileTemplate } from "@vue/compiler-sfc";
+import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
+import type {
+  DesktopPersistedOutgoingMessage,
+  DesktopRoomInfo,
+  DesktopRoomMessage,
+  DesktopSaveOutgoingMessageInput,
+  DesktopUpdateOutgoingMessageInput,
+} from "../../electron/ipc-types";
+import {
+  clearDesktopMessageOutbox,
+  desktopMessageOutbox,
+  hydrateDesktopMessageOutbox,
+  reconcileDesktopMessageOutbox,
+  retryDesktopOutgoingMessage,
+} from "../src/domain/message-outbox";
+import { useDesktopRoomMessages } from "../src/components/desktop/content/room-shell/useDesktopRoomMessages";
+import {
+  buildThreadIndicatorSummary,
+  buildThreadSummaries,
+} from "../src/components/desktop/content/room-chat/thread-utils";
+import { useAppAccountScope, useAppAccountSwitch } from "../src/composables/app/useAppSession";
+
+function roomInfo(overrides: Partial<DesktopRoomInfo> = {}): DesktopRoomInfo {
+  return {
+    identifier: "github.com/brosincode/letagents",
+    displayName: "letagents",
+    kind: "git",
+    parentRoomId: null,
+    focusKey: null,
+    sourceTaskId: null,
+    code: null,
+    isLocal: false,
+    ...overrides,
+  } as DesktopRoomInfo;
+}
+
+function roomMessage(overrides: Partial<DesktopRoomMessage> = {}): DesktopRoomMessage {
+  const id = overrides.id ?? "msg_1";
+  return {
+    id,
+    clientMessageId: null,
+    sender: "Alice",
+    text: "Hello",
+    attachments: [],
+    agentPromptKind: null,
+    source: "browser",
+    timestamp: "2026-11-19T02:00:00.000Z",
+    actorLabel: null,
+    agentIdentity: null,
+    threadRootId: id,
+    threadReplyToId: null,
+    thread: null,
+    replyTo: null,
+    ...overrides,
+  };
+}
+
+function withWindow<T>(value: unknown, run: () => Promise<T>): Promise<T> {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { value, configurable: true, writable: true });
+  return run().finally(() => {
+    if (previous) Object.defineProperty(globalThis, "window", previous);
+    else delete (globalThis as Record<string, unknown>).window;
+  });
+}
+
+class SimulatedDurableOutboxStore {
+  private rows = new Map<string, DesktopPersistedOutgoingMessage & { bootId: number }>();
+  private bootId = 1;
+  public currentAccountScope = "account:acct_alice";
+  public failNextSave: Error | null = null;
+  public delayNextList: Promise<void> | null = null;
+
+  simulateCrashAndRestart(): void {
+    this.bootId += 1;
+  }
+
+  size(): number {
+    return this.rows.size;
+  }
+
+  save = async (input: DesktopSaveOutgoingMessageInput): Promise<DesktopPersistedOutgoingMessage> => {
+    if (this.failNextSave) {
+      const error = this.failNextSave;
+      this.failNextSave = null;
+      throw error;
+    }
+    const storageMode = input.messageNamespace?.includes(":local:") ? "local" : "cloud";
+    const row: DesktopPersistedOutgoingMessage & { bootId: number } = {
+      ...input,
+      accountScope: this.currentAccountScope,
+      storageMode,
+      status: "pending",
+      error: null,
+      sender: "You",
+      updatedAt: input.timestamp,
+      bootId: this.bootId,
+    };
+    this.rows.set(input.clientMessageId, row);
+    const { bootId: _unused, ...persisted } = row;
+    return persisted;
+  };
+
+  update = async (clientMessageId: string, patch: DesktopUpdateOutgoingMessageInput): Promise<void> => {
+    const row = this.rows.get(clientMessageId);
+    if (!row || row.accountScope !== this.currentAccountScope) return;
+    if (patch.status) row.status = patch.status;
+    if (patch.error !== undefined) row.error = patch.error;
+    if (patch.gif !== undefined) row.gif = patch.gif;
+    row.bootId = this.bootId;
+  };
+
+  remove = async (clientMessageId: string): Promise<void> => {
+    const row = this.rows.get(clientMessageId);
+    if (row && row.accountScope === this.currentAccountScope) {
+      this.rows.delete(clientMessageId);
+    }
+  };
+
+  list = async (): Promise<DesktopPersistedOutgoingMessage[]> => {
+    const capturedScope = this.currentAccountScope;
+    if (this.delayNextList) {
+      const wait = this.delayNextList;
+      this.delayNextList = null;
+      await wait;
+    }
+    const items: DesktopPersistedOutgoingMessage[] = [];
+    for (const row of this.rows.values()) {
+      if (row.accountScope !== capturedScope) continue;
+      if (row.status === "pending" && row.bootId !== this.bootId) {
+        row.status = "uncertain";
+        row.error = row.error || "Delivery could not be confirmed before the app closed.";
+        row.bootId = this.bootId;
+      }
+      const { bootId: _unused, ...persisted } = row;
+      items.push({ ...persisted, attachments: persisted.attachments.map((a) => ({ ...a })) });
+    }
+    return items;
+  };
+}
+
+describe("desktop chat send crash recovery (renderer)", () => {
+  it("waits for durable persistence before clearing composer, keeps composer usable while pending, and preserves draft on persistence failure", async () => {
+    clearDesktopMessageOutbox();
+    const store = new SimulatedDurableOutboxStore();
+    const resolvers: Array<(value: { message: DesktopRoomMessage }) => void> = [];
+    let releaseSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
+
+    await withWindow({
+      letagentsDesktop: {
+        room: {
+          saveOutgoingMessage: async (input: DesktopSaveOutgoingMessageInput) => {
+            await saveGate;
+            return store.save(input);
+          },
+          updateOutgoingMessage: store.update,
+          deleteOutgoingMessage: store.remove,
+          listOutgoingMessages: store.list,
+          sendMessage: () => new Promise((resolve) => { resolvers.push(resolve); }),
+        },
+      },
+    }, async () => {
+      const scope = effectScope();
+      const messages = ref<DesktopRoomMessage[]>([]);
+      const sentEvents: DesktopRoomMessage[] = [];
+      const state = scope.run(() => useDesktopRoomMessages({
+        room: ref(roomInfo()),
+        messageNamespace: ref("github.com/brosincode/letagents:cloud:cloud"),
+        messages,
+        githubEventsVisible: ref(true),
+        playRoomSound() {},
+        onMessageSent(message) {
+          sentEvents.push(message);
+          messages.value = [...messages.value, message];
+        },
+      }))!;
+
+      const completions: boolean[] = [];
+      const firstSend = state.sendRoomMessage("First message", null, [], null, (ok) => completions.push(ok));
+      // Before durable persist finishes, composer MUST NOT have cleared yet.
+      assert.deepEqual(completions, []);
+      assert.equal(desktopMessageOutbox.value.length, 0);
+
+      releaseSave();
+      await nextTick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // Once durable persist finishes, composer clears immediately while delivery is still pending.
+      assert.deepEqual(completions, [true]);
+      assert.equal(state.sendingMessage.value, false, "composer stays usable while first delivery is pending");
+      assert.equal(state.visibleMessages.value.length, 1);
+      assert.equal(state.visibleMessages.value[0]!.outgoing?.status, "pending");
+
+      // User can immediately compose and send a second message while the first is pending.
+      const secondSend = state.sendRoomMessage("Second message", null, [], null, (ok) => completions.push(ok));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.deepEqual(completions, [true, true]);
+      assert.equal(state.visibleMessages.value.length, 2);
+      assert.equal(store.size(), 2);
+
+      // Persistence failure does NOT clear the composer.
+      store.failNextSave = new Error("Disk full");
+      await state.sendRoomMessage("Should stay in composer", null, [], null, (ok) => completions.push(ok));
+      assert.deepEqual(completions, [true, true, false]);
+      assert.match(state.sendError.value ?? "", /Disk full/);
+      assert.equal(state.visibleMessages.value.length, 2);
+
+      // Confirm both pending sends cleanly.
+      const id1 = state.visibleMessages.value[0]!.clientMessageId!;
+      const id2 = state.visibleMessages.value[1]!.clientMessageId!;
+      resolvers[0]!({ message: roomMessage({ id: "msg_10", text: "First message", clientMessageId: id1 }) });
+      resolvers[1]!({ message: roomMessage({ id: "msg_11", text: "Second message", clientMessageId: id2 }) });
+      await Promise.all([firstSend, secondSend]);
+      await nextTick();
+
+      assert.equal(sentEvents.length, 2);
+      assert.equal(desktopMessageOutbox.value.length, 0);
+      assert.equal(store.size(), 0);
+      assert.deepEqual(state.visibleMessages.value.map((m) => m.id), ["msg_10", "msg_11"]);
+      scope.stop();
+    });
+    clearDesktopMessageOutbox();
+  });
+
+  it("crash just before storage -> reopen via App auth startup watchers -> uncertain thread reply with attachment -> Retry reconciles to one row", async () => {
+    clearDesktopMessageOutbox();
+    const store = new SimulatedDurableOutboxStore();
+    const room = roomInfo();
+    const namespace = `${room.identifier}:cloud:cloud`;
+    const root = roomMessage({ id: "msg_1", text: "Thread root" });
+    const storedOnServer: DesktopRoomMessage[] = [root];
+    let crashBeforeStorage = true;
+
+    await withWindow({
+      letagentsDesktop: {
+        room: {
+          saveOutgoingMessage: store.save,
+          updateOutgoingMessage: store.update,
+          deleteOutgoingMessage: store.remove,
+          listOutgoingMessages: store.list,
+          sendMessage: async (
+            _roomId: string,
+            text: string,
+            replyTo: string | null,
+            attachments: Array<{ upload_id: string }>,
+            threadRootId: string | null,
+            clientMessageId: string,
+          ) => {
+            if (crashBeforeStorage) {
+              return new Promise(() => undefined); // process killed before storage
+            }
+            const existing = storedOnServer.find((m) => m.clientMessageId === clientMessageId);
+            if (existing) return { message: existing };
+            const created = roomMessage({
+              id: `msg_${storedOnServer.length + 1}`,
+              clientMessageId,
+              text,
+              threadRootId: threadRootId || `msg_${storedOnServer.length + 1}`,
+              threadReplyToId: replyTo,
+              attachments: attachments.map((a, idx) => ({
+                id: `att_${idx + 1}`,
+                fileName: "crash-proof.png",
+                mimeType: "image/png",
+                sizeBytes: 2048,
+                href: `letagents-attachment://download/${a.upload_id}`,
+              })),
+            });
+            storedOnServer.push(created);
+            return { message: created };
+          },
+        },
+      },
+    }, async () => {
+      // Session 1: send a thread reply with an attachment; composer clears, then crash before storage.
+      const session1 = effectScope();
+      const s1Messages = ref<DesktopRoomMessage[]>([root]);
+      const s1State = session1.run(() => useDesktopRoomMessages({
+        room: ref(room),
+        messageNamespace: ref(namespace),
+        messages: s1Messages,
+        githubEventsVisible: ref(true),
+        playRoomSound() {},
+        onMessageSent() {},
+      }))!;
+
+      let composerCleared = false;
+      void s1State.sendRoomMessage(
+        "Important thread reply",
+        root.id,
+        [{ upload_id: "upl_thread_0001", fileName: "crash-proof.png", mimeType: "image/png", sizeBytes: 2048 }],
+        root.id,
+        (sent) => { composerCleared = sent; },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(composerCleared, true);
+      assert.equal(store.size(), 1);
+      assert.equal(storedOnServer.length, 1, "nothing stored before crash");
+      session1.stop();
+
+      // App crashes and reopens cleanly.
+      clearDesktopMessageOutbox();
+      store.simulateCrashAndRestart();
+      crashBeforeStorage = false;
+
+      // Exercise the real startup watcher sequence: useAppAccountScope BEFORE useAppAccountSwitch,
+      // transitioning authStatus from null -> authenticated!
+      const session2 = effectScope();
+      const authStatus = ref<{ authenticated: boolean; account: { id: string; login: string } | null } | null>(null);
+      const inboxRentals = ref<unknown[]>([]);
+      const inboxRentalError = ref("");
+      const inboxSection = ref("needs-you");
+      const rentalRequestCount = ref(0);
+      const authSessionLocked = ref(false);
+      session2.run(() => {
+        useAppAccountScope({ authStatus });
+        useAppAccountSwitch({
+          authSessionLocked,
+          authStatus,
+          inboxRentalError,
+          inboxRentals,
+          inboxSection,
+          refreshNeedsYou: () => undefined,
+          reloadInboxRooms: () => undefined,
+          rentalRequestCount,
+          resetNeedsYou: () => undefined,
+        });
+      });
+
+      authStatus.value = { authenticated: true, account: { id: "acct_alice", login: "alice" } };
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // Verify restored entry was NOT cancelled by useAppAccountSwitch!
+      assert.equal(desktopMessageOutbox.value.length, 1);
+      const restoredEntry = desktopMessageOutbox.value[0]!;
+      assert.equal(restoredEntry.message.outgoing?.status, "uncertain");
+      assert.equal(restoredEntry.threadRootId, root.id);
+      assert.equal(restoredEntry.attachments[0]!.fileName, "crash-proof.png");
+
+      const s2Messages = ref<DesktopRoomMessage[]>([...storedOnServer]);
+      const s2State = session2.run(() => useDesktopRoomMessages({
+        room: ref(room),
+        messageNamespace: ref(namespace),
+        messages: s2Messages,
+        githubEventsVisible: ref(true),
+        playRoomSound() {},
+        onMessageSent(message) {
+          s2Messages.value = [...s2Messages.value, message];
+        },
+      }))!;
+
+      // Thread indicator on root shows the unconfirmed reply before even opening the thread.
+      const summaries = buildThreadSummaries(s2State.visibleMessages.value);
+      const indicator = buildThreadIndicatorSummary(root, summaries.get(root.id) ?? null);
+      assert.equal(indicator.count, 1);
+      assert.equal(indicator.hasUncertainOutgoing, true);
+
+      // User activates Retry -> reconciles to 1 stored message, 1 row, 1 attachment.
+      await retryDesktopOutgoingMessage(restoredEntry.clientMessageId);
+      await nextTick();
+
+      assert.equal(storedOnServer.length, 2);
+      assert.equal(desktopMessageOutbox.value.length, 0);
+      assert.equal(store.size(), 0);
+      const threadReplies = s2State.visibleMessages.value.filter((m) => m.threadRootId === root.id && m.id !== root.id);
+      assert.equal(threadReplies.length, 1);
+      assert.equal(threadReplies[0]!.id, "msg_2");
+      assert.equal(threadReplies[0]!.outgoing, undefined);
+      assert.equal(threadReplies[0]!.attachments.length, 1);
+      session2.stop();
+    });
+    clearDesktopMessageOutbox();
+  });
+
+  it("crash just after storage before ack reconciles when history loads BEFORE or AFTER hydration and via thread fetch without duplicates", async () => {
+    for (const historyBeforeHydrate of [true, false]) {
+      clearDesktopMessageOutbox();
+      const store = new SimulatedDurableOutboxStore();
+      const room = roomInfo({ identifier: "local:room-after-ack", isLocal: true });
+      const namespace = `${room.identifier}:local:${room.identifier}`;
+      const clientMessageId = "desktop-send:77777777-7777-4777-8777-777777777777";
+      await store.save({
+        clientMessageId,
+        roomIdentifier: room.identifier,
+        messageNamespace: namespace,
+        text: "Committed before crash",
+        replyTo: "msg_1",
+        threadRootId: "msg_1",
+        attachments: [{ upload_id: "local:att-1", fileName: "shot.png", mimeType: "image/png", sizeBytes: 512 }],
+        replyPreview: null,
+        timestamp: "2026-11-19T02:10:00.000Z",
+      });
+      store.simulateCrashAndRestart();
+
+      const canonical = roomMessage({
+        id: "msg_2",
+        clientMessageId,
+        text: "Committed before crash",
+        threadRootId: "msg_1",
+        threadReplyToId: "msg_1",
+        attachments: [{ id: "local:att-1", fileName: "shot.png", mimeType: "image/png", sizeBytes: 512, href: "letagents-attachment://local/x" }],
+      });
+
+      await withWindow({
+        letagentsDesktop: {
+          room: {
+            saveOutgoingMessage: store.save,
+            updateOutgoingMessage: store.update,
+            deleteOutgoingMessage: store.remove,
+            listOutgoingMessages: store.list,
+            sendMessage: async () => ({ message: canonical }),
+          },
+        },
+      }, async () => {
+        const scope = effectScope();
+        const messages = ref<DesktopRoomMessage[]>(historyBeforeHydrate ? [roomMessage({ id: "msg_1" }), canonical] : [roomMessage({ id: "msg_1" })]);
+        const state = scope.run(() => useDesktopRoomMessages({
+          room: ref(room),
+          messageNamespace: ref(namespace),
+          messages,
+          githubEventsVisible: ref(true),
+          playRoomSound() {},
+          onMessageSent() {},
+        }))!;
+
+        await hydrateDesktopMessageOutbox();
+        if (!historyBeforeHydrate) {
+          assert.equal(desktopMessageOutbox.value.length, 1);
+          // Reconcile via thread load (even if top-level snapshot didn't carry the reply)
+          reconcileDesktopMessageOutbox(room.identifier, [canonical], namespace);
+        }
+        await nextTick();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.equal(desktopMessageOutbox.value.length, 0);
+        assert.equal(store.size(), 0);
+        if (historyBeforeHydrate) {
+          const replies = state.visibleMessages.value.filter((m) => m.threadRootId === "msg_1" && m.id !== "msg_1");
+          assert.equal(replies.length, 1);
+          assert.equal(replies[0]!.attachments.length, 1);
+        }
+        scope.stop();
+      });
+    }
+    clearDesktopMessageOutbox();
+  });
+
+  it("account switch fences in-flight hydration and never leaks another account's outbox", async () => {
+    clearDesktopMessageOutbox();
+    const store = new SimulatedDurableOutboxStore();
+    store.currentAccountScope = "account:acct_alice";
+    await store.save({
+      clientMessageId: "desktop-send:88888888-8888-4888-8888-888888888888",
+      roomIdentifier: "room-a",
+      messageNamespace: "room-a:cloud:cloud",
+      text: "Alice secret",
+      replyTo: null,
+      threadRootId: null,
+      attachments: [],
+      replyPreview: null,
+      timestamp: "2026-11-19T02:11:00.000Z",
+    });
+    store.simulateCrashAndRestart();
+
+    let releaseAliceList!: () => void;
+    store.delayNextList = new Promise<void>((resolve) => { releaseAliceList = resolve; });
+
+    await withWindow({
+      letagentsDesktop: {
+        room: {
+          listOutgoingMessages: store.list,
+        },
+      },
+    }, async () => {
+      const aliceHydration = hydrateDesktopMessageOutbox();
+      // Account switches to Bob before Alice's listOutgoingMessages resolves!
+      store.currentAccountScope = "account:acct_bob";
+      clearDesktopMessageOutbox();
+      const bobHydration = hydrateDesktopMessageOutbox();
+      releaseAliceList();
+      await Promise.all([aliceHydration, bobHydration]);
+      assert.equal(desktopMessageOutbox.value.length, 0, "stale Alice hydration must not land in Bob's outbox");
+    });
+    clearDesktopMessageOutbox();
+  });
+});
+
+interface HostNode {
+  kind: "element" | "text" | "comment";
+  type?: string;
+  text: string;
+  children: HostNode[];
+  parent: HostNode | null;
+  props: Record<string, unknown>;
+}
+
+function makeHostNode(kind: HostNode["kind"], type?: string, text = ""): HostNode {
+  return { kind, type, text, children: [], parent: null, props: {} };
+}
+
+function collectNodes(node: HostNode, out: HostNode[] = []): HostNode[] {
+  out.push(node);
+  for (const child of node.children) collectNodes(child, out);
+  return out;
+}
+
+function nodeText(node: HostNode): string {
+  if (node.kind === "text") return node.text;
+  const html = typeof node.props.innerHTML === "string" ? node.props.innerHTML : "";
+  return html + node.children.map(nodeText).join("");
+}
+
+describe("recovery UI accessibility, theming and thread-panel contract", () => {
+  let vite: ViteDevServer;
+  let DesktopChatMessage: Vue.Component;
+
+  before(async () => {
+    Object.assign(globalThis, {
+      Document: class Document {},
+      ShadowRoot: class ShadowRoot {},
+      window: {
+        localStorage: { getItem: () => null, setItem: () => undefined, removeItem: () => undefined },
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        matchMedia: () => ({ matches: false, addEventListener: () => undefined, removeEventListener: () => undefined }),
+        setTimeout,
+        clearTimeout,
+        setInterval,
+        clearInterval,
+      },
+      document: {
+        body: makeHostNode("element", "body"),
+        visibilityState: "visible",
+        hasFocus: () => true,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+      },
+    });
+    const desktopRoot = fileURLToPath(new URL("../..", import.meta.url));
+    vite = await createServer({
+      root: desktopRoot,
+      logLevel: "error",
+      server: { middlewareMode: true, hmr: false },
+      optimizeDeps: { noDiscovery: true },
+    });
+    DesktopChatMessage = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue")).default;
+    const DesktopLongMessageContent = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopLongMessageContent.vue")).default;
+    for (const [component, modulePath] of [
+      [DesktopChatMessage, "components/desktop/content/DesktopChatMessage.vue"],
+      [DesktopLongMessageContent, "components/desktop/content/DesktopLongMessageContent.vue"],
+    ] as const) {
+      const source = await readFile(fileURLToPath(new URL(`../src/${modulePath}`, import.meta.url)), "utf8");
+      const descriptor = parse(source, { filename: modulePath }).descriptor;
+      assert.ok(descriptor.template);
+      const script = compileScript(descriptor, { id: modulePath });
+      const compiled = compileTemplate({
+        source: descriptor.template.content,
+        filename: modulePath,
+        id: modulePath,
+        compilerOptions: { bindingMetadata: script.bindings },
+      });
+      assert.deepEqual(compiled.errors, []);
+      const clientCode = compiled.code
+        .replace(/^import \{([\s\S]*?)\} from "vue"\n/, (_match, bindings: string) => `const {${bindings.replace(/\s+as\s+/g, ": ")}} = vue\n`)
+        .replace("export function render", "function render");
+      const transformed = await transformWithEsbuild(clientCode, `${modulePath}.ts`, { loader: "ts", target: "esnext" });
+      (component as { render?: unknown }).render = Function("vue", `${transformed.code}\nreturn render;`)(Vue);
+    }
+  });
+
+  after(async () => {
+    await vite?.close();
+  });
+
+  function mountMessage(props: Record<string, unknown>): { root: HostNode; app: App } {
+    const teleportTarget = makeHostNode("element", "body");
+    const renderer = createRenderer<HostNode, HostNode>({
+      createElement: (type) => makeHostNode("element", type),
+      createText: (text) => makeHostNode("text", undefined, text),
+      createComment: (text) => makeHostNode("comment", undefined, text),
+      setText: (node, text) => { node.text = text; },
+      setElementText: (node, text) => { node.children = [makeHostNode("text", undefined, text)]; },
+      insert: (child, parent, anchor) => {
+        child.parent = parent;
+        const index = anchor ? parent.children.indexOf(anchor) : -1;
+        if (index >= 0) parent.children.splice(index, 0, child);
+        else parent.children.push(child);
+      },
+      remove: (child) => {
+        if (!child.parent) return;
+        const index = child.parent.children.indexOf(child);
+        if (index >= 0) child.parent.children.splice(index, 1);
+        child.parent = null;
+      },
+      patchProp: (el, key, _prev, next) => { el.props[key] = next; },
+      parentNode: (node) => node.parent,
+      nextSibling: (node) => {
+        if (!node.parent) return null;
+        const idx = node.parent.children.indexOf(node);
+        return idx >= 0 ? node.parent.children[idx + 1] ?? null : null;
+      },
+      querySelector: () => teleportTarget,
+    });
+    const root = makeHostNode("element", "div");
+    const app = renderer.createApp({ render: () => Vue.h(DesktopChatMessage, { searchActive: false, ...props }) });
+    app.provide(ssrContextKey, { modules: new Set() });
+    app.mount(root);
+    return { root, app };
+  }
+
+  it("renders non-color pending, uncertain (with keyboard-accessible Retry), and attachment-only states in timeline and thread-reply contexts", async () => {
+    const emptyThreadSummary = {
+      count: 0, unreadCount: 0, latest: null, latestPreview: null, latestTimestamp: null,
+      participants: [], hasPartialHistory: false, loadingEarlier: false,
+    };
+
+    for (const context of ["timeline", "thread-reply"] as const) {
+      // Pending attachment-only message: no "No message body." placeholder, attachment chip visible.
+      const pendingMsg = roomMessage({
+        id: "pending:desktop-send:99999999-9999-4999-8999-999999999999",
+        clientMessageId: "desktop-send:99999999-9999-4999-8999-999999999999",
+        sender: "You",
+        text: "",
+        outgoing: {
+          status: "pending",
+          attachmentCount: 1,
+          attachments: [{ upload_id: "local:a1", fileName: "architecture.png", mimeType: "image/png", sizeBytes: 4096 }],
+          error: null,
+        },
+      });
+      const pendingView = mountMessage({
+        context,
+        message: pendingMsg,
+        threadSummary: emptyThreadSummary,
+        deliveryReceipts: [],
+        activeThreadRoot: false,
+        highlightQuery: "",
+      });
+      try {
+        const all = collectNodes(pendingView.root);
+        const article = all.find((n) => n.type === "article");
+        assert.equal(article?.props["data-outgoing-status"], "pending");
+        const fullText = nodeText(pendingView.root);
+        assert.ok(fullText.includes("Sending…"), `${context}: pending text must be visible without color`);
+        assert.ok(fullText.includes("architecture.png"), `${context}: attachment filename must be shown`);
+        assert.equal(fullText.includes("No message body."), false, `${context}: attachment-only send must not show 'No message body.'`);
+      } finally {
+        pendingView.app.unmount();
+      }
+
+      // Uncertain message: explicit warning status text + icon + keyboard-accessible native Retry button.
+      const uncertainMsg = roomMessage({
+        id: "pending:desktop-send:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        clientMessageId: "desktop-send:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        sender: "You",
+        text: "Recover me after crash",
+        outgoing: {
+          status: "uncertain",
+          attachmentCount: 1,
+          attachments: [{ upload_id: "upl_1", fileName: "report.pdf", mimeType: "application/pdf", sizeBytes: 12000 }],
+          error: "Delivery could not be confirmed before the app closed.",
+        },
+      });
+      const uncertainView = mountMessage({
+        context,
+        message: uncertainMsg,
+        threadSummary: emptyThreadSummary,
+        deliveryReceipts: [],
+        activeThreadRoot: false,
+        highlightQuery: "",
+      });
+      try {
+        const all = collectNodes(uncertainView.root);
+        const article = all.find((n) => n.type === "article");
+        assert.equal(article?.props["data-outgoing-status"], "uncertain");
+        const retryButton = all.find((n) => n.type === "button" && n.props["data-testid"] === "room-message-outgoing-retry");
+        assert.ok(retryButton, `${context}: Retry button must be rendered`);
+        assert.equal(retryButton.props.type, "button");
+        assert.equal(retryButton.props.disabled, undefined);
+        assert.equal(retryButton.props.tabindex, undefined);
+        assert.ok(nodeText(retryButton).includes("Retry safely"));
+        const fullText = nodeText(uncertainView.root);
+        assert.ok(fullText.includes("Delivery not confirmed"));
+        assert.ok(fullText.includes("Recover me after crash"));
+        assert.ok(fullText.includes("report.pdf"));
+      } finally {
+        uncertainView.app.unmount();
+      }
+    }
+  });
+
+  it("defines visible focus styling and light/dark theme tokens for outgoing recovery controls", async () => {
+    const baseCss = await readFile(fileURLToPath(new URL("../src/styles/01-base.css", import.meta.url)), "utf8");
+    const metaCss = await readFile(fileURLToPath(new URL("../src/styles/message-content/message-meta-reply.css", import.meta.url)), "utf8");
+    assert.match(baseCss, /:root\[data-theme="light"\]\s*\{\s*color-scheme:\s*light;/);
+    assert.match(baseCss, /:root\[data-theme="dark"\]\s*\{\s*color-scheme:\s*dark;/);
+    assert.match(metaCss, /\.room-message-outgoing button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--blue-text\)/);
+    assert.match(metaCss, /\.room-message-outgoing\[data-tone="warning"\]/);
+    assert.match(metaCss, /\.room-chat-message\[data-outgoing-status="uncertain"\]/);
+  });
+});

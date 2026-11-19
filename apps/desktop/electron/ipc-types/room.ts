@@ -412,6 +412,41 @@ export interface DesktopMessageReceipt {
   noWake: DesktopMessageNoWake | null;
 }
 
+export interface DesktopOutgoingMessageAttachment {
+  upload_id: string;
+  fileName?: string | null;
+  mimeType?: string | null;
+  sizeBytes?: number | null;
+}
+
+export interface DesktopSaveOutgoingMessageInput {
+  clientMessageId: string;
+  roomIdentifier: string;
+  messageNamespace: string | null;
+  text: string;
+  replyTo: string | null;
+  threadRootId: string | null;
+  attachments: DesktopOutgoingMessageAttachment[];
+  gif?: RoomGif | null;
+  replyPreview: DesktopRoomMessageReply | null;
+  timestamp: string;
+}
+
+export interface DesktopPersistedOutgoingMessage extends DesktopSaveOutgoingMessageInput {
+  accountScope: string;
+  storageMode: "local" | "cloud";
+  status: "pending" | "uncertain";
+  error: string | null;
+  sender: string;
+  updatedAt: string;
+}
+
+export interface DesktopUpdateOutgoingMessageInput {
+  status?: "pending" | "uncertain";
+  error?: string | null;
+  gif?: RoomGif | null;
+}
+
 export interface DesktopRoomMessage {
   gif?: RoomGif | null;
   senderProfile?: { login: string; avatarUrl: string | null } | null;
@@ -419,7 +454,12 @@ export interface DesktopRoomMessage {
   /** Exact idempotency identity supplied by the message publisher. */
   clientMessageId?: string | null;
   /** Renderer-only submission state; never a server message identity. */
-  outgoing?: { status: "pending" | "uncertain"; attachmentCount: number; error: string | null };
+  outgoing?: {
+    status: "pending" | "uncertain";
+    attachmentCount: number;
+    attachments?: DesktopOutgoingMessageAttachment[];
+    error: string | null;
+  };
   /** Renderer-only arrival sequence from a live event/send, never history backfill. */
   liveArrival?: number;
   sender: string;

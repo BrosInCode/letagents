@@ -71,6 +71,14 @@
   color: var(--text);
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
 .desktop-shell:has(.desktop-board-panel) {
   color-scheme: light dark;
 }

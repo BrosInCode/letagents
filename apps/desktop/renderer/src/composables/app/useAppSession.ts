@@ -9,7 +9,7 @@ import { computed, provide, watch } from "vue";
 import type { DesktopNotificationTarget, DesktopRoomStreamEvent } from "../../../../electron/ipc-types";
 import type { DesktopRoomLink } from "../../../../../../shared/room-app-links.mjs";
 import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount } from "../../domain/desktop-message-drafts";
-import { clearDesktopMessageOutbox } from "../../domain/message-outbox";
+import { clearDesktopMessageOutbox, hydrateDesktopMessageOutbox } from "../../domain/message-outbox";
 import { useDesktopAuthFlow } from "../useDesktopAuthFlow";
 import { invalidateRentalProviderDashboard } from "../useRentalProviderEvents";
 import { setReminderAccount, refreshMessageReminders } from "../useMessageReminders";
@@ -322,6 +322,21 @@ export function useAppAccountScope(context: unknown) {
     (account) => { setMessageReactionViewer(account); setMessagePinViewer(account); setMessageLinkPreviewViewer(account); roomUnread.account.value = account?.id ?? null; }, { immediate: true, flush: "sync" });
   watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
     (account) => { setTypingAccount(account); setReminderAccount(account); }, { immediate: true, flush: "sync" });
+  watch(
+    () => !authStatus.value
+      ? null
+      : authStatus.value.authenticated
+        ? `account:${authStatus.value.account?.id ?? ""}`
+        : "local",
+    (next, previous) => {
+      if (next === null) return;
+      if (previous !== undefined && next !== previous) {
+        clearDesktopMessageOutbox();
+      }
+      void hydrateDesktopMessageOutbox();
+    },
+    { immediate: true, flush: "sync" },
+  );
 }
 
 /** The GitHub device sign-in flow. */
@@ -378,7 +393,7 @@ export function useAppAccountSwitch(context: unknown) {
     reloadInboxRooms, rentalRequestCount, resetNeedsYou,
   } = app;
   watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
-    if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); roomJoinRequests.reset(); roomInvites.reset(); resetHostApprovals(); if (next) { void refreshNeedsYou(); void roomJoinRequests.refresh(); } }
+    if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; resetNeedsYou(); roomJoinRequests.reset(); roomInvites.reset(); resetHostApprovals(); if (next) { void refreshNeedsYou(); void roomJoinRequests.refresh(); } }
   }, { flush: "sync" });
 
   const showSignedOutGate = computed(() => (
