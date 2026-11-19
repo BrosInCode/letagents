@@ -14,7 +14,10 @@ import { basename, dirname, join } from "node:path";
 import { createServer } from "node:net";
 import test from "node:test";
 
-import { assertCursorSupervisedMcpAuthority } from "../main/agents/cursor-mcp-authority.js";
+import {
+  assertCursorSupervisedMcpAuthority,
+  runCursorSandboxedInspection,
+} from "../main/agents/cursor-mcp-authority.js";
 import { needsPosixProcessGroups, needsProcessTreeHelper, writeFakeProvider, useTestProcessTreeHelper } from "./platform.js";
 
 useTestProcessTreeHelper();
@@ -842,6 +845,64 @@ setInterval(() => {}, 1_000);
         // Best-effort cleanup after an assertion failure.
       }
     }
+    if (existsSync(root)) {
+      try {
+        rmSync(root, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup after an assertion failure.
+      }
+    }
+  }
+});
+
+test("Windows Cursor MCP inspection accepts complete output when a child holds inherited stdio open for 900 ms after exit 0", {
+  skip: process.platform !== "win32"
+    ? "tests Windows normal-exit inherited-pipe drain without POSIX process-group reaping"
+    : needsProcessTreeHelper,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-win-drain-"));
+  const executable = join(root, "fake-cursor-agent");
+  const holderReadyPath = join(root, "holder.ready");
+  const holderSource = [
+    'const { writeFileSync } = require("node:fs");',
+    `writeFileSync(${JSON.stringify(holderReadyPath)}, "ready");`,
+    "setTimeout(() => process.exit(0), 900);",
+  ].join("\n");
+  try {
+    const cursorBin = writeFakeProvider(executable, `const { spawn } = require("node:child_process");
+const { existsSync } = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] !== "--disable-project-configs" || args[1] !== "mcp" || args[2] !== "list") process.exit(2);
+const holder = spawn(process.execPath, ["-e", ${JSON.stringify(holderSource)}], {
+  cwd: process.cwd(),
+  detached: true,
+  stdio: ["ignore", "inherit", "inherit"],
+});
+holder.unref();
+function finishWhenHolderReady() {
+  if (!existsSync(${JSON.stringify(holderReadyPath)})) {
+    setTimeout(finishWhenHolderReady, 10);
+    return;
+  }
+  process.stdout.write("letagents: ready\\n", () => process.exit(0));
+}
+finishWhenHolderReady();
+`);
+
+    const result = await runCursorSandboxedInspection({
+      cursorBin,
+      commandArgs: ["--disable-project-configs", "mcp", "list"],
+      cwd: root,
+      writableProfileRoot: root,
+      env: { ...process.env },
+    });
+    assert.equal(result.errorCode, null);
+    assert.equal(result.ok, true);
+    assert.equal(result.stderr, "");
+    assert.equal(result.stdout, "letagents: ready\n");
+    rmSync(root, { recursive: true, force: true });
+    assert.equal(existsSync(root), false);
+  } finally {
     if (existsSync(root)) {
       try {
         rmSync(root, { recursive: true, force: true });

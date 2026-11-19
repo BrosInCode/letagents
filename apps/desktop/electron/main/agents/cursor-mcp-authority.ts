@@ -91,13 +91,6 @@ const forcedTermination = new Promise((resolve) => { resolveForcedTermination = 
 let hardFailureTimer = null;
 
 function wait(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-function waitCancellable(ms) {
-  let timer = null;
-  return {
-    promise: new Promise((resolve) => { timer = setTimeout(resolve, ms); }),
-    cancel: () => { if (timer) clearTimeout(timer); },
-  };
-}
 function requestForcedReap() {
   terminationForced = true;
   resolveForcedTermination();
@@ -205,13 +198,12 @@ function beginReaping() {
     if (process.platform === "win32") {
       // On Windows the wrapper runs inside letagents-process-tree.exe's Job
       // Object, which ends every descendant and waits for the job to empty as
-      // soon as this wrapper exits. Do not rely on ownGroupMembers() (which
-      // returns [] on Windows) or block on nativeClose when termination was
-      // requested or a descendant retains inherited stdio pipes.
+      // soon as this wrapper exits. On a normal native exit, wait for inherited
+      // stdio pipes to close under the existing 3 s hardFailureTimer (matching
+      // staging) while waking immediately if forced termination, timeout,
+      // abort, or stdio failure arrives.
       if (!terminationForced && !outputBroken && !outputOverflow && !nativeClosed) {
-        const grace = waitCancellable(graceMs);
-        await Promise.race([nativeClose, forcedTermination, grace.promise]);
-        grace.cancel();
+        await Promise.race([nativeClose, forcedTermination]);
       }
       if (terminationForced || outputBroken || outputOverflow || !nativeClosed) {
         signalOwnGroup("SIGTERM");
