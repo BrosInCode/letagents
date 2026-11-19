@@ -8,4 +8,5 @@ data/
 .DS_Store
 .npmrc
 src/web/node_modules
+src/api/pdf-text/node_modules
 src/web/dist
