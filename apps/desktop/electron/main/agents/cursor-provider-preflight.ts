@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -14,6 +14,7 @@ import {
   prepareCursorSupervisedProfile,
   type CursorManagedProfile,
 } from "./cursor-managed-profile.js";
+import { discardCursorProbeRoot } from "./cursor/probe-root.js";
 import {
   assertCursorSupervisedMcpAuthority,
   cursorMcpInspectionEnv,
@@ -169,11 +170,11 @@ export async function runDesktopCursorProviderPreflight(
   let managedProfile: CursorManagedProfile;
   let supervisedMcpRuntime: LetAgentsMcpRuntime | undefined;
   let preflightProfileRoot: string | null = null;
-  const cleanupPreflightDirectories = () => {
-    if (preflightProfileRoot) rmSync(preflightProfileRoot, { recursive: true, force: true });
-    if (roomOnlyReadOnly && preflightWorkspaceRoot) {
-      rmSync(preflightWorkspaceRoot, { recursive: true, force: true });
-    }
+  // Cursor's inspections ran in these folders. The answer is already decided
+  // when they are removed, so a folder that stays in use does not replace it.
+  const cleanupPreflightDirectories = async () => {
+    if (preflightProfileRoot) await discardCursorProbeRoot(preflightProfileRoot);
+    if (roomOnlyReadOnly && preflightWorkspaceRoot) await discardCursorProbeRoot(preflightWorkspaceRoot);
   };
   try {
     if (roomOnlyReadOnly) {
@@ -356,7 +357,7 @@ export async function runDesktopCursorProviderPreflight(
       mcpStatus,
     };
   } finally {
-    cleanupPreflightDirectories();
+    await cleanupPreflightDirectories();
   }
 }
 

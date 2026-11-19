@@ -1,4 +1,4 @@
-import { spawnTree } from "../../../../../shared/process-tree.mjs";
+import { PROCESS_TREE_UNKILLABLE_AFTER_MS, signalTree, spawnTree } from "../../../../../shared/process-tree.mjs";
 import {
   accessSync,
   constants as fsConstants,
@@ -24,7 +24,15 @@ export type CursorMcpListResult = {
 // cursor-agent starts Node and its bundle: 8-20 s in an emulated Windows VM.
 const CURSOR_MCP_INSPECTION_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 8_000;
 const CURSOR_MCP_INSPECTION_REAP_GRACE_MS = 500;
-const CURSOR_MCP_INSPECTION_PARENT_TERMINAL_GRACE_MS = 3_000;
+// How long the parent waits, after it asked the wrapper to stop, for the
+// wrapper's process to close. Windows: the child is the process-tree helper,
+// which exits only after it ended its job and every process it held has
+// exited (5 s at most), and an Electron-as-Node wrapper can take seconds to
+// exit under load. Its close is the only proof that nothing of the
+// inspection still runs in the caller's disposable profile folder.
+const CURSOR_MCP_INSPECTION_PARENT_TERMINAL_GRACE_MS = process.platform === "win32"
+  ? PROCESS_TREE_UNKILLABLE_AFTER_MS + 10_000
+  : 3_000;
 const CURSOR_MCP_INSPECTION_GROUP_RETIRE_TIMEOUT_MS = 3_000;
 const MAX_CURSOR_MCP_LIST_BYTES = 64 * 1024;
 const ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*m/g;
@@ -295,14 +303,23 @@ function start() {
     resolveNativeClosed();
   });
 }
+function stop() {
+  // Windows has no process group to signal, and this wrapper runs in the
+  // process-tree helper's job: its exit makes the helper end Cursor and
+  // everything Cursor started, and the helper exits only once they are gone.
+  // Waiting here for Cursor to close its pipes would leave that tree running
+  // while the parent's own wait runs out.
+  if (!started || process.platform === "win32") { process.exit(1); return; }
+  void beginReaping();
+}
 process.on("message", (message) => {
   if (!message || typeof message !== "object") return;
   if (message.type === "start") start();
-  if (message.type === "terminate") { if (started) void beginReaping(); else process.exit(1); }
+  if (message.type === "terminate") stop();
 });
-process.on("disconnect", () => { if (started) void beginReaping(); else process.exit(1); });
-process.on("SIGTERM", () => { if (started) void beginReaping(); else process.exit(1); });
-process.on("SIGINT", () => { if (started) void beginReaping(); else process.exit(1); });
+process.on("disconnect", stop);
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
 function breakOutput() {
   if (outputBroken) return;
   outputBroken = true;
@@ -577,6 +594,11 @@ function execCursorInspection(
       if (terminalTimer) clearTimeout(terminalTimer);
       if (commandTimer) clearTimeout(commandTimer);
       signal?.removeEventListener("abort", abort);
+      if (process.platform === "win32" && wrapperPid !== null) {
+        // The wrapper did not stop: end its job from here, so the caller is
+        // not handed a profile folder that Cursor's processes still use.
+        try { signalTree(wrapperPid, "SIGKILL", { child }); } catch { /* the inspection has failed either way */ }
+      }
       child.stdout?.destroy();
       child.stderr?.destroy();
       try {

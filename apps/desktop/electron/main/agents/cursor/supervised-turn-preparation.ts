@@ -4,7 +4,7 @@
 
 import { withReadOnlyImageFolders } from "../cursor-room-turn-images.js";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS, CURSOR_MCP_CONNECTOR_PARENT, CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS } from "../cursor-provider-constants.js";
@@ -22,6 +22,7 @@ import { buildCursorChildEnv, cursorDaemonChildEnv } from "../cursor-runner.js";
 import { managedCommitEnvironmentFor } from "../managed-agent-commit-identity.js";
 import type { SupervisedWorkspaceGenerationHandle } from "../supervised-workspace-generation.js";
 import { CursorProviderHandle, CursorRoomTurnNotDispatchedError } from "./lane-state.js";
+import { discardCursorProbeRoot } from "./probe-root.js";
 import {
   cursorPermissionUsesWorkspaceGeneration,
   cursorSupervisorMcpEnv,
@@ -96,6 +97,11 @@ export async function prepareSupervisedTurn(
   // MCP and no turn/provider capability. The authority wrapper denies
   // direct networking and confines readable data/process execution.
   const inspectionProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-inspection-"));
+  // Each probe folder is removed inside its `try`, once the probe passed: a
+  // folder that stays in use then fails the preparation through the same
+  // `catch` as the probe. After a failed probe the folder is only discarded
+  // in `finally`, so the probe's own error is the one that is reported.
+  let inspectionRootRemoval = false;
   try {
     const enumerationProfile = adapter.supervisedProfileFactory({
       apiBaseUrl,
@@ -119,6 +125,8 @@ export async function prepareSupervisedTurn(
       expectedServerName: enumerationProfile.mcpServerName,
       signal: launchSignal,
     });
+    inspectionRootRemoval = true;
+    await adapter.deps.removeProbeRoot(inspectionProfileRoot);
   } catch (error) {
     if (launchSignal?.aborted) {
       throw new CursorRoomTurnNotDispatchedError(
@@ -128,7 +136,7 @@ export async function prepareSupervisedTurn(
     }
     throw error;
   } finally {
-    rmSync(inspectionProfileRoot, { recursive: true, force: true });
+    if (!inspectionRootRemoval) await discardCursorProbeRoot(inspectionProfileRoot, adapter.deps.removeProbeRoot);
   }
   throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
 
@@ -136,6 +144,7 @@ export async function prepareSupervisedTurn(
   // afterward so an escaped pass-one descendant never had path authority
   // over the profile that exercises the packaged bridge.
   const bridgeProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-bridge-"));
+  let bridgeRootRemoval = false;
   try {
     const bridgeProfile = adapter.supervisedProfileFactory({
       apiBaseUrl,
@@ -175,6 +184,8 @@ export async function prepareSupervisedTurn(
       timeoutMs: CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS,
       signal: launchSignal,
     });
+    bridgeRootRemoval = true;
+    await adapter.deps.removeProbeRoot(bridgeProfileRoot);
   } catch (error) {
     if (supervisedRuntimeDataDir) {
       removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir);
@@ -188,7 +199,7 @@ export async function prepareSupervisedTurn(
     }
     throw error;
   } finally {
-    rmSync(bridgeProfileRoot, { recursive: true, force: true });
+    if (!bridgeRootRemoval) await discardCursorProbeRoot(bridgeProfileRoot, adapter.deps.removeProbeRoot);
   }
   throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
   // Prove the live credential-store identity immediately before every
@@ -198,6 +209,7 @@ export async function prepareSupervisedTurn(
   // fails closed for team-managed identities. The attested auth-only files
   // then overwrite stale metadata in the stable attempt profile.
   const identityProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-identity-"));
+  let identityRootRemoval = false;
   try {
     let identityProfile = adapter.supervisedProfileFactory({
       apiBaseUrl,
@@ -352,10 +364,17 @@ export async function prepareSupervisedTurn(
       ...supervisorMcpEnv,
       ...cursorWindowsMcpRuntimeEnv(mcpRuntimeRoot, supervisorMcpEnv.LETAGENTS_SUPERVISOR_DAEMON_SOCKET),
     };
+    // The sealed profile above was the last reader of the identity folder.
+    identityRootRemoval = true;
+    await adapter.deps.removeProbeRoot(identityProfileRoot);
   } catch (error) {
     if (workspaceGeneration) {
       await adapter.abandonTurnWorkspaceGeneration(workspaceGeneration);
       workspaceGeneration = null;
+    }
+    if (supervisedRuntimeDataDir) {
+      try { removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir); } catch { /* the error below is the one to report */ }
+      supervisedRuntimeDataDir = undefined;
     }
     if (launchSignal?.aborted) {
       throw new CursorRoomTurnNotDispatchedError(
@@ -365,7 +384,7 @@ export async function prepareSupervisedTurn(
     }
     throw error;
   } finally {
-    rmSync(identityProfileRoot, { recursive: true, force: true });
+    if (!identityRootRemoval) await discardCursorProbeRoot(identityProfileRoot, adapter.deps.removeProbeRoot);
   }
   return {
     childEnv,
