@@ -1,21 +1,16 @@
 import type { SenderIdentity } from "./types";
+import { ownerAttributionFromOwnerLabel, parseAgentLabel } from "../../../../../../../../shared/ui/agent-label";
 
 export { getSenderColor } from "../../../../../../../../shared/ui/sender-color";
 
+/** The shared agent-label parser, with the desktop's display choices. */
 export function parseSenderIdentity(input: { sender?: string | null }): SenderIdentity {
-  const raw = (input?.sender || "").trim();
-  const parts = raw.split(" | ").map((part) => part.trim()).filter(Boolean);
-  if (parts.length === 3 && /agent$/i.test(parts[1])) {
-    return {
-      displayName: parts[0],
-      ownerAttribution: parts[1],
-      ideLabel: normalizeIdeLabel(parts[2]),
-    };
-  }
+  const label = parseAgentLabel(input?.sender);
   return {
-    displayName: raw || "Unknown",
-    ownerAttribution: null,
-    ideLabel: inferIdeLabel(raw),
+    displayName: label.displayName || "Unknown",
+    ownerAttribution: label.ownerAttribution,
+    // "Agent" is the generic fallback, not a provider worth showing.
+    ideLabel: label.ideLabel === "Agent" ? null : label.ideLabel,
   };
 }
 
@@ -25,33 +20,8 @@ export function resolveOwnerAttribution(input: {
   actorLabel?: string | null;
   sender?: string | null;
 }): string | null {
-  const explicit = input.ownerAttribution?.trim();
-  if (explicit) return explicit;
-  const ownerLabel = input.ownerLabel?.trim();
-  if (ownerLabel) {
-    return /['’]s\s+agent$/i.test(ownerLabel) ? ownerLabel : `${ownerLabel}'s agent`;
-  }
-  return parseSenderIdentity({ sender: input.actorLabel }).ownerAttribution
+  return input.ownerAttribution?.trim()
+    || ownerAttributionFromOwnerLabel(input.ownerLabel)
+    || parseSenderIdentity({ sender: input.actorLabel }).ownerAttribution
     || parseSenderIdentity({ sender: input.sender }).ownerAttribution;
-}
-
-function normalizeIdeLabel(label: string): string | null {
-  const normalized = label.trim().toLowerCase();
-  if (!normalized) return null;
-  if (normalized === "codex") return "Codex";
-  if (normalized === "antigravity") return "Antigravity";
-  if (normalized === "claude") return "Claude";
-  if (normalized === "cursor") return "Cursor";
-  if (normalized === "opencode") return "OpenCode";
-  if (normalized === "agent") return null;
-  return normalized.split(/[^a-z0-9]+/).filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
-}
-
-function inferIdeLabel(value: string): string | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized.startsWith("codex")) return "Codex";
-  if (normalized.startsWith("antigravity")) return "Antigravity";
-  if (normalized.startsWith("claude")) return "Claude";
-  if (normalized.startsWith("cursor")) return "Cursor";
-  return null;
 }

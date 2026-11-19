@@ -5,14 +5,13 @@ import type {
 } from './types'
 
 export { getSenderColor } from '../../../../../shared/ui/sender-color'
+import {
+  ownerAttributionFromOwnerLabel,
+  parseAgentLabel,
+  type AgentLabel,
+} from '../../../../../shared/ui/agent-label'
 
-export interface ParsedIdentity {
-  raw: string
-  displayName: string
-  ownerAttribution: string | null
-  ideLabel: string | null
-  structured: boolean
-}
+export type ParsedIdentity = AgentLabel
 
 export function resolveAgentIdentity(
   sender: string,
@@ -25,13 +24,9 @@ export function resolveAgentIdentity(
   } | null,
 ): ParsedIdentity {
   const parsed = parseAgentIdentity(sender)
-  const structuredOwner = String(structured?.owner_label || '').trim()
-  const actorOwner = parseAgentIdentity(structured?.actor_label || '').ownerAttribution
   const ownerAttribution = structured?.owner_attribution
-    || (structuredOwner
-      ? (/['’]s\s+agent$/i.test(structuredOwner) ? structuredOwner : `${structuredOwner}'s agent`)
-      : null)
-    || actorOwner
+    || ownerAttributionFromOwnerLabel(structured?.owner_label)
+    || parseAgentIdentity(structured?.actor_label || '').ownerAttribution
     || parsed.ownerAttribution
   return {
     ...parsed,
@@ -43,82 +38,7 @@ export function resolveAgentIdentity(
 }
 
 export function parseAgentIdentity(sender: string): ParsedIdentity {
-  const raw = (sender || '').trim()
-  if (!raw)
-    return {
-      raw,
-      displayName: raw,
-      ownerAttribution: null,
-      ideLabel: null,
-      structured: false,
-    }
-
-  const parts = raw
-    .split(' | ')
-    .map((p) => p.trim())
-    .filter(Boolean)
-  if (parts.length === 3 && /agent$/i.test(parts[1])) {
-    return {
-      raw,
-      displayName: parts[0],
-      ownerAttribution: parts[1],
-      ideLabel: normalizeIdeLabel(parts[2]),
-      structured: true,
-    }
-  }
-
-  const legacy = raw.match(/^(.*?)\s*\(([^)]+agent)\)$/i)
-  if (legacy) {
-    return {
-      raw,
-      displayName: (legacy[1] || '').trim() || raw,
-      ownerAttribution: (legacy[2] || '').trim() || null,
-      ideLabel: inferIdeLabel((legacy[1] || '').trim()),
-      structured: false,
-    }
-  }
-
-  return {
-    raw,
-    displayName: raw,
-    ownerAttribution: null,
-    ideLabel: inferIdeLabel(raw),
-    structured: false,
-  }
-}
-
-function normalizeIdeLabel(label: string): string | null {
-  const n = (label || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-  if (!n) return null
-  const known: Record<string, string> = {
-    codex: 'Codex',
-    antigravity: 'Antigravity',
-    claude: 'Claude',
-    cursor: 'Cursor',
-    opencode: 'OpenCode',
-    agent: 'Agent',
-  }
-  return (
-    known[n] ||
-    n
-      .split('-')
-      .filter(Boolean)
-      .map((p) => p[0].toUpperCase() + p.slice(1))
-      .join(' ')
-  )
-}
-
-function inferIdeLabel(value: string): string | null {
-  const n = (value || '').trim().toLowerCase()
-  if (n.startsWith('codex')) return 'Codex'
-  if (n.startsWith('antigravity')) return 'Antigravity'
-  if (n.startsWith('claude')) return 'Claude'
-  if (n.startsWith('cursor')) return 'Cursor'
-  return null
+  return parseAgentLabel(sender)
 }
 
 export function isHumanSender(sender: string, source: string | null): boolean {
