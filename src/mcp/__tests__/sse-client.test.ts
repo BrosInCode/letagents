@@ -305,17 +305,32 @@ test("a stream that stayed open for 30 seconds starts the delay over even when i
     now: () => clock,
     respond: (request) => {
       if (request !== 3) return new Response("", { status: 200 });
-      // The third stream stays open (the clock moves on) and then breaks.
+      // The third stream stays open (the clock moves on while it is read) and then breaks.
+      // No read-ahead, so the clock moves only once the client reads the open stream.
       return new Response(new ReadableStream<Uint8Array>({
-        start(controller) {
+        pull(controller) {
           clock += SSE_HEALTHY_STREAM_MS;
           controller.error(new Error("connection lost"));
         },
-      }), { status: 200 });
+      }, { highWaterMark: 0 }), { status: 200 });
     },
     waits: 4,
   });
   assert.deepEqual(waits, [1_000, 1_500, 1_000, 1_500]);
+});
+
+test("a request that waited 30 seconds for a refusal was never open: the delay keeps growing", async () => {
+  let clock = 0;
+  const waits = await recordedWaits({
+    now: () => clock,
+    // A proxy that holds each request for its own limit and then answers 504.
+    respond: () => {
+      clock += SSE_HEALTHY_STREAM_MS;
+      return new Response("{}", { status: 504 });
+    },
+    waits: 4,
+  });
+  assert.deepEqual(waits, [1_000, 1_500, 2_250, 3_375]);
 });
 
 async function withTestDeadline<T>(work: Promise<T>, timeoutMs: number, message: string): Promise<T> {

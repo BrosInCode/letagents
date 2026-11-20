@@ -7,7 +7,11 @@ const MAX_SSE_FRAME_BYTES = 1024 * 1024;
 /** The first reconnect delay, and the delay again after a stream that worked. */
 export const SSE_RETRY_BASE_MS = 1_000;
 export const SSE_RETRY_MAX_MS = 30_000;
-/** A stream that stayed open this long worked, however it ended. */
+/**
+ * A stream that stayed open this long worked, however it ended. The time
+ * counts from the server's answer (HTTP 200), not from the request: a request
+ * that waited this long for a refusal was never open.
+ */
 export const SSE_HEALTHY_STREAM_MS = 30_000;
 /** Each wait is spread by this share around its value, so clients cut off together do not return together. */
 const SSE_RETRY_JITTER = 0.25;
@@ -79,8 +83,10 @@ interface Subscription {
   promise: Promise<void>;
 }
 
-/** What one opened stream did, for the reconnect delay after it. */
+/** What one stream attempt did, for the reconnect delay after it. */
 interface StreamAttempt {
+  /** When the server answered with an open stream; null while it has not. */
+  openedAtMs: number | null;
   deliveredRoomSync: boolean;
 }
 
@@ -194,8 +200,7 @@ export class SseClient {
         ? `${this.apiUrl}/projects/${encodeURIComponent(target.projectId)}/messages/stream`
         : `${this.apiUrl}/rooms/${encodeRoomIdPath(target.roomId)}/messages/stream`;
       const url = this.withIncludePromptOnly(this.withAgentIdentityQuery(baseUrl, target));
-      const openedAt = this.timing.now();
-      const attempt: StreamAttempt = { deliveredRoomSync: false };
+      const attempt: StreamAttempt = { openedAtMs: null, deliveredRoomSync: false };
       let endedCleanly = false;
       try {
         lastEventId = await this.openStream(
@@ -230,7 +235,7 @@ export class SseClient {
       // Only a stream that worked starts the delay over. Every other end, an
       // error or a stream the server ended at once, makes the next wait longer.
       if (sseStreamEarnsShortRetry({
-        livedMs: this.timing.now() - openedAt,
+        livedMs: attempt.openedAtMs === null ? 0 : this.timing.now() - attempt.openedAtMs,
         endedCleanly,
         deliveredRoomSync: attempt.deliveredRoomSync,
       })) retryMs = SSE_RETRY_BASE_MS;
@@ -297,6 +302,7 @@ export class SseClient {
       throw new Error("SSE response body is missing");
     }
 
+    if (attempt) attempt.openedAtMs = this.timing.now();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
