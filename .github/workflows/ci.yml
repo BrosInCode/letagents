@@ -787,6 +787,10 @@ jobs:
         if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/sequential-reply-turns.test.ts src/api/__tests__/sequential-reply-turns-db.test.ts
 
+      - name: Test polled read queries and their indexes
+        if: matrix.group == 3
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/polled-read-queries-db.test.ts
+
       - name: Test room memory and human request persistence
         if: matrix.group == 1
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-knowledge-routes.test.ts src/api/__tests__/room-knowledge-db.test.ts

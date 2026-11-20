@@ -72,4 +72,8 @@ export const agents = pgTable("agents", {
     .on(sql`normalize_message_thread_routing_alias(${table.canonical_key}, true)`),
   owner_name_idx: uniqueIndex("agents_owner_name_idx").on(table.owner_account_id, table.name),
   owner_idx: index("agents_owner_account_id_idx").on(table.owner_account_id),
+  // Few agents have an avatar; the batch avatar lookup reads only these.
+  avatar_canonical_idx: index("agents_avatar_canonical_key_idx")
+    .on(table.canonical_key)
+    .where(sql`${table.avatar} IS NOT NULL`),
 }));

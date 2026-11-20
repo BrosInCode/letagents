@@ -1,5 +1,5 @@
 import { normalizeAgentAvatar, type AgentAvatar } from "../../../shared/agent-avatar.js";
-import { asc, eq, inArray, sql } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
 import { agents } from "../schema.js";
@@ -126,7 +126,9 @@ export async function getAgentIdentitiesForOwner(ownerAccountId: string): Promis
 export async function getAgentAvatars(keys: readonly (string | null | undefined)[], executor: Pick<typeof db, "select"> = db): Promise<Map<string, AgentAvatar>> {
   const unique = [...new Set(keys.filter((key): key is string => Boolean(key)))];
   if (!unique.length) return new Map();
-  const rows = await executor.select({ key: agents.canonical_key, avatar: agents.avatar }).from(agents).where(inArray(agents.canonical_key, unique));
+  const rows = await executor.select({ key: agents.canonical_key, avatar: agents.avatar }).from(agents)
+    // One array parameter, not one per key; `avatar IS NOT NULL` lets PostgreSQL use the small partial avatar index.
+    .where(sql`${agents.canonical_key} = ANY(${sql.param(unique)}::text[]) AND ${agents.avatar} IS NOT NULL`);
   const result = new Map<string, AgentAvatar>();
   for (const row of rows) { const avatar = normalizeAgentAvatar(row.avatar); if (avatar) result.set(row.key, avatar); }
   return result;
