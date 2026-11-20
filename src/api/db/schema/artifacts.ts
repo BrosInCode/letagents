@@ -92,10 +92,11 @@ export const room_shared_artifacts = pgTable(
       name: "room_shared_artifacts_pk",
       columns: [table.room_id, table.identity_key],
     }),
-    room_kind_idx: index("room_shared_artifacts_room_kind_idx").on(
+    // Matches the list's ORDER BY kind, identity_key, so the list reads one page.
+    room_kind_key_idx: index("room_shared_artifacts_room_kind_key_idx").on(
       table.room_id,
       table.kind,
-      table.updated_at
+      table.identity_key
     ),
     room_url_idx: index("room_shared_artifacts_room_url_idx")
       .on(table.room_id, table.url)

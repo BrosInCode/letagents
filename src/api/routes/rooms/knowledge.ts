@@ -8,12 +8,12 @@ import { ATTENTION_CLOSED_RESPONSE, createKnowledgeRecord, knowledgeId, reviseKn
 import { commitAttentionAnswer, commitAttentionRequest, type AttentionRequestPublisher } from '../../rooms/attention-answers.js';
 import * as store from '../../db/room-knowledge.js';
 import { emitProjectMessage } from '../../server/events.js';
-import { getTasksForRooms } from '../../db.js';
+import { getAttentionTasksForRooms } from '../../account-unread/attention.js';
 
 export type KnowledgeRouteDeps = Pick<RoomMessageRouteDeps, 'resolveCanonicalRoomRequestId' | 'resolveRoomOrReply' | 'requireParticipant'> & {
   store?: typeof store;
   emitMessage?: typeof emitProjectMessage;
-  getTasks?: typeof getTasksForRooms;
+  getTasks?: typeof getAttentionTasksForRooms;
 };
 function fail(res: Response, error: unknown) {
   if (error instanceof RoomKnowledgeError) res.status(error.status).json({ error: error.message });
@@ -40,7 +40,7 @@ export function registerRoomKnowledgeRoutes(app: Express, deps: KnowledgeRouteDe
       try {
         const project = await room(req, res); if (!project) return;
         const page = await db.listRoomKnowledge(project.id, type);
-        const tasks = type === 'attention' ? (await (deps.getTasks ?? getTasksForRooms)([project.id]))
+        const tasks = type === 'attention' ? (await (deps.getTasks ?? getAttentionTasksForRooms)([project.id]))
           .filter(task => ['proposed', 'blocked', 'in_review'].includes(task.status))
           .map(task => ({ id: task.id, title: task.title, status: task.status, description: task.description, updated_at: task.updated_at })) : undefined;
         res.json({ room_id: project.id, ...page, ...(tasks ? { tasks } : {}) });
