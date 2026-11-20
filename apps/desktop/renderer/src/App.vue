@@ -7,7 +7,7 @@
     :data-cinematic="firstRunStage === 'welcome' || firstRunStage === 'github'"
     :data-room-arrival="showFirstRunGate ? null : roomArrival"
     :inert="!showFirstRunGate"
-    :style="roomTheme.css.value"
+    :style="[roomTheme.css.value, { '--arrival-sidebar-edge': arrivalSidebarEdge }]"
     data-testid="desktop-first-run-onboarding"
   >
     <FirstRunOnboardingView
@@ -61,6 +61,7 @@
     v-else-if="!showFirstRunSplash && !showFirstRunGate"
     class="desktop-shell"
     :data-sidebar-mode="isSettingsSurface ? 'hidden' : sidebarMode"
+    :data-picker-arrival="firstRunFinished && usedRoomFlight || null"
     :data-sidebar-resizing="isSidebarResizing"
     :style="[desktopShellStyle, roomTheme.css.value]"
     :data-room-theme="roomTheme.effective.value"
@@ -746,12 +747,19 @@ function openOnboardingCompanyStep() {
 
 const roomArrival = ref<"waiting" | "moving" | null>(null);
 
+const usedRoomFlight = ref(false);
+const arrivalSidebarEdge = ref("0px");
+
 async function openOnboardingRoom(id: string, icon?: HTMLElement) {
-  const flight = prepareFirstRoomFlight(icon, () => { roomArrival.value = "moving"; });
+  const flight = prepareFirstRoomFlight(icon, edge => {
+    arrivalSidebarEdge.value = `${edge}px`;
+    roomArrival.value = "moving";
+  });
   const clearArrival = () => {
     roomArrival.value = null;
     flight?.dispose();
   };
+  usedRoomFlight.value = Boolean(flight);
   if (flight) roomArrival.value = "waiting";
   try {
     const snapshot = await joinRoomCode(id);
