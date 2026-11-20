@@ -5,7 +5,7 @@
       <div>
         <div class="desktop-task-detail-status-row">
           <span class="desktop-task-status-badge" :data-status="task.status">
-            {{ readableStatus(task.status) }}
+            {{ taskStatusLabel(task.status) }}
           </span>
           <span
             v-if="ticket && ticketState"
@@ -269,6 +269,7 @@ import type { DesktopAgentPresence, DesktopTaskSummary, DesktopTaskTicket } from
 import { desktopIpc, getRoomBridge } from "../../../../ipc/index.js";
 import { ticketRefParts, ticketStateLabel } from "./ticket-ref";
 import { compactPerson, readableStatus, relativeTime, staleSummary } from "./formatters";
+import { taskStatusLabel } from "../../../../../../../../shared/ui/task-status";
 import { useNow } from "../../../../composables/useNow";
 
 // Labels such as "2m ago" move on with the shared clock even when the data is unchanged.

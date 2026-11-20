@@ -8,12 +8,14 @@ import { createServer, type ViteDevServer } from 'vite';
 let vite: ViteDevServer;
 let Reader: any;
 let LongMessage: any;
+let DesktopLongMessage: any;
 let preference: any;
 before(async () => {
   vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
   Reader = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../../shared/ui/MessageReader.vue', import.meta.url)))).default;
   preference = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../../shared/ui/message-reader.ts', import.meta.url)))).selectedReaderTextSize;
-  LongMessage = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/DesktopLongMessageContent.vue')).default;
+  LongMessage = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../../shared/ui/LongMessageContent.vue', import.meta.url)))).default;
+  DesktopLongMessage = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/DesktopLongMessageContent.vue')).default;
 });
 after(async () => { await vite?.close(); });
 
@@ -125,12 +127,13 @@ test('copy uses original text and reports denied clipboard access instead of fal
   assert.match(vm.copyStatus.value, /Could not copy/);
 });
 
-test('desktop reader has sender, avatar and room context without duplicate close actions or counters', async () => {
-  const OpenMessage = { ...LongMessage, setup(props: any, context: any) {
-    const vm = LongMessage.setup(props, context); vm.openReader(); return vm;
-  } };
+test('desktop reader has sender, avatar and room context without duplicate close actions or counters', async t => {
+  // Render through the desktop wrapper so its prop forwarding is covered; open the shared reader.
+  const originalSetup = LongMessage.setup;
+  LongMessage.setup = (props: any, context: any) => { const vm = originalSetup(props, context); vm.openReader(); return vm; };
+  t.after(() => { LongMessage.setup = originalSetup; });
   const context: any = {};
-  await renderToString(createSSRApp({ render: () => h(OpenMessage, { text: 'Message body', html: '<p>Message body</p>', messageId: 'msg_1',
+  await renderToString(createSSRApp({ render: () => h(DesktopLongMessage, { text: 'Message body', html: '<p>Message body</p>', messageId: 'msg_1',
     roomIdentifier: 'github.com/BrosInCode/letagents', sender: { name: 'Ada', context: 'Human', avatarUrl: 'https://avatars.githubusercontent.com/u/2', timestamp: '2026-10-17T12:00:00Z' } }) }), context);
   const html = context.teleports.body;
   assert.match(html, /<dialog[^>]*message-reader/);

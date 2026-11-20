@@ -22,7 +22,7 @@ import { orbStateForActivity, orbStateForTurn, orbStateForWork } from "../src/do
 import { ACTIVITY_ORB_STILL_SECONDS, createActivityOrbClock, drawActivityOrb } from "../../../../shared/ui/activity-orb";
 import { buildMessageTimelineEntries } from "../src/components/desktop/content/room-chat/timeline";
 import { composerDrafting, type ComposerEventPreview } from "../src/components/desktop/content/room-chat/composer-event-preview";
-import type { PresenceChipAgent } from "../src/domain/presence-chips";
+import type { PresenceChipAgent } from "../../../../shared/ui/presence-chips";
 
 /** A clock the test moves by hand. */
 function fakeTimers() {
@@ -333,7 +333,7 @@ test("useRoomActivity: presence changes become notices and timeline lines; a roo
   const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   try {
     const { useRoomActivity } = await vite.ssrLoadModule("/renderer/src/composables/useRoomActivity.ts");
-    const chips = await vite.ssrLoadModule("/renderer/src/domain/presence-chips.ts");
+    const chips = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/presence-chips.ts", import.meta.url)));
     const presence = ref<unknown[]>([]);
     const scope = ref("room-a");
     const drafting = ref(false);

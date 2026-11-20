@@ -1,15 +1,23 @@
 import type {
-  RoomReasoningEntry,
   RoomReasoningSession,
   RoomReasoningSnapshot,
   RoomReasoningUpdate,
 } from '../../../composables/useRoom'
+import {
+  buildReasoningSnapshot,
+  currentReasoningEntry,
+  orderTimelineEntries,
+  reasoningLabel,
+  reasoningUpdateEntry,
+  snapshotTimelineEntries,
+  type ReasoningTimelineEntry,
+} from '../../../../../../shared/ui/reasoning/reasoning-trace'
 
-export interface ReasoningTimelineEntry extends RoomReasoningEntry {
-  current?: boolean
-}
-
-export type ReasoningStreamState = 'blocked' | 'live' | 'recent' | 'snapshot'
+export {
+  classifyReasoningStream,
+  type ReasoningStreamState,
+  type ReasoningTimelineEntry,
+} from '../../../../../../shared/ui/reasoning/reasoning-trace'
 
 export interface ReasoningHighlight {
   label: string
@@ -62,35 +70,11 @@ export function mergeReasoningSessionDetail(
 
 export function buildCurrentSnapshot(session: RoomReasoningSession | null): RoomReasoningSnapshot | null {
   if (!session) return null
-
-  if (session.latest_payload) {
-    return session.latest_payload
-  }
-
-  if (
-    session.goal
-    || session.checking
-    || session.hypothesis
-    || session.blocker
-    || session.next_action
-    || session.milestone
-    || typeof session.confidence === 'number'
-    || session.status
-  ) {
-    return {
-      summary: session.summary || '',
-      goal: session.goal,
-      checking: session.checking,
-      hypothesis: session.hypothesis,
-      blocker: session.blocker,
-      next_action: session.next_action,
-      milestone: session.milestone,
-      confidence: session.confidence,
-      status: session.status,
-    }
-  }
-
-  return session.summary ? { summary: session.summary } : null
+  return buildReasoningSnapshot<RoomReasoningSnapshot>({
+    ...session,
+    latestPayload: session.latest_payload,
+    nextAction: session.next_action,
+  }) as RoomReasoningSnapshot | null
 }
 
 export function buildHighlights(
@@ -125,43 +109,30 @@ export function buildTimelineEntries(
 ): ReasoningTimelineEntry[] {
   if (!session) return []
 
-  const detailEntries = Array.isArray(session.entries) && session.entries.length > 0
-    ? session.entries
-    : Array.isArray(session.updates) && session.updates.length > 0
-      ? session.updates.map((update: RoomReasoningUpdate) => ({
-        id: update.id,
-        label: update.milestone ? 'Milestone' : update.status || 'Update',
-        text: update.summary,
-        timestamp: update.created_at,
-      }))
-      : []
+  const detailEntries: ReasoningTimelineEntry[] = Array.isArray(session.entries) && session.entries.length > 0
+    ? session.entries.map((entry) => ({
+      id: entry.id,
+      label: reasoningLabel(entry.label || entry.kind),
+      text: entry.text || '',
+      timestamp: entry.timestamp,
+    }))
+    : (session.updates || []).map((update: RoomReasoningUpdate) => reasoningUpdateEntry({
+      ...update,
+      payloadSummary: update.payload?.summary,
+      createdAt: update.created_at,
+    }))
+  const usable = detailEntries.filter((entry) => Boolean(entry.id && entry.text.trim()))
 
-  if (detailEntries.length > 0) {
-    return compactTimelineEntries([...detailEntries, ...currentLiveTimelineEntry])
-      .filter((entry) => Boolean(entry?.id && entry?.text))
-      .sort(compareTimelineEntries)
+  if (usable.length > 0) {
+    return orderTimelineEntries([...usable, ...currentLiveTimelineEntry])
   }
 
-  const synthesized = [
-    ['summary', 'Summary', snapshot?.summary || session.summary],
-    ['goal', 'Goal', snapshot?.goal],
-    ['checking', 'Checking', snapshot?.checking],
-    ['hypothesis', 'Hypothesis', snapshot?.hypothesis],
-    ['blocker', 'Blocker', snapshot?.blocker],
-    ['next-action', 'Next action', snapshot?.next_action],
-    ['milestone', 'Milestone', snapshot?.milestone],
-  ] as const
-
-  const timestamp = session.updated_at || session.created_at || new Date().toISOString()
-
-  return synthesized
-    .filter(([, , text]) => Boolean(String(text || '').trim()))
-    .map(([id, label, text]) => ({
-      id: `${session.id}-${id}`,
-      label,
-      text: String(text),
-      timestamp,
-    }))
+  return snapshotTimelineEntries(
+    session.id,
+    snapshot,
+    session.summary,
+    session.updated_at || session.created_at || new Date().toISOString(),
+  )
 }
 
 export function buildCurrentLiveTimelineEntry(
@@ -169,82 +140,13 @@ export function buildCurrentLiveTimelineEntry(
   snapshot: RoomReasoningSnapshot | null,
   currentSummary: string,
 ): ReasoningTimelineEntry[] {
-  const text = currentSummary.trim()
-  if (!session || !text) return []
-  return [{
-    id: `${session.id}-current-live`,
-    label: session.status || snapshot?.status || 'working',
-    text,
-    timestamp: session.updated_at || session.created_at || new Date().toISOString(),
-    current: true,
-  }]
-}
-
-export function resolveStreamState(
-  session: RoomReasoningSession | null,
-  snapshot: RoomReasoningSnapshot | null,
-  isCodexReasoningSummary: boolean,
-  isCodexSnapshot: boolean,
-): ReasoningStreamState {
-  const status = String(snapshot?.status || session?.status || '').toLowerCase()
-  if (isCodexReasoningSummary) return 'live'
-  if (isCodexSnapshot) return 'snapshot'
-  if (status === 'working' || status === 'reviewing') return 'live'
-  if (status === 'blocked') return 'blocked'
-  return 'recent'
-}
-
-export function isCodexReasoningSummarySnapshot(snapshot: RoomReasoningSnapshot | null): boolean {
-  const text = [
-    snapshot?.summary,
-    snapshot?.checking,
-    snapshot?.next_action,
-  ].join(' ').toLowerCase()
-  return text.includes('readable reasoning') || text.includes('reasoning summary')
-}
-
-export function isCodexSnapshotPayload(snapshot: RoomReasoningSnapshot | null): boolean {
-  if (isCodexReasoningSummarySnapshot(snapshot)) return false
-  const text = [
-    snapshot?.summary,
-    snapshot?.checking,
-    snapshot?.next_action,
-  ].join(' ').toLowerCase()
-  return text.includes('codex_app_server') || text.includes('app-server snapshot') || text.includes('snapshot-derived')
-}
-
-export function entryLabel(entry: RoomReasoningEntry): string {
-  const label = String(entry.label || entry.kind || '').trim()
-  if (!label) return 'Update'
-  return label
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase())
-}
-
-export function compactTimelineEntries(entries: ReasoningTimelineEntry[]): ReasoningTimelineEntry[] {
-  const compacted: ReasoningTimelineEntry[] = []
-  for (const entry of entries) {
-    const previous = compacted[compacted.length - 1]
-    if (
-      previous
-      && previous.label === entry.label
-      && normalizeTimelineText(previous.text) === normalizeTimelineText(entry.text)
-    ) {
-      compacted[compacted.length - 1] = {
-        ...previous,
-        id: entry.id,
-        timestamp: entry.timestamp || previous.timestamp,
-        current: Boolean(previous.current || entry.current),
-      }
-      continue
-    }
-    compacted.push(entry)
-  }
-  return compacted
-}
-
-export function normalizeTimelineText(value: string): string {
-  return value.replace(/\s+/g, ' ').trim()
+  if (!session) return []
+  return currentReasoningEntry(
+    session.id,
+    snapshot?.status || session.status,
+    currentSummary,
+    session.updated_at || session.created_at || new Date().toISOString(),
+  )
 }
 
 export function formatTimestamp(value: string | null | undefined): string {
@@ -260,13 +162,4 @@ export function formatTimestamp(value: string | null | undefined): string {
     hour: '2-digit',
     minute: '2-digit',
   })
-}
-
-function compareTimelineEntries(left: ReasoningTimelineEntry, right: ReasoningTimelineEntry): number {
-  const leftTime = Date.parse(left.timestamp || '')
-  const rightTime = Date.parse(right.timestamp || '')
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-    return leftTime - rightTime
-  }
-  return String(left.id).localeCompare(String(right.id))
 }

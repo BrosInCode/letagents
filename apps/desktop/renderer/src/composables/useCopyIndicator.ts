@@ -1,6 +1,6 @@
 import { ref, type Ref } from "vue";
 
-import { copyTextToClipboard } from "../domain/clipboard";
+import { copyTextToClipboard } from "../../../../../shared/ui/clipboard";
 
 export type CopyIndicator = {
   copied: Ref<boolean>;

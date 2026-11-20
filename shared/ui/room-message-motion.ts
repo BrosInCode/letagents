@@ -136,7 +136,7 @@ export function createRoomMessageAnimator(viewport: () => HTMLElement | null, wo
       animate(dot, [source.dots[index] || { opacity: 1 }, { opacity: 1, transform: `translateX(${-index * 6}px) scale(1.3)`, offset: .6 }, { opacity: 0, transform: `translateX(${-index * 6}px) scale(.8)` }], { duration: duration * .38, easing: ease, fill: 'forwards' });
     });
     animate(bubble, [{ opacity: 0 }, { opacity: 0, offset: .2 }, { opacity: 1 }], { duration });
-    animate(bubble.querySelector('.desktop-long-message, .long-message-content, .md-content') || bubble.firstElementChild,
+    animate(bubble.querySelector('.long-message, .md-content') || bubble.firstElementChild,
       [{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }],
       { duration: duration * .5, delay: duration * .2, fill: 'backwards', easing: ease });
   }
