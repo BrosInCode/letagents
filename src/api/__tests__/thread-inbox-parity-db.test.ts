@@ -2140,7 +2140,7 @@ test("PG send-time routing persists a 6,000-recipient broadcast in bounded chunk
     assert.equal(broadcastOverlay.account_agent_routing.recipient_agent_sessions?.length, 6_000);
   }
   assert.ok(overlayMs < 2_000, `6,000-recipient overlay took ${overlayMs.toFixed(1)}ms`);
-  const { result: batchedOverlays, read: overlayRead } = await captureStatement(pool!, /live_successor/, () =>
+  const { result: batchedOverlays, read: overlayRead } = await captureStatement(pool!, /WITH live_successor AS/, () =>
     getMessageAccountAgentRoutings!(
       db!,
       room.id,

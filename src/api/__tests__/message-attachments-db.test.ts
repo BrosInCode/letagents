@@ -318,7 +318,7 @@ for (const stage of ["attachments", "thread-read", "routing"] as const) {
         ? /^select /i.test(query) && query.includes('from "message_attachments"')
         : stage === "thread-read"
         ? /^select /i.test(query) && query.includes('from "message_thread_reads"')
-        : query.includes("WITH requested_account AS");
+        : query.includes("WITH live_successor AS");
       if (failHydration && targetQuery) {
         const error = new Error("injected hydration failure");
         const callback = args.at(-1);

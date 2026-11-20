@@ -354,7 +354,7 @@ const REFERENCE_RECEIPTS_SQL = `
    LIMIT 100001`;
 
 // Records the receipt statement the routing function sends, with its rows.
-const captureReceiptRead = (run: () => Promise<unknown>, match = /live_successor/) =>
+const captureReceiptRead = (run: () => Promise<unknown>, match = /WITH live_successor AS/) =>
   captureStatement<any>(client!.pool, match, run);
 const explainRead = (text: string, values: unknown[]) => explainStatementRead(client!.pool, text, values);
 
