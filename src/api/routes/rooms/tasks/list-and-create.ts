@@ -17,6 +17,7 @@ import {
 import { normalizeExternalRef } from "../../../connectors/key-detectors.js";
 import { parseLimit, type AuthenticatedRequest } from "../../../http/helpers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
+import { resolveRoomRequest } from "../../../rooms/request-room.js";
 import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
 import { normalizeTaskActorKey } from "../../../tasks/ownership.js";
 import {
@@ -31,9 +32,7 @@ export function registerTaskListAndCreateRoutes(
 ): void {
   app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -56,9 +55,7 @@ export function registerTaskListAndCreateRoutes(
 
   app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res, { allowCreate: false });
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;

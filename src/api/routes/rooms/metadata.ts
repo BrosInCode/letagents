@@ -8,12 +8,15 @@ import {
   respondWithBadRequest,
   type AuthenticatedRequest,
 } from "../../http/helpers.js";
+import type { RoomRequestResolver } from "../../rooms/request-room.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
 
 export interface RoomMetadataRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
+  /** Both room resolvers in one statement where it can; see `resolveRoomRequest`. */
+  resolveRoomRequestOrReply: RoomRequestResolver;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireAdmin(
     req: AuthenticatedRequest,

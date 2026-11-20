@@ -8,7 +8,7 @@ import { completeJobAsAgent, getJob, updateJobAsAgent } from "../../jobs/service
 import { resolveParticipantRoom, routeParam } from "./messages/helpers.js";
 import type { RoomMessageRouteDeps } from "./messages/types.js";
 
-export type JobAgentRouteDeps = Pick<RoomMessageRouteDeps, "resolveCanonicalRoomRequestId" | "resolveRoomOrReply" | "requireParticipant">;
+export type JobAgentRouteDeps = Pick<RoomMessageRouteDeps, "resolveCanonicalRoomRequestId" | "resolveRoomRequestOrReply" | "resolveRoomOrReply" | "requireParticipant">;
 
 // The agent side of LetAgents API jobs, for the `get_job`, `update_job` and
 // `complete_job` MCP tools. These are room routes with the worker identity
@@ -52,7 +52,7 @@ function optionalString(record: Record<string, unknown>, field: string): string 
 }
 
 export function registerJobAgentRoutes(app: Express, deps: JobAgentRouteDeps): void {
-  const room = (req: AuthenticatedRequest, res: Response) => resolveParticipantRoom(req, res, deps as RoomMessageRouteDeps);
+  const room = (req: AuthenticatedRequest, res: Response) => resolveParticipantRoom(req, res, deps);
 
   app.get(/^\/rooms\/(.+)\/jobs\/(job_[0-9a-f]{32})$/, async (req: AuthenticatedRequest, res) => {
     try {

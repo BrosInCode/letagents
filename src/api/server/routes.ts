@@ -64,6 +64,7 @@ import {
   resolveCanonicalRoomRequestId,
   resolveExistingRoomRequest,
   resolveRoomOrReply,
+  resolveRoomRequestOrReply,
 } from "../rooms/resolution.js";
 import { normalizeOptionalString } from "../tasks/coordination-inputs.js";
 import {
@@ -334,6 +335,7 @@ export function registerApiRoutes(app: Express): void {
   const githubIntegrationRouteDeps = {
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    resolveRoomRequestOrReply,
     requireAdmin,
     requireParticipant,
     getProjectAccessRoomId,
@@ -397,6 +399,7 @@ export function registerApiRoutes(app: Express): void {
     resolveRequestProjectRepoAccessRoomName,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    resolveRoomRequestOrReply,
     requireParticipant,
     parseOptionalAgentPromptKind,
     parseOptionalReplyToMessageId,
@@ -410,6 +413,7 @@ export function registerApiRoutes(app: Express): void {
   const roomPresenceRouteDeps = {
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    resolveRoomRequestOrReply,
     requireAdmin,
     requireParticipant,
     rememberAgentRoomParticipant,
@@ -420,6 +424,7 @@ export function registerApiRoutes(app: Express): void {
     reasoningEvents,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    resolveRoomRequestOrReply,
     requireParticipant,
   } satisfies RoomReasoningRouteDeps;
 
@@ -430,6 +435,7 @@ export function registerApiRoutes(app: Express): void {
     concludeFocusRoom,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    resolveRoomRequestOrReply,
     requireAdmin,
     requireParticipant,
     resolveProjectRole,
@@ -457,6 +463,7 @@ export function registerApiRoutes(app: Express): void {
     },
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    resolveRoomRequestOrReply,
     requireAdmin,
     requireParticipant,
     resolveProjectRole,
@@ -481,6 +488,7 @@ export function registerApiRoutes(app: Express): void {
   const roomEventRouteDeps = {
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    resolveRoomRequestOrReply,
     requireParticipant,
     getProjectAccessRoomId,
   } satisfies RoomEventRouteDeps;
@@ -489,6 +497,7 @@ export function registerApiRoutes(app: Express): void {
     artifactEvents,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    resolveRoomRequestOrReply,
     requireParticipant,
     getActiveTaskLeases,
     getRoomSharedArtifactByIdentityKey,
@@ -514,6 +523,7 @@ export function registerApiRoutes(app: Express): void {
     ensureTaskGitRoomForActiveWorkLease,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    resolveRoomRequestOrReply,
     requireAdmin,
     requireParticipant,
     normalizeOptionalString,
@@ -529,6 +539,7 @@ export function registerApiRoutes(app: Express): void {
   const roomMetadataRouteDeps = {
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    resolveRoomRequestOrReply,
     requireAdmin,
     updateProjectDisplayName,
     resolveProjectRole,

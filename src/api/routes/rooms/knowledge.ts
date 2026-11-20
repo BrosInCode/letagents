@@ -10,7 +10,7 @@ import * as store from '../../db/room-knowledge.js';
 import { emitProjectMessage } from '../../server/events.js';
 import { getAttentionTasksForRooms } from '../../account-unread/attention.js';
 
-export type KnowledgeRouteDeps = Pick<RoomMessageRouteDeps, 'resolveCanonicalRoomRequestId' | 'resolveRoomOrReply' | 'requireParticipant'> & {
+export type KnowledgeRouteDeps = Pick<RoomMessageRouteDeps, 'resolveCanonicalRoomRequestId' | 'resolveRoomRequestOrReply' | 'resolveRoomOrReply' | 'requireParticipant'> & {
   store?: typeof store;
   emitMessage?: typeof emitProjectMessage;
   getTasks?: typeof getAttentionTasksForRooms;
@@ -34,7 +34,7 @@ export function registerRoomKnowledgeRoutes(app: Express, deps: KnowledgeRouteDe
   const db = deps.store ?? store;
   const publish = deps.emitMessage ?? emitProjectMessage;
   // Both surfaces have the same room access boundary as messages.
-  const room = (req: AuthenticatedRequest, res: Response) => resolveParticipantRoom(req, res, deps as RoomMessageRouteDeps);
+  const room = (req: AuthenticatedRequest, res: Response) => resolveParticipantRoom(req, res, deps);
   for (const type of ['memory', 'attention'] as KnowledgeType[]) {
     app.get(new RegExp(`^/rooms/(.+)/${type}$`), async (req: AuthenticatedRequest, res) => {
       try {

@@ -30,7 +30,7 @@ import type { RoomMessageRouteDeps } from "./messages/types.js";
  * chooses for that room itself.
  */
 export type RoomSettingsRouteDeps =
-  Pick<RoomMetadataRouteDeps, "resolveCanonicalRoomRequestId" | "resolveRoomOrReply" | "requireAdmin" | "resolveProjectRole">
+  Pick<RoomMetadataRouteDeps, "resolveCanonicalRoomRequestId" | "resolveRoomRequestOrReply" | "resolveRoomOrReply" | "requireAdmin" | "resolveProjectRole">
   & Pick<RoomMessageRouteDeps, "requireParticipant">
   & {
     store?: typeof store;
@@ -50,7 +50,7 @@ export function registerRoomSettingsRoutes(app: Express, deps: RoomSettingsRoute
   const publish = deps.emitMessage ?? emitProjectMessage;
   const inheritedRoomIds = deps.resolveInheritedRoomIds ?? resolveInheritedGitHubFilterRoomIds;
   const room = (req: AuthenticatedRequest, res: Response) =>
-    resolveParticipantRoom(req, res, deps as unknown as RoomMessageRouteDeps);
+    resolveParticipantRoom(req, res, deps);
   // These settings steer every agent in the room, so an agent must not be
   // able to change them, not even with the token of an admin who owns it.
   const isPerson = (req: AuthenticatedRequest) => isHumanAppWrite(req, req.body ?? {});
