@@ -38,6 +38,7 @@ import {
 } from "./access-decision.js";
 import { isRepoBackedRoomId } from "./room-ids.js";
 import { isRepoAccessRoom } from "./room-nature.js";
+import type { LiveAuthorizationDenial } from "./live-authorization.js";
 
 export { isRepoBackedRoomId };
 export {
@@ -441,6 +442,17 @@ export async function reauthorizeGitRoomParticipant(
   req: AuthenticatedRequest,
   project: Project,
 ): Promise<boolean> {
+  return (await explainGitRoomReauthorization(req, project)) === true;
+}
+
+/**
+ * The same decision as reauthorizeGitRoomParticipant, with the step that
+ * refused: a live stream answers and logs by it.
+ */
+export async function explainGitRoomReauthorization(
+  req: AuthenticatedRequest,
+  project: Project,
+): Promise<true | LiveAuthorizationDenial> {
   const humanCredential = req.authKind === "session"
     || req.authKind === "owner_token"
     || req.authKind === "mcp_oauth"
@@ -448,11 +460,11 @@ export async function reauthorizeGitRoomParticipant(
   const fresh = await resolveRequestAuth(req);
   // A session or owner token revoked after entry must not keep a stream
   // alive, and a stream may never move to another account.
-  if (
-    humanCredential
-    && (fresh.authKind !== req.authKind || fresh.account?.account_id !== req.sessionAccount?.account_id)
-  ) {
-    return false;
+  if (humanCredential && fresh.authKind !== req.authKind) {
+    return { kind: "credential", reason: `auth_kind_changed_to_${fresh.authKind ?? "none"}` };
+  }
+  if (humanCredential && fresh.account?.account_id !== req.sessionAccount?.account_id) {
+    return { kind: "credential", reason: "account_changed" };
   }
   // A page grant also ends when it expires or is revoked (unpin, sign-out),
   // and it opens only the one room it was minted for.
@@ -460,7 +472,7 @@ export async function reauthorizeGitRoomParticipant(
     req.authKind === "page_grant"
     && (fresh.pageGrant?.grant_id !== req.pageGrant?.grant_id || fresh.pageGrant?.room_id !== project.id)
   ) {
-    return false;
+    return { kind: "credential", reason: "page_grant_ended" };
   }
   const decision = await decideRoomRead({
     project,
@@ -469,7 +481,18 @@ export async function reauthorizeGitRoomParticipant(
       : roomAccessPrincipal(fresh.account),
     freshness: "fresh",
   });
-  return decision.kind === "allow";
+  switch (decision.kind) {
+    case "allow":
+      return true;
+    case "auth_required":
+      return { kind: "credential", reason: "room_auth_required" };
+    case "indeterminate":
+      return { kind: "unavailable", reason: "repo_access_unavailable" };
+    case "repo_access_denied":
+      return { kind: "access", reason: decision.repo.kind };
+    default:
+      return { kind: "access", reason: decision.kind };
+  }
 }
 
 export async function resolveProjectRoomEntryDecision(input: {

@@ -22,6 +22,9 @@ const ownerTokens = testDatabaseUrl ? await import("../db/auth/owner-tokens.js")
 const rooms = testDatabaseUrl ? await import("../db/rooms.js") : null;
 const access = testDatabaseUrl ? await import("../rooms/access.js") : null;
 const liveAuthorization = testDatabaseUrl ? await import("../rooms/live-authorization.js") : null;
+const messageRoutes = testDatabaseUrl ? await import("../routes/rooms/messages/index.js") : null;
+const agentWorkRoutes = testDatabaseUrl ? await import("../routes/rooms/agent-work.js") : null;
+const roomEventBrokerModule = testDatabaseUrl ? await import("../server/room-event-broker.js") : null;
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
@@ -337,6 +340,159 @@ test(
     const req = sessionRequest(token, (await accountSessions!.getSessionAccountByToken(token))!);
     assert.equal(await access!.requireGitRoomParticipant(req, fakeResponse() as never, project), true);
     assert.equal(access!.liveRecheckIsFreshAtEntry(req), false, "repository entries may have used a visibility cache");
+  },
+);
+
+test(
+  "the live recheck names the step that refused: credential, access, or no answer from GitHub",
+  { concurrency: false, skip },
+  async (t) => {
+    const project = await createAdHocRoom();
+    assert.deepEqual(
+      await access!.explainGitRoomReauthorization(anonymousRequest(), project),
+      { kind: "credential", reason: "room_auth_required" },
+    );
+
+    const account = await createAccount("explain");
+    const token = "live_recheck_explain_token";
+    await accountSessions!.createSession(account.id, token, new Date(Date.now() + 60_000).toISOString());
+    const req = sessionRequest(token, (await accountSessions!.getSessionAccountByToken(token))!);
+    assert.deepEqual(
+      await access!.explainGitRoomReauthorization(req, project),
+      { kind: "access", reason: "membership_required" },
+    );
+    await addMember(project.id, account.id);
+    assert.equal(await access!.explainGitRoomReauthorization(req, project), true);
+    await accountSessions!.deleteSessionByToken(token);
+    assert.deepEqual(
+      await access!.explainGitRoomReauthorization(req, project),
+      { kind: "credential", reason: "auth_kind_changed_to_none" },
+    );
+
+    // GitHub answers nothing but 503: no decision, which is not a refusal.
+    const github = createServer((_req: IncomingMessage, res: ServerResponse) => {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "Service Unavailable" }));
+    });
+    await new Promise<void>((resolve) => github.listen(0, "127.0.0.1", () => resolve()));
+    const address = github.address();
+    assert.ok(address && typeof address === "object");
+    const previousBaseUrl = process.env.GITHUB_API_BASE_URL;
+    process.env.GITHUB_API_BASE_URL = `http://127.0.0.1:${address.port}`;
+    t.after(async () => {
+      if (previousBaseUrl === undefined) delete process.env.GITHUB_API_BASE_URL;
+      else process.env.GITHUB_API_BASE_URL = previousBaseUrl;
+      github.closeAllConnections?.();
+      await new Promise<void>((resolve) => github.close(() => resolve()));
+    });
+    const repoRoom = await rooms!.createProjectWithName("github.com/brosincode/unanswered-repo");
+    const repoToken = "live_recheck_explain_repo_token";
+    await accountSessions!.createSession(account.id, repoToken, new Date(Date.now() + 60_000).toISOString(), "github-user-token");
+    const repoReq = sessionRequest(repoToken, (await accountSessions!.getSessionAccountByToken(repoToken))!);
+    assert.deepEqual(
+      await access!.explainGitRoomReauthorization(repoReq, repoRoom),
+      { kind: "unavailable", reason: "repo_access_unavailable" },
+    );
+    assert.equal(await access!.reauthorizeGitRoomParticipant(repoReq, repoRoom), false, "the boolean form is unchanged");
+  },
+);
+
+test(
+  "a room stream that shares the agent-work view's live lease answers by the real reason",
+  { concurrency: false, skip },
+  async (t) => {
+    // GitHub holds each answer a moment, then gives none.
+    let githubRequests = 0;
+    const github = createServer((_req: IncomingMessage, res: ServerResponse) => {
+      githubRequests += 1;
+      setTimeout(() => {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ message: "Service Unavailable" }));
+      }, 200);
+    });
+    await new Promise<void>((resolve) => github.listen(0, "127.0.0.1", () => resolve()));
+    const address = github.address();
+    assert.ok(address && typeof address === "object");
+    const previousBaseUrl = process.env.GITHUB_API_BASE_URL;
+    process.env.GITHUB_API_BASE_URL = `http://127.0.0.1:${address.port}`;
+    const { EventEmitter } = await import("node:events");
+    const sources = Object.fromEntries([
+      "messageEvents", "taskEvents", "githubRoomEvents", "reasoningEvents", "artifactEvents",
+      "rentalActivityEvents", "messageInfoEvents", "agentWorkEvents", "agentApprovalEvents", "executionDelegationEvents",
+    ].map((name) => [name, new EventEmitter()]));
+    const broker = roomEventBrokerModule!.createRoomEventBroker(sources as never);
+    t.after(async () => {
+      broker.close();
+      if (previousBaseUrl === undefined) delete process.env.GITHUB_API_BASE_URL;
+      else process.env.GITHUB_API_BASE_URL = previousBaseUrl;
+      github.closeAllConnections?.();
+      await new Promise<void>((resolve) => github.close(() => resolve()));
+    });
+
+    const project = await rooms!.createProjectWithName("github.com/brosincode/shared-lease-repo");
+    const account = await createAccount("shared-lease");
+    const token = "live_recheck_shared_lease_token";
+    await accountSessions!.createSession(account.id, token, new Date(Date.now() + 60_000).toISOString(), "github-user-token");
+    const sessionAccount = (await accountSessions!.getSessionAccountByToken(token))!;
+    const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+    const app = {
+      get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) { handlers.set(path.toString(), handler); },
+      post() {}, put() {}, delete() {},
+    };
+    // No injected reauthorize: both routes use their default live check.
+    const deps = {
+      ...sources,
+      roomEventBroker: broker,
+      roomMessageOverlayBatcher: { prepare: async () => new Map(), prepareMany: async () => new Map(), close() {} },
+      getMessageStreamCheckpoint: async () => ({ checkpoint: null, cursorExists: true }),
+      resolveRequestProjectRepoAccessRoomName: async () => project.id,
+      resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+      resolveRoomOrReply: async () => project,
+      requireParticipant: async () => true,
+      shouldIncludePromptOnlyMessages: () => false,
+      logRoomStreamEnd: () => undefined,
+    };
+    messageRoutes!.registerRoomMessageRoutes(app as never, deps as never);
+    agentWorkRoutes!.registerRoomAgentWorkRoutes(app as never, deps as never, {} as never);
+    const request = (query: Record<string, string>) => ({
+      ...sessionRequest(token, sessionAccount),
+      params: { 0: project.id },
+      query,
+      get() { return undefined; },
+      on() { return this; },
+      off() { return this; },
+    });
+    const { EventEmitter: Emitter } = await import("node:events");
+    const response = () => Object.assign(new Emitter(), {
+      statusCode: 200,
+      body: null as unknown,
+      headers: new Map<string, string>(),
+      headersSent: false,
+      destroyed: false,
+      writes: [] as string[],
+      socket: { setKeepAlive() {} },
+      setHeader(name: string, value: string) { this.headers.set(name, value); },
+      flushHeaders() {},
+      write(chunk: string) { this.writes.push(chunk); return true; },
+      end() {},
+      status(code: number) { this.statusCode = code; return this; },
+      json(body: unknown) { this.body = body; this.headersSent = true; return this; },
+    });
+
+    // The agent-work view creates the shared lease and starts its fresh check.
+    const workResponse = response();
+    const work = handlers.get("/^\\/rooms\\/(.+)\\/agent-work\\/poll$/")!(request({ timeout: "1000" }), workResponse);
+    for (let i = 0; i < 200 && githubRequests === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.ok(githubRequests > 0, "the agent-work check is waiting on GitHub");
+
+    const streamResponse = response();
+    await handlers.get("/^\\/rooms\\/(.+)\\/messages\\/stream$/")!(request({}), streamResponse);
+    await work;
+    assert.equal(workResponse.statusCode, 403, "the agent-work view refuses as before");
+    assert.equal(streamResponse.statusCode, 503, "no answer from GitHub is not an access refusal");
+    assert.equal((streamResponse.body as { code?: string }).code, "REPO_ACCESS_UNAVAILABLE");
+    assert.equal(streamResponse.headers.get("Retry-After"), "30");
+    assert.deepEqual(streamResponse.writes, [], "no SSE byte");
   },
 );
 

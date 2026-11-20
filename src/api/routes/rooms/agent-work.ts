@@ -7,7 +7,7 @@ import { clearRoomAgentWork, publishRoomAgentWork, publishIndependentWorkspace, 
 import { requireWorkerRequestAgentIdentity } from "../../request/agent-identity.js";
 import { parsePollTimeout, respondWithInternalError, type AuthenticatedRequest } from "../../http/helpers.js";
 import { resolveRequestAuth } from "../../request/auth.js";
-import { reauthorizeGitRoomParticipant, resolveRequestProjectRepoAccessRoomName } from "../../rooms/access.js";
+import { explainGitRoomReauthorization, resolveRequestProjectRepoAccessRoomName } from "../../rooms/access.js";
 import { acquireLiveRoomAuthorization, type LiveRoomAuthorizationLease } from "../../rooms/live-authorization.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import { requireCurrentSupervisorGrant, respondToStaleSupervisorGrantFence, type RoomResolverDeps } from "../supervisor-host-grants.js";
@@ -181,7 +181,11 @@ async function pollRoomAgentWork(req: AuthenticatedRequest, res: Response, deps:
     if (closed()) return;
     authorization = acquireLiveRoomAuthorization({
       req, roomId: room.id, accessRoomName,
-      authorize: () => (deps.reauthorizeGitRoomParticipant ?? reauthorizeGitRoomParticipant)(req, room),
+      // A room stream of the same credential shares this lease and answers by
+      // the reason of a refusal, so the default check names its reason too.
+      authorize: () => deps.reauthorizeGitRoomParticipant
+        ? deps.reauthorizeGitRoomParticipant(req, room)
+        : explainGitRoomReauthorization(req, room),
     });
     stopInvalidation = authorization.onInvalidated(() => { authorizationEpoch++; });
     // Bound intentional waiting, not the duration of database/upstream checks.

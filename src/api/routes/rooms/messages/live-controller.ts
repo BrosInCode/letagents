@@ -2,10 +2,13 @@ import type { Project } from "../../../db.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
 import { beginRoomAgentDelivery } from "../../../rooms/agent-delivery.js";
-import { acquireLiveRoomAuthorization } from "../../../rooms/live-authorization.js";
 import {
+  acquireLiveRoomAuthorization,
+  type LiveAuthorizationDenial,
+} from "../../../rooms/live-authorization.js";
+import {
+  explainGitRoomReauthorization,
   liveRecheckIsFreshAtEntry,
-  reauthorizeGitRoomParticipant,
 } from "../../../rooms/access.js";
 import {
   MESSAGE_CREATED_EVENT_KINDS,
@@ -20,6 +23,8 @@ export interface LiveRoomDeliveryController {
   activationIdentity: ResolvedRequestAgentIdentity | null;
   activate(): void;
   check(options?: { force?: boolean }): Promise<boolean>;
+  /** Why the last check of this controller said no, or null after a yes. */
+  denial(): LiveAuthorizationDenial | null;
   close(): Promise<void>;
 }
 
@@ -42,6 +47,7 @@ export async function openLiveRoomDeliveryController(input: {
   let pendingSessionDisconnect = false;
   let pendingAuthorizationDenial = false;
   let closing: Promise<void> | null = null;
+  let denial: LiveAuthorizationDenial | null = null;
   const notifyRoute = (kind: "session" | "authorization", callback: () => void) => {
     if (closed) return;
     if (!activated) {
@@ -80,11 +86,12 @@ export async function openLiveRoomDeliveryController(input: {
       // retirement. Validate the durable delivery fence before any later body;
       // owner/repository authorization alone cannot prove that an X-Agent-
       // Session credential is still current.
-      if (delivery?.checkCredential && !(await delivery.checkCredential())) return false;
-      return (input.reauthorize ?? reauthorizeGitRoomParticipant)(
-        input.req,
-        input.project,
-      );
+      if (delivery?.checkCredential && !(await delivery.checkCredential())) {
+        return { kind: "credential", reason: "delivery_credential_rejected" };
+      }
+      return input.reauthorize
+        ? input.reauthorize(input.req, input.project)
+        : explainGitRoomReauthorization(input.req, input.project);
     },
     initiallyAllowed: true,
   });
@@ -94,6 +101,7 @@ export async function openLiveRoomDeliveryController(input: {
       // Let that terminal callback own the response so a long poll closes
       // cleanly without racing the authorization listener into a 403.
       if (!allowed && !sessionDisconnected) {
+        denial = authorization.lastDenial() ?? { kind: "access", reason: "authorize_denied" };
         notifyRoute("authorization", input.onAuthorizationDenied);
       }
     });
@@ -110,15 +118,22 @@ export async function openLiveRoomDeliveryController(input: {
       pendingAuthorizationDenial = false;
     },
     check: async (options) => {
-      if (closed) return false;
+      if (closed) {
+        denial = { kind: "unavailable", reason: "delivery_closed" };
+        return false;
+      }
       // Repository authorization is cached, but bearer expiry is an exact
       // serialization fence and is cheap to evaluate before every body.
       if (isRoomAgentDeliveryCredentialExpired(activationIdentity?.credential_fence)) {
+        denial = { kind: "credential", reason: "delivery_credential_expired" };
         await delivery?.checkCredential();
         return false;
       }
-      return authorization.check(options);
+      const allowed = await authorization.check(options);
+      denial = allowed ? null : authorization.lastDenial() ?? { kind: "access", reason: "authorize_denied" };
+      return allowed;
     },
+    denial: () => denial,
     close() {
       if (closing) return closing;
       closed = true;

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import http from "node:http";
 
 import express from "express";
 
@@ -12,6 +13,9 @@ const { registerRoomMessageRoutes } = await import("../routes/rooms/messages/ind
 const { createRoomEventBroker, RoomEventBroker } = await import("../server/room-event-broker.js");
 const { isRoomEventVisibleToSubscriber } = await import("../routes/rooms/messages/delivery-visibility.js");
 const { closeHttpServerIntake } = await import("../server/graceful-shutdown.js");
+const { createRoomStreamEndLog } = await import("../routes/rooms/messages/stream-end-log.js");
+const { replyStreamOpenDenied } = await import("../routes/rooms/messages/stream.js");
+const { githubRepoAccessInvalidationEvents } = await import("../github/repo-access.js");
 
 test("account stream overlays batch without rehydrating canonical message bodies", () => {
   const streamSource = readFileSync(
@@ -2709,4 +2713,345 @@ test("preview reads leave message SSE frames unchanged and produce no agent-visi
     assert.equal(frames[0]!.replace(/^id:.*\n/m, ""), frames[1]!.replace(/^id:.*\n/m, ""));
     assert.doesNotMatch(frames.join(""), /previews|Stored/);
   } finally { close(); agent.close(); deps.roomEventBroker.close(); }
+});
+
+/**
+ * A real HTTP server around the stream route with an owner-token agent whose
+ * delivery lease and broker subscriptions are counted.
+ */
+async function startCountedStreamServer(t: import("node:test").TestContext, input: {
+  roomId: string;
+  credentialValid?: () => Promise<boolean>;
+  reauthorize?: () => Promise<boolean>;
+  logRoomStreamEnd?: (line: { logLabel: string; roomId: string; actor: { label: string | null; accountId: string | null; kind: string }; reason: string }) => void;
+  onBeginDelivery?: (disconnect: () => void) => void;
+}) {
+  const counts = { deliveryEnds: 0, subscriptions: 0, subscriptionCloses: 0 };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async (roomId: string) => ({ id: roomId }),
+    requireParticipant: async () => true,
+    ...(input.reauthorize ? { reauthorizeGitRoomParticipant: input.reauthorize } : {}),
+    ...(input.logRoomStreamEnd ? { logRoomStreamEnd: input.logRoomStreamEnd } : {}),
+    beginRoomAgentDelivery: async (delivery: { onSessionDisconnected: () => void }) => {
+      input.onBeginDelivery?.(delivery.onSessionDisconnected);
+      return {
+        identity: {
+          actor_label: "Looping MCP",
+          agent_key: "owner/looping-mcp",
+          agent_instance_id: null,
+          agent_session_id: null,
+          session_kind: "controller",
+        },
+        checkCredential: input.credentialValid ?? (async () => true),
+        end: async () => { counts.deliveryEnds += 1; },
+      };
+    },
+  };
+  const subscribe = deps.roomEventBroker.subscribe.bind(deps.roomEventBroker);
+  deps.roomEventBroker.subscribe = ((roomId: string, options: never) => {
+    counts.subscriptions += 1;
+    const subscription = subscribe(roomId, options);
+    const close = subscription.close.bind(subscription);
+    subscription.close = () => {
+      counts.subscriptionCloses += 1;
+      close();
+    };
+    return subscription;
+  }) as typeof deps.roomEventBroker.subscribe;
+  const app = express();
+  app.use((req, _res, next) => {
+    Object.assign(req, { authKind: "owner_token", sessionAccount: { account_id: "acct_loop" } });
+    next();
+  });
+  registerRoomMessageRoutes(app as never, deps as never);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => {
+    deps.roomEventBroker.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}/rooms/${input.roomId}/messages/stream?actor_label=Looping%20MCP&actor_key=owner%2Flooping-mcp&include_prompt_only=1`;
+  return { counts, url };
+}
+
+/** Waits for the cleanup that runs after the response, then a little longer to catch a second run. */
+async function settleCleanup(counts: { deliveryEnds: number }): Promise<void> {
+  for (let i = 0; i < 100 && counts.deliveryEnds === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+}
+
+function gate() {
+  let release!: () => void;
+  const opened = new Promise<void>((resolve) => { release = resolve; });
+  return { opened, release };
+}
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+for (const failure of [
+  {
+    name: "a delivery credential that is no longer valid",
+    roomId: "room_open_credential",
+    credentialValid: async () => false,
+    status: 401,
+    code: "STREAM_CREDENTIAL_REJECTED",
+    retryAfter: null,
+    reason: "first_check:credential:delivery_credential_rejected",
+  },
+  {
+    name: "a refusal of access",
+    roomId: "room_open_access",
+    reauthorize: async () => false,
+    status: 403,
+    code: "STREAM_ACCESS_DENIED",
+    retryAfter: null,
+    reason: "first_check:access:authorize_denied",
+  },
+  {
+    name: "a check that gets no answer",
+    roomId: "room_open_unavailable",
+    reauthorize: async () => { throw new Error("upstream timed out"); },
+    status: 503,
+    code: "ROOM_ACCESS_CHECK_UNAVAILABLE",
+    retryAfter: "5",
+    reason: "first_check:unavailable:check_threw",
+  },
+]) {
+  test(`a first live check that fails on ${failure.name} answers ${failure.status} before any SSE byte`, async (t) => {
+    t.mock.method(console, "error", () => undefined);
+    const logged: Array<{ roomId: string; actor: { label: string | null; accountId: string | null; kind: string }; reason: string }> = [];
+    const server = await startCountedStreamServer(t, {
+      roomId: failure.roomId,
+      credentialValid: failure.credentialValid,
+      reauthorize: failure.reauthorize,
+      logRoomStreamEnd: (line) => logged.push(line),
+    });
+    const response = await fetch(server.url, { headers: { Accept: "text/event-stream" } });
+    const body = await response.text();
+    await settleCleanup(server.counts);
+
+    assert.equal(response.status, failure.status);
+    assert.match(response.headers.get("content-type") ?? "", /^application\/json/);
+    assert.doesNotMatch(response.headers.get("content-type") ?? "", /text\/event-stream/);
+    assert.doesNotMatch(body, /: connected/);
+    const json = JSON.parse(body) as { code?: string; error?: string; room_id?: string };
+    assert.equal(json.code, failure.code);
+    assert.equal(typeof json.error, "string");
+    assert.equal(json.room_id, failure.roomId);
+    assert.equal(response.headers.get("retry-after"), failure.retryAfter);
+    assert.deepEqual(server.counts, { deliveryEnds: 1, subscriptions: 1, subscriptionCloses: 1 }, "cleanup ran exactly once");
+    assert.deepEqual(logged.map((line) => [line.roomId, line.actor, line.reason]), [
+      [failure.roomId, { label: null, accountId: "acct_loop", kind: "owner_token" }, failure.reason],
+    ]);
+  });
+}
+
+test("a stream refusal keeps clear of the codes that make installed clients stop the room for good", () => {
+  const unavailable = {
+    headers: new Map<string, string>(),
+    statusCode: 200,
+    body: undefined as unknown,
+    setHeader(name: string, value: string) { this.headers.set(name, value); },
+    status(code: number) { this.statusCode = code; return this; },
+    json(body: unknown) { this.body = body; return this; },
+  };
+  replyStreamOpenDenied(unavailable as never, "github.com/example/repo", { kind: "unavailable", reason: "repo_access_unavailable" });
+  assert.equal(unavailable.statusCode, 503);
+  assert.equal(unavailable.headers.get("Retry-After"), "30");
+  assert.equal((unavailable.body as { code: string }).code, "REPO_ACCESS_UNAVAILABLE");
+
+  for (const reason of ["repo_collaborator_required", "membership_required", "unsupported_repo_provider"]) {
+    const refused = responseRecorder();
+    replyStreamOpenDenied(refused as never, "room_1", { kind: "access", reason });
+    assert.equal(refused.statusCode, 403);
+    assert.equal((refused.body as { code: string }).code, "STREAM_ACCESS_DENIED", reason);
+  }
+});
+
+test("a first live check that passes opens the stream with the same first frames", async (t) => {
+  const logged: string[] = [];
+  const server = await startCountedStreamServer(t, {
+    roomId: "room_open_allowed",
+    logRoomStreamEnd: (line) => logged.push(line.reason),
+  });
+  const controller = new AbortController();
+  const response = await fetch(server.url, { headers: { Accept: "text/event-stream" }, signal: controller.signal });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "text/event-stream");
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  while (!text.includes("event: room_sync")) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+  }
+  while (!text.endsWith("\n\n")) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+  }
+  assert.match(
+    text,
+    /^: connected\n\nevent: room_sync\ndata: \{"room_id":"room_open_allowed","checkpoint":null,"requested_cursor":null,"event_cursor":null,"gap":false\}\n\n$/,
+  );
+  assert.deepEqual(server.counts, { deliveryEnds: 0, subscriptions: 1, subscriptionCloses: 0 });
+
+  controller.abort();
+  await reader.cancel().catch(() => undefined);
+  for (let i = 0; i < 50 && server.counts.deliveryEnds === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(server.counts, { deliveryEnds: 1, subscriptions: 1, subscriptionCloses: 1 });
+  assert.deepEqual(logged, [], "a client that leaves is not an early end");
+});
+
+test("a looping client's refusals log once per window, then say how many were suppressed", async (t) => {
+  t.mock.method(console, "error", () => undefined);
+  let now = 1_000_000;
+  const lines: string[] = [];
+  const server = await startCountedStreamServer(t, {
+    roomId: "room_open_looping",
+    reauthorize: async () => false,
+    logRoomStreamEnd: createRoomStreamEndLog({ now: () => now, log: (line) => lines.push(line) }),
+  });
+  for (let i = 0; i < 3; i += 1) {
+    // A new client-chosen label on each request neither names nor keys the line.
+    const response = await fetch(server.url.replace("Looping%20MCP", `Label%20${i}`));
+    assert.equal(response.status, 403);
+    await response.text();
+    now += 1_000;
+  }
+  assert.deepEqual(lines, [
+    '[room messages stream] ended stream early room=room_open_looping account=acct_loop actor="" kind=owner_token reason=first_check:access:authorize_denied',
+  ]);
+  assert.doesNotMatch(lines[0]!, /looping-mcp|Label|Bearer|cookie/i, "no client label, actor key, token or header value");
+
+  now += 5 * 60_000;
+  const response = await fetch(server.url);
+  await response.text();
+  assert.equal(lines.length, 2);
+  assert.match(lines[1]!, /reason=first_check:access:authorize_denied \(2 more suppressed in the previous 300s\)$/);
+});
+
+test("the stream end log keeps a bounded number of windows", () => {
+  let now = 0;
+  const lines: string[] = [];
+  const log = createRoomStreamEndLog({ now: () => now, log: (line) => lines.push(line), maxKeys: 2 });
+  const actor = { label: "Agent", accountId: "acct_1", kind: "owner_token" };
+  log({ logLabel: "s", roomId: "room_a", actor, reason: "r" });
+  log({ logLabel: "s", roomId: "room_b", actor, reason: "r" });
+  log({ logLabel: "s", roomId: "room_a", actor, reason: "r" });
+  assert.equal(lines.length, 2, "room_a is still inside its window");
+  log({ logLabel: "s", roomId: "room_c", actor, reason: "r" });
+  log({ logLabel: "s", roomId: "room_a", actor, reason: "r" });
+  assert.equal(lines.length, 4, "room_c evicted the oldest window (room_a), so room_a logs again");
+  now += 1;
+  log({ logLabel: "s", roomId: "room_c", actor, reason: "r" });
+  assert.equal(lines.length, 4, "room_c survived: only the oldest window is dropped");
+});
+
+test("a client that leaves during a first check that then passes is cleaned up once", async (t) => {
+  const check = gate();
+  let checks = 0;
+  const server = await startCountedStreamServer(t, {
+    roomId: "room_race_client_leaves",
+    reauthorize: async () => { checks += 1; await check.opened; return true; },
+  });
+  const request = http.get(server.url);
+  request.on("error", () => undefined);
+  for (let i = 0; i < 100 && checks === 0; i += 1) await pause(10);
+  assert.equal(checks, 1, "the first check is in flight");
+  request.destroy();
+  await pause(50);
+  check.release();
+  await settleCleanup(server.counts);
+  assert.deepEqual(server.counts, { deliveryEnds: 1, subscriptions: 1, subscriptionCloses: 1 });
+});
+
+test("an invalidation during the first check whose follow-up check refuses answers 403", async (t) => {
+  const check = gate();
+  let checks = 0;
+  const server = await startCountedStreamServer(t, {
+    roomId: "room_race_invalidated",
+    reauthorize: async () => {
+      checks += 1;
+      if (checks === 1) {
+        await check.opened;
+        return true;
+      }
+      return false;
+    },
+  });
+  const pending = fetch(server.url);
+  for (let i = 0; i < 100 && checks === 0; i += 1) await pause(10);
+  githubRepoAccessInvalidationEvents.emit("invalidate", { roomName: "room_race_invalidated" });
+  check.release();
+  const response = await pending;
+  const body = JSON.parse(await response.text()) as { code: string };
+  await settleCleanup(server.counts);
+  assert.equal(response.status, 403);
+  assert.equal(body.code, "STREAM_ACCESS_DENIED");
+  assert.equal(checks, 2, "the invalidation forced one trailing check");
+  assert.deepEqual(server.counts, { deliveryEnds: 1, subscriptions: 1, subscriptionCloses: 1 });
+});
+
+test("a delivery session that disconnects during the first check answers 401", async (t) => {
+  const check = gate();
+  let checks = 0;
+  let disconnect!: () => void;
+  const server = await startCountedStreamServer(t, {
+    roomId: "room_race_session_disconnect",
+    reauthorize: async () => { checks += 1; await check.opened; return true; },
+    onBeginDelivery: (onDisconnect) => { disconnect = onDisconnect; },
+  });
+  const pending = fetch(server.url);
+  for (let i = 0; i < 100 && checks === 0; i += 1) await pause(10);
+  disconnect();
+  check.release();
+  const response = await pending;
+  const body = await response.text();
+  await settleCleanup(server.counts);
+  assert.equal(response.status, 401);
+  assert.doesNotMatch(body, /: connected/);
+  assert.deepEqual(server.counts, { deliveryEnds: 1, subscriptions: 1, subscriptionCloses: 1 });
+});
+
+test("a refusal does not wait for the delivery disconnect to finish", { timeout: 5_000 }, async (t) => {
+  const end = gate();
+  const counts = { deliveryEnds: 0 };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async (roomId: string) => ({ id: roomId }),
+    requireParticipant: async () => true,
+    reauthorizeGitRoomParticipant: async () => false,
+    logRoomStreamEnd: () => undefined,
+    beginRoomAgentDelivery: async () => ({
+      identity: { actor_label: "A", agent_key: "o/a", agent_instance_id: null, agent_session_id: null, session_kind: "controller" },
+      checkCredential: async () => true,
+      end: async () => { counts.deliveryEnds += 1; await end.opened; },
+    }),
+  };
+  const app = express();
+  app.use((req, _res, next) => { Object.assign(req, { authKind: "owner_token", sessionAccount: { account_id: "acct_slow" } }); next(); });
+  registerRoomMessageRoutes(app as never, deps as never);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => {
+    end.release();
+    deps.roomEventBroker.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const response = await fetch(`http://127.0.0.1:${address.port}/rooms/room_slow_end/messages/stream`);
+  assert.equal(response.status, 403, "the refusal arrives while the disconnect is still pending");
+  await response.text();
+  assert.equal(counts.deliveryEnds, 1);
+  end.release();
 });

@@ -8,7 +8,8 @@ const SSE_MAX_BUFFERED_BYTES = 1024 * 1024;
 const SSE_DRAIN_TIMEOUT_MS = 10_000;
 const inFlightSseCleanups = new Set<Promise<void>>();
 
-function trackSseCleanup(cleanup: () => void | Promise<void>, label: string): void {
+/** Runs a stream cleanup that shutdown waits for; a failure is logged, never thrown. */
+export function trackSseCleanup(cleanup: () => void | Promise<void>, label: string): void {
   let pending: Promise<void>;
   try {
     pending = Promise.resolve(cleanup()).catch((error: unknown) => {
@@ -48,30 +49,42 @@ function startSseStream(res: Response): NodeJS.Timeout {
   }, SSE_HEARTBEAT_INTERVAL_MS);
 }
 
+export interface SseWriterOptions {
+  drainTimeoutMs?: number;
+  /** Called when the writer drops a consumer that does not read fast enough. */
+  onSlowConsumer?: (reason: "buffer_limit" | "drain_timeout") => void;
+}
+
 export function createSseWriter(
   res: Response,
   label: string,
-  options: { drainTimeoutMs?: number } = {},
+  options: SseWriterOptions = {},
 ): (chunk: string) => Promise<boolean> {
   const drainTimeoutMs = Math.max(1, options.drainTimeoutMs ?? SSE_DRAIN_TIMEOUT_MS);
   return async (chunk: string) => {
     if (res.writableEnded || res.destroyed) {
       return false;
     }
-    if (res.writableNeedDrain && !(await waitForDrain(res, label, drainTimeoutMs))) return false;
+    if (res.writableNeedDrain && !(await waitForDrain(res, label, drainTimeoutMs, options.onSlowConsumer))) return false;
     const accepted = res.write(chunk);
     if (res.writableLength > SSE_MAX_BUFFERED_BYTES) {
       console.error(
         `[sse] closing slow consumer (${label}): ${res.writableLength} bytes buffered`
       );
       res.destroy();
+      options.onSlowConsumer?.("buffer_limit");
       return false;
     }
-    return accepted ? true : waitForDrain(res, label, drainTimeoutMs);
+    return accepted ? true : waitForDrain(res, label, drainTimeoutMs, options.onSlowConsumer);
   };
 }
 
-function waitForDrain(res: Response, label: string, timeoutMs: number): Promise<boolean> {
+function waitForDrain(
+  res: Response,
+  label: string,
+  timeoutMs: number,
+  onSlowConsumer?: SseWriterOptions["onSlowConsumer"],
+): Promise<boolean> {
   if (res.writableEnded || res.destroyed) return Promise.resolve(false);
   return new Promise((resolve) => {
     let settled = false;
@@ -81,6 +94,7 @@ function waitForDrain(res: Response, label: string, timeoutMs: number): Promise<
         res.destroy();
       } finally {
         finish(false);
+        onSlowConsumer?.("drain_timeout");
       }
     }, timeoutMs);
     timeout.unref?.();
@@ -122,7 +136,7 @@ export function openSseConnection(
   req: Pick<Request, "on" | "off">,
   res: Response,
   label: string,
-  options: { drainTimeoutMs?: number } = {},
+  options: SseWriterOptions = {},
 ): SseConnection {
   const heartbeat = startSseStream(res);
   const writeChunk = createSseWriter(res, label, options);
