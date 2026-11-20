@@ -40,6 +40,8 @@ export interface RoomMessageRouteDeps {
     },
   ): Promise<{ checkpoint: string | null; cursorExists: boolean }>;
   beginRoomAgentDelivery?: typeof import("../../../rooms/agent-delivery.js").beginRoomAgentDelivery;
+  /** Rate-limited log of early stream ends; injectable for tests. */
+  logRoomStreamEnd?: import("./stream-end-log.js").RoomStreamEndLog;
   attachReceiptAuthorityActivations?: typeof import("./receipt-activation.js").attachReceiptAuthorityActivations;
   getMessagesAfter?: typeof import("../../../db.js").getMessagesAfter;
   getMessageThreads?: typeof import("../../../db.js").getMessageThreads;

@@ -18,12 +18,24 @@ const AUTHORIZATION_LEASE_MS = 60_000;
 // the trailing check also races, fail closed and let the next event retry.
 const MAX_AUTHORIZATION_CHECKS_PER_FLIGHT = 2;
 
+/**
+ * Why a live check said no. `credential`: the credential is no longer valid.
+ * `access`: the credential is valid but may not read the room. `unavailable`:
+ * no decision now (an upstream gave no answer). `reason` names the step.
+ */
+export interface LiveAuthorizationDenial {
+  kind: "credential" | "access" | "unavailable";
+  reason: string;
+}
+
 interface SharedAuthorizationLease {
   roomId: string;
   roomName: string;
   login: string | null;
-  authorize: () => Promise<boolean>;
+  authorize: () => Promise<boolean | LiveAuthorizationDenial>;
   allowed: boolean;
+  /** Why the last check said no, else null. */
+  denial: LiveAuthorizationDenial | null;
   checkedAt: number;
   invalidated: boolean;
   credentialFingerprint: string | null;
@@ -42,6 +54,8 @@ export interface LiveRoomAuthorizationLease {
   check(options?: { force?: boolean }): Promise<boolean>;
   /** True when the last check got no answer (it threw): a false that is not a refusal. */
   lastCheckFailed(): boolean;
+  /** Why the last check said no, or null when it said yes. */
+  lastDenial(): LiveAuthorizationDenial | null;
   onInvalidated(handler: () => void): () => void;
   release(): void;
 }
@@ -204,7 +218,8 @@ export function acquireLiveRoomAuthorization(input: {
   req: AuthenticatedRequest;
   roomId: string;
   accessRoomName: string;
-  authorize: () => Promise<boolean>;
+  /** True allows; false or a denial (which names the reason) refuses. */
+  authorize: () => Promise<boolean | LiveAuthorizationDenial>;
   deliveryCredentialFence?: RoomAgentDeliveryCredentialFence | null;
   initiallyAllowed?: boolean;
   /** The caller's entry check was exact (no cache), so the first body needs no recheck. */
@@ -238,6 +253,7 @@ export function acquireLiveRoomAuthorization(input: {
       login: input.req.sessionAccount?.login?.trim().toLowerCase() || null,
       authorize: input.authorize,
       allowed: input.initiallyAllowed ?? true,
+      denial: null,
       checkedAt: now(),
       // The entry route may have used a visibility/access cache. Force one
       // fresh shared check before the first live body so reconnecting cannot
@@ -274,15 +290,16 @@ export function acquireLiveRoomAuthorization(input: {
     pending = (async () => {
       for (let attempt = 0; attempt < MAX_AUTHORIZATION_CHECKS_PER_FLIGHT; attempt += 1) {
         const checkedGeneration = lease!.invalidationGeneration;
-        let allowed: boolean;
+        let result: boolean | LiveAuthorizationDenial;
         try {
-          allowed = await lease!.authorize();
+          result = await lease!.authorize();
         } catch (error) {
           // Delivery is fail-closed: a dependency failure is not cached as a
           // revocation, but this event must not pass on a stale allow decision.
           lease!.checkedAt = now();
           lease!.failedAt = now();
           lease!.invalidated = true;
+          lease!.denial = { kind: "unavailable", reason: "check_threw" };
           if (failureRetryMs === 0) console.error("[room authorization] live recheck failed", error);
           return false;
         }
@@ -294,12 +311,16 @@ export function acquireLiveRoomAuthorization(input: {
           // traffic can retry without amplifying this event into more calls.
           continue;
         }
+        const allowed = result === true;
         lease!.allowed = allowed;
+        lease!.denial = typeof result === "object" ? result
+          : allowed ? null : { kind: "access", reason: "authorize_denied" };
         lease!.checkedAt = now();
         lease!.failedAt = null;
         lease!.invalidated = false;
         return allowed;
       }
+      lease!.denial = { kind: "unavailable", reason: "invalidation_race" };
       return false;
     })().finally(() => {
       if (lease!.inFlight === pending) lease!.inFlight = null;
@@ -311,6 +332,9 @@ export function acquireLiveRoomAuthorization(input: {
   return {
     check,
     lastCheckFailed: () => lease!.failedAt !== null,
+    lastDenial: () => lease!.credentialRetired
+      ? { kind: "credential", reason: "credential_retired" }
+      : lease!.denial,
     onInvalidated(handler) {
       lease!.invalidationHandlers.add(handler);
       return () => lease!.invalidationHandlers.delete(handler);

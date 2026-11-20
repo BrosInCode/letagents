@@ -16,6 +16,7 @@ import {
 } from "../../../rooms/membership-events.js";
 import {
   openSseConnection,
+  trackSseCleanup,
   type SseConnection,
 } from "../../../http/sse.js";
 import { getMessageStreamCheckpoint } from "../../../db.js";
@@ -33,8 +34,11 @@ import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import { createBoundedExecutor } from "../../../bounded-async.js";
 import {
   getProjectAccessRoomId,
+  replyRepoRoomAccessDecision,
   resolveRequestProjectRepoAccessRoomName,
 } from "../../../rooms/access.js";
+import type { LiveAuthorizationDenial } from "../../../rooms/live-authorization.js";
+import { logRoomStreamEnd } from "./stream-end-log.js";
 import { isRepoAccessRoom } from "../../../rooms/room-nature.js";
 import type { Message, Project } from "../../../db.js";
 import {
@@ -77,6 +81,46 @@ export function reasoningStreamFrame(
     return { name: "live_activity_update", data: { room_id: projectId, session: event.session } };
   }
   return { name: "reasoning_update", data: { room_id: projectId, session: event.session, update: event.update } };
+}
+
+/**
+ * The answer when the first live check refuses, sent before any SSE byte.
+ * Installed clients back off on a non-2xx answer but reconnect after 1 s when
+ * a 200 stream ends, so a refusal must never be a 200. The codes are new on
+ * purpose: the membership and collaborator refusal codes make the MCP client
+ * and Desktop stop the room for good (Desktop also forgets the join), while
+ * this refusal comes from a recheck that a later reconnect may pass.
+ */
+export function replyStreamOpenDenied(res: Response, roomId: string, denial: LiveAuthorizationDenial): void {
+  if (denial.kind === "unavailable" && denial.reason === "repo_access_unavailable") {
+    replyRepoRoomAccessDecision(res, roomId, { kind: "repo_access_unavailable" });
+    return;
+  }
+  if (denial.kind === "unavailable") {
+    res.setHeader?.("Retry-After", "5");
+    res.status(503).json({
+      error: "room_access_check_unavailable",
+      code: "ROOM_ACCESS_CHECK_UNAVAILABLE",
+      message: "The room access check could not finish. Try again.",
+      room_id: roomId,
+    });
+    return;
+  }
+  if (denial.kind === "credential") {
+    res.status(401).json({
+      error: "stream_credential_rejected",
+      code: "STREAM_CREDENTIAL_REJECTED",
+      message: "The credential of this stream is no longer valid for this room.",
+      room_id: roomId,
+    });
+    return;
+  }
+  res.status(403).json({
+    error: "stream_access_denied",
+    code: "STREAM_ACCESS_DENIED",
+    message: "This account may not read this room now.",
+    room_id: roomId,
+  });
 }
 
 /**
@@ -201,7 +245,24 @@ export async function streamRoomMessages(input: {
   }
   let connection: SseConnection | null = null;
   let streamClosed = false;
+  // An invalidation that refuses while the first check runs has no stream to
+  // close yet; the route answers with a refusal instead.
+  let deniedBeforeOpen: LiveAuthorizationDenial | null = null;
   let live: LiveRoomDeliveryController | null = null;
+  const logStreamEnd = (reason: string) => (deps.logRoomStreamEnd ?? logRoomStreamEnd)({
+    logLabel,
+    roomId: projectId,
+    actor: {
+      // The actor_label query value is the client's own choice, so it never
+      // names or keys a line: a client could vary it to flood the log.
+      label: live?.activationIdentity?.actor_label ?? null,
+      accountId: req.sessionAccount?.account_id ?? live?.activationIdentity?.owner_account_id ?? null,
+      kind: [req.authKind ?? "anonymous", live?.activationIdentity?.session_kind].filter(Boolean).join("/"),
+    },
+    reason,
+  });
+  const denialReason = (stage: string, denial: LiveAuthorizationDenial | null | undefined) =>
+    `${stage}:${denial ? `${denial.kind}:${denial.reason}` : "unknown"}`;
   try {
     live = await openLiveRoomDeliveryController({
       req,
@@ -211,10 +272,18 @@ export async function streamRoomMessages(input: {
       trackDelivery: !isAppSession(req),
       onSessionDisconnected: () => {
         streamClosed = true;
+        if (connection) logStreamEnd("session_disconnected");
         void connection?.write(`event: session_disconnect\ndata: ${JSON.stringify(frames.sessionDisconnect(projectId))}\n\n`)
           .finally(() => connection?.close());
       },
-      onAuthorizationDenied: () => connection?.close(),
+      onAuthorizationDenied: () => {
+        if (!connection) {
+          deniedBeforeOpen = live?.denial() ?? { kind: "access", reason: "authorize_denied" };
+          return;
+        }
+        if (!connection.closed) logStreamEnd(denialReason("revoked", live?.denial()));
+        connection.close();
+      },
       reauthorize: deps.reauthorizeGitRoomParticipant,
       beginDelivery: deps.beginRoomAgentDelivery,
     });
@@ -239,9 +308,6 @@ export async function streamRoomMessages(input: {
     return;
   }
 
-  connection = openSseConnection(req, res, `${logLabel} ${projectId}`);
-  connection.addCleanup(stopRoleUpdates);
-  const writeEvent = connection.write;
   const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
   const messageOverlayTarget = resolveLiveMessageOverlayTarget(
     req,
@@ -260,15 +326,46 @@ export async function streamRoomMessages(input: {
     ...(messageOnly ? {} : { roomAdmin: () => roomAdmin }),
   });
 
+  // The first live check runs before any SSE byte: a refusal is an HTTP error
+  // the client backs off from, not a 200 stream that ends at once.
+  let firstCheckAllowed = false;
+  let firstCheckDenial: LiveAuthorizationDenial | null = null;
+  try {
+    firstCheckAllowed = await liveController.check();
+    firstCheckDenial = liveController.denial();
+  } catch (error) {
+    console.error(`[${logLabel}] first access check failed for ${projectId}`, error);
+    firstCheckDenial = { kind: "unavailable", reason: "check_error" };
+  }
+  if (streamClosed || deniedBeforeOpen || !firstCheckAllowed) {
+    subscription.close();
+    stopRoleUpdates();
+    if (streamClosed) {
+      logStreamEnd("first_check:session_disconnected");
+      if (!res.headersSent) res.status(401).json({ error: "Agent delivery session is no longer active." });
+    } else {
+      const denial = (firstCheckAllowed ? deniedBeforeOpen : firstCheckDenial)
+        ?? { kind: "access", reason: "authorize_denied" };
+      logStreamEnd(denialReason("first_check", denial));
+      if (!res.headersSent) replyStreamOpenDenied(res, projectId, denial);
+    }
+    // The refusal does not wait for the durable delivery disconnect, which is
+    // slowest exactly when the database is, a likely time for a 503.
+    trackSseCleanup(() => liveController.close(), `${logLabel} ${projectId}, refused`);
+    return;
+  }
+
+  connection = openSseConnection(req, res, `${logLabel} ${projectId}`, {
+    onSlowConsumer: (reason) => logStreamEnd(`slow_consumer:${reason}`),
+  });
+  connection.addCleanup(stopRoleUpdates);
+  const writeEvent = connection.write;
+
   connection.addCleanup(() => {
     streamClosed = true;
     subscription.close();
   });
   connection.addCleanup(() => liveController.close());
-  if (!(await liveController.check())) {
-    connection.close();
-    return;
-  }
 
   // The broker subscription is installed before the checkpoint is read. That
   // ordering closes the snapshot/subscribe race: anything committed while
@@ -317,18 +414,23 @@ export async function streamRoomMessages(input: {
 
   void pumpRoomEvents().catch((error: unknown) => {
     console.error(`[${logLabel}] failed to deliver event for ${projectId}`, error);
-    if (!streamClosed) connection?.close();
+    if (!streamClosed) {
+      logStreamEnd("delivery_failed");
+      connection?.close();
+    }
   });
 
   async function pumpRoomEvents(): Promise<void> {
     while (!streamClosed) {
       const delivery = await subscription.next();
       if (!delivery) {
+        if (!streamClosed) logStreamEnd("subscription_ended");
         connection?.close();
         return;
       }
       if (streamClosed) return;
       if (!(await liveController.check())) {
+        if (!streamClosed) logStreamEnd(denialReason("pump_check", liveController.denial()));
         connection?.close();
         return;
       }
@@ -374,6 +476,7 @@ export async function streamRoomMessages(input: {
           });
           if (streamClosed) return;
           if (!(await liveController.check())) {
+            if (!streamClosed) logStreamEnd(denialReason("message_check", liveController.denial()));
             connection?.close();
             return;
           }
@@ -393,6 +496,7 @@ export async function streamRoomMessages(input: {
               gap: true,
             })));
             streamClosed = true;
+            logStreamEnd("hydration_failed");
             connection?.close();
           }
         }

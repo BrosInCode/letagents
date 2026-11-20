@@ -337,3 +337,36 @@ test("a bridge loss marker rechecks every lease, rooms without a repository incl
     repo.release();
   }
 });
+
+test("a live lease names why its last check refused, and forgets it after a yes", async () => {
+  const answers: Array<() => boolean | { kind: "credential" | "access" | "unavailable"; reason: string }> = [
+    () => ({ kind: "access", reason: "repo_collaborator_required" }),
+    () => false,
+    () => { throw new Error("temporary GitHub failure"); },
+    () => true,
+  ];
+  const lease = acquireLiveRoomAuthorization({
+    req: authenticatedRequest("denial-credential"),
+    roomId: "room_auth_denial",
+    accessRoomName: "github.com/example/denial",
+    authorize: async () => answers.shift()!(),
+  });
+  const originalError = console.error;
+  console.error = () => undefined;
+  try {
+    assert.equal(lease.lastDenial(), null);
+    assert.equal(await lease.check({ force: true }), false);
+    assert.deepEqual(lease.lastDenial(), { kind: "access", reason: "repo_collaborator_required" });
+    assert.equal(await lease.check(), false, "a named refusal is cached like a plain false");
+    assert.deepEqual(lease.lastDenial(), { kind: "access", reason: "repo_collaborator_required" });
+    assert.equal(await lease.check({ force: true }), false);
+    assert.deepEqual(lease.lastDenial(), { kind: "access", reason: "authorize_denied" });
+    assert.equal(await lease.check({ force: true }), false);
+    assert.deepEqual(lease.lastDenial(), { kind: "unavailable", reason: "check_threw" });
+    assert.equal(await lease.check(), true);
+    assert.equal(lease.lastDenial(), null);
+  } finally {
+    console.error = originalError;
+    lease.release();
+  }
+});
