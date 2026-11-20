@@ -20,14 +20,14 @@ import { FileCode, ArrowUpRight } from '@lucide/vue';
 import type { DesktopRoomAgentWork } from '../../../../../../electron/ipc-types';
 import { readableContributionText } from '../../../../../../../../shared/contribution-text.mjs';
 import { contributionChanges } from '../../../../domain/room-contributions';
-import { renderDesktopMarkdown } from '../formatting/markdown';
+import { renderMarkdown } from '../../../../../../../../shared/ui/markdown/markdown';
 const props = defineProps<{ work: DesktopRoomAgentWork }>();
 const changes = computed(() => contributionChanges(props.work));
 const files = computed(() => changes.value?.files.slice(0, 3) ?? []);
 const remaining = computed(() => (changes.value?.files.length ?? 0) + (changes.value?.hidden_files ?? 0) - files.value.length);
 const summary = computed(() => readableContributionText('contribution' in props.work.summary ? props.work.summary.contribution?.summary : null));
 // Remove only generic workspace labels; meaningful headings remain content.
-const prose = computed(() => renderDesktopMarkdown((summary.value ?? '').replace(/^#{1,6}[ \t]+workspace(?: file)?(?: qa| changes| update)?[ \t]*\n+/i, ''), { block: true, mentions: false }));
+const prose = computed(() => renderMarkdown((summary.value ?? '').replace(/^#{1,6}[ \t]+workspace(?: file)?(?: qa| changes| update)?[ \t]*\n+/i, ''), { block: true, mentions: false }));
 const proseTemplate = computed(() => {
   const template = document.createElement('template');
   template.innerHTML = prose.value;

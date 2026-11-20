@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { renderDesktopMarkdown } from "../src/components/desktop/content/formatting/markdown";
+import { renderMarkdown } from "../../../../shared/ui/markdown/markdown";
 import { renderMessageText } from "../src/components/desktop/content/desktop-chat-message/message-rendering";
 
-const block = (value: string, options: Parameters<typeof renderDesktopMarkdown>[1] = {}) =>
-  renderDesktopMarkdown(value, { block: true, ...options });
+const block = (value: string, options: Parameters<typeof renderMarkdown>[1] = {}) =>
+  renderMarkdown(value, { block: true, ...options });
 
 test("an agent reply with a numbered item, bold lead-in, pipe table and indented lines renders cleanly", () => {
   const html = block([
@@ -109,7 +109,7 @@ test("standalone inline-code URLs keep code styling and link the exact destinati
     const html = renderMessageText(input, "", new Set(["msg_12"]), new Set(["task_42"]), url => links.push(url));
     assert.equal(html, `<p>Download: <code><a href="${escaped}" target="_blank" rel="noopener noreferrer">${escaped}</a></code>.</p>`);
     assert.deepEqual(links, [url]);
-    assert.equal(renderDesktopMarkdown(`\`${url}\``), `<code><a href="${escaped}" target="_blank" rel="noopener noreferrer">${escaped}</a></code>`);
+    assert.equal(renderMarkdown(`\`${url}\``), `<code><a href="${escaped}" target="_blank" rel="noopener noreferrer">${escaped}</a></code>`);
   }
 });
 
@@ -159,7 +159,7 @@ test("search highlight marks prose and table cells but not code", () => {
 test("a list indented one level deeper on every line renders quickly and stays a list", () => {
   const value = Array.from({ length: 800 }, (_, level) => `${"  ".repeat(level)}- item ${level}`).join("\n");
   assert.ok(value.length > 600_000);
-  renderDesktopMarkdown("- warm up", { block: true });
+  renderMarkdown("- warm up", { block: true });
   // This synchronous parser test budgets its own work, not time preempted by
   // the other test-file processes running alongside it in CI.
   const started = process.cpuUsage();

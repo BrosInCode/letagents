@@ -96,7 +96,15 @@ import type {
   DesktopReasoningUpdate,
 } from "../../../../../electron/ipc-types";
 import { displayNameFromActor } from "../../../domain/agents";
-import { classifyReasoningStream } from "../../../domain/reasoning";
+import {
+  buildReasoningSnapshot,
+  classifyReasoningStream,
+  currentReasoningEntry,
+  orderTimelineEntries,
+  reasoningUpdateEntry,
+  snapshotTimelineEntries,
+  type ReasoningTimelineEntry,
+} from "../../../../../../../shared/ui/reasoning/reasoning-trace";
 import { formatShortDateTime, timestampValue } from "../../../domain/time";
 import { desktopIpc } from "../../../ipc/index.js";
 
@@ -104,14 +112,6 @@ interface ReasoningField {
   label: string;
   value: string;
   kind: "normal" | "blocker" | "confidence" | "status";
-}
-
-interface ReasoningTimelineEntry {
-  id: string;
-  label: string;
-  text: string;
-  timestamp: string | null;
-  current?: boolean;
 }
 
 const props = defineProps<{
@@ -152,34 +152,9 @@ const subtitle = computed(() => {
   return parts.join(" · ");
 });
 
-const currentSnapshot = computed<DesktopReasoningSnapshot | null>(() => {
-  const session = activeSession.value;
-  if (!session) return null;
-  if (session.latestPayload) return session.latestPayload;
-  if (
-    session.goal ||
-    session.checking ||
-    session.hypothesis ||
-    session.blocker ||
-    session.nextAction ||
-    session.milestone ||
-    typeof session.confidence === "number" ||
-    session.status
-  ) {
-    return {
-      summary: session.summary || "",
-      goal: session.goal,
-      checking: session.checking,
-      hypothesis: session.hypothesis,
-      blocker: session.blocker,
-      next_action: session.nextAction,
-      milestone: session.milestone,
-      confidence: session.confidence,
-      status: session.status,
-    };
-  }
-  return session.summary ? { summary: session.summary } : null;
-});
+const currentSnapshot = computed(() =>
+  buildReasoningSnapshot<DesktopReasoningSnapshot>(activeSession.value) as DesktopReasoningSnapshot | null
+);
 
 const currentSummary = computed(() =>
   currentSnapshot.value?.summary
@@ -206,44 +181,29 @@ const structuredFields = computed<ReasoningField[]>(() => {
 
 const timelineEntries = computed<ReasoningTimelineEntry[]>(() => {
   const updateEntries = detailUpdates.value
-    .map((update) => ({
-      id: update.id,
-      label: update.milestone ? "Milestone" : labelFromStatus(update.status),
-      text: update.summary || update.payload?.summary || update.milestone || "",
-      timestamp: update.createdAt,
-    }))
+    .map((update) => reasoningUpdateEntry({ ...update, payloadSummary: update.payload?.summary }))
     .filter((entry) => entry.text.trim());
   if (updateEntries.length) {
-    return compactTimelineEntries(sortTimeline([...updateEntries, ...currentLiveTimelineEntry.value]));
+    return orderTimelineEntries([...updateEntries, ...currentLiveTimelineEntry.value]);
   }
 
   const session = activeSession.value;
   const snapshot = currentSnapshot.value;
   if (!session || !snapshot) return [];
-  const timestamp = session.updatedAt || session.createdAt;
-  return compactTimelineEntries(sortTimeline([
-    { id: `${session.id}-summary`, label: "Summary", text: snapshot.summary || session.summary || "", timestamp },
-    { id: `${session.id}-goal`, label: "Goal", text: snapshot.goal || "", timestamp },
-    { id: `${session.id}-checking`, label: "Checking", text: snapshot.checking || "", timestamp },
-    { id: `${session.id}-hypothesis`, label: "Hypothesis", text: snapshot.hypothesis || "", timestamp },
-    { id: `${session.id}-blocker`, label: "Blocker", text: snapshot.blocker || "", timestamp },
-    { id: `${session.id}-next`, label: "Next action", text: snapshot.next_action || "", timestamp },
-    { id: `${session.id}-milestone`, label: "Milestone", text: snapshot.milestone || "", timestamp },
-  ].filter((entry) => entry.text.trim())));
+  // One timestamp for every field, so keep the field order (Summary, Goal, ...).
+  return snapshotTimelineEntries(session.id, snapshot, session.summary, session.updatedAt || session.createdAt);
 });
 
 const currentLiveTimelineEntry = computed<ReasoningTimelineEntry[]>(() => {
   const session = activeSession.value;
   const snapshot = currentSnapshot.value;
-  const text = String(snapshot?.summary || session?.summary || "").trim();
-  if (!session || !text) return [];
-  return [{
-    id: `${session.id}-current-live`,
-    label: labelFromStatus(snapshot?.status || session.status || "working"),
-    text,
-    timestamp: session.updatedAt || session.createdAt,
-    current: true,
-  }];
+  if (!session) return [];
+  return currentReasoningEntry(
+    session.id,
+    snapshot?.status || session.status,
+    String(snapshot?.summary || session.summary || ""),
+    session.updatedAt || session.createdAt,
+  );
 });
 
 const streamClassification = computed(() => {
@@ -356,46 +316,8 @@ function pushField(
   fields.push({ label, value: normalized, kind });
 }
 
-function sortTimeline(entries: ReasoningTimelineEntry[]): ReasoningTimelineEntry[] {
-  return [...entries].sort((left, right) =>
-    timestampValue(left.timestamp) - timestampValue(right.timestamp)
-    || left.id.localeCompare(right.id)
-  );
-}
-
-function compactTimelineEntries(entries: ReasoningTimelineEntry[]): ReasoningTimelineEntry[] {
-  const compacted: ReasoningTimelineEntry[] = [];
-  for (const entry of entries) {
-    const previous = compacted[compacted.length - 1];
-    if (
-      previous &&
-      previous.label === entry.label &&
-      normalizeTimelineText(previous.text) === normalizeTimelineText(entry.text)
-    ) {
-      compacted[compacted.length - 1] = {
-        ...previous,
-        id: entry.id,
-        timestamp: entry.timestamp || previous.timestamp,
-      };
-      continue;
-    }
-    compacted.push(entry);
-  }
-  return compacted;
-}
-
-function normalizeTimelineText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
 function sanitizeId(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]+/g, "-") || "stream";
-}
-
-function labelFromStatus(value: string | null): string {
-  const normalized = String(value || "").trim();
-  if (!normalized) return "Update";
-  return normalized.replace(/[_-]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function formatTimestamp(value: string | null | undefined): string {

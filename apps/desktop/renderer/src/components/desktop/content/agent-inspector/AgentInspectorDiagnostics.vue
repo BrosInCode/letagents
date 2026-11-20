@@ -138,7 +138,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, CircleHelp, Clock3, Copy, Cpu, FileText, Inbox, Pause, Radio, RefreshCw, Route, Server, ShieldCheck, TriangleAlert, Wrench } from "@lucide/vue";
 import type { DesktopSupervisorDaemonStatus } from "../../../../../../electron/ipc-types";
-import { copyTextToClipboard } from "../../../../domain/clipboard";
+import { copyTextToClipboard } from "../../../../../../../../shared/ui/clipboard";
 import { agentInspectorDiagnosticsReport, projectAgentInspectorDiagnostics } from "../../../../domain/agent-inspector-diagnostics";
 import { projectAgentTroubleshooting, safeDiagnosticText, type DiagnosticCheckId } from "../../../../domain/agent-inspector-troubleshooting";
 import type { AgentInspectorActionIntent, AgentInspectorActionState, AgentInspectorProjection } from "../../../../domain/agent-inspector";

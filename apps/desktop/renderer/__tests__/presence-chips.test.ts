@@ -13,7 +13,7 @@ import {
   PRESENCE_DISCONNECT_CONFIRM_MS,
   reachableAgents,
   type PresenceChip,
-} from "../src/domain/presence-chips";
+} from "../../../../shared/ui/presence-chips";
 
 function presence(name: string, overrides: Partial<DesktopAgentPresence> = {}): DesktopAgentPresence {
   return {

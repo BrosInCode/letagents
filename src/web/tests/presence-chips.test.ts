@@ -11,10 +11,12 @@ import {
   PRESENCE_CHIP_SETTLE_MS,
   PRESENCE_CHIP_VISIBLE_MS,
   PRESENCE_DISCONNECT_CONFIRM_MS,
-  reachableAgents,
+  reachableAgents as reachableSources,
   type PresenceChip,
-} from '../src/components/room/composer/presenceChips'
-import { usePresenceChips } from '../src/components/room/composer/usePresenceChips'
+} from '../../../shared/ui/presence-chips'
+import { presenceChipSource, usePresenceChips } from '../src/components/room/composer/usePresenceChips'
+
+const reachableAgents = (entries: RoomAgentPresence[]) => reachableSources(entries.map(presenceChipSource))
 
 function presence(name: string, overrides: Partial<RoomAgentPresence> = {}): RoomAgentPresence {
   return {

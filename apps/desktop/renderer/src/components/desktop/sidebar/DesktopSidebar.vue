@@ -564,7 +564,7 @@ import {
   computed, defineComponent, getCurrentInstance, getTransitionRawChildren, h, nextTick, onMounted, onBeforeUnmount, onUpdated, ref,
   resolveTransitionHooks, setTransitionHooks, useTransitionState, watch, type BaseTransitionProps, type Component, type PropType, type VNode,
 } from "vue";
-import { copyTextToClipboard } from "../../../domain/clipboard";
+import { copyTextToClipboard } from "../../../../../../../shared/ui/clipboard";
 import { isMacPlatform } from "../../../domain/room-switcher-shortcut";
 import { desktopUpdateSidebarPresentation } from "../../../domain/desktop-update-status";
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";

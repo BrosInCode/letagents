@@ -1,7 +1,7 @@
 /**
  * The task lifecycle is a product contract, not a board-specific ordering.
- * Keep display labels and accent tokens here so every web surface names a
- * status in the same way.
+ * Keep display labels and accent tokens here so every web and desktop surface
+ * names a status in the same way. The accent tokens are web CSS variables.
  */
 export const TASK_STATUS_ORDER = [
   'proposed',

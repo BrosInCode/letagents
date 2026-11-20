@@ -1,17 +1,8 @@
 import type { DesktopTaskSummary } from "../../../electron/ipc-types";
 import { timestampValue } from "./time";
+import { TASK_STATUS_ORDER } from "../../../../../shared/ui/task-status";
 
-export const TASK_STATUS_ORDER = [
-  "proposed",
-  "accepted",
-  "assigned",
-  "in_progress",
-  "blocked",
-  "in_review",
-  "merged",
-  "done",
-  "cancelled",
-] as const;
+export { TASK_STATUS_ORDER };
 
 const statusRanks = new Map<string, number>(
   TASK_STATUS_ORDER.map((status, index) => [status, index + 1])

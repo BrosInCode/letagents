@@ -367,7 +367,7 @@
 <script setup lang="ts">
 import { ArrowRight, Copy, RefreshCw } from "@lucide/vue";
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { copyTextToClipboard } from "../../../domain/clipboard";
+import { copyTextToClipboard } from "../../../../../../../shared/ui/clipboard";
 import {
   buildFocusRoomConclusionInput,
   canSubmitFocusRoomConclusion,
