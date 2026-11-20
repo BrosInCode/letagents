@@ -413,8 +413,8 @@ export async function getMessageAccountAgentRoutings(
            AND captured.room_id = receipt.room_id
            AND captured.agent_key = receipt.agent_key
           JOIN requested_account ON requested_account.account_id = captured.owner_account_id
-         -- One array parameter: PostgreSQL cannot size a JSON list, and with
-         -- one it scans the whole receipt table instead of the message index.
+         -- An array parameter, not a JSON list: PostgreSQL cannot size a JSON
+         -- list, so it could not use the message index for these numbers.
          WHERE receipt.message_room_id = ${roomId}
            AND receipt.message_number = ANY(${sql.param(snapshotNumbers)}::int[])
            AND captured.session_kind = 'worker'
@@ -617,17 +617,12 @@ export async function resolveGlobalLegacyTargets(
       publisher_agent_session_id: string | null;
       publisher_account_id: string | null;
     }>(sql`
-      WITH input_reply AS (
-        SELECT value.number
-          FROM jsonb_to_recordset(${JSON.stringify(replyNumbers.map((number) => ({ number })))}::jsonb)
-            AS value(number integer)
-      )
       SELECT reply.number, reply.sender, reply.source,
              reply.publisher_agent_key, reply.publisher_agent_session_id,
              reply.publisher_account_id
         FROM ${messages} AS reply
-        JOIN input_reply ON input_reply.number = reply.number
        WHERE reply.room_id = ${roomId}
+         AND reply.number = ANY(${sql.param(replyNumbers)}::int[])
     `);
     for (const reply of replies.rows) replyByNumber.set(Number(reply.number), reply);
   }

@@ -355,7 +355,7 @@ const REFERENCE_RECEIPTS_SQL = `
 type CapturedReceiptRead = { text: string; values: unknown[]; rows: Record<string, unknown>[] };
 
 // Records the receipt statement the routing function sends, with its rows.
-async function captureReceiptRead(run: () => Promise<unknown>): Promise<{ result: any; read: CapturedReceiptRead | null }> {
+async function captureReceiptRead(run: () => Promise<unknown>, match = /owned_receipt/): Promise<{ result: any; read: CapturedReceiptRead | null }> {
   const pool = client!.pool;
   const original = pool.query;
   let read: CapturedReceiptRead | null = null;
@@ -363,7 +363,7 @@ async function captureReceiptRead(run: () => Promise<unknown>): Promise<{ result
     const query = args[0] as string | { text: string };
     const text = typeof query === "string" ? query : query.text;
     const result = await (original as (...a: unknown[]) => Promise<{ rows: unknown[]; fields: { name: string }[] }>).apply(pool, args);
-    if (/owned_receipt/.test(text)) {
+    if (match.test(text)) {
       const names = result.fields.map((field) => field.name);
       read = {
         text, values: (args[1] as unknown[]) ?? [],
@@ -529,4 +529,65 @@ test("the receipt read of a message page reads the receipt table through its ind
   const rowsRead = scans.reduce((sum, scan) => sum + (scan["Actual Rows"] ?? 0) * (scan["Actual Loops"] ?? 1)
     + (scan["Rows Removed by Filter"] ?? 0) + (scan["Rows Removed by Index Recheck"] ?? 0), 0);
   assert.ok(rowsRead <= 400, `receipt rows read: ${rowsRead}`);
+});
+
+const REFERENCE_REPLY_SQL = `
+  WITH input_reply AS (
+    SELECT value.number FROM jsonb_to_recordset($1::jsonb) AS value(number integer)
+  )
+  SELECT reply.number, reply.sender, reply.source, reply.publisher_agent_key,
+         reply.publisher_agent_session_id, reply.publisher_account_id
+    FROM messages AS reply
+    JOIN input_reply ON input_reply.number = reply.number
+   WHERE reply.room_id = $2`;
+
+test("the reply lookup of legacy routing reads only the named messages of a large room", skip, async () => {
+  const routing = await import("../db/messages/account-agent-routing.js");
+  const room = await api!.createProjectWithName("reply-lookup");
+  await account("acct-r");
+  await client!.pool.query(
+    `INSERT INTO messages (room_id, sender, text, timestamp, number, source, publisher_agent_key, publisher_account_id)
+       SELECT $1, 'human', 'm', '2026-01-01T00:00:00Z', n, CASE WHEN n % 7 = 0 THEN 'agent' ELSE 'browser' END,
+              CASE WHEN n % 7 = 0 THEN 'acct-r/a' END, CASE WHEN n % 7 = 0 THEN 'acct-r' END
+         FROM generate_series(1, 3000) n`, [room.id]);
+  await client!.pool.query("ANALYZE messages");
+  const legacy = (replyTo: number[]) => replyTo.map((reply_to_number, index) => ({
+    number: 5000 + index, thread_root_number: null, routing_snapshot_version: null, publisher_account_id: null,
+    publisher_agent_key: null, reply_to_number, sender: "human", source: "browser", text: "hello",
+  }));
+  const run = (replyTo: number[]) => captureReceiptRead(
+    () => routing.resolveGlobalLegacyTargets(client!.db, room.id, legacy(replyTo)), /AS reply/i);
+  const cases: Array<[string, number[]]> = [
+    ["three numbers", [7, 1400, 2999]],
+    ["duplicate numbers", [14, 14, 21, 14]],
+    ["numbers with no message", [7, 99999, 3001]],
+    ["only missing numbers", [99999]],
+  ];
+  for (const [label, replyTo] of cases) {
+    const { read } = await run(replyTo);
+    assert.ok(read, label);
+    const unique = [...new Set(replyTo)];
+    const reference = await client!.pool.query(REFERENCE_REPLY_SQL, [
+      JSON.stringify(unique.map((number) => ({ number }))), room.id]);
+    assert.deepEqual(sortRows(read.rows), sortRows(reference.rows), label);
+  }
+  const found = await run([7, 1400, 2999]);
+  assert.equal(found.read!.rows.length, 3);
+  assert.equal(found.read!.rows.find((row) => row.number === 7)!.publisher_agent_key, "acct-r/a");
+  assert.match(found.read!.text, /= ANY\(/);
+  const none = await run([]);
+  assert.equal(none.read, null, "no reply numbers sends no reply statement");
+
+  const nodes = (plan: any): any[] => [plan, ...(plan.Plans ?? []).flatMap(nodes)];
+  const rowsRead = async (text: string, values: unknown[]) => {
+    const explained = await client!.pool.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${text}`, values);
+    return nodes(explained.rows[0]["QUERY PLAN"][0].Plan)
+      .filter((node) => node["Relation Name"] === "messages")
+      .reduce((sum, node) => sum + (node["Actual Rows"] ?? 0) * (node["Actual Loops"] ?? 1)
+        + (node["Rows Removed by Filter"] ?? 0) + (node["Rows Removed by Index Recheck"] ?? 0), 0);
+  };
+  // The room holds 3,000 messages; the three named ones are all the lookup may read.
+  assert.ok(await rowsRead(found.read!.text, found.read!.values) <= 10, "new form reads about 3 messages");
+  const oldRead = await rowsRead(REFERENCE_REPLY_SQL, [JSON.stringify([7, 1400, 2999].map((number) => ({ number }))), room.id]);
+  assert.ok(oldRead >= 3000, `the old form reads the whole room (${oldRead})`);
 });
