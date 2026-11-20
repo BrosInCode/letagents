@@ -1278,20 +1278,29 @@ function parseRoomStreamChunk(
     let eventName = "message";
     let eventCursor: string | null = null;
     const dataLines: string[] = [];
+    let hasField = false;
     for (const line of lines) {
       if (!line || line.startsWith(":")) continue;
       if (line.startsWith("event:")) {
+        hasField = true;
         eventName = line.slice("event:".length).trim() || "message";
         continue;
       }
       if (line.startsWith("id:")) {
+        hasField = true;
         eventCursor = line.slice("id:".length).trim() || null;
         continue;
       }
       if (line.startsWith("data:")) {
+        hasField = true;
         dataLines.push(line.slice("data:".length).trimStart());
       }
     }
+    // The server keeps the stream open with a comment (": connected" at the
+    // start, ": heartbeat" every 15 s). A frame of comments names no event, no
+    // cursor and no data: it is not an event and never a damaged one. Read as
+    // an empty event, each one started a gap repair and a full room reload.
+    if (!hasField) continue;
     queueOrHandleRoomStreamFrame(stream, eventName, dataLines.join("\n"), eventCursor);
   }
 

@@ -1288,6 +1288,65 @@ test("unknown well-formed frames advance without delivery or gap repair", async 
   }
 });
 
+test("the server's keep-alive comments are not events: no gap, no repair read, no cursor change", async () => {
+  const router = installFetchRouter();
+  try {
+    const initial = makeSse();
+    const reconnected = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    // What the server writes: one comment when the stream opens, then one every 15 s.
+    initial.pushRaw(": connected\n\n");
+    initial.pushRoomSync("msg_1", false, "broker_known");
+    await starting;
+    await waitUntil(() => router.pollCalls.length === 1);
+    const emittedCount = emitted.length;
+    const pollCount = router.pollCalls.length;
+    initial.pushRaw(": heartbeat\n\n");
+    initial.pushRaw(": heartbeat\r\n\n");
+    initial.pushMessage("msg_2", "after the keep-alive", "broker_message");
+    await waitUntil(() => messageIds().includes("msg_2"));
+    assert.deepEqual(
+      emitted.slice(emittedCount).map((event) => event.type),
+      ["message"],
+      "a keep-alive comment reaches the renderer as nothing, so no room reload starts",
+    );
+    assert.equal(router.pollCalls.length, pollCount, "a keep-alive comment starts no catch-up and no fallback poll");
+    assert.equal(lastDeliveryRepairToken(), undefined, "no keep-alive asked for a delivery repair");
+    initial.error();
+    await waitUntil(() => router.streamCalls.length >= 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_message");
+    reconnected.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("a frame that names an event but carries no data still repairs as damaged", async () => {
+  const router = installFetchRouter();
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    router.enqueueCatchUp([]);
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    sse.pushRoomSync("msg_1", false, "broker_known");
+    await starting;
+    sse.pushRaw("id: broker_empty\nevent: task_update\n\n");
+    await waitUntil(() => emitted.some(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ));
+    sse.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
 test("malformed or oversized unknown frames cannot advance the broker cursor", async (t) => {
   for (const data of ["null", JSON.stringify({ oversized: "x".repeat(1024 * 1024) })]) {
     await t.test(data === "null" ? "non-object payload" : "complete oversized frame", async () => {
