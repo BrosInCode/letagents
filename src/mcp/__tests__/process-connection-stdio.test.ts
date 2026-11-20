@@ -38,7 +38,9 @@ test("a process holds its connection open, learns when its session is ended, and
   let processConnection: "served" | "unknown" | "refused" = "served";
   let refusals = 0;
   let busyRegistrations = 0;
+  const userAgents = new Set<string>();
   const server = createServer(async (req, res) => {
+    userAgents.add(String(req.headers["user-agent"] ?? ""));
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
@@ -116,6 +118,8 @@ test("a process holds its connection open, learns when its session is ended, and
     await until(() => opened.length === 1, "the process connection to open");
     assert.equal(opened[0]!.session_id, sessionId);
     assert.ok(opened[0]!.token, "the connection proves which session it is for");
+    // The API calls of the tools and the process connection itself: all name the client and its version.
+    assert.deepEqual([...userAgents].filter((agent) => !/^LetAgents-MCP\/\d+\.\d+\.\d+ \(/.test(agent)), []);
 
     // The connection drops. The process is still there, so it reopens it.
     held.get(sessionId)!.destroy();
@@ -145,6 +149,8 @@ test("a process holds its connection open, learns when its session is ended, and
     await until(() => exits.length === 1, "the exit to be announced");
     assert.deepEqual(exits[0], { session_id: sessionId, connection_id: "00000000-0000-4000-8000-000000000003" },
       "it speaks for the connection it held, not for the session");
+    assert.deepEqual([...userAgents].filter((agent) => !/^LetAgents-MCP\/\d+\.\d+\.\d+ \(/.test(agent)), [],
+      "the exit notice names the client too");
 
     // A room server that predates the connection answers 404. That says
     // nothing about the session, so the process keeps it, and asks again
