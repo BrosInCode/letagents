@@ -101,8 +101,10 @@ export type DesktopInboxItem =
     })
   | (DesktopInboxItemBase & {
       kind: "github_attention";
-      /** The newest event in the group; opening the row opens its group in Activity. */
+      /** The newest event of the row; opening the row opens its group in Activity. */
       event: DesktopGitHubRoomEvent;
+      /** The shared change key: a newer event or a new reason, not the size of the loaded page. */
+      fingerprint: string;
       url: string | null;
     })
   | (DesktopInboxItemBase & {
@@ -162,6 +164,7 @@ function rentalRequestInboxItems(requests: readonly DesktopRentalRequest[]): Des
 }
 
 export function desktopInboxItemFingerprint(item: DesktopInboxItem): string {
+  if (item.kind === "github_attention") return [item.id, item.fingerprint].join("\u001f");
   return [
     item.id,
     item.timestamp || "",
@@ -213,7 +216,7 @@ function taskInboxItems(tasks: readonly DesktopTaskSummary[]): DesktopInboxItem[
     }));
 }
 
-/** Open pull requests with changes requested or a failed build, as the web inbox lists them. */
+/** Open pull requests with changes requested, and builds that still fail, as the web inbox lists them. */
 function githubAttentionInboxItems(events: readonly DesktopGitHubRoomEvent[]): DesktopInboxItem[] {
   const byId = new Map(events.map((event) => [event.id, event]));
   return githubAttentionItems(events.map(desktopActivityEvent)).flatMap((item) => {
@@ -238,6 +241,7 @@ function githubAttentionInboxItems(events: readonly DesktopGitHubRoomEvent[]): D
       }))),
       event,
       url: item.url,
+      fingerprint: item.fingerprint,
     }];
   });
 }

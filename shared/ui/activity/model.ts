@@ -33,6 +33,8 @@ export function eventTime(event: ActivityEvent): string {
     .find(value => value && Number.isFinite(Date.parse(value))) || '';
 }
 const stamp = (value: string) => Date.parse(value) || 0;
+/** Oldest first: provider time, then arrival, then id. */
+export function compareActivityEvents(left: ActivityEvent, right: ActivityEvent): number { return compare(left, right); }
 function compare(left: ActivityEvent, right: ActivityEvent): number {
   return stamp(eventTime(left)) - stamp(eventTime(right)) || stamp(left.created_at) - stamp(right.created_at) || left.id.localeCompare(right.id);
 }

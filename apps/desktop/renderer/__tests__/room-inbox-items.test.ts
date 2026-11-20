@@ -160,10 +160,11 @@ describe("desktop room inbox items", () => {
     const githubAttention = actionable.find((item) => item.kind === "github_attention");
     assert.ok(githubAttention);
     assert.equal(githubAttention.title, "lint");
+    assert.equal(githubAttention.id, "github-attention:lane:brosincode/letagents|staging|check|lint");
     assert.equal(githubAttention.preview, "Build failed: lint");
     assert.equal(githubAttention.context, "github-actions");
-    assert.equal(githubAttention.event.id, "evt_3", "the row opens the newest event of its group");
-    assert.equal(githubAttention.url, "https://github.com/BrosInCode/letagents/actions/runs/77");
+    assert.equal(githubAttention.event.id, "evt_3", "the row opens the newest run of the check");
+    assert.equal(githubAttention.url, "https://github.com/BrosInCode/letagents/runs/evt_3");
     assert.equal(githubAttention.occurrenceCount, 3);
     assert.equal(githubAttention.timestamp, "2026-06-01T08:25:00.000Z");
     assert.equal(githubAttention.firstSeenTimestamp, "2026-06-01T08:20:00.000Z");
@@ -177,10 +178,13 @@ describe("desktop room inbox items", () => {
     );
     assert.notEqual(
       desktopInboxItemFingerprint(githubAttention),
-      desktopInboxItemFingerprint({
-        ...githubAttention,
-        timestamp: "2026-06-01T08:24:00.000Z",
-      }),
+      desktopInboxItemFingerprint({ ...githubAttention, fingerprint: "evt_4|Build failed: lint" }),
+      "a newer run brings a read row back",
+    );
+    assert.equal(
+      desktopInboxItemFingerprint(githubAttention),
+      desktopInboxItemFingerprint({ ...githubAttention, occurrenceCount: 2 }),
+      "an old run leaving the loaded page does not",
     );
 
     const all = buildDesktopInboxItems({
@@ -207,10 +211,7 @@ describe("desktop room inbox items", () => {
       eventType: "pull_request", action: "closed", githubObjectId: "42", title: "Ship it",
       githubObjectUrl: "https://github.com/BrosInCode/letagents/pull/42", metadata: { merged: true },
     };
-    const failedOnPullRequest: DesktopGitHubRoomEvent = {
-      ...githubEvent("evt_check", "failure", "2026-06-01T08:30:00.000Z"),
-      metadata: { conclusion: "failure", pull_request_url: "https://github.com/BrosInCode/letagents/pull/42" },
-    };
+    const failedOnPullRequest = githubEvent("evt_check", "failure", "2026-06-01T08:30:00.000Z", { head_branch: "ship-it", same_repo_pull_request_numbers: [42] });
     assert.equal(rows([failedOnPullRequest]).length, 1);
     assert.deepEqual(rows([failedOnPullRequest, pullRequest]), []);
   });
@@ -330,21 +331,23 @@ function task(id: string, title: string, status: string): DesktopTaskSummary {
   };
 }
 
+/** A check run as the server stores it: one object and page per run (src/api/github/room-events/check-run.ts). */
 function githubEvent(
   id: string,
   state: string,
   createdAt = "2026-06-01T08:20:00.000Z",
+  metadata: Record<string, unknown> = {},
 ): DesktopGitHubRoomEvent {
   return {
     id,
     eventType: "check_run",
     action: "completed",
-    githubObjectId: "77",
-    githubObjectUrl: "https://github.com/BrosInCode/letagents/actions/runs/77",
+    githubObjectId: id,
+    githubObjectUrl: `https://github.com/BrosInCode/letagents/runs/${id}`,
     title: "lint",
     state,
     actorLogin: "github-actions",
-    metadata: { app_name: "CI", conclusion: state },
+    metadata: { app_name: "CI", conclusion: state, head_branch: "staging", head_sha: "sha1", same_repo_pull_request_numbers: [], ...metadata },
     linkedTaskId: "task_133",
     createdAt,
   };
