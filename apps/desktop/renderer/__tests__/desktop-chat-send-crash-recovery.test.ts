@@ -895,9 +895,12 @@ describe("recovery UI accessibility, theming and thread-panel contract", () => {
     });
     DesktopChatMessage = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue")).default;
     const DesktopLongMessageContent = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopLongMessageContent.vue")).default;
+    // DesktopLongMessageContent wraps the shared long-message component, which renders the message HTML.
+    const SharedLongMessageContent = (await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/LongMessageContent.vue", import.meta.url)))).default;
     for (const [component, modulePath] of [
       [DesktopChatMessage, "components/desktop/content/DesktopChatMessage.vue"],
       [DesktopLongMessageContent, "components/desktop/content/DesktopLongMessageContent.vue"],
+      [SharedLongMessageContent, "../../../../shared/ui/LongMessageContent.vue"],
     ] as const) {
       const source = await readFile(fileURLToPath(new URL(`../src/${modulePath}`, import.meta.url)), "utf8");
       const descriptor = parse(source, { filename: modulePath }).descriptor;

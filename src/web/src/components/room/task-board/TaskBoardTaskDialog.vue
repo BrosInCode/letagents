@@ -31,7 +31,7 @@
         </template>
         <section class="task-dialog-description">
           <h3>Description</h3>
-          <div class="task-markdown-preview" v-html="renderMessageContent(task.description || 'No description yet.')"></div>
+          <div class="task-markdown-preview" v-html="renderTaskMarkdown(task.description || 'No description yet.')"></div>
         </section>
         <div class="task-dialog-sections">
           <section v-if="secondaryWorkflowRefs.length" class="task-dialog-section">
@@ -98,12 +98,12 @@ import type { RoomAgentPresence, RoomTask, TaskGitHubArtifactStatus } from '@/co
 import TaskDetailLayout from '../../../../../../shared/ui/board/TaskDetailLayout.vue'
 import GitPullRequestIcon from '@/components/icons/GitPullRequestIcon.vue'
 import CloseIcon from '@/components/icons/CloseIcon.vue'
-import { taskStatusAccent, taskStatusLabel } from '@/domain/taskStatus'
+import { taskStatusAccent, taskStatusLabel } from '../../../../../../shared/ui/task-status'
 import TaskLeaseAuthority from '../task-lease-authority/TaskLeaseAuthority.vue'
 import TaskReviewAuthority from '../task-review-authority/TaskReviewAuthority.vue'
 import TaskMergeReadiness from '../TaskMergeReadiness.vue'
-import TaskMarkdownEditor from './TaskMarkdownEditor.vue'
-import { renderMessageContent } from '../chat-message/formatting'
+import TaskMarkdownEditor from '../../../../../../shared/ui/TaskMarkdownEditor.vue'
+import { renderTaskMarkdown } from '../chat-message/formatting'
 import {
   canFocusTask, formatActorName, formatTaskShortId, formatTimestamp,
   getSecondaryLeases, getTaskActions, getTaskWorkflowRefs,

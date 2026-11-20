@@ -1,9 +1,9 @@
 import { Lexer, Tokenizer, type Token, type Tokens } from "marked";
 
-import { desktopHighlighter } from "./code-highlighter";
+import { codeHighlighter } from "./code-highlighter";
 import { sanitizeMarkdownHtml } from "./markdown-sanitize";
 
-export interface DesktopMarkdownOptions {
+export interface MarkdownOptions {
   highlightQuery?: string;
   block?: boolean;
   mentions?: boolean;
@@ -17,7 +17,7 @@ const MAX_BLOCKQUOTE_DEPTH = 8;
 const MAX_CONTAINER_DEPTH = 16;
 const MAX_INDENT_COLUMNS = 64;
 
-export function renderDesktopMarkdown(value: string, options: DesktopMarkdownOptions = {}): string {
+export function renderMarkdown(value: string, options: MarkdownOptions = {}): string {
   // Output is a pure function of (text, block, mentions, preservePaths). A call that
   // passes `onLink` has a side effect per link and `highlightQuery` varies with the
   // search box, so neither is cached.
@@ -27,14 +27,14 @@ export function renderDesktopMarkdown(value: string, options: DesktopMarkdownOpt
     const hit = markdownCache.get(key);
     if (hit !== undefined) return hit;
   }
-  const fallbacksBefore = desktopHighlighter.budgetFallbacks;
+  const fallbacksBefore = codeHighlighter.budgetFallbacks;
   const html = options.block
     ? renderBlockMarkdown(value, options)
     : renderInlineMarkdown(value, options).replace(/\n/g, "<br>");
   const sanitized = sanitizeMarkdownHtml(html);
   // A code block that fell back to plain text (highlight budget spent) is not cached
   // by the highlighter, so a later render may colour it. Keep that true here too.
-  if (key !== null && desktopHighlighter.budgetFallbacks === fallbacksBefore) markdownCache.set(key, sanitized);
+  if (key !== null && codeHighlighter.budgetFallbacks === fallbacksBefore) markdownCache.set(key, sanitized);
   return sanitized;
 }
 
@@ -90,12 +90,12 @@ export class MarkdownRenderCache {
 
 export const markdownCache = new MarkdownRenderCache();
 
-function markdownCacheKey(value: string, options: DesktopMarkdownOptions): string {
+function markdownCacheKey(value: string, options: MarkdownOptions): string {
   const flags = `${options.block ? 1 : 0}${options.mentions === false ? 0 : 1}${options.preservePaths ? 1 : 0}`;
   return `${flags}:${value}`;
 }
 
-export function renderInlineMarkdown(value: string, options: DesktopMarkdownOptions = {}): string {
+export function renderInlineMarkdown(value: string, options: MarkdownOptions = {}): string {
   const tokens: string[] = [];
   const links = new Map<number, string>();
   const linkToken = (url: string, html: string) => {
@@ -115,13 +115,17 @@ export function renderInlineMarkdown(value: string, options: DesktopMarkdownOpti
   });
   tokenized = tokenized.replace(/\[([^\]\n]+)\]\((<[^>\n]+>|[^)\n]+)\)/g, (match, label: string, target: string) => {
     const path = target.replace(/^<|>$/g, "");
+    // A URL never holds a token: restoring one inside href="..." would let its
+    // HTML break out of the attribute. Leave such text as it is.
+    if (path.includes("\u0000")) return match;
     if (/^https?:\/\/[^\s]+$/.test(path)) {
       return linkToken(path, `<a href="${escapeAttr(path)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`);
     }
     const filename = localFileName(path, true);
     return filename ? markdownToken(tokens, `<code>${escapeHtml(options.preservePaths ? path : filename)}</code>`) : match;
   });
-  tokenized = tokenized.replace(/(https?:\/\/[^\s<>"']+)/g, (_match, url: string) =>
+  // A bare URL stops before a token (see above).
+  tokenized = tokenized.replace(/(https?:\/\/[^\s<>"'\u0000]+)/g, (_match, url: string) =>
     linkToken(url, `<a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`)
   );
   // Web links and inline code are already protected by tokens. Match only file
@@ -196,7 +200,7 @@ class ChatTokenizer extends Tokenizer {
 
 const FENCE_LANGUAGE = /^[A-Za-z0-9_+-]*$/;
 
-function renderBlockMarkdown(value: string, options: DesktopMarkdownOptions): string {
+function renderBlockMarkdown(value: string, options: MarkdownOptions): string {
   const source = capIndentation(value.replace(/\r\n/g, "\n").replace(/\r/g, "\n"));
   let tokens: Token[];
   try {
@@ -219,11 +223,11 @@ function capIndentation(source: string): string {
   });
 }
 
-function renderBlocks(tokens: readonly Token[], options: DesktopMarkdownOptions, quoteDepth: number): string {
+function renderBlocks(tokens: readonly Token[], options: MarkdownOptions, quoteDepth: number): string {
   return tokens.map((token) => renderBlock(token, options, quoteDepth)).join("");
 }
 
-function renderBlock(token: Token, options: DesktopMarkdownOptions, quoteDepth: number): string {
+function renderBlock(token: Token, options: MarkdownOptions, quoteDepth: number): string {
   switch (token.type) {
     case "space":
       return "";
@@ -231,7 +235,7 @@ function renderBlock(token: Token, options: DesktopMarkdownOptions, quoteDepth: 
       const code = token as Tokens.Code;
       const lang = (code.lang ?? "").trim().split(/\s+/)[0] ?? "";
       if (!FENCE_LANGUAGE.test(lang)) return `<p>${renderTextBlock(code.raw, options)}</p>`;
-      return desktopHighlighter.renderCodeBlock(code.text, lang);
+      return codeHighlighter.renderCodeBlock(code.text, lang);
     }
     case "heading": {
       const heading = token as Tokens.Heading;
@@ -261,7 +265,7 @@ function renderBlock(token: Token, options: DesktopMarkdownOptions, quoteDepth: 
   }
 }
 
-function renderList(list: Tokens.List, options: DesktopMarkdownOptions, quoteDepth: number): string {
+function renderList(list: Tokens.List, options: MarkdownOptions, quoteDepth: number): string {
   const tag = list.ordered ? "ol" : "ul";
   const startNumber = Number(list.start);
   const start = list.ordered && Number.isInteger(startNumber) && startNumber !== 1 ? ` start="${startNumber}"` : "";
@@ -269,7 +273,7 @@ function renderList(list: Tokens.List, options: DesktopMarkdownOptions, quoteDep
   return `<${tag}${start}>${items}</${tag}>`;
 }
 
-function renderListItem(item: Tokens.ListItem, options: DesktopMarkdownOptions, quoteDepth: number): string {
+function renderListItem(item: Tokens.ListItem, options: MarkdownOptions, quoteDepth: number): string {
   const blocks = item.tokens.filter((token) => token.type !== "space" && token.type !== "checkbox");
   const checkbox = item.task
     ? `<input class="markdown-task-checkbox" type="checkbox" disabled${item.checked ? " checked" : ""}>`
@@ -286,7 +290,7 @@ function renderListItem(item: Tokens.ListItem, options: DesktopMarkdownOptions, 
   }).join("") || checkbox;
 }
 
-function renderTable(table: Tokens.Table, options: DesktopMarkdownOptions): string {
+function renderTable(table: Tokens.Table, options: MarkdownOptions): string {
   const cell = (tag: "th" | "td", value: Tokens.TableCell) => {
     const align = value.align ? ` class="markdown-align-${value.align}"` : "";
     return `<${tag}${align}>${renderTextBlock(value.text, options)}</${tag}>`;
@@ -299,7 +303,7 @@ function renderTable(table: Tokens.Table, options: DesktopMarkdownOptions): stri
 }
 
 /** Inline-render one block of source text: drop indentation, keep single newlines as breaks. */
-function renderTextBlock(value: string, options: DesktopMarkdownOptions): string {
+function renderTextBlock(value: string, options: MarkdownOptions): string {
   const text = value
     .replace(/[ \t]+$/gm, "")
     .replace(/^[ \t]+/gm, "")
@@ -312,8 +316,13 @@ function markdownToken(tokens: string[], html: string): string {
   return `\u0000MD${index}\u0000`;
 }
 
+// A token can hold earlier tokens (inline code inside a link label), so restore
+// them too. A token only ever holds tokens made before it, so this ends.
 function restoreMarkdownTokens(value: string, tokens: string[], onToken: (index: number) => void): string {
-  return value.replace(/\u0000MD(\d+)\u0000/g, (_match, index: string) => { onToken(Number(index)); return tokens[Number(index)] || ""; });
+  return value.replace(/\u0000MD(\d+)\u0000/g, (_match, index: string) => {
+    onToken(Number(index));
+    return restoreMarkdownTokens(tokens[Number(index)] || "", tokens, onToken);
+  });
 }
 
 function escapeHtml(value: string): string {

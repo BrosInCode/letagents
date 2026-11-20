@@ -12,7 +12,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   resolve: {
-    dedupe: ["vue", "three"],
+    dedupe: ["vue", "three", "marked", "dompurify", "highlight.js"],
     alias: {
       '@': resolve(__dirname, 'src'),
     },

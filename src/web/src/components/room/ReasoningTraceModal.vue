@@ -15,6 +15,7 @@
       >
         <ReasoningTraceHeader
           :heading="heading"
+          :stream-description="streamDescription"
           :stream-label="streamLabel"
           :stream-state="streamState"
           :subtitle="subtitle"
@@ -78,12 +79,13 @@ const {
   currentSummary,
   heading,
   highlights,
+  streamDescription,
   streamLabel,
   streamState,
   subtitle,
   timelineEntries,
   titleId,
-} = useReasoningTracePresentation(activeSession)
+} = useReasoningTracePresentation(activeSession, () => props.open)
 
 watch(() => props.open, (next) => {
   if (!next) {

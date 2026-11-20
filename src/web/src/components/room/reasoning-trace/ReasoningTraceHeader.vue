@@ -5,7 +5,7 @@
       <h2 :id="titleId">{{ heading }}</h2>
       <p class="reasoning-subtitle">{{ subtitle }}</p>
     </div>
-    <span class="reasoning-live-badge" :data-state="streamState">
+    <span class="reasoning-live-badge" :data-state="streamState" :title="streamDescription">
       {{ streamLabel }}
     </span>
     <button class="reasoning-close" type="button" @click="$emit('close')">
@@ -19,6 +19,7 @@ import type { ReasoningStreamState } from './reasoningTrace'
 
 defineProps<{
   heading: string
+  streamDescription?: string
   streamLabel: string
   streamState: ReasoningStreamState
   subtitle: string

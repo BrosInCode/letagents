@@ -2,8 +2,9 @@ import { createApp } from 'vue'
 import { router } from './router'
 import App from './App.vue'
 import './styles/global.css'
+import '../../../shared/ui/markdown/markdown-tables.css'
 import { setupCodeBlockCopyListener } from '../../../shared/code-highlighting.mjs'
-import { copyTextToClipboard } from './domain/clipboard'
+import { copyTextToClipboard } from '../../../shared/ui/clipboard'
 
 setupCodeBlockCopyListener(copyTextToClipboard)
 

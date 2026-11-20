@@ -4,9 +4,9 @@ import { fileURLToPath } from 'node:url'
 import { createSSRApp, effectScope, h, nextTick, ref } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { createServer } from 'vite'
-import { renderDesktopMarkdown } from '../src/components/desktop/content/formatting/markdown'
+import { renderMarkdown } from '../../../../shared/ui/markdown/markdown'
 import { eligibleLinkPreviewReferences, excludeGitHubEventLink, linkPreviewPresentation } from '../../../../shared/message-link-previews.mjs'
-const render = (text: string, onLink?: (url: string) => void) => renderDesktopMarkdown(text, { block: true, onLink })
+const render = (text: string, onLink?: (url: string) => void) => renderMarkdown(text, { block: true, onLink })
 
 const url = 'https://github.com/org/repo/pull/1'
 const preview = { kind: 'pull' as const, number: 1, repository: 'org/repo', title: '<script>Title</script>', state: 'draft' as const, url }

@@ -92,7 +92,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { RoomTask } from '@/composables/useRoom'
-import { taskStatusLabel } from '@/domain/taskStatus'
+import { taskStatusLabel } from '../../../../../shared/ui/task-status'
 
 const props = defineProps<{
   open: boolean

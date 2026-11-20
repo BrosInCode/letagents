@@ -64,7 +64,7 @@ import {
   getSecondaryLeases, getTaskActions, getTaskWorkflowRefs,
   shouldShowAuthority, shouldShowReviewAuthority,
 } from './model'
-import { taskStatusLabel } from '../../../domain/taskStatus'
+import { taskStatusLabel } from '../../../../../../shared/ui/task-status'
 
 const props = defineProps<{
   task: RoomTask

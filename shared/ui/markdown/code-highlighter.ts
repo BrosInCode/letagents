@@ -27,7 +27,7 @@ import {
   createCodeHighlighter,
   type CanonicalLanguage,
   type CodeHighlighter,
-} from "../../../../../../../../shared/code-highlighting.mjs";
+} from "../../code-highlighting.mjs";
 
 const languages: Record<CanonicalLanguage, LanguageFn> = {
   javascript,
@@ -58,8 +58,13 @@ for (const [name, language] of Object.entries(languages)) {
   hljs.registerLanguage(name, language);
 }
 
-export const desktopHighlighter: CodeHighlighter = createCodeHighlighter({
-  highlight(code: string, canonicalLanguage: CanonicalLanguage): string {
-    return hljs.highlight(code, { language: canonicalLanguage, ignoreIllegals: true }).value;
-  },
-});
+/**
+ * Highlights with the languages registered above. Tests build their own
+ * highlighter from this: the app and the repo root each install highlight.js,
+ * and only this copy has the languages.
+ */
+export function highlightCode(code: string, canonicalLanguage: CanonicalLanguage): string {
+  return hljs.highlight(code, { language: canonicalLanguage, ignoreIllegals: true }).value;
+}
+
+export const codeHighlighter: CodeHighlighter = createCodeHighlighter({ highlight: highlightCode });

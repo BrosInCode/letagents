@@ -4,7 +4,7 @@ import type { DesktopTaskSummary, WorkerSnapshot } from "../../../../../../elect
 import { TASK_STATUS_ORDER } from "../../../../domain/tasks";
 import { timestampValue } from "../../../../domain/time";
 import { taskMatchesLocalWorker } from "./board-workers";
-import { readableStatus } from "./formatters";
+import { taskStatusLabel } from "../../../../../../../../shared/ui/task-status";
 import { reviewLeases, shouldShowReviewPanel, workLease } from "./task-state";
 import type { TaskGroup } from "./types";
 
@@ -32,7 +32,7 @@ export const CLOSEOUT_BOARD_STATUSES = TASK_STATUS_ORDER.slice(6);
 export const BOARD_HANDOFF_STAGE_LABELS: ReadonlyArray<string> = [
   ...ACTIVE_BOARD_STATUSES
     .filter((status) => status !== "blocked")
-    .map((status) => status === "in_review" ? "Review" : readableStatus(status)),
+    .map((status) => status === "in_review" ? "Review" : taskStatusLabel(status)),
   "Closeout",
 ];
 
@@ -128,7 +128,7 @@ export function boardOwnerOptions(tasks: DesktopTaskSummary[]): Array<{ id: stri
 export function boardStatusOptions(): Array<{ id: string; label: string }> {
   return [
     { id: "all", label: "All statuses" },
-    ...TASK_STATUS_ORDER.map((id) => ({ id, label: readableStatus(id) })),
+    ...TASK_STATUS_ORDER.map((id) => ({ id, label: taskStatusLabel(id) })),
   ];
 }
 
@@ -164,7 +164,7 @@ export function visibleBoardGroups(input: {
   });
   const groups = statuses.filter((status) => !input.statusFilter || input.statusFilter === "all" || status === input.statusFilter).map((status) => ({
     status,
-    label: readableStatus(status),
+    label: taskStatusLabel(status),
     tasks: tasks.filter((task) => task.status === status),
   }));
   // Open and Closeout are the full lifecycle, so every stage stays a drop

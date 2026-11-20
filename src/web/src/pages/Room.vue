@@ -83,7 +83,7 @@
       <ReleaseQueueWidget :key="room?.identifier" :room-id="room?.identifier || ''" :load="loadReleasePlanning" :open-external="openReleaseLink" @select="openBoardTask" />
     </div>
     <TaskLinkPreview v-if="isConnected" :room-id="room?.identifier || ''" :tasks="previewTasks" :active="activeTab === 'chat'" :accept="acceptPreviewTask" :open-external="openReleaseLink" @open-board="openBoardTask">
-    <template #description="{ text }"><div v-html="renderMessageContent(text)" /></template>
+    <template #description="{ text }"><div v-html="renderTaskMarkdown(text)" /></template>
     <RoomTabPanels
       ref="roomTabPanelsRef"
       :activeTab="activeTab"
@@ -224,7 +224,7 @@
 
     <AskAgentDialog v-if="askAgentOpen && auth.isSignedIn.value && room" :room-identifier="room.identifier" :room-label="roomTitle" @close="askAgentOpen = false" />
 
-    <ImageViewerModal
+    <ImageViewer
       v-if="activeImageId && roomImages.length"
       :images="roomImages"
       :activeImageId="activeImageId"
@@ -250,7 +250,7 @@
 import TaskLinkPreview from '../../../../shared/ui/board/TaskLinkPreview.vue'
 import { webBoardTask } from '../components/room/task-board/workspace-tasks'
 import { getTaskActions } from '../components/room/task-board/model'
-import { renderMessageContent } from '../components/room/chat-message/formatting'
+import { renderTaskMarkdown } from '../components/room/chat-message/formatting'
 import ReleaseQueueWidget from '../../../../shared/ui/board/ReleaseQueueWidget.vue'
 import { fetchBoardPlanning } from '../composables/room/boardPlanning'
 import { activityUnread } from '../../../../shared/ui/activity/unread'
@@ -271,7 +271,7 @@ import { joinRequestAlerts } from '@/composables/roomJoinRequestAlerts'
 import RoomSidebar from '@/components/room/RoomSidebar.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
-import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
+import ImageViewer from '../../../../shared/ui/image-viewer/ImageViewer.vue'
 import { messageThreadParentId } from '@/components/room/messageThreading'
 import RoomAccessRequest from './room/RoomAccessRequest.vue'
 import RoomConnectionError from './room/RoomConnectionError.vue'

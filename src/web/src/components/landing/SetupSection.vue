@@ -33,7 +33,7 @@ import CursorIcon from '@/components/icons/CursorIcon.vue'
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import CodexIcon from '@/components/icons/CodexIcon.vue'
 import AntigravityIcon from '@/components/icons/AntigravityIcon.vue'
-import { copyTextToClipboard } from '@/domain/clipboard'
+import { copyTextToClipboard } from '../../../../../shared/ui/clipboard'
 
 const jsonMcpConfig = JSON.stringify({
   mcpServers: { letagents: { command: 'npx', args: ['-y', 'letagents'], env: { LETAGENTS_API_URL: 'https://letagents.chat' } } },
