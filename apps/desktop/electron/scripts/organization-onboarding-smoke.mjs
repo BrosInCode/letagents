@@ -275,6 +275,10 @@ try {
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   assert.ok(releaseFirstRoomRead, 'room access is being checked');
+  if (hasMotion) {
+    assert.ok(await js(`Boolean(document.querySelector('${roomChoice} [data-first-room-departure="waiting"]'))
+      && !document.querySelector('.first-room-flight')`), 'the clicked icon is emphasized before room access returns');
+  }
   // A changed list may remove the clicked row while the room opens.
   await js(`{ const input = document.querySelector('.company-room-search input'); input.value = 'missing'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await waitFor(`!document.querySelector('${roomChoice}')`);

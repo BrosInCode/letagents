@@ -108,6 +108,11 @@ function roomName(room: FirstRunRoomChoice): string {
   opacity: 0.6;
 }
 
+.company-rooms-row:has([data-first-room-departure="waiting"]) {
+  background: var(--setup-surface-muted);
+  opacity: 1;
+}
+
 .company-rooms-row:focus-visible {
   outline: 2px solid var(--setup-accent);
   outline-offset: -2px;
@@ -135,6 +140,7 @@ function roomName(room: FirstRunRoomChoice): string {
   height: 16px;
   color: var(--setup-muted-strong);
 }
+.company-rooms-icon[data-first-room-departure="waiting"] { color: var(--setup-text); }
 .company-rooms-icon svg { display: block; width: 100%; height: 100%; }
 
 .company-rooms-visibility {

@@ -1,7 +1,7 @@
 const reducedMotion = "(prefers-reduced-motion: reduce)";
 const landingWait = 2_500;
 const maxLandingWait = 5_000;
-const flightDuration = 600;
+const flightDuration = 680;
 
 type ActiveEntry = () => string | null;
 type Landing = { icon: SVGSVGElement; bounds: DOMRect };
@@ -68,10 +68,12 @@ export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (
   const clickedBounds = icon.getBoundingClientRect();
   if (!glyph || !clickedBounds.width || !clickedBounds.height) return;
   const copy = glyph.cloneNode(true);
+  icon.dataset.firstRoomDeparture = "waiting";
   const style = getComputedStyle(icon);
-  const color = style.getPropertyValue("--workspace-accent").trim() || style.color;
+  const accent = style.getPropertyValue("--first-room-accent").trim() || style.color;
+  const color = style.color;
 
-  return async (activeEntry: ActiveEntry, metadataReady: Promise<void>) => {
+  const fly = async (activeEntry: ActiveEntry, metadataReady: Promise<void>) => {
     const preference = window.matchMedia(reducedMotion);
     const initialLanding = await waitForLanding(activeEntry, preference, metadataReady);
     if (!initialLanding) return;
@@ -86,9 +88,13 @@ export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (
       left: `${origin.left}px`, top: `${origin.top}px`,
       width: `${origin.width}px`, height: `${origin.height}px`, color,
     });
-    flight.append(copy, landing.icon.cloneNode(true));
+    flight.style.setProperty("--first-room-accent", accent);
+    flight.style.setProperty("--first-room-duration", `${flightDuration}ms`);
+    const destinationGlyph = landing.icon.cloneNode(true) as SVGSVGElement;
+    destinationGlyph.style.color = getComputedStyle(landing.icon).color;
+    flight.append(copy, destinationGlyph);
     document.body.append(flight);
-    icon.dataset.firstRoomDeparture = "";
+    icon.dataset.firstRoomDeparture = "moving";
     landing.icon.dataset.firstRoomLanding = "";
 
     function landingFrame(target: Landing): Keyframe {
@@ -96,13 +102,13 @@ export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (
       const x = left - origin.left;
       const y = top - origin.top;
       const scale = `${width / origin.width}, ${height / origin.height}`;
-      return { transform: `translate3d(${x}px, ${y}px, 0) scale(${scale})`, color: getComputedStyle(target.icon).color };
+      return { transform: `translate3d(${x}px, ${y}px, 0) scale(${scale})` };
     }
 
     const animation = flight.animate([
-      { transform: "translate3d(0, 0, 0) scale(1)", color },
+      { transform: "translate3d(0, 0, 0) scale(1)" },
       landingFrame(landing),
-    ], { duration: flightDuration, easing: "cubic-bezier(.52, .07, .14, 1)", fill: "both" });
+    ], { duration: flightDuration, easing: "cubic-bezier(.32, .04, .43, 1)", fill: "both" });
     let frame = 0;
     const cancel = () => animation.cancel();
     // Data can replace or move the sidebar row after the workspace appears.
@@ -117,10 +123,10 @@ export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (
         if (!sameLanding(landing, next)) {
           const effect = animation.effect as KeyframeEffect;
           const elapsed = typeof animation.currentTime === "number" ? animation.currentTime : 0;
-          const computed = getComputedStyle(flight);
-          const from = { transform: computed.transform, color: computed.color };
+          const from = { transform: getComputedStyle(flight).transform };
           delete landing.icon.dataset.firstRoomLanding;
           next.icon.dataset.firstRoomLanding = "";
+          destinationGlyph.style.color = getComputedStyle(next.icon).color;
           effect.setKeyframes([from, landingFrame(next)]);
           effect.updateTiming({ duration: Math.max(120, Number(effect.getTiming().duration) - elapsed) });
           animation.currentTime = 0;
@@ -142,8 +148,9 @@ export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (
       cancelAnimationFrame(frame);
       preference.removeEventListener("change", cancel);
       delete landing.icon.dataset.firstRoomLanding;
-      delete icon.dataset.firstRoomDeparture;
       flight.remove();
     }
   };
+
+  return { fly, clearDeparture: () => { delete icon.dataset.firstRoomDeparture; } };
 }

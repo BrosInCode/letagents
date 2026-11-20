@@ -212,25 +212,45 @@ html[data-window-chrome="mac"] .first-run-wizard { --welcome-brand-top: 42px; }
 }
 .desktop-onboarding-shell[data-room-arrival="moving"] {
   opacity: 0;
-  transition: opacity 280ms var(--ease-out);
+  transition: opacity 300ms ease-in-out 60ms;
+}
+
+[data-first-room-departure="waiting"] {
+  --first-room-accent: var(--workspace-accent, var(--setup-accent));
+  position: relative;
+  isolation: isolate;
 }
 
 .first-room-flight {
   position: fixed;
   display: grid;
+  isolation: isolate;
   z-index: 1100;
   pointer-events: none;
   transform-origin: top left;
+}
+.first-room-flight::before,
+[data-first-room-departure="waiting"]::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -7px;
+  border: 1px solid color-mix(in srgb, var(--first-room-accent) 65%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--first-room-accent) 23%, #171a1d);
+}
+.first-room-flight::before {
+  animation: first-room-backplate-out var(--first-room-duration) ease-out both;
 }
 .first-room-flight svg {
   display: block;
   grid-area: 1 / 1;
   width: 100%;
   height: 100%;
-  filter: drop-shadow(0 0 6px color-mix(in srgb, currentColor 45%, transparent));
 }
-.first-room-flight svg:first-child { animation: first-room-glyph-out 600ms linear both; }
-.first-room-flight svg:last-child { animation: first-room-glyph-in 600ms linear both; }
+.first-room-flight svg:first-child { animation: first-room-glyph-out var(--first-room-duration) linear both; }
+.first-room-flight svg:last-child { animation: first-room-glyph-in var(--first-room-duration) linear both; }
+@keyframes first-room-backplate-out { 73% { opacity: 1; } to { opacity: 0; } }
 @keyframes first-room-glyph-out { 75% { opacity: 1; } to { opacity: 0; } }
 @keyframes first-room-glyph-in { 0%, 75% { opacity: 0; } to { opacity: 1; } }
-[data-first-room-landing], [data-first-room-departure] { opacity: 0; }
+[data-first-room-landing], [data-first-room-departure="moving"] { opacity: 0; }
