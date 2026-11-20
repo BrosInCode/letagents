@@ -10,7 +10,7 @@ import type {
 } from "../ipc-types.js";
 import { mapApiActivityEvent } from "../rental/api-mapper.js";
 import { apiUrl, roomMessageHistoryPageSize } from "./paths.js";
-import { readStoredAuth } from "./auth.js";
+import { DesktopApiError, readStoredAuth } from "./auth.js";
 import { DESKTOP_USER_AGENT } from "./client-identity.js";
 import { isDesktopSmokeCheck } from "./smoke.js";
 import { publishRoomStreamPointer } from "./room-stream-pointers.js";
@@ -30,7 +30,13 @@ import {
   mapRoomMessagePayload,
 } from "./rooms.js";
 import { mapRoomArtifactPayload } from "./rooms/snapshot/mappers.js";
-import { forgetJoinedRoomInfo } from "./rooms/room-info.js";
+import {
+  forgetJoinedRoomInfo,
+  getJoinedRoomInfo,
+  joinedRoomInfoRemainingMs,
+  onJoinedRoomInfoChange,
+  roomInfoCacheKey,
+} from "./rooms/room-info.js";
 import { invalidateInFlightRoomReads } from "./rooms/in-flight-reads.js";
 import { emitToMainWindow } from "./window.js";
 import {
@@ -91,6 +97,8 @@ let activeRoomStream: {
   }>;
   bufferedSseFrameBytes: number;
   bufferedSseFrameOverflow: boolean;
+  /** The next check of the open room's join (see `checkOpenRoomJoin`). */
+  roomJoinTimer: NodeJS.Timeout | null;
   /** Whether a connection of this stream delivered its handshake before. */
   syncedOnce: boolean;
   /**
@@ -410,8 +418,9 @@ function repairMalformedRoomStreamFrame(
  * already pending is kept: its token still waits for that read.
  *
  * `messagesRepaired`: the caller knows that the durable messages are current
- * (the catch-up of this connection just ended well), so only the room read
- * is owed and no message request is sent.
+ * (the catch-up of this connection just ended well, or the read is about the
+ * room itself and no event was missed), so only the room read is owed and no
+ * message request is sent.
  */
 function startRoomStreamGapRepair(
   roomIdentifier: string,
@@ -1596,6 +1605,71 @@ async function openDesktopRoomStream(
   }
 }
 
+// The room open joins the room itself; the first check waits for that join.
+const OPEN_ROOM_JOIN_FIRST_CHECK_MS =
+  Number(process.env.LETAGENTS_OPEN_ROOM_JOIN_FIRST_CHECK_MS) > 0
+    ? Number(process.env.LETAGENTS_OPEN_ROOM_JOIN_FIRST_CHECK_MS)
+    : 30_000;
+const OPEN_ROOM_JOIN_CHECK_SLACK_MS = 1_000;
+const OPEN_ROOM_JOIN_RETRY_MS =
+  Number(process.env.LETAGENTS_OPEN_ROOM_JOIN_RETRY_MS) > 0
+    ? Number(process.env.LETAGENTS_OPEN_ROOM_JOIN_RETRY_MS)
+    : 60_000;
+
+function scheduleOpenRoomJoinCheck(
+  stream: NonNullable<typeof activeRoomStream>,
+  delayMs: number,
+): void {
+  if (!isCurrentRoomStream(stream) || stream.roomJoinTimer) return;
+  stream.roomJoinTimer = setTimeout(() => {
+    stream.roomJoinTimer = null;
+    void checkOpenRoomJoin(stream);
+  }, delayMs);
+}
+
+/**
+ * Repeat the join of the room that is open when the remembered answer ends
+ * (five minutes, see `getJoinedRoomInfo`).
+ *
+ * The join is the only thing that tells the server the person still has the
+ * room open (the room's member list shows when each person was last there),
+ * and the only place a new room name, role or focus state comes from: no
+ * stream event carries them. A changed answer asks for one room read through
+ * `onJoinedRoomInfoChange`; a refusal asks for one here, and that read shows
+ * why the room is closed.
+ *
+ * Until 2026-11 a full room reload every 15 seconds did both by accident
+ * (see `repairUnprovenConnectionStart`), also while the window was hidden.
+ * This check runs in the main process for the same reason.
+ */
+async function checkOpenRoomJoin(stream: NonNullable<typeof activeRoomStream>): Promise<void> {
+  if (!isCurrentRoomStream(stream)) return;
+  let nextCheckMs = OPEN_ROOM_JOIN_RETRY_MS;
+  try {
+    await getJoinedRoomInfo(stream.roomIdentifier, { create: false });
+    nextCheckMs = joinedRoomInfoRemainingMs(stream.roomIdentifier) + OPEN_ROOM_JOIN_CHECK_SLACK_MS;
+  } catch (error) {
+    // No answer or a server fault: the room stays as it is, and the check comes again.
+    if (
+      isCurrentRoomStream(stream)
+      && error instanceof DesktopApiError
+      && [401, 403, 404, 410].includes(error.status)
+    ) startRoomStreamGapRepair(stream.roomIdentifier, { messagesRepaired: true });
+  }
+  scheduleOpenRoomJoinCheck(stream, nextCheckMs);
+}
+
+// The server now describes the open room in another way: read the room once.
+onJoinedRoomInfoChange((roomIdentifiers) => {
+  const stream = activeRoomStream;
+  if (!stream || !isCurrentRoomStream(stream) || stream.localRoomIdentifier) return;
+  const open = new Set([stream.roomIdentifier, stream.canonicalRoomIdentifier].map(roomInfoCacheKey).filter(Boolean));
+  if (roomIdentifiers.some((identifier) => open.has(roomInfoCacheKey(identifier)))) {
+    // No event was missed: only the room read is owed.
+    startRoomStreamGapRepair(stream.roomIdentifier, { messagesRepaired: true });
+  }
+});
+
 export async function startDesktopRoomStream(
   roomIdentifier: string,
   afterMessageId?: string | null,
@@ -1650,6 +1724,7 @@ export async function startDesktopRoomStream(
     bufferedSseFrames: [],
     bufferedSseFrameBytes: 0,
     bufferedSseFrameOverflow: false,
+    roomJoinTimer: null,
     syncedOnce: false,
     connectGapPending: false,
     connectCatchUpDone: false,
@@ -1724,6 +1799,7 @@ export async function startDesktopRoomStream(
   // `openDesktopRoomStream` brings up if/when SSE drops, and retires again on
   // reconnect — instead of running a second permanent transport per room.
   void openDesktopRoomStream(startingStream);
+  scheduleOpenRoomJoinCheck(startingStream, OPEN_ROOM_JOIN_FIRST_CHECK_MS);
   await startingStream.readyPromise;
 }
 
@@ -1759,5 +1835,9 @@ function stopActiveRoomStream(roomIdentifier?: string | null): void {
     clearTimeout(activeRoomStream.reconnectTimer);
   }
   clearCatchUpRetry(activeRoomStream);
+  if (activeRoomStream.roomJoinTimer) {
+    clearTimeout(activeRoomStream.roomJoinTimer);
+    activeRoomStream.roomJoinTimer = null;
+  }
   activeRoomStream = null;
 }
