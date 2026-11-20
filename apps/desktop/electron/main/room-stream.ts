@@ -11,6 +11,7 @@ import type {
 import { mapApiActivityEvent } from "../rental/api-mapper.js";
 import { apiUrl, roomMessageHistoryPageSize } from "./paths.js";
 import { readStoredAuth } from "./auth.js";
+import { DESKTOP_USER_AGENT } from "./client-identity.js";
 import { isDesktopSmokeCheck } from "./smoke.js";
 import { publishRoomStreamPointer } from "./room-stream-pointers.js";
 import {
@@ -861,7 +862,7 @@ async function fetchRoomMessagePollPage(
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers({
     Accept: "application/json",
-
+    "User-Agent": DESKTOP_USER_AGENT,
   });
   if (storedAuth.token) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
@@ -987,7 +988,7 @@ async function fetchLatestRoomMessagePage(
   signal: AbortSignal,
 ): Promise<void> {
   const storedAuth = await readStoredAuth();
-  const headers = new Headers({ Accept: "application/json" });
+  const headers = new Headers({ Accept: "application/json", "User-Agent": DESKTOP_USER_AGENT });
   if (storedAuth.token) headers.set("Authorization", `Bearer ${storedAuth.token}`);
   const response = await fetch(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
@@ -1084,7 +1085,7 @@ async function emitLatestRoomMessageWindow(
   stream: NonNullable<typeof activeRoomStream>,
 ): Promise<void> {
   const storedAuth = await readStoredAuth();
-  const headers = new Headers({ Accept: "application/json" });
+  const headers = new Headers({ Accept: "application/json", "User-Agent": DESKTOP_USER_AGENT });
   if (storedAuth.token) headers.set("Authorization", `Bearer ${storedAuth.token}`);
   const response = await fetch(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
@@ -1360,7 +1361,7 @@ async function openDesktopRoomStream(
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers({
     Accept: "text/event-stream",
-
+    "User-Agent": DESKTOP_USER_AGENT,
   });
   if (storedAuth.token) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);

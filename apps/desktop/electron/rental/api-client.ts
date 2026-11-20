@@ -92,6 +92,11 @@ export interface RentalApiClientOptions {
    */
   getAuthToken?: () => string | null | undefined | Promise<string | null | undefined>;
   /**
+   * Sent as `User-Agent` when given, so the server's logs name the client
+   * and its build. Node's fetch sends "node" otherwise.
+   */
+  userAgent?: string;
+  /**
    * Override `fetch` for tests. Defaults to `globalThis.fetch`.
    */
   fetchFn?: FetchLike;
@@ -108,9 +113,11 @@ export class RentalApiClient {
   private readonly getAuthToken: RentalApiClientOptions["getAuthToken"];
   private readonly fetchFn: FetchLike;
   private readonly parseJson: (text: string) => unknown;
+  private readonly userAgent: string | null;
 
   constructor(options: RentalApiClientOptions) {
     this.apiBaseUrl = options.apiBaseUrl.replace(/\/+$/, "");
+    this.userAgent = options.userAgent?.trim() || null;
     this.authToken = options.authToken?.trim() || null;
     this.getAuthToken = options.getAuthToken;
     this.fetchFn = options.fetchFn ?? (globalThis.fetch as FetchLike);
@@ -495,6 +502,7 @@ export class RentalApiClient {
     const headers: Record<string, string> = {
       accept: "application/json",
     };
+    if (this.userAgent) headers["user-agent"] = this.userAgent;
     let serializedBody: string | undefined;
     if (body !== undefined && body !== null) {
       headers["content-type"] = "application/json";

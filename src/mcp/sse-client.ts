@@ -1,4 +1,5 @@
 import { roomAccessRefusal } from "../../shared/room-membership.mjs";
+import { MCP_USER_AGENT } from "./client-identity.js";
 import { encodeRoomIdPath } from "./room-id.js";
 
 const MAX_SSE_FRAME_BYTES = 1024 * 1024;
@@ -169,11 +170,12 @@ export class SseClient {
   private async getHeaders(): Promise<Record<string, string>> {
     const token = await this.getAccessToken?.();
     if (!token) {
-      return { Accept: "text/event-stream" };
+      return { Accept: "text/event-stream", "User-Agent": MCP_USER_AGENT };
     }
 
     return {
       Accept: "text/event-stream",
+      "User-Agent": MCP_USER_AGENT,
       Authorization: `Bearer ${token}`,
     };
   }
