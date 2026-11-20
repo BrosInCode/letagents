@@ -147,8 +147,11 @@ export function makeAgentSessionToken(): string {
   return crypto.randomBytes(32).toString("base64url");
 }
 
+/** Every worker bearer token starts with this; request auth looks it up in the bearer table first. */
+export const AGENT_SESSION_BEARER_TOKEN_PREFIX = "lasb_";
+
 export function makeAgentSessionBearerToken(): string {
-  return `lasb_${crypto.randomBytes(32).toString("base64url")}`;
+  return `${AGENT_SESSION_BEARER_TOKEN_PREFIX}${crypto.randomBytes(32).toString("base64url")}`;
 }
 
 
