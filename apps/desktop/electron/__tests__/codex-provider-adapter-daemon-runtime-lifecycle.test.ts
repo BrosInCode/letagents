@@ -774,8 +774,7 @@ test(`Restart and resume starts an agent again at once while the daemon is still
     // its time passes: the bound that would end the wait never comes. The
     // owner's last resort must not wait for it, even for a step that holds
     // the entry's queue.
-    const wait = exitWaitClock(agent);
-    endFault = wait.fault(fault);
+    endFault = exitWaitClock(agent).fault(fault);
     const before = (await agent.request("manifest.list")).result[0] as { room_id: string; provider_ref: { execution_generation_id: string } };
     const runtimeId = agent.read<{ runtime_generation_id: string }>(
       "SELECT runtime_generation_id FROM execution_runtime_generations WHERE agent_id=? ORDER BY created_at_ms DESC")[0]!.runtime_generation_id;
@@ -786,16 +785,15 @@ test(`Restart and resume starts an agent again at once while the daemon is still
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.equal(agent.harness.launches.length, 1, "nothing replaces the process by itself yet");
 
-    // The owner uses Diagnostics, "Restart and resume". It is answered while
-    // the recording still waits: a recovery that waited for the recording's
-    // bound would never be answered here.
+    // The owner uses Diagnostics, "Restart and resume". It takes effect at
+    // once, not after the recording's bound: this test never passes any of
+    // that bound's time, so a recovery that waited for it is never answered.
     const asked = answered(agent.request("supervisor.recover_agent_runtime", { entry_id: agent.id, daemon_generation: agent.daemonGeneration(),
       mode: "resume", operation_id: "owner-restart-1", room_id: before.room_id,
       execution_generation_id: before.provider_ref.execution_generation_id, runtime_generation_id: runtimeId }));
-    await agent.eventually(() => asked.answer !== undefined, "Restart and resume is answered while the exit's recording has not ended");
+    await agent.eventually(() => asked.answer !== undefined, "Restart and resume is answered while the exit's recording has not ended, and its bound has not");
     const recovered = asked.answer!;
     assert.equal(recovered.result?.outcome, "recovering", recovered.error ?? recovered.result?.error);
-    assert.equal(wait.passed(), 0, "it took effect at once, not after the recording's bound: none of that time had passed");
     assert.equal(terminals.settling(agent.id), false, "the exit the daemon was still recording gives way to the owner's recovery");
     await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again").catch(async (error) => {
       const current = await agent.view();
@@ -826,11 +824,14 @@ test("a recovery that asks the provider whether the saved process is gone names 
     await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the exit waits to be recorded");
 
     // The daemon holds no runtime and has not recorded the end of the saved one, so it asks the provider whether that process is gone.
-    // The recovery waits its turn behind the exit's recording, which holds the agent's queue until its time has run out.
+    // The recovery takes its turn in the agent's queue when the exit's recording lets go of it. The daemon is kept
+    // waiting for the exit until the recovery is answered: once it stops waiting it replaces the process itself, and
+    // a recovery that came after that would be told that the runtime is connected.
     const attachedBefore = agent.attachedRefs().length;
-    const recovering = agent.request("supervisor.recover_agent_runtime", { entry_id: agent.id, daemon_generation: agent.daemonGeneration() });
-    await agent.eventually(() => agent.ownerActionRuns(), "the recovery has begun");
-    const [recovered] = await Promise.all([recovering, wait.runsOut()]);
+    const recovering = answered(agent.request("supervisor.recover_agent_runtime", { entry_id: agent.id, daemon_generation: agent.daemonGeneration() }));
+    await agent.eventually(() => agent.ownerActionRuns() || recovering.answer !== undefined, "the recovery has begun");
+    await wait.runsOut(() => agent.eventually(() => recovering.answer !== undefined, "the recovery is answered while the daemon still waits for the exit"));
+    const recovered = recovering.answer!;
     assert.equal(recovered.ok, true, recovered.error);
     const asked = agent.attachedRefs().slice(attachedBefore);
     assert.ok(asked.length > 0, "the provider was asked to attach the saved process");
@@ -873,6 +874,11 @@ test(`an app update that waits on an exit that cannot be recorded, because ${fau
     await agent.eventually(() => asked.answer !== undefined, "the update goes ahead once the wait for the exit has ended");
     assert.equal(asked.answer!.ok, true, asked.answer!.error);
     assert.equal(terminals.settling(agent.id), false);
+    // The bounds ran from the exit. Had the wait begun again at the update's request, half the ordinary attempts' time more would have passed.
+    const { settleMs, lastAttemptMs, recordMs } = terminals.bounds;
+    const afterOrdinaryAttempts: Partial<Record<typeof fault, number>> = { "closing its approvals never returns": lastAttemptMs / 2,
+      "its entry's queue never answers": lastAttemptMs, "saving its terminal never returns": lastAttemptMs + recordMs };
+    assert.equal(wait.passed(), settleMs + (afterOrdinaryAttempts[fault] ?? 0), "the update waited for what was left of the exit's wait, and no longer");
   } finally {
     endFault();
     await agent.cleanup();

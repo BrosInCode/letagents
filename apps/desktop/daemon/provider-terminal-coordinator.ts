@@ -76,8 +76,9 @@ export type ProviderTerminalPorts = {
 export const EXIT_SETTLEMENT_BOUNDS = { settleMs: 15_000, lastAttemptMs: 8_000, recordMs: 4_000 };
 /**
  * What times those bounds: the process's own timers, outside tests. A test
- * that runs a whole daemon puts its own in place and ends each bound itself,
- * so that no bound has to be shortened and raced against the work it bounds.
+ * that runs a whole daemon can put its own in place and end each bound
+ * itself, instead of shortening the bounds and racing them against the work
+ * they bound.
  */
 export type ExitSettlementTimers = {
   set(callback: () => void, ms: number): object;
@@ -145,7 +146,7 @@ export class ProviderTerminalCoordinator {
     PlannedConfigurationReplacement
   >();
 
-  /** The bounds in force. */
+  /** Tests shorten these, or leave them and take over `timers`. */
   bounds = { ...EXIT_SETTLEMENT_BOUNDS };
   /** Times the bounds; see ExitSettlementTimers. A bound never keeps the process alive. */
   timers: ExitSettlementTimers = {

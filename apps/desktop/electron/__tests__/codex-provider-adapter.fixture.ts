@@ -1417,7 +1417,9 @@ export const EXIT_RECORDING_FAULTS = {
  * the daemon's own work takes as long as it takes. Only these bounds are
  * taken over: the daemon's heartbeat, its retries and the test's own waits
  * stay on the real clock, which Node's mock timers would stop as well.
- * Call this before the exit.
+ * Call this before the exit, and end the fault before the daemon is stopped:
+ * a stop waits for an exit that is still being recorded, and on this clock
+ * that wait ends only when the recording does.
  */
 export function exitWaitClock(agent: Awaited<ReturnType<typeof codexDaemonFixture>>) {
   const terminals = agent.exitSettlement();
@@ -1470,15 +1472,20 @@ export function exitWaitClock(agent: Awaited<ReturnType<typeof codexDaemonFixtur
     /**
      * Lets the wait for an exit that cannot be recorded run out, the way the
      * fault makes it. A bound ends only once the recording has reached the
-     * fault and waits on that bound, and a step that would still finish is
-     * never cut short. The ordinary attempts' time ends when one of them is
-     * held or failed by the fault: an attempt that is still on its way would
-     * otherwise be left in the entry's queue and run again later. After that
+     * fault and waits on that bound, and no attempt is cut short on its way
+     * there: an attempt that is cut while it still waits for the entry's
+     * queue stays in that queue and runs again later, beside the last one.
+     * So the ordinary attempts' time ends when one of them is held by the
+     * fault, or, where the fault fails them, between two of them. After that
      * a step that fails leaves nothing more to wait for; approvals that never
      * close cost the last attempt half its time; a queue or a save that never
      * answers costs it all of that time, and the save then has its own.
+     *
+     * `beforeItStops` is awaited before the last of those bounds, which is
+     * the one whose end makes the daemon stop waiting for the exit and
+     * converge the agent: for something that has to happen while it waits.
      */
-    async runsOut() {
+    async runsOut(beforeItStops: () => Promise<unknown> = async () => {}) {
       if (!fault) throw new Error("Name the fault that stops the exit being recorded first, with fault().");
       const { settleMs, lastAttemptMs, recordMs } = terminals.bounds;
       const ended = () => !recording();
@@ -1487,18 +1494,29 @@ export function exitWaitClock(agent: Awaited<ReturnType<typeof codexDaemonFixtur
         throw new Error(`${(error as Error).message}: the recording ${exit ? `is ${exit.overdue || "on time"}, ${exit.operation ? "with an attempt running" : "between attempts"}${exit.abandoned ? ", given up" : ""}` : "has ended"}; `
           + `it reached the fault ${reached()} time(s); bounds still running: ${[...armed].map((timer) => timer.ms).join(", ") || "none"}`);
       });
-      await waitFor(() => left(settleMs) !== null && reached() >= 1, "an attempt to record the exit reaches the fault");
-      pass(left(settleMs)!);
+      const fails = fault === "closing its approvals fails every time" || fault === "saving its terminal fails every time";
+      /** The bounds that end under this fault, in order: when the daemon waits on each, and how much time ends it. */
+      const bounds: Array<{ waitsOnIt: () => boolean; label: string; left: () => number }> = [{
+        waitsOnIt: () => left(settleMs) !== null && reached() >= 1 && !(fails && recording()?.operation),
+        label: fails ? "an attempt to record the exit fails, and the next has not begun" : "an attempt to record the exit is held by the fault",
+        left: () => left(settleMs)!,
+      }];
       if (fault === "closing its approvals never returns") {
-        await waitFor(() => ended() || (reached() >= 2 && left(lastAttemptMs / 2) !== null), "the last attempt waits for the approvals to close");
-        pass(lastAttemptMs / 2);
+        bounds.push({ waitsOnIt: () => reached() >= 2 && left(lastAttemptMs / 2) !== null, label: "the last attempt waits for the approvals to close", left: () => lastAttemptMs / 2 });
       } else if (fault === "its entry's queue never answers" || fault === "saving its terminal never returns") {
-        await waitFor(() => ended() || (recording()!.overdue === "last" && Boolean(recording()!.operation) && reached() >= 2), "the last attempt reaches the fault as well");
-        pass(lastAttemptMs);
+        bounds.push({ waitsOnIt: () => recording()!.overdue === "last" && Boolean(recording()!.operation) && reached() >= 2,
+          label: "the last attempt is held by the fault as well", left: () => lastAttemptMs });
         if (fault === "saving its terminal never returns") {
-          await waitFor(() => ended() || (Boolean(recording()!.abandoned) && reached() >= 3), "the daemon stops waiting, and its save of the terminal reaches the fault");
-          pass(recordMs);
+          bounds.push({ waitsOnIt: () => Boolean(recording()!.abandoned) && reached() >= 3,
+            label: "the daemon stops waiting, and its save of the terminal is held by the fault", left: () => recordMs });
         }
+      }
+      for (const [index, bound] of bounds.entries()) {
+        if (index === bounds.length - 1) await beforeItStops();
+        // The first bound belongs to an exit that is being recorded; a later one is moot once the recording has ended.
+        // Nothing but this test runs between the check and the end of the bound, so what the check saw still holds.
+        await waitFor(() => (index > 0 && ended()) || bound.waitsOnIt(), bound.label);
+        if (!(index > 0 && ended())) pass(bound.left());
       }
       await waitFor(ended, "the daemon no longer waits for the exit");
     },

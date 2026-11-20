@@ -815,24 +815,32 @@ test("a Cursor MCP inspection that never answers ends at its own time limit, on 
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-time-limit-"));
   const executable = join(root, "fake-cursor-agent");
+  // Only the limit ends this inspection. Should the limit fail, the test ends it in its cleanup.
+  const stopped = new AbortController();
+  let ended = false;
+  let attestation: Promise<void> = Promise.resolve();
   try {
     // The stand-in never answers and never exits, so the outcome is the same
     // however long this machine takes to start it: nothing races the limit.
     const cursorBin = writeFakeProvider(executable, "setInterval(() => {}, 1_000);\n");
     const startedAt = Date.now();
-    let ended = false;
-    const attestation = assertCursorSupervisedMcpAuthority({
+    attestation = assertCursorSupervisedMcpAuthority({
       cursorBin,
       cwd: root,
       writableProfileRoot: root,
       env: { ...process.env },
       timeoutMs: 500,
+      signal: stopped.signal,
     }).finally(() => { ended = true; });
     const rejected = assert.rejects(attestation, /failed while inspecting .*\(ETIMEDOUT\)/);
     await eventually(() => ended, "the inspection to end at its time limit");
     await rejected;
     assert.ok(Date.now() - startedAt >= 500, "not before the limit");
   } finally {
+    if (!ended) {
+      stopped.abort();
+      await attestation.catch(() => undefined);
+    }
     try {
       rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     } catch {
