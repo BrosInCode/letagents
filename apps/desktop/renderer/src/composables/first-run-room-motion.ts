@@ -1,7 +1,8 @@
 const reducedMotion = "(prefers-reduced-motion: reduce)";
 const landingWait = 2_500;
 const maxLandingWait = 5_000;
-const flightDuration = 680;
+const departureDuration = 420;
+const landingDuration = 460;
 
 type ActiveEntry = () => string | null;
 type Landing = { icon: SVGSVGElement; bounds: DOMRect };
@@ -65,36 +66,46 @@ function waitForLanding(activeEntry: ActiveEntry, preference: MediaQueryList, me
 export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: () => void) {
   if (!icon || window.matchMedia(reducedMotion).matches) return;
   const glyph = icon.querySelector("svg");
-  const clickedBounds = icon.getBoundingClientRect();
-  if (!glyph || !clickedBounds.width || !clickedBounds.height) return;
-  const copy = glyph.cloneNode(true);
-  icon.dataset.firstRoomDeparture = "waiting";
+  const origin = icon.getBoundingClientRect();
+  if (!glyph || !origin.width || !origin.height) return;
   const style = getComputedStyle(icon);
-  const accent = style.getPropertyValue("--first-room-accent").trim() || style.color;
-  const color = style.color;
+  const accent = style.getPropertyValue("--workspace-accent").trim()
+    || style.getPropertyValue("--setup-accent").trim()
+    || style.color;
+  const flight = document.createElement("span");
+  flight.className = "first-room-flight";
+  flight.setAttribute("aria-hidden", "true");
+  Object.assign(flight.style, {
+    left: `${origin.left}px`, top: `${origin.top}px`,
+    width: `${origin.width}px`, height: `${origin.height}px`,
+    color: style.getPropertyValue("--setup-text").trim() || style.color,
+  });
+  flight.style.setProperty("--first-room-accent", accent);
+  flight.style.setProperty("--first-room-duration", `${landingDuration}ms`);
+  flight.append(glyph.cloneNode(true));
+  document.body.append(flight);
+  icon.dataset.firstRoomDeparture = "";
+
+  // Start with motion toward the sidebar. The real row owns the end position
+  // once the room snapshot and workspace are available.
+  const approachX = Math.min(72, origin.left) - origin.left;
+  const approachY = -Math.min(48, origin.top * .14);
+  const departure = flight.animate([
+    { transform: "translate3d(0, 0, 0)" },
+    { transform: `translate3d(${approachX}px, ${approachY}px, 0)` },
+  ], { duration: departureDuration, easing: "cubic-bezier(.23, .66, .34, 1)", fill: "forwards" });
 
   const fly = async (activeEntry: ActiveEntry, metadataReady: Promise<void>) => {
     const preference = window.matchMedia(reducedMotion);
     const initialLanding = await waitForLanding(activeEntry, preference, metadataReady);
     if (!initialLanding) return;
     let landing = initialLanding;
-    const sourceBounds = icon.getBoundingClientRect();
-    const origin = sourceBounds.width && sourceBounds.height ? sourceBounds : clickedBounds;
-
-    const flight = document.createElement("span");
-    flight.className = "first-room-flight";
-    flight.setAttribute("aria-hidden", "true");
-    Object.assign(flight.style, {
-      left: `${origin.left}px`, top: `${origin.top}px`,
-      width: `${origin.width}px`, height: `${origin.height}px`, color,
-    });
-    flight.style.setProperty("--first-room-accent", accent);
-    flight.style.setProperty("--first-room-duration", `${flightDuration}ms`);
+    const approachTransform = getComputedStyle(flight).transform;
+    departure.cancel();
     const destinationGlyph = landing.icon.cloneNode(true) as SVGSVGElement;
     destinationGlyph.style.color = getComputedStyle(landing.icon).color;
-    flight.append(copy, destinationGlyph);
-    document.body.append(flight);
-    icon.dataset.firstRoomDeparture = "moving";
+    flight.append(destinationGlyph);
+    flight.dataset.landing = "";
     landing.icon.dataset.firstRoomLanding = "";
 
     function landingFrame(target: Landing): Keyframe {
@@ -106,9 +117,9 @@ export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (
     }
 
     const animation = flight.animate([
-      { transform: "translate3d(0, 0, 0) scale(1)" },
+      { transform: approachTransform },
       landingFrame(landing),
-    ], { duration: flightDuration, easing: "cubic-bezier(.32, .04, .43, 1)", fill: "both" });
+    ], { duration: landingDuration, easing: "cubic-bezier(.32, .04, .43, 1)", fill: "both" });
     let frame = 0;
     const cancel = () => animation.cancel();
     // Data can replace or move the sidebar row after the workspace appears.
@@ -148,9 +159,15 @@ export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (
       cancelAnimationFrame(frame);
       preference.removeEventListener("change", cancel);
       delete landing.icon.dataset.firstRoomLanding;
-      flight.remove();
     }
   };
 
-  return { fly, clearDeparture: () => { delete icon.dataset.firstRoomDeparture; } };
+  return {
+    fly,
+    dispose: () => {
+      departure.cancel();
+      delete icon.dataset.firstRoomDeparture;
+      flight.remove();
+    },
+  };
 }

@@ -276,8 +276,22 @@ try {
   }
   assert.ok(releaseFirstRoomRead, 'room access is being checked');
   if (hasMotion) {
-    assert.ok(await js(`Boolean(document.querySelector('${roomChoice} [data-first-room-departure="waiting"]'))
-      && !document.querySelector('.first-room-flight')`), 'the clicked icon is emphasized before room access returns');
+    const departure = await js(`new Promise(resolve => {
+      const icon = document.querySelector('.first-room-flight:not([data-landing])');
+      if (!icon) return resolve(null);
+      const left = parseFloat(icon.style.left);
+      const top = parseFloat(icon.style.top);
+      const until = performance.now() + 800;
+      function sample() {
+        const current = icon.getBoundingClientRect().left;
+        if (left - current >= 24) resolve({ left, top, current });
+        else if (performance.now() >= until) resolve(null);
+        else requestAnimationFrame(sample);
+      }
+      sample();
+    })`);
+    assert.ok(departure && Math.hypot(departure.left - origin.left, departure.top - origin.top) < 2,
+      'the icon moves from the clicked room while access is still pending');
   }
   // A changed list may remove the clicked row while the room opens.
   await js(`{ const input = document.querySelector('.company-room-search input'); input.value = 'missing'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
@@ -297,7 +311,8 @@ try {
   assert.ok(releaseWorkspaceMetadata, 'workspace metadata starts loading while the landing row is missing');
   await new Promise(resolve => setTimeout(resolve, 2650));
   await js(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
-  assert.ok(await js(`!document.querySelector('.first-room-flight')`), 'room arrival waits while the sidebar row is still loading');
+  assert.ok(await js(`!document.querySelector('.first-room-flight[data-landing]')`), 'landing waits while the sidebar row is still loading');
+  const approach = await js(`document.querySelector('.first-room-flight')?.getBoundingClientRect().toJSON() ?? null`);
   if (hasMotion) {
     assert.ok(await js(`{
       const picker = document.querySelector('[data-testid="desktop-first-run-onboarding"][data-room-arrival="waiting"]');
@@ -309,7 +324,7 @@ try {
   await js(`document.getElementById('defer-sidebar-room-row').remove()`);
   releaseWorkspaceMetadata();
   if (hasMotion) {
-    await waitFor(`Boolean(document.querySelector('.first-room-flight'))`);
+    await waitFor(`Boolean(document.querySelector('.first-room-flight[data-landing]'))`);
     assert.ok(await js(`document.querySelector('[data-testid="desktop-first-run-onboarding"]')?.dataset.roomArrival === 'moving'
       && !document.querySelector('[data-testid="desktop-shell"]').inert`), 'the picker fades as the flight begins');
     const flight = await js(`{
@@ -330,8 +345,8 @@ try {
     }`);
     const distance = (a, b) => Math.hypot(a.left - b.left, a.top - b.top);
     assert.ok(flight.sameRoom, 'the icon lands on the active room in the sidebar');
-    assert.ok(distance(flight.from, origin) < 2, 'the flight starts at the exact clicked room icon');
-    assert.ok(distance(flight.halfway, origin) > 10 && distance(flight.halfway, flight.destination) > 10, 'the icon visibly travels between the two positions');
+    assert.ok(approach && distance(flight.from, approach) < 2, 'landing continues from the waiting icon without jumping');
+    assert.ok(distance(flight.halfway, approach) > 10 && distance(flight.halfway, flight.destination) > 10, 'the icon visibly travels between the two positions');
     assert.ok(distance(flight.to, flight.destination) < 2, 'the flight ends at the sidebar icon');
     await js(`window.dispatchEvent(new Event('resize'))`);
     assert.ok(await js(`Boolean(document.querySelector('.first-room-flight'))`), 'a layout notification does not cancel the flight');

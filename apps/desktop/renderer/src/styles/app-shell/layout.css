@@ -215,12 +215,6 @@ html[data-window-chrome="mac"] .first-run-wizard { --welcome-brand-top: 42px; }
   transition: opacity 300ms ease-in-out 60ms;
 }
 
-[data-first-room-departure="waiting"] {
-  --first-room-accent: var(--workspace-accent, var(--setup-accent));
-  position: relative;
-  isolation: isolate;
-}
-
 .first-room-flight {
   position: fixed;
   display: grid;
@@ -229,8 +223,7 @@ html[data-window-chrome="mac"] .first-run-wizard { --welcome-brand-top: 42px; }
   pointer-events: none;
   transform-origin: top left;
 }
-.first-room-flight::before,
-[data-first-room-departure="waiting"]::before {
+.first-room-flight::before {
   content: "";
   position: absolute;
   z-index: -1;
@@ -239,7 +232,7 @@ html[data-window-chrome="mac"] .first-run-wizard { --welcome-brand-top: 42px; }
   border-radius: 8px;
   background: color-mix(in srgb, var(--first-room-accent) 23%, #171a1d);
 }
-.first-room-flight::before {
+.first-room-flight[data-landing]::before {
   animation: first-room-backplate-out var(--first-room-duration) ease-out both;
 }
 .first-room-flight svg {
@@ -248,9 +241,9 @@ html[data-window-chrome="mac"] .first-run-wizard { --welcome-brand-top: 42px; }
   width: 100%;
   height: 100%;
 }
-.first-room-flight svg:first-child { animation: first-room-glyph-out var(--first-room-duration) linear both; }
-.first-room-flight svg:last-child { animation: first-room-glyph-in var(--first-room-duration) linear both; }
+.first-room-flight[data-landing] svg:first-child { animation: first-room-glyph-out var(--first-room-duration) linear both; }
+.first-room-flight[data-landing] svg:last-child { animation: first-room-glyph-in var(--first-room-duration) linear both; }
 @keyframes first-room-backplate-out { 73% { opacity: 1; } to { opacity: 0; } }
 @keyframes first-room-glyph-out { 75% { opacity: 1; } to { opacity: 0; } }
 @keyframes first-room-glyph-in { 0%, 75% { opacity: 0; } to { opacity: 1; } }
-[data-first-room-landing], [data-first-room-departure="moving"] { opacity: 0; }
+[data-first-room-landing], [data-first-room-departure] { opacity: 0; }

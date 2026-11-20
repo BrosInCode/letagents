@@ -750,7 +750,7 @@ async function openOnboardingRoom(id: string, icon?: HTMLElement) {
   const flight = prepareFirstRoomFlight(icon, () => { roomArrival.value = "moving"; });
   const clearArrival = () => {
     roomArrival.value = null;
-    flight?.clearDeparture();
+    flight?.dispose();
   };
   if (flight) roomArrival.value = "waiting";
   try {
