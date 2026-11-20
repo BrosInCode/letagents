@@ -732,7 +732,6 @@ test("the reply lookup of legacy routing reads only the named messages of a larg
 
   const rowsRead = async (text: string, values: unknown[]) => (await explainRead(text, values)).rowsRead("messages");
   // The room holds 3,000 messages; the three named ones are all the lookup may read.
+  // (The join-list form read all 3,000. That is not asserted: it is PostgreSQL's plan, not this code.)
   assert.ok(await rowsRead(found.read!.text, found.read!.values) <= 10, "new form reads about 3 messages");
-  const oldRead = await rowsRead(REFERENCE_REPLY_SQL, [JSON.stringify([7, 1400, 2999].map((number) => ({ number }))), room.id]);
-  assert.ok(oldRead >= 3000, `the old form reads the whole room (${oldRead})`);
 });

@@ -39,9 +39,10 @@ export async function captureStatement<T>(
 /**
  * What a statement read, taken from EXPLAIN ANALYZE and not from a clock: for
  * a table, the rows its scans returned or discarded, times each scan's loops;
- * for the statement, the pages it touched. EXPLAIN reports rows as a rounded
- * mean per loop, so the count is exact for one loop and close for many.
- * The time limit only turns a runaway statement into a failure.
+ * for the statement, the pages it touched. The row count is a lower bound:
+ * EXPLAIN reports rows as a rounded mean per loop, and it does not report
+ * index entries that an index condition rejected. The page count has neither
+ * gap. The time limit only turns a runaway statement into a failure.
  */
 export async function explainRead(pool: Pool, text: string, values: unknown[], timeoutMs = 60_000) {
   const connection = await pool.connect();

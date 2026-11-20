@@ -387,7 +387,9 @@ export async function getMessageAccountAgentRoutings(
     //    other session conditions out of that lookup, so no wider index can
     //    take the key's place.
     //  - The message and account lists are array parameters, which PostgreSQL
-    //    searches by index or by hash.
+    //    searches by index or by hash. The hash needs the list as a constant
+    //    at planning time, which an unnamed statement gives (db.execute). A
+    //    named prepared statement can lose it and search value by value.
     //  - Live successors and prior speakers are lookup tables. Each is built
     //    in one pass, and only when a row asks for it.
     const receipts = await executor.execute<{
@@ -424,8 +426,9 @@ export async function getMessageAccountAgentRoutings(
           ) AS one
       ), prior_speaker AS (
         -- 'message:position' -> the agents that already answered before that
-        -- position, in turn order. Sequenced receipts are few (at most
-        -- MAX_SEQUENTIAL_REPLY_AGENTS for each plan of a message).
+        -- position, in turn order. This reads the page's receipts once more
+        -- and keeps the sequenced ones (at most MAX_SEQUENTIAL_REPLY_AGENTS
+        -- for each plan of a message).
         SELECT jsonb_object_agg(
                  turn.message_number || ':' || turn.turn_position,
                  turn.speakers

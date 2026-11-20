@@ -2170,6 +2170,8 @@ test("PG send-time routing persists a 6,000-recipient broadcast in bounded chunk
     overlayPlan.rowsRead("room_agent_sessions") <= 6_000,
     `session rows read: ${overlayPlan.rowsRead("room_agent_sessions")}`,
   );
+  // About 3 pages for each recipient; the statement above touched 588,000.
+  assert.ok(overlayPlan.pages <= 60_000, `pages touched: ${overlayPlan.pages}`);
   assert.equal(
     batchedOverlays.get(owner)?.get(Number(broadcast.id.slice(4)))?.recipient_agent_keys.length,
     6_000,
