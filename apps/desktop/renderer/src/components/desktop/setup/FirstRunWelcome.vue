@@ -50,10 +50,14 @@ const fullScreen = ref(false);
 const supportsFullscreen = ref(false);
 const handoffState = ref(props.leaving ? "settled" : "idle");
 const handoffDuration = 800;
+const paintInterval = 1000 / 60;
 let paint: ReturnType<typeof createHandoffPainter> | undefined;
+let context: CanvasRenderingContext2D | null = null;
 let observer: ResizeObserver | undefined;
 let preference: MediaQueryList | undefined;
 let width = 0, height = 0, elapsed = 0, last = 0, animation = 0;
+let nextPaint = 0;
+let needsDraw = true;
 let startedAt = 0;
 let mark: HandoffMark | undefined;
 
@@ -88,7 +92,8 @@ function placeMark() {
 function settleHandoff() {
   handoffState.value = "settled";
   mark = undefined;
-  canvas.value?.getContext("2d")?.clearRect(0, 0, width, height);
+  needsDraw = false;
+  context?.clearRect(0, 0, width, height);
   emit("settle");
 }
 
@@ -99,8 +104,15 @@ function draw() {
 }
 
 function tick(now: number) {
-  if (!last || now - last >= 29) {
+  animation = 0;
+  // A deadline follows the display clock without painting all 120 Hz frames.
+  // Tolerance absorbs fractional timestamps and refresh-rate jitter.
+  const advance = canPlay() && (!last || now + 1 >= nextPaint);
+  if (advance) {
     if (last && !paused.value) elapsed += Math.min((now - last) / 1000, .06);
+    nextPaint = last
+      ? Math.max(nextPaint + paintInterval, now + paintInterval / 2)
+      : now + paintInterval;
     last = now;
     if (mark) {
       mark.progress = Math.min(1, (now - startedAt) / handoffDuration);
@@ -109,52 +121,64 @@ function tick(now: number) {
         return;
       }
     }
-    draw();
   }
-  animation = requestAnimationFrame(tick);
+  if (advance || needsDraw) {
+    draw();
+    needsDraw = false;
+  }
+  scheduleFrame();
+}
+
+function canPlay() {
+  return !reduced.value && (props.leaving ? Boolean(mark) : !paused.value);
+}
+
+function scheduleFrame() {
+  if (!animation && available.value && width && height && !document.hidden && (needsDraw || canPlay())) {
+    animation = requestAnimationFrame(tick);
+  }
 }
 
 function updatePlayback() {
   cancelAnimationFrame(animation);
+  animation = 0;
   last = 0;
   if (props.leaving && (reduced.value || !available.value || document.hidden) && handoffState.value === "moving") settleHandoff();
-  if (!available.value || reduced.value || document.hidden || (props.leaving ? !mark : paused.value)) return;
-  animation = requestAnimationFrame(tick);
+  scheduleFrame();
 }
 
-function resize() {
+function sizeCanvas() {
   const surface = canvas.value;
-  const context = surface?.getContext("2d");
-  if (!surface || !context || !frame.value) return;
-  const size = frame.value.getBoundingClientRect();
-  if (!size.width || !size.height) return;
-  width = size.width;
-  height = size.height;
+  if (!surface || !context || !width || !height) return;
   const density = Math.min(devicePixelRatio || 1, 1.5, Math.sqrt(1_500_000 / (width * height)));
-  surface.width = Math.max(1, Math.floor(width * density));
-  surface.height = Math.max(1, Math.floor(height * density));
+  const pixelWidth = Math.max(1, Math.floor(width * density));
+  const pixelHeight = Math.max(1, Math.floor(height * density));
+  if (surface.width !== pixelWidth) surface.width = pixelWidth;
+  if (surface.height !== pixelHeight) surface.height = pixelHeight;
   context.setTransform(density, 0, 0, density, 0, 0);
   if (mark) mark = placeMark() ?? mark;
-  draw();
+  needsDraw = true;
+  scheduleFrame();
 }
 
 function lostContext() {
   available.value = false;
+  context = null;
   updatePlayback();
 }
 
 function restoreContext() {
-  const context = canvas.value?.getContext("2d");
+  context = canvas.value?.getContext("2d") ?? null;
   if (!context) return;
   paint = createHandoffPainter(context);
   available.value = true;
-  resize();
+  sizeCanvas();
   updatePlayback();
 }
 
 function motionPreferenceChanged() {
   reduced.value = preference?.matches ?? false;
-  draw();
+  needsDraw = true;
   updatePlayback();
 }
 
@@ -172,7 +196,7 @@ async function toggleFullscreen() {
 function replay() {
   elapsed = 0;
   paused.value = false;
-  draw();
+  needsDraw = true;
   updatePlayback();
 }
 
@@ -191,7 +215,7 @@ watch(() => props.leaving, leaving => {
   } else {
     mark = undefined;
     handoffState.value = "idle";
-    draw();
+    needsDraw = true;
     heading.value?.focus({ preventScroll: true });
   }
   updatePlayback();
@@ -209,7 +233,13 @@ onMounted(() => {
   canvas.value?.addEventListener("contextlost", lostContext);
   canvas.value?.addEventListener("contextrestored", restoreContext);
   if (frame.value) {
-    observer = new ResizeObserver(resize);
+    observer = new ResizeObserver(([entry]) => {
+      const size = entry.contentRect;
+      if (width === size.width && height === size.height) return;
+      width = size.width;
+      height = size.height;
+      sizeCanvas();
+    });
     observer.observe(frame.value);
   }
   restoreContext();
