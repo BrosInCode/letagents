@@ -248,6 +248,7 @@
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRoomShellRefresh"
+          @activity-history-visible="setRoomActivityHistoryVisible"
           @content-deleted="handleContentDeleted"
           @open-ask-agent="askAgentOpen = true"
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
@@ -643,7 +644,7 @@ Object.assign(app, useAppHistoryWatchers(app));
 const {
   roomAgentWork, roomAgentWorkStatus, roomAgentWorkTruncated, handleRoomRenamed, refresh,
   repoStatusValue, selectedSnapshotLoading, upsertSelectedTask, authSnapshotPending,
-  handleContentDeleted,
+  handleContentDeleted, setRoomActivityHistoryVisible,
 } = Object.assign(app, useAppRoomData(app));
 
 const {

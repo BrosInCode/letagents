@@ -4,6 +4,7 @@ import type {
   DesktopReasoningSession,
   DesktopRoomLiveMetadata,
   DesktopRoomMessage,
+  DesktopRoomLiveMetadataSourceKey,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopTaskSummary,
@@ -276,15 +277,22 @@ export function preserveErroredSnapshotSources(
  * `preserveErroredSnapshotSources` — so a transient outage does not blank the
  * room; its error state is still recorded so degraded-state banners show. The
  * sourceStates of the skipped event-fed sections are preserved verbatim.
+ *
+ * `requested` names the sources the read asked for (absent: all five). A
+ * section that was not requested came back as an empty placeholder: the
+ * snapshot keeps its own data and source state for it.
  */
 export function applyRoomLiveMetadata(
   snapshot: DesktopRoomSnapshot | null,
   metadata: DesktopRoomLiveMetadata,
+  requested?: readonly DesktopRoomLiveMetadataSourceKey[],
 ): DesktopRoomSnapshot | null {
   if (!snapshot) return snapshot;
   if (!snapshotMatchesRoom(snapshot, metadata.roomIdentifier)) return snapshot;
   const states = metadata.sourceStates;
-  const errored = (key: keyof typeof states): boolean => states[key]?.status === "error";
+  const kept = (key: keyof typeof states): boolean => Boolean(requested && !requested.includes(key));
+  // A failed section and a section that was not requested both keep what the snapshot has.
+  const errored = (key: keyof typeof states): boolean => kept(key) || states[key]?.status === "error";
   // Unwrap the top-level Vue proxy. Nested sections read from it are then raw
   // objects, so reused sections stay plain data in the new snapshot.
   const current = toRaw(snapshot);
@@ -304,13 +312,14 @@ export function applyRoomLiveMetadata(
   const boardSettings = errored("boardSettings")
     ? current.boardSettings
     : reuseUnchanged(current.boardSettings, metadata.boardSettings);
+  const state = (key: keyof typeof states) => (kept(key) ? current.sourceStates?.[key] ?? states[key] : states[key]);
   const sourceStates = reuseUnchanged(current.sourceStates, {
     ...current.sourceStates,
-    focusRooms: states.focusRooms,
-    participants: states.participants,
-    presence: states.presence,
-    activityHistory: states.activityHistory,
-    boardSettings: states.boardSettings,
+    focusRooms: state("focusRooms"),
+    participants: state("participants"),
+    presence: state("presence"),
+    activityHistory: state("activityHistory"),
+    boardSettings: state("boardSettings"),
   });
   if (
     focusRooms === current.focusRooms

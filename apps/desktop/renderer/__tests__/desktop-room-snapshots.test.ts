@@ -305,6 +305,26 @@ describe("applyRoomLiveMetadata", () => {
     assert.equal(applied.sourceStates.presence.status, "error");
   });
 
+  it("keeps the data and the state of a section that the read did not ask for", () => {
+    const history = [{ id: "agent:river" }];
+    const current = {
+      ...roomSnapshot("cloud", "hello", "msg_1"),
+      recentActivity: history,
+      participants: [{ participantKey: "old" }],
+      sourceStates: { ...readyStates(), activityHistory: { status: "error", error: "history down" } },
+    } as unknown as DesktopRoomSnapshot;
+    // A read without the activity history returns an empty, ready placeholder for it.
+    const metadata = liveMetadata({ participants: [{ participantKey: "fresh" }] as unknown as DesktopRoomLiveMetadata["participants"] });
+
+    const applied = applyRoomLiveMetadata(current, metadata, ["focusRooms", "participants", "presence", "boardSettings"])!;
+
+    assert.equal(applied.recentActivity, history, "the history on screen is not replaced by the placeholder");
+    assert.deepEqual(applied.sourceStates.activityHistory, { status: "error", error: "history down" });
+    assert.deepEqual(applied.participants.map((p) => (p as { participantKey: string }).participantKey), ["fresh"]);
+    // Without the list, the same payload replaces the history as before.
+    assert.deepEqual(applyRoomLiveMetadata(current, metadata)!.recentActivity, []);
+  });
+
   it("returns the snapshot unchanged when the metadata is for a different room", () => {
     const current = roomSnapshot("cloud", "hello", "msg_1");
     const metadata = liveMetadata({ roomIdentifier: "some/other/room" });
