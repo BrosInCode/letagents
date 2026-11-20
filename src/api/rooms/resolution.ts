@@ -1,5 +1,6 @@
 import type { Response } from "express";
 import { isRoomDeleted } from "../db/content-deletion.js";
+import { getRoomWithTombstoneByExactId } from "../db/rooms.js";
 import { RoomDeletedError } from "../db/utils.js";
 
 import {
@@ -12,6 +13,7 @@ import {
 import { getOrCreateGitHubRefRoomFromLocator } from "../github/git-room-routing.js";
 import { classifyRoomLocator, isFocusRoomIdShape, isJoinCodeShape, parseFocusRoomLocator } from "./room-nature.js";
 import { normalizeRoomId } from "./routing.js";
+import type { ResolvedRoomRequest } from "./request-room.js";
 
 export function isReservedRoomId(roomId: string): boolean {
   return isFocusRoomIdShape(roomId);
@@ -124,4 +126,31 @@ export async function resolveCanonicalRoomRequestId(roomId: string): Promise<str
 
   const existing = await getProjectById(roomId);
   return existing?.id ?? roomId;
+}
+
+/**
+ * `resolveCanonicalRoomRequestId` followed by `resolveRoomOrReply` (without
+ * create), with the same answers. A request that names a room by its exact
+ * stored id, which is nearly every request, reads the room and its tombstone
+ * in one statement instead of three (two for a join code, which the pair
+ * never canonicalizes). Every other locator (alias, focus locator, an id that
+ * is not normalized, an unknown or deleted id) takes the two-step path
+ * unchanged.
+ */
+export async function resolveRoomRequestOrReply(
+  roomId: string,
+  res: Response
+): Promise<ResolvedRoomRequest> {
+  const locatorType = classifyRoomLocator(roomId).type;
+  if ((locatorType === "room_name" || locatorType === "reserved" || locatorType === "join_code")
+    && normalizeRoomId(roomId) === roomId) {
+    const found = await getRoomWithTombstoneByExactId(roomId);
+    if (found?.deleted) {
+      replyRoomDeleted(res, roomId);
+      return { roomId, project: null };
+    }
+    if (found) return { roomId, project: found.project };
+  }
+  const canonicalRoomId = await resolveCanonicalRoomRequestId(roomId);
+  return { roomId: canonicalRoomId, project: await resolveRoomOrReply(canonicalRoomId, res) };
 }

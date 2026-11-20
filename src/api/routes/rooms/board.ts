@@ -40,6 +40,7 @@ import {
 } from "../../request/agent-identity.js";
 import { resolveGitRoomProjectRole } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+import { resolveRoomRequest, type RoomRequestResolver } from "../../rooms/request-room.js";
 import { registerJevLinkRoutes, respondToJevLinkIntentDecision, type JevLinkDecisions } from "./jev-links.js";
 import { registerBoardPlanningRoutes } from "./board-planning.js";
 
@@ -49,6 +50,8 @@ export interface RoomBoardRouteDeps {
   jevLinks?: () => Promise<JevLinkDecisions>;
   ensureTaskGitRoomForActiveWorkLease?(input: { parentRoomId: string; taskId: string }): Promise<unknown>;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
+  /** Both room resolvers in one statement where it can; see `resolveRoomRequest`. */
+  resolveRoomRequestOrReply: RoomRequestResolver;
   resolveRoomOrReply(
     roomId: string,
     res: Response,
@@ -351,8 +354,7 @@ export function registerRoomBoardRoutes(
 
   app.get(/^\/rooms\/(.+)\/board-governance$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
 
@@ -369,8 +371,7 @@ export function registerRoomBoardRoutes(
 
   app.get(/^\/rooms\/(.+)\/board-settings$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
 
@@ -389,8 +390,7 @@ export function registerRoomBoardRoutes(
 
   app.patch(/^\/rooms\/(.+)\/board-settings$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireAdmin(req, res, project))) return;
 
@@ -416,8 +416,7 @@ export function registerRoomBoardRoutes(
 
   app.post(/^\/rooms\/(.+)\/board-managers$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireAdmin(req, res, project))) return;
 
@@ -443,8 +442,7 @@ export function registerRoomBoardRoutes(
 
   app.delete(/^\/rooms\/(.+)\/board-managers\/active$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireAdmin(req, res, project))) return;
 
@@ -459,8 +457,7 @@ export function registerRoomBoardRoutes(
 
   app.get(/^\/rooms\/(.+)\/board-intents$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
 
@@ -471,8 +468,7 @@ export function registerRoomBoardRoutes(
 
   app.post(/^\/rooms\/(.+)\/board-intents$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
 
@@ -550,9 +546,8 @@ export function registerRoomBoardRoutes(
 
   app.post(/^\/rooms\/(.+)\/board-intents\/([^/]+)\/approve$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     const intentId = (req.params as Record<string, string>)[1] ?? "";
-    const project = await deps.resolveRoomOrReply(roomId, res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
 
@@ -752,9 +747,8 @@ export function registerRoomBoardRoutes(
 
   app.post(/^\/rooms\/(.+)\/board-intents\/([^/]+)\/deny$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     const intentId = (req.params as Record<string, string>)[1] ?? "";
-    const project = await deps.resolveRoomOrReply(roomId, res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
 

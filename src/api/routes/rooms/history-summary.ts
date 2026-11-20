@@ -17,10 +17,9 @@ import { isHumanAppWrite } from "../../request/app-session.js";
 import type { RoomSettingsRouteDeps } from "./settings.js";
 import { replyTurnHoldAgentKey, resolveMessageActivationIdentity } from "./messages/activation-identity.js";
 import { resolveParticipantRoom } from "./messages/helpers.js";
-import type { RoomMessageRouteDeps } from "./messages/types.js";
 
 export type RoomHistorySummaryRouteDeps = Pick<RoomSettingsRouteDeps,
-  "resolveCanonicalRoomRequestId" | "resolveRoomOrReply" | "requireAdmin" | "resolveProjectRole" | "requireParticipant"> & {
+  "resolveCanonicalRoomRequestId" | "resolveRoomRequestOrReply" | "resolveRoomOrReply" | "requireAdmin" | "resolveProjectRole" | "requireParticipant"> & {
   settings?: Pick<typeof settings, "getRoomHistorySummaryEnabled" | "setRoomHistorySummaryEnabled">;
   history?: Pick<typeof history, "startOrWakeRoomHistory" | "skipRoomHistoryToNow" | "readRoomHistoryStatus" | "readRoomHistoryView" | "readRoomHistoryExpansion">;
   summarizerConfigured?: () => boolean;
@@ -41,7 +40,7 @@ export function registerRoomHistorySummaryRoutes(app: Express, deps: RoomHistory
   const holdAgentKey = deps.resolveHoldAgentKey
     ?? (async (req: AuthenticatedRequest, roomId: string) => replyTurnHoldAgentKey(await resolveMessageActivationIdentity(req, roomId)));
   const room = (req: AuthenticatedRequest, res: Response) =>
-    resolveParticipantRoom(req, res, deps as unknown as RoomMessageRouteDeps);
+    resolveParticipantRoom(req, res, deps);
   const isPerson = (req: AuthenticatedRequest) => isHumanAppWrite(req, req.body ?? {});
   const canManage = async (req: AuthenticatedRequest, project: Project) =>
     isPerson(req) && await deps.resolveProjectRole(project, req.sessionAccount) === "admin";

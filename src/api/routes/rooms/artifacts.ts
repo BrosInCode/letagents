@@ -12,11 +12,14 @@ import {
   type TaskWorkflowArtifact,
 } from "../../repo-workflow.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+import { resolveRoomRequest, type RoomRequestResolver } from "../../rooms/request-room.js";
 
 export type PublishedArtifactSource = "manual" | "task_workflow_artifact";
 
 export interface RoomArtifactRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
+  /** Both room resolvers in one statement where it can; see `resolveRoomRequest`. */
+  resolveRoomRequestOrReply: RoomRequestResolver;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireParticipant(
     req: AuthenticatedRequest,
@@ -213,8 +216,7 @@ export function registerRoomArtifactRoutes(
 ): void {
   app.get(/^\/rooms\/(.+)\/artifacts$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -233,8 +235,7 @@ export function registerRoomArtifactRoutes(
 
   app.post(/^\/rooms\/(.+)\/artifacts$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;

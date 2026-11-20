@@ -30,6 +30,7 @@ import {
 } from "../../../rooms/activity-state.js";
 import { buildFallbackRoomParticipants } from "../../../rooms/participant-fallback.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
+import { resolveRoomRequest } from "../../../rooms/request-room.js";
 import {
   buildRoomActivityHistoryParticipants,
   normalizeHistoryKind,
@@ -46,9 +47,7 @@ export function registerPresenceReadRoutes(
 ): void {
   app.get(/^(?:\/api)?\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -80,9 +79,7 @@ export function registerPresenceReadRoutes(
 
   app.get(/^\/rooms\/(.+)\/participants$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -142,9 +139,7 @@ export function registerPresenceReadRoutes(
 
   app.get(/^\/rooms\/(.+)\/activity-history$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;

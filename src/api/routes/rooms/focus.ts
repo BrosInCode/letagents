@@ -32,6 +32,7 @@ import {
   type FocusRoomConclusionDetails,
 } from "../../focus-rooms/conclusion.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+import { resolveRoomRequest, type RoomRequestResolver } from "../../rooms/request-room.js";
 import {
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
@@ -53,6 +54,8 @@ export interface RoomFocusRouteDeps {
   getTaskOwnershipState: typeof getTaskOwnershipState;
   concludeFocusRoom: typeof concludeFocusRoom;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
+  /** Both room resolvers in one statement where it can; see `resolveRoomRequest`. */
+  resolveRoomRequestOrReply: RoomRequestResolver;
   resolveRoomOrReply(
     roomId: string,
     res: Response,
@@ -157,9 +160,7 @@ export function registerRoomFocusRoutes(
   app.get(/^\/rooms\/(.+)\/focus\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -184,9 +185,7 @@ export function registerRoomFocusRoutes(
   app.patch(/^\/rooms\/(.+)\/focus\/([^/]+)\/settings$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res, { allowCreate: false });
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -222,9 +221,7 @@ export function registerRoomFocusRoutes(
 
   app.get(/^\/rooms\/(.+)\/focus-rooms$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -243,9 +240,7 @@ export function registerRoomFocusRoutes(
 
   app.post(/^\/rooms\/(.+)\/focus-rooms$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res, { allowCreate: false });
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -299,9 +294,7 @@ export function registerRoomFocusRoutes(
   app.delete(/^\/rooms\/(.+)\/focus\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res, { allowCreate: false });
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireAdmin(req, res, project))) return;
@@ -329,9 +322,7 @@ export function registerRoomFocusRoutes(
   app.post(/^\/rooms\/(.+)\/focus\/([^/]+)\/conclude$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res, { allowCreate: false });
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;

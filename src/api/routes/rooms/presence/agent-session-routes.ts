@@ -37,6 +37,7 @@ import {
 import { disconnectRoomAgentDeliverySession } from "../../../rooms/agent-delivery.js";
 import { closeRequestsOfRetiredAgent } from "../../../rooms/attention-answers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
+import { resolveRoomRequest } from "../../../rooms/request-room.js";
 import {
   requireWorkerRequestAgentIdentity,
   type ResolvedRequestAgentIdentity,
@@ -158,9 +159,7 @@ export function registerAgentSessionRoutes(
 
   app.post(/^\/rooms\/(.+)\/agent-sessions$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -679,8 +678,7 @@ export function registerAgentSessionRoutes(
   app.get(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/process$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
 
@@ -793,8 +791,7 @@ export function registerAgentSessionRoutes(
   app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/process\/exit$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
     const identity = await requireWorkerRequestAgentIdentity({
@@ -826,9 +823,7 @@ export function registerAgentSessionRoutes(
   app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/disconnect$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!targetSessionId) {
@@ -918,8 +913,7 @@ export function registerAgentSessionRoutes(
   app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/failures$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
 
@@ -966,8 +960,7 @@ export function registerAgentSessionRoutes(
   app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/desktop-heartbeat$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
     const body = req.body as {
@@ -1033,8 +1026,7 @@ export function registerAgentSessionRoutes(
   app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/native-activity$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     const body = req.body as {
       agent_session_id?: string;
@@ -1142,8 +1134,7 @@ export function registerAgentSessionRoutes(
   app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/desktop-pause$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
     const body = req.body as {

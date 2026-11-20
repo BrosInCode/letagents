@@ -9,6 +9,7 @@ import {
 } from "../../../http/helpers.js";
 import { buildSyntheticPresenceEntry } from "../../../presence/fallback.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
+import { resolveRoomRequest } from "../../../rooms/request-room.js";
 import { requireWorkerRequestAgentIdentity } from "../../../request/agent-identity.js";
 import {
   normalizeAgentPresenceStatus,
@@ -26,9 +27,7 @@ export function registerPresenceUpdateRoutes(
 ): void {
   app.post(/^\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;

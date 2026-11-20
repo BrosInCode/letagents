@@ -309,6 +309,25 @@ export async function getProjectById(id: string): Promise<Project | undefined> {
 }
 
 /**
+ * The room stored under exactly this id, and whether a permanent-deletion
+ * tombstone names the same id, read in one statement. Aliases are not
+ * followed: undefined means no row has this id.
+ */
+export async function getRoomWithTombstoneByExactId(
+  id: string
+): Promise<{ project: Project; deleted: boolean } | undefined> {
+  const [row] = await db
+    .select({
+      room: rooms,
+      deleted: sql<boolean>`EXISTS (SELECT 1 FROM deleted_rooms WHERE room_id = ${id})`,
+    })
+    .from(rooms)
+    .where(eq(rooms.id, id))
+    .limit(1);
+  return row ? { project: toProject(row.room), deleted: row.deleted === true } : undefined;
+}
+
+/**
  * Change a room's id inside the caller's transaction. Foreign keys with
  * ON UPDATE CASCADE carry most rows along; this also moves what they cannot:
  * the per-room message and task counters (their names embed the room id) and

@@ -15,10 +15,13 @@ import {
 import { createGitHubAppSetupState } from "../../github/app-setup-state.js";
 import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+import { resolveRoomRequest, type RoomRequestResolver } from "../../rooms/request-room.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 
 export interface GitHubIntegrationRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
+  /** Both room resolvers in one statement where it can; see `resolveRoomRequest`. */
+  resolveRoomRequestOrReply: RoomRequestResolver;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireAdmin(
     req: AuthenticatedRequest,
@@ -49,8 +52,7 @@ async function getGitHubRoomIntegrationProject(
   res: Response,
   rawId: string
 ): Promise<GitHubRoomIntegrationProject | null> {
-  const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-  const project = await deps.resolveRoomOrReply(roomId, res);
+  const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
   if (!project) {
     return null;
   }

@@ -16,6 +16,7 @@ import type { FocusParentBoardWriteIsolationDecision } from "../../../focus-room
 import type { EnsureTaskGitRoomResult } from "../../../github/task-git-room.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import type { buildTaskUpdatePatch } from "../../../tasks/ownership.js";
+import type { RoomRequestResolver } from "../../../rooms/request-room.js";
 
 export type RoomRole = "admin" | "participant" | "anonymous";
 export type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
@@ -50,6 +51,8 @@ export interface RoomTaskRouteDeps {
   /** Binds a newly linked card to its ticket when the room's filter matches it. Best effort. */
   refreshLinkedTicket?: (roomId: string, externalRef: string) => Promise<void>;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
+  /** Both room resolvers in one statement where it can; see `resolveRoomRequest`. */
+  resolveRoomRequestOrReply: RoomRequestResolver;
   resolveRoomOrReply(
     roomId: string,
     res: Response,

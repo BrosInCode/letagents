@@ -2,9 +2,12 @@ import type { Response } from "express";
 
 import type { Message, Project } from "../../../db.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
+import type { RoomRequestResolver } from "../../../rooms/request-room.js";
 
 export interface RoomPresenceRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
+  /** Both room resolvers in one statement where it can; see `resolveRoomRequest`. */
+  resolveRoomRequestOrReply: RoomRequestResolver;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireAdmin(
     req: AuthenticatedRequest,

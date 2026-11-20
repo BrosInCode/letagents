@@ -13,6 +13,7 @@ import type {
 import type { AgentPromptKind } from "../../../../shared/room-agent-prompts.js";
 import type { RoomEventBroker } from "../../../server/room-event-broker.js";
 import type { RoomMessageOverlayBatcher } from "../../../server/room-message-overlays.js";
+import type { RoomRequestResolver } from "../../../rooms/request-room.js";
 
 export interface RoomMessageRouteDeps {
   roomEventBroker: RoomEventBroker;
@@ -54,6 +55,8 @@ export interface RoomMessageRouteDeps {
   queueMessageReactionInvalidation?(roomId: string): void;
   searchRoomMessages?: typeof import("../../../db/messages/search.js").searchRoomMessages;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
+  /** Both room resolvers in one statement where it can; see `resolveRoomRequest`. */
+  resolveRoomRequestOrReply: RoomRequestResolver;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireParticipant(
     req: AuthenticatedRequest,
@@ -106,5 +109,5 @@ export interface RoomMessageRouteDeps {
  */
 export type RoomMessageHandlerDeps = Omit<
   RoomMessageRouteDeps,
-  "resolveCanonicalRoomRequestId" | "resolveRoomOrReply" | "requireParticipant"
+  "resolveCanonicalRoomRequestId" | "resolveRoomRequestOrReply" | "resolveRoomOrReply" | "requireParticipant"
 >;

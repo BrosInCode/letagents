@@ -15,7 +15,7 @@ import { testWakeWebhookRule } from "../../wake-rules/webhook-test.js";
 import { resolveParticipantRoom, routeParam } from "./messages/helpers.js";
 import type { RoomMessageRouteDeps } from "./messages/types.js";
 
-export type WakeRuleRouteDeps = Pick<RoomMessageRouteDeps, "resolveCanonicalRoomRequestId" | "resolveRoomOrReply" | "requireParticipant">;
+export type WakeRuleRouteDeps = Pick<RoomMessageRouteDeps, "resolveCanonicalRoomRequestId" | "resolveRoomRequestOrReply" | "resolveRoomOrReply" | "requireParticipant">;
 
 function fail(res: Response, error: unknown): void {
   // A room admin check GitHub did not answer: retry, not "not allowed".
@@ -100,7 +100,7 @@ function personWebhookForm(body: Record<string, unknown>): { url: string; secret
 }
 
 export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): void {
-  const room = (req: AuthenticatedRequest, res: Response) => resolveParticipantRoom(req, res, deps as RoomMessageRouteDeps);
+  const room = (req: AuthenticatedRequest, res: Response) => resolveParticipantRoom(req, res, deps);
 
   app.get(/^\/rooms\/(.+)\/wake-rules$/, async (req: AuthenticatedRequest, res) => {
     try {

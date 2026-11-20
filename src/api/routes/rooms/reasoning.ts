@@ -24,6 +24,7 @@ import {
   type AuthenticatedRequest,
 } from "../../http/helpers.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+import { resolveRoomRequest, type RoomRequestResolver } from "../../rooms/request-room.js";
 import { requireWorkerRequestAgentIdentity } from "../../request/agent-identity.js";
 import {
   normalizeAgentPresenceStatus,
@@ -47,6 +48,8 @@ interface ReasoningSessionRemovedEvent {
 export interface RoomReasoningRouteDeps {
   reasoningEvents: EventEmitter;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
+  /** Both room resolvers in one statement where it can; see `resolveRoomRequest`. */
+  resolveRoomRequestOrReply: RoomRequestResolver;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireParticipant(
     req: AuthenticatedRequest,
@@ -153,9 +156,7 @@ export function registerRoomReasoningRoutes(
 
   app.get(/^\/rooms\/(.+)\/reasoning$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -181,9 +182,7 @@ export function registerRoomReasoningRoutes(
 
   app.get(/^\/rooms\/(.+)\/reasoning-sessions$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -212,9 +211,7 @@ export function registerRoomReasoningRoutes(
 
   app.post(/^\/rooms\/(.+)\/reasoning-sessions$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -313,10 +310,9 @@ export function registerRoomReasoningRoutes(
 
   app.get(/^\/rooms\/(.+)\/reasoning-sessions\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     const sessionId = (req.params as Record<string, string>)[1] ?? "";
 
-    const project = await deps.resolveRoomOrReply(roomId, res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -339,10 +335,9 @@ export function registerRoomReasoningRoutes(
 
   app.patch(/^\/rooms\/(.+)\/reasoning-sessions\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     const sessionId = (req.params as Record<string, string>)[1] ?? "";
 
-    const project = await deps.resolveRoomOrReply(roomId, res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
@@ -421,10 +416,9 @@ export function registerRoomReasoningRoutes(
     /^\/rooms\/(.+)\/reasoning-sessions\/([^/]+)\/updates$/,
     async (req: AuthenticatedRequest, res) => {
       const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-      const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+      const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
       const sessionId = (req.params as Record<string, string>)[1] ?? "";
 
-      const project = await deps.resolveRoomOrReply(roomId, res);
       if (!project) return;
 
       if (!(await deps.requireParticipant(req, res, project))) return;
@@ -524,9 +518,7 @@ export function registerRoomReasoningRoutes(
    */
   app.delete(/^\/rooms\/(.+)\/live-activity$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-    const project = await deps.resolveRoomOrReply(roomId, res);
+    const { project } = await resolveRoomRequest(deps, normalizeRoomId(rawId), res);
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
