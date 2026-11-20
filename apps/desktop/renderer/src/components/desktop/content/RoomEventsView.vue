@@ -12,6 +12,7 @@ import { computed, ref } from 'vue';
 import type { DesktopGitHubEventsPage } from '../../../../../electron/ipc-types';
 import ActivityFeed from '../../../../../../../shared/ui/activity/ActivityFeed.vue';
 import PullRequestChangesButton from './room-events/PullRequestChangesButton.vue';
+import { desktopActivityEvent } from '../../../domain/activity-event';
 const diffOpen = ref(false);
 const props = defineProps<{
   roomIdentifier: string;
@@ -41,13 +42,7 @@ const emit = defineEmits<{
   closeSelectedEvent: [];
 }>();
 
-const events = computed(() => (props.eventsPage?.events || []).filter(event => !props.linkedTaskId || event.linkedTaskId === props.linkedTaskId).map(event => ({
-  id: event.id, event_type: event.eventType, action: event.action, github_object_id: event.githubObjectId,
-  github_object_url: event.githubObjectUrl, title: event.title, state: event.state, actor_login: event.actorLogin,
-  metadata: event.metadata, linked_task_id: event.linkedTaskId, created_at: event.createdAt,
-  provider_event_at: event.providerEventAt, provider_object_updated_at: event.providerObjectUpdatedAt,
-  event_order_at: event.eventOrderAt, head_sha: event.headSha,
-})));
+const events = computed(() => (props.eventsPage?.events || []).filter(event => !props.linkedTaskId || event.linkedTaskId === props.linkedTaskId).map(desktopActivityEvent));
 </script>
 <style scoped>
 .desktop-activity-panel { height: 100%; overflow-y: auto; background: var(--bg, #0a0a0a); }

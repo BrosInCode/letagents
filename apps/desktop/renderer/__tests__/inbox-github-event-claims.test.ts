@@ -28,7 +28,7 @@ function needsYou(rooms: DesktopAttentionRoom[], updatesIncluded = true): Deskto
   return { rooms, failures: [], limited: false, cloudUnavailable: false, signedOut: false, updatesIncluded };
 }
 
-const checkRows = (data: DesktopNeedsYou) => filterUniversalInbox(buildUniversalInbox(data), 'updates', [], {}).filter(item => item.category === 'github_failure');
+const checkRows = (data: DesktopNeedsYou) => filterUniversalInbox(buildUniversalInbox(data), 'updates', [], {}).filter(item => item.category === 'github_attention');
 
 test('focus rooms that read their repo room\'s lane show a shared failed check once, in the repo room', () => {
   // The repo room comes last and sorts after the focus rooms, yet it keeps the event.
@@ -38,6 +38,8 @@ test('focus rooms that read their repo room\'s lane show a shared failed check o
   assert.equal(rows[0].roomIdentifier, REPO);
   assert.equal(rows[0].roomName, 'App');
   assert.deepEqual(inboxNavigationIntent(rows[0], 'room'), { roomIdentifier: REPO }, 'Open room opens the room that kept the event');
+  assert.deepEqual(inboxNavigationIntent(rows[0]), { roomIdentifier: REPO, taskId: undefined, eventId: 'evt_1', eventUrl: 'https://github.com/acme/app/actions/runs/77' },
+    'Open in Activity opens the group of the newest event, or its GitHub page when the room has not loaded it');
   assert.deepEqual([...claimGitHubEvents(data.rooms)].map(([id, events]) => [id, events.map(event => event.id)]),
     [['focus_1', []], ['focus_2', []], [REPO, ['evt_1']]]);
 });
@@ -62,7 +64,7 @@ test('repeated failures of one check still group into one row with their occurre
   assert.equal(rows.length, 1);
   assert.equal(rows[0].roomIdentifier, REPO);
   const activity = rows[0].activity;
-  assert.ok(activity?.kind === 'github_failure');
+  assert.ok(activity?.kind === 'github_attention');
   assert.equal(activity.occurrenceCount, 3);
   assert.deepEqual(activity.activity.map(entry => entry.id), ['github:evt_3', 'github:evt_2', 'github:evt_1']);
 });

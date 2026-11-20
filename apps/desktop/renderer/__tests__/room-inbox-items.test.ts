@@ -108,7 +108,7 @@ describe("desktop room inbox items", () => {
     assert.match(JSON.stringify(named?.activity), /@SummitMisty Noted\./);
   });
 
-  it("derives actionable inbox rows from threads, tasks, GitHub failures, and blocked agents", () => {
+  it("derives actionable inbox rows from threads, tasks, GitHub attention, and blocked agents", () => {
     const threadPage: DesktopRoomThreadInboxPage = {
       threads: [
         {
@@ -144,12 +144,11 @@ describe("desktop room inbox items", () => {
         reasoning("reasoning_1", "blocked", "Need repo access"),
         reasoning("reasoning_2", "working", null),
       ],
-      fallbackRepository: "BrosInCode/letagents",
     });
 
     assert.deepEqual(actionable.map((item) => item.kind).sort(), [
       "agent_blocked",
-      "github_failure",
+      "github_attention",
       "task_blocked",
       "task_review",
       "thread",
@@ -158,24 +157,28 @@ describe("desktop room inbox items", () => {
     assert.equal(readableThread?.title, "LumenRiver requested task_19: Tests and CI");
     assert.equal(readableThread?.preview, "The request was approved");
     assert.ok(readableThread?.activity.every((entry) => !["Unread root", "Latest reply"].includes(entry.description || "")));
-    const githubFailure = actionable.find((item) => item.kind === "github_failure");
-    assert.ok(githubFailure);
-    assert.equal(githubFailure.preview, "Failed check from CI");
-    assert.equal(githubFailure.context, "BrosInCode/letagents · task_133 · by github-actions");
-    assert.equal(githubFailure.occurrenceCount, 2);
-    assert.equal(githubFailure.timestamp, "2026-06-01T08:25:00.000Z");
-    assert.equal(githubFailure.firstSeenTimestamp, "2026-06-01T08:20:00.000Z");
+    const githubAttention = actionable.find((item) => item.kind === "github_attention");
+    assert.ok(githubAttention);
+    assert.equal(githubAttention.title, "lint");
+    assert.equal(githubAttention.preview, "Build failed: lint");
+    assert.equal(githubAttention.context, "github-actions");
+    assert.equal(githubAttention.event.id, "evt_3", "the row opens the newest event of its group");
+    assert.equal(githubAttention.url, "https://github.com/BrosInCode/letagents/actions/runs/77");
+    assert.equal(githubAttention.occurrenceCount, 3);
+    assert.equal(githubAttention.timestamp, "2026-06-01T08:25:00.000Z");
+    assert.equal(githubAttention.firstSeenTimestamp, "2026-06-01T08:20:00.000Z");
     assert.deepEqual(
-      githubFailure.activity.map((entry) => [entry.id, entry.timestamp]),
+      githubAttention.activity.map((entry) => [entry.id, entry.timestamp]),
       [
         ["github:evt_3", "2026-06-01T08:25:00.000Z"],
         ["github:evt_1", "2026-06-01T08:20:00.000Z"],
+        ["github:evt_2", "2026-06-01T08:20:00.000Z"],
       ],
     );
     assert.notEqual(
-      desktopInboxItemFingerprint(githubFailure),
+      desktopInboxItemFingerprint(githubAttention),
       desktopInboxItemFingerprint({
-        ...githubFailure,
+        ...githubAttention,
         timestamp: "2026-06-01T08:24:00.000Z",
       }),
     );
@@ -188,6 +191,28 @@ describe("desktop room inbox items", () => {
       reasoningSessions: [],
     });
     assert.deepEqual(all.map((item) => item.id).sort(), ["thread:msg_1", "thread:msg_4"]);
+  });
+
+  it("drops a GitHub failure once a later run passes or the pull request merges", () => {
+    const rows = (githubEvents: DesktopGitHubRoomEvent[]) => buildDesktopInboxItems({
+      filter: "actionable", threadPage: null, tasks: [], githubEvents, reasoningSessions: [],
+    }).filter((item) => item.kind === "github_attention");
+    assert.equal(rows([githubEvent("evt_1", "failure", "2026-06-01T08:20:00.000Z")]).length, 1);
+    assert.deepEqual(rows([
+      githubEvent("evt_1", "failure", "2026-06-01T08:20:00.000Z"),
+      githubEvent("evt_2", "success", "2026-06-01T08:30:00.000Z"),
+    ]), []);
+    const pullRequest: DesktopGitHubRoomEvent = {
+      ...githubEvent("evt_pr", "merged", "2026-06-01T08:40:00.000Z"),
+      eventType: "pull_request", action: "closed", githubObjectId: "42", title: "Ship it",
+      githubObjectUrl: "https://github.com/BrosInCode/letagents/pull/42", metadata: { merged: true },
+    };
+    const failedOnPullRequest: DesktopGitHubRoomEvent = {
+      ...githubEvent("evt_check", "failure", "2026-06-01T08:30:00.000Z"),
+      metadata: { conclusion: "failure", pull_request_url: "https://github.com/BrosInCode/letagents/pull/42" },
+    };
+    assert.equal(rows([failedOnPullRequest]).length, 1);
+    assert.deepEqual(rows([failedOnPullRequest, pullRequest]), []);
   });
 
   it("surfaces offline worker agents and ignores reachable or controller presence", () => {

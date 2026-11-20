@@ -10,7 +10,8 @@ import type {
   DesktopSnapshotSourceStates,
   DesktopTaskSummary,
 } from "../../../../../../electron/ipc-types";
-import { presentDesktopGitHubEvent } from "../room-events/presenter";
+import { githubAttentionItems } from "../../../../../../../../shared/ui/activity/attention";
+import { desktopActivityEvent } from "../../../../domain/activity-event";
 import { attentionResponseAgentNames, roomMessageVisibleText } from "../../../../domain/attention-response";
 
 export type DesktopInboxFilter = "actionable" | "all";
@@ -59,7 +60,7 @@ export type DesktopInboxItemKind =
   | "thread"
   | "task_review"
   | "task_blocked"
-  | "github_failure"
+  | "github_attention"
   | "agent_blocked"
   | "agent_offline"
   | "rental_request";
@@ -99,7 +100,8 @@ export type DesktopInboxItem =
       task: DesktopTaskSummary;
     })
   | (DesktopInboxItemBase & {
-      kind: "github_failure";
+      kind: "github_attention";
+      /** The newest event in the group; opening the row opens its group in Activity. */
       event: DesktopGitHubRoomEvent;
       url: string | null;
     })
@@ -124,14 +126,13 @@ export interface BuildDesktopInboxItemsInput {
   reasoningSessions: readonly DesktopReasoningSession[];
   presence?: readonly DesktopAgentPresence[];
   rentalRequests?: readonly DesktopRentalRequest[];
-  fallbackRepository?: string | null;
 }
 
 export function buildDesktopInboxItems(input: BuildDesktopInboxItemsInput): DesktopInboxItem[] {
   const items: DesktopInboxItem[] = [
     ...threadInboxItems(input.threadPage, input.filter, attentionResponseAgentNames(input.presence || [])),
     ...taskInboxItems(input.tasks),
-    ...githubFailureInboxItems(input.githubEvents, input.fallbackRepository ?? null),
+    ...githubAttentionInboxItems(input.githubEvents),
     ...agentBlockedInboxItems(input.reasoningSessions),
     ...agentOfflineInboxItems(input.presence || []),
     ...rentalRequestInboxItems(input.rentalRequests || []),
@@ -212,54 +213,33 @@ function taskInboxItems(tasks: readonly DesktopTaskSummary[]): DesktopInboxItem[
     }));
 }
 
-function githubFailureInboxItems(
-  events: readonly DesktopGitHubRoomEvent[],
-  fallbackRepository: string | null,
-): DesktopInboxItem[] {
-  const groups = new Map<string, Extract<DesktopInboxItem, { kind: "github_failure" }>>();
-  for (const event of events) {
-    const presented = presentDesktopGitHubEvent(event, fallbackRepository);
-    if (presented.kind !== "check" || presented.tone !== "danger") continue;
-    const preview = presented.sourceLabel ? `Failed check from ${presented.sourceLabel}` : "Failed check";
-    const context = compactGitHubContext(presented);
-    const groupKey = [presented.title, preview, context || ""].join("\u001f");
-    const existing = groups.get(groupKey);
-    const item: Extract<DesktopInboxItem, { kind: "github_failure" }> = {
-      id: `github-failure:${hashString(groupKey)}`,
-      kind: "github_failure",
-      title: presented.title,
-      preview,
-      context,
-      timestamp: presented.createdAt || null,
-      firstSeenTimestamp: presented.createdAt || null,
-      occurrenceCount: existing ? existing.occurrenceCount + 1 : 1,
+/** Open pull requests with changes requested or a failed build, as the web inbox lists them. */
+function githubAttentionInboxItems(events: readonly DesktopGitHubRoomEvent[]): DesktopInboxItem[] {
+  const byId = new Map(events.map((event) => [event.id, event]));
+  return githubAttentionItems(events.map(desktopActivityEvent)).flatMap((item) => {
+    const event = byId.get(item.latestEventId);
+    if (!event) return [];
+    return [{
+      id: `github-attention:${item.id}`,
+      kind: "github_attention" as const,
+      title: item.title,
+      preview: item.body,
+      context: item.actor,
+      timestamp: item.timestamp || null,
+      firstSeenTimestamp: item.firstSeen || null,
+      occurrenceCount: item.history.length,
       actionable: true,
-      activity: [
-        {
-          id: `github:${event.id}`,
-          label: `${presented.title} failed`,
-          description: preview,
-          timestamp: presented.createdAt || null,
-          tone: "danger",
-        },
-      ],
+      activity: sortActivity(item.history.map((entry) => ({
+        id: `github:${entry.id}`,
+        label: entry.label,
+        description: entry.body,
+        timestamp: entry.timestamp || null,
+        tone: "neutral" as const,
+      }))),
       event,
-      url: presented.url,
-    };
-    if (!existing) {
-      groups.set(groupKey, item);
-      continue;
-    }
-    const existingTime = Date.parse(existing.timestamp || "");
-    const nextTime = Date.parse(item.timestamp || "");
-    groups.set(groupKey, {
-      ...(Number.isFinite(nextTime) && (!Number.isFinite(existingTime) || nextTime > existingTime) ? item : existing),
-      firstSeenTimestamp: earlierTimestamp(existing.firstSeenTimestamp, item.firstSeenTimestamp),
-      occurrenceCount: item.occurrenceCount,
-      activity: sortActivity([...existing.activity, ...item.activity]),
-    });
-  }
-  return [...groups.values()];
+      url: item.url,
+    }];
+  });
 }
 
 function agentBlockedInboxItems(
@@ -386,25 +366,6 @@ function sortActivity(
     .sort((left, right) => compareTimestamps(right.timestamp, left.timestamp));
 }
 
-function compactGitHubContext(
-  presented: ReturnType<typeof presentDesktopGitHubEvent>,
-): string | null {
-  const parts = [
-    presented.repository,
-    presented.linkedTaskId,
-    presented.actor ? `by ${presented.actor}` : null,
-  ].filter(Boolean);
-  return parts.length ? parts.join(" · ") : null;
-}
-
-function hashString(value: string): string {
-  let hash = 5381;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = ((hash << 5) + hash) ^ value.charCodeAt(index);
-  }
-  return (hash >>> 0).toString(36);
-}
-
 function isTaskInboxStatus(task: DesktopTaskSummary): boolean {
   return task.status === "in_review" || task.status === "blocked";
 }
@@ -441,17 +402,4 @@ function compareTimestamps(left: string | null, right: string | null): number {
     return Number.isFinite(leftTime) ? 1 : -1;
   }
   return 0;
-}
-
-function earlierTimestamp(left: string | null, right: string | null): string | null {
-  if (!left) return right;
-  if (!right) return left;
-  const leftTime = Date.parse(left);
-  const rightTime = Date.parse(right);
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
-    return leftTime <= rightTime ? left : right;
-  }
-  if (Number.isFinite(leftTime)) return left;
-  if (Number.isFinite(rightTime)) return right;
-  return left;
 }

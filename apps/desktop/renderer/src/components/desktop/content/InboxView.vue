@@ -267,7 +267,7 @@ function markRead(updates: UniversalInboxItem[]) { const result = markInboxUpdat
 function undoRead() { dismissals.value = undoInboxRead(lastRead.value, dismissals.value); lastRead.value = []; persistDismissals(); void nextTick(() => layout.value?.focusHeading()); }
 onBeforeUnmount(() => { alive = false; clearTimeout(settleTimer); });
 function date(time: string) { return Number.isFinite(Date.parse(time)) ? new Date(time).toLocaleString() : ''; }
-function actionLabel(item: UniversalInboxItem) { if (item.taskId) return 'Open task'; return ({ thread: 'Open thread', github_failure: 'Open check', agent_blocked: 'Open agent', agent_offline: 'Open room activity', rental_request: 'Review rental request', agent_attention: 'Open diagnostics', board_intent: 'Review request' } as Record<string, string>)[item.category] || 'Open room'; }
+function actionLabel(item: UniversalInboxItem) { if (item.taskId) return 'Open task'; return ({ thread: 'Open thread', github_attention: 'Open in Activity', agent_blocked: 'Open agent', agent_offline: 'Open room activity', rental_request: 'Review rental request', agent_attention: 'Open diagnostics', board_intent: 'Review request' } as Record<string, string>)[item.category] || 'Open room'; }
 function openRoom(item: UniversalInboxItem, mode?: 'room' | 'source') {
   const intent = inboxNavigationIntent(item, mode);
   if (intent) emit('openRoom', intent); else emit('openRental');
