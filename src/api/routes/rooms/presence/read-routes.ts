@@ -57,9 +57,7 @@ export function registerPresenceReadRoutes(
     const scope = typeof req.query.scope === "string" ? req.query.scope.trim().toLowerCase() : "live";
     try {
       const presence = scope === "snapshot"
-        ? (await getRoomAgentPresenceSnapshot(project.id))
-            .filter((entry) => entry.session_kind === "worker")
-            .slice(0, limit)
+        ? await getRoomAgentPresenceSnapshot(project.id, { relevantTo: "roster", limit })
         : await getRoomAgentPresence(project.id, { limit });
 
       res.json({
@@ -172,9 +170,15 @@ export function registerPresenceReadRoutes(
         messageCounts,
         reasoningSessionCounts,
       ] = await Promise.all([
-        getRoomParticipantsForRooms([selectedRoom.id], { includeHidden: true }),
+        // A history entry carries no avatar, so neither read looks any up.
+        getRoomParticipantsForRooms([selectedRoom.id], { includeHidden: true, includeAvatars: false }),
         getRoomActivityHistoryTasks(selectedRoom.id),
-        getRoomAgentPresenceSnapshot(selectedRoom.id, { includeEndedSessions: true, collapseWorkerSessions: true }).catch(() => []),
+        getRoomAgentPresenceSnapshot(selectedRoom.id, {
+          includeEndedSessions: true,
+          collapseWorkerSessions: true,
+          relevantTo: "history",
+          includeAvatars: false,
+        }).catch(() => []),
         getRoomMessageCountsBySender(selectedRoom.id).catch(() => []),
         getRoomReasoningSessionCountsByActor(selectedRoom.id).catch(() => []),
       ]);

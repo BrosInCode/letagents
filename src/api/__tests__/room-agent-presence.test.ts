@@ -939,3 +939,253 @@ test(
     assert.ok(presence.every((entry) => entry.freshness === "stale"));
   }
 );
+
+test(
+  "roster reads return the workers of the full snapshot, from the worker rows alone",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (!pool || !getRoomAgentPresence || !getRoomAgentPresenceSnapshot || !setRoomLiveAgentSuppressed) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    const presenceModule = await import("../db/presence.js");
+    const { AGENT_AVATAR_COLORS } = await import("../../../shared/agent-avatar.mjs");
+
+    const roomId = "roster-read";
+    const now = Date.now();
+    const at = (deltaMs: number) => new Date(now + deltaMs).toISOString();
+    const minute = 60_000;
+    const day = 24 * 60 * minute;
+    await pool.query("INSERT INTO rooms (id, display_name, created_at) VALUES ($1, 'Roster', $2)", [roomId, at(-day)]);
+    await pool.query(
+      `INSERT INTO accounts (id, provider, provider_user_id, login, created_at, updated_at)
+       VALUES ('roster-owner', 'github', 'roster-owner', 'Owner', $1, $1)`,
+      [at(-day)]
+    );
+    await pool.query(
+      `INSERT INTO agents (id, canonical_key, name, display_name, owner_account_id, owner_login, owner_label, avatar, created_at, updated_at)
+       VALUES ('roster-agent-1', 'owner/w1', 'w1', 'Worker 1', 'roster-owner', 'owner', 'Owner', $1, $2, $2),
+              ('roster-agent-4', 'owner/w4', 'w4', 'Worker 4', 'roster-owner', 'owner', 'Owner', $1, $2, $2)`,
+      [JSON.stringify({ kind: "initials", color: AGENT_AVATAR_COLORS[0] }), at(-day)]
+    );
+
+    // One session per worker; `ended` sessions are outside every roster read.
+    const sessions: Array<{ id: string; label: string; key: string; instance: string; ended?: boolean }> = [
+      { id: "s1", label: "Worker 1", key: "owner/w1", instance: "i1" },
+      { id: "s2", label: "Worker 2", key: "owner/w2", instance: "i2" },
+      { id: "s3", label: "Worker 3", key: "owner/w3", instance: "i3" },
+      { id: "s4", label: "Worker 4", key: "owner/w4", instance: "i4" },
+      { id: "s5a", label: "Worker 5 before restart", key: "owner/w5", instance: "i5" },
+      { id: "s5b", label: "Worker 5", key: "owner/w5", instance: "i5" },
+      { id: "s6", label: "Ended 6", key: "owner/w6", instance: "i6", ended: true },
+      { id: "s7", label: "Legacy 7", key: "owner/w7", instance: "i7" },
+      { id: "s8", label: "Worker 8", key: "owner/w8", instance: "i8" },
+      { id: "s9", label: "Absorbed 9", key: "owner/w9", instance: "i9" },
+      { id: "s10", label: "StatusOnly 10", key: "owner/w10", instance: "i10" },
+    ];
+    for (const session of sessions) {
+      await pool.query(
+        `INSERT INTO room_agent_sessions (session_id, room_id, token_hash, session_kind, runtime, actor_label, agent_key,
+           agent_instance_id, display_name, owner_account_id, owner_label, ide_label, created_at, updated_at, last_seen_at, ended_at)
+         VALUES ($1, $2, $3, 'worker', 'codex', $4, $5, $6, $4, 'roster-owner', 'Owner', 'Codex', $7, $7, $7, $8)`,
+        [session.id, roomId, `roster-token-${session.id}`, session.label, session.key, session.instance, at(-day),
+          session.ended ? at(-minute) : null]
+      );
+    }
+
+    const deliveries: Array<{
+      session: string; label: string; key: string | null; instance: string | null;
+      connections?: number; updated: number; disconnected?: number; grace?: number;
+    }> = [
+      { session: "s1", label: "Worker 1", key: "owner/w1", instance: "i1", connections: 1, updated: -5_000 },
+      { session: "s2", label: "Worker 2", key: "owner/w2", instance: "i2", updated: -20_000, disconnected: -20_000, grace: 60 * minute },
+      { session: "s3", label: "Worker 3", key: "owner/w3", instance: "i3", updated: -2 * minute, disconnected: -2 * minute },
+      { session: "s4", label: "Worker 4", key: "owner/w4", instance: "i4", updated: -3 * day, disconnected: -3 * day },
+      { session: "s5a", label: "Worker 5 before restart", key: "owner/w5", instance: "i5", updated: -4 * minute, disconnected: -4 * minute },
+      { session: "s5b", label: "Worker 5", key: "owner/w5", instance: "i5", connections: 2, updated: -8_000 },
+      { session: "s6", label: "Ended 6", key: "owner/w6", instance: "i6", connections: 1, updated: -6_000 },
+      { session: "s7", label: "Legacy 7", key: null, instance: null, updated: -5 * minute, disconnected: -5 * minute },
+      { session: "s8", label: "Worker 8", key: "owner/w8", instance: "i8", updated: -3 * minute, disconnected: -3 * minute },
+    ];
+    for (const delivery of deliveries) {
+      await pool.query(
+        `INSERT INTO room_agent_delivery_sessions (room_id, delivery_key, agent_session_id, session_kind, actor_label, agent_key,
+           agent_instance_id, display_name, repo_branch, transport, active_connection_count, last_connected_at,
+           last_disconnected_at, reconnect_grace_expires_at, created_at, updated_at)
+         VALUES ($1, $2, $3, 'worker', $4, $5, $6, $4, $7, 'sse', $8, $9, $10, $11, $9, $12)`,
+        [roomId, `agent_session:${delivery.session}`, delivery.session, delivery.label, delivery.key, delivery.instance,
+          `branch-${delivery.session}`, delivery.connections ?? 0, at(-day),
+          delivery.disconnected === undefined ? null : at(delivery.disconnected),
+          delivery.grace === undefined ? null : at(delivery.grace), at(delivery.updated)]
+      );
+    }
+    // The connection history of chats that never were workers: far more rows
+    // than workers, some newer than every worker row. "Absorbed 9" and
+    // "Worker 3" share their label with a status row or a worker row.
+    await pool.query(
+      `INSERT INTO room_agent_delivery_sessions (room_id, delivery_key, session_kind, actor_label, display_name, transport,
+         active_connection_count, last_connected_at, last_disconnected_at, created_at, updated_at)
+       SELECT $1, 'controller:' || label, 'controller', label, label, 'sse', CASE WHEN i % 50 = 0 THEN 1 ELSE 0 END,
+         $2::timestamptz, $3::timestamptz - i * interval '1 second', $2::timestamptz, $3::timestamptz - i * interval '1 second'
+       FROM (SELECT i, CASE i WHEN 401 THEN 'Absorbed 9' WHEN 402 THEN 'Worker 3' ELSE 'Chat ' || i END AS label
+             FROM generate_series(1, 402) i) chats`,
+      [roomId, at(-day), at(-1_000)]
+    );
+
+    const statuses: Array<{ label: string; kind: "worker" | "controller"; session: string | null; status: string }> = [
+      { label: "Worker 1", kind: "worker", session: "s1", status: "working" },
+      // A status row of another kind still belongs to the worker with its label.
+      { label: "Worker 3", kind: "controller", session: null, status: "reviewing" },
+      // Only a controller delivery row has this label, so the merge hides the row.
+      { label: "Absorbed 9", kind: "worker", session: "s9", status: "working" },
+      { label: "StatusOnly 10", kind: "worker", session: "s10", status: "blocked" },
+      { label: "Chat 5", kind: "controller", session: null, status: "working" },
+      { label: "Ended 6", kind: "worker", session: "s6", status: "working" },
+    ];
+    for (const status of statuses) {
+      await pool.query(
+        `INSERT INTO room_agent_presence (room_id, actor_label, agent_session_id, session_kind, display_name, status,
+           status_text, last_heartbeat_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $2, $5, 'text', $6, $6, $6)`,
+        [roomId, status.label, status.session, status.kind, status.status, at(-10_000)]
+      );
+    }
+    await setRoomLiveAgentSuppressed({ room_id: roomId, actor_labels: ["Worker 8"], suppressed: true, suppressed_by: "Owner" });
+
+    const isWorker = (entry: { session_kind: string }) => entry.session_kind === "worker";
+    const full = await getRoomAgentPresenceSnapshot(roomId);
+    const fullWorkers = full.filter(isWorker);
+    assert.deepEqual(
+      fullWorkers.map((entry) => entry.actor_label),
+      ["Worker 1", "Worker 5", "Worker 2", "StatusOnly 10", "Worker 3", "Worker 8", "Legacy 7", "Worker 4"],
+      "the fixture covers live, grace, offline, legacy, succession and status-only workers"
+    );
+    assert.equal(full.length - fullWorkers.length, 402, "the full snapshot also carries every controller row");
+    assert.equal(fullWorkers.find((entry) => entry.actor_label === "Worker 3")?.status, "reviewing");
+    assert.ok(fullWorkers.find((entry) => entry.actor_label === "Worker 4")?.avatar, "an entry outside a small limit has an avatar");
+
+    for (const limit of [1, 3, 7, 50]) {
+      assert.deepEqual(
+        await getRoomAgentPresenceSnapshot(roomId, { relevantTo: "roster", limit }),
+        fullWorkers.slice(0, limit),
+        `roster snapshot with limit ${limit}`
+      );
+    }
+
+    const expectedLive = presenceModule.filterRoomAgentPresenceForLiveRoster({
+      presence: await presenceModule.getMergedRoomAgentPresenceRecords(roomId, {
+        statusLimit: 500,
+        deliveryLimit: 500,
+        excludeEndedSessions: true,
+      }),
+      suppressedActors: await presenceModule.getRoomLiveAgentSuppressionActorLabels(roomId),
+      limit: 500,
+    });
+    assert.deepEqual(
+      expectedLive.map((entry) => entry.actor_label),
+      ["Worker 1", "Worker 5", "Worker 2", "Worker 3", "Legacy 7"]
+    );
+    assert.deepEqual(await getRoomAgentPresence(roomId, { limit: 500 }), expectedLive);
+
+    const originalQuery = pool.query;
+    const reads: Array<{ text: string; rows: number }> = [];
+    pool.query = (async function (...args: unknown[]) {
+      const query = args[0] as string | { text: string };
+      const result = await (originalQuery as (...args: unknown[]) => Promise<{ rows: unknown[] }>).apply(pool, args);
+      reads.push({ text: typeof query === "string" ? query : query.text, rows: result.rows.length });
+      return result;
+    }) as typeof pool.query;
+    try {
+      await getRoomAgentPresenceSnapshot(roomId, { relevantTo: "roster", limit: 100 });
+      await getRoomAgentPresence(roomId, { limit: 500 });
+    } finally {
+      pool.query = originalQuery;
+    }
+    const deliveryReads = reads.filter((read) => /^select .* from "room_agent_delivery_sessions"/i.test(read.text));
+    const statusReads = reads.filter((read) => /^select .* from "room_agent_presence"/i.test(read.text));
+    assert.equal(deliveryReads.length, 2);
+    assert.equal(statusReads.length, 2);
+    // 8 worker rows of open sessions, and the one controller row that hides a status row.
+    assert.deepEqual(deliveryReads.map((read) => read.rows), [9, 9]);
+    assert.deepEqual(statusReads.map((read) => read.rows), [4, 4]);
+  }
+);
+
+test(
+  "roster reads do not search a room's whole history for each row",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (!pool || !getRoomAgentPresence || !getRoomAgentPresenceSnapshot) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    // Worker rows are never deleted, so a room collects them. A filter that
+    // compares each row with a list of them costs rows times list.
+    const roomId = "roster-long-history";
+    await pool.query(`
+      INSERT INTO rooms (id, display_name, created_at) VALUES ('${roomId}', 'Long history', '2026-01-01');
+      INSERT INTO accounts (id, provider, provider_user_id, login, created_at, updated_at)
+        VALUES ('long-owner', 'github', 'long-owner', 'Owner', '2026-01-01', '2026-01-01');
+      INSERT INTO room_agent_sessions (session_id, room_id, token_hash, session_kind, runtime, actor_label, agent_key,
+          agent_instance_id, display_name, owner_account_id, owner_label, ide_label, created_at, updated_at, last_seen_at, ended_at)
+        SELECT 'long-s-' || i, '${roomId}', 'long-t-' || i, 'worker', 'codex', 'Worker ' || i, 'owner/w' || i, 'inst-' || i,
+          'Worker ' || i, 'long-owner', 'Owner', 'Codex', '2026-01-01', '2026-01-01', '2026-01-01',
+          CASE WHEN i > 5 THEN '2026-02-01'::timestamptz END
+        FROM generate_series(1, 1500) i;
+      INSERT INTO room_agent_delivery_sessions (room_id, delivery_key, agent_session_id, session_kind, actor_label, agent_key,
+          agent_instance_id, display_name, transport, active_connection_count, last_connected_at, created_at, updated_at)
+        SELECT '${roomId}', 'agent_session:long-s-' || i, 'long-s-' || i, 'worker', 'Worker ' || i, 'owner/w' || i, 'inst-' || i,
+          'Worker ' || i, 'sse', CASE WHEN i <= 5 THEN 1 ELSE 0 END, '2026-01-01', '2026-01-01',
+          CASE WHEN i <= 5 THEN now() ELSE now() - i * interval '1 minute' END
+        FROM generate_series(1, 1500) i;
+      INSERT INTO room_agent_delivery_sessions (room_id, delivery_key, session_kind, actor_label, display_name, transport,
+          last_connected_at, created_at, updated_at)
+        SELECT '${roomId}', 'controller:Chat ' || i, 'controller', 'Chat ' || i, 'Chat ' || i, 'sse', '2026-01-01', '2026-01-01',
+          now() - i * interval '7 seconds'
+        FROM generate_series(1, 6000) i;
+      INSERT INTO room_agent_presence (room_id, actor_label, session_kind, display_name, status, last_heartbeat_at, created_at, updated_at)
+        SELECT '${roomId}', 'Chat ' || i, 'controller', 'Chat ' || i, 'working', now() - i * interval '3 seconds', '2026-01-01', '2026-01-01'
+        FROM generate_series(1, 3000) i;
+      INSERT INTO room_agent_presence (room_id, actor_label, agent_session_id, session_kind, display_name, status, last_heartbeat_at, created_at, updated_at)
+        SELECT '${roomId}', 'Worker ' || i, 'long-s-' || i, 'worker', 'Worker ' || i, 'working', now() - i * interval '1 minute', '2026-01-01', '2026-01-01'
+        FROM generate_series(1, 1500) i;
+      ANALYZE;
+    `);
+
+    const originalQuery = pool.query;
+    const reads: Array<{ text: string; values: unknown[] }> = [];
+    pool.query = (async function (...args: unknown[]) {
+      const query = args[0] as string | { text: string; values?: unknown[] };
+      reads.push({
+        text: typeof query === "string" ? query : query.text,
+        values: (typeof query === "string" ? args[1] : query.values ?? args[1]) as unknown[] ?? [],
+      });
+      return (originalQuery as (...args: unknown[]) => Promise<unknown>).apply(pool, args);
+    }) as typeof pool.query;
+    let live: Awaited<ReturnType<typeof getRoomAgentPresence>>;
+    try {
+      live = await getRoomAgentPresence(roomId);
+      await getRoomAgentPresenceSnapshot(roomId, { relevantTo: "roster", limit: 100 });
+    } finally {
+      pool.query = originalQuery;
+    }
+    assert.deepEqual(live.map((entry) => entry.actor_label).sort(), ["Worker 1", "Worker 2", "Worker 3", "Worker 4", "Worker 5"]);
+
+    const rosterReads = reads.filter((read) =>
+      /^select [^()]*? from "room_agent_(delivery_sessions|presence)"/i.test(read.text));
+    assert.equal(rosterReads.length, 4);
+    for (const read of rosterReads) {
+      // PostgreSQL searches an array from its start for each row it filters.
+      // It picks that plan only for some room shapes, so the statement itself
+      // must not compare a row with an array built from the room's rows.
+      assert.doesNotMatch(read.text, /=\s*ANY\s*\(\s*ARRAY\s*\(/i, read.text.slice(0, 80));
+      const result = await pool.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${read.text}`, read.values);
+      const plan = JSON.stringify((result.rows[0] as { "QUERY PLAN": unknown })["QUERY PLAN"]);
+      assert.doesNotMatch(plan, /"Filter": "[^"]*= ANY \(\$\d+\)/, read.text.slice(0, 80));
+    }
+  }
+);

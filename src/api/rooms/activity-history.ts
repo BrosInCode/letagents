@@ -106,10 +106,10 @@ function toTaskSummary(task: RoomActivityHistoryTask): RoomActivityHistoryTaskSu
 
 function compareRoomActivityHistoryEntries(
   left: RoomActivityHistoryEntry,
-  right: RoomActivityHistoryEntry
+  leftTime: number,
+  right: RoomActivityHistoryEntry,
+  rightTime: number
 ): number {
-  const leftTime = Date.parse(left.last_seen_at);
-  const rightTime = Date.parse(right.last_seen_at);
   if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
     return rightTime - leftTime;
   }
@@ -122,46 +122,87 @@ function compareRoomActivityHistoryEntries(
   return left.participant.display_name.localeCompare(right.participant.display_name);
 }
 
+// Each seen time is parsed once: the comparator runs many times per entry.
 export function sortRoomActivityHistoryEntries(
   entries: readonly RoomActivityHistoryEntry[]
 ): RoomActivityHistoryEntry[] {
-  return [...entries].sort(compareRoomActivityHistoryEntries);
+  return entries
+    .map((entry) => ({ entry, time: Date.parse(entry.last_seen_at) }))
+    .sort((left, right) => compareRoomActivityHistoryEntries(left.entry, left.time, right.entry, right.time))
+    .map(({ entry }) => entry);
 }
 
-function participantMatchesAssignee(participant: RoomParticipant, task: RoomActivityHistoryTask): boolean {
-  if (participant.kind === "agent") {
-    const assigneeAgentKey = normalize(task.assignee_agent_key);
-    if (assigneeAgentKey && assigneeAgentKey === normalize(participant.agent_key)) {
-      return true;
-    }
+const CURRENT_TASK_STATUSES: ReadonlySet<string> = new Set([
+  "proposed", "accepted", "assigned", "in_progress", "blocked", "in_review",
+]);
+const COMPLETED_TASK_STATUSES: ReadonlySet<string> = new Set(["merged", "done"]);
 
-    const assignee = normalize(task.assignee);
-    return Boolean(
-      assignee
-      && (assignee === normalize(participant.actor_label) || assignee === normalize(participant.display_name))
-    );
-  }
-
-  const assignee = normalize(task.assignee);
-  return Boolean(
-    assignee
-    && (assignee === normalize(participant.github_login) || assignee === normalize(participant.display_name))
-  );
+/**
+ * The tasks of one room under each normalized name that can claim them, so a
+ * participant finds its tasks by lookup. Comparing every participant with
+ * every task made the history cost participants times tasks on each read.
+ */
+interface RoomTaskIndex {
+  order: Map<RoomActivityHistoryTask, number>;
+  byAssignee: Map<string, RoomActivityHistoryTask[]>;
+  byAssigneeAgentKey: Map<string, RoomActivityHistoryTask[]>;
+  byCreator: Map<string, RoomActivityHistoryTask[]>;
 }
 
-function participantMatchesCreator(participant: RoomParticipant, task: RoomActivityHistoryTask): boolean {
-  const createdBy = normalize(task.created_by);
-  if (!createdBy) {
-    return false;
-  }
+function buildRoomTaskIndex(tasks: readonly RoomActivityHistoryTask[]): RoomTaskIndex {
+  const index: RoomTaskIndex = {
+    order: new Map(),
+    byAssignee: new Map(),
+    byAssigneeAgentKey: new Map(),
+    byCreator: new Map(),
+  };
+  const add = (map: Map<string, RoomActivityHistoryTask[]>, name: string, task: RoomActivityHistoryTask) => {
+    if (!name) return;
+    const existing = map.get(name);
+    if (existing) existing.push(task);
+    else map.set(name, [task]);
+  };
+  tasks.forEach((task, position) => {
+    index.order.set(task, position);
+    add(index.byAssignee, normalize(task.assignee), task);
+    add(index.byAssigneeAgentKey, normalize(task.assignee_agent_key), task);
+    add(index.byCreator, normalize(task.created_by), task);
+  });
+  return index;
+}
 
+/** The tasks under any of the lists, once each, in the room's task order. */
+function unionInRoomOrder(
+  index: RoomTaskIndex,
+  lists: ReadonlyArray<readonly RoomActivityHistoryTask[] | undefined>
+): readonly RoomActivityHistoryTask[] {
+  const found = [...new Set(lists.filter((list): list is readonly RoomActivityHistoryTask[] => Boolean(list)))];
+  if (found.length === 0) return [];
+  if (found.length === 1) return found[0];
+  return [...new Set(found.flat())].sort((left, right) => index.order.get(left)! - index.order.get(right)!);
+}
+
+function tasksAssignedTo(index: RoomTaskIndex, participant: RoomParticipant): readonly RoomActivityHistoryTask[] {
+  const displayName = normalize(participant.display_name);
   if (participant.kind === "agent") {
-    return createdBy === normalize(participant.actor_label)
-      || createdBy === normalize(participant.display_name);
+    return unionInRoomOrder(index, [
+      index.byAssigneeAgentKey.get(normalize(participant.agent_key)),
+      index.byAssignee.get(normalize(participant.actor_label)),
+      index.byAssignee.get(displayName),
+    ]);
   }
 
-  return createdBy === normalize(participant.github_login)
-    || createdBy === normalize(participant.display_name);
+  return unionInRoomOrder(index, [
+    index.byAssignee.get(normalize(participant.github_login)),
+    index.byAssignee.get(displayName),
+  ]);
+}
+
+function tasksCreatedBy(index: RoomTaskIndex, participant: RoomParticipant): readonly RoomActivityHistoryTask[] {
+  return unionInRoomOrder(index, [
+    index.byCreator.get(normalize(participant.kind === "agent" ? participant.actor_label : participant.github_login)),
+    index.byCreator.get(normalize(participant.display_name)),
+  ]);
 }
 
 function buildTaskSearchText(
@@ -265,27 +306,32 @@ export function buildRoomActivityHistoryEntries(input: {
     }
     tasksByRoom.set(task.room_id, [task]);
   }
+  const taskIndexByRoom = new Map<string, RoomTaskIndex>();
+  const taskIndexFor = (roomId: string): RoomTaskIndex => {
+    let index = taskIndexByRoom.get(roomId);
+    if (!index) {
+      index = buildRoomTaskIndex(tasksByRoom.get(roomId) ?? []);
+      taskIndexByRoom.set(roomId, index);
+    }
+    return index;
+  };
 
-  return input.participants
+  const entries = input.participants
     .map((participant) => {
       const room = roomsById.get(participant.room_id);
       if (!room) {
         return null;
       }
 
-      const roomTasks = tasksByRoom.get(room.id) ?? [];
-      const assignedTasks = roomTasks.filter((task) => participantMatchesAssignee(participant, task));
+      const taskIndex = taskIndexFor(room.id);
+      const assignedTasks = tasksAssignedTo(taskIndex, participant);
       const currentTasks = sortTasksByUpdated(
-        assignedTasks.filter((task) =>
-          ["proposed", "accepted", "assigned", "in_progress", "blocked", "in_review"].includes(task.status)
-        )
+        assignedTasks.filter((task) => CURRENT_TASK_STATUSES.has(task.status))
       );
       const completedTasks = sortTasksByUpdated(
-        assignedTasks.filter((task) => ["merged", "done"].includes(task.status))
+        assignedTasks.filter((task) => COMPLETED_TASK_STATUSES.has(task.status))
       );
-      const createdTasks = sortTasksByUpdated(
-        roomTasks.filter((task) => participantMatchesCreator(participant, task))
-      );
+      const createdTasks = sortTasksByUpdated(tasksCreatedBy(taskIndex, participant));
 
       const entry: RoomActivityHistoryEntryWithSearch = {
         id: `${room.id}:${participant.participant_key}`,
@@ -345,8 +391,8 @@ export function buildRoomActivityHistoryEntries(input: {
 
       return entry;
     })
-    .filter((entry): entry is RoomActivityHistoryEntry => entry !== null)
-    .sort(compareRoomActivityHistoryEntries);
+    .filter((entry): entry is RoomActivityHistoryEntry => entry !== null);
+  return sortRoomActivityHistoryEntries(entries);
 }
 
 export function decorateRoomActivityHistoryEntriesWithCounts(input: {

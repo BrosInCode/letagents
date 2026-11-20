@@ -145,7 +145,7 @@ export async function getRoomParticipants(
 
 export async function getRoomParticipantsForRooms(
   roomIds: readonly string[],
-  options?: { includeHidden?: boolean }
+  options?: { includeHidden?: boolean; includeAvatars?: boolean }
 ): Promise<RoomParticipant[]> {
   if (roomIds.length === 0) {
     return [];
@@ -162,6 +162,9 @@ export async function getRoomParticipantsForRooms(
     .where(and(...conditions))
     .orderBy(desc(room_participants.last_seen_at), asc(room_participants.display_name));
 
+  if (options?.includeAvatars === false) {
+    return (rows as RoomParticipantRow[]).map(toRoomParticipant);
+  }
   const avatars = await getAgentAvatars(rows.map(row => row.agent_key));
   return (rows as RoomParticipantRow[]).map(row => ({ ...toRoomParticipant(row), ...(row.agent_key && avatars.has(row.agent_key) ? { avatar: avatars.get(row.agent_key) } : {}) }));
 }
