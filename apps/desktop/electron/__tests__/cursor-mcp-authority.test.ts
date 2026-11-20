@@ -737,6 +737,12 @@ test("Cursor MCP timeout reaps the inspection process tree before returning so i
     "setInterval(() => {}, 1_000);",
   ].join("\n");
   let descendantPid: number | null = null;
+  // The time limit ends when this test ends it, once the descendant is up.
+  // A real limit of a few seconds also covers the start of the helper, the
+  // wrapper, Cursor and its descendant; on a slow machine it ran out first,
+  // and the descendant this test is about was never there to be reaped.
+  const timeLimit: { ms: number | null; end: (() => void) | null } = { ms: null, end: null };
+  let attestation: Promise<void> = Promise.resolve();
   try {
     const cursorBin = writeFakeProvider(executable, `const { spawn } = require("node:child_process");
 const { writeFileSync } = require("node:fs");
@@ -750,19 +756,29 @@ writeFileSync(${JSON.stringify(descendantPidPath)}, String(descendant.pid));
 setInterval(() => {}, 1_000);
 `);
 
-    const attestation = assertCursorSupervisedMcpAuthority({
+    attestation = assertCursorSupervisedMcpAuthority({
       cursorBin,
       cwd: root,
       writableProfileRoot: root,
       env: { ...process.env },
-      timeoutMs: process.platform === "win32" ? 3_000 : 1_000,
+      timeoutMs: 3_000,
+      dependencies: {
+        startTimeLimit: (onTimeout, timeoutMs) => {
+          Object.assign(timeLimit, { ms: timeoutMs, end: onTimeout });
+          return () => { timeLimit.end = null; };
+        },
+      },
     });
     const rejected = assert.rejects(attestation, /failed while inspecting .*\(ETIMEDOUT\)/);
     await eventually(() => existsSync(descendantPidPath), "MCP descendant pid");
     descendantPid = Number(readFileSync(descendantPidPath, "utf8"));
     await eventually(() => existsSync(descendantReadyPath), "MCP descendant readiness");
+    assert.equal(timeLimit.ms, 3_000, "the inspection runs under the time limit it was given");
+    assert.ok(timeLimit.end, "and that limit has not been cancelled while the inspection runs");
+    timeLimit.end();
 
     await rejected;
+    assert.equal(timeLimit.end, null, "the limit is cancelled once the inspection has returned");
     assert.equal(
       processAlive(descendantPid),
       false,
@@ -771,6 +787,12 @@ setInterval(() => {}, 1_000);
     rmSync(root, { recursive: true, force: true });
     assert.equal(existsSync(root), false);
   } finally {
+    // After an assertion failure the limit may not have been ended: end it,
+    // so that the inspection stops and does not outlive this test.
+    if (timeLimit.end) {
+      timeLimit.end();
+      await attestation.catch(() => undefined);
+    }
     if (descendantPid && processAlive(descendantPid)) {
       try {
         process.kill(descendantPid, "SIGKILL");
@@ -784,6 +806,45 @@ setInterval(() => {}, 1_000);
       } catch {
         // Best-effort cleanup after an assertion failure.
       }
+    }
+  }
+});
+
+test("a Cursor MCP inspection that never answers ends at its own time limit, on the real clock", {
+  skip: needsProcessTreeHelper,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-time-limit-"));
+  const executable = join(root, "fake-cursor-agent");
+  // Only the limit ends this inspection. Should the limit fail, the test ends it in its cleanup.
+  const stopped = new AbortController();
+  let ended = false;
+  let attestation: Promise<void> = Promise.resolve();
+  try {
+    // The stand-in never answers and never exits, so the outcome is the same
+    // however long this machine takes to start it: nothing races the limit.
+    const cursorBin = writeFakeProvider(executable, "setInterval(() => {}, 1_000);\n");
+    const startedAt = Date.now();
+    attestation = assertCursorSupervisedMcpAuthority({
+      cursorBin,
+      cwd: root,
+      writableProfileRoot: root,
+      env: { ...process.env },
+      timeoutMs: 500,
+      signal: stopped.signal,
+    }).finally(() => { ended = true; });
+    const rejected = assert.rejects(attestation, /failed while inspecting .*\(ETIMEDOUT\)/);
+    await eventually(() => ended, "the inspection to end at its time limit");
+    await rejected;
+    assert.ok(Date.now() - startedAt >= 500, "not before the limit");
+  } finally {
+    if (!ended) {
+      stopped.abort();
+      await attestation.catch(() => undefined);
+    }
+    try {
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch {
+      // Best-effort cleanup: this test is about the limit, not about the root.
     }
   }
 });
@@ -988,8 +1049,10 @@ function processAlive(pid: number): boolean {
 async function eventually(check: () => boolean, label: string): Promise<void> {
   // The full Electron suite launches many child-process tests concurrently;
   // give birth evidence room to appear under CI contention without weakening
-  // any production timeout or cleanup bound.
-  const deadline = Date.now() + 10_000;
+  // any production timeout or cleanup bound. A Windows runner has taken more
+  // than three seconds to start the helper, the wrapper, Cursor and its
+  // descendant; the wait ends as soon as the evidence is there.
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (check()) return;
     await new Promise((resolve) => setTimeout(resolve, 25));

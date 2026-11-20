@@ -842,6 +842,18 @@ export async function codexRoomTurnInput(attachments: ProviderRoomTurnRequest["a
 }
 
 /**
+ * How long a test waits for something the daemon is expected to do. The wait
+ * ends as soon as the daemon has done it, so its length costs nothing in a
+ * run that passes: it only decides how slow a machine may be before a test
+ * that would pass is failed instead. The daemon's SQLite writes are
+ * synchronous, and on a CI runner whose disk has a slow minute a step that
+ * takes 100 ms takes seconds. Waits of 3 to 15 seconds failed tests there
+ * that were only slow (the same tests took 60 to 90 seconds and passed where
+ * their waits allowed it).
+ */
+export const DAEMON_WAIT_MS = 60_000;
+
+/**
  * The real adapter over a fake app-server, the real router, and a real daemon
  * with its real delivery, execution capture and shadow store. One supervised
  * daemon-inbox Codex agent is launched, bound and listening when this returns.
@@ -900,7 +912,7 @@ export async function codexDaemonFixture(options: {
     });
     socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
   });
-  const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = 15_000) => {
+  const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = DAEMON_WAIT_MS) => {
     const deadline = Date.now() + timeoutMs;
     while (!await check()) {
       if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
@@ -1061,7 +1073,7 @@ export async function codexDaemonFixture(options: {
       assert.equal(saved.result?.outcome, "updated", saved.error ?? saved.result?.error);
       // While the last turn is still being wrapped up the answer is "busy":
       // the app says so and the owner presses the button again.
-      for (const deadline = Date.now() + 10_000; ;) {
+      for (const deadline = Date.now() + DAEMON_WAIT_MS; ;) {
         const applied = await request("supervisor.apply_agent_configuration", { entry_id: id, daemon_generation: daemonGeneration,
           expected_configuration_revision: configuration.config_revision + 1 });
         if (applied.result?.outcome !== "busy_active_turn" || Date.now() >= deadline) return applied;
@@ -1189,7 +1201,12 @@ export async function codexDaemonFixture(options: {
         ports: { settleRuntimeApprovals(...args: unknown[]): Promise<void>; serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
           durability: { recordTerminal(...args: unknown[]): Promise<unknown> }; exitUnsettled(entryId: string, exitId: string): void };
         bounds: { settleMs: number; lastAttemptMs: number; recordMs: number }; settling(entryId: string): boolean;
+        timers: { set(callback: () => void, ms: number): object; clear(timer: object): void };
       } }).providerTerminals,
+      /** Whether an app update has asked to go ahead and is waiting for the agents' work and exits. */
+      updateWaits: () => (daemon as unknown as { handoffDraining: boolean }).handoffDraining,
+      /** Whether an action of the owner's on the agent itself (a recovery, a restart, a removal) is in progress. */
+      ownerActionRuns: () => (daemon as unknown as { entryConcurrency: { isLifecycleActive(entryId: string): boolean } }).entryConcurrency.isLifecycleActive(id),
       daemonGeneration: () => daemonGeneration,
       /**
        * The ordering a loaded machine produces by itself: the daemon is
@@ -1272,7 +1289,7 @@ export async function codexDaemonFixture(options: {
 /** What the desktop app sends for "Restart to apply changes": the saved settings start a new runtime. Asked again while a turn is wrapping up. */
 export async function applySavedSettings(agent: Awaited<ReturnType<typeof codexDaemonFixture>>) {
   const configuration = (await agent.request("supervisor.get_agent_configuration", { entry_id: agent.id, daemon_generation: agent.daemonGeneration() })).result;
-  for (const deadline = Date.now() + 10_000; ;) {
+  for (const deadline = Date.now() + DAEMON_WAIT_MS; ;) {
     const applied = await agent.request("supervisor.apply_agent_configuration", { entry_id: agent.id, daemon_generation: agent.daemonGeneration(),
       expected_configuration_revision: configuration.config_revision });
     if (applied.result?.outcome !== "busy_active_turn" || Date.now() >= deadline) return applied;
@@ -1330,7 +1347,7 @@ export async function answerOnReplacement(agent: Awaited<ReturnType<typeof codex
       activation: { for_current_agent: { decision: "activate" } } });
   }
   await agent.eventually(async () => agent.turns.length === ordinal && Boolean((await agent.receipt(`msg_${ordinal}`))?.provider_turn_id),
-    `msg_${ordinal} starts its turn on the replacement`, 8_000).catch(async (error) => {
+    `msg_${ordinal} starts its turn on the replacement`).catch(async (error) => {
     const current = await agent.view();
     throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
   });
@@ -1345,44 +1362,166 @@ export async function answerOnReplacement(agent: Awaited<ReturnType<typeof codex
 /**
  * What stops the daemon recording an exit, for as long as a test lasts.
  * Each returns what ends the fault, for the test to call when it is done:
- * a daemon cannot be stopped under a step that never returns.
+ * a daemon cannot be stopped under a step that never returns. `met` is
+ * called each time the recording reaches the faulty step, which then fails
+ * it or holds it.
  */
 export type ExitSettlement = ReturnType<Awaited<ReturnType<typeof codexDaemonFixture>>["exitSettlement"]>;
 export const EXIT_RECORDING_FAULTS = {
-  "closing its approvals fails every time": (terminals: ExitSettlement) => {
+  "closing its approvals fails every time": (terminals: ExitSettlement, met = () => {}) => {
     const original = terminals.ports.settleRuntimeApprovals;
-    terminals.ports.settleRuntimeApprovals = async () => { throw new Error("approval storage fault"); };
+    terminals.ports.settleRuntimeApprovals = async () => { met(); throw new Error("approval storage fault"); };
     return () => { terminals.ports.settleRuntimeApprovals = original; };
   },
-  "closing its approvals never returns": (terminals: ExitSettlement) => {
+  "closing its approvals never returns": (terminals: ExitSettlement, met = () => {}) => {
     const original = terminals.ports.settleRuntimeApprovals;
     let end!: () => void;
     const ended = new Promise<void>((resolve) => { end = resolve; });
-    terminals.ports.settleRuntimeApprovals = async (...args) => { await ended; return original(...args); };
+    terminals.ports.settleRuntimeApprovals = async (...args) => { met(); await ended; return original(...args); };
     return () => { terminals.ports.settleRuntimeApprovals = original; end(); };
   },
-  "its entry's queue never answers": (terminals: ExitSettlement) => {
+  "its entry's queue never answers": (terminals: ExitSettlement, met = () => {}) => {
     const original = terminals.ports.serializeEntry;
     let end!: () => void;
     const ended = new Promise<void>((resolve) => { end = resolve; });
-    terminals.ports.serializeEntry = async (entryId, operation) => { await ended; return original(entryId, operation); };
+    terminals.ports.serializeEntry = async (entryId, operation) => { met(); await ended; return original(entryId, operation); };
     return () => { terminals.ports.serializeEntry = original; end(); };
   },
-  "saving its terminal fails every time": (terminals: ExitSettlement) => {
+  "saving its terminal fails every time": (terminals: ExitSettlement, met = () => {}) => {
     const original = terminals.ports.durability;
     terminals.ports.durability = Object.create(original, {
-      recordTerminal: { value: async () => { throw new Error("terminal storage fault"); } } });
+      recordTerminal: { value: async () => { met(); throw new Error("terminal storage fault"); } } });
     return () => { terminals.ports.durability = original; };
   },
-  "saving its terminal never returns": (terminals: ExitSettlement) => {
+  "saving its terminal never returns": (terminals: ExitSettlement, met = () => {}) => {
     const original = terminals.ports.durability;
     let end!: () => void;
     const ended = new Promise<void>((resolve) => { end = resolve; });
     terminals.ports.durability = Object.create(original, {
-      recordTerminal: { value: async (...args: unknown[]) => { await ended; return original.recordTerminal(...args); } } });
+      recordTerminal: { value: async (...args: unknown[]) => { met(); await ended; return original.recordTerminal(...args); } } });
     return () => { terminals.ports.durability = original; end(); };
   },
 } as const;
+
+/**
+ * The daemon's wait for an exit to be recorded, on a clock the test moves.
+ *
+ * Outside tests the wait has three bounds (EXIT_SETTLEMENT_BOUNDS): fifteen
+ * seconds for the ordinary attempts, eight for one last attempt, of which its
+ * approvals step may take half, and four to save the terminal once the daemon
+ * has stopped waiting. A test that shortens them to fractions of a second
+ * races each one against the work the daemon does between two bounds, and on
+ * a slow machine the bound wins: the last attempt is given up while it is
+ * still recording, or the wait is over before the test has looked. Here the
+ * bounds keep their lengths and none ends until the test passes its time, so
+ * the daemon's own work takes as long as it takes. Only these bounds are
+ * taken over: the daemon's heartbeat, its retries and the test's own waits
+ * stay on the real clock, which Node's mock timers would stop as well.
+ * Call this before the exit, and end the fault before the daemon is stopped:
+ * a stop waits for an exit that is still being recorded, and on this clock
+ * that wait ends only when the recording does.
+ */
+export function exitWaitClock(agent: Awaited<ReturnType<typeof codexDaemonFixture>>) {
+  const terminals = agent.exitSettlement();
+  let now = 0;
+  const armed = new Set<{ due: number; ms: number; callback: () => void }>();
+  /** The fault in force, how often the recording has reached it, and how often it had when the newest exit began. */
+  let fault: keyof typeof EXIT_RECORDING_FAULTS | null = null;
+  let met = 0, metBeforeExit = 0;
+  terminals.timers = {
+    set: (callback, ms) => {
+      // The ordinary attempts' bound is the first thing started for an exit.
+      if (ms === terminals.bounds.settleMs) metBeforeExit = met;
+      const timer = { due: now + ms, ms, callback };
+      armed.add(timer);
+      return timer;
+    },
+    clear: (timer) => { armed.delete(timer as { due: number; ms: number; callback: () => void }); },
+  };
+  /** Passes this much of the wait's time. Each bound that falls due ends, the earliest first. */
+  const pass = (ms: number) => {
+    const until = now + ms;
+    for (;;) {
+      const [next] = [...armed].filter((timer) => timer.due <= until).sort((a, b) => a.due - b.due);
+      if (!next) break;
+      armed.delete(next);
+      now = next.due;
+      next.callback();
+    }
+    now = until;
+  };
+  /** How much is left of the bound of this length that the daemon waits on, or null when it waits on none. */
+  const left = (ms: number) => {
+    const dues = [...armed].filter((timer) => timer.ms === ms).map((timer) => timer.due - now);
+    return dues.length ? Math.min(...dues) : null;
+  };
+  /** The daemon's own record of the exit it is recording, while it waits for it. */
+  const recording = () => [...(terminals as unknown as { pending: Map<{ entryId: string }, { overdue: false | "due" | "last"; operation: unknown; abandoned: unknown }> }).pending]
+    .find(([installation]) => installation.entryId === agent.id)?.[1];
+  /** How often the recording of the newest exit has reached the fault. */
+  const reached = () => met - metBeforeExit;
+  return {
+    pass,
+    /** How much of the wait's time this test has passed. */
+    passed: () => now,
+    /** Stops the daemon recording exits, as EXIT_RECORDING_FAULTS says, and returns what ends the fault. */
+    fault(name: keyof typeof EXIT_RECORDING_FAULTS) {
+      fault = name;
+      return EXIT_RECORDING_FAULTS[name](terminals, () => { met += 1; });
+    },
+    /**
+     * Lets the wait for an exit that cannot be recorded run out, the way the
+     * fault makes it. A bound ends only once the recording has reached the
+     * fault and waits on that bound, and no attempt is cut short on its way
+     * there: an attempt that is cut while it still waits for the entry's
+     * queue stays in that queue and runs again later, beside the last one.
+     * So the ordinary attempts' time ends when one of them is held by the
+     * fault, or, where the fault fails them, between two of them. After that
+     * a step that fails leaves nothing more to wait for; approvals that never
+     * close cost the last attempt half its time; a queue or a save that never
+     * answers costs it all of that time, and the save then has its own.
+     *
+     * `beforeItStops` is awaited before the last of those bounds, which is
+     * the one whose end makes the daemon stop waiting for the exit and
+     * converge the agent: for something that has to happen while it waits.
+     */
+    async runsOut(beforeItStops: () => Promise<unknown> = async () => {}) {
+      if (!fault) throw new Error("Name the fault that stops the exit being recorded first, with fault().");
+      const { settleMs, lastAttemptMs, recordMs } = terminals.bounds;
+      const ended = () => !recording();
+      const waitFor = (check: () => boolean, label: string) => agent.eventually(check, label).catch((error) => {
+        const exit = recording();
+        throw new Error(`${(error as Error).message}: the recording ${exit ? `is ${exit.overdue || "on time"}, ${exit.operation ? "with an attempt running" : "between attempts"}${exit.abandoned ? ", given up" : ""}` : "has ended"}; `
+          + `it reached the fault ${reached()} time(s); bounds still running: ${[...armed].map((timer) => timer.ms).join(", ") || "none"}`);
+      });
+      const fails = fault === "closing its approvals fails every time" || fault === "saving its terminal fails every time";
+      /** The bounds that end under this fault, in order: when the daemon waits on each, and how much time ends it. */
+      const bounds: Array<{ waitsOnIt: () => boolean; label: string; left: () => number }> = [{
+        waitsOnIt: () => left(settleMs) !== null && reached() >= 1 && !(fails && recording()?.operation),
+        label: fails ? "an attempt to record the exit fails, and the next has not begun" : "an attempt to record the exit is held by the fault",
+        left: () => left(settleMs)!,
+      }];
+      if (fault === "closing its approvals never returns") {
+        bounds.push({ waitsOnIt: () => reached() >= 2 && left(lastAttemptMs / 2) !== null, label: "the last attempt waits for the approvals to close", left: () => lastAttemptMs / 2 });
+      } else if (fault === "its entry's queue never answers" || fault === "saving its terminal never returns") {
+        bounds.push({ waitsOnIt: () => recording()!.overdue === "last" && Boolean(recording()!.operation) && reached() >= 2,
+          label: "the last attempt is held by the fault as well", left: () => lastAttemptMs });
+        if (fault === "saving its terminal never returns") {
+          bounds.push({ waitsOnIt: () => Boolean(recording()!.abandoned) && reached() >= 3,
+            label: "the daemon stops waiting, and its save of the terminal is held by the fault", left: () => recordMs });
+        }
+      }
+      for (const [index, bound] of bounds.entries()) {
+        if (index === bounds.length - 1) await beforeItStops();
+        // The first bound belongs to an exit that is being recorded; a later one is moot once the recording has ended.
+        // Nothing but this test runs between the check and the end of the bound, so what the check saw still holds.
+        await waitFor(() => (index > 0 && ended()) || bound.waitsOnIt(), bound.label);
+        if (!(index > 0 && ended())) pass(bound.left());
+      }
+      await waitFor(ended, "the daemon no longer waits for the exit");
+    },
+  };
+}
 
 export const OUTPUT_CLOSED_BY = {
   "the commands' ends": (emit: (method: string, params: Record<string, unknown>) => void, ids: string[]) => {

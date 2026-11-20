@@ -39,6 +39,12 @@ export type CursorMcpInspectionDependencies = {
   getProcessIdentity(pid: number): string | null | undefined;
   processGroupAlive(pid: number): boolean;
   wait(ms: number): Promise<void>;
+  /**
+   * Starts the inspection's time limit and returns what cancels it. A test
+   * ends the limit itself, once the processes it needs are up, instead of
+   * racing a short limit against the time this machine takes to start them.
+   */
+  startTimeLimit(onTimeout: () => void, timeoutMs: number): () => void;
 };
 
 const DEFAULT_CURSOR_MCP_INSPECTION_DEPENDENCIES: CursorMcpInspectionDependencies = {
@@ -55,6 +61,10 @@ const DEFAULT_CURSOR_MCP_INSPECTION_DEPENDENCIES: CursorMcpInspectionDependencie
     }
   },
   wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  startTimeLimit(onTimeout, timeoutMs) {
+    const timer = setTimeout(onTimeout, timeoutMs);
+    return () => clearTimeout(timer);
+  },
 };
 
 // The wrapper is the durable process-group leader and deliberately stays alive
@@ -609,7 +619,7 @@ function execCursorInspection(
     let stdout = "";
     let stderr = "";
     let outputBytes = 0;
-    let commandTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelTimeLimit: (() => void) | null = null;
     let terminalTimer: ReturnType<typeof setTimeout> | null = null;
     let wrapperStarted = false;
     let wrapperPreparing = false;
@@ -622,7 +632,7 @@ function execCursorInspection(
       if (settled) return;
       settled = true;
       if (terminalTimer) clearTimeout(terminalTimer);
-      if (commandTimer) clearTimeout(commandTimer);
+      cancelTimeLimit?.();
       signal?.removeEventListener("abort", abort);
       resolveResult(result);
     };
@@ -778,10 +788,10 @@ function execCursorInspection(
     const abort = () => requestTermination("ABORT_ERR");
     signal?.addEventListener("abort", abort, { once: true });
     if (timeoutMs > 0) {
-      commandTimer = setTimeout(() => requestTermination("ETIMEDOUT"), timeoutMs);
+      cancelTimeLimit = dependencies.startTimeLimit(() => requestTermination("ETIMEDOUT"), timeoutMs);
     }
     child.once("close", (code) => {
-      if (commandTimer) clearTimeout(commandTimer);
+      cancelTimeLimit?.();
       if (terminalTimer) clearTimeout(terminalTimer);
       signal?.removeEventListener("abort", abort);
       if (process.platform === "win32" && code === PROCESS_TREE_UNKILLABLE_EXIT_CODE && !errorCode) {

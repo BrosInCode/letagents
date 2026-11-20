@@ -321,7 +321,7 @@ for (const replacement of ["a crash", "a configuration change", "the owner's set
       else agent.updateApp();
       // An update replaces a runtime when its next message is about to start.
       if (replacement === "an app update after a refused turn") agent.converge();
-      await agent.eventually(() => agent.harness.clients.length === 2, "the runtime is replaced", 10_000).catch(async (error) => {
+      await agent.eventually(() => agent.harness.clients.length === 2, "the runtime is replaced").catch(async (error) => {
         const current = await agent.view();
         throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
       });
@@ -414,7 +414,7 @@ for (const [left, shape] of Object.entries(RECORDS_LEFT_BEHIND)) {
 
       // Its turn is in the record, on a new observer with no gap, behind one boundary for the runtime that was left damaged.
       const recorded = (turn: string) => agent.eventually(() => record.turns().some((row) => row.provider_turn_id === turn && row.state === "terminal"),
-        `${turn} is recorded to its end`, 5_000).catch((error) => {
+        `${turn} is recorded to its end`).catch((error) => {
         throw new Error(`${(error as Error).message}: observer ${JSON.stringify(record.observer())}, turns ${JSON.stringify(record.turns())}`);
       });
       await recorded("turn-2");
@@ -468,7 +468,7 @@ for (const state of ["lost", "active"] as const) {
       await agent.eventually(() => record.boundaries().length === 1, "the earlier runtime is archived");
       assert.deepEqual(record.boundaries().map((row) => [row.runtime_generation_id, row.observer_json]), [[earlier, null]]);
       await answerOnReplacement(agent, 2);
-      await agent.eventually(() => record.turns().some((turn) => turn.provider_turn_id === "turn-2" && turn.state === "terminal"), "the next turn is recorded", 5_000)
+      await agent.eventually(() => record.turns().some((turn) => turn.provider_turn_id === "turn-2" && turn.state === "terminal"), "the next turn is recorded")
         .catch((error) => { throw new Error(`${(error as Error).message}: observer ${JSON.stringify(record.observer())}, turns ${JSON.stringify(record.turns())}`); });
       assert.equal(record.observer()!.max, record.observer()!.last, "with no gap");
       assert.equal(record.turns().find((turn) => turn.provider_turn_id === "turn-left-open")?.state, "lost");
@@ -655,7 +655,7 @@ for (const gap of ["left by the daemon before it", "made by the re-attach itself
       attached.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
       attached.emit({ method: "turn/completed", params: { threadId: agent.threadId, turnId: turn.id, turn } });
       agent.whenNextConnects((server) => agent.serveThread(server));
-      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered", 12_000).catch(async (error) => {
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered").catch(async (error) => {
         const row = await agent.receipt("msg_2");
         const current = await agent.view();
         throw new Error(`${(error as Error).message}: row is ${row?.state}; agent is ${current.observed_state}/${current.condition}; ${current.room_agent_state.ingress.detail}`);
@@ -737,7 +737,7 @@ test("an agent whose record is full keeps answering, and its next runtime starts
     await agent.eventually(() => agent.harness.clients.length === 2, "the crashed runtime is replaced");
     await answerOnReplacement(agent, 3);
     assert.deepEqual(agent.published, ["Answer 1.", "Answer 2.", "Answer 3."]);
-    await agent.eventually(() => record.turns().some((turn) => turn.provider_turn_id === "turn-3" && turn.state === "terminal"), "the next turn is recorded", 5_000)
+    await agent.eventually(() => record.turns().some((turn) => turn.provider_turn_id === "turn-3" && turn.state === "terminal"), "the next turn is recorded")
       .catch(async (error) => {
         const current = await agent.view();
         throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); observer ${JSON.stringify(record.observer())}`);
