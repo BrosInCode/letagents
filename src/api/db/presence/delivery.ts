@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gt, isNull, sql } from "drizzle-orm";
 
 import {
   ACTIVE_AGENT_DELIVERY_WINDOW_MS,
+  ROOM_AGENT_HEARTBEAT_WRITE_COALESCE_MS,
   ROOM_AGENT_RECONNECT_GRACE_MS,
   type RoomAgentDeliveryTransport,
   type RoomAgentDeliveryCredentialFence,
@@ -149,6 +150,14 @@ export async function pruneStaleRoomAgentDeliveryInstances(
   });
 }
 
+/**
+ * Auth retirement locks the session row and then the delivery key lock. A
+ * caller that later updates the session row must take the row lock it needs
+ * here, before the key lock: upgrading a share lock after the key lock
+ * deadlocks with a second holder of the same share lock.
+ */
+type DeliveryCredentialLock = "share" | "no key update";
+
 async function hasActiveDeliveryCredential(
   tx: any,
   input: {
@@ -156,6 +165,7 @@ async function hasActiveDeliveryCredential(
     agent_session_id: string;
     credential_fence?: RoomAgentDeliveryCredentialFence | null;
   },
+  lock: DeliveryCredentialLock = "share",
 ): Promise<boolean> {
   const fence = input.credential_fence;
   if (!fence) return false;
@@ -169,7 +179,7 @@ async function hasActiveDeliveryCredential(
         eq(room_agent_sessions.token_hash, fence.token_hash),
         isNull(room_agent_sessions.ended_at),
       ))
-      .for("share")
+      .for(lock)
       .limit(1);
     return Boolean(activeSession);
   }
@@ -189,7 +199,7 @@ async function hasActiveDeliveryCredential(
       isNull(room_agent_session_bearers.revoked_at),
       gt(room_agent_session_bearers.expires_at, new Date().toISOString()),
     ))
-    .for("share")
+    .for(lock)
     .limit(1);
   return Boolean(activeBearer);
 }
@@ -246,8 +256,9 @@ async function assertActiveDeliveryCredential(
     agent_session_id: string;
     credential_fence?: RoomAgentDeliveryCredentialFence | null;
   },
+  lock: DeliveryCredentialLock = "share",
 ): Promise<void> {
-  if (!(await hasActiveDeliveryCredential(tx, input))) {
+  if (!(await hasActiveDeliveryCredential(tx, input, lock))) {
     throw new InactiveRoomAgentDeliverySessionError(input.agent_session_id);
   }
 }
@@ -407,7 +418,11 @@ export async function markRoomAgentDeliveryHeartbeat(input: {
   credential_fence?: RoomAgentDeliveryCredentialFence | null;
   delivery_instance_id?: string | null;
 }): Promise<boolean> {
-  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  // Timestamp-only writes are skipped while the stored value is newer than
+  // this; any change to a count still writes.
+  const coalesceCutoff = new Date(nowMs - ROOM_AGENT_HEARTBEAT_WRITE_COALESCE_MS).toISOString();
   const deliveryKey = buildRoomAgentDeliveryKey(input);
   const credentialFingerprint = roomAgentDeliveryCredentialFingerprint(input.credential_fence);
   return db.transaction(async (tx) => {
@@ -415,7 +430,7 @@ export async function markRoomAgentDeliveryHeartbeat(input: {
       room_id: input.room_id,
       agent_session_id: input.agent_session_id,
       credential_fence: input.credential_fence,
-    });
+    }, "no key update");
     if (!credentialActive) {
       if (input.delivery_instance_id) {
         await lockRoomAgentDeliveryInstanceKeyTx(tx, input.room_id, deliveryKey);
@@ -484,63 +499,101 @@ export async function markRoomAgentDeliveryHeartbeat(input: {
         eq(room_agent_delivery_instances.delivery_key, deliveryKey),
         sql`${room_agent_delivery_instances.updated_at} < ${staleConnectionCutoff}::timestamptz`,
       )).returning({ instance_id: room_agent_delivery_instances.instance_id });
-      const [instance] = await tx.update(room_agent_delivery_instances)
-        .set({ updated_at: now })
-        .where(and(
-          eq(room_agent_delivery_instances.room_id, input.room_id),
-          eq(room_agent_delivery_instances.delivery_key, deliveryKey),
-          eq(room_agent_delivery_instances.instance_id, input.delivery_instance_id),
-          ...(credentialFingerprint
-            ? [eq(room_agent_delivery_instances.credential_fingerprint, credentialFingerprint)]
-            : []),
-        ))
-        .returning({ instance_id: room_agent_delivery_instances.instance_id });
+      // The instance exists whether or not its timestamp is due for a write,
+      // so it is selected apart from the coalesced update. Every instance
+      // mutation holds the key lock, so the two cannot disagree.
+      const instanceResult = await tx.execute<{ instance_id: string }>(sql`
+        WITH target AS (
+          SELECT instance_id
+            FROM ${room_agent_delivery_instances}
+           WHERE room_id = ${input.room_id}
+             AND delivery_key = ${deliveryKey}
+             AND instance_id = ${input.delivery_instance_id}
+             ${credentialFingerprint ? sql`AND credential_fingerprint = ${credentialFingerprint}` : sql``}
+        ), touched AS (
+          UPDATE ${room_agent_delivery_instances} AS instance
+             SET updated_at = ${now}::timestamptz
+            FROM target
+           WHERE instance.room_id = ${input.room_id}
+             AND instance.delivery_key = ${deliveryKey}
+             AND instance.instance_id = target.instance_id
+             AND instance.updated_at < ${coalesceCutoff}::timestamptz
+        )
+        SELECT instance_id FROM target
+      `);
+      const instance = instanceResult.rows[0];
       if (instance || staleInstances.length > 0) {
         const liveInstanceCount = await countRoomAgentDeliveryInstancesTx(
           tx,
           input.room_id,
           deliveryKey,
         );
+        const nextConnectionCount = sql`GREATEST(
+          ${room_agent_delivery_sessions.active_connection_count} - ${staleInstances.length},
+          ${liveInstanceCount},
+          0
+        )`;
         await tx.update(room_agent_delivery_sessions)
           .set({
-            active_connection_count: sql`GREATEST(
-              ${room_agent_delivery_sessions.active_connection_count} - ${staleInstances.length},
-              ${liveInstanceCount},
-              0
-            )`,
+            active_connection_count: nextConnectionCount,
             updated_at: now,
           })
           .where(and(
             eq(room_agent_delivery_sessions.room_id, input.room_id),
             eq(room_agent_delivery_sessions.delivery_key, deliveryKey),
+            sql`(${room_agent_delivery_sessions.updated_at} < ${coalesceCutoff}::timestamptz
+              OR ${room_agent_delivery_sessions.active_connection_count} <> ${nextConnectionCount})`,
           ));
       }
       if (instance && input.agent_session_id) {
-        await tx.update(room_agent_sessions)
-          .set({ updated_at: now, last_seen_at: now })
-          .where(eq(room_agent_sessions.session_id, input.agent_session_id));
+        await touchRoomAgentSessionLastSeenTx(tx, input.agent_session_id, now, coalesceCutoff);
       }
       return Boolean(instance);
     }
-    const [session] = await tx
-      .update(room_agent_delivery_sessions)
-      .set({ updated_at: now })
-      .where(and(
-        eq(room_agent_delivery_sessions.room_id, input.room_id),
-        eq(room_agent_delivery_sessions.delivery_key, deliveryKey),
-        ...(credentialFingerprint
-          ? [eq(room_agent_delivery_sessions.credential_fingerprint, credentialFingerprint)]
-          : []),
-        sql`${room_agent_delivery_sessions.active_connection_count} > 0`,
-      ))
-      .returning({ delivery_key: room_agent_delivery_sessions.delivery_key });
+    // As above: "no live session" must come from the predicate, never from a
+    // skipped write. This branch holds no key lock, so the read locks the row:
+    // it waits for a concurrent disconnect and re-checks the committed count,
+    // as a plain UPDATE would.
+    const sessionResult = await tx.execute<{ delivery_key: string }>(sql`
+      WITH target AS (
+        SELECT room_id, delivery_key
+          FROM ${room_agent_delivery_sessions}
+         WHERE room_id = ${input.room_id}
+           AND delivery_key = ${deliveryKey}
+           ${credentialFingerprint ? sql`AND credential_fingerprint = ${credentialFingerprint}` : sql``}
+           AND active_connection_count > 0
+           FOR NO KEY UPDATE
+      ), touched AS (
+        UPDATE ${room_agent_delivery_sessions} AS delivery
+           SET updated_at = ${now}::timestamptz
+          FROM target
+         WHERE delivery.room_id = target.room_id
+           AND delivery.delivery_key = target.delivery_key
+           AND delivery.updated_at < ${coalesceCutoff}::timestamptz
+      )
+      SELECT delivery_key FROM target
+    `);
+    const session = sessionResult.rows[0];
     if (session && input.agent_session_id) {
-      await tx.update(room_agent_sessions)
-        .set({ updated_at: now, last_seen_at: now })
-        .where(eq(room_agent_sessions.session_id, input.agent_session_id));
+      await touchRoomAgentSessionLastSeenTx(tx, input.agent_session_id, now, coalesceCutoff);
     }
     return Boolean(session);
   });
+}
+
+async function touchRoomAgentSessionLastSeenTx(
+  tx: any,
+  agentSessionId: string,
+  now: string,
+  coalesceCutoff: string,
+): Promise<void> {
+  await tx.update(room_agent_sessions)
+    .set({ updated_at: now, last_seen_at: now })
+    .where(and(
+      eq(room_agent_sessions.session_id, agentSessionId),
+      sql`(${room_agent_sessions.last_seen_at} < ${coalesceCutoff}::timestamptz
+        OR ${room_agent_sessions.updated_at} < ${coalesceCutoff}::timestamptz)`,
+    ));
 }
 
 export interface DesktopRoomAgentDeliveryHeartbeatInput {
@@ -575,7 +628,7 @@ async function upsertDesktopRoomAgentDeliveryHeartbeatTx(
       room_id: input.room_id,
       agent_session_id: input.agent_session_id,
       credential_fence: input.credential_fence,
-    });
+    }, "no key update");
     await lockRoomAgentDeliveryInstanceKeyTx(tx, input.room_id, deliveryKey);
     const [connectedSession] = await tx
       .insert(room_agent_delivery_sessions)
@@ -820,7 +873,7 @@ export async function markRoomAgentDeliveryDisconnected(input: {
       room_id: input.room_id,
       agent_session_id: input.agent_session_id,
       credential_fence: input.credential_fence,
-    });
+    }, "no key update");
     if (!credentialActive && !input.delivery_instance_id) return null;
     if (input.delivery_instance_id) {
       await lockRoomAgentDeliveryInstanceKeyTx(tx, input.room_id, deliveryKey);

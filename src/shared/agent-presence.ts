@@ -20,6 +20,14 @@ export const ACTIVE_AGENT_PRESENCE_WINDOW_MS = 90_000;
 export const ACTIVE_AGENT_DELIVERY_WINDOW_MS = ACTIVE_AGENT_PRESENCE_WINDOW_MS;
 export const ROOM_AGENT_DELIVERY_HEARTBEAT_INTERVAL_MS = 30_000;
 export const ROOM_AGENT_RECONNECT_GRACE_MS = 10_000;
+/**
+ * A delivery heartbeat skips a timestamp-only write when the stored value is
+ * newer than this. A long-poll start forces a heartbeat next to the interval
+ * one, so duplicates arrive seconds apart. The window is far below the
+ * heartbeat interval: every regular heartbeat still writes, and a stored
+ * timestamp is never more than this far behind the last heartbeat.
+ */
+export const ROOM_AGENT_HEARTBEAT_WRITE_COALESCE_MS = 10_000;
 
 /**
  * An agent's process holds one connection open for as long as it runs. While

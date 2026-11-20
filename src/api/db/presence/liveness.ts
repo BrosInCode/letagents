@@ -1,5 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../client.js";
+import { buildRoomAgentDeliveryKey } from "./helpers.js";
 import { toRoomAgentLivenessObservation, toRoomAgentPresence } from "../mappers.js";
 import {
   room_agent_delivery_sessions,
@@ -16,16 +17,35 @@ class StaleNativePresenceOwnerError extends Error {}
 
 type LivenessDeliveryScheduler = Pick<typeof db, "update">;
 
+/**
+ * A due time up to this much earlier than the new one is kept. The column is
+ * in a partial index, so each rewrite touches every index of the table, and
+ * native activity reports arrive every few seconds.
+ */
+const NATIVE_HARNESS_DUE_TIME_SLACK_MS = 60_000;
+
 async function scheduleNativeHarnessDeliveryCheck(
   executor: LivenessDeliveryScheduler,
   input: { room_id: string; agent_session_id: string; observed_at: string },
 ): Promise<void> {
+  const dueMs = Date.parse(input.observed_at) + 5 * 60_000;
+  const due = new Date(dueMs).toISOString();
   await executor.update(room_agent_delivery_sessions)
-    .set({ next_liveness_check_at: new Date(Date.parse(input.observed_at) + 5 * 60_000).toISOString() })
+    .set({ next_liveness_check_at: due })
     .where(and(
       eq(room_agent_delivery_sessions.room_id, input.room_id),
+      // Every worker delivery row is keyed by its session id; the key makes
+      // this a primary-key update instead of a scan of the room's rows.
+      eq(room_agent_delivery_sessions.delivery_key, buildRoomAgentDeliveryKey({
+        actor_label: "",
+        agent_session_id: input.agent_session_id,
+      })),
       eq(room_agent_delivery_sessions.agent_session_id, input.agent_session_id),
       eq(room_agent_delivery_sessions.session_kind, "worker"),
+      sql`(${room_agent_delivery_sessions.next_liveness_check_at} IS NULL
+        OR ${room_agent_delivery_sessions.next_liveness_check_at} > ${due}::timestamptz
+        OR ${room_agent_delivery_sessions.next_liveness_check_at}
+          < ${new Date(dueMs - NATIVE_HARNESS_DUE_TIME_SLACK_MS).toISOString()}::timestamptz)`,
     ));
 }
 
@@ -309,6 +329,14 @@ export async function recordNativeHarnessActivity(input: {
       };
     }
 
+    // Desktop heartbeats and pauses lock the delivery row before the presence
+    // row. Take them in the same order, or the two deadlock for one agent.
+    await scheduleNativeHarnessDeliveryCheck(tx, {
+      room_id: input.room_id,
+      agent_session_id: input.agent_session_id,
+      observed_at: serverNow,
+    });
+
     const activitySummary = parseNativeActivitySummary(input.activity_summary);
     const presence = nativeHarnessPresenceForStatus(input.status, activitySummary.ok ? activitySummary.summary : null);
     const [presenceRow] = await tx.insert(room_agent_presence).values({
@@ -346,12 +374,6 @@ export async function recordNativeHarnessActivity(input: {
       setWhere: nativePresenceOwnerFence(input),
     }).returning();
     if (!presenceRow) throw new StaleNativePresenceOwnerError("A newer worker session owns this actor's rendered presence.");
-
-    await scheduleNativeHarnessDeliveryCheck(tx, {
-      room_id: input.room_id,
-      agent_session_id: input.agent_session_id,
-      observed_at: serverNow,
-    });
 
     const held = await tx.select({ id: task_leases.id, epoch: task_leases.epoch }).from(task_leases).where(and(
       eq(task_leases.room_id, input.room_id),

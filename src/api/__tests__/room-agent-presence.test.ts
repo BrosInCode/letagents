@@ -17,6 +17,7 @@ const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 const schemaModule = testDatabaseUrl ? await import("../db/schema.js") : null;
 const agentPresenceModule = await import("../../shared/agent-presence.js");
 const roomAgentActivityModule = await import("../../shared/room-agent-activity.js");
+type RoomAgentDeliveryCredentialFence = import("../../shared/agent-presence.js").RoomAgentDeliveryCredentialFence;
 const hashToken = (token: string) => crypto.createHash("sha256").update(token).digest("hex");
 
 const db = dbClientModule?.db;
@@ -28,14 +29,23 @@ const getRoomAgentPresence = dbModule?.getRoomAgentPresence;
 const getRoomAgentPresenceSnapshot = dbModule?.getRoomAgentPresenceSnapshot;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
 const markRoomAgentDeliveryDisconnected = dbModule?.markRoomAgentDeliveryDisconnected;
+const markRoomAgentDeliveryHeartbeat = dbModule?.markRoomAgentDeliveryHeartbeat;
 const pruneStaleRoomAgentDeliveryInstances = dbModule?.pruneStaleRoomAgentDeliveryInstances;
 const upsertDesktopRoomAgentDeliveryHeartbeat = dbModule?.upsertDesktopRoomAgentDeliveryHeartbeat;
+const upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat = dbModule?.upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat;
 const setRoomLiveAgentSuppressed = dbModule?.setRoomLiveAgentSuppressed;
 const upsertAccount = dbModule?.upsertAccount;
 const upsertRoomAgentLivenessObservation = dbModule?.upsertRoomAgentLivenessObservation;
 const upsertRoomAgentPresence = dbModule?.upsertRoomAgentPresence;
+const recordNativeHarnessActivity = dbModule?.recordNativeHarnessActivity;
+const getRoomAgentDeliverySessions = dbModule?.getRoomAgentDeliverySessions;
 const room_agent_delivery_sessions = schemaModule?.room_agent_delivery_sessions;
-const { ACTIVE_AGENT_DELIVERY_WINDOW_MS } = agentPresenceModule;
+const deliveryHelpersModule = testDatabaseUrl ? await import("../db/presence/helpers.js") : null;
+const {
+  ACTIVE_AGENT_DELIVERY_WINDOW_MS,
+  ROOM_AGENT_DELIVERY_HEARTBEAT_INTERVAL_MS,
+  ROOM_AGENT_HEARTBEAT_WRITE_COALESCE_MS,
+} = agentPresenceModule;
 const { RECENTLY_OFFLINE_MAX_AGENTS, RECENTLY_OFFLINE_WINDOW_MS } = roomAgentActivityModule;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
@@ -938,6 +948,515 @@ test(
     assert.equal(presence.length, RECENTLY_OFFLINE_MAX_AGENTS);
     assert.ok(presence.every((entry) => entry.freshness === "stale"));
   }
+);
+
+async function createDeliveryWorker(slug: string, options: { bearer?: boolean } = {}) {
+  if (!createProjectWithName || !createRoomAgentSession || !upsertAccount || !pool) {
+    throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+  }
+  const room = await createProjectWithName(`github.com/brosincode/${slug}`);
+  const owner = await upsertAccount({
+    provider: "github",
+    provider_user_id: `${slug}-owner`,
+    login: "PulseOwner",
+  });
+  const actorLabel = "Pulse | PulseOwner's agent | Codex";
+  const bearerFlag = process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED;
+  if (options.bearer) process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "1";
+  const worker = await createRoomAgentSession({
+    room_id: room.id,
+    session_kind: "worker",
+    runtime: "codex",
+    actor_label: actorLabel,
+    agent_key: "PulseOwner/pulse",
+    agent_instance_id: `${slug}-instance`,
+    display_name: "Pulse",
+    owner_account_id: owner.id,
+    owner_label: "PulseOwner",
+    ide_label: "Codex",
+  }).finally(() => {
+    if (bearerFlag === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED;
+    else process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = bearerFlag;
+  });
+  let credential_fence: RoomAgentDeliveryCredentialFence = {
+    kind: "session_token",
+    token_hash: hashToken(worker.session_token),
+  };
+  if (options.bearer) {
+    const bearer = (await pool.query<{ bearer_id: string; generation: number }>(
+      "SELECT bearer_id, generation FROM room_agent_session_bearers WHERE session_id = $1",
+      [worker.session_id],
+    )).rows[0];
+    assert.ok(bearer, "worker bearer was issued");
+    credential_fence = { kind: "bearer", bearer_id: bearer.bearer_id, generation: bearer.generation };
+  }
+  const identity = {
+    room_id: room.id,
+    actor_label: actorLabel,
+    agent_key: "PulseOwner/pulse",
+    agent_instance_id: `${slug}-instance`,
+    agent_session_id: worker.session_id,
+    session_kind: "worker" as const,
+    runtime: "codex",
+    display_name: "Pulse",
+    owner_label: "PulseOwner",
+    ide_label: "Codex",
+    credential_fence,
+  };
+  return {
+    room,
+    worker,
+    deliveryKey: `agent_session:${worker.session_id}`,
+    connect: (instanceId: string) => markRoomAgentDeliveryConnected!({
+      ...identity,
+      delivery_instance_id: instanceId,
+      transport: "long_poll",
+    }),
+    heartbeat: (instanceId: string) => markRoomAgentDeliveryHeartbeat!({
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_session_id: worker.session_id,
+      credential_fence,
+      delivery_instance_id: instanceId,
+    }),
+    disconnect: (instanceId: string) => markRoomAgentDeliveryDisconnected!({
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_session_id: worker.session_id,
+      credential_fence,
+      delivery_instance_id: instanceId,
+    }),
+    desktopHeartbeat: () => upsertDesktopRoomAgentDeliveryHeartbeat!(identity),
+  };
+}
+
+function deadlockCodes(results: PromiseSettledResult<unknown>[]): string[] {
+  return results.flatMap((result) => result.status === "rejected"
+    ? [String((result.reason as { code?: string; cause?: { code?: string } })?.code
+      ?? (result.reason as { cause?: { code?: string } })?.cause?.code
+      ?? (result.reason as Error)?.message)]
+    : []);
+}
+
+test(
+  "heartbeat, desktop heartbeat and disconnect of one worker serialize without a lock-order deadlock",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (!pool || !markRoomAgentDeliveryHeartbeat || !markRoomAgentDeliveryConnected || !markRoomAgentDeliveryDisconnected || !upsertDesktopRoomAgentDeliveryHeartbeat) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    for (const bearer of [false, true]) {
+      const delivery = await createDeliveryWorker(`delivery-lock-order-${bearer ? "bearer" : "token"}`, { bearer });
+      const pairs: Array<[string, () => Promise<unknown>, () => Promise<unknown>]> = [
+        ["two process heartbeats", () => delivery.heartbeat("host-a"), () => delivery.heartbeat("host-b")],
+        ["heartbeat and disconnect", () => delivery.heartbeat("host-a"), () => delivery.disconnect("host-b")],
+        ["heartbeat and desktop heartbeat", () => delivery.heartbeat("host-a"), () => delivery.desktopHeartbeat()],
+        ["desktop heartbeat and disconnect", () => delivery.desktopHeartbeat(), () => delivery.disconnect("host-a")],
+      ];
+      for (const [name, first, second] of pairs) {
+        await delivery.connect("host-a");
+        await delivery.connect("host-b");
+        // Hold the delivery key lock so both calls start their transactions
+        // before either can proceed. The first passes the credential check and
+        // waits here; the second waits at the session row lock.
+        const gate = await pool.connect();
+        let results: PromiseSettledResult<unknown>[];
+        try {
+          await gate.query("BEGIN");
+          await gate.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(concat($1::text, chr(31), $2::text), 0))",
+            [delivery.room.id, delivery.deliveryKey],
+          );
+          const calls = [first(), second()];
+          await sleep(100);
+          await gate.query("COMMIT");
+          results = await Promise.allSettled(calls);
+        } finally {
+          await gate.query("ROLLBACK").catch(() => undefined);
+          gate.release();
+        }
+        assert.deepEqual(deadlockCodes(results), [], `${name} (${bearer ? "bearer" : "session token"}) must not fail`);
+      }
+      if (bearer) continue;
+
+      // Unordered rounds of every path at once, on separate pool connections.
+      let failures: string[] = [];
+      for (let round = 0; round < 8; round += 1) {
+        await delivery.connect("host-a");
+        const results = await Promise.allSettled([
+          delivery.heartbeat("host-a"),
+          delivery.heartbeat("host-a"),
+          delivery.desktopHeartbeat(),
+          delivery.disconnect("host-a"),
+        ]);
+        failures = failures.concat(deadlockCodes(results));
+      }
+      assert.deepEqual(failures, []);
+
+      const final = await pool.query<{ instances: number; count: number; last_seen_at: string | null }>(`
+        SELECT (SELECT count(*)::int FROM room_agent_delivery_instances
+                 WHERE room_id = $1 AND delivery_key = $2 AND instance_id = 'host-a') AS instances,
+               delivery.active_connection_count AS count,
+               session.last_seen_at
+          FROM room_agent_delivery_sessions AS delivery
+          JOIN room_agent_sessions AS session ON session.session_id = delivery.agent_session_id
+         WHERE delivery.room_id = $1 AND delivery.delivery_key = $2
+      `, [delivery.room.id, delivery.deliveryKey]);
+      // A heartbeat never re-creates an instance, so host A's disconnect leaves
+      // it gone in every order. The aggregate counts host B (still connected
+      // from the gated pairs) and may hold the desktop lease.
+      assert.equal(final.rows[0]?.instances, 0);
+      assert.ok([0, 1, 2].includes(final.rows[0]!.count));
+      assert.ok(final.rows[0]?.last_seen_at);
+    }
+  },
+);
+
+async function readHeartbeatRows(roomId: string, deliveryKey: string, instanceId: string) {
+  const row = (await pool!.query<{
+    instance_at: Date | null;
+    instance_version: string | null;
+    delivery_at: Date;
+    delivery_version: string;
+    count: number;
+    session_seen_at: Date;
+    session_at: Date;
+  }>(`
+    SELECT instance.updated_at AS instance_at,
+           instance.xmin::text AS instance_version,
+           delivery.updated_at AS delivery_at,
+           delivery.xmin::text AS delivery_version,
+           delivery.active_connection_count AS count,
+           session.last_seen_at AS session_seen_at,
+           session.updated_at AS session_at
+      FROM room_agent_delivery_sessions AS delivery
+      JOIN room_agent_sessions AS session ON session.session_id = delivery.agent_session_id
+      LEFT JOIN room_agent_delivery_instances AS instance
+        ON instance.room_id = delivery.room_id
+       AND instance.delivery_key = delivery.delivery_key
+       AND instance.instance_id = $3
+     WHERE delivery.room_id = $1 AND delivery.delivery_key = $2
+  `, [roomId, deliveryKey, instanceId])).rows[0];
+  assert.ok(row, "delivery row exists");
+  return row;
+}
+
+test(
+  "a duplicate delivery heartbeat inside the coalescing window writes no row; a later or count-changing one writes",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async (context) => {
+    if (!pool || !markRoomAgentDeliveryHeartbeat || !markRoomAgentDeliveryConnected) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    context.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    const delivery = await createDeliveryWorker("delivery-coalesce");
+    await delivery.connect("host-a");
+
+    context.mock.timers.tick(ROOM_AGENT_HEARTBEAT_WRITE_COALESCE_MS + 1_000);
+    assert.equal(await delivery.heartbeat("host-a"), true);
+    const written = await readHeartbeatRows(delivery.room.id, delivery.deliveryKey, "host-a");
+    assert.equal(written.instance_at?.getTime(), Date.now());
+    assert.equal(written.delivery_at.getTime(), Date.now());
+    assert.equal(written.session_seen_at.getTime(), Date.now());
+    assert.equal(written.session_at.getTime(), Date.now());
+
+    // The heartbeat a long-poll start forces, two seconds after the interval one.
+    context.mock.timers.tick(2_000);
+    assert.equal(await delivery.heartbeat("host-a"), true);
+    assert.deepEqual(await readHeartbeatRows(delivery.room.id, delivery.deliveryKey, "host-a"), written);
+    // A skipped write must not read as a missing instance, nor hide one.
+    assert.equal(await delivery.heartbeat("host-missing"), false);
+
+    context.mock.timers.tick(ROOM_AGENT_HEARTBEAT_WRITE_COALESCE_MS);
+    assert.equal(await delivery.heartbeat("host-a"), true);
+    const later = await readHeartbeatRows(delivery.room.id, delivery.deliveryKey, "host-a");
+    assert.equal(later.instance_at?.getTime(), Date.now());
+    assert.equal(later.delivery_at.getTime(), Date.now());
+    assert.equal(later.session_seen_at.getTime(), Date.now());
+    assert.notEqual(later.instance_version, written.instance_version);
+    assert.notEqual(later.delivery_version, written.delivery_version);
+
+    // A crashed second process: its stale instance is removed inside the
+    // window and the count change is written even though no timestamp is due.
+    await delivery.connect("host-b");
+    await pool.query(
+      `UPDATE room_agent_delivery_instances SET updated_at = $3::timestamptz
+        WHERE room_id = $1 AND delivery_key = $2 AND instance_id = 'host-b'`,
+      [delivery.room.id, delivery.deliveryKey, new Date(Date.now() - ACTIVE_AGENT_DELIVERY_WINDOW_MS - 1_000).toISOString()],
+    );
+    assert.equal((await readHeartbeatRows(delivery.room.id, delivery.deliveryKey, "host-a")).count, 2);
+    context.mock.timers.tick(1_000);
+    assert.equal(await delivery.heartbeat("host-a"), true);
+    const pruned = await readHeartbeatRows(delivery.room.id, delivery.deliveryKey, "host-a");
+    assert.equal(pruned.count, 1);
+    assert.equal((await readHeartbeatRows(delivery.room.id, delivery.deliveryKey, "host-b")).instance_at, null);
+  },
+);
+
+test(
+  "a worker that heartbeats every interval stays reachable while duplicate heartbeats are coalesced",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async (context) => {
+    if (!getRoomAgentDeliverySessions || !deliveryHelpersModule) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    const { isRoomAgentDeliverySessionReachable } = deliveryHelpersModule;
+    context.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    const delivery = await createDeliveryWorker("delivery-coalesce-reachable");
+    await delivery.connect("host-a");
+    const current = async () => {
+      const [session] = await getRoomAgentDeliverySessions(delivery.room.id);
+      assert.ok(session);
+      return session;
+    };
+
+    for (let interval = 0; interval < 10; interval += 1) {
+      context.mock.timers.tick(ROOM_AGENT_DELIVERY_HEARTBEAT_INTERVAL_MS - 2_000);
+      assert.equal(isRoomAgentDeliverySessionReachable(await current(), Date.now()), true, `reachable before beat ${interval}`);
+      assert.equal(await delivery.heartbeat("host-a"), true);
+      const stored = await current();
+      assert.ok(Date.now() - Date.parse(stored.updated_at) <= ROOM_AGENT_HEARTBEAT_WRITE_COALESCE_MS);
+      context.mock.timers.tick(2_000);
+      assert.equal(await delivery.heartbeat("host-a"), true);
+      assert.equal(isRoomAgentDeliverySessionReachable(await current(), Date.now()), true);
+    }
+
+    // Coalescing never stretches the reachability window itself.
+    context.mock.timers.tick(ACTIVE_AGENT_DELIVERY_WINDOW_MS + 1_000);
+    assert.equal(isRoomAgentDeliverySessionReachable(await current(), Date.now()), false);
+  },
+);
+
+test(
+  "native activity keeps a due time that is less than a minute early and rewrites an older one",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async (context) => {
+    if (!pool || !recordNativeHarnessActivity) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    context.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    const delivery = await createDeliveryWorker("native-due-time");
+    await delivery.connect("host-a");
+    let sequence = 0;
+    const record = async () => {
+      sequence += 1;
+      const result = await recordNativeHarnessActivity({
+        room_id: delivery.room.id,
+        agent_session_id: delivery.worker.session_id,
+        actor_label: delivery.worker.actor_label,
+        agent_key: delivery.worker.agent_key!,
+        session_kind: "worker",
+        runtime: "codex",
+        display_name: "Pulse",
+        owner_label: "PulseOwner",
+        ide_label: "Codex",
+        repo_branch: null,
+        provider_observed_at: new Date().toISOString(),
+        sequence,
+        method: "native_harness.bound",
+        status: "working",
+      });
+      assert.equal(result.accepted, true);
+    };
+    const due = async () => (await pool!.query<{ due: Date; version: string }>(
+      `SELECT next_liveness_check_at AS due, xmin::text AS version
+         FROM room_agent_delivery_sessions WHERE room_id = $1 AND delivery_key = $2`,
+      [delivery.room.id, delivery.deliveryKey],
+    )).rows[0]!;
+
+    context.mock.timers.tick(61_000);
+    await record();
+    const rescheduled = await due();
+    assert.equal(rescheduled.due.getTime(), Date.now() + 5 * 60_000);
+
+    context.mock.timers.tick(30_000);
+    await record();
+    assert.deepEqual(await due(), rescheduled);
+
+    context.mock.timers.tick(31_000);
+    await record();
+    assert.equal((await due()).due.getTime(), Date.now() + 5 * 60_000);
+  },
+);
+
+test(
+  "a duplicate heartbeat of a lease without process instances is coalesced and still reports a live lease",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async (context) => {
+    if (!pool || !createProjectWithName || !markRoomAgentDeliveryConnected || !markRoomAgentDeliveryDisconnected || !markRoomAgentDeliveryHeartbeat) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    context.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    const room = await createProjectWithName("github.com/brosincode/delivery-coalesce-controller");
+    const actorLabel = "Lease Poller | Owner | MCP";
+    await markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+      session_kind: "controller",
+      display_name: "Lease Poller",
+      transport: "long_poll",
+    });
+    const read = async () => (await pool.query<{ updated_at: Date; version: string }>(
+      `SELECT updated_at, xmin::text AS version FROM room_agent_delivery_sessions
+        WHERE room_id = $1 AND delivery_key = $2`,
+      [room.id, `controller:${actorLabel}`],
+    )).rows[0]!;
+    const heartbeat = () => markRoomAgentDeliveryHeartbeat({ room_id: room.id, actor_label: actorLabel });
+
+    context.mock.timers.tick(ROOM_AGENT_HEARTBEAT_WRITE_COALESCE_MS + 1_000);
+    assert.equal(await heartbeat(), true);
+    const written = await read();
+    assert.equal(written.updated_at.getTime(), Date.now());
+
+    context.mock.timers.tick(2_000);
+    assert.equal(await heartbeat(), true);
+    assert.deepEqual(await read(), written);
+
+    await markRoomAgentDeliveryDisconnected({ room_id: room.id, actor_label: actorLabel });
+    assert.equal(await heartbeat(), false);
+  },
+);
+
+test(
+  "native activity and a desktop heartbeat with presence take the delivery row before the presence row",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (!pool || !recordNativeHarnessActivity || !upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    const delivery = await createDeliveryWorker("native-desktop-lock-order");
+    let sequence = 0;
+    const native = () => {
+      sequence += 1;
+      return recordNativeHarnessActivity({
+        room_id: delivery.room.id,
+        agent_session_id: delivery.worker.session_id,
+        actor_label: delivery.worker.actor_label,
+        agent_key: delivery.worker.agent_key!,
+        session_kind: "worker",
+        runtime: "codex",
+        display_name: "Pulse",
+        owner_label: "PulseOwner",
+        ide_label: "Codex",
+        repo_branch: null,
+        provider_observed_at: new Date(Date.now() + sequence).toISOString(),
+        sequence,
+        method: "native_harness.bound",
+        status: "working",
+      });
+    };
+    const desktop = () => upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat({
+      room_id: delivery.room.id,
+      actor_label: delivery.worker.actor_label,
+      agent_key: delivery.worker.agent_key,
+      agent_instance_id: "native-desktop-lock-order-instance",
+      agent_session_id: delivery.worker.session_id,
+      session_kind: "worker",
+      runtime: "codex",
+      display_name: "Pulse",
+      owner_label: "PulseOwner",
+      ide_label: "Codex",
+      credential_fence: { kind: "session_token", token_hash: hashToken(delivery.worker.session_token) },
+      presence: { status: "working", status_text: "Working" },
+    });
+    // After an offline announcement the due time stays NULL until recovery,
+    // so the native report must write, and lock, the delivery row.
+    const clearDueTime = () => pool.query(
+      "UPDATE room_agent_delivery_sessions SET next_liveness_check_at = NULL WHERE room_id = $1",
+      [delivery.room.id],
+    );
+    await desktop();
+
+    // Hold the presence row: the native report queues on it first, then the
+    // desktop heartbeat queues on it holding whatever it locked before.
+    await clearDueTime();
+    const gate = await pool.connect();
+    let results: PromiseSettledResult<unknown>[];
+    try {
+      await gate.query("BEGIN");
+      await gate.query(
+        "SELECT 1 FROM room_agent_presence WHERE room_id = $1 AND actor_label = $2 FOR UPDATE",
+        [delivery.room.id, delivery.worker.actor_label],
+      );
+      const nativeCall = native();
+      await sleep(50);
+      const desktopCall = desktop();
+      await sleep(100);
+      await gate.query("COMMIT");
+      results = await Promise.allSettled([nativeCall, desktopCall]);
+    } finally {
+      await gate.query("ROLLBACK").catch(() => undefined);
+      gate.release();
+    }
+    assert.deepEqual(deadlockCodes(results), []);
+
+    let failures: string[] = [];
+    for (let round = 0; round < 10; round += 1) {
+      await clearDueTime();
+      failures = failures.concat(deadlockCodes(await Promise.allSettled([native(), desktop(), native(), desktop()])));
+    }
+    assert.deepEqual(failures, []);
+  },
+);
+
+test(
+  "a heartbeat without a process instance waits for a concurrent disconnect and reports it",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (!pool || !createProjectWithName || !markRoomAgentDeliveryConnected || !markRoomAgentDeliveryHeartbeat) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    const room = await createProjectWithName("github.com/brosincode/delivery-heartbeat-disconnect-race");
+    const actorLabel = "Lease Poller | Owner | MCP";
+    await markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+      session_kind: "controller",
+      display_name: "Lease Poller",
+      transport: "long_poll",
+    });
+    await pool.query(
+      "UPDATE room_agent_delivery_sessions SET updated_at = now() - interval '20 seconds' WHERE room_id = $1",
+      [room.id],
+    );
+    const gate = await pool.connect();
+    let heartbeat: Promise<boolean>;
+    try {
+      await gate.query("BEGIN");
+      await gate.query(
+        "UPDATE room_agent_delivery_sessions SET active_connection_count = 0, updated_at = now() WHERE room_id = $1",
+        [room.id],
+      );
+      heartbeat = markRoomAgentDeliveryHeartbeat({ room_id: room.id, actor_label: actorLabel });
+      await sleep(100);
+      await gate.query("COMMIT");
+    } finally {
+      await gate.query("ROLLBACK").catch(() => undefined);
+      gate.release();
+    }
+    assert.equal(await heartbeat, false);
+  },
 );
 
 test(
