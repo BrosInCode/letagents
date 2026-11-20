@@ -300,6 +300,22 @@ export function isCompleteRoomSnapshot(snapshot: DesktopRoomSnapshot | null): sn
 }
 
 /**
+ * Whether the snapshot on screen can stand in for a kept copy of the same
+ * room: it is ready, every source of it was read, and it is the same room in
+ * the same storage. Stream events and gap reads change only the snapshot on
+ * screen, so such a snapshot is never older than the copy.
+ */
+export function snapshotCoversRoomCopy(
+  shown: DesktopRoomSnapshot | null,
+  copy: DesktopRoomSnapshot,
+): shown is DesktopRoomSnapshot {
+  return isCompleteRoomSnapshot(shown)
+    && copy.access.status === "ready"
+    && roomSnapshotsMatch(shown, copy)
+    && snapshotStorageNamespacesMatch(shown, copy);
+}
+
+/**
  * Complete a read that left sources out (`incoming.unloadedSources`, as a read
  * after a stream gap does) from the snapshot on screen: each section it did not
  * read keeps the value and the source state that `current` has. The result is

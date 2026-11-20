@@ -31,6 +31,7 @@ import {
   removeSnapshotReasoningSession,
   replaceSnapshotRoomArtifacts,
   roomSnapshotsMatch,
+  snapshotCoversRoomCopy,
   snapshotMatchesRoom,
   upsertSnapshotLiveActivitySession,
   upsertSnapshotReasoningSession,
@@ -147,6 +148,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   let activeStreamRoom: string | null = null;
   let activeActivityScope: string | null = null;
   let activeStreamToken = 0;
+  // The stream token under which a full read of the stream's room last landed
+  // on screen. A read after a gap may leave sections out only then.
+  let fullReadStreamToken: number | null = null;
   let bufferedStreamEvents: DesktopRoomStreamEvent[] = [];
   let bufferedStreamEventBytes = 0;
   let streamBufferOverflow = false;
@@ -161,6 +165,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   let sameTaskSelectionRefresh: {
     key: string;
     base: DesktopRoomSnapshot | null;
+    rootRead: boolean;
     promise: Promise<void>;
   } | null = null;
   let artifactRefreshContext = 0;
@@ -363,6 +368,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         rootBarrierToken = await beginRoomSnapshotBarrier(barrierRoomIdentifier);
       }
       const rootRepairToken = pendingRepairTokenFor(barrierRoomIdentifier);
+      const rootStreamToken = rootBarrierToken === null ? null : activeStreamToken;
       if (!sessionIsCurrent(sessionGeneration)) return;
       const [
         nextAppInfo,
@@ -436,10 +442,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         if (rootReadMatchesBarrier) queueRepairReadIfGapChanged(nextRootRoomSnapshot.roomIdentifier, rootRepairToken);
         finishRoomSnapshotBarrier(nextRootRoomSnapshot.roomIdentifier, rootBarrierToken);
       }
-      await refreshSelectedSnapshot(nextRootRoomSnapshot);
+      await refreshSelectedSnapshot(nextRootRoomSnapshot, { rootRead: true });
       // The root read above is fresh; when it is the room shown, it may be kept.
       if (sessionIsCurrent(sessionGeneration)) {
         rememberFreshSelectedSnapshot(nextRootRoomSnapshot, [requestedRootRoomIdentifier]);
+        noteFullReadOnScreen(nextRootRoomSnapshot, rootReadMatchesBarrier ? rootStreamToken : null);
       }
     } finally {
       queueSkippedRecoveryAfterFailedRead(streamReconcileRoom, rootBarrierToken);
@@ -554,10 +561,15 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
    * entry), so it still joins; nothing from a later task can. A caller that
    * needs data newer than a read already in flight passes `fresh` and never
    * joins.
+   *
+   * `rootRead` says that the caller just read `baseRootSnapshot` from the
+   * server. Only then does it replace a complete snapshot of the same room
+   * that is on screen (see `rootSnapshotForScreen`). Such a call never joins
+   * one that did not say so.
    */
   function refreshSelectedSnapshot(
     baseRootSnapshot: DesktopRoomSnapshot | null = options.rootRoomSnapshot.value,
-    { fresh = false }: { fresh?: boolean } = {},
+    { fresh = false, rootRead = false }: { fresh?: boolean; rootRead?: boolean } = {},
   ): Promise<void> {
     const entry = options.activeEntry.value;
     const key = JSON.stringify([
@@ -568,11 +580,16 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       baseRootSnapshot ? options.resolveSelectedRoomIdentifier(baseRootSnapshot) : null,
     ]);
     const base = baseRootSnapshot ? toRaw(baseRootSnapshot) : null;
-    if (!fresh && sameTaskSelectionRefresh?.key === key && sameTaskSelectionRefresh.base === base) {
+    if (
+      !fresh
+      && sameTaskSelectionRefresh?.key === key
+      && sameTaskSelectionRefresh.base === base
+      && (!rootRead || sameTaskSelectionRefresh.rootRead)
+    ) {
       return sameTaskSelectionRefresh.promise;
     }
-    const promise = refreshSelectedSnapshotNow(baseRootSnapshot);
-    const current = { key, base, promise };
+    const promise = refreshSelectedSnapshotNow(baseRootSnapshot, rootRead);
+    const current = { key, base, rootRead, promise };
     sameTaskSelectionRefresh = current;
     const forget = () => {
       if (sameTaskSelectionRefresh === current) sameTaskSelectionRefresh = null;
@@ -582,7 +599,44 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     return promise;
   }
 
-  async function refreshSelectedSnapshotNow(baseRootSnapshot: DesktopRoomSnapshot | null): Promise<void> {
+  /**
+   * The root room as the screen shows it when this refresh makes no read.
+   *
+   * Stream events and gap reads change only the snapshot on screen. The root
+   * copy keeps the tasks, reasoning, artifacts and GitHub events of its last
+   * full read, so it is the older one while a complete snapshot of the root
+   * room is on screen: that snapshot stays. The root copy is shown when the
+   * caller just read it, or when the screen holds something else (another
+   * room, a placeholder, a cached paint, a room that is not ready).
+   */
+  function rootSnapshotForScreen(root: DesktopRoomSnapshot, rootRead: boolean): DesktopRoomSnapshot {
+    const shown = options.selectedSnapshot.value;
+    if (
+      !rootRead
+      && snapshotCoversRoomCopy(shown, root)
+      && !(cachedPaint && snapshotMatchesRoom(shown, cachedPaint.roomIdentifier))
+    ) return shown;
+    return mergeFreshSelectedSnapshot(root);
+  }
+
+  /**
+   * A full read of the stream's room landed on screen under `streamToken`.
+   * From now on a read after a gap of this stream may leave the poll-only
+   * sections out: they were read with the room and the periodic read keeps
+   * them. A token that is no longer the stream's (another room, a newer
+   * barrier) notes nothing.
+   */
+  function noteFullReadOnScreen(read: DesktopRoomSnapshot, streamToken: number | null): void {
+    if (streamToken === null || streamToken !== activeStreamToken) return;
+    if (!isCompleteRoomSnapshot(read) || !snapshotMatchesRoom(read, activeStreamRoom)) return;
+    if (!snapshotMatchesRoom(options.selectedSnapshot.value, activeStreamRoom)) return;
+    fullReadStreamToken = streamToken;
+  }
+
+  async function refreshSelectedSnapshotNow(
+    baseRootSnapshot: DesktopRoomSnapshot | null,
+    rootRead = false,
+  ): Promise<void> {
     const requestId = ++selectedSnapshotRequestId;
 
     if (!baseRootSnapshot) {
@@ -595,7 +649,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     if (options.activeEntry.value.type !== "room") {
       if (requestId === selectedSnapshotRequestId) {
-        setSelectedSnapshot(mergeFreshSelectedSnapshot(baseRootSnapshot), { activitySnapshot: true });
+        setSelectedSnapshot(rootSnapshotForScreen(baseRootSnapshot, rootRead), { activitySnapshot: true });
         selectedSnapshotLoading.value = false;
       }
       return;
@@ -655,7 +709,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
     if (!roomIdentifier || roomIdentifier === baseRootSnapshot.roomIdentifier) {
       if (requestId === selectedSnapshotRequestId) {
-        setSelectedSnapshot(mergeFreshSelectedSnapshot(baseRootSnapshot), { activitySnapshot: true });
+        setSelectedSnapshot(rootSnapshotForScreen(baseRootSnapshot, rootRead), { activitySnapshot: true });
         selectedSnapshotLoading.value = false;
       }
       return;
@@ -670,6 +724,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     try {
       barrierToken = await beginRoomSnapshotBarrier(roomIdentifier);
       const repairToken = pendingRepairTokenFor(roomIdentifier);
+      const streamToken = activeStreamToken;
       const nextSnapshot = await getRoomSnapshot(roomIdentifier);
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
       await acknowledgeStreamGapRepairFromSnapshot(roomIdentifier, nextSnapshot, repairToken);
@@ -677,6 +732,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       cachedSelectedSnapshots.noteFreshAccess(nextSnapshot, [roomIdentifier]);
       setSelectedSnapshot(mergeFreshSelectedSnapshot(nextSnapshot), { cacheAlias: roomIdentifier, activitySnapshot: true });
       rememberFreshSelectedSnapshot(nextSnapshot, [roomIdentifier]);
+      noteFullReadOnScreen(nextSnapshot, streamToken);
       queueRepairReadIfGapChanged(roomIdentifier, repairToken);
       finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
     } catch (error) {
@@ -840,11 +896,16 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
    * fresh. So when the room on screen is a complete snapshot of this room,
    * only the stream-fed sources are read and its other sections stay. A
    * placeholder, a cached paint or another room gets the full read.
+   *
+   * The first read after the stream turned to this room is a full one too.
+   * The room may show a copy kept while another room was open, and nothing
+   * read the poll-only sections of that copy in the meantime.
    */
   function gapReadOptions(roomIdentifier: string): DesktopRoomSnapshotOptions | undefined {
     const shown = options.selectedSnapshot.value;
     if (!isCompleteRoomSnapshot(shown) || !snapshotMatchesRoom(shown, roomIdentifier)) return undefined;
     if (cachedPaint && snapshotMatchesRoom(shown, cachedPaint.roomIdentifier)) return undefined;
+    if (fullReadStreamToken !== activeStreamToken) return undefined;
     return { sources: "stream_fed" };
   }
 
@@ -1041,6 +1102,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     const deliveryRepairToken = roomKey
       ? pendingDeliveryRepairs.get(roomKey)?.token ?? null
       : null;
+    const streamToken = activeStreamToken;
     streamReconcileRoom = roomIdentifier;
     resetBufferedStreamEvents();
     try {
@@ -1080,6 +1142,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (authoritativeMessages) cachedPaint = null;
       setSelectedSnapshot(authoritativeMessages ? snapshot : mergeFreshSelectedSnapshot(snapshot), { activitySnapshot: true });
       rememberFreshSelectedSnapshot(snapshot, [roomIdentifier]);
+      // Only a read that asked for every source counts: `read`, not the completed `snapshot`.
+      noteFullReadOnScreen(read, streamToken);
       const pending = streamBufferOverflow ? [] : bufferedStreamEvents;
       const overflowed = streamBufferOverflow;
       resetBufferedStreamEvents();

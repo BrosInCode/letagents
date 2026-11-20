@@ -2199,7 +2199,7 @@ function createSwitchSimulation(options: {
   });
   current.harness = harness;
   const bridge = harness.windowBridge as { letagentsDesktop: { room: {
-    getSnapshot: (identifier: string | null) => Promise<DesktopRoomSnapshot>;
+    getSnapshot: (identifier: string | null, snapshotOptions?: unknown) => Promise<DesktopRoomSnapshot>;
   } } };
   const simulation = {
     harness,
@@ -2219,9 +2219,10 @@ function createSwitchSimulation(options: {
       harness.state.invalidateSession();
     },
   };
-  bridge.letagentsDesktop.room.getSnapshot = async (identifier) => {
+  bridge.letagentsDesktop.room.getSnapshot = async (identifier, snapshotOptions) => {
     const roomIdentifier = identifier || "room_parent";
     harness.getSnapshotRequests.push(identifier);
+    harness.getSnapshotOptions.push(snapshotOptions);
     timeline.push(`read:${roomIdentifier}`);
     if (simulation.read) return simulation.read(roomIdentifier);
     await flushAsync();
@@ -2602,6 +2603,125 @@ describe("useDesktopAppData snapshot reads per room switch", () => {
     assert.deepEqual(harness.getSnapshotRequests, ["room_parent", "room_parent"]);
     assert.deepEqual(acks(harness), ["room_parent:101"]);
     assert.equal(harness.selectedSnapshot.value?.roomIdentifier, "room_parent");
+  });
+
+  // Stream events and gap reads change only the room on screen. The root copy
+  // keeps the board of its last full read. Until 2026-11 a full reload every
+  // 15 seconds (an accident of the stream's keep-alive) hid that difference.
+  describe("the main room on screen against its kept copy", () => {
+    const withTask = (roomIdentifier: string, status: string): DesktopRoomSnapshot => ({
+      ...simulatedSnapshot(roomIdentifier),
+      tasks: [{ ...taskSummary("task_1"), status }],
+    } as DesktopRoomSnapshot);
+    const shownTasks = (harness: ReturnType<typeof createHarness>) =>
+      harness.selectedSnapshot.value?.tasks.map((task) => `${task.id}:${task.status}`);
+    const settingsEntry = {
+      id: "settings", type: "system", title: "Settings", description: "", sectionLabel: "",
+    } as unknown as SidebarEntry;
+    const taskDone = { type: "task_update", roomIdentifier: "room_parent", task: { ...taskSummary("task_1"), status: "done" } } as const;
+
+    /** room_parent on screen, its stream connected and its first read done, with the task in progress. */
+    async function mainRoomWithTaskInProgress() {
+      const simulation = createSwitchSimulation({ handshake: "gap" });
+      const { harness } = simulation;
+      harness.rootRoomSnapshot.value = withTask("room_parent", "in_progress");
+      harness.selectedSnapshot.value = withTask("room_parent", "in_progress");
+      let server = "in_progress";
+      simulation.read = async (roomIdentifier) => {
+        await flushAsync();
+        return roomIdentifier === "room_parent" ? withTask("room_parent", server) : simulatedSnapshot(roomIdentifier);
+      };
+      await withDesktopBridge(harness.windowBridge, async () => {
+        await harness.state.syncSelectedRoomStream("room_parent");
+        await simulation.settle();
+      });
+      harness.getSnapshotRequests.length = 0;
+      harness.getSnapshotOptions.length = 0;
+      return { simulation, harness, setServer: (status: string) => { server = status; } };
+    }
+
+    it("keeps what the stream changed across a visit to Settings, with no read", async () => {
+      const { simulation, harness, setServer } = await mainRoomWithTaskInProgress();
+      await withDesktopBridge(harness.windowBridge, async () => {
+        setServer("done");
+        simulation.emit(taskDone);
+        await simulation.settle();
+        assert.deepEqual(shownTasks(harness), ["task_1:done"]);
+        harness.activeEntry.value = settingsEntry;
+        await simulation.settle();
+        assert.deepEqual(shownTasks(harness), ["task_1:done"], "Settings keeps the room as the stream left it");
+        harness.activeEntry.value = parentEntry();
+        await simulation.settle();
+      });
+      simulation.dispose();
+
+      assert.deepEqual(shownTasks(harness), ["task_1:done"], "the return shows the room, not its older copy");
+      assert.deepEqual(harness.getSnapshotRequests, [], "the stream kept the room current: nothing is read");
+      assert.equal(harness.state.selectedSnapshotLoading.value, false);
+    });
+
+    it("reads the whole room once on the return from a focus room, because the copy is older than the stream", async () => {
+      const { simulation, harness, setServer } = await mainRoomWithTaskInProgress();
+      await withDesktopBridge(harness.windowBridge, async () => {
+        setServer("done");
+        simulation.emit(taskDone);
+        await simulation.settle();
+        harness.activeEntry.value = focusEntry("focus_b", "Focus B");
+        await simulation.settle();
+        harness.getSnapshotRequests.length = 0;
+        harness.getSnapshotOptions.length = 0;
+        harness.activeEntry.value = parentEntry();
+        await simulation.settle();
+        await simulation.settle();
+      });
+      simulation.dispose();
+
+      assert.deepEqual(shownTasks(harness), ["task_1:done"]);
+      assert.deepEqual(harness.getSnapshotRequests, ["room_parent"], "the new connection asks for one room read");
+      assert.deepEqual(harness.getSnapshotOptions, [undefined],
+        "a full one: nothing read the copy's people, presence or board settings while the focus room was open");
+    });
+
+    it("reads only the stream-fed sources at a later gap of the same stream", async () => {
+      const { simulation, harness } = await mainRoomWithTaskInProgress();
+      await withDesktopBridge(harness.windowBridge, async () => {
+        simulation.emit({ type: "open", roomIdentifier: "room_parent", checkpoint: null, gap: true, verified: true, deliveryRepairToken: 150 });
+        await simulation.settle();
+      });
+      simulation.dispose();
+
+      assert.deepEqual(harness.getSnapshotRequests, ["room_parent"]);
+      assert.deepEqual(harness.getSnapshotOptions, [{ sources: "stream_fed" }]);
+      assert.deepEqual(acks(harness).at(-1), "room_parent:150");
+    });
+
+    it("shows a root that was just read, also over a complete room on screen", async () => {
+      const { simulation, harness, setServer } = await mainRoomWithTaskInProgress();
+      await withDesktopBridge(harness.windowBridge, async () => {
+        // The app reloads (sign-in, manual reload): the root is read again and must win.
+        setServer("done");
+        await harness.state.refresh();
+        await simulation.settle();
+      });
+      simulation.dispose();
+
+      assert.deepEqual(shownTasks(harness), ["task_1:done"]);
+      assert.deepEqual(harness.rootRoomSnapshot.value?.tasks.map((task) => task.status), ["done"]);
+    });
+
+    it("shows the copy when the room on screen is not a complete room", async () => {
+      const { simulation, harness } = await mainRoomWithTaskInProgress();
+      await withDesktopBridge(harness.windowBridge, async () => {
+        // A room whose read left sources out cannot stand in for the copy.
+        harness.selectedSnapshot.value = { ...withTask("room_parent", "unknown"), unloadedSources: ["tasks"] } as DesktopRoomSnapshot;
+        harness.activeEntry.value = settingsEntry;
+        await simulation.settle();
+      });
+      simulation.dispose();
+
+      assert.deepEqual(shownTasks(harness), ["task_1:in_progress"]);
+      assert.equal(harness.selectedSnapshot.value?.unloadedSources, undefined);
+    });
   });
 
   it("an explicit room refresh never joins a selection read already in flight", async () => {
