@@ -3,8 +3,30 @@
  * idle upstream request at 60 seconds, and some at 30.
  */
 export const ROOM_POLL_FLOOR_HOLD_MS = 25_000;
-/** The longest hold asked for. The server holds a poll for 180 seconds at most by default. */
-export const ROOM_POLL_TARGET_HOLD_MS = 150_000;
+/**
+ * The longest hold asked for: one doubling step above the floor.
+ *
+ * - The most common proxy limit is 60 seconds (the default of nginx
+ *   `proxy_read_timeout` and of the AWS ALB idle timeout). The server starts
+ *   its hold timer after its own work for the request (the sign-in check, the
+ *   first queries), so a hold near 60 seconds can lose the race against the
+ *   proxy under load. 50 seconds leaves 10.
+ * - While a poll is open, the server keeps the agent's delivery lease fresh
+ *   by itself, and a machine that sleeps or loses its network sends no close.
+ *   So a daemon that is gone counts as connected for at most 60 seconds (the
+ *   hold plus 10) and as within its reconnect grace for at most 70, inside
+ *   the 90 seconds of the presence window.
+ * - With one step, a path that cuts between 25 and 50 seconds (a 30 second
+ *   gateway, for example) costs each agent one cut probe for each cool-down
+ *   round and nothing else.
+ *
+ * The server would hold a poll for 180 seconds, and 150 seconds was the first
+ * aim of this change. That waits: raise this only when the server learns
+ * sooner that a client is gone, for example from keep-alive bytes on the open
+ * poll or from a sleep signal of the desktop. The costs listed at
+ * RoomPollHold grow with it too.
+ */
+export const ROOM_POLL_TARGET_HOLD_MS = 50_000;
 /** How long holds stay at the proven time after a longer one was cut; doubled for each cut that follows. */
 export const ROOM_POLL_PROBE_COOLDOWN_MS = 10 * 60_000;
 export const ROOM_POLL_PROBE_COOLDOWN_MAX_MS = 60 * 60_000;
@@ -23,20 +45,33 @@ export type RoomPollAttempt = { readonly holdMs: number; readonly provenMs: numb
  * How long a room poll asks one room server to hold it. It owns no request
  * and no timer: the poll takes a hold, then reports what happened.
  *
- * A server holds a poll until a message arrives, so a longer hold costs no
- * latency and saves requests. A proxy on the way may end a request that
- * stays open too long, and that limit is not known in advance. So a hold
- * goes only as far as twice the longest time a poll on this path stayed open
- * and was then answered (the proven time), and never past the target. From
- * the floor that is 50 s, 100 s, then 150 s.
+ * A server holds a poll until a message arrives, so on a healthy path a
+ * longer hold adds no latency and saves requests. A proxy on the way may end
+ * a request that stays open too long, and that limit is not known in
+ * advance. So a hold goes only as far as twice the longest time a poll on
+ * this path stayed open and was then answered (the proven time), and never
+ * past the target. From the floor that is one step: 25 s, then 50 s.
  *
  * A hold above the proven time is a probe. A probe that fails after it
  * outlived the proven time has met the path's limit: holds stay at the
- * proven time for a cool-down, then one probes again. A poll that fails
- * earlier than a poll on this path once lived says the path changed (another
- * network, another proxy, a restarted server), and the proof starts again
- * from the floor. In both cases the poll is asked again at once with a hold
- * that is still proven, so nothing is shown and no message waits.
+ * proven time for a cool-down, then every observing agent of that server
+ * probes again, as one round. A poll that fails earlier than a poll on this
+ * path once lived says the path changed (another network, another proxy, a
+ * restarted server), and the proof starts again from the floor. In both
+ * cases the poll is asked again at once with a hold that is still proven.
+ * When the cut is an error at once (a proxy's 504, a closed connection),
+ * nothing is shown and no message waits.
+ *
+ * What a hold above the floor costs:
+ * - A connection that dies with no error is found only by the poll's own
+ *   deadline, 20 s after the hold: after up to 70 s, where it was 45 s. A
+ *   message that came meanwhile waits for that.
+ * - A path that drops a long request with no error makes each probe wait
+ *   for that deadline, and the probe repeats after each cool-down.
+ * - Two retries use the end of a poll as their clock. They run every 50 s
+ *   at most, where it was 25 s: the server finds a lost reply-turn wake at
+ *   the agent's next poll, and the delivery pump asks again for a
+ *   managed-contract replacement that met a conflict.
  */
 export class RoomPollHold {
   private readonly floorMs: number;

@@ -385,10 +385,10 @@ export async function readRoomThread(input: {
 
 type RoomPollInput = Parameters<SupervisedDeliveryHttp["poll"]>[0];
 
-async function requestRoomPoll(input: RoomPollInput, holdMs: number): Promise<SupervisedPollResponse> {
+async function requestRoomPoll(request: typeof roomRequest, input: RoomPollInput, holdMs: number): Promise<SupervisedPollResponse> {
   const query = new URLSearchParams({ timeout: String(holdMs) });
   if (input.afterMessageId) query.set("after", input.afterMessageId);
-  const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/poll?${query}`, {
+  const response = await request(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/poll?${query}`, {
     headers: { authorization: `Bearer ${input.bearer}` },
     signal: boundedCloudSignal(input.signal, holdMs + CLOUD_REQUEST_TIMEOUT_MS),
   });
@@ -416,18 +416,19 @@ async function requestRoomPoll(input: RoomPollInput, holdMs: number): Promise<Su
  * A local room answers from this process within half a second and ignores
  * the hold, so its request stays as it was.
  */
-export function supervisedRoomPoll(options: { nowMs?: () => number } = {}): SupervisedDeliveryHttp["poll"] {
+export function supervisedRoomPoll(options: { nowMs?: () => number; request?: typeof roomRequest } = {}): SupervisedDeliveryHttp["poll"] {
   const nowMs = options.nowMs ?? (() => performance.now());
+  const request = options.request ?? roomRequest;
   const holds = new Map<string, RoomPollHold>();
   return async (input) => {
-    if (isLocalRoomApi(input.apiUrl)) return requestRoomPoll(input, ROOM_POLL_FLOOR_HOLD_MS);
+    if (isLocalRoomApi(input.apiUrl)) return requestRoomPoll(request, input, ROOM_POLL_FLOOR_HOLD_MS);
     let hold = holds.get(input.apiUrl);
     if (!hold) holds.set(input.apiUrl, hold = new RoomPollHold(nowMs));
     let attempt = hold.start(!input.observing);
     for (let retried = false; ; retried = true) {
       const startedAtMs = nowMs();
       try {
-        const page = await requestRoomPoll(input, attempt.holdMs);
+        const page = await requestRoomPoll(request, input, attempt.holdMs);
         hold.answered(attempt, nowMs() - startedAtMs);
         return page;
       } catch (error) {

@@ -47,106 +47,150 @@ test("a lane that is not observing yet asks for the floor hold, as every poll di
   assert.deepEqual(requests[0], { origin: "https://letagents.test", timeout: 25_000, after: "msg_42", authorization: "Bearer worker-secret" });
 });
 
-test("the idle polls of an observing lane climb to 150 s and stay there", async (t) => {
+test("the idle polls of an observing lane go to 50 s in one step and stay there", async (t) => {
   const { clock, idle } = harness(t);
-  assert.deepEqual(await idle(5), [50_000, 100_000, 150_000, 150_000, 150_000]);
+  assert.deepEqual(await idle(3), [50_000, 50_000, 50_000]);
   const from = clock.now;
-  assert.equal((await idle(12)).length, 12);
-  assert.equal(clock.now - from, 30 * MINUTE, "12 requests in 30 idle minutes; 72 at the 25 s hold");
+  assert.equal((await idle(36)).length, 36);
+  assert.equal(clock.now - from, 30 * MINUTE, "36 requests in 30 idle minutes; 72 at the 25 s hold");
 });
 
 test("a message that arrives during a long hold is answered at once and proves the time it took", async (t) => {
   const { script, ask, idle } = harness(t);
-  await idle(1);
-  script.push({ openMs: 70_000, body: { messages: [{ id: "msg_43" }] } });
+  script.push({ openMs: 27_000, body: { messages: [{ id: "msg_43" }] } });
   assert.deepEqual(await ask(), { messages: [{ id: "msg_43" }] });
-  assert.deepEqual(await idle(1), [140_000]);
+  // The path ends a request after 30 s: the poll is asked again with the 27 s that the message proved.
+  script.push({ openMs: 30_000, status: 504 });
+  assert.deepEqual(await idle(1), [50_000, 27_000]);
 });
 
 for (const [name, cut] of [
-  ["HTTP 504 from a proxy", { openMs: 60_000, status: 504 }],
-  ["a closed connection", { openMs: 60_000, error: new TypeError("fetch failed") }],
-  ["no answer before the poll's own deadline", { openMs: 120_000, error: new DOMException("The operation was aborted due to timeout", "TimeoutError") }],
+  ["HTTP 504 from a proxy", { openMs: 30_000, status: 504 }],
+  ["a closed connection", { openMs: 30_000, error: new TypeError("fetch failed") }],
+  ["no answer before the poll's own deadline", { openMs: 70_000, error: new DOMException("The operation was aborted due to timeout", "TimeoutError") }],
 ] as const) {
   test(`a probe cut by ${name} is asked again once, with the same cursor and bearer, and nothing is thrown`, async (t) => {
     const { clock, requests, script, ask, idle } = harness(t);
-    await idle(1);
     script.push(cut, { openMs: 2_000, body: { messages: [{ id: "msg_43" }] } });
     assert.deepEqual(await ask(), { messages: [{ id: "msg_43" }] }, "the caller gets the answer of the second request");
-    assert.deepEqual(requests.slice(1), [
-      { origin: "https://letagents.test", timeout: 100_000, after: "msg_42", authorization: "Bearer worker-secret" },
+    assert.deepEqual(requests, [
       { origin: "https://letagents.test", timeout: 50_000, after: "msg_42", authorization: "Bearer worker-secret" },
+      { origin: "https://letagents.test", timeout: 25_000, after: "msg_42", authorization: "Bearer worker-secret" },
     ]);
-    assert.deepEqual(await idle(3), [50_000, 50_000, 50_000], "the hold stays where the path is proven");
+    assert.deepEqual(await idle(3), [25_000, 25_000, 25_000], "the hold stays where the path is proven");
     clock.now += 10 * MINUTE;
     script.push(cut);
-    assert.deepEqual(await idle(2), [100_000, 50_000, 50_000], "after the cool-down one probe, cut and asked again");
+    assert.deepEqual(await idle(2), [50_000, 25_000, 25_000], "after the cool-down one probe, cut and asked again");
     clock.now += 10 * MINUTE;
-    assert.deepEqual(await idle(1), [50_000], "the second cool-down is longer");
+    assert.deepEqual(await idle(1), [25_000], "the second cool-down is longer");
     clock.now += 10 * MINUTE;
-    assert.deepEqual(await idle(2), [100_000, 150_000], "the limit is gone: the hold climbs again");
+    assert.deepEqual(await idle(2), [50_000, 50_000], "the limit is gone: the hold reaches the target");
   });
 }
 
-test("a failure that a 25 s poll would have met too is thrown as before", async (t) => {
+test("a failure that a 25 s poll would have met too is thrown as before, and the hold learns nothing", async (t) => {
   const { requests, script, ask, idle } = harness(t);
-  await idle(3);
   script.push({ openMs: 3_000, status: 503 });
   await assert.rejects(ask(), (error: unknown) => !(error instanceof SupervisedRoomAuthorizationError)
     && error instanceof Error && error.message === "Supervised room poll failed with HTTP 503.");
   script.push({ openMs: 40, error: new TypeError("fetch failed") });
   await assert.rejects(ask(), /fetch failed/);
-  assert.equal(requests.length, 5, "neither failure was asked again");
-  // The lane's next poll is its confirming one; the proof is untouched.
+  // The lane's next poll is its confirming one, at the floor.
   script.push({ openMs: 30_000, status: 502 });
   await assert.rejects(ask({ observing: false }), /HTTP 502/);
-  assert.deepEqual(await idle(1), [150_000]);
+  assert.deepEqual(requests.map((request) => request.timeout), [50_000, 50_000, 25_000], "no failure was asked again");
+  assert.deepEqual(await idle(1), [50_000], "and no cool-down started");
+  // Now 50 s is proven, and an early failure does not take the proof away:
+  script.push({ openMs: 3_000, status: 503 });
+  await assert.rejects(ask(), /HTTP 503/);
+  // the cut that follows is the cut of a proven hold, so the poll after it probes at once.
+  script.push({ openMs: 40_000, status: 504 });
+  assert.deepEqual(await idle(2), [50_000, 25_000, 50_000]);
 });
 
 test("a proven hold that is cut early is asked again at the floor, and the hold is proven again", async (t) => {
   const { requests, script, ask, idle } = harness(t);
-  await idle(3);
-  // The path changed: a proxy now ends a request after 60 s.
-  script.push({ openMs: 60_000, status: 504 });
+  await idle(1);
+  // The path changed: a proxy now ends a request after 40 s.
+  script.push({ openMs: 40_000, status: 504 });
   assert.deepEqual(await ask(), { messages: [] });
-  assert.deepEqual(requests.slice(3).map((request) => request.timeout), [150_000, 25_000]);
-  script.push({}, { openMs: 60_000, status: 504 });
-  assert.deepEqual(await idle(3), [50_000, 100_000, 50_000, 50_000], "50 s is proven, the probe to 100 s is cut, 50 s stays");
+  assert.deepEqual(requests.slice(1).map((request) => request.timeout), [50_000, 25_000]);
+  script.push({ openMs: 40_000, status: 504 });
+  assert.deepEqual(await idle(2), [50_000, 25_000, 25_000], "the probe to 50 s is cut and asked again, so 25 s stays");
 });
 
 test("a second failure is thrown: one poll asks at most twice", async (t) => {
-  const { requests, script, ask, idle } = harness(t);
-  await idle(1);
-  script.push({ openMs: 60_000, status: 504 }, { openMs: 15, status: 502 });
+  const { requests, script, ask } = harness(t);
+  // A message after 30 s proves 30 s, so a poll that is asked again holds above the floor.
+  script.push({ openMs: 30_000, body: { messages: [{ id: "msg_43" }] } });
+  await ask();
+  // Each of the two failures comes late enough to be asked again. Only the first one is.
+  script.push({ openMs: 40_000, status: 504 }, { openMs: 28_000, status: 502 });
   await assert.rejects(ask(), (error: unknown) => error instanceof Error && error.message === "Supervised room poll failed with HTTP 502.");
-  assert.equal(requests.length, 3);
+  assert.deepEqual(requests.map((request) => request.timeout), [50_000, 50_000, 30_000]);
 });
 
 for (const status of [401, 403] as const) {
   test(`HTTP ${status} is a refused bearer whenever it comes: thrown, not asked again, and the hold learns nothing`, async (t) => {
     const { requests, script, ask, idle } = harness(t);
-    await idle(1);
-    script.push({ openMs: 70_000, status });
+    script.push({ openMs: 30_000, status });
     await assert.rejects(ask(), (error: unknown) => error instanceof SupervisedRoomAuthorizationError && error.status === status);
-    assert.equal(requests.length, 2);
-    assert.deepEqual(await idle(1), [100_000]);
+    assert.equal(requests.length, 1);
+    assert.deepEqual(await idle(1), [50_000], "a cut probe would have started a cool-down at 25 s");
   });
 }
 
 test("a poll that its caller aborts is rejected with the abort and the hold learns nothing", async (t) => {
   const { requests, script, ask, idle } = harness(t);
-  await idle(1);
   const stop = new AbortController();
-  script.push({ openMs: 70_000, abort: stop });
+  script.push({ openMs: 30_000, abort: stop });
   await assert.rejects(ask({ signal: stop.signal }), (error: unknown) => error === stop.signal.reason);
-  assert.equal(requests.length, 2);
-  assert.deepEqual(await idle(1), [100_000]);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(await idle(1), [50_000], "a cut probe would have started a cool-down at 25 s");
 });
 
 test("each room server has its own hold, shared by every agent that polls it", async (t) => {
-  const { requests, ask, idle } = harness(t);
-  await idle(3);
+  const { requests, script, ask, idle } = harness(t);
+  // The path to the first server ends a request after 30 s.
+  script.push({ openMs: 30_000, status: 504 });
+  assert.deepEqual(await idle(2), [50_000, 25_000, 25_000]);
   await ask({ apiUrl: "https://rooms.example" });
   assert.deepEqual(requests.at(-1), { origin: "https://rooms.example", timeout: 50_000, after: "msg_42", authorization: "Bearer worker-secret" });
-  assert.deepEqual(await idle(1), [150_000]);
+  assert.deepEqual(await idle(1), [25_000]);
+});
+
+test("a local room's poll stays the 25 s request it was, and no hold is kept for it", async () => {
+  const clock = { now: 0 };
+  const requests: Array<{ url: string; authorization: string }> = [];
+  let failNext = false;
+  const poll = supervisedRoomPoll({
+    nowMs: () => clock.now,
+    // The local room is served in this process, not over fetch.
+    request: async (url, init) => {
+      requests.push({ url, authorization: (init?.headers as Record<string, string>).authorization });
+      if (failNext) {
+        failNext = false;
+        clock.now += 90_000;
+        throw new Error("local room failed");
+      }
+      // It reads the room again after half a second and answers, whatever hold was asked.
+      clock.now += 500;
+      return new Response(JSON.stringify({ room_id: "local-room", messages: [] }));
+    },
+  });
+  const ask = (observing: boolean) => poll({
+    roomId: "local-room", apiUrl: "letagents-local://rooms", bearer: "worker-secret",
+    afterMessageId: "msg_7", observing, signal: new AbortController().signal,
+  });
+  assert.deepEqual(await ask(false), { room_id: "local-room", messages: [] });
+  await ask(true);
+  await ask(true);
+  // For a room server this failure, after 90 s, would be learned from and asked again.
+  failNext = true;
+  await assert.rejects(ask(true), /local room failed/);
+  await ask(true);
+  assert.deepEqual(requests, Array.from({ length: 5 }, () => ({
+    url: "letagents-local://rooms/rooms/local-room/messages/poll?timeout=25000&after=msg_7",
+    authorization: "Bearer worker-secret",
+  })));
 });
