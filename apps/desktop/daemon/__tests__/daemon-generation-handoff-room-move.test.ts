@@ -177,9 +177,6 @@ test("generation handoff reattaches the same provider and publishes its supervis
       supervisedDelivery: { stop: (entryId: string) => Promise<void> };
     };
     await deliveryRecoveryInternals.updateManifestEntry("supervised_handoff", (current) => ({ ...current, delivery_mode: "daemon_inbox" }));
-    // Counted before the latch is set: the heartbeat that finds it may publish while the transition returns,
-    // and the one after it is not published again, because the room then has the agent's status.
-    const heartbeatCountBeforeRecovery = nativeRequests.filter((request) => request.body.method === "native_harness.heartbeat").length;
     await first.transition(
       "supervised_handoff",
       "recovering",
@@ -187,6 +184,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
       "Provider is running; waiting for desktop credential handoff.",
       "test-stale-handoff-latch",
     );
+    const heartbeatCountBeforeRecovery = nativeRequests.filter((request) => request.body.method === "native_harness.heartbeat").length;
     await eventually(
       async () => nativeRequests.filter((request) => request.body.method === "native_harness.heartbeat").length > heartbeatCountBeforeRecovery,
       "credential handoff latch recovery heartbeat",
@@ -206,8 +204,8 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await deliveryRecoveryInternals.supervisedDelivery.stop("supervised_handoff");
     await deliveryRecoveryInternals.updateManifestEntry("supervised_handoff", (current) => ({ ...current, delivery_mode: "mcp_polling" }));
     // From here the test follows what the provider stream publishes. A status the room already has is
-    // not published again, and this fixture's heartbeat always says "working": it would publish a change
-    // to working before the stream event that the test looks for. So this daemon's heartbeats are left out.
+    // not published again at once, and this fixture's heartbeat always says "working": it would publish a
+    // change to working before the stream event that the test looks for. So this daemon's heartbeats are left out.
     const publicationSeam = first as unknown as { publishNativeActivity: (entryId: string, method: string, ...rest: unknown[]) => Promise<boolean> };
     const publishNative = publicationSeam.publishNativeActivity.bind(first);
     publicationSeam.publishNativeActivity = async (entryId, method, ...rest) =>
@@ -261,6 +259,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
         durablePayloadRef: null,
       });
     };
+    const firstWaitAt = Date.now();
     emitCompatWaitCursor("msg_2818");
     await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).get("supervised_handoff"))?.room_cursor === "msg_2818", "published-runtime native wait cursor checkpoint");
     await flushActivity(first);
@@ -286,6 +285,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(regressiveFormalCursor.ok, true);
     assert.equal((regressiveFormalCursor.result as { room_cursor: string }).room_cursor, "msg_2820",
       "out-of-order formal acknowledgements report and preserve the newest durable cursor");
+    const secondWaitAt = Date.now();
     emitCompatWaitCursor("msg_2819");
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 2), "delayed compatibility cursor evidence");
     const formalCursorWins = await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).get("supervised_handoff");
@@ -295,8 +295,11 @@ test("generation handoff reattaches the same provider and publishes its supervis
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "tool_lifecycle", method: "item/toolCall/started", payload: { tool: "test" }, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 3), "first native stream event after cursor evidence");
     await eventually(async () => nativeRequests.some((request) => request.body.method === "item/toolCall/started"), "daemon-supervised stream HTTP publication");
-    assert.deepEqual(nativeRequests.filter((request) => request.body.method === "assistant").map((request) => request.body.status), ["idle"],
-      "the second wait told the room nothing new, so the daemon did not publish it again");
+    // This daemon's heartbeat is 2 s, so an idle status is due again after 5 s. A machine that slow would publish the second wait too.
+    if (secondWaitAt - firstWaitAt < 4_000) {
+      assert.deepEqual(nativeRequests.filter((request) => request.body.method === "assistant").map((request) => request.body.status), ["idle"],
+        "the second wait told the room nothing new, so the daemon did not publish it again");
+    }
     const workingProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(workingProjection.observed_state, "working", "real Codex tool work restores the active projection");
     const diagnosticProjection = workingProjection as DaemonManifestEntryView;

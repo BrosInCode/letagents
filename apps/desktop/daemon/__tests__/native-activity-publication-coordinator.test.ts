@@ -66,6 +66,14 @@ test("a run that recovers the handoff starts delivery", async (t) => {
 const HEARTBEAT_MS = 15_000;
 const LOCAL_ROOM_API = "letagents-local://rooms";
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
 /** A coordinator with a clock, a publication journal and a room server that the test controls. */
 function room(options: { apiUrl?: string } = {}) {
   const clock = { now: Date.parse("2026-11-20T10:00:00.000Z") };
@@ -75,9 +83,11 @@ function room(options: { apiUrl?: string } = {}) {
     entry: { ...blocked(), observed_state: "idle", condition: "none", last_error: null } as DaemonManifestEntry,
     /** What the room server does with a publication. */
     server: "accepts" as "accepts" | "refuses" | "unreachable",
+    /** Each next request waits for its entry before it reaches the room server (`request`) or before its answer comes back (`answer`). */
+    network: [] as Array<{ request?: Promise<void>; answer?: Promise<void> }>,
   };
   /** The publications that reached the room server, with the second they were sent in. */
-  const sent: Array<{ at: number; method: string; status: "working" | "idle"; summary: string | null }> = [];
+  const sent: Array<{ at: number; method: string; status: "working" | "idle"; summary: string | null; sequence: number }> = [];
   let reservations = 0;
   let deliveries = 0;
   let timers: Array<{ at: number; run: () => void }> = [];
@@ -94,9 +104,14 @@ function room(options: { apiUrl?: string } = {}) {
     updateEntry: async (_id, update) => (state.entry = update(state.entry)),
     startDelivery: async () => { deliveries += 1; },
     publishWorkerActivity: async (input) => {
+      const at = (clock.now - startedAt) / 1_000;
+      const slow = state.network.shift();
+      await slow?.request;
       if (state.server === "unreachable") throw new TypeError("fetch failed");
-      sent.push({ at: (clock.now - startedAt) / 1_000, method: input.method, status: input.status, summary: input.activitySummary ?? null });
-      return state.server === "accepts";
+      sent.push({ at, method: input.method, status: input.status, summary: input.activitySummary ?? null, sequence: input.sequence });
+      const accepted = state.server === "accepts";
+      await slow?.answer;
+      return accepted;
     },
   }, {
     heartbeatIntervalMs: HEARTBEAT_MS,
@@ -114,7 +129,7 @@ function room(options: { apiUrl?: string } = {}) {
     const due = timers.filter((timer) => timer.at <= clock.now);
     timers = timers.filter((timer) => timer.at > clock.now);
     for (const timer of due) timer.run();
-    if (due.length) await new Promise((resolve) => setImmediate(resolve));
+    if (due.length) await settle();
   };
   const heartbeat = (status: "working" | "idle" = "idle") => coordinator.publishIfDue("agent-1", "native_harness.heartbeat", status);
   return { clock, state, sent, coordinator, advance, heartbeat, reservations: () => reservations, deliveries: () => deliveries };
@@ -127,7 +142,7 @@ test("the first publication for a binding is sent; the same status is not sent a
   assert.equal(await r.heartbeat(), false);
   await r.advance(HEARTBEAT_MS);
   assert.equal(await r.heartbeat(), false);
-  assert.deepEqual(r.sent, [{ at: 0, method: "native_harness.heartbeat", status: "idle", summary: null }]);
+  assert.deepEqual(r.sent, [{ at: 0, method: "native_harness.heartbeat", status: "idle", summary: null, sequence: 1 }]);
   assert.equal(r.reservations(), 1, "a publication that is not sent reserves no sequence in the journal");
 });
 
@@ -145,16 +160,23 @@ test("a status that the room does not have is sent at once", async () => {
   ]);
 });
 
-test("a status that the room has is sent again when it is two and a half heartbeats old", async () => {
-  const r = room();
-  await r.heartbeat();
-  await r.advance(37_499);
-  assert.equal(await r.heartbeat(), false);
-  await r.advance(1);
-  assert.equal(await r.heartbeat(), true);
+test("an idle status is sent again after two and a half heartbeats, a working status after half a heartbeat", async () => {
+  const idle = room();
+  await idle.heartbeat("idle");
+  await idle.advance(37_499);
+  assert.equal(await idle.heartbeat("idle"), false);
+  await idle.advance(1);
+  assert.equal(await idle.heartbeat("idle"), true);
   // A clock that was set back must not hold the refresh off for as long as it was set back.
-  await r.advance(-3_600_000);
-  assert.equal(await r.heartbeat(), true);
+  await idle.advance(-3_600_000);
+  assert.equal(await idle.heartbeat("idle"), true);
+
+  const working = room();
+  await working.heartbeat("working");
+  await working.advance(7_499);
+  assert.equal(await working.heartbeat("working"), false);
+  await working.advance(1);
+  assert.equal(await working.heartbeat("working"), true);
 });
 
 test("five idle minutes of heartbeats are 7 publications; every one of the 20 was sent before", async () => {
@@ -171,7 +193,17 @@ test("five idle minutes of heartbeats are 7 publications; every one of the 20 wa
   assert.equal(gated.reservations(), 7);
 });
 
-test("a minute of working events is one publication for the change and one refresh", async () => {
+test("a working agent's heartbeat is sent every time, as before", async () => {
+  const r = room();
+  // Another writer can set the presence row to idle at any time; the next heartbeat puts "working" back.
+  for (let tick = 0; tick < 20; tick += 1) {
+    assert.equal(await r.heartbeat("working"), true);
+    await r.advance(HEARTBEAT_MS);
+  }
+  assert.deepEqual(r.sent.map((publication) => publication.at), Array.from({ length: 20 }, (_, tick) => tick * 15));
+});
+
+test("a minute of working events is one publication for the change and one refresh each 7.5 seconds", async () => {
   const r = room();
   await r.heartbeat("idle");
   // Ten provider events each second, and the heartbeat every 15 seconds.
@@ -182,10 +214,9 @@ test("a minute of working events is one publication for the change and one refre
   }
   assert.deepEqual(r.sent.map(({ at, method, status }) => [at, method, status]), [
     [0, "native_harness.heartbeat", "idle"],
-    [0.1, "item/agentMessage/delta", "working"],
-    [37.6, "item/agentMessage/delta", "working"],
+    ...[0.1, 7.6, 15.1, 22.6, 30.1, 37.6, 45.1, 52.6].map((at) => [at, "item/agentMessage/delta", "working"]),
   ]);
-  assert.equal(r.reservations(), 3, "604 before");
+  assert.equal(r.reservations(), 9, "8 working publications; 604 before");
 });
 
 test("a publication that fails is made again by the next call", async () => {
@@ -239,21 +270,36 @@ test("a new binding has told the room nothing yet", async () => {
   assert.equal(r.sent.length, 4);
 });
 
-test("publications that end out of order leave the newest one as the room's copy", async () => {
+for (const [has, changes] of [["idle", "working"], ["working", "idle"]] as const) {
+  test(`a status the room has (${has}) is not left out while the other one is on its way`, async () => {
+    const r = room();
+    await r.heartbeat(has);
+    // A slow request: the change to the other status has not reached the room server yet.
+    const slow = deferred();
+    r.state.network.push({ request: slow.promise });
+    const onItsWay = r.coordinator.publishIfDue("agent-1", "item/updated", changes);
+    await settle();
+    // The agent's state goes back before that request arrives.
+    assert.equal(await r.heartbeat(has), true, "it goes out too, although it is what the room accepted last");
+    slow.resolve();
+    await onItsWay;
+    assert.deepEqual(r.sent.map(({ status, sequence }) => [status, sequence]), [[has, 1], [has, 3], [changes, 2]],
+      "the later status has the higher sequence, so the server keeps it whichever request arrives first");
+    assert.equal(await r.heartbeat(has), false, "and it is what the daemon takes the room to have");
+    assert.equal(r.reservations(), 3);
+  });
+}
+
+test("answers that come back out of order leave the newest publication as the room's copy", async () => {
   const r = room();
-  let releaseFirst!: () => void;
-  const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
-  const ports = (r.coordinator as unknown as { ports: { publishWorkerActivity: (input: { sequence: number }) => Promise<boolean> } }).ports;
-  const send = ports.publishWorkerActivity;
-  ports.publishWorkerActivity = async (input) => {
-    if (input.sequence === 1) await firstHeld;
-    return send(input);
-  };
+  const slow = deferred();
+  r.state.network.push({ answer: slow.promise });
   const first = r.coordinator.publish("agent-1", "native_harness.heartbeat", "idle");
-  await new Promise((resolve) => setImmediate(resolve));
+  await settle();
   assert.equal(await r.coordinator.publish("agent-1", "item/started", "working"), true);
-  releaseFirst();
+  slow.resolve();
   assert.equal(await first, true);
+  assert.deepEqual(r.sent.map(({ status, sequence }) => [status, sequence]), [["idle", 1], ["working", 2]]);
   assert.equal(await r.heartbeat("working"), false, "the room has the working status of sequence 2");
   assert.equal(await r.heartbeat("idle"), true);
 });
@@ -262,12 +308,12 @@ test("an entry that waits for its credential handoff is recovered by publish, wh
   const r = room();
   assert.equal(await r.coordinator.publish("agent-1", "native_harness.bound", "working"), true);
   r.state.entry = blocked();
-  await r.advance(HEARTBEAT_MS);
+  await r.advance(5_000);
   // The gated entry point is not for this entry: the room has the status, so nothing would be sent or recovered.
   assert.equal(await r.heartbeat("working"), false);
   assert.equal(r.state.entry.condition, "coordination_blocked");
   assert.equal(await r.coordinator.publish("agent-1", "native_harness.heartbeat", "working"), true);
-  await new Promise((resolve) => setImmediate(resolve));
+  await settle();
   assert.equal(r.state.entry.condition, "none");
   assert.equal(r.state.entry.observed_state, "working");
   assert.equal(r.state.entry.last_error, null);
@@ -280,20 +326,20 @@ test("an activity line that the room does not have makes a working publication d
   let permitted: "working" | null = "working";
   r.coordinator.observeActivitySummary("agent-1", "Reading files", () => permitted);
   await r.advance(0);
-  await r.advance(HEARTBEAT_MS);
+  await r.advance(5_000);
   assert.equal(await r.heartbeat("working"), false, "the room has this status and this line");
   // A changed line that could not be published at its time, because the agent's bearer was being rotated.
   permitted = null;
   r.coordinator.observeActivitySummary("agent-1", "Running tests", () => permitted);
   await r.advance(0);
   assert.equal(r.sent.length, 1);
-  await r.advance(HEARTBEAT_MS);
-  assert.equal(await r.heartbeat("working"), true, "the next heartbeat carries the line that waits");
-  await r.advance(HEARTBEAT_MS);
+  await r.advance(1_000);
+  assert.equal(await r.heartbeat("working"), true, "the next heartbeat carries the line that waits, before the status is due again");
+  await r.advance(5_000);
   assert.equal(await r.heartbeat("working"), false);
   assert.deepEqual(r.sent.map(({ at, method, summary }) => [at, method, summary]), [
     [0, "native_harness.activity_summary", "Reading files"],
-    [30, "native_harness.heartbeat", "Running tests"],
+    [6, "native_harness.heartbeat", "Running tests"],
   ]);
 });
 
