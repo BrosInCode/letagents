@@ -157,7 +157,7 @@ export function inboxNavigationIntent(item: UniversalInboxItem, mode?: 'room' | 
   else if (!mode) {
     intent.taskId = item.taskId;
     if (item.activity?.kind === 'thread') intent.threadRootId = item.activity.root.id;
-    if (item.activity?.kind === 'github_failure') { intent.eventId = item.activity.event.id; intent.eventUrl = item.activity.url ?? undefined; }
+    if (item.activity?.kind === 'github_attention') { intent.eventId = item.activity.event.id; intent.eventUrl = item.activity.url ?? undefined; }
     if (item.activity?.kind === 'agent_blocked') intent.reasoningSessionId = item.activity.session.id;
     if (item.activity?.kind === 'agent_offline') intent.activity = true;
     if (item.attention?.kind === 'agent_attention') intent.agentEntryId = item.attention.entry.id;
@@ -192,7 +192,7 @@ export function attentionRecordCategory(record: KnowledgeRecord): string {
 
 export function inboxCategoryLabel(category: string): string {
   return ({ question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review', closed: 'Closed', proposed: 'Proposed task', accepted: 'Task accepted', blocked: 'Blocked task',
-    in_review: 'Task review', done: 'Completed', merged: 'Merged', thread: 'Unread replies', github_failure: 'Failed check',
+    in_review: 'Task review', done: 'Completed', merged: 'Merged', thread: 'Unread replies', github_attention: 'GitHub attention',
     agent_blocked: 'Blocked agent', agent_offline: 'Agent offline', rental_request: 'Rental request',
     tool_approval: 'Tool approval', agent_attention: 'Stuck agent', board_intent: 'Board request',
     room_join_request: 'Join request' } as Record<string, string>)[category] || category;

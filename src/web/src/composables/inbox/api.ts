@@ -1,5 +1,5 @@
 import type { KnowledgeRecord } from '../../../../../shared/room-knowledge.mjs'
-import { eventTime, groupActivity, githubUrl } from '../../../../../shared/ui/activity/model'
+import { githubAttentionItems } from '../../../../../shared/ui/activity/attention'
 import type { RoomAgentPresence, RoomGitHubEvent, RoomMessage, RoomReasoningSession, RoomTask } from '../room/types'
 import { roomPath } from '../room/api'
 
@@ -96,10 +96,9 @@ export function createInboxApi(fetcher: InboxFetch) {
       const seen = new Set<string>()
       for (const { room, events } of eventPages.sort((a, b) => Number(Boolean(a.room.parentId)) - Number(Boolean(b.room.parentId)) || a.room.id.localeCompare(b.room.id))) {
         const unique = events.filter(event => { if (seen.has(event.id)) return false; seen.add(event.id); return true })
-        for (const group of groupActivity(unique).filter(group => group.attention)) result.items.push({ ...base(room, 'github', group.id), section: 'updates', category: 'GitHub attention',
-          title: group.title, body: group.summary || `${group.status} · ${group.title}`, actor: group.actor || 'GitHub', timestamp: group.time,
-          fingerprint: group.events.map(event => event.id).sort().join(':'), url: githubUrl(group.url), taskId: group.taskIds[0],
-          history: group.events.map(event => ({ id: event.id, label: event.title || event.event_type.replace(/_/g, ' '), body: event.state || event.action, timestamp: eventTime(event) })) })
+        for (const item of githubAttentionItems(unique)) result.items.push({ ...base(room, 'github', item.id), section: 'updates', category: 'GitHub attention',
+          title: item.title, body: item.body, actor: item.actor, timestamp: item.timestamp,
+          fingerprint: item.fingerprint, url: item.url, taskId: item.taskId ?? undefined, history: item.history })
       }
       result.items = [...new Map(result.items.map(item => [item.key, item])).values()].sort(compareItems)
       return result

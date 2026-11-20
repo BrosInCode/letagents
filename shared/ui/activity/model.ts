@@ -21,6 +21,10 @@ export interface ActivityGroup {
   kind: 'pr' | 'workflow' | 'event'; time: string; firstReceived: string; head: string | null;
   status: string; tone: string; inReview: boolean; attention: boolean; merged: boolean;
   summary: string; events: ActivityEvent[]; reviews: ActivityReview[]; runs: ActivityRun[]; taskIds: string[];
+  /** Reviewers whose latest verdict asks for changes. */
+  changesRequestedBy: string[];
+  /** Failed jobs (or runs and checks) on the current head. */
+  failedChecks: string[];
 }
 const text = (value: unknown): string | null => typeof value === 'string' && value.trim() ? value : typeof value === 'number' && Number.isFinite(value) ? String(value) : null;
 const meta = (event: ActivityEvent) => event.metadata || {};
@@ -29,6 +33,8 @@ export function eventTime(event: ActivityEvent): string {
     .find(value => value && Number.isFinite(Date.parse(value))) || '';
 }
 const stamp = (value: string) => Date.parse(value) || 0;
+/** Oldest first: provider time, then arrival, then id. */
+export function compareActivityEvents(left: ActivityEvent, right: ActivityEvent): number { return compare(left, right); }
 function compare(left: ActivityEvent, right: ActivityEvent): number {
   return stamp(eventTime(left)) - stamp(eventTime(right)) || stamp(left.created_at) - stamp(right.created_at) || left.id.localeCompare(right.id);
 }
@@ -58,6 +64,8 @@ function latestState(events: ActivityEvent[]): ActivityEvent {
   const completed = events.filter(terminal);
   return [...(completed.length ? completed : events)].sort(compare).slice(-1)[0]!;
 }
+/** "Passed", "Failed", "Changes requested"-style label for an event's state. */
+export function activityStateLabel(event: ActivityEvent): string { return state(event); }
 function state(event: ActivityEvent): string {
   const value = text(meta(event).conclusion) || text(meta(event).status) || event.state || event.action;
   return ({success:'Passed', failure:'Failed', timed_out:'Timed out', cancelled:'Cancelled', action_required:'Action required', in_progress:'Running', queued:'Queued', requested:'Queued', waiting:'Waiting', pending:'Pending', neutral:'Neutral', skipped:'Skipped', completed:'Completed'} as Record<string,string>)[value] || value.replace(/_/g, ' ');
@@ -176,15 +184,20 @@ export function groupActivity(events: readonly ActivityEvent[]): ActivityGroup[]
       const before = latestByReviewer.get(review.actor);
       if (!before || stamp(review.submittedAt) >= stamp(before.submittedAt)) latestByReviewer.set(review.actor, review);
     }
-    const changes = [...latestByReviewer.values()].some(review => review.verdict === 'Changes requested');
+    const changesRequestedBy = [...latestByReviewer.values()].filter(review => review.verdict === 'Changes requested').map(review => review.actor);
+    const changes = changesRequestedBy.length > 0;
     const currentRuns = runs.filter(run => !head || run.sha === head);
     const latestAttempts = new Map<string, ActivityRun>();
     // Different workflow runs are retained; only the most recent run for a provider-identified
     // workflow on the current PR head contributes to its summary.
     for (const run of currentRuns) latestAttempts.set(run.workflowId, run);
     const activeRuns = [...latestAttempts.values()];
-    const ciFailed = activeRuns.some(run => failed(run.state) || run.state === 'Awaiting run update' && run.jobs.some(job => failed(job.state)))
-      || latest.event_type === 'check_run' && failed(state(latest));
+    const failedRuns = activeRuns.filter(run => failed(run.state) || run.state === 'Awaiting run update' && run.jobs.some(job => failed(job.state)));
+    const failedChecks = [...new Set([
+      ...failedRuns.flatMap(run => { const jobs = run.jobs.filter(job => failed(job.state)).map(job => job.name); return jobs.length ? jobs : [run.name]; }),
+      ...(latest.event_type === 'check_run' && failed(state(latest)) ? [latest.title || 'Check'] : []),
+    ])];
+    const ciFailed = failedChecks.length > 0;
     const running = activeRuns.some(run => ['Running','Queued','Waiting','Pending','Awaiting run update'].includes(run.state));
     const attention = !merged && pr?.state !== 'closed' && (changes || ciFailed);
     const status = merged ? 'Merged' : pr?.state === 'closed' ? 'Closed' : changes ? 'Changes requested' : ciFailed ? 'Build failed' : running ? 'CI running' : isPr ? !pr ? 'Review activity' : meta(pr).draft === true ? 'Draft' : 'In review' : runs.slice(-1)[0]?.state || (latest.event_type === 'check_run' ? state(latest) : latest.state?.replace(/_/g, ' ')) || latest.action.replace(/_/g, ' ');
@@ -196,7 +209,7 @@ export function groupActivity(events: readonly ActivityEvent[]): ActivityGroup[]
       url, kind: isPr ? 'pr' as const : runs.length ? 'workflow' as const : 'event' as const,
       time: eventTime(latest), firstReceived: [...updates].sort((a,b) => stamp(a.created_at) - stamp(b.created_at))[0].created_at,
       head, status, tone: merged ? 'purple' : attention ? 'red' : running ? 'blue' : 'muted',
-      inReview: open && meta(pr || latest).draft !== true, attention, merged, summary,
+      inReview: open && meta(pr || latest).draft !== true, attention, merged, summary, changesRequestedBy, failedChecks,
       events: updates, reviews, runs, taskIds: [...new Set(updates.map(event => event.linked_task_id).filter((value): value is string => Boolean(value)))],
     };
   }).sort((a,b) => stamp(b.time) - stamp(a.time) || a.id.localeCompare(b.id));
