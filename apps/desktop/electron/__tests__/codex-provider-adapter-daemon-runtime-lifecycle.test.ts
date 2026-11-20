@@ -14,6 +14,7 @@ import {
   convergeAcrossExit,
   answerOnReplacement,
   EXIT_RECORDING_FAULTS,
+  exitWaitClock,
   executionRecord,
 } from "./codex-provider-adapter.fixture.js";
 
@@ -244,7 +245,7 @@ test("a failed turn whose turn/completed never arrives is settled from the threa
     await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles without its turn/completed");
     assert.equal((await agent.receipt("msg_1"))?.last_error, reason, "with the provider's reason, read from the thread");
     assert.deepEqual(agent.harness.sleeps.slice(sleepsBefore), [2_000], "after one stated wait, not a poll");
-    await agent.eventually(async () => (await agent.view()).observed_state === "idle", "the agent is idle again", 5_000).catch(async (error) => {
+    await agent.eventually(async () => (await agent.view()).observed_state === "idle", "the agent is idle again").catch(async (error) => {
       const current = await agent.view();
       throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
     });
@@ -278,7 +279,7 @@ for (const lastTurn of ["answered", "refused"] as const) test(`an app update rep
 
     agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2",
       activation: { for_current_agent: { decision: "activate" } } });
-    await agent.eventually(() => agent.harness.clients.length === 2, "the runtime launched by the old app is replaced", 10_000).catch(async (error) => {
+    await agent.eventually(() => agent.harness.clients.length === 2, "the runtime launched by the old app is replaced").catch(async (error) => {
       const current = await agent.view();
       throw new Error(`${(error as Error).message}: msg_2 is ${(await agent.receipt("msg_2"))?.state}; agent is ${current.observed_state}/${current.condition} (${current.last_error}); inbox ${current.room_agent_state.inbox.state}`);
     });
@@ -540,7 +541,7 @@ test("an ended runtime whose room access was refused is not minted for again on 
   });
   try {
     await agent.eventually(async () => /Use Reconnect/.test((await agent.view()).last_error ?? ""),
-      "room access is given up after its bounded attempts", 30_000);
+      "room access is given up after its bounded attempts");
     // The runtime itself now ends without its process exiting.
     agent.client.emit({ method: "process/systemError", params: { status: "systemError" } });
     // The failure itself is reconciled once; let that settle before counting.
@@ -649,7 +650,7 @@ test("a convergence pass that runs while a crash is being settled starts no repl
   }
 });
 
-for (const [fault, inject] of Object.entries(EXIT_RECORDING_FAULTS)) {
+for (const fault of Object.keys(EXIT_RECORDING_FAULTS) as Array<keyof typeof EXIT_RECORDING_FAULTS>) {
   test(`an agent whose crash cannot be recorded because ${fault} is started again after a bounded wait, answers its next message, and tells its owner`, async () => {
     const { EXIT_UNSETTLED_NOTICE } = await import(new URL("../../daemon/provider-terminal-coordinator.ts", import.meta.url).href);
     const agent = await codexDaemonFixture({ holdExits: true });
@@ -658,23 +659,24 @@ for (const [fault, inject] of Object.entries(EXIT_RECORDING_FAULTS)) {
       await agent.deliver(1, { answer: "Answer 1." });
       await agent.turnsRecorded(1);
       const terminals = agent.exitSettlement();
-      // Fifteen seconds, eight and four outside tests.
-      terminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
-      endFault = inject(terminals);
+      // Fifteen seconds, eight and four, on a clock this test moves.
+      const wait = exitWaitClock(agent);
+      endFault = EXIT_RECORDING_FAULTS[fault](terminals);
 
-      const crashedAt = Date.now();
       agent.exitProcess(0, "SIGKILL");
       await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the daemon lets go of the exited runtime and starts recording its exit");
+      // One millisecond short of the ordinary attempts' time, a convergence pass still starts nothing.
+      wait.pass(terminals.bounds.settleMs - 1);
       agent.converge();
       await new Promise((resolve) => setTimeout(resolve, 300));
-      assert.equal(agent.harness.launches.length, 1, "while the exit may still be recorded, no replacement is started");
+      assert.equal(agent.harness.launches.length, 1, "while the exit may still be recorded, no replacement is started: not before the ordinary attempts had their time");
       assert.equal(terminals.settling(agent.id), true);
 
-      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again once the wait has ended", 5_000).catch(async (error) => {
+      await wait.runsOut(fault);
+      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again once the wait has ended").catch(async (error) => {
         const current = await agent.view();
         throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); settling=${terminals.settling(agent.id)}`);
       });
-      assert.ok(Date.now() - crashedAt >= 600, "not before the ordinary attempts had their time");
       assert.equal(terminals.settling(agent.id), false, "the daemon no longer waits for that exit");
       await answerOnReplacement(agent, 2);
       assert.equal(agent.published.at(-1), "Answer 2.");
@@ -697,7 +699,8 @@ for (const [fault, inject] of Object.entries(EXIT_RECORDING_FAULTS)) {
 
       // The replacement crashes as well, and its exit cannot be recorded either: that is a second exit, and the owner is told of it too.
       agent.exitProcess(1, "SIGKILL");
-      await agent.eventually(() => agent.harness.clients.length === 3, "the agent is started again after the second crash", 5_000);
+      await wait.runsOut(fault);
+      await agent.eventually(() => agent.harness.clients.length === 3, "the agent is started again after the second crash");
       await agent.eventually(async () => ((await agent.request("manifest.list")).result[0] as typeof entry).activity
         ?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length === 2, "the owner reads of each exit once");
       await answerOnReplacement(agent, 3);
@@ -725,16 +728,17 @@ for (const fault of ["closing its approvals never returns", "its entry's queue n
       await agent.deliver(1, { answer: "Answer 1." });
       await agent.turnsRecorded(1);
       const terminals = agent.exitSettlement();
-      terminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
+      const wait = exitWaitClock(agent);
       endFault = EXIT_RECORDING_FAULTS[fault](terminals);
 
-      const applied = await agent.changeEffortAndRestart();
+      // The restart is answered when the wait for the stopped process's exit has run out.
+      const [applied] = await Promise.all([agent.changeEffortAndRestart(), wait.runsOut(fault)]);
       // The last attempt records the exit without the approvals step, and the
       // restart completes as asked. When the queue is what fails, the app is
       // told the exit could not be recorded, and the agent is started all the same.
       if (fault === "closing its approvals never returns") assert.equal(applied.result?.outcome, "restarting", JSON.stringify(applied));
       else assert.match(applied.error ?? "", /could not finish recording that in time/, JSON.stringify(applied));
-      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again", 5_000).catch(async (error) => {
+      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again").catch(async (error) => {
         const current = await agent.view();
         throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); settling=${terminals.settling(agent.id)}; answer=${JSON.stringify(applied)}`);
       });
@@ -751,6 +755,13 @@ for (const fault of ["closing its approvals never returns", "its entry's queue n
   });
 }
 
+/** What the daemon has answered a request so far: nothing while it makes the request wait. A request that fails is answered with its error. */
+function answered(request: Promise<{ ok: boolean; result?: any; error?: string }>) {
+  const state: { answer?: { ok: boolean; result?: any; error?: string } } = {};
+  request.then((answer) => { state.answer = answer; }, (error) => { state.answer = { ok: false, error: String(error) }; });
+  return state;
+}
+
 for (const fault of ["its entry's queue never answers", "closing its approvals never returns", "saving its terminal never returns"] as const) {
 test(`Restart and resume starts an agent again at once while the daemon is still recording the exit of its crashed process, because ${fault}`, async () => {
   const agent = await codexDaemonFixture({ holdExits: true, osProcessBirths: true });
@@ -759,9 +770,11 @@ test(`Restart and resume starts an agent again at once while the daemon is still
     await agent.deliver(1, { answer: "Answer 1." });
     await agent.turnsRecorded(1);
     const terminals = agent.exitSettlement();
-    // The exit's recording does not finish. The bound that would end the wait
-    // is seconds away; the owner's last resort must not wait for it, even for
-    // a step that holds the entry's queue.
+    // The exit's recording does not finish, and on this test's clock none of
+    // its time passes: the bound that would end the wait never comes. The
+    // owner's last resort must not wait for it, even for a step that holds
+    // the entry's queue.
+    const wait = exitWaitClock(agent);
     endFault = EXIT_RECORDING_FAULTS[fault](terminals);
     const before = (await agent.request("manifest.list")).result[0] as { room_id: string; provider_ref: { execution_generation_id: string } };
     const runtimeId = agent.read<{ runtime_generation_id: string }>(
@@ -773,15 +786,18 @@ test(`Restart and resume starts an agent again at once while the daemon is still
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.equal(agent.harness.launches.length, 1, "nothing replaces the process by itself yet");
 
-    // The owner uses Diagnostics, "Restart and resume".
-    const askedAt = Date.now();
-    const recovered = await agent.request("supervisor.recover_agent_runtime", { entry_id: agent.id, daemon_generation: agent.daemonGeneration(),
+    // The owner uses Diagnostics, "Restart and resume". It is answered while
+    // the recording still waits: a recovery that waited for the recording's
+    // bound would never be answered here.
+    const asked = answered(agent.request("supervisor.recover_agent_runtime", { entry_id: agent.id, daemon_generation: agent.daemonGeneration(),
       mode: "resume", operation_id: "owner-restart-1", room_id: before.room_id,
-      execution_generation_id: before.provider_ref.execution_generation_id, runtime_generation_id: runtimeId });
+      execution_generation_id: before.provider_ref.execution_generation_id, runtime_generation_id: runtimeId }));
+    await agent.eventually(() => asked.answer !== undefined, "Restart and resume is answered while the exit's recording has not ended");
+    const recovered = asked.answer!;
     assert.equal(recovered.result?.outcome, "recovering", recovered.error ?? recovered.result?.error);
-    assert.ok(Date.now() - askedAt < 3_000, `it took effect at once, not after the recording's bound (${Date.now() - askedAt} ms)`);
+    assert.equal(wait.passed(), 0, "it took effect at once, not after the recording's bound: none of that time had passed");
     assert.equal(terminals.settling(agent.id), false, "the exit the daemon was still recording gives way to the owner's recovery");
-    await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again", 3_000).catch(async (error) => {
+    await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again").catch(async (error) => {
       const current = await agent.view();
       throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
     });
@@ -804,19 +820,22 @@ test("a recovery that asks the provider whether the saved process is gone names 
     await agent.deliver(1, { answer: "Answer 1." });
     await agent.turnsRecorded(1);
     const terminals = agent.exitSettlement();
-    terminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
+    const wait = exitWaitClock(agent);
     endFault = EXIT_RECORDING_FAULTS["saving its terminal never returns"](terminals);
     agent.exitProcess(0, "SIGKILL");
     await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the exit waits to be recorded");
 
     // The daemon holds no runtime and has not recorded the end of the saved one, so it asks the provider whether that process is gone.
+    // The recovery waits its turn behind the exit's recording, which holds the agent's queue until its time has run out.
     const attachedBefore = agent.attachedRefs().length;
-    const recovered = await agent.request("supervisor.recover_agent_runtime", { entry_id: agent.id, daemon_generation: agent.daemonGeneration() });
+    const recovering = agent.request("supervisor.recover_agent_runtime", { entry_id: agent.id, daemon_generation: agent.daemonGeneration() });
+    await agent.eventually(() => agent.ownerActionRuns(), "the recovery has begun");
+    const [recovered] = await Promise.all([recovering, wait.runsOut("saving its terminal never returns")]);
     assert.equal(recovered.ok, true, recovered.error);
     const asked = agent.attachedRefs().slice(attachedBefore);
     assert.ok(asked.length > 0, "the provider was asked to attach the saved process");
     assert.ok(asked.every((ref) => ref.ownerSetup === true), "and was told it was started with the owner's setup");
-    await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again", 3_000);
+    await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again");
     assert.equal(agent.harness.launchOptions[1]?.options.homeHarness, true, "the setup is still on, so the replacement has it");
   } finally {
     endFault();
@@ -832,20 +851,27 @@ test(`an app update that waits on an exit that cannot be recorded, because ${fau
     await agent.deliver(1, { answer: "Answer 1." });
     await agent.turnsRecorded(1);
     const terminals = agent.exitSettlement();
-    terminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
+    const wait = exitWaitClock(agent);
     endFault = EXIT_RECORDING_FAULTS[fault](terminals);
-    const exitedAt = Date.now();
     agent.exitProcess(0, "SIGKILL");
     await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the exit waits to be recorded");
+    // The wait is counted from the exit, not from the request: half of the
+    // ordinary attempts' time has gone by when the update asks.
+    wait.pass(terminals.bounds.settleMs / 2);
 
     // The update waits for the exit to be recorded, which outside tests
     // takes 27 seconds at most: inside the 30 seconds after which the app
     // would say "Update deferred" and leave the owner to try again. A step
     // that fails is waited through as one that never returns is.
-    const handoff = await agent.request("daemon.prepare_handoff");
-    assert.equal(handoff.ok, true, handoff.error);
-    // The wait is counted from the exit, not from the request.
-    assert.ok(Date.now() - exitedAt >= 600, "it waited for the exit, for as long as the exit was waited for");
+    const asked = answered(agent.request("daemon.prepare_handoff"));
+    await agent.eventually(() => agent.updateWaits(), "the update waits for the agent's exit");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(asked.answer, undefined, "it waits for the exit, for as long as the exit is waited for");
+    assert.equal(terminals.settling(agent.id), true);
+    // What is left of the wait, counted from the exit, is all the update waits for.
+    await wait.runsOut(fault);
+    await agent.eventually(() => asked.answer !== undefined, "the update goes ahead once the wait for the exit has ended");
+    assert.equal(asked.answer!.ok, true, asked.answer!.error);
     assert.equal(terminals.settling(agent.id), false);
   } finally {
     endFault();
@@ -862,7 +888,8 @@ for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
       await agent.deliver(1, { answer: "Answer 1." });
       await agent.turnsRecorded(1);
       const terminals = agent.exitSettlement();
-      terminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
+      // The wait for an exit that cannot be recorded ends when this test passes its time, not before.
+      const wait = exit === "cannot be recorded" ? exitWaitClock(agent) : null;
       if (exit === "cannot be recorded") endFault = EXIT_RECORDING_FAULTS["its entry's queue never answers"](terminals);
       agent.exitProcess(0, "SIGKILL");
       await agent.eventually(() => !agent.holdsRuntime(), "the daemon lets go of the exited runtime");
@@ -883,7 +910,8 @@ for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
         assert.equal(early.outcome, "invalid", early.error);
         assert.match(early.error ?? "", /live provider execution|fully stopped durable lifecycle/);
         assert.equal(unended(), 1, "the ended process has no saved terminal yet");
-        await agent.eventually(() => !terminals.settling(agent.id), "the daemon stops waiting for the exit", 5_000);
+        await wait!.runsOut("its entry's queue never answers");
+        assert.equal(terminals.settling(agent.id), false, "the daemon stops waiting for the exit");
       }
       await agent.eventually(() => unended() === 0, "the ended process has a saved terminal");
       // The agent's first working event published its live activity line,
@@ -1028,13 +1056,13 @@ for (const ending of ["interrupted", "completed"] as const) test(`a turn whose r
     await replaced(2);
     agent.serveThread(agent.harness.clients[1]!);
     await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === settled, "the replacement reads how the turn ended");
-    await agent.eventually(() => turnStates()[0]?.state === "terminal", "and the record closes the turn", 5_000).catch((error) => {
+    await agent.eventually(() => turnStates()[0]?.state === "terminal", "and the record closes the turn").catch((error) => {
       throw new Error(`${(error as Error).message}: the record has ${JSON.stringify(turnStates())}`);
     });
 
     // The next turn is recorded: nothing is left open in front of it.
     await answerOnReplacement(agent, 2);
-    await agent.eventually(() => turnStates()[1]?.state === "terminal", "the next turn is recorded to its end", 5_000).catch((error) => {
+    await agent.eventually(() => turnStates()[1]?.state === "terminal", "the next turn is recorded to its end").catch((error) => {
       throw new Error(`${(error as Error).message}: the record has ${JSON.stringify(turnStates())}, observer ${JSON.stringify(observer())}`);
     });
     assert.deepEqual([observer().last], [observer().max], "with no gap in the record");
@@ -1080,7 +1108,7 @@ test("a turn the record never saw start is still recovered by the replacement, a
 
     await answerOnReplacement(agent, 2);
     await agent.eventually(() => agent.read<{ state: string }>(
-      "SELECT state FROM execution_turns WHERE agent_id=? AND provider_turn_id='turn-2'")[0]?.state === "terminal", "the next turn is recorded to its end", 5_000)
+      "SELECT state FROM execution_turns WHERE agent_id=? AND provider_turn_id='turn-2'")[0]?.state === "terminal", "the next turn is recorded to its end")
       .catch((error) => { throw new Error(`${(error as Error).message}: observer ${JSON.stringify(observer())}`); });
     assert.equal(observer().max, observer().last, "the record has no gap");
     assert.deepEqual(agent.read<{ provider_turn_id: string }>("SELECT provider_turn_id FROM execution_turns WHERE agent_id=?"),
