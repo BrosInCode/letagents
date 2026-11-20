@@ -57,7 +57,7 @@ export type BoundedActiveWorkLeaseOwner = {
 };
 
 // The account×message pair budget is the real public batch bound. PostgreSQL
-// receives the account set as one JSON recordset so global legacy authority is
+// receives the account set as one array parameter so global legacy authority is
 // resolved once rather than once per arbitrary 1,000-account transport chunk.
 export const MAX_ACCOUNT_ROUTING_ACCOUNTS = 100_000;
 export const MAX_ACCOUNT_ROUTING_PAIRS = 100_000;
@@ -378,6 +378,18 @@ export async function getMessageAccountAgentRoutings(
     .filter((row) => row.routing_snapshot_version !== null)
     .map((row) => row.number);
   if (snapshotNumbers.length > 0) {
+    // No step of this read depends on the planner's row estimates. When they
+    // were too low (a new room, a large broadcast, tables without statistics),
+    // joins in the earlier forms ran as nested loops that read a room's
+    // sessions once per receipt.
+    //  - The page's receipts come from one pass over the message index.
+    //  - Each receipt finds its session by primary key. OFFSET 0 keeps the
+    //    other session conditions out of that lookup, so no wider index can
+    //    take the key's place.
+    //  - The message and account lists are array parameters, which PostgreSQL
+    //    searches by index or by hash.
+    //  - Live successors and prior speakers are lookup tables. Each is built
+    //    in one pass, and only when a row asks for it.
     const receipts = await executor.execute<{
       account_id: string;
       message_number: number;
@@ -390,83 +402,92 @@ export async function getMessageAccountAgentRoutings(
       prior_speakers: string[] | null;
       hold_release_reason: string | null;
     }>(sql`
-      WITH requested_account AS (
-        SELECT value.account_id
-          FROM jsonb_to_recordset(${JSON.stringify(accountIds.map((account_id) => ({ account_id })))}::jsonb)
-            AS value(account_id text)
-      ), owned_receipt AS (
-        SELECT captured.owner_account_id AS account_id,
-               receipt.message_number,
-               receipt.agent_key,
-               receipt.agent_session_id,
-               receipt.activation_reason,
-               receipt.turn_position,
-               receipt.turn_count,
-               -- A hold past its deadline is released by the frontier even
-               -- before a sweep records it.
-               CASE WHEN receipt.hold_released_at IS NULL AND receipt.hold_release_after <= now()
-                      THEN 'deadline' ELSE receipt.hold_release_reason END AS hold_release_reason,
-               captured.ended_at
-          FROM ${message_agent_receipts} AS receipt
-          JOIN ${room_agent_sessions} AS captured
-            ON captured.session_id = receipt.agent_session_id
-           AND captured.room_id = receipt.room_id
-           AND captured.agent_key = receipt.agent_key
-          JOIN requested_account ON requested_account.account_id = captured.owner_account_id
-         -- An array parameter, not a JSON list: PostgreSQL cannot size a JSON
-         -- list, so it could not use the message index for these numbers.
-         WHERE receipt.message_room_id = ${roomId}
-           AND receipt.message_number = ANY(${sql.param(snapshotNumbers)}::int[])
-           AND captured.session_kind = 'worker'
-      ), replied_turn AS (
-        -- Sequenced receipts that already answered: few rows, read once, so a
-        -- later turn can name who spoke before it.
-        SELECT replied.message_number, replied.turn_position, replied.actor_label
-          FROM ${message_agent_receipts} AS replied
-         WHERE replied.message_room_id = ${roomId}
-           AND replied.message_number = ANY(${sql.param(snapshotNumbers)}::int[])
-           AND replied.turn_position IS NOT NULL
-           AND replied.receipt_state = 'replied'
-      ), receipt_key AS (
-        SELECT DISTINCT owned_receipt.account_id, owned_receipt.agent_key
-          FROM owned_receipt
-         WHERE owned_receipt.ended_at IS NOT NULL
-      ), unique_live_successor AS (
-        SELECT receipt_key.account_id,
-               active.agent_key,
-               CASE WHEN COUNT(*) = 1
-                      AND MIN(active.owner_account_id) = receipt_key.account_id
-                      AND MAX(active.owner_account_id) = receipt_key.account_id
-                      THEN MIN(active.session_id)
-                    ELSE NULL END AS agent_session_id
-          FROM receipt_key
-          JOIN ${room_agent_sessions} AS active ON active.agent_key = receipt_key.agent_key
-         WHERE active.room_id = ${roomId}
-           AND active.session_kind = 'worker'
-           AND active.ended_at IS NULL
-         GROUP BY receipt_key.account_id, active.agent_key
+      WITH live_successor AS (
+        -- agent key -> owner account -> session, for each agent key with
+        -- exactly one live worker session in the room. A receipt whose
+        -- session ended may pass to that session, if the same account owns it.
+        SELECT jsonb_object_agg(
+                 one.agent_key,
+                 jsonb_build_object(one.owner_account_id, one.session_id)
+               ) AS by_agent_key
+          FROM (
+            -- Byte order, so a sorted grouping does not pay for the locale.
+            SELECT active.agent_key COLLATE "C" AS agent_key,
+                   MIN(active.owner_account_id) AS owner_account_id,
+                   MIN(active.session_id) AS session_id
+              FROM ${room_agent_sessions} AS active
+             WHERE active.room_id = ${roomId}
+               AND active.session_kind = 'worker'
+               AND active.ended_at IS NULL
+             GROUP BY active.agent_key COLLATE "C"
+            HAVING COUNT(*) = 1
+          ) AS one
+      ), prior_speaker AS (
+        -- 'message:position' -> the agents that already answered before that
+        -- position, in turn order. Sequenced receipts are few (at most
+        -- MAX_SEQUENTIAL_REPLY_AGENTS for each plan of a message).
+        SELECT jsonb_object_agg(
+                 turn.message_number || ':' || turn.turn_position,
+                 turn.speakers
+               ) AS by_turn
+          FROM (
+            SELECT sequenced.message_number,
+                   sequenced.turn_position,
+                   COALESCE(
+                     jsonb_agg(sequenced.actor_label)
+                       FILTER (WHERE sequenced.receipt_state = 'replied')
+                       OVER (
+                         PARTITION BY sequenced.message_number
+                         ORDER BY sequenced.turn_position
+                         RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                       ),
+                     '[]'::jsonb
+                   ) AS speakers
+              FROM ${message_agent_receipts} AS sequenced
+             WHERE sequenced.message_room_id = ${roomId}
+               AND sequenced.message_number = ANY(${sql.param(snapshotNumbers)}::int[])
+               AND sequenced.turn_position IS NOT NULL
+          ) AS turn
       )
-      SELECT owned_receipt.account_id,
-             owned_receipt.message_number,
-             owned_receipt.agent_key,
-             owned_receipt.agent_session_id,
-             owned_receipt.activation_reason,
-             CASE WHEN owned_receipt.ended_at IS NOT NULL
-                    THEN unique_live_successor.agent_session_id
-                  ELSE NULL END AS successor_agent_session_id,
-             owned_receipt.turn_position,
-             owned_receipt.turn_count,
-             owned_receipt.hold_release_reason,
-             CASE WHEN owned_receipt.turn_position >= 2 THEN (
-               SELECT COALESCE(jsonb_agg(prior.actor_label ORDER BY prior.turn_position), '[]'::jsonb)
-                 FROM replied_turn AS prior
-                WHERE prior.message_number = owned_receipt.message_number
-                  AND prior.turn_position < owned_receipt.turn_position
-             ) END AS prior_speakers
-        FROM owned_receipt
-        LEFT JOIN unique_live_successor
-          ON unique_live_successor.account_id = owned_receipt.account_id
-         AND unique_live_successor.agent_key = owned_receipt.agent_key
+      SELECT captured.owner_account_id AS account_id,
+             receipt.message_number,
+             receipt.agent_key,
+             receipt.agent_session_id,
+             receipt.activation_reason,
+             CASE WHEN captured.ended_at IS NOT NULL
+                    THEN (SELECT by_agent_key FROM live_successor)
+                           -> receipt.agent_key ->> captured.owner_account_id
+                  END AS successor_agent_session_id,
+             receipt.turn_position,
+             receipt.turn_count,
+             -- A hold past its deadline is released by the frontier even
+             -- before a sweep records it.
+             CASE WHEN receipt.hold_released_at IS NULL AND receipt.hold_release_after <= now()
+                    THEN 'deadline' ELSE receipt.hold_release_reason END AS hold_release_reason,
+             CASE WHEN receipt.turn_position >= 2
+                    THEN (SELECT by_turn FROM prior_speaker)
+                           -> (receipt.message_number || ':' || receipt.turn_position)
+                  END AS prior_speakers
+        FROM ${message_agent_receipts} AS receipt
+       CROSS JOIN LATERAL (
+         -- The account test is a column here, not a condition outside: as a
+         -- condition PostgreSQL would estimate it once per listed account.
+         SELECT session.room_id,
+                session.agent_key,
+                session.session_kind,
+                session.owner_account_id,
+                session.ended_at,
+                session.owner_account_id = ANY(${sql.param(accountIds)}::text[]) AS requested
+           FROM ${room_agent_sessions} AS session
+          WHERE session.session_id = receipt.agent_session_id
+         OFFSET 0
+       ) AS captured
+       WHERE receipt.message_room_id = ${roomId}
+         AND receipt.message_number = ANY(${sql.param(snapshotNumbers)}::int[])
+         AND captured.room_id = receipt.room_id
+         AND captured.agent_key = receipt.agent_key
+         AND captured.session_kind = 'worker'
+         AND captured.requested
        LIMIT ${MAX_ACCOUNT_ROUTING_TARGETS + 1}
     `);
     if (receipts.rows.length > MAX_ACCOUNT_ROUTING_TARGETS) {

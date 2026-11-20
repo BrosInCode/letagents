@@ -45,6 +45,7 @@ const projectionRetryModule = testDatabaseUrl
 const projectionReadinessModule = testDatabaseUrl
   ? await import("../db/messages/projection-readiness.js")
   : null;
+const { captureStatement, explainRead } = await import("./statement-read.js");
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
@@ -2139,21 +2140,35 @@ test("PG send-time routing persists a 6,000-recipient broadcast in bounded chunk
     assert.equal(broadcastOverlay.account_agent_routing.recipient_agent_sessions?.length, 6_000);
   }
   assert.ok(overlayMs < 2_000, `6,000-recipient overlay took ${overlayMs.toFixed(1)}ms`);
-  const batchedOverlays = await getMessageAccountAgentRoutings!(
-    db!,
-    room.id,
-    [owner, unrelatedOwner],
-    [{
-      number: Number(broadcast.id.slice(4)),
-      thread_root_number: null,
-      routing_snapshot_version: 1,
-      publisher_account_id: owner,
-      publisher_agent_key: null,
-      reply_to_number: null,
-      sender: "Human",
-      source: "browser",
-      text: "@everyone status",
-    }],
+  const { result: batchedOverlays, read: overlayRead } = await captureStatement(pool!, /live_successor/, () =>
+    getMessageAccountAgentRoutings!(
+      db!,
+      room.id,
+      [owner, unrelatedOwner],
+      [{
+        number: Number(broadcast.id.slice(4)),
+        thread_root_number: null,
+        routing_snapshot_version: 1,
+        publisher_account_id: owner,
+        publisher_agent_key: null,
+        reply_to_number: null,
+        sender: "Human",
+        source: "browser",
+        text: "@everyone status",
+      }],
+    ));
+  // The clock above depends on the machine; this does not. The overlay reads
+  // one receipt and one session for each recipient. A statement that left the
+  // session join to the planner read 3,000 sessions for each receipt here.
+  assert.ok(overlayRead, "the overlay sent its receipt statement");
+  const overlayPlan = await explainRead(pool!, overlayRead.text, overlayRead.values);
+  assert.ok(
+    overlayPlan.rowsRead("message_agent_receipts") <= 6_000,
+    `receipt rows read: ${overlayPlan.rowsRead("message_agent_receipts")}`,
+  );
+  assert.ok(
+    overlayPlan.rowsRead("room_agent_sessions") <= 6_000,
+    `session rows read: ${overlayPlan.rowsRead("room_agent_sessions")}`,
   );
   assert.equal(
     batchedOverlays.get(owner)?.get(Number(broadcast.id.slice(4)))?.recipient_agent_keys.length,
