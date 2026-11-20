@@ -394,10 +394,6 @@ export async function getMessageAccountAgentRoutings(
         SELECT value.account_id
           FROM jsonb_to_recordset(${JSON.stringify(accountIds.map((account_id) => ({ account_id })))}::jsonb)
             AS value(account_id text)
-      ), input_message AS (
-        SELECT value.message_number
-          FROM jsonb_to_recordset(${JSON.stringify(snapshotNumbers.map((message_number) => ({ message_number })))}::jsonb)
-            AS value(message_number integer)
       ), owned_receipt AS (
         SELECT captured.owner_account_id AS account_id,
                receipt.message_number,
@@ -412,21 +408,23 @@ export async function getMessageAccountAgentRoutings(
                       THEN 'deadline' ELSE receipt.hold_release_reason END AS hold_release_reason,
                captured.ended_at
           FROM ${message_agent_receipts} AS receipt
-          JOIN input_message ON input_message.message_number = receipt.message_number
           JOIN ${room_agent_sessions} AS captured
             ON captured.session_id = receipt.agent_session_id
            AND captured.room_id = receipt.room_id
            AND captured.agent_key = receipt.agent_key
           JOIN requested_account ON requested_account.account_id = captured.owner_account_id
+         -- An array parameter, not a JSON list: PostgreSQL cannot size a JSON
+         -- list, so it could not use the message index for these numbers.
          WHERE receipt.message_room_id = ${roomId}
+           AND receipt.message_number = ANY(${sql.param(snapshotNumbers)}::int[])
            AND captured.session_kind = 'worker'
       ), replied_turn AS (
         -- Sequenced receipts that already answered: few rows, read once, so a
         -- later turn can name who spoke before it.
         SELECT replied.message_number, replied.turn_position, replied.actor_label
           FROM ${message_agent_receipts} AS replied
-          JOIN input_message ON input_message.message_number = replied.message_number
          WHERE replied.message_room_id = ${roomId}
+           AND replied.message_number = ANY(${sql.param(snapshotNumbers)}::int[])
            AND replied.turn_position IS NOT NULL
            AND replied.receipt_state = 'replied'
       ), receipt_key AS (
@@ -619,17 +617,12 @@ export async function resolveGlobalLegacyTargets(
       publisher_agent_session_id: string | null;
       publisher_account_id: string | null;
     }>(sql`
-      WITH input_reply AS (
-        SELECT value.number
-          FROM jsonb_to_recordset(${JSON.stringify(replyNumbers.map((number) => ({ number })))}::jsonb)
-            AS value(number integer)
-      )
       SELECT reply.number, reply.sender, reply.source,
              reply.publisher_agent_key, reply.publisher_agent_session_id,
              reply.publisher_account_id
         FROM ${messages} AS reply
-        JOIN input_reply ON input_reply.number = reply.number
        WHERE reply.room_id = ${roomId}
+         AND reply.number = ANY(${sql.param(replyNumbers)}::int[])
     `);
     for (const reply of replies.rows) replyByNumber.set(Number(reply.number), reply);
   }

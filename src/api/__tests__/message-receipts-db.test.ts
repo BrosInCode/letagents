@@ -292,3 +292,302 @@ test("a plan queued before agent_count existed records unknown when routing elec
   } as any);
   assert.deepEqual(await a.noWake(sent.message.id), { reason: "unknown" });
 });
+
+// The receipt read of a message page used to join the receipt table to a
+// jsonb_to_recordset list, which PostgreSQL cannot size, so it scanned the
+// whole table. This is the statement as it was, kept as the reference.
+const REFERENCE_RECEIPTS_SQL = `
+  WITH requested_account AS (
+    SELECT value.account_id FROM jsonb_to_recordset($1::jsonb) AS value(account_id text)
+  ), input_message AS (
+    SELECT value.message_number FROM jsonb_to_recordset($2::jsonb) AS value(message_number integer)
+  ), owned_receipt AS (
+    SELECT captured.owner_account_id AS account_id, receipt.message_number, receipt.agent_key,
+           receipt.agent_session_id, receipt.activation_reason, receipt.turn_position, receipt.turn_count,
+           CASE WHEN receipt.hold_released_at IS NULL AND receipt.hold_release_after <= now()
+                  THEN 'deadline' ELSE receipt.hold_release_reason END AS hold_release_reason,
+           captured.ended_at
+      FROM message_agent_receipts AS receipt
+      JOIN input_message ON input_message.message_number = receipt.message_number
+      JOIN room_agent_sessions AS captured
+        ON captured.session_id = receipt.agent_session_id
+       AND captured.room_id = receipt.room_id
+       AND captured.agent_key = receipt.agent_key
+      JOIN requested_account ON requested_account.account_id = captured.owner_account_id
+     WHERE receipt.message_room_id = $3 AND captured.session_kind = 'worker'
+  ), replied_turn AS (
+    SELECT replied.message_number, replied.turn_position, replied.actor_label
+      FROM message_agent_receipts AS replied
+      JOIN input_message ON input_message.message_number = replied.message_number
+     WHERE replied.message_room_id = $3 AND replied.turn_position IS NOT NULL
+       AND replied.receipt_state = 'replied'
+  ), receipt_key AS (
+    SELECT DISTINCT owned_receipt.account_id, owned_receipt.agent_key
+      FROM owned_receipt WHERE owned_receipt.ended_at IS NOT NULL
+  ), unique_live_successor AS (
+    SELECT receipt_key.account_id, active.agent_key,
+           CASE WHEN COUNT(*) = 1
+                  AND MIN(active.owner_account_id) = receipt_key.account_id
+                  AND MAX(active.owner_account_id) = receipt_key.account_id
+                  THEN MIN(active.session_id) ELSE NULL END AS agent_session_id
+      FROM receipt_key
+      JOIN room_agent_sessions AS active ON active.agent_key = receipt_key.agent_key
+     WHERE active.room_id = $3 AND active.session_kind = 'worker' AND active.ended_at IS NULL
+     GROUP BY receipt_key.account_id, active.agent_key
+  )
+  SELECT owned_receipt.account_id, owned_receipt.message_number, owned_receipt.agent_key,
+         owned_receipt.agent_session_id, owned_receipt.activation_reason,
+         CASE WHEN owned_receipt.ended_at IS NOT NULL
+                THEN unique_live_successor.agent_session_id ELSE NULL END AS successor_agent_session_id,
+         owned_receipt.turn_position, owned_receipt.turn_count, owned_receipt.hold_release_reason,
+         CASE WHEN owned_receipt.turn_position >= 2 THEN (
+           SELECT COALESCE(jsonb_agg(prior.actor_label ORDER BY prior.turn_position), '[]'::jsonb)
+             FROM replied_turn AS prior
+            WHERE prior.message_number = owned_receipt.message_number
+              AND prior.turn_position < owned_receipt.turn_position
+         ) END AS prior_speakers
+    FROM owned_receipt
+    LEFT JOIN unique_live_successor
+      ON unique_live_successor.account_id = owned_receipt.account_id
+     AND unique_live_successor.agent_key = owned_receipt.agent_key
+   LIMIT 100001`;
+
+type CapturedReceiptRead = { text: string; values: unknown[]; rows: Record<string, unknown>[] };
+
+// Records the receipt statement the routing function sends, with its rows.
+async function captureReceiptRead(run: () => Promise<unknown>, match = /owned_receipt/): Promise<{ result: any; read: CapturedReceiptRead | null }> {
+  const pool = client!.pool;
+  const original = pool.query;
+  let read: CapturedReceiptRead | null = null;
+  pool.query = (async function (...args: unknown[]) {
+    const query = args[0] as string | { text: string };
+    const text = typeof query === "string" ? query : query.text;
+    const result = await (original as (...a: unknown[]) => Promise<{ rows: unknown[]; fields: { name: string }[] }>).apply(pool, args);
+    if (match.test(text)) {
+      const names = result.fields.map((field) => field.name);
+      read = {
+        text, values: (args[1] as unknown[]) ?? [],
+        rows: result.rows.map((row) => Array.isArray(row)
+          ? Object.fromEntries(names.map((name, index) => [name, (row as unknown[])[index]]))
+          : row as Record<string, unknown>),
+      };
+    }
+    return result;
+  }) as typeof pool.query;
+  try {
+    const result = await run();
+    return { result, read };
+  } finally {
+    pool.query = original;
+  }
+}
+
+const sortRows = (rows: Record<string, unknown>[]) =>
+  [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+
+test("the receipt read finds receipts by room and message number and returns what the join-list read returned", skip, async () => {
+  const routing = await import("../db/messages/account-agent-routing.js");
+  const room = await api!.createProjectWithName("receipt-parity");
+  const focus = await api!.createProjectWithName("receipt-parity-focus");
+  for (const id of ["acct-a", "acct-b", "acct-c"]) await account(id);
+  const T = "2026-01-01T00:00:00Z";
+  await client!.pool.query(
+    `INSERT INTO messages (room_id, sender, text, timestamp, number, routing_snapshot_version)
+       SELECT $1, 'human', 'm' || n, $2, n, CASE WHEN n = 7 THEN NULL ELSE 1 END FROM generate_series(1, 8) n`,
+    [room.id, T]);
+  const session = (id: string, roomId: string, owner: string, key: string, kind: string, ended: boolean) =>
+    client!.pool.query(
+      `INSERT INTO room_agent_sessions (session_id, room_id, token_hash, session_kind, runtime, actor_label, agent_key,
+         display_name, owner_account_id, owner_label, ide_label, created_at, updated_at, last_seen_at, ended_at)
+       VALUES ($1,$2,$1,$3::room_agent_session_kind,'codex',$1,$4,$1,$5,$5,'Codex',$6,$6,$6,$7)`,
+      [id, roomId, kind, key, owner, T, ended ? T : null]);
+  await session("s-a-live", room.id, "acct-a", "acct-a/x", "worker", false);
+  await session("s-a-old", room.id, "acct-a", "acct-a/y", "worker", true);
+  await session("s-a-new", room.id, "acct-a", "acct-a/y", "worker", false);
+  await session("s-b-old", room.id, "acct-b", "acct-b/z", "worker", true);
+  await session("s-b-live1", room.id, "acct-b", "acct-b/z", "worker", false);
+  await session("s-b-live2", room.id, "acct-b", "acct-b/z", "worker", false);
+  await session("s-c-ctrl", room.id, "acct-c", "acct-c/c", "controller", false);
+  await session("s-c-live", room.id, "acct-c", "acct-c/d", "worker", false);
+  await session("s-a-focus", focus.id, "acct-a", "acct-a/f", "worker", false);
+  let n = 0;
+  const receipt = (msg: number, roomId: string, sessionId: string, key: string, extra: Record<string, unknown> = {}) => {
+    const row = {
+      activation_reason: "mention", receipt_state: "pending", turn_position: null, turn_count: null,
+      hold_release_after: null, hold_released_at: null, hold_release_reason: null, actor_label: key, ...extra,
+    };
+    return client!.pool.query(
+      `INSERT INTO message_agent_receipts (id, message_room_id, message_number, room_id, agent_session_id, agent_key,
+         actor_label, activation_reason, receipt_state, turn_position, turn_count, hold_release_after,
+         hold_released_at, hold_release_reason, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)`,
+      [`r${++n}`, room.id, msg, roomId, sessionId, key, row.actor_label, row.activation_reason, row.receipt_state,
+        row.turn_position, row.turn_count, row.hold_release_after, row.hold_released_at, row.hold_release_reason, T]);
+  };
+  // 1: live agent, ended agent with one live successor, ended agent with two live successors.
+  await receipt(1, room.id, "s-a-live", "acct-a/x");
+  await receipt(1, room.id, "s-a-old", "acct-a/y");
+  await receipt(1, room.id, "s-b-old", "acct-b/z");
+  // 2: a three-turn sequence; position 1 replied, position 3 is past its deadline and never swept.
+  await receipt(2, room.id, "s-c-live", "acct-c/d", { turn_position: 1, turn_count: 3, receipt_state: "replied", actor_label: "First" });
+  await receipt(2, room.id, "s-a-live", "acct-a/x", { turn_position: 2, turn_count: 3 });
+  await receipt(2, room.id, "s-b-live1", "acct-b/z", { turn_position: 3, turn_count: 3, hold_release_after: "2026-01-02T00:00:00Z" });
+  // 3: a hold still in the future, and a hold already released with its reason.
+  await receipt(3, room.id, "s-a-live", "acct-a/x", { turn_position: 2, turn_count: 2, hold_release_after: "2999-01-01T00:00:00Z" });
+  await receipt(3, room.id, "s-b-live1", "acct-b/z", { turn_position: 1, turn_count: 2, hold_release_after: "2026-01-02T00:00:00Z",
+    hold_released_at: "2026-01-02T00:00:00Z", hold_release_reason: "turn" });
+  // 4: a controller session (excluded). 5: a receipt whose own room differs from its message room.
+  await receipt(4, room.id, "s-c-ctrl", "acct-c/c");
+  await receipt(5, focus.id, "s-a-focus", "acct-a/f");
+  // 7 has no routing snapshot; 6 and 8 have a snapshot and no receipt.
+
+  const run = async (accountIds: string[], numbers: number[]) => {
+    const rows = await routing.getMessageAccountRoutingRows(client!.db, room.id, [...new Set(numbers)]);
+    // Duplicated rows model a caller that repeats a message; the function collapses them.
+    const repeated = [...rows, ...rows.filter((row) => numbers.indexOf(row.number) !== numbers.lastIndexOf(row.number))];
+    const captured = await captureReceiptRead(() =>
+      routing.getMessageAccountAgentRoutings(client!.db, room.id, accountIds, repeated));
+    return { ...captured, rows };
+  };
+  const cases: Array<[string, string[], number[]]> = [
+    ["every account, every message", ["acct-a", "acct-b", "acct-c"], [1, 2, 3, 4, 5, 6, 7, 8]],
+    ["duplicate account and message numbers", ["acct-a", "acct-a", "acct-b"], [3, 2, 3, 2, 1]],
+    ["one account", ["acct-a"], [1, 2, 3, 4, 5]],
+    ["numbers without receipts", ["acct-a", "acct-b"], [6, 8]],
+    ["an account that owns nothing", ["nobody"], [1, 2, 3]],
+  ];
+  let compared = 0;
+  for (const [label, accountIds, numbers] of cases) {
+    const { read } = await run(accountIds, numbers);
+    assert.ok(read, `${label}: the receipt statement ran`);
+    assert.match(read.text, /= ANY\(/, `${label}: the new statement filters by an array`);
+    const snapshotNumbers = (await routing.getMessageAccountRoutingRows(client!.db, room.id, [...new Set(numbers)]))
+      .filter((row) => row.routing_snapshot_version !== null).map((row) => row.number);
+    const reference = await client!.pool.query(REFERENCE_RECEIPTS_SQL, [
+      JSON.stringify([...new Set(accountIds)].map((account_id) => ({ account_id }))),
+      JSON.stringify(snapshotNumbers.map((message_number) => ({ message_number }))),
+      room.id,
+    ]);
+    // The statement has no ORDER BY, so both sides are compared as sets of rows.
+    assert.deepEqual(sortRows(read.rows), sortRows(reference.rows), label);
+    compared += read.rows.length;
+  }
+  assert.ok(compared > 0);
+
+  const full = await run(["acct-a", "acct-b", "acct-c"], [1, 2, 3, 4, 5, 6, 7, 8]);
+  const byAccount = full.result as Map<string, Map<number, any>>;
+  const targets = (account: string, number: number) => byAccount.get(account)!.get(number).recipient_agent_sessions;
+  assert.equal(targets("acct-a", 1).find((t: any) => t.agent_key === "acct-a/y").successor_agent_session_id, "s-a-new");
+  assert.equal(targets("acct-b", 1)[0].successor_agent_session_id, undefined, "two live successors name none");
+  assert.deepEqual(targets("acct-a", 2)[0].prior_speakers, ["First"]);
+  assert.equal(targets("acct-b", 2)[0].hold_release_reason, "deadline");
+  assert.equal(targets("acct-a", 3)[0].hold_release_reason, undefined, "a future hold has no release reason");
+  assert.equal(targets("acct-b", 3)[0].hold_release_reason, "turn");
+  assert.deepEqual(targets("acct-c", 4), [], "a controller session receives nothing");
+  assert.equal(targets("acct-a", 5)[0].agent_key, "acct-a/f");
+  assert.equal(byAccount.get("acct-a")!.get(7)!.authority, "legacy");
+
+  const empty = await captureReceiptRead(() => routing.getMessageAccountAgentRoutings(client!.db, room.id, ["acct-a"], []));
+  assert.equal(empty.read, null, "an empty list sends no receipt statement");
+  assert.equal((empty.result as Map<unknown, unknown>).size, 0);
+});
+
+test("the receipt read of a message page reads the receipt table through its index", skip, async () => {
+  const routing = await import("../db/messages/account-agent-routing.js");
+  const T = "2026-01-01T00:00:00Z";
+  for (const id of ["acct-a", "acct-b", "acct-c"]) await account(id);
+  // 60 rooms; room-0 holds 850 messages with 4 receipts each (3,400), the others 24 each (~5,600).
+  await client!.pool.query(`
+    INSERT INTO rooms (id, created_at, display_name) SELECT 'plan-' || r, '${T}', 'plan ' || r FROM generate_series(0, 59) r;
+    INSERT INTO messages (room_id, sender, text, timestamp, number, routing_snapshot_version)
+      SELECT 'plan-' || r, 'human', 'm', '${T}', n, 1 FROM generate_series(0, 59) r,
+        LATERAL generate_series(1, CASE WHEN r = 0 THEN 850 ELSE 24 END) n;
+    INSERT INTO room_agent_sessions (session_id, room_id, token_hash, session_kind, runtime, actor_label, agent_key,
+        display_name, owner_account_id, owner_label, ide_label, created_at, updated_at, last_seen_at)
+      SELECT 's-' || r || '-' || i, 'plan-' || r, 's-' || r || '-' || i, 'worker', 'codex', 'a' || i, 'acct-' || chr(97 + i % 3) || '/a' || i,
+        'a' || i, 'acct-' || chr(97 + i % 3), 'x', 'Codex', '${T}', '${T}', '${T}'
+        FROM generate_series(0, 59) r, generate_series(0, 5) i;
+    INSERT INTO message_agent_receipts (id, message_room_id, message_number, room_id, agent_session_id, agent_key,
+        actor_label, activation_reason, receipt_state, created_at, updated_at)
+      SELECT 'p-' || r || '-' || n || '-' || i, 'plan-' || r, n, 'plan-' || r, 's-' || r || '-' || i,
+        'acct-' || chr(97 + i % 3) || '/a' || i, 'a' || i, 'mention', 'pending', '${T}', '${T}'
+        FROM generate_series(0, 59) r, LATERAL generate_series(1, CASE WHEN r = 0 THEN 850 ELSE 24 END) n,
+        generate_series(0, 3) i;
+    ANALYZE;`);
+  const numbers = Array.from({ length: 50 }, (_, index) => 700 + index);
+  const rows = await routing.getMessageAccountRoutingRows(client!.db, "plan-0", numbers);
+  const { read } = await captureReceiptRead(() =>
+    routing.getMessageAccountAgentRoutings(client!.db, "plan-0", ["acct-a", "acct-b", "acct-c"], rows));
+  assert.ok(read);
+  assert.equal(read.rows.length, 200);
+  const nodes = (plan: any): any[] => [plan, ...(plan.Plans ?? []).flatMap(nodes)];
+  const explained = await client!.pool.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${read.text}`, read.values);
+  const scans = nodes(explained.rows[0]["QUERY PLAN"][0].Plan).filter((node) => node["Relation Name"] === "message_agent_receipts");
+  assert.ok(scans.length > 0);
+  for (const scan of scans) assert.notEqual(scan["Node Type"], "Seq Scan", "no full scan of message_agent_receipts");
+  // The page names 50 messages of a room that holds 3,400 receipts; only the 200 that match may be read.
+  const rowsRead = scans.reduce((sum, scan) => sum + (scan["Actual Rows"] ?? 0) * (scan["Actual Loops"] ?? 1)
+    + (scan["Rows Removed by Filter"] ?? 0) + (scan["Rows Removed by Index Recheck"] ?? 0), 0);
+  assert.ok(rowsRead <= 400, `receipt rows read: ${rowsRead}`);
+});
+
+const REFERENCE_REPLY_SQL = `
+  WITH input_reply AS (
+    SELECT value.number FROM jsonb_to_recordset($1::jsonb) AS value(number integer)
+  )
+  SELECT reply.number, reply.sender, reply.source, reply.publisher_agent_key,
+         reply.publisher_agent_session_id, reply.publisher_account_id
+    FROM messages AS reply
+    JOIN input_reply ON input_reply.number = reply.number
+   WHERE reply.room_id = $2`;
+
+test("the reply lookup of legacy routing reads only the named messages of a large room", skip, async () => {
+  const routing = await import("../db/messages/account-agent-routing.js");
+  const room = await api!.createProjectWithName("reply-lookup");
+  await account("acct-r");
+  await client!.pool.query(
+    `INSERT INTO messages (room_id, sender, text, timestamp, number, source, publisher_agent_key, publisher_account_id)
+       SELECT $1, 'human', 'm', '2026-01-01T00:00:00Z', n, CASE WHEN n % 7 = 0 THEN 'agent' ELSE 'browser' END,
+              CASE WHEN n % 7 = 0 THEN 'acct-r/a' END, CASE WHEN n % 7 = 0 THEN 'acct-r' END
+         FROM generate_series(1, 3000) n`, [room.id]);
+  await client!.pool.query("ANALYZE messages");
+  const legacy = (replyTo: number[]) => replyTo.map((reply_to_number, index) => ({
+    number: 5000 + index, thread_root_number: null, routing_snapshot_version: null, publisher_account_id: null,
+    publisher_agent_key: null, reply_to_number, sender: "human", source: "browser", text: "hello",
+  }));
+  const run = (replyTo: number[]) => captureReceiptRead(
+    () => routing.resolveGlobalLegacyTargets(client!.db, room.id, legacy(replyTo)), /AS reply/i);
+  const cases: Array<[string, number[]]> = [
+    ["three numbers", [7, 1400, 2999]],
+    ["duplicate numbers", [14, 14, 21, 14]],
+    ["numbers with no message", [7, 99999, 3001]],
+    ["only missing numbers", [99999]],
+  ];
+  for (const [label, replyTo] of cases) {
+    const { read } = await run(replyTo);
+    assert.ok(read, label);
+    const unique = [...new Set(replyTo)];
+    const reference = await client!.pool.query(REFERENCE_REPLY_SQL, [
+      JSON.stringify(unique.map((number) => ({ number }))), room.id]);
+    assert.deepEqual(sortRows(read.rows), sortRows(reference.rows), label);
+  }
+  const found = await run([7, 1400, 2999]);
+  assert.equal(found.read!.rows.length, 3);
+  assert.equal(found.read!.rows.find((row) => row.number === 7)!.publisher_agent_key, "acct-r/a");
+  assert.match(found.read!.text, /= ANY\(/);
+  const none = await run([]);
+  assert.equal(none.read, null, "no reply numbers sends no reply statement");
+
+  const nodes = (plan: any): any[] => [plan, ...(plan.Plans ?? []).flatMap(nodes)];
+  const rowsRead = async (text: string, values: unknown[]) => {
+    const explained = await client!.pool.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${text}`, values);
+    return nodes(explained.rows[0]["QUERY PLAN"][0].Plan)
+      .filter((node) => node["Relation Name"] === "messages")
+      .reduce((sum, node) => sum + (node["Actual Rows"] ?? 0) * (node["Actual Loops"] ?? 1)
+        + (node["Rows Removed by Filter"] ?? 0) + (node["Rows Removed by Index Recheck"] ?? 0), 0);
+  };
+  // The room holds 3,000 messages; the three named ones are all the lookup may read.
+  assert.ok(await rowsRead(found.read!.text, found.read!.values) <= 10, "new form reads about 3 messages");
+  const oldRead = await rowsRead(REFERENCE_REPLY_SQL, [JSON.stringify([7, 1400, 2999].map((number) => ({ number }))), room.id]);
+  assert.ok(oldRead >= 3000, `the old form reads the whole room (${oldRead})`);
+});
