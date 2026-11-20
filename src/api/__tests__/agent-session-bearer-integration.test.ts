@@ -42,6 +42,10 @@ const revokeRoomAgentSessionBearer = dbModule?.revokeRoomAgentSessionBearer;
 const rotateRoomAgentSessionBearer = dbModule?.rotateRoomAgentSessionBearer;
 const createTask = dbModule?.createTask;
 const createTaskLease = dbModule?.createTaskLease;
+const createOwnerToken = dbModule?.createOwnerToken;
+const createSession = dbModule?.createSession;
+const createSupervisorHostGrant = dbModule?.createSupervisorHostGrant;
+const revokeSupervisorHostGrant = dbModule?.revokeSupervisorHostGrant;
 let seedOrdinal = 0;
 
 async function resetDatabase(): Promise<void> {
@@ -283,6 +287,123 @@ test("concurrent rotation has one winner and one active next generation", { skip
   const rows = await db!.select().from(room_agent_session_bearers!).where(eq(room_agent_session_bearers!.session_id, session.session_id));
   assert.equal(rows.filter((row) => !row.revoked_at).length, 1);
   assert.equal(rows.filter((row) => row.generation === 2).length, 1);
+});
+
+/** The tables that `run` reads, one entry for each SQL statement, in order. */
+async function tablesRead<T>(run: () => Promise<T>): Promise<{ result: T; tables: string[] }> {
+  const original = pool!.query;
+  const tables: string[] = [];
+  pool!.query = function (this: unknown, ...args: unknown[]) {
+    const first = args[0] as string | { text?: string };
+    const text = typeof first === "string" ? first : first?.text ?? "";
+    tables.push(/ from "([a-z_]+)"/i.exec(text)?.[1] ?? text);
+    return (original as (...rest: unknown[]) => unknown).apply(this, args);
+  } as typeof original;
+  try {
+    return { result: await run(), tables };
+  } finally {
+    pool!.query = original;
+  }
+}
+
+function bearerRequest(token: string, cookie?: string) {
+  return { headers: { authorization: `Bearer ${token}`, ...(cookie ? { cookie: `letagents_session=${cookie}` } : {}) } } as never;
+}
+
+async function seedCredentials() {
+  const { room, session } = await seed();
+  const ownerToken = "a".repeat(64);
+  await createOwnerToken!({ accountId: "acct_bearer_test", githubUserId: "bearer-test", token: ownerToken });
+  const sessionToken = "b".repeat(64);
+  await createSession!("acct_bearer_test", sessionToken, new Date(Date.now() + 60_000).toISOString());
+  const grant = await createSupervisorHostGrant!({
+    owner_account_id: "acct_bearer_test", host_id: "host_prefix", installation_id: "install_prefix",
+    allowed_room_ids: [room.id], allowed_agent_keys: ["WorkerOwner/granted"], expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const grantedSession = await createRoomAgentSession!({
+    room_id: room.id, session_kind: "worker", runtime: "codex", actor_label: "Granted | Worker Owner's agent | Agent",
+    agent_key: "WorkerOwner/granted", agent_instance_id: "instance_granted", display_name: "Granted",
+    owner_account_id: "acct_bearer_test", owner_label: "Worker Owner", ide_label: "Agent",
+    supervisor_grant_id: grant.grant.grant_id,
+  });
+  return { room, session, ownerToken, sessionToken, grant, grantedSession };
+}
+
+test("each credential kind resolves to its principal, and a prefixed token reads its own table first", { skip: requiresDatabase }, async () => {
+  const { session, ownerToken, sessionToken, grant, grantedSession } = await seedCredentials();
+
+  const owner = await tablesRead(() => resolveRequestAuth(bearerRequest(ownerToken)));
+  assert.equal(owner.result.authKind, "owner_token");
+  assert.equal(owner.result.account?.account_id, "acct_bearer_test");
+  assert.deepEqual(owner.tables, ["owner_tokens"]);
+
+  const appSession = await tablesRead(() => resolveRequestAuth(bearerRequest(sessionToken)));
+  assert.equal(appSession.result.authKind, "session");
+  assert.equal(appSession.result.account?.account_id, "acct_bearer_test");
+  assert.deepEqual(appSession.tables, ["owner_tokens", "auth_sessions"]);
+
+  const host = await tablesRead(() => resolveRequestAuth(bearerRequest(grant.token)));
+  assert.equal(host.result.authKind, "supervisor_grant");
+  assert.equal(host.result.account, null);
+  assert.equal(host.result.supervisorGrant?.grant_id, grant.grant.grant_id);
+  assert.deepEqual(host.tables, ["supervisor_host_grants"]);
+
+  const worker = await tablesRead(() => resolveRequestAuth(bearerRequest(session.worker_bearer!)));
+  assert.equal(worker.result.authKind, "agent_session");
+  assert.equal(worker.result.agentSession?.agent_session_id, session.session_id);
+  assert.equal(worker.result.agentSession?.waiting_for_asker, false);
+  assert.deepEqual(worker.tables, ["room_agent_session_bearers"]);
+
+  const grantedWorker = await tablesRead(() => resolveRequestAuth(bearerRequest(grantedSession.worker_bearer!)));
+  assert.equal(grantedWorker.result.authKind, "agent_session");
+  assert.equal(grantedWorker.result.agentSession?.agent_session_id, grantedSession.session_id);
+  assert.deepEqual(grantedWorker.tables, ["room_agent_session_bearers", "agent_asks"]);
+
+  // A browser cookie beside a host grant is still refused.
+  const envelope = await tablesRead(() => resolveRequestAuth(bearerRequest(grant.token, sessionToken)));
+  assert.deepEqual(envelope.result, { account: null, authKind: null });
+  assert.deepEqual(envelope.tables, ["auth_sessions", "supervisor_host_grants"]);
+});
+
+test("an unknown, revoked or expired prefixed token is refused after every credential table", { skip: requiresDatabase }, async () => {
+  const { session, grant } = await seedCredentials();
+  const refused = { account: null, authKind: null };
+
+  for (const token of [`lasb_${"Z".repeat(43)}`, `lashg_${"Z".repeat(43)}`]) {
+    const unknown = await tablesRead(() => resolveRequestAuth(bearerRequest(token)));
+    assert.deepEqual(unknown.result, refused);
+    assert.equal(unknown.tables.length, 4, token);
+    assert.deepEqual([...unknown.tables].sort(), ["auth_sessions", "owner_tokens", "room_agent_session_bearers", "supervisor_host_grants"]);
+  }
+
+  await revokeSupervisorHostGrant!({ grant_id: grant.grant.grant_id, owner_account_id: "acct_bearer_test" });
+  const revokedGrant = await tablesRead(() => resolveRequestAuth(bearerRequest(grant.token)));
+  assert.deepEqual(revokedGrant.result, refused);
+  assert.deepEqual(revokedGrant.tables, ["supervisor_host_grants", "owner_tokens", "auth_sessions", "room_agent_session_bearers"]);
+
+  await db!.update(room_agent_session_bearers!).set({ expires_at: new Date(Date.now() - 1000).toISOString() })
+    .where(eq(room_agent_session_bearers!.session_id, session.session_id));
+  const expiredBearer = await tablesRead(() => resolveRequestAuth(bearerRequest(session.worker_bearer!)));
+  assert.deepEqual(expiredBearer.result, refused);
+  assert.deepEqual(expiredBearer.tables, ["room_agent_session_bearers", "owner_tokens", "auth_sessions", "supervisor_host_grants"]);
+
+  // The prefix decides only the order: a prefixed string stored in another
+  // credential table still resolves there.
+  const prefixedOwnerToken = `lasb_${"Y".repeat(43)}`;
+  await createOwnerToken!({ accountId: "acct_bearer_test", githubUserId: "bearer-test", token: prefixedOwnerToken });
+  const prefixedOwner = await tablesRead(() => resolveRequestAuth(bearerRequest(prefixedOwnerToken)));
+  assert.equal(prefixedOwner.result.authKind, "owner_token");
+  assert.deepEqual(prefixedOwner.tables, ["room_agent_session_bearers", "owner_tokens"]);
+
+  // With worker bearers turned off, a worker-shaped token never reads the bearer table.
+  process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "false";
+  try {
+    const flagOff = await tablesRead(() => resolveRequestAuth(bearerRequest(`lasb_${"X".repeat(43)}`)));
+    assert.deepEqual(flagOff.result, refused);
+    assert.deepEqual(flagOff.tables, ["owner_tokens", "auth_sessions", "supervisor_host_grants"]);
+  } finally {
+    process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "true";
+  }
 });
 
 test("bearer artifact publishing requires exactly one caller-held work lease", { skip: requiresDatabase }, async () => {

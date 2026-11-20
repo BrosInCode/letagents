@@ -3,6 +3,8 @@ import { parseBearerAuthorization } from "./bearer-authorization.js";
 
 import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
 import { getOwnerTokenAccountByTokenHash } from "../db/auth/owner-tokens.js";
+import { AGENT_SESSION_BEARER_TOKEN_PREFIX } from "../db/auth/room-agent-sessions.js";
+import { SUPERVISOR_GRANT_TOKEN_PREFIX } from "../db/auth/supervisor-grants.js";
 import { getMcpOAuthAccessGrant, getMcpOAuthGrantBySecretHash } from "../db/mcp-oauth.js";
 import { isRemoteMcpRequestPath, mcpOAuthUrls } from "../mcp-oauth/config.js";
 import { grantSecretOf, looksLikeMcpAccessToken, safeEqual, sha256Hex } from "../mcp-oauth/tokens.js";
@@ -60,62 +62,88 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
     return resolvePageGrantToken(req, providerToken);
   }
 
-  const ownerTokenAccount = await getOwnerTokenAccountByToken(providerToken);
-  if (ownerTokenAccount) {
-    return {
-      account: ownerTokenAccount,
-      authKind: "owner_token",
-    };
-  }
-
-  const appSession = await getSessionAccountByToken(providerToken);
-  if (appSession) {
-    if (cookieSessionAccount && cookieSessionAccount.id !== appSession.id) {
-      return { account: null, authKind: null };
-    }
-    return { account: appSession, authKind: "session" };
-  }
-
-  const supervisorGrant = await getSupervisorHostGrantByToken(providerToken);
-  if (supervisorGrant) {
-    // A browser/session credential and a host credential in one request is a
-    // confused-deputy envelope. Do not silently choose either principal.
-    if (cookieSessionAccount) return { account: null, authKind: null };
-    return { account: null, authKind: "supervisor_grant", supervisorGrant };
-  }
-
-  if (isAgentSessionBearerFeatureEnabled()) {
-    const workerBearer = await getRoomAgentSessionBearerByToken(providerToken);
-    if (workerBearer) {
-      const { bearer, session } = workerBearer;
-      // Loaded here, not at the top: the ask store pulls in room messaging, which imports this module.
-      const waitingForAsker = session.supervisor_grant_id
-        ? await import("../agent-asks/store.js").then(asks => asks.isGrantWaitingForAsker(session.supervisor_grant_id!))
-        : false;
+  // Each lookup answers a principal, a refusal, or null (not this kind).
+  const resolveOwnerToken = async (): Promise<ResolvedRequestAuth | null> => {
+    const ownerTokenAccount = await getOwnerTokenAccountByToken(providerToken);
+    if (ownerTokenAccount) {
       return {
-        account: null,
-        authKind: "agent_session",
-        agentSession: {
-          bearer_id: bearer.bearer_id,
-          bearer_generation: bearer.generation,
-          capabilities: bearer.capabilities.filter(isAgentSessionBearerCapability),
-          room_id: session.room_id,
-          agent_session_id: session.session_id,
-          actor_label: session.actor_label,
-          agent_key: session.agent_key,
-          owner_account_id: session.owner_account_id,
-          agent_instance_id: session.agent_instance_id,
-          session_kind: "worker",
-          runtime: session.runtime,
-          display_name: session.display_name,
-          owner_label: session.owner_label,
-          ide_label: session.ide_label,
-          repo_branch: session.repo_branch ?? null,
-          expires_at: bearer.expires_at,
-          waiting_for_asker: waitingForAsker,
-        },
+        account: ownerTokenAccount,
+        authKind: "owner_token",
       };
     }
+    return null;
+  };
+
+  const resolveAppSession = async (): Promise<ResolvedRequestAuth | null> => {
+    const appSession = await getSessionAccountByToken(providerToken);
+    if (appSession) {
+      if (cookieSessionAccount && cookieSessionAccount.id !== appSession.id) {
+        return { account: null, authKind: null };
+      }
+      return { account: appSession, authKind: "session" };
+    }
+    return null;
+  };
+
+  const resolveSupervisorGrant = async (): Promise<ResolvedRequestAuth | null> => {
+    const supervisorGrant = await getSupervisorHostGrantByToken(providerToken);
+    if (supervisorGrant) {
+      // A browser/session credential and a host credential in one request is a
+      // confused-deputy envelope. Do not silently choose either principal.
+      if (cookieSessionAccount) return { account: null, authKind: null };
+      return { account: null, authKind: "supervisor_grant", supervisorGrant };
+    }
+    return null;
+  };
+
+  const resolveWorkerBearer = async (): Promise<ResolvedRequestAuth | null> => {
+    if (!isAgentSessionBearerFeatureEnabled()) return null;
+    const workerBearer = await getRoomAgentSessionBearerByToken(providerToken);
+    if (!workerBearer) return null;
+    const { bearer, session } = workerBearer;
+    // Loaded here, not at the top: the ask store pulls in room messaging, which imports this module.
+    const waitingForAsker = session.supervisor_grant_id
+      ? await import("../agent-asks/store.js").then(asks => asks.isGrantWaitingForAsker(session.supervisor_grant_id!))
+      : false;
+    return {
+      account: null,
+      authKind: "agent_session",
+      agentSession: {
+        bearer_id: bearer.bearer_id,
+        bearer_generation: bearer.generation,
+        capabilities: bearer.capabilities.filter(isAgentSessionBearerCapability),
+        room_id: session.room_id,
+        agent_session_id: session.session_id,
+        actor_label: session.actor_label,
+        agent_key: session.agent_key,
+        owner_account_id: session.owner_account_id,
+        agent_instance_id: session.agent_instance_id,
+        session_kind: "worker",
+        runtime: session.runtime,
+        display_name: session.display_name,
+        owner_label: session.owner_label,
+        ide_label: session.ide_label,
+        repo_branch: session.repo_branch ?? null,
+        expires_at: bearer.expires_at,
+        waiting_for_asker: waitingForAsker,
+      },
+    };
+  };
+
+  // Workers and supervisors send most requests, and their tokens carry a
+  // prefix that owner and session tokens (hex) never have. Ask the table the
+  // prefix names first, so a hit costs one lookup instead of four. On a miss
+  // the other tables still follow in their usual order, so every token gets
+  // the same answer as when the order was fixed.
+  const lookups = [resolveOwnerToken, resolveAppSession, resolveSupervisorGrant, resolveWorkerBearer];
+  const first = providerToken.startsWith(AGENT_SESSION_BEARER_TOKEN_PREFIX)
+    ? resolveWorkerBearer
+    : providerToken.startsWith(SUPERVISOR_GRANT_TOKEN_PREFIX)
+      ? resolveSupervisorGrant
+      : null;
+  for (const lookup of first ? [first, ...lookups.filter((other) => other !== first)] : lookups) {
+    const resolved = await lookup();
+    if (resolved) return resolved;
   }
 
   return {

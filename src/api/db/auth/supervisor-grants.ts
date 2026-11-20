@@ -6,8 +6,11 @@ import { supervisor_host_grants } from "../schema.js";
 import { hashToken, nextPrefixedId } from "../utils.js";
 import type { SupervisorHostGrant } from "../types.js";
 
+/** Every supervisor grant token starts with this; request auth looks it up in the grant table first. */
+export const SUPERVISOR_GRANT_TOKEN_PREFIX = "lashg_";
+
 export function makeSupervisorGrantToken(): string {
-  return `lashg_${crypto.randomBytes(32).toString("base64url")}`;
+  return `${SUPERVISOR_GRANT_TOKEN_PREFIX}${crypto.randomBytes(32).toString("base64url")}`;
 }
 
 function toSupervisorHostGrant(row: typeof supervisor_host_grants.$inferSelect): SupervisorHostGrant {
