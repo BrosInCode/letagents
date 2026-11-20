@@ -10,6 +10,7 @@ import type {
   DesktopRoomInfo,
   DesktopRoomMessage,
   DesktopRoomSnapshot,
+  DesktopRoomSnapshotOptions,
   DesktopRoomStreamEvent,
   DesktopTaskSummary,
   DiagnosticsSnapshot,
@@ -19,7 +20,10 @@ import type {
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import { reuseUnchanged } from "../domain/reuse-unchanged";
 import {
+  ALL_SNAPSHOT_SOURCES,
   appendSnapshotMessage,
+  completeRoomSnapshot,
+  isCompleteRoomSnapshot,
   mergeDesktopRoomMessages,
   mergeRoomSnapshotMessages,
   messageReferencesMissingThreadContext,
@@ -819,8 +823,29 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
   }
 
-  function getRoomSnapshot(roomIdentifier: string | null): Promise<DesktopRoomSnapshot> {
-    return withSnapshotTimeout(desktopIpc.room.getSnapshot(roomIdentifier), roomIdentifier || "workspace room");
+  function getRoomSnapshot(
+    roomIdentifier: string | null,
+    snapshotOptions?: DesktopRoomSnapshotOptions,
+  ): Promise<DesktopRoomSnapshot> {
+    return withSnapshotTimeout(
+      snapshotOptions ? desktopIpc.room.getSnapshot(roomIdentifier, snapshotOptions) : desktopIpc.room.getSnapshot(roomIdentifier),
+      roomIdentifier || "workspace room",
+    );
+  }
+
+  /**
+   * What a read after a stream gap asks for. A gap can leave only the
+   * stream-fed sections behind (messages, tasks, reasoning, live activity,
+   * artifacts, GitHub events); the periodic metadata read keeps the others
+   * fresh. So when the room on screen is a complete snapshot of this room,
+   * only the stream-fed sources are read and its other sections stay. A
+   * placeholder, a cached paint or another room gets the full read.
+   */
+  function gapReadOptions(roomIdentifier: string): DesktopRoomSnapshotOptions | undefined {
+    const shown = options.selectedSnapshot.value;
+    if (!isCompleteRoomSnapshot(shown) || !snapshotMatchesRoom(shown, roomIdentifier)) return undefined;
+    if (cachedPaint && snapshotMatchesRoom(shown, cachedPaint.roomIdentifier)) return undefined;
+    return { sources: "stream_fed" };
   }
 
   function withSnapshotTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -1019,12 +1044,18 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     streamReconcileRoom = roomIdentifier;
     resetBufferedStreamEvents();
     try {
-      const snapshot = await getRoomSnapshot(roomIdentifier);
+      // Content deletion replaces the room's messages and keeps the full read.
+      const read = await getRoomSnapshot(roomIdentifier, replaceMessages ? undefined : gapReadOptions(roomIdentifier));
       if (
         generation !== streamReconcileGeneration
         || !roomKey
         || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
       ) return;
+      // The sections a stream-fed read left out stay as the room shows them
+      // now, including what a metadata read changed while this read ran.
+      const snapshot = completeRoomSnapshot(options.selectedSnapshot.value, read);
+      // The room on screen could not give them (it changed under the read): read the whole room.
+      if (snapshot.unloadedSources?.length) options.scheduleLiveMetadataRefresh(0);
       if (["ROOM_DELETED", "ROOM_NOT_FOUND"].includes(snapshot.access.code ?? "")) {
         cachedSelectedSnapshots.noteFreshAccess(snapshot, [roomIdentifier]);
         cachedPaint = null;
@@ -1238,6 +1269,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   ): void {
     const shown = options.selectedSnapshot.value;
     if (fresh.access.status !== "ready" || !shown || !roomSnapshotsMatch(shown, fresh)) return;
+    // Only a complete snapshot may be painted from the cache later.
+    if (!isCompleteRoomSnapshot(fresh) || !isCompleteRoomSnapshot(shown)) return;
     cachedSelectedSnapshots.remember(shown, aliases, { create: true });
   }
 
@@ -1429,5 +1462,7 @@ function createOptimisticSelectedSnapshot(
     // Optimistic placeholder while the focus room loads; inherit the root's
     // known source health until the real snapshot replaces it.
     sourceStates: baseRootSnapshot.sourceStates,
+    // Nothing of this room was read yet: a partial read cannot build on it.
+    unloadedSources: ALL_SNAPSHOT_SOURCES,
   };
 }

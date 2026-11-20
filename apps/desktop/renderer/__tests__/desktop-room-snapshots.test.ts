@@ -8,9 +8,12 @@ import type {
   DesktopRoomSnapshot,
 } from "../../electron/ipc-types";
 import {
+  ALL_SNAPSHOT_SOURCES,
   appendDesktopRoomMessage,
   appendSnapshotMessage,
   applyRoomLiveMetadata,
+  completeRoomSnapshot,
+  isCompleteRoomSnapshot,
   mergeDesktopRoomMessages,
   mergeRoomSnapshotMessages,
   messageReferencesMissingThreadContext,
@@ -361,6 +364,75 @@ describe("applyRoomLiveMetadata", () => {
     assert.equal(next.focusRooms, current.focusRooms);
     assert.equal(next.boardSettings, current.boardSettings);
     assert.equal(next.messages, current.messages);
+  });
+});
+
+describe("completeRoomSnapshot", () => {
+  const POLL_ONLY = ["focusRooms", "participants", "presence", "activityHistory", "boardSettings"] as const;
+  const shown = (): DesktopRoomSnapshot => ({
+    ...roomSnapshot("cloud", "old message", "msg_1"),
+    tasks: [{ id: "task_old" }],
+    focusRooms: [{ roomId: "focus_1" }],
+    participants: [{ participantKey: "river" }],
+    participantHiddenCount: 3,
+    presence: [{ actorLabel: "agent:river" }],
+    recentActivity: [{ id: "agent:river" }],
+    boardSettings: { managerMode: "intent_required", activeManager: null, pendingIntentCount: 2 },
+    sourceStates: { ...readyStates(), presence: { status: "error", error: "presence down" } },
+  } as unknown as DesktopRoomSnapshot);
+  const streamFedRead = (): DesktopRoomSnapshot => ({
+    ...roomSnapshot("cloud", "new message", "msg_2"),
+    tasks: [{ id: "task_new" }],
+    unloadedSources: POLL_ONLY,
+  } as unknown as DesktopRoomSnapshot);
+
+  it("returns a complete read as it is", () => {
+    const read = roomSnapshot("cloud", "new message", "msg_2");
+    assert.equal(completeRoomSnapshot(shown(), read), read);
+  });
+
+  it("takes the sections a stream-fed read left out, and their states, from the room on screen", () => {
+    const current = shown();
+    const completed = completeRoomSnapshot(current, streamFedRead());
+
+    // What the read loaded is the read's.
+    assert.deepEqual(completed.tasks.map((task) => task.id), ["task_new"]);
+    assert.deepEqual(completed.messages.map((message) => message.id), ["msg_2"]);
+    // What it left out stays as shown, by reference.
+    assert.equal(completed.focusRooms, current.focusRooms);
+    assert.equal(completed.participants, current.participants);
+    assert.equal(completed.participantHiddenCount, 3);
+    assert.equal(completed.presence, current.presence);
+    assert.equal(completed.recentActivity, current.recentActivity);
+    assert.equal(completed.boardSettings, current.boardSettings);
+    assert.deepEqual(completed.sourceStates.presence, { status: "error", error: "presence down" });
+    assert.equal(completed.sourceStates.tasks.status, "ready");
+    assert.equal(completed.unloadedSources, undefined);
+    assert.ok(isCompleteRoomSnapshot(completed));
+  });
+
+  it("leaves the read marked when the room on screen cannot give the sections", () => {
+    const read = streamFedRead();
+    const placeholder = { ...shown(), unloadedSources: ALL_SNAPSHOT_SOURCES } as DesktopRoomSnapshot;
+    const otherRoom = { ...shown(), roomIdentifier: "some/other/room", room: null } as DesktopRoomSnapshot;
+    const refused = { ...shown(), access: { ...shown().access, status: "forbidden" } } as DesktopRoomSnapshot;
+    for (const current of [null, placeholder, otherRoom, refused]) {
+      const result = completeRoomSnapshot(current, read);
+      assert.equal(result, read);
+      assert.ok(!isCompleteRoomSnapshot(result));
+    }
+  });
+
+  it("keeps a read without source states without them", () => {
+    const { sourceStates: _states, ...withoutStates } = streamFedRead();
+    const completed = completeRoomSnapshot(shown(), withoutStates as DesktopRoomSnapshot);
+    assert.equal(completed.sourceStates, undefined);
+    assert.equal(completed.participantHiddenCount, 3);
+  });
+
+  it("does not complete a read that was refused", () => {
+    const read = { ...streamFedRead(), access: { ...streamFedRead().access, status: "unavailable" } } as DesktopRoomSnapshot;
+    assert.equal(completeRoomSnapshot(shown(), read), read);
   });
 });
 

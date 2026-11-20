@@ -274,6 +274,93 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
     assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
   });
 
+  it("reads only the stream-fed sources after a gap in a loaded room and keeps its other sections", async () => {
+    const harness = createHarness();
+    const loaded = {
+      ...focusSnapshot([roomMessage("msg_1", "Existing")]),
+      tasks: [taskSummary("task_1")],
+      participants: [{ participantKey: "river" }],
+      participantHiddenCount: 2,
+      presence: [{ actorLabel: "agent:river" }],
+      recentActivity: [{ id: "agent:river" }],
+      focusRooms: [focusRoomInfo("focus_child", "Child")],
+      boardSettings: { managerMode: "intent_required", activeManager: null, pendingIntentCount: 3 },
+    } as unknown as DesktopRoomSnapshot;
+    harness.nextSelectedSnapshot = Promise.resolve(loaded);
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      assert.deepEqual(harness.getSnapshotOptions, [undefined], "opening a room reads every source");
+      // What the main process answers to a stream-fed read: the poll-only sections are empty placeholders.
+      harness.nextSelectedSnapshot = Promise.resolve({
+        ...focusSnapshot([roomMessage("msg_1", "Existing"), roomMessage("msg_2", "Missed")]),
+        tasks: [taskSummary("task_1"), taskSummary("task_2")],
+        unloadedSources: ["focusRooms", "participants", "presence", "activityHistory", "boardSettings"],
+      } as DesktopRoomSnapshot);
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", checkpoint: "msg_2", gap: true, verified: true, deliveryRepairToken: 7,
+      });
+      await flushAsync();
+      await flushAsync();
+    });
+
+    assert.deepEqual(harness.getSnapshotOptions.at(-1), { sources: "stream_fed" });
+    const shown = harness.selectedSnapshot.value!;
+    assert.deepEqual(shown.messages.map((message) => message.id), ["msg_1", "msg_2"]);
+    assert.deepEqual(shown.tasks.map((task) => task.id), ["task_1", "task_2"]);
+    assert.deepEqual(shown.participants, loaded.participants);
+    assert.equal(shown.participantHiddenCount, 2);
+    assert.deepEqual(shown.presence, loaded.presence);
+    assert.deepEqual(shown.recentActivity, loaded.recentActivity);
+    assert.deepEqual(shown.focusRooms, loaded.focusRooms);
+    assert.deepEqual(shown.boardSettings, loaded.boardSettings);
+    assert.equal(shown.unloadedSources, undefined, "the room on screen is a complete snapshot again");
+    assert.deepEqual(harness.deliveryRepairs.map((entry) => entry.repair), [{ token: 7 }]);
+    assert.deepEqual(harness.metadataRefreshCalls, [], "no second read is needed");
+  });
+
+  it("reads the whole room after a gap when the room on screen was never fully read", async () => {
+    const harness = createHarness();
+    // The placeholder a room shows while its first read runs, or after that read failed.
+    harness.selectedSnapshot.value = {
+      ...focusSnapshot(),
+      unloadedSources: ["focusRooms", "tasks", "participants", "presence", "reasoning", "activityHistory", "roomArtifacts", "boardSettings", "messages", "githubEvents"],
+    } as DesktopRoomSnapshot;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.syncSelectedRoomStream("focus_a");
+      harness.state.handleRoomStreamEvent({ type: "open", roomIdentifier: "focus_a", checkpoint: null, gap: true, verified: false });
+      await flushAsync();
+    });
+
+    assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
+    assert.deepEqual(harness.getSnapshotOptions, [undefined]);
+    assert.equal(harness.selectedSnapshot.value!.unloadedSources, undefined);
+  });
+
+  it("asks for a full read when the room on screen changed under a stream-fed read", async () => {
+    const harness = createHarness();
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      let resolveRead!: (snapshot: DesktopRoomSnapshot) => void;
+      harness.nextSelectedSnapshot = new Promise<DesktopRoomSnapshot>((resolve) => { resolveRead = resolve; });
+      harness.state.handleRoomStreamEvent({ type: "open", roomIdentifier: "focus_a", checkpoint: null, gap: true, verified: false });
+      await flushAsync();
+      assert.deepEqual(harness.getSnapshotOptions.at(-1), { sources: "stream_fed" });
+      // While the read runs, the room on screen stops being a complete snapshot.
+      harness.selectedSnapshot.value = { ...harness.selectedSnapshot.value!, unloadedSources: ["participants"] };
+      resolveRead({
+        ...focusSnapshot([roomMessage("msg_2", "Missed")]),
+        unloadedSources: ["focusRooms", "participants", "presence", "activityHistory", "boardSettings"],
+      } as DesktopRoomSnapshot);
+      await flushAsync();
+      await flushAsync();
+    });
+
+    assert.deepEqual(harness.metadataRefreshCalls, [0], "the full room read fills what the partial read could not");
+    assert.deepEqual(harness.selectedSnapshot.value!.messages.map((message) => message.id), ["msg_2"]);
+  });
+
   it("acknowledges the authoritative gap snapshot to the room stream once", async () => {
     const harness = createHarness();
     const priorTask = { ...taskSummary("task_1"), updatedAt: "2026-08-11T10:00:00.000Z" };
@@ -1324,6 +1411,8 @@ function createHarness(options: {
   authStatus: Ref<DesktopAuthStatus | null>;
   activeEntry: Ref<SidebarEntry>;
   getSnapshotRequests: Array<string | null>;
+  /** The options of each snapshot read, in order; undefined for a full read. */
+  getSnapshotOptions: Array<unknown>;
   deliveryRepairs: Array<{ roomIdentifier: string; repair: DesktopRoomDeliveryRepair }>;
   deliveryRepairFailures: number;
   getArtifactsRequests: Array<string>;
@@ -1359,6 +1448,7 @@ function createHarness(options: {
   const sessionGeneration = ref(0);
   const selectedRootRoomIdentifier = ref<string | null>(options.selectedRootRoomIdentifier || "room_parent");
   const getSnapshotRequests: Array<string | null> = [];
+  const getSnapshotOptions: Array<unknown> = [];
   const deliveryRepairs: Array<{ roomIdentifier: string; repair: DesktopRoomDeliveryRepair }> = [];
   const getArtifactsRequests: Array<string> = [];
   const metadataRefreshCalls: Array<number | undefined> = [];
@@ -1420,6 +1510,7 @@ function createHarness(options: {
       harness.deliveryRepairFailures = value;
     },
     getSnapshotRequests,
+    getSnapshotOptions,
     getArtifactsRequests,
     metadataRefreshCalls,
     listAccountRoomsCalls,
@@ -1492,8 +1583,9 @@ function createHarness(options: {
               }
             };
           },
-          getSnapshot: async (roomIdentifier: string | null): Promise<DesktopRoomSnapshot> => {
+          getSnapshot: async (roomIdentifier: string | null, snapshotOptions?: unknown): Promise<DesktopRoomSnapshot> => {
             getSnapshotRequests.push(roomIdentifier);
+            getSnapshotOptions.push(snapshotOptions);
             return harness.nextSelectedSnapshot;
           },
           listAccountRooms: async (

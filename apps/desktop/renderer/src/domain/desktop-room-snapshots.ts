@@ -7,6 +7,7 @@ import type {
   DesktopRoomLiveMetadataSourceKey,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
+  DesktopSnapshotSourceKey,
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
 import { toRaw } from "vue";
@@ -263,6 +264,75 @@ export function preserveErroredSnapshotSources(
     roomArtifacts: errored("roomArtifacts") ? current.roomArtifacts : incoming.roomArtifacts,
     boardSettings: errored("boardSettings") ? current.boardSettings : incoming.boardSettings,
   };
+}
+
+/** Every snapshot source, for a placeholder that has read none of them. */
+export const ALL_SNAPSHOT_SOURCES: readonly DesktopSnapshotSourceKey[] = [
+  "focusRooms",
+  "tasks",
+  "participants",
+  "presence",
+  "reasoning",
+  "activityHistory",
+  "roomArtifacts",
+  "boardSettings",
+  "messages",
+  "githubEvents",
+];
+
+/** The snapshot fields that the read of each source fills. */
+const SNAPSHOT_SOURCE_FIELDS: Record<DesktopSnapshotSourceKey, readonly (keyof DesktopRoomSnapshot)[]> = {
+  focusRooms: ["focusRooms"],
+  tasks: ["tasks"],
+  participants: ["participants", "participantHiddenCount"],
+  presence: ["presence"],
+  reasoning: ["reasoningSessions", "liveActivitySessions"],
+  activityHistory: ["recentActivity"],
+  roomArtifacts: ["roomArtifacts"],
+  boardSettings: ["boardSettings"],
+  messages: ["messages"],
+  githubEvents: ["githubEvents"],
+};
+
+/** Whether every source of this snapshot was read: it may give its sections to a later partial read. */
+export function isCompleteRoomSnapshot(snapshot: DesktopRoomSnapshot | null): snapshot is DesktopRoomSnapshot {
+  return Boolean(snapshot && snapshot.access.status === "ready" && !snapshot.unloadedSources?.length);
+}
+
+/**
+ * Complete a read that left sources out (`incoming.unloadedSources`, as a read
+ * after a stream gap does) from the snapshot on screen: each section it did not
+ * read keeps the value and the source state that `current` has. The result is
+ * a complete snapshot.
+ *
+ * When `current` cannot give those sections (another room, not ready, or not
+ * complete itself), the read comes back unchanged and still names what it
+ * lacks, so the caller can ask for a full read.
+ */
+export function completeRoomSnapshot(
+  current: DesktopRoomSnapshot | null,
+  incoming: DesktopRoomSnapshot,
+): DesktopRoomSnapshot {
+  const unloaded = incoming.unloadedSources;
+  if (!unloaded?.length) return incoming;
+  if (
+    incoming.access.status !== "ready"
+    || !isCompleteRoomSnapshot(current)
+    || !roomSnapshotsMatch(current, incoming)
+    || !snapshotStorageNamespacesMatch(current, incoming)
+  ) return incoming;
+  const shown = toRaw(current);
+  const { unloadedSources: _left, ...read } = incoming;
+  const completed: DesktopRoomSnapshot = { ...read };
+  // A snapshot without source states (an older main process) stays without them.
+  const sourceStates = incoming.sourceStates ? { ...incoming.sourceStates } : null;
+  const assign = <K extends keyof DesktopRoomSnapshot>(field: K) => { completed[field] = shown[field]; };
+  for (const source of unloaded) {
+    for (const field of SNAPSHOT_SOURCE_FIELDS[source] ?? []) assign(field);
+    if (sourceStates && shown.sourceStates?.[source]) sourceStates[source] = shown.sourceStates[source];
+  }
+  if (sourceStates) completed.sourceStates = sourceStates;
+  return completed;
 }
 
 /**
