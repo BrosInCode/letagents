@@ -17,7 +17,7 @@ export interface GitHubAttentionItem {
   firstSeen: string
   url: string | null
   taskId: string | null
-  /** The newest event of the row, for opening its group in Activity. */
+  /** The newest event of the row's own group (the pull request, or the newest run), for opening it in Activity. */
   latestEventId: string
   /** Changes when the row gains a newer event or a new reason, so a read row comes back. */
   fingerprint: string
@@ -112,7 +112,7 @@ function row(id: string, lead: ActivityGroup, groups: readonly ActivityGroup[], 
     firstSeen: [...events].sort((a, b) => stamp(a.created_at) - stamp(b.created_at))[0]!.created_at,
     url: githubUrl(lead.url),
     taskId: groups.flatMap(group => group.taskIds)[0] ?? null,
-    latestEventId: latest.id,
+    latestEventId: latestOf(lead).id,
     fingerprint: `${latest.id}|${body}`,
     history: events.map(event => ({ id: event.id, ...historyEntry(event), timestamp: eventTime(event) })),
   }

@@ -70,7 +70,10 @@ test('a pull request row clears when a new commit passes, and never shows after 
 })
 
 test('a check from another app counts on the pull request for its current commit only', () => {
-  assert.deepEqual(githubAttentionItems([event('pr'), check('c1', 'vercel', 'failure', 3, { pullRequest: 42, branch: 'feature' })]).map(item => item.body), ['Build failed: vercel'])
+  const [onPullRequest] = githubAttentionItems([event('pr'), check('c1', 'vercel', 'failure', 3, { pullRequest: 42, branch: 'feature' })])
+  assert.equal(onPullRequest.body, 'Build failed: vercel')
+  assert.equal(onPullRequest.latestEventId, 'pr', 'Open in Activity opens the pull request, not the check')
+  assert.equal(onPullRequest.fingerprint, 'c1|Build failed: vercel', 'the newer check still marks the row unread')
   assert.deepEqual(githubAttentionItems([event('pr', { head_sha: 'sha2', metadata: { head_sha: 'sha2' } }), check('c1', 'vercel', 'failure', 3, { pullRequest: 42, branch: 'feature' })]), [])
   assert.deepEqual(githubAttentionItems([event('pr'), check('c1', 'vercel', 'failure', 3, { pullRequest: 42 }), check('c2', 'vercel', 'success', 4, { pullRequest: 42 })]), [])
   assert.deepEqual(githubAttentionItems([check('c1', 'vercel', 'failure', 3, { pullRequest: 42 })]).map(item => item.id), [`lane:${pr.toLowerCase()}|check|vercel`],
