@@ -661,7 +661,7 @@ for (const fault of Object.keys(EXIT_RECORDING_FAULTS) as Array<keyof typeof EXI
       const terminals = agent.exitSettlement();
       // Fifteen seconds, eight and four, on a clock this test moves.
       const wait = exitWaitClock(agent);
-      endFault = EXIT_RECORDING_FAULTS[fault](terminals);
+      endFault = wait.fault(fault);
 
       agent.exitProcess(0, "SIGKILL");
       await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the daemon lets go of the exited runtime and starts recording its exit");
@@ -672,7 +672,7 @@ for (const fault of Object.keys(EXIT_RECORDING_FAULTS) as Array<keyof typeof EXI
       assert.equal(agent.harness.launches.length, 1, "while the exit may still be recorded, no replacement is started: not before the ordinary attempts had their time");
       assert.equal(terminals.settling(agent.id), true);
 
-      await wait.runsOut(fault);
+      await wait.runsOut();
       await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again once the wait has ended").catch(async (error) => {
         const current = await agent.view();
         throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); settling=${terminals.settling(agent.id)}`);
@@ -699,7 +699,7 @@ for (const fault of Object.keys(EXIT_RECORDING_FAULTS) as Array<keyof typeof EXI
 
       // The replacement crashes as well, and its exit cannot be recorded either: that is a second exit, and the owner is told of it too.
       agent.exitProcess(1, "SIGKILL");
-      await wait.runsOut(fault);
+      await wait.runsOut();
       await agent.eventually(() => agent.harness.clients.length === 3, "the agent is started again after the second crash");
       await agent.eventually(async () => ((await agent.request("manifest.list")).result[0] as typeof entry).activity
         ?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length === 2, "the owner reads of each exit once");
@@ -729,10 +729,10 @@ for (const fault of ["closing its approvals never returns", "its entry's queue n
       await agent.turnsRecorded(1);
       const terminals = agent.exitSettlement();
       const wait = exitWaitClock(agent);
-      endFault = EXIT_RECORDING_FAULTS[fault](terminals);
+      endFault = wait.fault(fault);
 
       // The restart is answered when the wait for the stopped process's exit has run out.
-      const [applied] = await Promise.all([agent.changeEffortAndRestart(), wait.runsOut(fault)]);
+      const [applied] = await Promise.all([agent.changeEffortAndRestart(), wait.runsOut()]);
       // The last attempt records the exit without the approvals step, and the
       // restart completes as asked. When the queue is what fails, the app is
       // told the exit could not be recorded, and the agent is started all the same.
@@ -775,7 +775,7 @@ test(`Restart and resume starts an agent again at once while the daemon is still
     // owner's last resort must not wait for it, even for a step that holds
     // the entry's queue.
     const wait = exitWaitClock(agent);
-    endFault = EXIT_RECORDING_FAULTS[fault](terminals);
+    endFault = wait.fault(fault);
     const before = (await agent.request("manifest.list")).result[0] as { room_id: string; provider_ref: { execution_generation_id: string } };
     const runtimeId = agent.read<{ runtime_generation_id: string }>(
       "SELECT runtime_generation_id FROM execution_runtime_generations WHERE agent_id=? ORDER BY created_at_ms DESC")[0]!.runtime_generation_id;
@@ -821,7 +821,7 @@ test("a recovery that asks the provider whether the saved process is gone names 
     await agent.turnsRecorded(1);
     const terminals = agent.exitSettlement();
     const wait = exitWaitClock(agent);
-    endFault = EXIT_RECORDING_FAULTS["saving its terminal never returns"](terminals);
+    endFault = wait.fault("saving its terminal never returns");
     agent.exitProcess(0, "SIGKILL");
     await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the exit waits to be recorded");
 
@@ -830,7 +830,7 @@ test("a recovery that asks the provider whether the saved process is gone names 
     const attachedBefore = agent.attachedRefs().length;
     const recovering = agent.request("supervisor.recover_agent_runtime", { entry_id: agent.id, daemon_generation: agent.daemonGeneration() });
     await agent.eventually(() => agent.ownerActionRuns(), "the recovery has begun");
-    const [recovered] = await Promise.all([recovering, wait.runsOut("saving its terminal never returns")]);
+    const [recovered] = await Promise.all([recovering, wait.runsOut()]);
     assert.equal(recovered.ok, true, recovered.error);
     const asked = agent.attachedRefs().slice(attachedBefore);
     assert.ok(asked.length > 0, "the provider was asked to attach the saved process");
@@ -852,7 +852,7 @@ test(`an app update that waits on an exit that cannot be recorded, because ${fau
     await agent.turnsRecorded(1);
     const terminals = agent.exitSettlement();
     const wait = exitWaitClock(agent);
-    endFault = EXIT_RECORDING_FAULTS[fault](terminals);
+    endFault = wait.fault(fault);
     agent.exitProcess(0, "SIGKILL");
     await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the exit waits to be recorded");
     // The wait is counted from the exit, not from the request: half of the
@@ -869,7 +869,7 @@ test(`an app update that waits on an exit that cannot be recorded, because ${fau
     assert.equal(asked.answer, undefined, "it waits for the exit, for as long as the exit is waited for");
     assert.equal(terminals.settling(agent.id), true);
     // What is left of the wait, counted from the exit, is all the update waits for.
-    await wait.runsOut(fault);
+    await wait.runsOut();
     await agent.eventually(() => asked.answer !== undefined, "the update goes ahead once the wait for the exit has ended");
     assert.equal(asked.answer!.ok, true, asked.answer!.error);
     assert.equal(terminals.settling(agent.id), false);
@@ -890,7 +890,7 @@ for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
       const terminals = agent.exitSettlement();
       // The wait for an exit that cannot be recorded ends when this test passes its time, not before.
       const wait = exit === "cannot be recorded" ? exitWaitClock(agent) : null;
-      if (exit === "cannot be recorded") endFault = EXIT_RECORDING_FAULTS["its entry's queue never answers"](terminals);
+      if (wait) endFault = wait.fault("its entry's queue never answers");
       agent.exitProcess(0, "SIGKILL");
       await agent.eventually(() => !agent.holdsRuntime(), "the daemon lets go of the exited runtime");
 
@@ -910,7 +910,7 @@ for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
         assert.equal(early.outcome, "invalid", early.error);
         assert.match(early.error ?? "", /live provider execution|fully stopped durable lifecycle/);
         assert.equal(unended(), 1, "the ended process has no saved terminal yet");
-        await wait!.runsOut("its entry's queue never answers");
+        await wait!.runsOut();
         assert.equal(terminals.settling(agent.id), false, "the daemon stops waiting for the exit");
       }
       await agent.eventually(() => unended() === 0, "the ended process has a saved terminal");

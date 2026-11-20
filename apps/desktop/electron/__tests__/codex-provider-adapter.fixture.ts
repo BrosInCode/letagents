@@ -1362,41 +1362,43 @@ export async function answerOnReplacement(agent: Awaited<ReturnType<typeof codex
 /**
  * What stops the daemon recording an exit, for as long as a test lasts.
  * Each returns what ends the fault, for the test to call when it is done:
- * a daemon cannot be stopped under a step that never returns.
+ * a daemon cannot be stopped under a step that never returns. `met` is
+ * called each time the recording reaches the faulty step, which then fails
+ * it or holds it.
  */
 export type ExitSettlement = ReturnType<Awaited<ReturnType<typeof codexDaemonFixture>>["exitSettlement"]>;
 export const EXIT_RECORDING_FAULTS = {
-  "closing its approvals fails every time": (terminals: ExitSettlement) => {
+  "closing its approvals fails every time": (terminals: ExitSettlement, met = () => {}) => {
     const original = terminals.ports.settleRuntimeApprovals;
-    terminals.ports.settleRuntimeApprovals = async () => { throw new Error("approval storage fault"); };
+    terminals.ports.settleRuntimeApprovals = async () => { met(); throw new Error("approval storage fault"); };
     return () => { terminals.ports.settleRuntimeApprovals = original; };
   },
-  "closing its approvals never returns": (terminals: ExitSettlement) => {
+  "closing its approvals never returns": (terminals: ExitSettlement, met = () => {}) => {
     const original = terminals.ports.settleRuntimeApprovals;
     let end!: () => void;
     const ended = new Promise<void>((resolve) => { end = resolve; });
-    terminals.ports.settleRuntimeApprovals = async (...args) => { await ended; return original(...args); };
+    terminals.ports.settleRuntimeApprovals = async (...args) => { met(); await ended; return original(...args); };
     return () => { terminals.ports.settleRuntimeApprovals = original; end(); };
   },
-  "its entry's queue never answers": (terminals: ExitSettlement) => {
+  "its entry's queue never answers": (terminals: ExitSettlement, met = () => {}) => {
     const original = terminals.ports.serializeEntry;
     let end!: () => void;
     const ended = new Promise<void>((resolve) => { end = resolve; });
-    terminals.ports.serializeEntry = async (entryId, operation) => { await ended; return original(entryId, operation); };
+    terminals.ports.serializeEntry = async (entryId, operation) => { met(); await ended; return original(entryId, operation); };
     return () => { terminals.ports.serializeEntry = original; end(); };
   },
-  "saving its terminal fails every time": (terminals: ExitSettlement) => {
+  "saving its terminal fails every time": (terminals: ExitSettlement, met = () => {}) => {
     const original = terminals.ports.durability;
     terminals.ports.durability = Object.create(original, {
-      recordTerminal: { value: async () => { throw new Error("terminal storage fault"); } } });
+      recordTerminal: { value: async () => { met(); throw new Error("terminal storage fault"); } } });
     return () => { terminals.ports.durability = original; };
   },
-  "saving its terminal never returns": (terminals: ExitSettlement) => {
+  "saving its terminal never returns": (terminals: ExitSettlement, met = () => {}) => {
     const original = terminals.ports.durability;
     let end!: () => void;
     const ended = new Promise<void>((resolve) => { end = resolve; });
     terminals.ports.durability = Object.create(original, {
-      recordTerminal: { value: async (...args: unknown[]) => { await ended; return original.recordTerminal(...args); } } });
+      recordTerminal: { value: async (...args: unknown[]) => { met(); await ended; return original.recordTerminal(...args); } } });
     return () => { terminals.ports.durability = original; end(); };
   },
 } as const;
@@ -1421,8 +1423,17 @@ export function exitWaitClock(agent: Awaited<ReturnType<typeof codexDaemonFixtur
   const terminals = agent.exitSettlement();
   let now = 0;
   const armed = new Set<{ due: number; ms: number; callback: () => void }>();
+  /** The fault in force, how often the recording has reached it, and how often it had when the newest exit began. */
+  let fault: keyof typeof EXIT_RECORDING_FAULTS | null = null;
+  let met = 0, metBeforeExit = 0;
   terminals.timers = {
-    set: (callback, ms) => { const timer = { due: now + ms, ms, callback }; armed.add(timer); return timer; },
+    set: (callback, ms) => {
+      // The ordinary attempts' bound is the first thing started for an exit.
+      if (ms === terminals.bounds.settleMs) metBeforeExit = met;
+      const timer = { due: now + ms, ms, callback };
+      armed.add(timer);
+      return timer;
+    },
     clear: (timer) => { armed.delete(timer as { due: number; ms: number; callback: () => void }); },
   };
   /** Passes this much of the wait's time. Each bound that falls due ends, the earliest first. */
@@ -1445,36 +1456,51 @@ export function exitWaitClock(agent: Awaited<ReturnType<typeof codexDaemonFixtur
   /** The daemon's own record of the exit it is recording, while it waits for it. */
   const recording = () => [...(terminals as unknown as { pending: Map<{ entryId: string }, { overdue: false | "due" | "last"; operation: unknown; abandoned: unknown }> }).pending]
     .find(([installation]) => installation.entryId === agent.id)?.[1];
+  /** How often the recording of the newest exit has reached the fault. */
+  const reached = () => met - metBeforeExit;
   return {
     pass,
     /** How much of the wait's time this test has passed. */
     passed: () => now,
+    /** Stops the daemon recording exits, as EXIT_RECORDING_FAULTS says, and returns what ends the fault. */
+    fault(name: keyof typeof EXIT_RECORDING_FAULTS) {
+      fault = name;
+      return EXIT_RECORDING_FAULTS[name](terminals, () => { met += 1; });
+    },
     /**
      * Lets the wait for an exit that cannot be recorded run out, the way the
-     * fault makes it. Each bound ends only once the daemon is waiting on it,
-     * and a step that would still finish is never cut short: after the
-     * ordinary attempts' time, a step that fails leaves nothing more to wait
-     * for; approvals that never close cost the last attempt half its time;
-     * a queue or a save that never answers costs it all of that time, and the
-     * save then has its own.
+     * fault makes it. A bound ends only once the recording has reached the
+     * fault and waits on that bound, and a step that would still finish is
+     * never cut short. The ordinary attempts' time ends when one of them is
+     * held or failed by the fault: an attempt that is still on its way would
+     * otherwise be left in the entry's queue and run again later. After that
+     * a step that fails leaves nothing more to wait for; approvals that never
+     * close cost the last attempt half its time; a queue or a save that never
+     * answers costs it all of that time, and the save then has its own.
      */
-    async runsOut(fault: keyof typeof EXIT_RECORDING_FAULTS) {
+    async runsOut() {
+      if (!fault) throw new Error("Name the fault that stops the exit being recorded first, with fault().");
       const { settleMs, lastAttemptMs, recordMs } = terminals.bounds;
       const ended = () => !recording();
-      await agent.eventually(() => left(settleMs) !== null, "the daemon waits for the exit to be recorded");
+      const waitFor = (check: () => boolean, label: string) => agent.eventually(check, label).catch((error) => {
+        const exit = recording();
+        throw new Error(`${(error as Error).message}: the recording ${exit ? `is ${exit.overdue || "on time"}, ${exit.operation ? "with an attempt running" : "between attempts"}${exit.abandoned ? ", given up" : ""}` : "has ended"}; `
+          + `it reached the fault ${reached()} time(s); bounds still running: ${[...armed].map((timer) => timer.ms).join(", ") || "none"}`);
+      });
+      await waitFor(() => left(settleMs) !== null && reached() >= 1, "an attempt to record the exit reaches the fault");
       pass(left(settleMs)!);
       if (fault === "closing its approvals never returns") {
-        await agent.eventually(() => ended() || left(lastAttemptMs / 2) !== null, "the last attempt waits for the approvals to close");
+        await waitFor(() => ended() || (reached() >= 2 && left(lastAttemptMs / 2) !== null), "the last attempt waits for the approvals to close");
         pass(lastAttemptMs / 2);
       } else if (fault === "its entry's queue never answers" || fault === "saving its terminal never returns") {
-        await agent.eventually(() => ended() || (recording()!.overdue === "last" && Boolean(recording()!.operation)), "the last attempt is made");
+        await waitFor(() => ended() || (recording()!.overdue === "last" && Boolean(recording()!.operation) && reached() >= 2), "the last attempt reaches the fault as well");
         pass(lastAttemptMs);
         if (fault === "saving its terminal never returns") {
-          await agent.eventually(() => ended() || Boolean(recording()!.abandoned), "the daemon stops waiting and saves the terminal");
+          await waitFor(() => ended() || (Boolean(recording()!.abandoned) && reached() >= 3), "the daemon stops waiting, and its save of the terminal reaches the fault");
           pass(recordMs);
         }
       }
-      await agent.eventually(ended, "the daemon no longer waits for the exit");
+      await waitFor(ended, "the daemon no longer waits for the exit");
     },
   };
 }

@@ -737,6 +737,12 @@ test("Cursor MCP timeout reaps the inspection process tree before returning so i
     "setInterval(() => {}, 1_000);",
   ].join("\n");
   let descendantPid: number | null = null;
+  // The time limit ends when this test ends it, once the descendant is up.
+  // A real limit of a few seconds also covers the start of the helper, the
+  // wrapper, Cursor and its descendant; on a slow machine it ran out first,
+  // and the descendant this test is about was never there to be reaped.
+  const timeLimit: { ms: number | null; end: (() => void) | null } = { ms: null, end: null };
+  let attestation: Promise<void> = Promise.resolve();
   try {
     const cursorBin = writeFakeProvider(executable, `const { spawn } = require("node:child_process");
 const { writeFileSync } = require("node:fs");
@@ -750,12 +756,7 @@ writeFileSync(${JSON.stringify(descendantPidPath)}, String(descendant.pid));
 setInterval(() => {}, 1_000);
 `);
 
-    // The time limit ends when this test ends it, once the descendant is up.
-    // A real limit of a few seconds also covers the start of the helper, the
-    // wrapper, Cursor and its descendant; on a slow machine it ran out first,
-    // and the descendant this test is about was never there to be reaped.
-    const timeLimit: { ms: number | null; end: (() => void) | null } = { ms: null, end: null };
-    const attestation = assertCursorSupervisedMcpAuthority({
+    attestation = assertCursorSupervisedMcpAuthority({
       cursorBin,
       cwd: root,
       writableProfileRoot: root,
@@ -786,6 +787,12 @@ setInterval(() => {}, 1_000);
     rmSync(root, { recursive: true, force: true });
     assert.equal(existsSync(root), false);
   } finally {
+    // After an assertion failure the limit may not have been ended: end it,
+    // so that the inspection stops and does not outlive this test.
+    if (timeLimit.end) {
+      timeLimit.end();
+      await attestation.catch(() => undefined);
+    }
     if (descendantPid && processAlive(descendantPid)) {
       try {
         process.kill(descendantPid, "SIGKILL");
