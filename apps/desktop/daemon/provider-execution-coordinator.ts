@@ -2188,13 +2188,13 @@ export class ProviderExecutionCoordinator {
           generation: execution.generation,
         },
       );
-      await this.options.settleRuntimeApprovals(entry.id);
-      if (entry.desired_state === "stopped") {
-        await this.options.durability.releaseTerminalExecutionFence(
-          ref.work_attempt_id,
-          ref.execution_generation_id,
-        );
-      }
+    }
+    await this.options.settleRuntimeApprovals(entry.id);
+    if (entry.desired_state === "stopped") {
+      await this.options.durability.releaseTerminalExecutionFence(
+        ref.work_attempt_id,
+        ref.execution_generation_id,
+      );
     }
     await this.options.observeProviderExit(
       entry.id,
@@ -2207,8 +2207,9 @@ export class ProviderExecutionCoordinator {
 
   /**
    * Stop an unattached Open Model runtime via exact process-birth fencing so
-   * pre-typed sidecars ("legacy" / "typed_shadow") or unresponsive HTTP servers
-   * never fall through a null attach() into a false "stopped" state.
+   * pre-typed sidecars ("legacy" / "typed_shadow"), unresponsive HTTP servers,
+   * or protocol-only terminals without proven native death never release the
+   * fence or report "stopped" before the exact process birth is confirmed gone.
    */
   private async stopUnattachedOpenModelRef(
     entry: DaemonManifestEntry,
@@ -2223,7 +2224,11 @@ export class ProviderExecutionCoordinator {
         "Provider exact-reference stop has no matching durable execution generation.",
       );
     }
-    if (execution.terminal) {
+    if (execution.terminal?.native_runtime_death) {
+      validatedNativeRuntimeDeath(
+        { nativeRuntimeDeath: execution.terminal.native_runtime_death },
+        ref.provider_connection,
+      );
       await this.options.settleRuntimeApprovals(entry.id);
       if (entry.desired_state === "stopped") {
         await this.options.durability.releaseTerminalExecutionFence(
@@ -2257,7 +2262,11 @@ export class ProviderExecutionCoordinator {
     const execution = attempt.execution_generations.find(
       (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
     );
-    if (execution?.terminal) {
+    if (execution?.terminal?.native_runtime_death) {
+      validatedNativeRuntimeDeath(
+        { nativeRuntimeDeath: execution.terminal.native_runtime_death },
+        ref.provider_connection,
+      );
       await this.options.settleRuntimeApprovals(entry.id);
       if (entry.desired_state === "stopped") {
         await this.options.durability.releaseTerminalExecutionFence(
@@ -2298,16 +2307,18 @@ export class ProviderExecutionCoordinator {
         actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
       });
     }
-    if (execution && !execution.terminal) {
-      await this.options.durability.recordTerminal(
-        ref.work_attempt_id,
-        ref.execution_generation_id,
-        {
-          ...this.options.terminalPayload(terminal, execution.actor, ref.provider_connection),
-          actor: execution.actor,
-          generation: execution.generation,
-        },
-      );
+    if (execution) {
+      if (!execution.terminal) {
+        await this.options.durability.recordTerminal(
+          ref.work_attempt_id,
+          ref.execution_generation_id,
+          {
+            ...this.options.terminalPayload(terminal, execution.actor, ref.provider_connection),
+            actor: execution.actor,
+            generation: execution.generation,
+          },
+        );
+      }
       await this.options.settleRuntimeApprovals(entry.id);
       if (entry.desired_state === "stopped") {
         await this.options.durability.releaseTerminalExecutionFence(

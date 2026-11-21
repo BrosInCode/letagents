@@ -33,6 +33,11 @@ import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordina
 import { launchProgress } from "../launch-progress.js";
 import { setTurnStartLatencyReporter, type StartLatencyRecord } from "../turn-start-latency.js";
 import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-spawn-configuration.js";
+import { OpenModelProviderAdapter } from "../../electron/main/agents/open-model-provider-adapter.js";
+import { ProviderActionPortRouter } from "../provider-action-port-router.js";
+import { ExecutionProtocolError } from "../execution-protocol.js";
+import { ProviderStopError } from "../daemon-error-policy.js";
+import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -3042,4 +3047,207 @@ test("while an agent is still to be replaced the scheduler converges again after
   await failing.drainConvergence();
   assert.deepEqual(failures, [failed]);
   assert.deepEqual(timers, [], "and it is not tried again behind the owner's back");
+});
+
+test("Stop proves process death before releasing the fence even when an immutable protocol_error terminal already exists", async () => {
+  const existingProtocolError: ExecutionTerminalPayload = {
+    ended_at: "2026-08-26T00:01:00.000Z",
+    exit_code: null,
+    signal: null,
+    stdio_archive_ref: null,
+    stdio_tail: "",
+    terminal_cause: "protocol_error",
+    actor: "daemon-provider",
+    generation: 1,
+    provider_continuation_id: "ses-pre-typed",
+  };
+
+  // 1. Real OpenModelProviderAdapter + ProviderActionPortRouter + ProviderExecutionCoordinator
+  //    for both legacy and typed_shadow private server-auth.json sidecars.
+  for (const priorMode of ["legacy", "typed_shadow"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `letagents-stop-protocol-terminal-${priorMode}-`));
+    try {
+      const pid = 9101;
+      const birth = `opencode-birth-${priorMode}-${pid}`;
+      const attemptDir = join(root, `wa-${priorMode}`);
+      mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
+      const serverAuthPath = join(attemptDir, "server-auth.json");
+      await writePrivateFileAtomically(
+        serverAuthPath,
+        `${JSON.stringify({
+          username: "opencode",
+          password: "secret",
+          lifecycleAuthorityMode: priorMode,
+          connection: { url: "http://127.0.0.1:44991", pid, processIdentity: birth },
+        })}\n`,
+      );
+
+      let identityState: string | null | undefined = undefined;
+      let identityReads = 0;
+      let killOnSignal: NodeJS.Signals | null = null;
+      const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+      const adapter = new OpenModelProviderAdapter({
+        binary: "/opt/letagents/opencode",
+        runtimeRoot: root,
+        stopGraceMs: 25,
+        dependencies: {
+          getProcessIdentity: (candidatePid) => {
+            if (candidatePid !== pid) return null;
+            identityReads += 1;
+            return identityState;
+          },
+          signalProcess: (candidatePid, signal, identity) => {
+            signals.push({ pid: candidatePid, signal, identity });
+            if (killOnSignal === signal && identity === birth) identityState = null;
+          },
+          observeProcessExit: () => new Promise(() => {}),
+          discoverRuntimeConnection: async () => null,
+          probeGit: async () => null,
+        },
+      });
+      const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+
+      let fenceReleases = 0;
+      const stopEntry: DaemonManifestEntry = {
+        ...baseEntry(),
+        id: `agent-om-${priorMode}`,
+        provider: "open-model",
+        desired_state: "stopped",
+        observed_state: "recovering",
+        condition: "coordination_blocked",
+        work_attempt_id: `wa-${priorMode}`,
+        provider_ref: {
+          work_attempt_id: `wa-${priorMode}`,
+          execution_generation_id: `gen-${priorMode}`,
+          provider_continuation_id: "ses-pre-typed",
+          provider_connection: {
+            kind: "opencode_server",
+            url: "http://127.0.0.1:44991",
+            pid,
+            processIdentity: birth,
+            serverAuthPath,
+          },
+        },
+      };
+      const runtime = harness({ entry: stopEntry, provider: router });
+      runtime.executionGenerations.push({
+        execution_generation_id: `gen-${priorMode}`,
+        work_attempt_id: `wa-${priorMode}`,
+        started_at: "2026-08-26T00:00:00.000Z",
+        actor: "daemon-provider",
+        generation: 1,
+        terminal: { ...existingProtocolError },
+      });
+      runtime.options.durability.releaseTerminalExecutionFence = async () => { fenceReleases += 1; };
+
+      // 1a. Unverifiable birth: never signals, never releases fence, never reports stopped.
+      identityState = undefined;
+      await assert.rejects(
+        runtime.coordinator.converge(stopEntry.id),
+        (error: unknown) => error instanceof ProviderStopError
+          && /process birth cannot be verified/i.test(String(error.cause)),
+      );
+      assert.ok(identityReads >= 1, `${priorMode} must check process identity`);
+      assert.equal(signals.length, 0);
+      assert.equal(fenceReleases, 0);
+      assert.equal(runtime.terminalWrites.length, 0);
+      assert.notEqual(runtime.entry().observed_state, "stopped");
+
+      // 1b. Surviving stubborn process: escalates TERM -> KILL, never releases fence or reports stopped.
+      identityReads = 0;
+      identityState = birth;
+      killOnSignal = null;
+      await assert.rejects(
+        runtime.coordinator.converge(stopEntry.id),
+        (error: unknown) => error instanceof ProviderStopError
+          && /has not yet proved the recorded process birth is gone/i.test(String(error.cause)),
+      );
+      assert.ok(identityReads >= 1);
+      assert.deepEqual(signals, [
+        { pid, signal: "SIGTERM", identity: birth },
+        { pid, signal: "SIGKILL", identity: birth },
+      ]);
+      assert.equal(fenceReleases, 0);
+      assert.equal(runtime.terminalWrites.length, 0);
+      assert.notEqual(runtime.entry().observed_state, "stopped");
+
+      // 1c. Surviving process exits on SIGTERM: preserves immutable protocol_error, releases fence once, observes exit.
+      identityReads = 0;
+      signals.length = 0;
+      identityState = birth;
+      killOnSignal = "SIGTERM";
+      await runtime.coordinator.converge(stopEntry.id);
+      assert.ok(identityReads >= 1);
+      assert.deepEqual(signals, [{ pid, signal: "SIGTERM", identity: birth }]);
+      assert.equal(runtime.terminalWrites.length, 0, `${priorMode} must preserve existing immutable terminal record`);
+      assert.equal(runtime.executionGenerations[0]!.terminal?.terminal_cause, "protocol_error");
+      assert.equal(fenceReleases, 1, `${priorMode} releases fence only after confirmed process death`);
+      assert.equal(runtime.observedTerminals.length, 1);
+      assert.equal(runtime.observedTerminals[0]!.terminalCause, "stopped");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  // 2. Analogous stopRetiredPreTypedRuntime path (no stopRef, enters via identity_mismatch)
+  //    also refuses to release the fence on a protocol-only terminal without proven death.
+  let attachResponse: ProviderActionHandle | null = null;
+  let stopCalls = 0;
+  let retiredFenceReleases = 0;
+  const retiredEntry: DaemonManifestEntry = {
+    ...baseEntry(),
+    id: "agent-retired-protocol-terminal",
+    provider: "codex",
+    desired_state: "stopped",
+    observed_state: "recovering",
+    condition: "coordination_blocked",
+    work_attempt_id: "attempt-1",
+    provider_ref: {
+      work_attempt_id: "attempt-1",
+      execution_generation_id: "generation-1",
+      provider_continuation_id: "continuation-1",
+      provider_connection: returnedHandle.providerConnection,
+    },
+  };
+  const retired = harness({
+    entry: retiredEntry,
+    provider: provider({
+      attach: async () => attachResponse,
+      stop: async (handle) => {
+        stopCalls += 1;
+        return terminal(handle);
+      },
+    }),
+  });
+  retired.executionGenerations.push({
+    execution_generation_id: "generation-1",
+    work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z",
+    actor: "daemon-provider",
+    generation: 1,
+    terminal: { ...existingProtocolError, provider_continuation_id: "continuation-1" },
+  });
+  retired.options.store.readRuntimeLifecycleAuthority = async () => null;
+  retired.options.store.hasRetiredRuntimeLifecycleAuthority = async () => true;
+  retired.options.durability.releaseTerminalExecutionFence = async () => { retiredFenceReleases += 1; };
+  // Make attachLiveProvider throw identity_mismatch as happens for a frozen pre-typed row.
+  retired.coordinator.attachLiveProvider = async () => { throw new ExecutionProtocolError("identity_mismatch"); };
+
+  attachResponse = null;
+  await assert.rejects(
+    retired.coordinator.converge(retiredEntry.id),
+    (error: unknown) => error instanceof ProviderStopError
+      && /could not be attached or proven stopped/i.test(String(error.cause)),
+  );
+  assert.equal(stopCalls, 0);
+  assert.equal(retiredFenceReleases, 0);
+  assert.equal(retired.terminalWrites.length, 0);
+  assert.notEqual(retired.entry().observed_state, "stopped");
+
+  attachResponse = returnedHandle;
+  await retired.coordinator.converge(retiredEntry.id);
+  assert.equal(stopCalls, 1);
+  assert.equal(retired.terminalWrites.length, 0, "immutable protocol_error terminal is preserved");
+  assert.equal(retiredFenceReleases, 1, "fence released only after provider.stop confirmed termination");
+  assert.equal(retired.observedTerminals.length, 1);
 });
