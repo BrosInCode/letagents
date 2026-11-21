@@ -372,6 +372,9 @@ export class SupervisedAgentDelivery extends SupervisedAgentDeliveryPump {
           continue;
         }
         consecutivePollErrors += 1;
+        // The health written below stands until a poll is ingested again.
+        const owner = this.loopOwners.get(agent.agentId);
+        if (owner) owner.observing = false;
         // A refusal is shown to the owner and asks for nothing. The same
         // answer is all the daemon sees when a room admin has disconnected the
         // agent, so a refusal must never lead to a new session or a new
@@ -447,7 +450,9 @@ export class SupervisedAgentDelivery extends SupervisedAgentDeliveryPump {
       // one it holds now.
       const owner = this.loopOwners.get(agent.agentId);
       const bearer = agent.bearer;
-      const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal }).catch((error: unknown) => {
+      // A lane shows as starting, or as reconnecting after a failure, until one
+      // poll is ingested. Only later polls may be held for long.
+      const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer, afterMessageId: cursor?.last_observed_message_id ?? null, observing: owner?.observing === true, signal: controller.signal }).catch((error: unknown) => {
         if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer
           && (error.status !== 401 || !this.bearerHold(agent.agentId, bearer))) owner.roomRefused = true;
         throw error;
@@ -471,6 +476,7 @@ export class SupervisedAgentDelivery extends SupervisedAgentDeliveryPump {
         observed_messages: observedMessages(response.messages ?? []),
         onInserted: ids => { for (const id of ids) newlyInserted.add(id); onInserted?.(ids); },
       });
+      if (owner) owner.observing = true;
       for (const item of received) {
         if (!newlyInserted.has(item.source_message_id)) continue;
         turnStartLatency.received({ agentId: agent.agentId, item, busy: this.activeTurns.has(agent.agentId), liveHandle: Boolean(agent.handle) });

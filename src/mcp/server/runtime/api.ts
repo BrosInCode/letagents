@@ -1,4 +1,5 @@
 import { clearAuthenticatedAccountCache } from "./auth-cache.js";
+import { MCP_USER_AGENT } from "../../client-identity.js";
 import { currentWorkerCall } from "../../worker-call-context.js";
 import {
   roomAccessRefusal,
@@ -259,6 +260,7 @@ export async function apiCallWhenFree<T = unknown>(path: string, options?: Reque
  */
 export async function apiRequest(path: string, options: RequestInit = {}): Promise<Response> {
   const headers = new Headers(options.headers);
+  if (!headers.has("User-Agent")) headers.set("User-Agent", MCP_USER_AGENT);
   const scope = currentSessionScope();
   if (scope) {
     // In process, as the session's account; any caller Authorization header is dropped.
@@ -279,6 +281,7 @@ export async function apiRequest(path: string, options: RequestInit = {}): Promi
 
 export async function apiCall<T = unknown>(path: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers);
+  if (!headers.has("User-Agent")) headers.set("User-Agent", MCP_USER_AGENT);
   if (!headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }

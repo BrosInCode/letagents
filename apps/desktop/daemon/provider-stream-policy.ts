@@ -101,6 +101,22 @@ export function isAgentInspectorLiveDisplayEvent(event: Pick<ProviderActionStrea
     || event.method === "item/toolCall/updated";
 }
 
+/** No daemon writes this any more, but an entry that an earlier one left waiting can still carry it. */
+const CREDENTIAL_HANDOFF_LATCH = "Provider is running; waiting for desktop credential handoff.";
+
+/**
+ * True while an entry waits for its worker credential handoff. Only an
+ * accepted native-activity publication of its exact binding ends the wait,
+ * so that publication must always be sent.
+ */
+export function awaitsCredentialHandoff(
+  entry: Pick<DaemonManifestEntry, "desired_state" | "condition" | "last_error">,
+): boolean {
+  return entry.desired_state === "running"
+    && entry.condition === "coordination_blocked"
+    && entry.last_error === CREDENTIAL_HANDOFF_LATCH;
+}
+
 /** Durable, set-once ready stamp for a manifest entry. */
 export function resolveReadyReachedAt(
   current: Pick<DaemonManifestEntry, "desired_state" | "observed_state" | "condition" | "ready_reached_at">,

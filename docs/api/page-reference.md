@@ -46,7 +46,7 @@ Each name calls the method in brackets (the same name when none), with that meth
 - `use("data").collection(scope, name)` (viewer: data.viewer, page: data.page, room: data.room): `list(input?)`, `get(docId)`, `set(docId, data, options?)`, `update(docId, data, options?)`, `delete(docId, options?)`, `onSnapshot(cb, input?)` watches data.list. `options`: `{ ifRevision? }`.
 
 ## Live updates
-- A watch runs its read now, then again about 250 ms after each change in the room; work item reads also run at least every 2 minutes. Each answer calls `cb(result, error)`: one of the two is null. A watch returns a function that stops it.
+- A watch runs its read now, then again about 250 ms after each change in the room; work item reads also run at least every 2 minutes, and the planning read every 60 seconds (a sprint or release edit sends no change). Each answer calls `cb(result, error)`: one of the two is null. A watch returns a function that stops it.
 - `letagents.watch(method, input, cb)` watches any of: work_items.search, work_items.get, work_items.history, data.list, data.get, jobs.list, jobs.get, intents.list, intents.get, tasks.list, tasks.get, planning.get. It needs the method's capability.
 - At most 16 watches run per page; one more calls back with `too_large`.
 - `letagents.events.onChange(cb)` gets `{ resource }` (work_items, documents, jobs, intents, pages, tasks) when something changes, or `{ resource: "*" }` after a gap; returns an unsubscribe function.

@@ -24,6 +24,7 @@ import type { ProviderActionHandle, ProviderActionPort } from "../provider-actio
 import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { STOP_CALLBACKS_DEADLINE_MS } from "../provider-stream-coordinator.js";
+import { EXIT_SETTLEMENT_BOUNDS } from "../provider-terminal-coordinator.js";
 import {
   SupervisorDaemon,
   noWorkLeaseHttp,
@@ -505,11 +506,18 @@ for (const failure of ["none", "before-seal", "after-seal", "before-seal, cleare
     sourceId: "terminal-at-seal", position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }),
     dispose: () => { disposeCalls++; if (failure !== "before-seal") fire(); },
   }), "codex", { onExit: async (_handle, listener) => { onExit = listener; return () => {}; } });
-  const internal = env.daemon as unknown as { handoffScheduled: boolean;
-    providerTerminals: { drain(): Promise<void>; bounds: { settleMs: number; lastAttemptMs: number; recordMs: number } } };
-  // An exit that cannot be saved holds the handoff no longer than its bound: fifteen, eight and four seconds outside tests.
+  const internal = env.daemon as unknown as { handoffScheduled: boolean; handoffDraining: boolean;
+    providerTerminals: { drain(): Promise<void>; pending: Map<unknown, unknown>;
+      timers: { set(callback: () => void, ms: number): object; clear(timer: object): void } } };
+  // An exit that cannot be saved holds the handoff no longer than its bound: fifteen, eight and four seconds.
+  // Here a bound ends when this test ends it. The handoff is then seen to wait for the bound, and a save that
+  // succeeds on its second attempt has all the time it needs: no shortened bound is raced.
   const unsaved = failure === "before-seal" || failure === "after-seal";
-  if (failure !== "post-seal-timeout") internal.providerTerminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
+  const bounds: Array<{ ms: number; end: () => void }> = [];
+  if (failure !== "post-seal-timeout") internal.providerTerminals.timers = {
+    set: (end, ms) => { const bound = { ms, end }; bounds.push(bound); return bound; },
+    clear: (bound) => { const at = bounds.indexOf(bound as (typeof bounds)[number]); if (at >= 0) bounds.splice(at, 1); },
+  };
   const inspection = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
   const record = env.internals.durability.recordTerminal.bind(env.internals.durability);
   let rejectWrites = failure !== "none", recordAttempts = 0;
@@ -531,10 +539,21 @@ for (const failure of ["none", "before-seal", "after-seal", "before-seal, cleare
       fire();
       await eventually(async () => recordAttempts > 0, "first terminal attempts persistence before handoff");
     }
-    const preparing = daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    let answered = false;
+    const preparing = daemonRequest(env.paths.socketPath, "daemon.prepare_handoff").finally(() => { answered = true; });
     if (failure === "post-seal-timeout") {
       await eventually(async () => recordAttempts === 1, "post-seal terminal reached its blocked storage call");
       expire();
+    }
+    if (unsaved) {
+      // The handoff has reached the exit: before the seal it waits for the exit while it drains, after the seal the exit arrives in it.
+      await eventually(async () => recordAttempts > 0 && internal.providerTerminals.pending.size === 1
+        && (failure === "after-seal" || internal.handoffDraining), "the handoff waits for an exit whose save has failed");
+      await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal(answered, false, "the handoff waits for as long as the exit may still be saved");
+      const ordinaryAttempts = bounds.findIndex(bound => bound.ms === EXIT_SETTLEMENT_BOUNDS.settleMs);
+      assert.notEqual(ordinaryAttempts, -1, "the ordinary attempts' time has not ended by itself");
+      bounds.splice(ordinaryAttempts, 1)[0]!.end();
     }
     const response = await preparing;
     if (failure === "post-seal-timeout") {

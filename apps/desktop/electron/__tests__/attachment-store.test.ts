@@ -181,9 +181,11 @@ test("a local SVG is served as an image that cannot run script", async () => {
 
 test("the cloud proxy sends the sign-in only to attachment downloads and adds safety headers", async () => {
   const calls: string[] = [];
+  const userAgents: Array<string | null> = [];
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push(String(input));
+    userAgents.push(new Headers(init?.headers).get("User-Agent"));
     return new Response("<svg onload=alert(1)>", {
       headers: { "Content-Type": "image/svg+xml", "Content-Encoding": "gzip", "Content-Length": "999" },
     });
@@ -204,6 +206,9 @@ test("the cloud proxy sends the sign-in only to attachment downloads and adds sa
     assert.equal((await handleAttachmentProtocolRequest(new Request(href("/rooms/x/messages")))).status, 403);
     assert.equal((await handleAttachmentProtocolRequest(new Request(href("/rooms/x/messages/m/attachments/a/extra")))).status, 403);
     assert.equal(calls.length, 2);
+    for (const userAgent of userAgents) {
+      assert.match(userAgent ?? "", /^LetAgents-Desktop\/\d+\.\d+\.\d+ \(/, "a download names the desktop app and its version");
+    }
   } finally {
     globalThis.fetch = realFetch;
   }

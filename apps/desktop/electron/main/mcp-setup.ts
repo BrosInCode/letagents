@@ -14,6 +14,7 @@ import type {
   DesktopMcpInstallTargetId,
 } from "../ipc-types.js";
 import { readStoredAuth } from "./auth.js";
+import { DESKTOP_USER_AGENT } from "./client-identity.js";
 import {
   buildCodexTomlLetAgentsMcpConfig,
   createLetAgentsMcpServerConfig,
@@ -311,6 +312,7 @@ async function checkLocalApiHealth(configuredApiUrl: string): Promise<boolean> {
       const timeout = setTimeout(() => controller.abort(), 900);
       try {
         const response = await fetch(`${normalizedApiUrl}/api/health`, {
+          headers: { "User-Agent": DESKTOP_USER_AGENT },
           signal: controller.signal,
         });
         return response.ok;

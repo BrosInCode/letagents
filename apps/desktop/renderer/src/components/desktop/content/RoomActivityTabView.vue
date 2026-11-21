@@ -36,7 +36,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, useId, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, useId, watch } from "vue";
 import AgentRoster from "../../../../../../../shared/ui/agents/AgentRoster.vue";
 import AgentChanges from "../../../../../../../shared/ui/agents/AgentChanges.vue";
 import { agentChange } from "../../../../../../../shared/ui/agents/changes";
@@ -114,6 +114,8 @@ const emit = defineEmits<{
   "open-agent-detail": [request: AgentInspectorRequest];
   "open-agent-correction": [entryId: string];
   "refresh-room": [];
+  /** This tab came on screen (true) or left it (false). It alone shows the activity history. */
+  "history-visible": [visible: boolean];
   "reveal-message": [messageId: string];
   "clear-artifact-task-filter": [];
   "open-person": [target: PersonTarget, position: PersonMenuPosition, action: PersonMenuAction];
@@ -362,7 +364,20 @@ function roomBranchMismatchLabel(participant: { repoBranch: string | null }): st
   return managedAgentRoomBranchMismatchLabel(participant, props.roomGitRoom);
 }
 
-onMounted(refreshActivity);
+// Each change is reported once: the app counts the tabs on screen, and a tab
+// that is kept alive gets both "deactivated" and, later, "unmounted".
+let historyVisible = false;
+function reportHistoryVisible(visible: boolean): void {
+  if (historyVisible === visible) return;
+  historyVisible = visible;
+  emit("history-visible", visible);
+}
+// The refresh comes first: the room read it schedules already covers the history.
+onMounted(() => { refreshActivity(); reportHistoryVisible(true); });
+// Kept alive behind Settings or the Inbox, the tab is mounted but not on screen.
+onActivated(() => reportHistoryVisible(true));
+onDeactivated(() => reportHistoryVisible(false));
+onBeforeUnmount(() => reportHistoryVisible(false));
 </script>
 
 <style scoped>

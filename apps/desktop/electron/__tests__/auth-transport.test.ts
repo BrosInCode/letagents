@@ -230,6 +230,27 @@ test("dispatcher: apiFetch routes through a shared keep-alive dispatcher", async
   recorder.restore();
 });
 
+test("user agent: every API request names the desktop app and its version", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { DESKTOP_USER_AGENT } = await import("../main/client-identity.js");
+  const manifest = JSON.parse(
+    readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+  ) as { version: string };
+  // Node's fetch sends "node" unless a client names itself; the server's logs then cannot tell builds apart.
+  assert.ok(DESKTOP_USER_AGENT.startsWith(`LetAgents-Desktop/${manifest.version} (`), DESKTOP_USER_AGENT);
+
+  const recorder = installFetchRecorder();
+  try {
+    await apiFetch("/user-agent");
+    assert.equal(new Headers(recorder.calls.at(-1)!.init.headers).get("User-Agent"), DESKTOP_USER_AGENT);
+    // A caller that names its own client keeps it.
+    await apiFetch("/user-agent", { headers: { "User-Agent": "custom/1" } });
+    assert.equal(new Headers(recorder.calls.at(-1)!.init.headers).get("User-Agent"), "custom/1");
+  } finally {
+    recorder.restore();
+  }
+});
+
 test("204 typing acknowledgments do not attempt to parse an empty JSON body", async () => {
   const previous = globalThis.fetch;
   globalThis.fetch = async () => new Response(null, { status: 204 });

@@ -182,6 +182,20 @@ import {
 } from "../rooms/outbox-store.js";
 import { getDesktopAccountUnread, reportDesktopRoomRead } from "../rooms/account-unread.js";
 
+/**
+ * The snapshot options a renderer may set. Only these known values cross the
+ * bridge; anything else it sends is ignored.
+ */
+export function roomSnapshotOptionsFromRenderer(options: unknown): DesktopRoomSnapshotOptions | undefined {
+  if (!options || typeof options !== "object") return undefined;
+  const sent = options as { create?: unknown; sources?: unknown };
+  const accepted: DesktopRoomSnapshotOptions = {
+    ...(sent.create === false ? { create: false as const } : {}),
+    ...(sent.sources === "stream_fed" ? { sources: "stream_fed" as const } : {}),
+  };
+  return Object.keys(accepted).length ? accepted : undefined;
+}
+
 export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room:needs-you", async (_event, includeUpdates) => {
     const needsYou = await getDesktopNeedsYou(includeUpdates === true);
@@ -238,11 +252,7 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       _event,
       roomIdentifier?: string | null,
       options?: DesktopRoomSnapshotOptions | null,
-    ): Promise<DesktopRoomSnapshot> => fetchRoomSnapshot(
-      roomIdentifier,
-      // Only the one flag crosses the bridge; anything else a renderer sends is ignored.
-      options && typeof options === "object" && options.create === false ? { create: false } : undefined,
-    ),
+    ): Promise<DesktopRoomSnapshot> => fetchRoomSnapshot(roomIdentifier, roomSnapshotOptionsFromRenderer(options)),
   );
   targetIpcMain.handle(
     "desktop:room:get-live-metadata",

@@ -1,4 +1,4 @@
-import { computed, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { preserveRoomRepoStatistics } from "../../domain/repo-status";
 import { isAuthSnapshotPending } from "../../components/desktop/content/auth-onboarding";
 import { useDesktopAccountRoomSettings } from "../useDesktopAccountRoomSettings";
@@ -19,6 +19,17 @@ export function useAppRoomData(context: unknown) {
     resolveSelectedRoomIdentifier, rootRoomSnapshot, selectedMcpTargetIds, selectedRoomIdentifier,
     selectedRootRoomIdentifier, selectedSnapshot, sessionGeneration, settingsAccountRooms, workers,
   } = app;
+  // The room shell reports each Activity tab that comes on screen or leaves it.
+  // A count, not a flag: when the room changes, the new room's tab can report
+  // itself before the old room's tab reports that it left.
+  const activityTabsOnScreen = ref(0);
+  const roomActivityHistoryVisible = computed(() => activityTabsOnScreen.value > 0);
+  function setRoomActivityHistoryVisible(visible: boolean): void {
+    activityTabsOnScreen.value = Math.max(0, activityTabsOnScreen.value + (visible ? 1 : -1));
+  }
+  // The explicit room refresh reads through the stream's read barrier. The
+  // data layer below owns that barrier and is created after the live sync.
+  let readRoomThroughStream: ((roomIdentifier: string) => Promise<boolean>) | null = null;
   const {
     clearLiveMetadataRefreshInterval,
     clearLiveMetadataRefreshTimer,
@@ -32,6 +43,8 @@ export function useAppRoomData(context: unknown) {
     syncSelectedRoomStream: syncDesktopRoomStream,
   } = useDesktopRoomLiveSync({
     accountId: computed(() => authStatus.value?.account?.id || null),
+    activityHistoryVisible: roomActivityHistoryVisible,
+    readRoomThroughStream: (roomIdentifier) => readRoomThroughStream?.(roomIdentifier) ?? Promise.resolve(false),
     rootRoomSnapshot,
     selectedRoomIdentifier,
     selectedSnapshot,
@@ -48,8 +61,10 @@ export function useAppRoomData(context: unknown) {
     handleRoomRenamed,
     handleRoomStreamEvent,
     invalidateSession,
+    readSelectedRoomThroughStream,
     refresh,
     refreshAccountRooms,
+    refreshActiveRoom,
     refreshSelectedSnapshot,
     repoStatusValue,
     selectedSnapshotLoading,
@@ -79,7 +94,8 @@ export function useAppRoomData(context: unknown) {
     syncRoomStream: syncDesktopRoomStream,
     workers,
   });
-  Object.assign(app, { clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom, handleContentDeleted, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms, refreshSelectedSnapshot, selectedSnapshotLoading, syncSelectedRoomStream });
+  readRoomThroughStream = readSelectedRoomThroughStream;
+  Object.assign(app, { clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom, handleContentDeleted, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms, refreshActiveRoom, refreshSelectedSnapshot, selectedSnapshotLoading, syncSelectedRoomStream });
 
   const authSnapshotPending = computed(() =>
     isAuthSnapshotPending({
@@ -94,8 +110,8 @@ export function useAppRoomData(context: unknown) {
     roomAgentWorkStatus, roomAgentWorkTruncated, scheduleLiveMetadataRefresh,
     syncDesktopRoomStream, clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom, handleContentDeleted,
     handleRoomRenamed, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms,
-    refreshSelectedSnapshot, repoStatusValue, selectedSnapshotLoading, syncSelectedRoomStream,
-    upsertSelectedTask, authSnapshotPending,
+    refreshActiveRoom, refreshSelectedSnapshot, repoStatusValue, selectedSnapshotLoading, syncSelectedRoomStream,
+    upsertSelectedTask, authSnapshotPending, setRoomActivityHistoryVisible,
   };
 }
 

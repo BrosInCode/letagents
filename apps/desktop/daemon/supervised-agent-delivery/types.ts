@@ -92,7 +92,13 @@ export interface SupervisedDeliveryHttp {
     taskIds?: readonly string[]; heldBefore?: string; signal: AbortSignal }): Promise<ContinuityTask[]>;
   /** Production admission owns first-cursor creation before provider reachability. */
   admissionOwnsInitialCursor?: boolean;
-  poll(input: { roomId: string; apiUrl: string; bearer: string; afterMessageId: string | null; signal: AbortSignal }): Promise<SupervisedPollResponse>;
+  /**
+   * `observing`: this lane's last poll was answered, so its owner already
+   * reads it as observing and this poll may be held for long. Without it the
+   * answer must come within the hold that works everywhere, because what the
+   * owner reads about the lane (starting, or reconnecting) waits for it.
+   */
+  poll(input: { roomId: string; apiUrl: string; bearer: string; afterMessageId: string | null; observing?: boolean; signal: AbortSignal }): Promise<SupervisedPollResponse>;
   /**
    * Read the room tail before the first ever daemon cursor is installed. This
    * is intentionally a separate REST history read: an uninitialised poll

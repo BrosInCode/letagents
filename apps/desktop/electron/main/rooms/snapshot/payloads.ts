@@ -2,6 +2,7 @@ import type { AgentAvatar } from "../../../../../../shared/agent-avatar.mjs";
 import type {
   DesktopReasoningSession,
   DesktopRoomSharedArtifactDetail,
+  DesktopSnapshotSourceKey,
   DesktopSnapshotSourceStates,
 } from "../../../ipc-types.js";
 import type { GitHubEventsResponse } from "../events.js";
@@ -240,4 +241,6 @@ export interface RoomSnapshotData {
   messagesData: MessagesResponse;
   githubEventsData: GitHubEventsResponse | null;
   sourceStates: DesktopSnapshotSourceStates;
+  /** Sources this read left out; see `DesktopRoomSnapshot.unloadedSources`. */
+  unloadedSources?: readonly DesktopSnapshotSourceKey[];
 }

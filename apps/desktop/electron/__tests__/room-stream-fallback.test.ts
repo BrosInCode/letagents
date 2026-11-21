@@ -154,7 +154,7 @@ function refusalResponse(body: unknown, status = 403, headers: Record<string, st
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
 }
 
-type PollRecord = { url: string; after: string | null; timeout: string | null; signal: AbortSignal };
+type PollRecord = { url: string; after: string | null; timeout: string | null; signal: AbortSignal; headers: Headers };
 type StreamRecord = { url: string; signal: AbortSignal; headers: Headers };
 
 interface ControllableSse {
@@ -294,6 +294,7 @@ function installFetchRouter(): {
         after: parsed.searchParams.get("after"),
         timeout,
         signal,
+        headers: new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)),
       });
       if (timeout === "0") {
         const handler = catchUpQueue.shift();
@@ -392,6 +393,24 @@ function lastDeliveryRepairToken(): number | undefined {
   return undefined;
 }
 
+/**
+ * What the renderer does after a connection starts: the first handshake asks
+ * for one room read (a verified gap with a repair token), and the renderer
+ * acknowledges that read. Until then every later cursor only waits.
+ */
+function acknowledgeConnectionStart(room = ROOM): void {
+  const token = lastDeliveryRepairToken();
+  assert.equal(typeof token, "number", "the first handshake of a connection asks for one room read");
+  acknowledgeDesktopRoomStreamGapRepair(room, { token: token as number });
+}
+
+function verifiedGaps(): Array<Extract<DesktopRoomStreamEvent, { type: "open" }>> {
+  return emitted.filter(
+    (event): event is Extract<DesktopRoomStreamEvent, { type: "open" }> =>
+      event.type === "open" && event.gap === true && event.verified === true,
+  );
+}
+
 function emittedMessage(id: string) {
   return emitted.find(
     (event): event is Extract<DesktopRoomStreamEvent, { type: "message" }> =>
@@ -471,7 +490,13 @@ test("API resource pointers, board changes and stream gaps reach main's pointer 
     await waitUntil(() => router.streamCalls.length === 1);
     sse.pushRaw(`event: room_sync\ndata: ${JSON.stringify({ room_id: canonicalRoom, checkpoint: "msg_1", gap: false, event_cursor: "c0" })}\n\n`);
     await starting;
-    assert.deepEqual(pointers, [], "a room_sync without a gap is no pointer");
+    assert.deepEqual(pointers, [{ roomIds: [ROOM, canonicalRoom], gap: true }],
+      "the start of a connection is a gap under both room ids: pages read again once");
+    pointers.length = 0;
+    acknowledgeConnectionStart();
+    sse.pushRaw(`event: room_sync\ndata: ${JSON.stringify({ room_id: canonicalRoom, checkpoint: "msg_1", gap: false, event_cursor: "c0b" })}\n\n`);
+    await waitUntil(() => emitted.filter((event) => event.type === "open" && event.verified && !event.gap).length === 2);
+    assert.deepEqual(pointers, [], "a later room_sync without a gap is no pointer");
     sse.pushRaw(`id: c1\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({ room_id: canonicalRoom, resource: "work_items" })}\n\n`);
     await waitUntil(() => pointers.length === 1);
     assert.deepEqual(pointers[0], { roomIds: [ROOM, canonicalRoom], resource: "work_items" });
@@ -527,7 +552,8 @@ test("a tracker change's work_items frame re-runs a page's work item watch withi
     const sentAt = Date.now();
     sse.pushRaw(`id: c1\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({ room_id: canonicalRoom, resource: "work_items" })}\n\n`);
     await waitUntil(() => runs.length === 2, 3_000);
-    assert.deepEqual(trace, ["work_items"]);
+    // The connection start came first, before the watch existed.
+    assert.deepEqual(trace, ["gap", "work_items"]);
     assert.ok(runs[1] - sentAt < PAGE_WATCH_DEBOUNCE_MS + 1_000, `re-ran ${runs[1] - sentAt} ms after the frame`);
     sse.close();
   } finally {
@@ -1274,6 +1300,7 @@ test("unknown well-formed frames advance without delivery or gap repair", async 
     await waitUntil(() => router.streamCalls.length === 1);
     initial.pushRoomSync("msg_1", false, "broker_known");
     await starting;
+    acknowledgeConnectionStart();
     const emittedCount = emitted.length;
     initial.pushRaw("id: broker_future\nevent: future_room_event\ndata: {\"future_field\":true}\n\n");
     await new Promise((resolve) => setImmediate(resolve));
@@ -1282,6 +1309,242 @@ test("unknown well-formed frames advance without delivery or gap repair", async 
     await waitUntil(() => router.streamCalls.length >= 2, 4_000);
     assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_future");
     reconnected.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("the server's keep-alive comments are not events: no gap, no repair read, no cursor change", async () => {
+  const router = installFetchRouter();
+  try {
+    const initial = makeSse();
+    const reconnected = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    // What the server writes: one comment when the stream opens, then one every 15 s.
+    initial.pushRaw(": connected\n\n");
+    initial.pushRoomSync("msg_1", false, "broker_known");
+    await starting;
+    await waitUntil(() => router.pollCalls.length === 1);
+    // The connection start itself asks for one room read; the comments ask for none.
+    assert.equal(verifiedGaps().length, 1, "one repair for the connection start, none for \": connected\"");
+    const startToken = lastDeliveryRepairToken();
+    acknowledgeConnectionStart();
+    const emittedCount = emitted.length;
+    const pollCount = router.pollCalls.length;
+    initial.pushRaw(": heartbeat\n\n");
+    initial.pushRaw(": heartbeat\r\n\n");
+    initial.pushMessage("msg_2", "after the keep-alive", "broker_message");
+    await waitUntil(() => messageIds().includes("msg_2"));
+    assert.deepEqual(
+      emitted.slice(emittedCount).map((event) => event.type),
+      ["message"],
+      "a keep-alive comment reaches the renderer as nothing, so no room reload starts",
+    );
+    assert.equal(router.pollCalls.length, pollCount, "a keep-alive comment starts no catch-up and no fallback poll");
+    assert.equal(lastDeliveryRepairToken(), startToken, "no keep-alive asked for a delivery repair");
+    initial.error();
+    await waitUntil(() => router.streamCalls.length >= 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_message");
+    reconnected.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+const roomSyncFrame = (room: string, checkpoint: string | null, gap: boolean, eventCursor: string | null) =>
+  `event: room_sync\ndata: ${JSON.stringify({ room_id: room, checkpoint, gap, event_cursor: eventCursor })}\n\n`;
+const openEvents = () => emitted.filter(
+  (event): event is Extract<DesktopRoomStreamEvent, { type: "open" }> => event.type === "open",
+);
+
+// The room on screen was read before the connection, or not at all yet. Until
+// 2026-11 the ": connected" comment asked for the room read by accident.
+test("the first handshake of a connection asks for one room read, and its cursor waits for that read", async () => {
+  const room = "focus_connection_start_room";
+  const router = installFetchRouter();
+  try {
+    const first = makeSse();
+    const second = makeSse();
+    const third = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: first }, { kind: "ok", sse: second }, { kind: "ok", sse: third });
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(room, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    assert.equal(router.streamCalls[0]?.headers.get("Last-Event-ID"), null);
+    first.pushRaw(": connected\n\n");
+    first.pushRaw(roomSyncFrame(room, "msg_1", false, "cursor_start"));
+    await starting;
+    await waitUntil(() => openEvents().length === 3);
+    assert.deepEqual(openEvents().map(({ gap, verified, deliveryRepairToken, checkpoint }) => ({
+      gap, verified, deliveryRepairToken, checkpoint,
+    })), [
+      { gap: false, verified: false, deliveryRepairToken: undefined, checkpoint: "msg_1" },
+      { gap: true, verified: true, deliveryRepairToken: 1, checkpoint: "msg_1" },
+      { gap: false, verified: true, deliveryRepairToken: undefined, checkpoint: "msg_1" },
+    ], "the repair request comes before the boundary of the same handshake");
+    assert.deepEqual(router.pollCalls.map((call) => call.timeout), ["0"],
+      "the catch-up of the connection is the message repair: no second request, no fallback poll");
+    for (const call of [router.streamCalls[0], router.pollCalls[0]]) {
+      assert.match(call?.headers.get("User-Agent") ?? "", /^LetAgents-Desktop\/\d+\.\d+\.\d+ \(/,
+        "the stream and its message requests name the desktop app and its version");
+    }
+
+    // The room read is still owed: nothing may become the place a reconnect starts from.
+    first.pushTask({ id: "task_live", status: "open" }, "cursor_task");
+    await waitUntil(() => emitted.some((event) => event.type === "task_update"));
+    router.enqueueCatchUp([]);
+    first.error();
+    await waitUntil(() => router.streamCalls.length === 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), null,
+      "a cursor is not sent before the room read that makes it true");
+    second.pushRaw(roomSyncFrame(room, "msg_1", false, "cursor_second"));
+    await waitUntil(() => openEvents().filter((event) => event.verified && !event.gap).length === 2);
+    // The read owed for the first connection may be on its way already. It began before this
+    // connection, so it cannot say what happened while no connection was up: a new token replaces the old.
+    assert.deepEqual(verifiedGaps().map((event) => event.deliveryRepairToken), [1, 2]);
+    // Between the two connections the fallback long-poll ran, as it does whenever the stream is down.
+    assert.equal(router.pollCalls.filter((call) => call.timeout === "0").length, 2,
+      "one catch-up for each connection, no message request for the repair itself");
+    acknowledgeDesktopRoomStreamGapRepair(room, { token: 1 });
+    second.pushTask({ id: "task_between", status: "open" }, "cursor_between");
+    await waitUntil(() => emitted.filter((event) => event.type === "task_update").length === 2);
+
+    // The renderer read the room after the second connection began: the cursor is now one the room on screen has followed.
+    acknowledgeConnectionStart(room);
+    second.pushTask({ id: "task_later", status: "open" }, "cursor_later");
+    await waitUntil(() => emitted.filter((event) => event.type === "task_update").length === 3);
+    router.enqueueCatchUp([]);
+    second.error();
+    await waitUntil(() => router.streamCalls.length === 3, 4_000);
+    assert.equal(router.streamCalls[2]?.headers.get("Last-Event-ID"), "cursor_later",
+      "the answer to the old token committed nothing; the answer to the new one committed the newest cursor");
+    third.pushRaw(": connected\n\n");
+    third.pushRaw(roomSyncFrame(room, "msg_1", false, "cursor_third"));
+    await waitUntil(() => openEvents().filter((event) => event.verified && !event.gap).length === 3);
+    assert.equal(verifiedGaps().length, 2,
+      "a reconnect that sent the stream's own cursor continues: the server replays, and no room read is asked for");
+    third.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("a reconnect that has no cursor to send asks for one room read again", async () => {
+  const room = "focus_quiet_reconnect_room";
+  const router = installFetchRouter();
+  try {
+    const first = makeSse();
+    const second = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: first }, { kind: "ok", sse: second });
+    const starting = startDesktopRoomStream(room);
+    await waitUntil(() => router.streamCalls.length === 1);
+    // A room in which nothing happened yet: the server has no cursor to give.
+    first.pushRaw(roomSyncFrame(room, null, false, null));
+    await starting;
+    await waitUntil(() => verifiedGaps().length === 1);
+    acknowledgeConnectionStart(room);
+    first.error();
+    await waitUntil(() => router.streamCalls.length === 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), null);
+    // The server answers `gap: false` to a request without a cursor, also after it lost everything in a restart.
+    second.pushRaw(roomSyncFrame(room, null, false, null));
+    await waitUntil(() => verifiedGaps().length === 2);
+    assert.equal(lastDeliveryRepairToken(), 2, "what changed while the stream was away is read again");
+    second.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("a gap that the server reports in the first handshake is one repair, not two", async () => {
+  const room = "focus_server_gap_start_room";
+  const router = installFetchRouter();
+  try {
+    const first = makeSse();
+    const second = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: first }, { kind: "ok", sse: second });
+    router.enqueueCatchUp([]);
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(room, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    first.pushRaw(roomSyncFrame(room, "msg_1", true, "cursor_gap"));
+    await starting;
+    await waitUntil(() => verifiedGaps().length === 1);
+    await sleep(20);
+    assert.equal(verifiedGaps().length, 1);
+    assert.equal(openEvents().at(-1)?.deliveryRepairToken, 1);
+    await waitUntil(() => router.pollCalls.filter((call) => call.timeout === "0").length === 2);
+    acknowledgeConnectionStart(room);
+    first.error();
+    await waitUntil(() => router.streamCalls.length === 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "cursor_gap",
+      "the server's own gap carries the cursor that the repair commits");
+    second.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("a new stream for a room seen before sends the old cursor, and still asks for one room read", async () => {
+  const room = "focus_return_room";
+  const router = installFetchRouter();
+  try {
+    const earlier = makeSse();
+    const other = makeSse();
+    const returned = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: earlier }, { kind: "ok", sse: other }, { kind: "ok", sse: returned });
+    const starting = startDesktopRoomStream(room);
+    await waitUntil(() => router.streamCalls.length === 1);
+    earlier.pushRaw(roomSyncFrame(room, null, false, "cursor_earlier"));
+    await starting;
+    await waitUntil(() => verifiedGaps().length === 1);
+    acknowledgeConnectionStart(room);
+
+    // The person opens another room and comes back: the room now shows a copy kept from before.
+    const elsewhere = startDesktopRoomStream("focus_elsewhere_room");
+    await waitUntil(() => router.streamCalls.length === 2);
+    other.pushRaw(roomSyncFrame("focus_elsewhere_room", null, false, null));
+    await elsewhere;
+    emitted.length = 0;
+    const returning = startDesktopRoomStream(room);
+    await waitUntil(() => router.streamCalls.length === 3);
+    assert.equal(router.streamCalls[2]?.headers.get("Last-Event-ID"), "cursor_earlier");
+    returned.pushRaw(roomSyncFrame(room, null, false, "cursor_returned"));
+    await returning;
+    await waitUntil(() => verifiedGaps().length === 1);
+    assert.equal(verifiedGaps()[0]?.roomIdentifier, room,
+      "the kept copy can be older than the remembered cursor, so the room is read once");
+    returned.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("a frame that names an event but carries no data still repairs as damaged", async () => {
+  const router = installFetchRouter();
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    router.enqueueCatchUp([]);
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    sse.pushRoomSync("msg_1", false, "broker_known");
+    await starting;
+    sse.pushRaw("id: broker_empty\nevent: task_update\n\n");
+    await waitUntil(() => emitted.some(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ));
+    sse.close();
   } finally {
     await stopDesktopRoomStream();
     router.restore();
@@ -1301,6 +1564,7 @@ test("malformed or oversized unknown frames cannot advance the broker cursor", a
         await waitUntil(() => router.streamCalls.length === 1);
         initial.pushRoomSync("msg_1", false, "broker_known");
         await starting;
+        acknowledgeConnectionStart();
         const gapCount = emitted.filter((event) => event.type === "open" && event.gap && event.verified).length;
         initial.pushRaw(`id: broker_bad_future\nevent: future_room_event\ndata: ${data}\n\n`);
         await waitUntil(() => emitted.filter((event) => event.type === "open" && event.gap && event.verified).length > gapCount);
@@ -1328,6 +1592,7 @@ for (const messageIds of [["msg_7"], null, []]) test(`message-info ${JSON.string
     await waitUntil(() => router.streamCalls.length === 1);
     initial.pushRoomSync("msg_1", false, "broker_before_info");
     await starting;
+    acknowledgeConnectionStart();
     await new Promise((resolve) => setImmediate(resolve));
     const gapCount = emitted.filter(
       (event) => event.type === "open" && event.gap === true && event.verified === true,
@@ -1433,6 +1698,7 @@ test("resource invalidations advance the broker cursor while only supported reso
       })}\n\n`,
     );
     await starting;
+    acknowledgeConnectionStart();
     const emittedCount = emitted.length;
     initial.pushRaw(
       `id: broker_work\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
@@ -1785,10 +2051,12 @@ test('typing bypasses bootstrap buffers and cannot reach cursors or gap repair',
     // The verified open event is emitted just after the room_sync cursor is stored.
     await waitUntil(() => emitted.some(e => e.type === 'open' && e.verified && e.gap === false));
     assert.equal(emitted.filter(e => e.type === 'typing').length, count, 'no bootstrap replay');
-    assert.equal(emitted.some(e => e.type === 'open' && e.gap === true && e.verified), false);
+    assert.equal(verifiedGaps().length, 1, 'only the connection start asks for a repair, typing never');
+    acknowledgeConnectionStart();
     // Last before the drop, so no later room_sync can overwrite a cursor that typing wrongly set.
     initial.pushRaw(`id: forbidden_typing_cursor\nevent: room_typing_v1\ndata: ${JSON.stringify({ ...signal, sequence: 3, expires_at: Date.now() + 5000 })}\n\n`);
     await waitUntil(() => emitted.filter(e => e.type === 'typing').length === count + 1);
+    assert.equal(verifiedGaps().length, 1, 'a typing frame with a cursor starts no repair');
     initial.error();
     await waitUntil(() => router.streamCalls.length >= 2, 4000);
     assert.equal(router.streamCalls[1]?.headers.get('Last-Event-ID'), 'broker_real');

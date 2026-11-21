@@ -1,5 +1,5 @@
 import { apiFetch, DesktopApiError } from "../../auth.js";
-import type { DesktopSnapshotSourceState } from "../../../ipc-types.js";
+import type { DesktopRoomLiveMetadataSourceKey, DesktopSnapshotSourceState } from "../../../ipc-types.js";
 import {
   cloudRoomIdentifierForStorage,
   localRoomIdentifierForStorage,
@@ -34,13 +34,37 @@ type ThreadPageResponse = {
   has_older?: boolean;
 };
 
+/**
+ * The sources the server pushes no events for. The periodic metadata read
+ * (`fetchRoomLiveMetadata`) keeps them fresh, so a read after a stream gap
+ * leaves them out.
+ */
+export const POLL_ONLY_ROOM_SOURCES: readonly DesktopRoomLiveMetadataSourceKey[] = [
+  "focusRooms",
+  "participants",
+  "presence",
+  "activityHistory",
+  "boardSettings",
+];
+
+export interface RoomSnapshotDataOptions {
+  forceCloudMessages?: boolean;
+  /**
+   * "stream_fed": request only the sources the room stream feeds. The
+   * poll-only sources get their empty fallback and are named in the result's
+   * `unloadedSources`; the caller must not show them as room state.
+   */
+  sources?: "stream_fed";
+}
+
 export async function fetchRoomSnapshotData(
   roomIdentifier: string,
-  options: { forceCloudMessages?: boolean } = {},
+  options: RoomSnapshotDataOptions = {},
 ): Promise<RoomSnapshotData> {
   const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
   const apiRoomIdentifier = cloudRoomIdentifierForStorage(storage, roomIdentifier);
   const localRoomIdentifier = localRoomIdentifierForStorage(storage, roomIdentifier);
+  const streamFedOnly = options.sources === "stream_fed";
   const [
     focusRooms,
     tasks,
@@ -54,20 +78,20 @@ export async function fetchRoomSnapshotData(
     githubEvents,
     liveActivity,
   ] = await Promise.all([
-    loadFocusRooms(apiRoomIdentifier),
+    streamFedOnly ? notLoaded(emptyFocusRooms()) : loadFocusRooms(apiRoomIdentifier),
     loadSource(
       fetchAllCloudTasks(apiRoomIdentifier),
       { tasks: [] } as RoomSnapshotData["tasksData"],
     ),
-    loadParticipants(apiRoomIdentifier),
-    loadPresence(apiRoomIdentifier),
+    streamFedOnly ? notLoaded(emptyParticipants()) : loadParticipants(apiRoomIdentifier),
+    streamFedOnly ? notLoaded(emptyPresence()) : loadPresence(apiRoomIdentifier),
     loadSource(
       apiFetch<ReasoningResponse>(
         `/rooms/${encodeURIComponent(apiRoomIdentifier)}/reasoning-sessions`,
       ),
       { sessions: [], reasoning_sessions: [] } as ReasoningResponse,
     ),
-    loadActivityHistory(apiRoomIdentifier),
+    streamFedOnly ? notLoaded(emptyActivityHistory()) : loadActivityHistory(apiRoomIdentifier),
     loadSource(
       storage.effectiveMode === "local"
         ? getLocalRoomArtifacts(localRoomIdentifier, { limit: 100 })
@@ -76,7 +100,7 @@ export async function fetchRoomSnapshotData(
           ),
       { artifacts: [] } as RoomSnapshotData["roomArtifactsData"],
     ),
-    loadBoardSettings(apiRoomIdentifier),
+    streamFedOnly ? notLoaded(emptyBoardSettings()) : loadBoardSettings(apiRoomIdentifier),
     loadSource(
       !options.forceCloudMessages && storage.effectiveMode === "local"
         ? getLatestLocalChatMessages(localRoomIdentifier, {
@@ -129,7 +153,13 @@ export async function fetchRoomSnapshotData(
       messages: messages.state,
       githubEvents: githubEvents.state,
     },
+    ...(streamFedOnly ? { unloadedSources: POLL_ONLY_ROOM_SOURCES } : {}),
   };
+}
+
+/** A source this read left out on purpose: its empty fallback, with no request made. */
+function notLoaded<T>(fallback: T): Promise<{ data: T; state: DesktopSnapshotSourceState }> {
+  return Promise.resolve({ data: fallback, state: { status: "ready", error: null } });
 }
 
 /**
@@ -163,12 +193,18 @@ export async function loadSource<T>(
  * fetch and the lighter periodic metadata fetch share the exact same request
  * URLs, fallbacks, and `loadSource` graceful-degradation semantics.
  */
+const emptyFocusRooms = () => ({ focus_rooms: [] } as FocusRoomsResponse);
+const emptyParticipants = () => ({ participants: [], hidden_count: 0 } as ParticipantsResponse);
+const emptyPresence = () => ({ presence: [] } as PresenceResponse);
+const emptyActivityHistory = () => ({ entries: [] } as ActivityHistoryResponse);
+const emptyBoardSettings = () => ({ pending_intent_count: 0 } as RoomSnapshotData["boardSettingsData"]);
+
 export function loadFocusRooms(apiRoomIdentifier: string) {
   return loadSource(
     apiFetch<FocusRoomsResponse>(
       `/rooms/${encodeURIComponent(apiRoomIdentifier)}/focus-rooms`,
     ),
-    { focus_rooms: [] } as FocusRoomsResponse,
+    emptyFocusRooms(),
   );
 }
 
@@ -177,7 +213,7 @@ export function loadParticipants(apiRoomIdentifier: string) {
     apiFetch<ParticipantsResponse>(
       `/rooms/${encodeURIComponent(apiRoomIdentifier)}/participants`,
     ),
-    { participants: [], hidden_count: 0 } as ParticipantsResponse,
+    emptyParticipants(),
   );
 }
 
@@ -186,7 +222,7 @@ export function loadPresence(apiRoomIdentifier: string) {
     apiFetch<PresenceResponse>(
       `/rooms/${encodeURIComponent(apiRoomIdentifier)}/presence?limit=100&scope=snapshot`,
     ),
-    { presence: [] } as PresenceResponse,
+    emptyPresence(),
   );
 }
 
@@ -195,7 +231,7 @@ export function loadActivityHistory(apiRoomIdentifier: string) {
     apiFetch<ActivityHistoryResponse>(
       `/rooms/${encodeURIComponent(apiRoomIdentifier)}/activity-history?page_size=50`,
     ),
-    { entries: [] } as ActivityHistoryResponse,
+    emptyActivityHistory(),
   );
 }
 
@@ -204,7 +240,7 @@ export function loadBoardSettings(apiRoomIdentifier: string) {
     apiFetch<RoomSnapshotData["boardSettingsData"]>(
       `/rooms/${encodeURIComponent(apiRoomIdentifier)}/board-settings`,
     ),
-    { pending_intent_count: 0 } as RoomSnapshotData["boardSettingsData"],
+    emptyBoardSettings(),
   );
 }
 

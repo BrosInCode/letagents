@@ -43,6 +43,7 @@ export const PAGE_CHANGE_RESOURCES: readonly string[];
 export const PAGE_WATCH_LIMITS: Readonly<{
     debounceMs: 250;
     workItemPollMs: 120000;
+    planningPollMs: 60000;
     maxWatches: 16;
 }>;
 /** Calls the desktop asks the viewer about first, in an app-drawn sheet. */

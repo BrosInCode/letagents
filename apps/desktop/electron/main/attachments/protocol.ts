@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 
 import { guessMessageAttachmentMimeType } from "../../../../../shared/message-attachments.mjs";
 import { readStoredAuth } from "../auth.js";
+import { DESKTOP_USER_AGENT } from "../client-identity.js";
 import { apiUrl } from "#provider-runtime/paths.js";
 import { realLocalAttachmentPath, resolveLocalAttachmentPath } from "./links.js";
 
@@ -52,7 +53,7 @@ async function cloudAttachmentResponse(rawTarget: string, signal?: AbortSignal):
     return new Response("Attachment proxy target is not an attachment.", { status: 403 });
   }
   const storedAuth = await readStoredAuth();
-  const headers = new Headers();
+  const headers = new Headers({ "User-Agent": DESKTOP_USER_AGENT });
   if (storedAuth.token) {
     headers.set("Authorization", `Bearer ${storedAuth.token}`);
   }

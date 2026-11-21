@@ -1,7 +1,49 @@
 import { roomAccessRefusal } from "../../shared/room-membership.mjs";
+import { MCP_USER_AGENT } from "./client-identity.js";
 import { encodeRoomIdPath } from "./room-id.js";
 
 const MAX_SSE_FRAME_BYTES = 1024 * 1024;
+
+/** The first reconnect delay, and the delay again after a stream that worked. */
+export const SSE_RETRY_BASE_MS = 1_000;
+export const SSE_RETRY_MAX_MS = 30_000;
+/**
+ * A stream that stayed open this long worked, however it ended. The time
+ * counts from the server's answer (HTTP 200), not from the request: a request
+ * that waited this long for a refusal was never open.
+ */
+export const SSE_HEALTHY_STREAM_MS = 30_000;
+/** Each wait is spread by this share around its value, so clients cut off together do not return together. */
+const SSE_RETRY_JITTER = 0.25;
+
+/**
+ * Whether a stream that ended earns the short reconnect delay again.
+ *
+ * It does when it stayed open for `SSE_HEALTHY_STREAM_MS`, or when it gave its
+ * `room_sync` handshake and then ended without an error. A stream the server
+ * opened (HTTP 200) and ended at once gives neither. Such a stream used to
+ * reset the delay, so a client the server kept refusing reconnected every
+ * second with no backoff.
+ */
+export function sseStreamEarnsShortRetry(stream: {
+  livedMs: number;
+  endedCleanly: boolean;
+  deliveredRoomSync: boolean;
+}): boolean {
+  return stream.livedMs >= SSE_HEALTHY_STREAM_MS || (stream.endedCleanly && stream.deliveredRoomSync);
+}
+
+/** The wait before a reconnect: the delay, moved by up to a quarter either way. `random` is in [0, 1). */
+export function sseRetryWaitMs(delayMs: number, random: number): number {
+  return Math.round(delayMs * (1 - SSE_RETRY_JITTER + 2 * SSE_RETRY_JITTER * random));
+}
+
+/** Test seams for time and chance; production uses the real clock and `Math.random`. */
+export interface SseClientTiming {
+  now?: () => number;
+  random?: () => number;
+  wait?: (signal: AbortSignal, delayMs: number) => Promise<void>;
+}
 
 class SseFrameOverflowError extends Error {
   constructor() {
@@ -41,6 +83,13 @@ interface Subscription {
   promise: Promise<void>;
 }
 
+/** What one stream attempt did, for the reconnect delay after it. */
+interface StreamAttempt {
+  /** When the server answered with an open stream; null while it has not. */
+  openedAtMs: number | null;
+  deliveredRoomSync: boolean;
+}
+
 export interface SseGap {
   room_id?: string;
   project_id?: string;
@@ -63,10 +112,20 @@ export class SseClient {
   private readonly getAccessToken?: () => string | null | Promise<string | null>;
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly eventCursors = new Map<string, string>();
+  private readonly timing: Required<SseClientTiming>;
 
-  constructor(apiUrl: string, getAccessToken?: () => string | null | Promise<string | null>) {
+  constructor(
+    apiUrl: string,
+    getAccessToken?: () => string | null | Promise<string | null>,
+    timing: SseClientTiming = {},
+  ) {
     this.apiUrl = apiUrl.replace(/\/$/, "");
     this.getAccessToken = getAccessToken;
+    this.timing = {
+      now: timing.now ?? Date.now,
+      random: timing.random ?? Math.random,
+      wait: timing.wait ?? waitForRetry,
+    };
   }
 
   subscribe(
@@ -117,11 +176,12 @@ export class SseClient {
   private async getHeaders(): Promise<Record<string, string>> {
     const token = await this.getAccessToken?.();
     if (!token) {
-      return { Accept: "text/event-stream" };
+      return { Accept: "text/event-stream", "User-Agent": MCP_USER_AGENT };
     }
 
     return {
       Accept: "text/event-stream",
+      "User-Agent": MCP_USER_AGENT,
       Authorization: `Bearer ${token}`,
     };
   }
@@ -134,12 +194,14 @@ export class SseClient {
   ): Promise<void> {
     let lastEventId: string | null = this.eventCursors.get(target.roomId) ?? null;
     let useLegacyRoute = false;
-    let retryMs = 1_000;
+    let retryMs = SSE_RETRY_BASE_MS;
     while (!signal.aborted) {
       const baseUrl = useLegacyRoute && target.projectId
         ? `${this.apiUrl}/projects/${encodeURIComponent(target.projectId)}/messages/stream`
         : `${this.apiUrl}/rooms/${encodeRoomIdPath(target.roomId)}/messages/stream`;
       const url = this.withIncludePromptOnly(this.withAgentIdentityQuery(baseUrl, target));
+      const attempt: StreamAttempt = { openedAtMs: null, deliveredRoomSync: false };
+      let endedCleanly = false;
       try {
         lastEventId = await this.openStream(
           url,
@@ -148,8 +210,9 @@ export class SseClient {
           lastEventId,
           onMessage,
           onGap,
+          attempt,
         );
-        retryMs = 1_000;
+        endedCleanly = true;
       } catch (error) {
         if (signal.aborted) return;
         // Until an admin lets the account in, every reconnect is refused too.
@@ -169,8 +232,15 @@ export class SseClient {
         console.error(`SSE stream disconnected for room ${target.roomId}:`, error);
       }
       if (signal.aborted) return;
-      await waitForRetry(signal, retryMs);
-      retryMs = Math.min(Math.ceil(retryMs * 1.5), 30_000);
+      // Only a stream that worked starts the delay over. Every other end, an
+      // error or a stream the server ended at once, makes the next wait longer.
+      if (sseStreamEarnsShortRetry({
+        livedMs: attempt.openedAtMs === null ? 0 : this.timing.now() - attempt.openedAtMs,
+        endedCleanly,
+        deliveredRoomSync: attempt.deliveredRoomSync,
+      })) retryMs = SSE_RETRY_BASE_MS;
+      await this.timing.wait(signal, sseRetryWaitMs(retryMs, this.timing.random()));
+      retryMs = Math.min(Math.ceil(retryMs * 1.5), SSE_RETRY_MAX_MS);
     }
   }
 
@@ -202,6 +272,7 @@ export class SseClient {
     lastEventId: string | null,
     onMessage: (message: Message) => void,
     onGap?: (gap: SseGap) => void,
+    attempt?: StreamAttempt,
   ): Promise<string | null> {
     const headers = await this.getHeaders();
     if (signal.aborted) return lastEventId;
@@ -231,6 +302,7 @@ export class SseClient {
       throw new Error("SSE response body is missing");
     }
 
+    if (attempt) attempt.openedAtMs = this.timing.now();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -265,7 +337,7 @@ export class SseClient {
         const rawEvent = buffer.slice(0, boundaryIndex);
         buffer = buffer.slice(boundaryIndex + 2);
         try {
-          lastEventId = this.handleEvent(rawEvent, lastEventId, onMessage, onGap);
+          lastEventId = this.handleEvent(rawEvent, lastEventId, onMessage, onGap, attempt);
         } catch (error) {
           // A complete but malformed typed frame is the same lost-boundary
           // condition as an oversized frame. Never reconnect from its cursor
@@ -289,7 +361,7 @@ export class SseClient {
     const trailing = buffer + decoder.decode();
     if (trailing.trim()) {
       try {
-        lastEventId = this.handleEvent(trailing, lastEventId, onMessage, onGap);
+        lastEventId = this.handleEvent(trailing, lastEventId, onMessage, onGap, attempt);
       } catch (error) {
         this.eventCursors.delete(roomId);
         try {
@@ -309,6 +381,7 @@ export class SseClient {
     lastEventId: string | null,
     onMessage: (message: Message) => void,
     onGap?: (gap: SseGap) => void,
+    attempt?: StreamAttempt,
   ): string | null {
     const normalizedEvent = rawEvent.replace(/\r/g, "");
     const lines = normalizedEvent.split("\n");
@@ -329,6 +402,8 @@ export class SseClient {
     // responses (runtime/messages.ts).
     const payload = JSON.parse(dataLines.join("\n")) as Message & Partial<SseGap>;
     if (eventName === "room_sync") {
+      // The handshake of a stream the server accepted, with or without a gap.
+      if (attempt) attempt.deliveredRoomSync = true;
       if (payload.gap === true) {
         try {
           onGap?.(payload as SseGap);

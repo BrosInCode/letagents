@@ -15,6 +15,7 @@ import type {
   DesktopPendingDeviceAuth,
 } from "../ipc-types.js";
 import { recordManagedAgentCommitAccount } from "#provider-runtime/agents/managed-agent-commit-identity.js";
+import { DESKTOP_USER_AGENT } from "./client-identity.js";
 import { apiUrl } from "#provider-runtime/paths.js";
 import { desktopSmokeAuthStatus, isDesktopSmokeCheck } from "./smoke.js";
 
@@ -569,6 +570,7 @@ export async function apiFetch<T>(
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers(init?.headers);
   requestHeaders.set("Accept", "application/json");
+  if (!requestHeaders.has("User-Agent")) requestHeaders.set("User-Agent", DESKTOP_USER_AGENT);
   if (
     typeof init?.body === "string"
     && init.body.length > 0

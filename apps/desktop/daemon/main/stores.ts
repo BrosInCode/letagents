@@ -153,7 +153,7 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       bindings: this.workerBindings,
       updateEntry: (entryId, update, options) => this.updateManifestEntry(entryId, update, undefined, options),
       startDelivery: (entryId) => this.startSupervisedDelivery(entryId),
-    });
+    }, { heartbeatIntervalMs: this.nativeHeartbeatIntervalMs });
     this.stateWatch = new DaemonStateWatch({
       ...daemonAuthority, coalesceMs: STATE_WATCH_NOTIFICATION_COALESCE_MS,
       entries: async () => this.readModel.entriesWithDerivedLiveness((await this.store.loadForStateWatch()).entries, { reuseUnchangedInboxInputs: true }),
