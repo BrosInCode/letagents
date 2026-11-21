@@ -26,9 +26,12 @@ import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
 import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
-import type { ProviderHandle, SupervisedProviderAdapter } from "#provider-runtime/agents/provider-adapter.js";
+import type { SupervisedProviderAdapter } from "#provider-runtime/agents/provider-adapter.js";
+import { ProviderRuntimeBoundary, type ProviderRuntimeRef, type ProviderRuntimeSnapshot } from "#provider-runtime/agents/provider-runtime-boundary.js";
 
-type NativeHandle = ProviderHandle;
+/** What the router keeps for a work attempt: the provider, its data boundary and the reference of the installed runtime. */
+type Remembered = { provider: string; boundary: ProviderRuntimeBoundary; runtime: ProviderRuntimeRef | null };
+type Installed = Remembered & { runtime: ProviderRuntimeRef };
 
 /**
  * The contract between the daemon and a provider adapter. Its one definition
@@ -61,17 +64,25 @@ const bundledRuntimeVerifierFromBuild: BundledRuntimeVerifier = async () => {
   await module.warmLetAgentsMcpRuntime({ devEntryPath: devMcpServerEntryFromEnv() ?? undefined });
 };
 
-function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: number): ProviderActionHandle {
+/**
+ * The daemon's view of one runtime. It holds the runtime reference, not a
+ * provider object. Its four changing fields ask the boundary for the state of
+ * that exact runtime at each read; after the boundary forgets the runtime,
+ * they keep the last state that was read.
+ */
+function publicHandle(boundary: ProviderRuntimeBoundary, installed: ProviderRuntimeSnapshot, appliedConfigurationRevision?: number): ProviderActionHandle {
+  let last = installed;
+  const now = () => (last = boundary.inspectIfHeld(installed.ref) ?? last);
   return {
-    workAttemptId: handle.workAttemptId,
-    ...(handle.managedLaunchContract ? { managedLaunchContract: handle.managedLaunchContract } : {}),
-    get pid() { return handle.pid; },
-    get providerContinuationId() { return handle.providerContinuationId; },
-    get providerConnection() { return handle.providerConnection ?? null; },
+    workAttemptId: installed.ref.workAttemptId,
+    ...(installed.managedLaunchContract ? { managedLaunchContract: installed.managedLaunchContract } : {}),
+    get pid() { return now().pid; },
+    get providerContinuationId() { return now().providerContinuationId; },
+    get providerConnection() { return now().providerConnection; },
     ...(appliedConfigurationRevision === undefined ? {} : { appliedConfigurationRevision }),
-    ...(handle.launchNotices?.length ? { launchNotices: [...handle.launchNotices] } : {}),
-    ...(handle.ownerSetup === true ? { ownerSetup: true as const } : {}),
-    get observedState() { return handle.observedState(); },
+    ...(installed.launchNotices?.length ? { launchNotices: [...installed.launchNotices] } : {}),
+    ...(installed.ownerSetup === true ? { ownerSetup: true as const } : {}),
+    get observedState() { return now().observedState; },
   };
 }
 
@@ -81,11 +92,15 @@ function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: numbe
  * the package import name, at the first use of each provider.
  */
 export class ProviderActionPortRouter implements ProviderActionPort {
-  private readonly adapters = new Map<string, Promise<NativeProviderAdapter>>();
-  private readonly handles = new Map<string, { provider: string; adapter: NativeProviderAdapter; handle: NativeHandle | null }>();
+  private readonly boundaries = new Map<string, Promise<ProviderRuntimeBoundary>>();
+  private readonly handles = new Map<string, Remembered>();
   private readonly actions = new Map<string, string>();
-  /** Whether each remembered native handle's process has exited. One that has stays remembered for custody, and is never attached again. */
-  private readonly exits = new WeakMap<NativeHandle, { exited: boolean }>();
+  /**
+   * Whether each runtime's process has exited, by runtime id. A remembered runtime that has exited stays
+   * remembered for custody, and is never attached again. `replaced` is set when the router names another
+   * runtime for the work attempt; a runtime that is both is forgotten by the boundary.
+   */
+  private readonly exits = new Map<string, { exited: boolean; replaced: boolean }>();
 
   constructor(
     private readonly adapterLoaders: Readonly<Record<string, ProviderAdapterLoader>> = {},
@@ -99,41 +114,43 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   compactionProgress(workAttemptId: string, provider: string): { state: "compacting"; startedAt: string } | null {
     const current = this.handles.get(workAttemptId);
     if (!current || current.provider !== provider) return null;
-    return current.adapter.compactionProgress?.(workAttemptId) ?? null;
+    return current.boundary.compactionProgress(workAttemptId);
   }
 
   runtimeCustody(workAttemptId: string, provider: string): ProviderRuntimeCustody {
     const remembered = this.handles.get(workAttemptId);
     if (!remembered) return { state: "absent" };
     if (remembered.provider !== provider) return { state: "unknown" };
-    const state = remembered.adapter.runtimeCustody?.(workAttemptId, remembered.handle ?? undefined);
+    const installed = remembered.runtime ? remembered.boundary.inspectIfHeld(remembered.runtime) : null;
+    const state = remembered.boundary.runtimeCustody(workAttemptId, installed?.ref);
     if (state === "unknown") return { state: "unknown" };
-    if (state === "absent") return remembered.handle
-      ? { state: "retired", handle: publicHandle(remembered.handle) } : { state: "absent" };
-    if (!remembered.handle || remembered.handle.workAttemptId !== workAttemptId) return { state: "unknown" };
-    return { state: "owned", handle: publicHandle(remembered.handle) };
+    if (state === "absent") return installed
+      ? { state: "retired", handle: publicHandle(remembered.boundary, installed) } : { state: "absent" };
+    if (!installed || installed.ref.workAttemptId !== workAttemptId) return { state: "unknown" };
+    return { state: "owned", handle: publicHandle(remembered.boundary, installed) };
   }
 
-  private rememberAcquisition(provider: string, adapter: NativeProviderAdapter, workAttemptId: string): void {
+  private rememberAcquisition(provider: string, boundary: ProviderRuntimeBoundary, workAttemptId: string): void {
     const previous = this.handles.get(workAttemptId);
     this.resolveProvider(previous?.provider, provider);
-    if (previous && previous.adapter !== adapter) throw new Error("Provider custody owner changed for the same work attempt.");
-    this.handles.set(workAttemptId, { provider, adapter, handle: previous?.handle ?? null });
+    if (previous && previous.boundary !== boundary) throw new Error("Provider custody owner changed for the same work attempt.");
+    this.handles.set(workAttemptId, { provider, boundary, runtime: previous?.runtime ?? null });
   }
 
   async capabilities(workAttemptId: string, requestedProvider?: string): Promise<ProviderActionCapabilities> {
     const provider = this.resolveProvider(this.handles.get(workAttemptId)?.provider, requestedProvider);
-    const adapter = await this.adapter(provider);
-    return { ...adapter.capabilities(), exactProcessStop: typeof adapter.stopRef === "function" };
+    const boundary = await this.boundary(provider);
+    return { ...boundary.capabilities(), exactProcessStop: boundary.has("stopRef") };
   }
 
   async spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle> {
     const provider = this.resolveProvider(this.handles.get(request.workAttemptId)?.provider, request.provider);
-    const adapter = await this.adapter(provider);
-    this.rememberAcquisition(provider, adapter, request.workAttemptId);
-    const handle = await adapter.spawn(request);
-    this.remember(provider, adapter, request, handle);
-    return publicHandle(handle, request.configurationRevision);
+    const boundary = await this.boundary(provider);
+    this.rememberAcquisition(provider, boundary, request.workAttemptId);
+    const { onProgress, onNativeStarted, ...data } = request;
+    const runtime = await boundary.spawn(data, { onProgress, onNativeStarted });
+    this.remember(provider, boundary, request, runtime);
+    return publicHandle(boundary, runtime, request.configurationRevision);
   }
 
   async attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null> {
@@ -146,8 +163,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     // A handle whose process has exited is evidence of that exit, not a
     // runtime. The adapter answers for it from the durable reference, as it
     // does for a daemon that never held the handle.
-    if (remembered?.handle && !this.exits.get(remembered.handle)?.exited) {
-      const handle = remembered.handle;
+    const installed = remembered?.runtime ? remembered.boundary.inspectIfHeld(remembered.runtime) : null;
+    if (remembered && installed && !this.exits.get(installed.ref.runtimeId)?.exited) {
+      const handle = installed;
       if (
         handle.providerContinuationId !== ref.providerContinuationId
         || (handle.lifecycleAuthorityMode !== undefined
@@ -161,28 +179,32 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       // remembered native handle is the authority needed to repair that
       // manifest, never permission to launch a replacement.
       if (provider === "codex" && ref.launchPolicy !== undefined) {
-        const bound = await (await this.adapter(provider)).attach({
+        const bound = await (await this.boundary(provider)).attach({
           ...ref, providerConnection: ref.providerConnection ?? handle.providerConnection,
         });
         // The adapter can stop a runtime that fails a check against the policy it is given
         // here. Its proof that the process is gone is then the answer, as at a first attach.
-        if (bound !== handle) return bound && isAttachTerminal(bound) ? bound : null;
+        if (bound.state !== "attached" || bound.runtime.ref.runtimeId !== handle.ref.runtimeId) {
+          return bound.state === "terminal" ? attachTerminal(bound) : null;
+        }
       }
-      return publicHandle(handle);
+      return publicHandle(remembered.boundary, handle);
     }
-    const adapter = await this.adapter(provider);
-    this.rememberAcquisition(provider, adapter, ref.workAttemptId);
-    const handle = await adapter.attach(ref);
-    if (!handle || isAttachTerminal(handle)) return handle;
-    this.handles.set(ref.workAttemptId, { provider, adapter, handle });
-    this.watchExit(adapter, handle);
-    return publicHandle(handle);
+    const boundary = await this.boundary(provider);
+    this.rememberAcquisition(provider, boundary, ref.workAttemptId);
+    const attached = await boundary.attach(ref);
+    if (attached.state === "absent") return null;
+    if (attached.state === "terminal") return attachTerminal(attached);
+    this.install(ref.workAttemptId, { provider, boundary, runtime: attached.runtime.ref });
+    this.watchExit(boundary, attached.runtime.ref);
+    return publicHandle(boundary, attached.runtime);
   }
 
   async attachAction(actionId: string, workAttemptId: string): Promise<ProviderActionAttachment> {
     if (this.actions.get(actionId) !== workAttemptId) return { state: "absent" };
     const remembered = this.handles.get(workAttemptId);
-    return remembered?.handle ? { state: "attached", handle: publicHandle(remembered.handle) } : { state: "absent" };
+    const installed = remembered?.runtime ? remembered.boundary.inspectIfHeld(remembered.runtime) : null;
+    return remembered && installed ? { state: "attached", handle: publicHandle(remembered.boundary, installed) } : { state: "absent" };
   }
 
   async resume(ref: ProviderActionRef, request: ProviderActionSpawn): Promise<ProviderActionHandle> {
@@ -192,22 +214,23 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       ref.provider,
       providerFromConnection(ref.providerConnection),
     );
-    const adapter = await this.adapter(provider);
-    this.rememberAcquisition(provider, adapter, request.workAttemptId);
-    const handle = await adapter.resume(ref, request);
-    this.remember(provider, adapter, request, handle);
-    return publicHandle(handle, request.configurationRevision);
+    const boundary = await this.boundary(provider);
+    this.rememberAcquisition(provider, boundary, request.workAttemptId);
+    const { onProgress, onNativeStarted, ...data } = request;
+    const runtime = await boundary.resume(ref, data, { onProgress, onNativeStarted });
+    this.remember(provider, boundary, request, runtime);
+    return publicHandle(boundary, runtime, request.configurationRevision);
   }
 
   async poke(handle: ProviderActionHandle, message: string, options?: { actionId?: string }): Promise<void> {
     const remembered = this.required(handle);
-    await (await this.adapter(remembered.provider)).poke(remembered.handle, message);
+    await (await this.boundary(remembered.provider)).poke(remembered.runtime, message);
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
   }
 
   async controlTurn(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string; targetTurnId?: string | null; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult> {
     const remembered = this.required(handle);
-    const result = await (await this.adapter(remembered.provider)).controlTurn(remembered.handle, correction, {
+    const result = await (await this.boundary(remembered.provider)).controlTurn(remembered.runtime, correction, {
       targetTurnId: options?.targetTurnId,
       checkpointTurnStarted: options?.checkpointTurnStarted,
       markDispatched: options?.markDispatched,
@@ -218,29 +241,32 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   async inspectTurn(handle: ProviderActionHandle, turnId: string): Promise<"active" | "terminal" | "unknown"> {
     const remembered = this.required(handle);
-    const adapter = await this.adapter(remembered.provider);
-    if (!adapter.inspectTurn) throw new Error(`Provider '${remembered.provider}' does not support exact turn inspection.`);
-    return adapter.inspectTurn(remembered.handle, turnId);
+    const boundary = await this.boundary(remembered.provider);
+    if (!boundary.has("inspectTurn")) throw new Error(`Provider '${remembered.provider}' does not support exact turn inspection.`);
+    return boundary.inspectTurn(remembered.runtime, turnId);
   }
 
   async controlExactTurn(handle: ProviderActionHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult> {
     const remembered = this.required(handle);
-    const adapter = await this.adapter(remembered.provider);
-    if (!adapter.controlExactTurn) throw new Error(`Provider '${remembered.provider}' does not support exact turn control.`);
-    return adapter.controlExactTurn(remembered.handle, options);
+    const boundary = await this.boundary(remembered.provider);
+    if (!boundary.has("controlExactTurn")) throw new Error(`Provider '${remembered.provider}' does not support exact turn control.`);
+    return boundary.controlExactTurn(remembered.runtime, options);
   }
 
   async inspectTurnBoundary(handle: ProviderActionHandle): Promise<NativeTurnBoundary> {
     const remembered = this.required(handle);
     const expected = handle.providerConnection ? { ...handle.providerConnection } : null;
     const continuation = handle.providerContinuationId;
-    const current = () => this.handles.get(handle.workAttemptId) === remembered
-      && remembered.handle.providerContinuationId === continuation
-      && sameProviderActionConnectionIdentity(expected, remembered.handle.providerConnection);
+    const current = () => {
+      if (this.handles.get(handle.workAttemptId) !== remembered) return false;
+      const now = remembered.boundary.inspectIfHeld(remembered.runtime);
+      return now !== null && now.providerContinuationId === continuation
+        && sameProviderActionConnectionIdentity(expected, now.providerConnection);
+    };
     if (!current()) return { state: "unknown" };
-    const adapter = await this.adapter(remembered.provider);
-    if (!current() || !adapter.inspectTurnBoundary) return { state: "unknown" };
-    const result = await adapter.inspectTurnBoundary(remembered.handle);
+    const boundary = await this.boundary(remembered.provider);
+    if (!current() || !boundary.has("inspectTurnBoundary")) return { state: "unknown" };
+    const result = await boundary.inspectTurnBoundary(remembered.runtime);
     if (!current() || (result.state !== "unknown"
       && (result.providerContinuationId !== continuation
         || result.nativeProcessIdentity !== expected?.processIdentity))) return { state: "unknown" };
@@ -251,10 +277,13 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const remembered = this.required(handle);
     const connection = structuredClone(handle.providerConnection);
     const continuation = handle.providerContinuationId;
-    const current = () => this.handles.get(handle.workAttemptId) === remembered
-      && remembered.handle.pid === handle.pid && remembered.handle.providerContinuationId === continuation
-      && sameProviderActionConnectionIdentity(connection, remembered.handle.providerConnection)
-      && sameProviderActionConnectionIdentity(connection, handle.providerConnection);
+    const current = () => {
+      if (this.handles.get(handle.workAttemptId) !== remembered) return false;
+      const now = remembered.boundary.inspectIfHeld(remembered.runtime);
+      return now !== null && now.pid === handle.pid && now.providerContinuationId === continuation
+        && sameProviderActionConnectionIdentity(connection, now.providerConnection)
+        && sameProviderActionConnectionIdentity(connection, handle.providerConnection);
+    };
     return { remembered, connection, continuation, current };
   }
 
@@ -262,10 +291,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const binding = this.permissionBinding(handle);
     const { remembered, current } = binding;
     const notify = (event: ProviderPermissionObservation) => { try { listener(event); } catch { /* Observer cannot control providers. */ } };
-    const adapter = await this.adapter(remembered.provider);
+    const boundary = await this.boundary(remembered.provider);
     if (signal.aborted) return;
-    if (!current() || !["codex", "open-model", "claude-code"].includes(remembered.provider) || !adapter.observePermissions) { notify({ type: "unavailable" }); return; }
-    await adapter.observePermissions(remembered.handle, event => {
+    if (!current() || !["codex", "open-model", "claude-code"].includes(remembered.provider) || !boundary.has("observePermissions")) { notify({ type: "unavailable" }); return; }
+    await boundary.observePermissions(remembered.runtime, event => {
       if (signal.aborted) return;
       if (!current()) { notify({ type: "unavailable" }); return; }
       if (event.type === "request_closed") {
@@ -303,9 +332,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       if (request.provider === "codex") {
         const params = request.native.params as Record<string, unknown> | null;
         if (request.native.method === "mcpServer/elicitation/request") {
-          const adapter = await this.adapter(remembered.provider);
-          if (!current() || !adapter.inspectPermissionMcpToolCall) return { outcome: "correlation_unproven" };
-          const proposal = await adapter.inspectPermissionMcpToolCall(remembered.handle, request.native);
+          const boundary = await this.boundary(remembered.provider);
+          if (!current() || !boundary.has("inspectPermissionMcpToolCall")) return { outcome: "correlation_unproven" };
+          const proposal = await boundary.inspectPermissionMcpToolCall(remembered.runtime, request.native);
           if (!current() || !proposal || proposal.threadId !== continuation
             || typeof proposal.turnId !== "string" || !proposal.turnId.trim() || proposal.turnId.length > 512) {
             return { outcome: "correlation_unproven" };
@@ -322,15 +351,15 @@ export class ProviderActionPortRouter implements ProviderActionPort {
           || typeof params.itemId !== "string" || !params.itemId.trim() || params.itemId.length > 512
           || !Number.isSafeInteger(params.startedAtMs) || (params.startedAtMs as number) < 0) return { outcome: "correlation_unproven" };
         if (kind === "network") {
-          const adapter = await this.adapter(remembered.provider);
-          if (!current() || !adapter.inspectPermissionProfile) return { outcome: "correlation_unproven" };
-          const profile = await adapter.inspectPermissionProfile(remembered.handle, request.native);
+          const boundary = await this.boundary(remembered.provider);
+          if (!current() || !boundary.has("inspectPermissionProfile")) return { outcome: "correlation_unproven" };
+          const profile = await boundary.inspectPermissionProfile(remembered.runtime, request.native);
           if (!current() || !profile) return { outcome: "correlation_unproven" };
         }
         if (kind === "file_change") {
-          const adapter = await this.adapter(remembered.provider);
-          if (!current() || !adapter.inspectPermissionFileChanges) return { outcome: "correlation_unproven" };
-          const fileChanges = await adapter.inspectPermissionFileChanges(remembered.handle, request.native);
+          const boundary = await this.boundary(remembered.provider);
+          if (!current() || !boundary.has("inspectPermissionFileChanges")) return { outcome: "correlation_unproven" };
+          const fileChanges = await boundary.inspectPermissionFileChanges(remembered.runtime, request.native);
           if (!current() || !fileChanges?.length) return { outcome: "correlation_unproven" };
           return { outcome: "correlated", providerContinuationId: continuation!, providerTurnId: params.turnId, kind, fileChanges };
         }
@@ -341,9 +370,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         : (expected as OpenCodeNativePermissionRequest).permission === "bash" ? "command"
           : (expected as OpenCodeNativePermissionRequest).permission === "edit" ? "file_change" : null;
       if (!kind) return { outcome: "correlation_unproven" };
-      const adapter = await this.adapter(remembered.provider);
-      if (!current() || !adapter.correlatePermissionTurn) return { outcome: "correlation_unproven" };
-      const result = await adapter.correlatePermissionTurn(remembered.handle, expected,
+      const boundary = await this.boundary(remembered.provider);
+      if (!current() || !boundary.has("correlatePermissionTurn")) return { outcome: "correlation_unproven" };
+      const result = await boundary.correlatePermissionTurn(remembered.runtime, expected,
         request.provider === "open-model" && options.roomTurnId ? { roomTurnId: options.roomTurnId } : undefined);
       if (!current() || result.outcome !== "correlated" || result.providerContinuationId !== continuation) return { outcome: "correlation_unproven" };
       return { outcome: "correlated", providerContinuationId: result.providerContinuationId, providerTurnId: result.providerTurnId, kind };
@@ -357,11 +386,11 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     };
     assertCurrent();
     const native = request.provider === "codex" ? request.native : structuredClone(request.native);
-    const adapter = await this.adapter(remembered.provider);
+    const boundary = await this.boundary(remembered.provider);
     assertCurrent();
-    if (!adapter.replyPermission || typeof options?.beforeNativeDispatch !== "function") throw Object.assign(new Error("Permission dispatch is unsupported."), { outcome: "not_dispatched" });
+    if (!boundary.has("replyPermission") || typeof options?.beforeNativeDispatch !== "function") throw Object.assign(new Error("Permission dispatch is unsupported."), { outcome: "not_dispatched" });
     let admitted = false;
-    const result = await adapter.replyPermission(remembered.handle, native, reply, {
+    const result = await boundary.replyPermission(remembered.runtime, native, reply, {
       expectedFileChanges: options.expectedFileChanges,
       beforeNativeDispatch: async () => { assertCurrent(); await options.beforeNativeDispatch(); assertCurrent(); },
       assertNativeDispatch: () => { assertCurrent(); options.assertNativeDispatch?.(); admitted = true; },
@@ -377,32 +406,32 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointPreparedTurn?: (state: { providerTurnId: string; providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; settleLifecycleBeforeIdle?: () => Promise<void>; markDurableTurnStarted?: () => void; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult> {
     const remembered = this.required(handle);
-    const adapter = await this.adapter(remembered.provider);
-    if (!adapter.runRoomTurn) throw new Error(`Provider '${remembered.provider}' does not support bounded room turns.`);
-    return adapter.runRoomTurn(remembered.handle, request, options);
+    const boundary = await this.boundary(remembered.provider);
+    if (!boundary.has("runRoomTurn")) throw new Error(`Provider '${remembered.provider}' does not support bounded room turns.`);
+    return boundary.runRoomTurn(remembered.runtime, request, options);
   }
 
   /** Asked for one turn only; an unknown or replaced handle takes no images. */
   async roomTurnImageDelivery(handle: ProviderActionHandle): Promise<RoomTurnImageDelivery> {
     let remembered: ReturnType<ProviderActionPortRouter["required"]>;
     try { remembered = this.required(handle); } catch { return null; }
-    const adapter = await this.adapter(remembered.provider);
-    return adapter.roomTurnImageDelivery?.(remembered.handle) ?? null;
+    const boundary = await this.boundary(remembered.provider);
+    return boundary.has("roomTurnImageDelivery") ? boundary.roomTurnImageDelivery(remembered.runtime) ?? null : null;
   }
 
   /** Asked for one turn only; an unknown or replaced handle opens no files. */
   async roomTurnFileAccess(handle: ProviderActionHandle): Promise<RoomTurnFileAccess> {
     let remembered: ReturnType<ProviderActionPortRouter["required"]>;
     try { remembered = this.required(handle); } catch { return null; }
-    const adapter = await this.adapter(remembered.provider);
-    return adapter.roomTurnFileAccess?.(remembered.handle) ?? null;
+    const boundary = await this.boundary(remembered.provider);
+    return boundary.has("roomTurnFileAccess") ? boundary.roomTurnFileAccess(remembered.runtime) ?? null : null;
   }
 
   async recoverRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; settleLifecycleBeforeIdle?: () => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void> }): Promise<ProviderRoomTurnResult> {
     const remembered = this.required(handle);
-    const adapter = await this.adapter(remembered.provider);
-    if (!adapter.recoverRoomTurn) throw new Error(`Provider '${remembered.provider}' does not support bounded room-turn recovery.`);
-    return adapter.recoverRoomTurn(remembered.handle, request, options);
+    const boundary = await this.boundary(remembered.provider);
+    if (!boundary.has("recoverRoomTurn")) throw new Error(`Provider '${remembered.provider}' does not support bounded room-turn recovery.`);
+    return boundary.recoverRoomTurn(remembered.runtime, request, options);
   }
 
   async repairContinuation(handle: ProviderActionHandle, request: ProviderContinuationRepairRequest, options: { checkpointReplacement: (providerContinuationId: string) => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderContinuationRepairResult> {
@@ -418,21 +447,21 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         throw new Error("Provider ownership changed during continuation repair.");
       }
     };
-    const adapter = await this.adapter(remembered.provider);
+    const boundary = await this.boundary(remembered.provider);
     assertOwned();
-    if (!adapter.repairContinuation) throw new Error(`Provider '${remembered.provider}' does not support continuation repair.`);
-    const repaired = await adapter.repairContinuation(remembered.handle, request, options);
+    if (!boundary.has("repairContinuation")) throw new Error(`Provider '${remembered.provider}' does not support continuation repair.`);
+    const { runtime, ...repaired } = await boundary.repairContinuation(remembered.runtime, request, options);
     assertOwned();
-    if (repaired.handle.workAttemptId !== workAttemptId || repaired.handle.pid !== pid
-      || !sameProviderActionConnectionIdentity(repaired.handle.providerConnection, connection)) {
+    if (runtime.ref.workAttemptId !== workAttemptId || runtime.pid !== pid
+      || !sameProviderActionConnectionIdentity(runtime.providerConnection, connection)) {
       throw new Error("Provider continuation repair changed the verified provider process identity.");
     }
     if (repaired.previousProviderContinuationId !== continuation
-      || repaired.replacementProviderContinuationId !== repaired.handle.providerContinuationId) {
+      || repaired.replacementProviderContinuationId !== runtime.providerContinuationId) {
       throw new Error("Provider continuation repair returned inconsistent conversation identity.");
     }
     if (repaired.outcome === "rematerialized") {
-      if (repaired.handle !== remembered.handle || repaired.replacementProviderContinuationId !== continuation) {
+      if (runtime.ref.runtimeId !== remembered.runtime.runtimeId || repaired.replacementProviderContinuationId !== continuation) {
         throw new Error("Provider restoration must preserve the installed native handle and conversation.");
       }
       // The registry record owns existing observations. A restoration changes
@@ -442,28 +471,29 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     if (repaired.replacementProviderContinuationId === continuation) {
       throw new Error("Provider replacement must establish a different conversation.");
     }
-    this.handles.set(workAttemptId, { ...remembered, handle: repaired.handle });
-    this.watchExit(adapter, repaired.handle);
+    this.install(workAttemptId, { ...remembered, runtime: runtime.ref });
+    this.watchExit(boundary, runtime.ref);
     return {
       ...repaired,
-      handle: publicHandle(repaired.handle, handle.appliedConfigurationRevision),
+      handle: publicHandle(boundary, runtime, handle.appliedConfigurationRevision),
     };
   }
 
   async describeManagedLaunchContract(input: { provider: string; apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null> {
-    const adapter = await this.adapter(this.requiredProvider(input.provider));
-    if (!adapter.stopIdle || !adapter.describeManagedLaunchContract) return null;
-    return adapter.describeManagedLaunchContract(input);
+    const boundary = await this.boundary(this.requiredProvider(input.provider));
+    if (!boundary.has("stopIdle") || !boundary.has("describeManagedLaunchContract")) return null;
+    const { apiUrl, devMcpServerEntryPath } = input;
+    return boundary.describeManagedLaunchContract({ apiUrl, ...(devMcpServerEntryPath === undefined ? {} : { devMcpServerEntryPath }) });
   }
 
   async stopIdle(handle: ProviderActionHandle, assertCurrent: () => void): Promise<ProviderActionTerminal> {
     const remembered = this.required(handle);
-    const adapter = await this.adapter(remembered.provider);
-    if (!adapter.stopIdle || this.required(handle) !== remembered) {
+    const boundary = await this.boundary(remembered.provider);
+    if (!boundary.has("stopIdle") || this.required(handle) !== remembered) {
       throw new Error("The exact provider cannot prove idle replacement.");
     }
     assertCurrent();
-    return adapter.stopIdle(remembered.handle, () => {
+    return boundary.stopIdle(remembered.runtime, () => {
       if (this.required(handle) !== remembered) throw new Error("Provider changed before idle replacement.");
       assertCurrent();
     });
@@ -471,7 +501,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   async stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {
     const remembered = this.required(handle);
-    const terminal = await (await this.adapter(remembered.provider)).stop(remembered.handle, options);
+    const terminal = await (await this.boundary(remembered.provider)).stop(remembered.runtime, stopOptions(options));
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
     return terminal;
   }
@@ -485,48 +515,50 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       ref.provider,
       providerFromConnection(ref.providerConnection),
     );
-    const adapter = await this.adapter(provider);
+    const boundary = await this.boundary(provider);
     // Protocol terminals can precede OS death. The exact-reference path
     // must prove the frozen birth is gone even when a cached handle exists.
-    if (adapter.stopRef && (provider === "codex" || provider === "open-model" || options?.force)) {
-      const terminal = await adapter.stopRef(ref, options);
+    if (boundary.has("stopRef") && (provider === "codex" || provider === "open-model" || options?.force)) {
+      const terminal = await boundary.stopRef(ref, stopOptions(options));
       if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);
       return terminal;
     }
-    if (remembered?.handle
-      && !this.exits.get(remembered.handle)?.exited
-      && remembered.handle.providerContinuationId === ref.providerContinuationId
-      && sameProviderActionConnectionIdentity(remembered.handle.providerConnection, ref.providerConnection)) {
-      const terminal = await adapter.stop(remembered.handle, options);
+    const installed = remembered?.runtime ? remembered.boundary.inspectIfHeld(remembered.runtime) : null;
+    if (installed
+      && !this.exits.get(installed.ref.runtimeId)?.exited
+      && installed.providerContinuationId === ref.providerContinuationId
+      && sameProviderActionConnectionIdentity(installed.providerConnection, ref.providerConnection)) {
+      const terminal = await boundary.stop(installed.ref, stopOptions(options));
       if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);
       return terminal;
     }
-    if (!adapter.stopRef) throw new Error(`Provider '${provider}' cannot stop an unattached durable process reference.`);
-    const terminal = await adapter.stopRef(ref, options);
+    if (!boundary.has("stopRef")) throw new Error(`Provider '${provider}' cannot stop an unattached durable process reference.`);
+    const terminal = await boundary.stopRef(ref, stopOptions(options));
     if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);
     return terminal;
   }
 
   async onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void> {
     const remembered = this.required(handle);
-    return (await this.adapter(remembered.provider)).onExit(remembered.handle, listener);
+    return (await this.boundary(remembered.provider)).onExit(remembered.runtime, listener);
   }
 
   async onStream(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void> {
     const remembered = this.required(handle);
-    return (await this.adapter(remembered.provider)).onStream(remembered.handle, listener);
+    return (await this.boundary(remembered.provider)).onStream(remembered.runtime, listener);
   }
 
   async onExecution(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription> {
     const remembered = this.required(handle);
-    const adapter = await this.adapter(remembered.provider);
-    if (!adapter.onExecution) throw new Error(`Provider '${remembered.provider}' does not expose native execution observations.`);
-    return adapter.onExecution(remembered.handle, listener);
+    const boundary = await this.boundary(remembered.provider);
+    if (!boundary.has("onExecution")) throw new Error(`Provider '${remembered.provider}' does not expose native execution observations.`);
+    return boundary.onExecution(remembered.runtime, listener);
   }
 
   async stopBackgroundCommand(handle: ProviderActionHandle, taskId: string): Promise<"stopping" | "not_running" | "failed"> {
     const remembered = this.required(handle);
-    return await remembered.adapter.stopBackgroundCommand?.(remembered.handle, taskId) ?? "not_running";
+    if (!remembered.boundary.has("stopBackgroundCommand")) return "not_running";
+    return await remembered.boundary.stopBackgroundCommand(remembered.runtime, taskId) ?? "not_running";
   }
 
   async readUsage(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null> {
@@ -539,25 +571,34 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const sameConnection = remembered.provider === "cursor" && connection?.kind === "cursor_cli"
       && connection.pid === null && connection.processIdentity == null
       ? sameProviderActionConnectionSnapshot : sameProviderActionConnectionIdentity;
-    if (!sameConnection(remembered.handle.providerConnection, connection)
-      || this.exits.get(remembered.handle)?.exited) return null;
-    const usage = await remembered.adapter.readUsage?.(remembered.handle) ?? null;
+    const runtimeId = remembered.runtime.runtimeId;
+    if (!sameConnection(remembered.boundary.inspectIfHeld(remembered.runtime)?.providerConnection, connection)
+      || this.exits.get(runtimeId)?.exited) return null;
+    const usage = remembered.boundary.has("readUsage") ? await remembered.boundary.readUsage(remembered.runtime) ?? null : null;
     const current = this.handles.get(handle.workAttemptId);
-    return current === remembered && current.handle?.providerContinuationId === continuation
-      && sameConnection(current.handle.providerConnection, connection)
-      && !this.exits.get(remembered.handle)?.exited && usage?.providerContinuationId === continuation ? usage : null;
+    const now = current === remembered ? remembered.boundary.inspectIfHeld(remembered.runtime) : null;
+    return now !== null && now.providerContinuationId === continuation
+      && sameConnection(now.providerConnection, connection)
+      && !this.exits.get(runtimeId)?.exited && usage?.providerContinuationId === continuation ? usage : null;
   }
 
   async probeControl(handle: ProviderActionHandle): Promise<ControlProbeResult> {
     const remembered = this.required(handle);
-    const adapter = await this.adapter(remembered.provider);
-    return adapter.probeControl?.(remembered.handle) ?? { state: "unprobeable" };
+    const boundary = await this.boundary(remembered.provider);
+    return boundary.has("probeControl") ? boundary.probeControl(remembered.runtime) : { state: "unprobeable" };
   }
 
-  private adapter(provider: string): Promise<NativeProviderAdapter> {
-    const current = this.adapters.get(provider);
+  /** The data boundary of one provider. The adapter behind it is loaded at the first use and is named nowhere else. */
+  private boundary(provider: string): Promise<ProviderRuntimeBoundary> {
+    const current = this.boundaries.get(provider);
     if (current) return current;
-    const loaded = (async () => {
+    const loaded = this.loadAdapter(provider).then((adapter) => new ProviderRuntimeBoundary(provider, adapter));
+    this.boundaries.set(provider, loaded);
+    return loaded;
+  }
+
+  private loadAdapter(provider: string): Promise<NativeProviderAdapter> {
+    return (async () => {
       const loader = this.adapterLoaders[provider];
       if (loader) return loader();
       if (provider === "codex") {
@@ -582,8 +623,6 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       }
       throw new Error(`No supervised native adapter is available for ${provider}.`);
     })();
-    this.adapters.set(provider, loaded);
-    return loaded;
   }
 
   private requiredProvider(provider: string | null | undefined): string {
@@ -602,34 +641,61 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     return providers[0]!;
   }
 
-  private remember(provider: string, adapter: NativeProviderAdapter, request: ProviderActionSpawn, handle: NativeHandle): void {
-    this.handles.set(request.workAttemptId, { provider, adapter, handle });
-    this.watchExit(adapter, handle);
+  private remember(provider: string, boundary: ProviderRuntimeBoundary, request: ProviderActionSpawn, runtime: ProviderRuntimeSnapshot): void {
+    this.install(request.workAttemptId, { provider, boundary, runtime: runtime.ref });
+    this.watchExit(boundary, runtime.ref);
     if (request.actionId) this.actions.set(request.actionId, request.workAttemptId);
   }
 
+  /** Name the runtime of a work attempt. The runtime that was named before is forgotten once its process has exited. */
+  private install(workAttemptId: string, next: Installed): void {
+    const previous = this.handles.get(workAttemptId);
+    this.handles.set(workAttemptId, next);
+    if (!previous?.runtime || previous.runtime.runtimeId === next.runtime.runtimeId) return;
+    const exit = this.exits.get(previous.runtime.runtimeId);
+    if (exit) exit.replaced = true;
+    this.forgetEnded(previous.boundary, previous.runtime);
+  }
+
+  private forgetEnded(boundary: ProviderRuntimeBoundary, runtime: ProviderRuntimeRef): void {
+    const exit = this.exits.get(runtime.runtimeId);
+    if (!exit?.exited || !exit.replaced) return;
+    this.exits.delete(runtime.runtimeId);
+    boundary.release(runtime);
+  }
+
   /** Learn of the exit from the adapter itself; a handle's reported state cannot tell a stopped process from a failed turn. */
-  private watchExit(adapter: NativeProviderAdapter, handle: NativeHandle): void {
-    if (this.exits.has(handle)) return;
-    const exit = { exited: false };
-    this.exits.set(handle, exit);
-    try { adapter.onExit(handle, () => { exit.exited = true; }); }
+  private watchExit(boundary: ProviderRuntimeBoundary, runtime: ProviderRuntimeRef): void {
+    if (this.exits.has(runtime.runtimeId)) return;
+    const exit = { exited: false, replaced: false };
+    this.exits.set(runtime.runtimeId, exit);
+    try { boundary.onExit(runtime, () => { exit.exited = true; this.forgetEnded(boundary, runtime); }); }
     catch { /* An adapter that cannot report this exit keeps the handle attachable, as before. */ }
   }
 
-  private required(handle: ProviderActionHandle): { provider: string; adapter: NativeProviderAdapter; handle: NativeHandle } {
+  private required(handle: ProviderActionHandle): Installed {
     const remembered = this.handles.get(handle.workAttemptId);
-    if (!remembered?.handle
-      || remembered.handle.providerContinuationId !== handle.providerContinuationId
-      || (remembered.provider !== "cursor" && remembered.handle.pid !== handle.pid)) {
+    const installed = remembered?.runtime ? remembered.boundary.inspectIfHeld(remembered.runtime) : null;
+    if (!remembered || !installed
+      || installed.providerContinuationId !== handle.providerContinuationId
+      || (remembered.provider !== "cursor" && installed.pid !== handle.pid)) {
       throw new Error("Provider handle is not owned by the current daemon generation.");
     }
-    return remembered as typeof remembered & { handle: NativeHandle };
+    return remembered as Installed;
   }
 }
 
-function isAttachTerminal(value: NativeHandle | ProviderActionAttachTerminal): value is ProviderActionAttachTerminal {
-  return "state" in value && value.state === "terminal";
+function attachTerminal(attached: { terminal: ProviderActionTerminal; notices?: readonly string[] }): ProviderActionAttachTerminal {
+  return { state: "terminal", terminal: attached.terminal, ...(attached.notices ? { notices: attached.notices } : {}) };
+}
+
+/** The stop options that cross the data boundary. The action id is the router's own record and stays here. */
+function stopOptions(options?: { force?: boolean; graceMs?: number; actionId?: string }): { force?: boolean; graceMs?: number } | undefined {
+  if (!options) return undefined;
+  return {
+    ...(options.force === undefined ? {} : { force: options.force }),
+    ...(options.graceMs === undefined ? {} : { graceMs: options.graceMs }),
+  };
 }
 
 function providerFromConnection(connection: ProviderActionRef["providerConnection"]): string | null {
