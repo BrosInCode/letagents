@@ -632,6 +632,23 @@ export class RuntimeRecoveryCoordinator {
           validatedNativeRuntimeDeath({ nativeRuntimeDeath: execution.terminal.native_runtime_death }, ref.provider_connection);
           await this.options.settleRuntimeApprovals(entryId);
           await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, ref.execution_generation_id);
+        } else if (execution.terminal && !recoverIdleCursor) {
+          // The record ends the generation; it does not witness that the process is gone.
+          // This recovery clears the reference below, and then nothing can find that process again.
+          const connection = ref.provider_connection;
+          if (connection && Number.isSafeInteger(connection.pid) && connection.processIdentity) {
+            if (!this.provider) throw new Error("Provider recovery is unavailable.");
+            const capabilities = await this.provider.capabilities(ref.work_attempt_id, entry.provider);
+            if (capabilities.exactProcessStop && this.provider.stopRef) {
+              try {
+                await this.provider.stopRef({ workAttemptId: ref.work_attempt_id, provider: entry.provider,
+                  providerContinuationId: ref.provider_continuation_id, providerConnection: connection },
+                { actionId: `recovery:${entryId}:retire-predecessor:${this.nowMs()}` });
+              } catch {
+                throw new Error("LetAgents cannot prove that the previous provider process stopped. Recovery was not started.");
+              }
+            }
+          }
         }
       }
       await this.options.settleRuntimeApprovals(entryId);

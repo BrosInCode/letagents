@@ -91,6 +91,7 @@ function turnInFlight(head: Pick<SupervisedInboxItem, "state" | "provider_turn_i
     || (head.state === "pending" && Boolean(head.provider_turn_id) && !head.outcome));
 }
 const UNATTACHABLE_GENERATION_CAUSE = "durable execution generation remains live without an attachable provider handle";
+const UNPROVEN_PREDECESSOR_CAUSE = "the earlier provider process is not proven gone after its recorded end; no replacement starts until it is";
 
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
@@ -1531,6 +1532,58 @@ export class ProviderExecutionCoordinator {
       && this.options.concurrency.currentControlEpoch(entry.id) === controlEpoch);
   }
 
+  /**
+   * A stored terminal record ends a generation. It does not say that the
+   * process is gone, unless it carries the witnessed death of that exact
+   * process. A daemon that ended between the record and the stop of the
+   * process leaves a record without that witness and a process that still
+   * runs. Before a replacement starts, the adapter proves the recorded
+   * process birth gone: it signals that exact birth if it is alive, and it
+   * never signals a process id that another process now has. False means no
+   * replacement may start in this pass; the entry says why and is checked
+   * again.
+   */
+  private async retireUnprovenPredecessor(entry: DaemonManifestEntry): Promise<boolean> {
+    const ref = entry.provider_ref;
+    const connection = ref?.provider_connection;
+    if (!ref || !connection || !Number.isSafeInteger(connection.pid) || !connection.processIdentity) return true;
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (!execution?.terminal || execution.terminal.native_runtime_death) return true;
+    const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
+    if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return true;
+    try {
+      await this.options.provider.stopRef(await this.providerRef(entry), {
+        actionId: `manifest:${entry.id}:retire-predecessor:${this.options.nowMs()}`,
+      });
+      return true;
+    } catch (error) {
+      console.warn("[provider_execution] predecessor_not_proven_gone", JSON.stringify({
+        entryId: entry.id, executionGenerationId: ref.execution_generation_id,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      if (entry.observed_state !== "recovering" || entry.condition !== "coordination_blocked"
+        || entry.last_error !== UNPROVEN_PREDECESSOR_CAUSE) {
+        await this.options.transition(
+          entry.id,
+          "recovering",
+          "coordination_blocked",
+          UNPROVEN_PREDECESSOR_CAUSE,
+          "daemon-convergence",
+        );
+      }
+      const checks = (this.unattachableRechecks.get(entry.id) ?? 0) + 1;
+      this.unattachableRechecks.set(entry.id, checks);
+      this.scheduleRecovery(entry.id, Math.min(
+        UNATTACHABLE_GENERATION_RECHECK_MS * 2 ** Math.min(checks - 1, 10),
+        UNATTACHABLE_GENERATION_RECHECK_MAX_MS,
+      ));
+      return false;
+    }
+  }
+
   private async launchProvider(
     initialEntry: DaemonManifestEntry,
     initialControlEpoch: number,
@@ -1582,6 +1635,7 @@ export class ProviderExecutionCoordinator {
       ));
       return;
     }
+    if (!await this.retireUnprovenPredecessor(entry)) return;
     this.unattachableRechecks.delete(entry.id);
     await this.archiveExitedRuntimes(entry.id);
     if (!activeExecution && entry.turn_control && entry.turn_control.status !== "completed") {
@@ -2102,6 +2156,8 @@ export class ProviderExecutionCoordinator {
       const ref = entry.provider_ref;
       if (entry.provider === "open-model" || ref.provider_connection?.kind === "opencode_server") {
         if (await this.stopUnattachedOpenModelRef(entry, ref)) return;
+      } else if (await this.stopEndedUnprovenRef(entry, ref)) {
+        return;
       }
       try {
         handle = await this.attachLiveProvider(entry);
@@ -2237,6 +2293,30 @@ export class ProviderExecutionCoordinator {
     const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
     if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return false;
     await this.stopUnattachedExactRef(entry, ref, Boolean(execution.terminal));
+    return true;
+  }
+
+  /**
+   * Stop or pause of an entry whose generation has a stored terminal record
+   * with no witnessed process death. The record is not proof that the process
+   * is gone, so the entry is not reported stopped until the adapter has
+   * proved the recorded process birth gone. A generation with no terminal
+   * record keeps the ordinary path: attach, then stop the handle.
+   */
+  private async stopEndedUnprovenRef(
+    entry: DaemonManifestEntry,
+    ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
+  ): Promise<boolean> {
+    const connection = ref.provider_connection;
+    if (!connection || !Number.isSafeInteger(connection.pid) || !connection.processIdentity) return false;
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (!execution?.terminal || execution.terminal.native_runtime_death) return false;
+    const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
+    if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return false;
+    await this.stopUnattachedExactRef(entry, ref, true);
     return true;
   }
 
