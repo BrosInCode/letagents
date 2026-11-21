@@ -120,7 +120,9 @@ test("the page reference states the desktop's watch, change and confirm rules", 
   const watchable = [...declaration(watch, "PAGE_WATCHABLE_METHODS").matchAll(/^ {2}"([\w.]+)": \{ resources: \[[^\]]*\], pollMs: ([\d_]+|null) \}/gm)];
   assert.deepEqual(watchable.map(([, method]) => method), [...PAGE_WATCHABLE_READS]);
   for (const [, method, poll] of watchable) {
-    const expected = method.startsWith("work_items.") ? String(PAGE_WATCH_LIMITS.workItemPollMs) : "null";
+    // A tracker changes with no webhook, and a planning edit sends no room event: both reads also run on a timer.
+    const expected = method.startsWith("work_items.") ? String(PAGE_WATCH_LIMITS.workItemPollMs)
+      : method === "planning.get" ? String(PAGE_WATCH_LIMITS.planningPollMs) : "null";
     assert.equal(poll.replaceAll("_", ""), expected, method);
   }
   assert.match(watch, new RegExp(`PAGE_WATCH_DEBOUNCE_MS = ${PAGE_WATCH_LIMITS.debounceMs};`));
