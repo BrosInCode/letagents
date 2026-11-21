@@ -987,7 +987,7 @@ test("credential-only reconnect reattaches the exact OpenCode runtime and checkp
       executionGenerationId: execution.execution_generation_id,
       providerConnection: recoveredConnection,
       configurationRevision: restoredConfiguration.runtime_configuration_revision,
-    }), "legacy", "reattach freezes the pre-existing native birth without current-policy inference");
+    }), "typed", "reattach freezes the pre-existing native birth as typed");
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();

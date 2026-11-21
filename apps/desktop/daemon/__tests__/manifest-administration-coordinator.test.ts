@@ -410,17 +410,6 @@ test("replaying a creation request returns the saved agent whatever name the rep
   );
 });
 
-test("manifest.put rejects caller-supplied polling custody before any write or convergence", async () => {
-  for (const polling_contract of ["custodial_polling_v1", "unknown", null, undefined]) {
-    const state = harness();
-    const candidate = { ...entry(), polling_contract };
-    await assert.rejects(() => state.subject.putManifestEntry(candidate),
-      /Polling custody is daemon-owned/);
-    assert.deepEqual(state.events, []);
-    assert.equal(state.manifest.entries.length, 0);
-  }
-});
-
 test("put enforces purge and admits a second supervised entry for the same room and provider", async () => {
   const purged = harness();
   purged.setPurgeComplete(true);

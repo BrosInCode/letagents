@@ -4,7 +4,7 @@
  * Modules:
  * - entry-reads.ts: Manifest and entry reads, runtime lifecycle authority, and typed lifecycle effects.
  * - approvals.ts: Execution approvals, host tool rules, managed-runtime checks and execution delegation.
- * - delivery-and-polling.ts: Delivery drains, agent configuration reads, live sharing, and custodial polling activation and offers.
+ * - delivery-and-polling.ts: Agent configuration reads and live sharing.
  * - room-moves-and-purges.ts: Room-move and purge journals.
  * - entries-and-recovery.ts: Agent configuration updates, entry replacement, provider birth checkpoints and runtime recovery.
  * - turn-control.ts: Turn-control preparation, target checkpoints and commit.

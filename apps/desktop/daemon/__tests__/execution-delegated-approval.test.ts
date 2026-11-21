@@ -70,7 +70,7 @@ function fixture(): DatabaseSync {
   `);
   materializeExecutionIdentity(db, {
     runtime: { agentId: "agent", executionGenerationId: "generation", runtimeGenerationId,
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 },
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 },
     message: { agentId: "agent", roomId: "room", executionGenerationId: "generation",
       sourceMessageId: "message", workspaceId: "workspace", createdAtMs: 100 },
     turn: { turnId, agentId: "agent", roomId: "room", executionGenerationId: "generation",

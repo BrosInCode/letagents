@@ -383,19 +383,13 @@ test("a hard runtime failure after provider control cannot be committed as healt
   }
 });
 
-test("daemon-inbox correction is stop-then-resend while a legacy lane keeps native correction", async () => {
+test("daemon-inbox correction is stop-then-resend", async () => {
   const daemonInbox = effectFixture({ deliveryMode: "daemon_inbox" });
   const daemonResult = await daemonInbox.subject.control({ ...turnInput(), correction: "redirect" });
   assert.deepEqual(daemonInbox.nativeCorrections, [null]);
   assert.deepEqual(daemonInbox.preparedStrategies, ["stop_then_resend"]);
   assert.deepEqual(daemonInbox.commitActivations, [true]);
   assert.equal(daemonResult.resumed, true, "durable correction activation is the resumed outcome");
-
-  const legacy = effectFixture({ deliveryMode: "mcp_polling" });
-  await legacy.subject.control({ ...turnInput(), correction: "redirect" });
-  assert.deepEqual(legacy.nativeCorrections, ["redirect"]);
-  assert.deepEqual(legacy.preparedStrategies, ["native"]);
-  assert.deepEqual(legacy.commitActivations, [false]);
 });
 
 test("provider uncertain freezes while explicit not-applied resumes, and both redact durable errors", async () => {

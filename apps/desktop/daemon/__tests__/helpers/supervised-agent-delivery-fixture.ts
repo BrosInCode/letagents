@@ -13,6 +13,7 @@ import { projectDeliveryReceipts } from "../../manifest-view-projection.js";
 import { DAEMON_PROTOCOL_VERSION } from "../../types.js";
 import { connectDaemon } from "../../../../../shared/daemon-endpoint.mjs";
 import { removeTestDirectory } from "../../../electron/__tests__/harness.js";
+import { runtimeReadySubscription } from "./daemon-fixture.js";
 
 export const agent = {
   agentId: "stone", roomId: "room", provider: "codex", deliveryMode: "daemon_inbox" as const, apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
@@ -36,7 +37,7 @@ export const provider = (
     turnControl: "unsupported" as const,
     continuationRepair: repairContinuation ? "same_process" as const : "unsupported" as const,
   }),
-  spawn: async () => { throw new Error("not used"); }, attach: async () => null, attachAction: async () => ({ state: "absent" as const }), resume: async () => { throw new Error("not used"); }, poke: async () => {}, stop: async () => ({ endedAt: "", exitCode: 0, signal: null, terminalCause: "stopped" as const, providerContinuationId: null }), onExit: async () => () => {}, runRoomTurn, recoverRoomTurn,
+  spawn: async () => { throw new Error("not used"); }, attach: async () => null, attachAction: async () => ({ state: "absent" as const }), resume: async () => { throw new Error("not used"); }, poke: async () => {}, stop: async () => ({ endedAt: "", exitCode: 0, signal: null, terminalCause: "stopped" as const, providerContinuationId: null }), onExit: async () => () => {}, onExecution: (handle, listener) => runtimeReadySubscription(handle, listener), runRoomTurn, recoverRoomTurn,
   repairContinuation,
 } satisfies ProviderActionPort);
 
@@ -134,6 +135,7 @@ export async function installExactTestProviderBirth(
         executionGenerationId: string,
         mayStartDelivery: () => boolean,
       ): Promise<void>;
+      drainCallbacks?: () => Promise<void>;
     };
   },
   entryId: string,
@@ -174,11 +176,12 @@ export async function installExactTestProviderBirth(
     executionGenerationId,
     providerConnection: handle.providerConnection,
     appliedRevision: handle.appliedConfigurationRevision ?? 1,
-    requestedAuthorityMode: "typed_shadow",
+    requestedAuthorityMode: "typed",
     observedAtMs: Date.now(),
   });
   internals.manifestGeneration = birth.generation;
   await internals.providerStreams.install(entryId, handle, executionGenerationId, () => false);
+  await internals.providerStreams.drainCallbacks?.();
 }
 
 export async function enqueue(store: SupervisedAgentInboxStore, id = "1") {

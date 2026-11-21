@@ -9,13 +9,10 @@ import type { ProcessIdentity } from "../process-identity.js";
 import type { DatabaseSync } from "node:sqlite";
 import { sameProviderActionConnectionSnapshot } from "../provider-action-port.js";
 import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, archiveExitedRuntimes, exitedRuntimesToArchive, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, readRuntimeRecovery, recordInterruptedCursorRecovery, type RuntimeRestartRequest, type RuntimeRecoveryRecord } from "../runtime-recovery-journal.js";
-import { assertNoPollingActivation } from "../custodial-polling-activation.js";
-import { assertNoDeliveryDrain } from "../delivery-drain.js";
 import { cancelInterruptedSupervisedTurn } from "../supervised-agent-history-retention.js";
 import type { SupervisedProviderTurnBinding } from "../supervised-agent-inbox-store.js";
 import { composeDaemonManifestEntry, projectDaemonManifestEntry } from "../manifest-entry-projection.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
-import { lifecycleAuthorityProviderSchema, type LifecycleAuthorityMode } from "../lifecycle-authority-mode.js";
 import type { DaemonAgentConfiguration, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
 import { type Row, type StoredAgentConfiguration, type PreMembershipRoomMoveCancellation, ManifestConflictError, json, canonicalManifestEntry, run, storeMethods } from "./shared.js";
 
@@ -34,8 +31,6 @@ export const entriesAndRecovery = storeMethods({
       let transactionOpen = false;
       const commit = async () => {
         database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
-        assertNoDeliveryDrain(database, input.agentId);
-        assertNoPollingActivation(database, input.agentId);
         const advanced = database.prepare("UPDATE manifest_metadata SET generation=generation+1 WHERE singleton=1 AND generation=?").run(expectedGeneration);
         if (Number(advanced.changes) !== 1) throw new ManifestConflictError("Manifest generation changed during configuration update.");
         const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,image_input=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.imageInput ? 1 : 0, input.agentId, input.expectedRevision);
@@ -113,11 +108,11 @@ export const entriesAndRecovery = storeMethods({
       providerConnection: DaemonProviderConnection;
       appliedRevision: number;
       managedLaunchContract?: string;
-      requestedAuthorityMode: LifecycleAuthorityMode;
+      requestedAuthorityMode?: "typed";
       observedAtMs: number;
     },
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode | null }> {
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: "typed" | null }> {
     const snapshot = structuredClone(input);
     const normalized = canonicalManifestEntry(snapshot.entry);
     const result = await this.writeTargeted(expectedGeneration, (database) => {
@@ -143,14 +138,14 @@ export const entriesAndRecovery = storeMethods({
         .get(ref.work_attempt_id, snapshot.executionGenerationId)) {
         throw new ManifestConflictError("Provider birth has no exact durable execution generation.");
       }
-      const provider = lifecycleAuthorityProviderSchema.safeParse(normalized.provider);
       const expectedProvider = {
         codex_app_server: "codex",
         claude_cli: "claude-code",
         cursor_cli: "cursor",
         opencode_server: "open-model",
       } as const;
-      if (!provider.success || provider.data !== expectedProvider[snapshot.providerConnection.kind]) {
+      const provider = expectedProvider[snapshot.providerConnection.kind];
+      if (normalized.provider !== provider) {
         throw new ManifestConflictError("Provider birth connection does not match its provider.");
       }
       const projection = projectDaemonManifestEntry(normalized);
@@ -161,7 +156,7 @@ export const entriesAndRecovery = storeMethods({
         snapshot.appliedRevision, normalized.id);
 
       const connection = snapshot.providerConnection;
-      let authorityMode: LifecycleAuthorityMode | null = null;
+      let authorityMode: "typed" | null = null;
       if (connection.pid === null || !connection.processIdentity) {
         if (connection.kind !== "cursor_cli" || connection.pid !== null || connection.processIdentity != null) {
           throw new ManifestConflictError("Provider birth requires an exact native process identity.");
@@ -169,18 +164,19 @@ export const entriesAndRecovery = storeMethods({
       } else {
         const runtimeGenerationId = executionRuntimeStorageIdentity(normalized.id,
           snapshot.executionGenerationId, connection.kind, connection.pid, connection.processIdentity);
-        authorityMode = materializeRuntimeIdentity(database, {
+        const persistedAuthority = materializeRuntimeIdentity(database, {
           agentId: normalized.id,
           executionGenerationId: snapshot.executionGenerationId,
           runtimeGenerationId,
-          provider: provider.data,
-          authorityMode: snapshot.requestedAuthorityMode,
+          provider,
+          authorityMode: "typed",
           configRevision: snapshot.appliedRevision,
           createdAtMs: snapshot.observedAtMs,
         });
-        if (authorityMode !== snapshot.requestedAuthorityMode) {
+        if (persistedAuthority !== "typed") {
           throw new Error("Provider birth retained an incompatible frozen lifecycle authority.");
         }
+        authorityMode = "typed";
         if (snapshot.managedLaunchContract !== undefined) {
           if (!/^[a-f0-9]{64}$/.test(snapshot.managedLaunchContract)) throw new Error("Invalid managed launch contract.");
           const prior = database.prepare("SELECT contract_sha256 FROM managed_launch_contracts WHERE runtime_generation_id=?").get(runtimeGenerationId);
@@ -214,8 +210,6 @@ export const entriesAndRecovery = storeMethods({
   async prepareRuntimeRecovery(expectedGeneration: number, input: RuntimeRestartRequest,
     commitFence: (commit: () => Promise<void>) => Promise<void>) {
     const result = await this.writeTargeted(expectedGeneration, database => {
-      assertNoDeliveryDrain(database, input.entryId);
-      assertNoPollingActivation(database, input.entryId);
       if (database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') LIMIT 1").get(input.entryId)) {
         throw new Error("Finish the room move before restarting this agent.");
       }

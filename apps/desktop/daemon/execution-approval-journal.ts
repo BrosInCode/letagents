@@ -4,7 +4,6 @@ import { z } from "zod";
 import { executionIdentity, nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import type { ApprovalState } from "./execution-reducer.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeExecutionIdentity } from "./execution-shadow-store.js";
-import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
 import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
 import type { DaemonManifestEntry } from "./types.js";
 
@@ -320,7 +319,7 @@ export function admitExecutionApproval(db: DatabaseSync, input: AdmitOperational
   const common = { agentId: value.agentId, roomId: value.roomId, executionGenerationId: turn.generation, createdAtMs: turn.createdAtMs };
   materializeExecutionIdentity(db, {
     runtime: { agentId: value.agentId, executionGenerationId: turn.generation, runtimeGenerationId: turn.runtimeId,
-      provider: parsed.authority.provider, authorityMode: lifecycleAuthorityModeForProvider(parsed.authority.provider, "daemon_inbox"),
+      provider: parsed.authority.provider, authorityMode: "typed",
       configRevision: parsed.authority.configurationRevision, createdAtMs: turn.createdAtMs },
     message: { ...common, sourceMessageId: turn.sourceMessageId, workspaceId: parsed.authority.workAttemptId },
     turn: { ...common, turnId: turn.turnId, runtimeGenerationId: turn.runtimeId,

@@ -37,7 +37,7 @@ export async function withRuntimeLaunchOwnership<T>(
 }
 
 export type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
-  lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
+  lifecycleAuthorityMode?: "typed";
   startupIntent?: {
     url: string;
   };
@@ -199,8 +199,6 @@ export async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeC
     throw new Error("OpenCode server authentication sidecar is malformed.");
   }
   if (value.lifecycleAuthorityMode !== undefined
-    && value.lifecycleAuthorityMode !== "legacy"
-    && value.lifecycleAuthorityMode !== "typed_shadow"
     && value.lifecycleAuthorityMode !== "typed") {
     throw new Error("OpenCode server authentication sidecar contains an invalid lifecycle authority.");
   }

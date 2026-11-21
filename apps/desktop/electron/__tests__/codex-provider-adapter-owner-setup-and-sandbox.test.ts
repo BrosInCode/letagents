@@ -74,14 +74,12 @@ test("the owner's own Codex setup reaches the app-server launch only for an exac
   })), /a rented agent never uses its owner's own setup/);
   assert.equal(rental.launches.length, 0, "nothing starts");
 
-  // An agent that collects its own room messages could not be held back once the setup is turned off, so it never has it.
-  for (const deliveryMode of [undefined, "mcp_polling"] as const) {
-    const polling = createHarness();
-    await assert.rejects(new CodexProviderAdapter({ dependencies: polling.dependencies }).spawn(spawnRequest({
-      ...supervised, ...(deliveryMode ? { deliveryMode } : { deliveryMode: undefined }), homeHarness: true,
-    })), /an agent that collects its own room messages never uses its owner's own setup/, String(deliveryMode));
-    assert.equal(polling.launches.length, 0, "nothing starts");
-  }
+  // An agent that does not name daemon_inbox delivery cannot use the owner's own setup.
+  const polling = createHarness();
+  await assert.rejects(new CodexProviderAdapter({ dependencies: polling.dependencies }).spawn(spawnRequest({
+    ...supervised, deliveryMode: undefined, homeHarness: true,
+  })), /an agent that collects its own room messages never uses its owner's own setup/);
+  assert.equal(polling.launches.length, 0, "nothing starts");
   // Its environment is cleared of the room agent's coordinates, so the room's server must be the one given its own copy.
   const unsupervised = createHarness();
   await assert.rejects(new CodexProviderAdapter({ dependencies: unsupervised.dependencies }).spawn(spawnRequest({ deliveryMode: "daemon_inbox", ...FULL_ACCESS, homeHarness: true })),

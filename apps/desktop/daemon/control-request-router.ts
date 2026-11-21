@@ -1,7 +1,5 @@
 import { retiredRuntimeEvidenceListSchema } from "./runtime-recovery-journal.js";
 import type { DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
-import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
-import type { CustodialForwardRequest, DeliveryDrainIdentity, DeliveryDrainRequest, PollingActivationRequest } from "./delivery-cutover-execution-coordinator.js";
 import type { createHostApprovalBridge } from "./host-approval-broker.js";
 
 /**
@@ -12,12 +10,6 @@ export interface DaemonControlOperations {
   mutateLocalBoard(input: unknown): Promise<unknown>;
   watchLocalBoard(input: unknown, signal: AbortSignal): Promise<unknown>;
   hostApprovals: Pick<ReturnType<typeof createHostApprovalBridge>, "challenge" | "verify" | "list" | "decide" | "listToolRules" | "revokeToolRule">;
-  activateCustodialPolling(input: PollingActivationRequest): unknown;
-  getPollingActivation(input: DeliveryDrainIdentity): unknown;
-  cancelPollingActivation(input: DeliveryDrainIdentity): unknown;
-  prepareDeliveryDrain(input: DeliveryDrainRequest | CustodialForwardRequest): unknown;
-  getDeliveryDrain(input: DeliveryDrainIdentity): unknown;
-  cancelDeliveryDrain(input: DeliveryDrainIdentity): unknown;
   status(): unknown;
   prepareHandoff(): unknown;
   /**
@@ -99,7 +91,6 @@ export interface DaemonControlOperations {
   }): unknown;
   bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number; initial_message?: string }): unknown;
   borrowWorkerCredential(input: WorkerSessionCoordinates & { daemon_generation: number; provider_turn_id: string; api_url: string }): unknown;
-  authorizeCustodialPolling(input: CustodialPollingAuthorizationInput): unknown;
   checkpointWorkerCursor(input: Omit<WorkerSessionCoordinates, "room_id"> & { room_cursor: string }): unknown;
   readAttempt(id: string): unknown;
 }
@@ -134,12 +125,11 @@ const HANDOFF_DRAIN_METHODS = new Set<string>([
   "local_board.watch", "attempt.read", "supervisor.watch_agent_stream", "supervisor.watch_background_commands",
   "supervisor.get_agent_inspector_detail",
   "supervisor.get_agent_configuration", "supervisor.get_room_move", "supervisor.get_current_room_move",
-  "supervisor.get_delivery_drain", "supervisor.get_polling_activation",
   "supervisor.host_approval_challenge", "supervisor.host_approval_request",
   "supervisor.prepare_bounded_effect", "supervisor.execute_bounded_tool", "supervisor.complete_bounded_effect",
   "supervisor.borrow_worker_credential", "supervisor.verify_worker_session", "supervisor.checkpoint_worker_cursor",
   "supervisor.install_host_grant", "supervisor.install_worker_credential", "supervisor.bind_worker_session",
-  "supervisor.authorize_custodial_polling", "supervisor.sync_execution_delegations",
+  "supervisor.sync_execution_delegations",
 ]);
 
 function paramsRecord(value: unknown): Record<string, unknown> {
@@ -332,47 +322,6 @@ export function createDaemonControlRequestHandler(
       }
       if (input?.actorId !== `host-${operations.hostApprovals.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
       return operations.hostApprovals.decide(input);
-    }
-    if (request.method === "supervisor.activate_custodial_polling"
-      || request.method === "supervisor.get_polling_activation"
-      || request.method === "supervisor.cancel_polling_activation") {
-      const params = paramsRecord(request.params);
-      const error = "Polling activation requires exact typed coordinates and the current daemon generation.";
-      if (positiveIntegerParam(params, "daemon_generation", error) !== context.currentGeneration()) throw new Error(error);
-      const identity = {
-        entryId: requiredStringParam(params, "entry_id", error),
-        operationId: requiredStringParam(params, "operation_id", error),
-      };
-      if (request.method === "supervisor.get_polling_activation") return operations.getPollingActivation(identity);
-      if (request.method === "supervisor.cancel_polling_activation") return operations.cancelPollingActivation(identity);
-      return operations.activateCustodialPolling({ ...identity,
-        requestId: requiredStringParam(params, "request_id", error),
-        roomId: requiredStringParam(params, "room_id", error),
-        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
-        reverseOperationId: requiredStringParam(params, "reverse_operation_id", error),
-      });
-    }
-    if (request.method === "supervisor.prepare_delivery_drain"
-      || request.method === "supervisor.prepare_custodial_forward"
-      || request.method === "supervisor.get_delivery_drain"
-      || request.method === "supervisor.cancel_delivery_drain") {
-      const params = paramsRecord(request.params);
-      const error = "Delivery drain requires exact typed coordinates and the current daemon generation.";
-      if (positiveIntegerParam(params, "daemon_generation", error) !== context.currentGeneration()) throw new Error(error);
-      const identity = {
-        entryId: requiredStringParam(params, "entry_id", error),
-        operationId: requiredStringParam(params, "operation_id", error),
-      };
-      if (request.method === "supervisor.get_delivery_drain") return operations.getDeliveryDrain(identity);
-      if (request.method === "supervisor.cancel_delivery_drain") return operations.cancelDeliveryDrain(identity);
-      const coordinates = { ...identity,
-        requestId: requiredStringParam(params, "request_id", error),
-        roomId: requiredStringParam(params, "room_id", error),
-        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
-      };
-      return request.method === "supervisor.prepare_custodial_forward"
-        ? operations.prepareDeliveryDrain({ ...coordinates, reverseOperationId: requiredStringParam(params, "reverse_operation_id", error) })
-        : operations.prepareDeliveryDrain(coordinates);
     }
     if (request.method === "manifest.watch_state") {
       const params = paramsRecord(request.params);
@@ -772,28 +721,6 @@ export function createDaemonControlRequestHandler(
         agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? 0),
         provider_turn_id: String(params.provider_turn_id ?? ""),
         api_url: String(params.api_url ?? ""),
-      });
-    }
-    if (request.method === "supervisor.authorize_custodial_polling") {
-      const params = paramsRecord(request.params);
-      if (params.room_cursor !== undefined && params.room_cursor !== null && typeof params.room_cursor !== "string") {
-        throw new Error("Custodial polling cursor must be a string or null.");
-      }
-      return operations.authorizeCustodialPolling({
-        entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
-        work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
-        agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? NaN),
-        api_url: String(params.api_url ?? ""), contract: String(params.contract ?? ""),
-        phase: String(params.phase ?? ""), tool_name: String(params.tool_name ?? ""),
-        expected_configuration_revision: Number(params.expected_configuration_revision ?? NaN),
-        process_incarnation_id: typeof params.process_incarnation_id === "string" ? params.process_incarnation_id : undefined,
-        // JSON-RPC numeric and string request IDs belong to different invocations.
-        mcp_request_id: typeof params.mcp_request_id === "string" || typeof params.mcp_request_id === "number" ? params.mcp_request_id : undefined,
-        room_cursor: params.room_cursor as string | null | undefined,
-        expected_activation_id: typeof params.expected_activation_id === "string" ? params.expected_activation_id : undefined,
-        expected_binding_epoch: typeof params.expected_binding_epoch === "number" ? params.expected_binding_epoch : undefined,
-        input_cursor: typeof params.input_cursor === "string" ? params.input_cursor : undefined,
-        offered_frontier: typeof params.offered_frontier === "string" ? params.offered_frontier : undefined,
       });
     }
     if (request.method === "supervisor.checkpoint_worker_cursor") {

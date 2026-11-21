@@ -790,7 +790,7 @@ test("v6 repair adds bounded delivery columns without shifting exact turn or cut
     const repaired = new ManifestStore(env.databasePath);
     const loaded = await repaired.load();
     const restored = loaded.entries[0]!;
-    assert.equal(restored.delivery_mode ?? "mcp_polling", "mcp_polling", "old v6 rows safely default to legacy ingress before cutover");
+    assert.equal(restored.delivery_mode, "daemon_inbox", "old v6 rows safely project daemon_inbox");
     assert.equal(restored.turn_control?.provider_turn_id, undefined, "missing v6 extension does not shift booleans into the turn id");
     assert.equal(restored.turn_control?.inbox_item_id, undefined);
     assert.equal(restored.turn_control?.correction_text, undefined);
@@ -801,15 +801,6 @@ test("v6 repair adds bounded delivery columns without shifting exact turn or cut
     await repaired.replaceEntry(loaded.generation, {
       ...restored,
       delivery_mode: "daemon_inbox",
-      delivery_cutover: {
-        work_attempt_id: "attempt_1",
-        execution_generation_id: "run_1",
-        provider_continuation_id: "thread_1",
-        provider_turn_id: "turn_repaired_cutover",
-        phase: "prepared",
-        error: null,
-        updated_at: "2026-07-19T00:02:04.000Z",
-      },
       turn_control: { ...restored.turn_control!, provider_turn_id: "turn_repaired_exact" },
     });
     const roundTrip = await repaired.load();
@@ -817,15 +808,7 @@ test("v6 repair adds bounded delivery columns without shifting exact turn or cut
     assert.equal(roundTrip.entries[0]?.turn_control?.provider_turn_id, "turn_repaired_exact");
     assert.equal(roundTrip.entries[0]?.turn_control?.has_correction, true);
     assert.equal(roundTrip.entries[0]?.turn_control?.status, "completed");
-    assert.deepEqual(roundTrip.entries[0]?.delivery_cutover, {
-      work_attempt_id: "attempt_1",
-      execution_generation_id: "run_1",
-      provider_continuation_id: "thread_1",
-      provider_turn_id: "turn_repaired_cutover",
-      phase: "prepared",
-      error: null,
-      updated_at: "2026-07-19T00:02:04.000Z",
-    });
+    assert.equal(roundTrip.entries[0]?.delivery_cutover, undefined);
     await repaired.close();
   } finally {
     await store.close();

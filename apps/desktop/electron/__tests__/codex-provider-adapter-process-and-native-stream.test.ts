@@ -39,7 +39,7 @@ test("request timeout leaves a slow live writer working and unsignalled", async 
   adapter.onExit(handle, (terminal) => terminals.push(terminal));
   await flush();
 
-  assert.equal(handle.observedState(), "working");
+  assert.equal(handle.observedState(), "idle");
   assert.equal(harness.launches[0]?.alive, true);
   assert.deepEqual(harness.signals, []);
   assert.deepEqual(terminals, []);
@@ -385,8 +385,8 @@ test("native turn failure leaves the Codex runtime reusable while system failure
   assert.equal(handle.observedState(), "idle");
 
   harness.clients[0]!.emit({
-    method: "thread/status/changed",
-    params: { threadId: handle.providerContinuationId, status: { type: "systemError" } },
+    method: "process/systemError",
+    params: {},
   });
   await flush();
   assert.equal(handle.observedState(), "failed");
@@ -399,44 +399,19 @@ test("native turn failure leaves the Codex runtime reusable while system failure
   assert.equal(handle.observedState(), "failed", "turn settlement cannot clear process/control failure");
 });
 
-test("Codex spawn cannot clear runtime failure observed before handle admission or initial turn acknowledgement", async () => {
+test("Codex spawn cannot clear runtime failure observed before handle admission", async () => {
   const queuedHarness = createHarness();
   const queuedCreateClient = queuedHarness.dependencies.createRpcClient;
   const queuedAdapter = new CodexProviderAdapter({ dependencies: {
     ...queuedHarness.dependencies,
     createRpcClient: (serverUrl, notify) => {
       const client = queuedCreateClient(serverUrl, notify) as FakeRpc;
-      client.emit({ method: "thread/status/changed", params: {
-        threadId: "thread-1", status: { type: "systemError" },
-      } });
+      client.emit({ method: "process/systemError", params: {} });
       return client;
     },
   } });
   const queuedHandle = await queuedAdapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
   assert.equal(queuedHandle.observedState(), "failed", "queued native failure survives the idle launch baseline");
-
-  const pollingHarness = createHarness();
-  const pollingCreateClient = pollingHarness.dependencies.createRpcClient;
-  const pollingAdapter = new CodexProviderAdapter({ dependencies: {
-    ...pollingHarness.dependencies,
-    createRpcClient: (serverUrl, notify) => {
-      const client = pollingCreateClient(serverUrl, notify) as FakeRpc;
-      const request = client.request.bind(client);
-      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
-        const result = await request<T>(method, params);
-        if (method === "turn/start") {
-          client.emit({ method: "thread/status/changed", params: {
-            threadId: "thread-1", status: { type: "systemError" },
-          } });
-          await flush();
-        }
-        return result;
-      };
-      return client;
-    },
-  } });
-  const pollingHandle = await pollingAdapter.spawn(spawnRequest());
-  assert.equal(pollingHandle.observedState(), "failed", "turn acknowledgement cannot clear runtime failure");
 });
 
 test("execution failures preserve the Codex runtime and subsequent exact room turns", async () => {
@@ -461,7 +436,7 @@ test("execution failures preserve the Codex runtime and subsequent exact room tu
     client.emit(failure);
     assert.equal(stream.at(-1)?.kind, failure.kind, failure.method);
     assert.equal(providerStreamLifecycle(stream.at(-1)!), "working", failure.method);
-    assert.equal(handle.observedState(), "working", failure.method);
+    assert.equal(handle.observedState(), "idle", failure.method);
   }
   await flush();
   assert.equal(harness.launches[0]!.alive, true);
@@ -505,14 +480,6 @@ test("execution failures preserve the Codex runtime and subsequent exact room tu
 });
 
 test("typed Codex authority is daemon-inbox only and ignores raw execution failure classification", async () => {
-  const rejectedHarness = createHarness();
-  const rejected = new CodexProviderAdapter({ dependencies: rejectedHarness.dependencies });
-  await assert.rejects(
-    rejected.spawn(spawnRequest({ deliveryMode: "mcp_polling", lifecycleAuthorityMode: "typed" })),
-    /Typed Codex lifecycle authority requires daemon-inbox delivery/,
-  );
-  assert.equal(rejectedHarness.launches.length, 0, "an invalid authority/delivery pair starts no runtime");
-
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest({

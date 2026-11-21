@@ -99,6 +99,15 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       store: ManifestStore;
       manifestGeneration: number;
       supervisedInbox: SupervisedAgentInboxStore;
+      providerStreams: {
+        install(
+          entryId: string,
+          handle: typeof liveHandle,
+          executionGenerationId: string,
+          mayStartDelivery: () => boolean,
+        ): Promise<void>;
+        drainCallbacks: () => Promise<void>;
+      };
       workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
       durability: {
         getAttempt(id: string): Promise<{ work_attempt_id: string; checkpoints: Array<{ provider_continuation_id: string | null }> }>;
@@ -165,11 +174,12 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       executionGenerationId: identity.execution,
       providerConnection: connection,
       appliedRevision: 1,
-      requestedAuthorityMode: "typed_shadow",
+      requestedAuthorityMode: "typed",
       observedAtMs: Date.now(),
     });
     internals.manifestGeneration = birth.generation;
-    internals.liveHandles.set("stone", liveHandle);
+    await internals.providerStreams.install("stone", liveHandle, identity.execution, () => false);
+    await internals.providerStreams.drainCallbacks();
     await internals.workerBindings.bind({
       entry_id: "stone", room_id: "room", work_attempt_id: identity.attempt,
       execution_generation_id: identity.execution, agent_session_id: identity.session,

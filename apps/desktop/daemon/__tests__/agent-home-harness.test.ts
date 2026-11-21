@@ -371,20 +371,15 @@ test("turning the owner's own setup off restarts an idle agent that still has it
   }
 });
 
-test("a signed request still cannot give a rental, a Cursor agent, an Open Model agent or an agent that collects its own messages the owner's own setup", { timeout: 60_000 * WAIT_SCALE }, async () => {
+test("a signed request still cannot give a rental, a Cursor agent, or an Open Model agent the owner's own setup", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, configuration, setOwnSetup, storedPolicy, forceStoredKey }) => {
-    for (const [id, provider, availability, reason, deliveryMode] of [
-      ["supervised_rental_0123456789abcdef", "cursor", "rental", /rented agent works for someone else/, "daemon_inbox"],
-      ["supervised_rental_fedcba9876543210", "codex", "rental", /rented agent works for someone else/, "daemon_inbox"],
-      ["supervised_cursor", "cursor", "unsupported", /no setup of yours/, "daemon_inbox"],
-      ["supervised_open", "open-model", "unsupported", /no setup of yours/, "daemon_inbox"],
-      // Agents on the older delivery, where each collects its own room messages: turning it off could not be enforced.
-      ["supervised_polling_codex", "codex", "polling", /^Not available for this agent: it fetches its own messages, so LetAgents can't reliably switch your setup off again\.$/, "mcp_polling"],
-      ["supervised_polling_claude", "claude-code", "polling", /it fetches its own messages/, undefined],
+    for (const [id, provider, availability, reason] of [
+      ["supervised_rental_0123456789abcdef", "cursor", "rental", /rented agent works for someone else/],
+      ["supervised_rental_fedcba9876543210", "codex", "rental", /rented agent works for someone else/],
+      ["supervised_cursor", "cursor", "unsupported", /no setup of yours/],
+      ["supervised_open", "open-model", "unsupported", /no setup of yours/],
     ] as const) {
-      const { delivery_mode: _delivered, ...polling } = agent(id, provider);
-      const created = await daemonRequest(socketPath, "manifest.put", { entry: deliveryMode === "daemon_inbox" ? agent(id, provider)
-        : { ...polling, ...(deliveryMode ? { delivery_mode: deliveryMode } : {}) } });
+      const created = await daemonRequest(socketPath, "manifest.put", { entry: agent(id, provider) });
       assert.equal(created.ok, true, created.error);
       assert.equal((await configuration(id)).home_harness_availability, availability);
       const refused = await setOwnSetup(id, true);
@@ -399,7 +394,7 @@ test("a signed request still cannot give a rental, a Cursor agent, an Open Model
 
     // A value that reached the stored policy some other way is still not the owner's choice for these agents.
     forceStoredKey();
-    for (const id of ["supervised_rental_0123456789abcdef", "supervised_rental_fedcba9876543210", "supervised_cursor", "supervised_open", "supervised_polling_codex", "supervised_polling_claude"]) {
+    for (const id of ["supervised_rental_0123456789abcdef", "supervised_rental_fedcba9876543210", "supervised_cursor", "supervised_open"]) {
       assert.equal(storedPolicy(id)[KEY], false, "the test did plant the value");
       assert.equal((await configuration(id)).home_harness, false, id);
     }
@@ -407,7 +402,7 @@ test("a signed request still cannot give a rental, a Cursor agent, an Open Model
     assert.equal(planted.some((item) => Object.hasOwn(item, "home_harness")), false, "no list or badge shows it for them");
 
     // And the next ordinary Save of such an agent takes the planted value out of what is stored.
-    for (const [id, profile] of [["supervised_rental_fedcba9876543210", "full_access"], ["supervised_cursor", "sandboxed_write"], ["supervised_polling_codex", "full_access"]] as const) {
+    for (const [id, profile] of [["supervised_rental_fedcba9876543210", "full_access"], ["supervised_cursor", "sandboxed_write"]] as const) {
       const current = await configuration(id);
       const saved = await daemonRequest(socketPath, "supervisor.update_agent_configuration", {
         entry_id: id, daemon_generation: current.daemon_generation, expected_revision: current.config_revision,

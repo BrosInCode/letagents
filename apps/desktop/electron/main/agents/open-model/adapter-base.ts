@@ -105,7 +105,6 @@ export abstract class OpenModelAdapterBase {
     this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
       providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
       nativeEventId: checkpoint.nativeEventId });
-    this.emitLifecycleProjection(handle, "turn/started", checkpoint.nativeEventId, checkpoint.phase);
   }
 
   protected emitTurnTerminal(handle: OpenModelHandle, turnId: string, outcome: TurnOutcome): void {
@@ -125,17 +124,6 @@ export abstract class OpenModelAdapterBase {
     this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome,
       sideEffects: "none", providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
       nativeEventId: checkpoint.nativeEventId });
-    this.emitLifecycleProjection(handle, "turn/completed", checkpoint.nativeEventId, checkpoint.phase);
-  }
-
-  protected emitLifecycleProjection(
-    handle: OpenModelHandle,
-    method: "turn/started" | "turn/completed",
-    nativeEventId: string,
-    nativeLifecyclePhase: "turn_active" | "turn_terminal",
-  ): void {
-    this.emitStream(handle, { kind: "turn_lifecycle", method, summary: null, payload: null,
-      nativeEventId, nativeLifecyclePhase, lifecycleProjectionOnly: true });
   }
 
   protected required(handle: ProviderHandle): OpenModelHandle {
@@ -329,7 +317,7 @@ export abstract class OpenModelAdapterBase {
   protected emitStream(
     handle: OpenModelHandle,
     input: Pick<ProviderStreamEvent, "kind" | "method"> & Partial<Pick<ProviderStreamEvent,
-      "nativeEventId" | "nativeLifecyclePhase" | "lifecycleProjectionOnly" | "liveDisplayOnly">> & {
+      "nativeEventId" | "nativeLifecyclePhase" | "liveDisplayOnly">> & {
       summary: string | null;
       payload: unknown;
       /** The caller already redacted part of the payload. */
@@ -347,7 +335,6 @@ export abstract class OpenModelAdapterBase {
       method: input.method,
       ...(input.nativeEventId ? { nativeEventId: input.nativeEventId } : {}),
       ...(input.nativeLifecyclePhase ? { nativeLifecyclePhase: input.nativeLifecyclePhase } : {}),
-      ...(input.lifecycleProjectionOnly ? { lifecycleProjectionOnly: true as const } : {}),
       ...(input.liveDisplayOnly ? { liveDisplayOnly: true as const } : {}),
       summary: input.summary,
       payload: safe.payload,

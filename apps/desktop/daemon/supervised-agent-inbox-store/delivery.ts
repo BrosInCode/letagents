@@ -1,7 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { pendingRuntimeRecovery } from "../runtime-recovery-journal.js";
 import { prepareRoomContext } from "../prepared-room-context.js";
-import { deliveryDrainAllowsAdmission } from "../delivery-drain.js";
 import { FOLLOW_UP_ENDED } from "../task-continuity.js";
 import { cancelInterruptedSupervisedTurn, readDurableNativeFailure } from "../supervised-agent-history-retention.js";
 import type { SupervisedInboxState, SupervisedRetryDomain, SupervisedInboxItem, InboxHeadSnapshot, SupervisedInboxItemMetadata, Row } from "./types.js";
@@ -65,7 +64,6 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       // prevents a later item becoming blocked and hiding the real stall.
       if (!finalStates.has(next)) this.assertCurrentHead(database, item);
       if (next === "dispatching" && item.state !== "pending") throw new Error("Only the current pending FIFO head may be dispatched.");
-      if (next === "dispatching" && !deliveryDrainAllowsAdmission(database, item)) throw new Error("Delivery drain blocks new turn admission.");
       if (Object.hasOwn(patch, "provider_turn_id")
         && patch.provider_turn_id !== item.provider_turn_id) {
         throw new Error("Provider turn identity may change only through the atomic turn-start checkpoint.");
@@ -115,7 +113,6 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
         // blocked after A finishes until the accepted action completes.
         if (status !== "retryable" || linkedInboxItemId === null || item.inbox_item_id !== linkedInboxItemId) return null;
       }
-      if (!deliveryDrainAllowsAdmission(database, item)) return null;
       if (item.state === "result_recovery") return item;
       if (item.state !== "pending") return null;
       if (this.readTaskContinuation(database, item) && item.next_attempt_at_ms !== null
@@ -146,7 +143,6 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       const item = rowToItem(current);
       if (item.state !== "dispatching" || item.provider_turn_id) throw new Error("Provider dispatch intent requires an unstarted dispatching inbox item.");
       this.assertCurrentHead(database, item);
-      if (!deliveryDrainAllowsAdmission(database, item)) throw new Error("Delivery drain blocks new turn dispatch.");
       if (context) {
         const snapshot = prepareRoomContext(context, this.now());
         run(database.prepare(`INSERT INTO supervised_agent_prepared_context(inbox_item_id,snapshot_json) VALUES (?,?)

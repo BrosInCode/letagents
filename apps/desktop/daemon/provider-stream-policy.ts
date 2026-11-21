@@ -47,12 +47,10 @@ export function providerStreamLifecycle(event: ProviderActionStreamEvent, daemon
   // Do not exempt arbitrary process/terminal errors.
   const executionScoped = /^(?:item\/|command\/exec(?:\/|$))/i.test(method) || event.kind === "tool_lifecycle";
   // The Claude adapter labels only recognized turn-limit errors as lifecycle
-  // events. Keep their failure payload intact, but never fence the session
-  // ("terminal" would still fence legacy mcp_polling continuations).
+  // events. Keep their failure payload intact without fencing the session.
   if (event.provider === "claude-code" && event.kind === "turn_lifecycle" && /^result\/error_/.test(method)) return "idle";
   // Codex turn failure is an exact terminal turn outcome, not app-server
-  // failure. The coordinator preserves the observed terminal edge for legacy
-  // cutover, then maps it to runtime-idle without fencing the reusable server.
+  // failure; map it to runtime-idle without fencing the reusable server.
   // Transcript snapshots may carry the same turn-scoped result without a live
   // turn notification, but hard thread failure evidence always wins.
   const codexTranscript = event.provider === "codex"

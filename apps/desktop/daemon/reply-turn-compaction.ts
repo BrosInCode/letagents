@@ -38,8 +38,7 @@ export class ReplyTurnCompactionObserver {
 
   observe(event: ProviderActionStreamEvent): void {
     if (this.closed || event.provider !== "codex" || event.workAttemptId !== this.scope.workAttemptId
-      || event.providerContinuationId !== this.scope.providerContinuationId
-      || event.lifecycleProjectionOnly) return;
+      || event.providerContinuationId !== this.scope.providerContinuationId) return;
     const terminal = /^turn\/(?:completed|interrupted|failed|cancelled|stopped)$/.test(event.method);
     if (event.payloadTruncated || event.payloadRedacted) {
       // Partial native terminal evidence can revoke this optional hint, but

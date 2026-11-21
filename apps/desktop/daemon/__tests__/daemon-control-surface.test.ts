@@ -1158,7 +1158,7 @@ test("purgeAgent drops the ephemeral live feed and settles its outstanding waite
     const status = (await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number };
     // A fully stopped durable identity carrying a live-feed transcript.
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
-      ...entry, id: "purge_streams", desired_state: "stopped", observed_state: "stopped",
+      ...entry, id: "purge_streams", desired_state: "stopped", observed_state: "stopped", last_worker_binding: null,
     } })).ok, true);
     internals.pushAgentStreamEvent("purge_streams", mk("hello"));
     assert.equal((await internals.watchAgentStream({ entryId: "purge_streams", afterSequence: 0, waitMs: 0 })).events.length, 1);
@@ -1169,10 +1169,12 @@ test("purgeAgent drops the ephemeral live feed and settles its outstanding waite
     // A successful purge settles the waiter and drops the entry's ephemeral state.
     const purge = (await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
       entry_id: "purge_streams", daemon_generation: status.generation, revoked_agent_session_id: null,
+      grant_revoked_without_worker_session: true,
     })).result as { outcome: string };
     assert.equal(purge.outcome, "purged");
     const replay = (await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
       entry_id: "purge_streams", daemon_generation: status.generation, revoked_agent_session_id: null,
+      grant_revoked_without_worker_session: true,
     })).result as { outcome: string };
     assert.equal(replay.outcome, "purged", "a completed purge tombstone remains replayable after the identity row is gone");
     await pending; // the blocked watcher returns rather than hanging to its own timeout

@@ -236,13 +236,11 @@ test("a launch uses the owner's own setup only for an exact true, an owner's age
       /a rented agent never uses its owner's own setup/,
     );
     // Only an agent the daemon delivers room messages to can be held back once the owner turns the setup off.
-    for (const deliveryMode of [undefined, "mcp_polling"] as const) {
-      assert.throws(
-        () => spawnUsesHomeHarness(provider, { homeHarness: true, supervisorEntryId: "supervised_abc", ...(deliveryMode ? { deliveryMode } : {}) }),
-        /an agent that collects its own room messages never uses its owner's own setup/, String(deliveryMode),
-      );
-      assert.equal(spawnUsesHomeHarness(provider, { supervisorEntryId: "supervised_abc", ...(deliveryMode ? { deliveryMode } : {}) }), false, "without the request it is an ordinary launch");
-    }
+    assert.throws(
+      () => spawnUsesHomeHarness(provider, { homeHarness: true, supervisorEntryId: "supervised_abc" }),
+      /an agent that collects its own room messages never uses its owner's own setup/,
+    );
+    assert.equal(spawnUsesHomeHarness(provider, { supervisorEntryId: "supervised_abc" }), false, "without the request it is an ordinary launch");
     // A rental without the request is an ordinary launch.
     assert.equal(spawnUsesHomeHarness(provider, { supervisorEntryId: "supervised_rental_abc" }), false);
   }

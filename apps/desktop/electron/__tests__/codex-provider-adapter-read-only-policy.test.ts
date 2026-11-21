@@ -336,14 +336,6 @@ test("Codex Read-only starts with web search off, at launch and for every conver
   }, { checkpointReplacement: async () => {} });
   assert.deepEqual(sent(found.clients[1]!, "thread/start")[0]!.config, { web_search: "disabled" });
 
-  // The polling kind of launch is not started at Read-only at all: see the test of the room tools.
-  const polling = createHarness();
-  await assert.rejects(new CodexProviderAdapter({ dependencies: polling.dependencies }).spawn(readOnly({
-    pollingContract: "custodial_polling_v1", deliveryMode: "mcp_polling", supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
-    supervisorExecutionGenerationId: "execution_exact", supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" } })),
-    /^Error: Read-only access is for a Codex agent that LetAgents delivers room messages to\./);
-  assert.deepEqual(polling.launchOptions, [], "no Codex was started");
-
   // No other access level changes: no override, and a stored config reaches the conversation as it always did.
   for (const [permissionProfileId, launchPolicy] of [
     ["full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
@@ -632,19 +624,6 @@ test("a Read-only Codex agent's room tools are an exact named list, and every ot
   assert.deepEqual(unnamed.modes, unchanged);
   assert.equal(unnamed.defaultMode, "writes");
   assert.deepEqual(unnamed.otherOverrides, []);
-
-  // The background service holds that list only where it runs the room tools itself. An agent that
-  // collects its own messages calls the room server directly, and only Codex would hold the list there.
-  // So that kind of launch is not started at Read-only, and its owner is told what to do.
-  const polling = { pollingContract: "custodial_polling_v1" as const, deliveryMode: "mcp_polling" as const };
-  const NOT_FOR_POLLING = "Read-only access is for a Codex agent that LetAgents delivers room messages to. This agent collects its own room messages, "
-    + "so LetAgents cannot hold it to the room tools that Read-only allows, and did not start it. Choose another access level for this agent.";
-  await assert.rejects(launchOf({ ...polling, ...readOnlyLevel }), (error: Error) => error.message === NOT_FOR_POLLING);
-  // A launch that does not say how its messages arrive is taken as that kind too.
-  await assert.rejects(new CodexProviderAdapter({ dependencies: createHarness().dependencies }).spawn(spawnRequest({ ...readOnlyLevel, configurationRevision: 1 })),
-    (error: Error) => error.message === NOT_FOR_POLLING);
-  const pollingFullAccess = await launchOf({ ...polling, permissionProfileId: "full_access", launchPolicy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } });
-  assert.equal(pollingFullAccess.tools.includes("wait_for_messages"), true, "every other level starts that kind of launch as before");
 
   // The daemon compares one launch contract for a room server: a Read-only agent records the one it expects,
   // so it is not replaced again and again as out of date.

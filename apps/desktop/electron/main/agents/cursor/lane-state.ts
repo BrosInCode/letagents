@@ -127,7 +127,7 @@ export class CursorProviderHandle implements ProviderHandle {
     readonly workAttemptId: string,
     readonly cwd: string,
     readonly policyArgs: string[],
-    readonly deliveryMode: "mcp_polling" | "daemon_inbox",
+    readonly deliveryMode: "daemon_inbox",
     readonly spawnRequest: ProviderSpawnRequest,
     readonly supervisedProfile: CursorManagedProfile | null,
     now: () => string,

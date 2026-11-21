@@ -9,7 +9,6 @@ export const LETAGENTS_RUNTIME_READINESS_URI = "letagents://runtime/readiness";
 export type LetAgentsRuntimeContract = {
   format: 1;
   profiles: {
-    supervised_mcp_polling: { contract: "custodial_polling_v1"; tools: string[] };
     cursor_supervised_room_turn: {
       tools: string[];
     };
@@ -57,7 +56,6 @@ export function letAgentsRuntimeContract(apiUrl: string | undefined = process.en
   return {
     format: 1,
     profiles: {
-      supervised_mcp_polling: { contract: "custodial_polling_v1", tools: registeredToolNames("supervised_mcp_polling", "codex", apiUrl) },
       cursor_supervised_room_turn: {
         tools: registeredToolNames("supervised_room_turn", "cursor", apiUrl),
       },

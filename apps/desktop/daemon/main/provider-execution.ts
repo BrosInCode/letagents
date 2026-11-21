@@ -2,7 +2,6 @@
  * Builds the provider side of the daemon: provider streams, scheduler
  * failures, provider execution and provider reconciliation.
  */
-import { unavailableLifecycleProjectionDiagnostics } from "../lifecycle-projection-ledger.js";
 import { ProviderExecutionCoordinator } from "../provider-execution-coordinator.js";
 import { ProviderReconciliationCoordinator } from "../provider-reconciliation-coordinator.js";
 import { ProviderSchedulerFailureCoordinator } from "../provider-scheduler-failure-coordinator.js";
@@ -24,11 +23,6 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
       observeExecution: (installation) => (this.typedLifecycleEffects?.changed(installation.entryId),
         this.executionCapture?.install(installation) ?? (() => {})),
       advanceExecution: (installation) => { this.typedLifecycleEffects?.changed(installation.entryId); this.executionCapture?.advance(installation); },
-      observeLegacyLifecycle: (observation) => this.executionCapture?.recordLegacyLifecycle(observation),
-      markLifecycleProjectionUnavailable: (provider) => this.executionCapture?.recordLifecycleProjectionUnavailable(provider),
-      lifecycleProjectionDiagnostics: () => this.executionCapture?.lifecycleProjectionDiagnostics()
-        ?? unavailableLifecycleProjectionDiagnostics(),
-      captureAdmission: (installation) => this.executionCapture?.captureAdmission(installation) ?? "unavailable",
       typedLifecycleAdmission: (installation) => this.executionCapture?.typedLifecycleAdmission(installation) ?? "unavailable",
       recordBlock: (installation) => this.executionCapture?.recordBlock(installation) ?? null,
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
@@ -42,7 +36,6 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
         readRuntimeLifecycleAuthority: (input) => this.store.readRuntimeLifecycleAuthority(input),
       },
       bindings: this.workerBindings,
-      durability: this.durability,
       runtimeCustody: this.workerRuntimeCustody,
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeManifest: (operation) => this.serializeManifestMutation(operation),
@@ -61,7 +54,6 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
       },
       delivery: {
         start: (entryId) => this.startSupervisedDelivery(entryId),
-        startCutover: (entryId) => this.deliveryCutovers.start(entryId),
       },
       heartbeat: {
         intervalMs: this.nativeHeartbeatIntervalMs,

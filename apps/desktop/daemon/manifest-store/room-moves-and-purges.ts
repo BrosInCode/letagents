@@ -6,8 +6,6 @@
  * A method name may be defined in only one module; store.ts throws on a duplicate.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { assertNoPollingActivation } from "../custodial-polling-activation.js";
-import { assertNoDeliveryDrain } from "../delivery-drain.js";
 import { cancelInterruptedSupervisedTurn, pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
 import type { DaemonPurgePhase, DaemonPurgeRecord, DaemonPurgeWorkerSessionAttestation, DaemonRoomMovePhase, DaemonRoomMoveRecord } from "../types.js";
 import { type Row, roomMoveFromRow, purgeFromRow, ManifestConflictError, bool, nullableString, json, run, storeMethods } from "./shared.js";
@@ -33,8 +31,6 @@ export const roomMovesAndPurges = storeMethods({
             if (move.operation_id !== input.operation_id || move.agent_id !== input.agent_id || move.source_room_id !== input.source_room_id || move.destination_room_id !== input.destination_room_id || move.execution_generation_id !== input.execution_generation_id) throw new Error("Room-move request id is already bound to different coordinates.");
             result = { created: false, move };
           } else {
-            assertNoDeliveryDrain(database, input.agent_id);
-            assertNoPollingActivation(database, input.agent_id);
             const unresolvedControl = database.prepare(`SELECT action_id FROM turn_control_journals
               WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id) as Row | undefined;
             if (unresolvedControl) {

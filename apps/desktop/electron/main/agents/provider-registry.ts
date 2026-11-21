@@ -143,7 +143,7 @@ export function getDesktopAgentProvider(
 
 export function supervisedDeliveryModeForProvider(
   providerId: DesktopAgentProviderId,
-): "mcp_polling" | "daemon_inbox" {
+): "daemon_inbox" {
   const provider = getDesktopAgentProvider(providerId);
   if (!provider?.capabilities.includes("supervised_runtime") || !provider.supervisedDeliveryMode) {
     throw new Error(`${provider?.name ?? providerId} is not available through the supervised engine.`);

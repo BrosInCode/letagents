@@ -442,11 +442,11 @@ test("runtime lifecycle authority lookup reads only the exact frozen native birt
   await store.load(); const database = new DatabaseSync(env.databasePath);
   const base = { agentId: "agent", executionGenerationId: "generation", configurationRevision: 3 };
   const births = [
-    { providerConnection: { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "codex-birth" }, provider: "codex", mode: "legacy" },
-    { providerConnection: { kind: "claude_cli", pid: 4312, processIdentity: "claude-birth" }, provider: "claude-code", mode: "typed_shadow" },
+    { providerConnection: { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "codex-birth" }, provider: "codex", mode: "typed" },
+    { providerConnection: { kind: "claude_cli", pid: 4312, processIdentity: "claude-birth" }, provider: "claude-code", mode: "typed" },
     { providerConnection: { kind: "cursor_cli", pid: 4313, processIdentity: "cursor-birth-a" }, provider: "cursor", mode: "typed" },
-    { providerConnection: { kind: "opencode_server", url: "http://127.0.0.1:4314", pid: 4314, processIdentity: "opencode-birth", serverAuthPath: "/test/auth" }, provider: "open-model", mode: "typed_shadow" },
-  ] as const satisfies ReadonlyArray<{ providerConnection: DaemonProviderConnection; provider: "codex" | "claude-code" | "cursor" | "open-model"; mode: "legacy" | "typed_shadow" | "typed" }>;
+    { providerConnection: { kind: "opencode_server", url: "http://127.0.0.1:4314", pid: 4314, processIdentity: "opencode-birth", serverAuthPath: "/test/auth" }, provider: "open-model", mode: "typed" },
+  ] as const satisfies ReadonlyArray<{ providerConnection: DaemonProviderConnection; provider: "codex" | "claude-code" | "cursor" | "open-model"; mode: "typed" }>;
   const input = { ...base, providerConnection: births[2].providerConnection };
   try {
     const shadow = new ExecutionShadowStore(database);
@@ -461,8 +461,8 @@ test("runtime lifecycle authority lookup reads only the exact frozen native birt
       input.providerConnection.kind, input.providerConnection.pid, input.providerConnection.processIdentity);
     const runtime = { agentId: input.agentId, executionGenerationId: input.executionGenerationId, runtimeGenerationId,
       provider: "cursor" as const, configRevision: input.configurationRevision };
-    assert.equal(shadow.registerRuntime({ ...runtime, authorityMode: "legacy", createdAtMs: 101 }), "typed",
-      "later policy requests cannot relabel the birth");
+    assert.equal(shadow.registerRuntime({ ...runtime, authorityMode: "typed", createdAtMs: 101 }), "typed",
+      "re-registering the same birth is idempotent");
     assert.equal(await store.readRuntimeLifecycleAuthority(input), "typed");
     const queuedChild = structuredClone(input);
     const queuedRead = store.readRuntimeLifecycleAuthority(queuedChild);
@@ -510,7 +510,6 @@ test("approval journal rechecks operational checkpoint and configuration at sele
       ["runtime_deployments", "provider_process_identity", "other", "birth"],
       ["runtime_deployments", "provider_connection_url", "http://127.0.0.1:9999", "http://127.0.0.1:4311"],
       ["agent_configurations", "runtime_configuration_revision", 2, 1],
-      ["agent_configurations", "delivery_mode", "mcp_polling", "daemon_inbox"],
       ["agent_launch_intents", "desired_state", "paused", "running"],
       ["work_attempt_executions", "terminal_json", "{}", null],
     ] as const;

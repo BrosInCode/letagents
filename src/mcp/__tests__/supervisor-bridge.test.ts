@@ -12,7 +12,6 @@ import {
 } from "../server/runtime/supervised-room-authority.js";
 import {
   borrowSupervisedWorkerCredential,
-  authorizeCustodialPolling,
   borrowCurrentSupervisedWorkerCredential,
   bindSupervisedWorkerSession,
   bindSupervisedWorkerSessionWithContext,
@@ -41,101 +40,6 @@ const session: StoredAgentSessionState = {
   updated_at: "2026-01-01T00:00:00.000Z",
   last_seen_at: "2026-01-01T00:00:00.000Z",
 };
-
-test("custodial wait negotiates receipts and release retains exact invocation, binding and generation", async () => {
-  const root = await mkdtemp(join(tmpdir(), "custodial-gate-"));
-  const socketPath = testDaemonSocketPath(root);
-  const requests: any[] = [];
-  let capable = false;
-  let offersCapable = false;
-  let generation = 17;
-  let overrides: Record<string, unknown> = {};
-  const server = createServer((socket) => {
-    let buffer = "";
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk: string) => {
-      buffer += chunk;
-      if (!buffer.includes("\n")) return;
-      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
-      requests.push(request);
-      const negotiation = request.method === "daemon.negotiate";
-      const stale = !negotiation && request.params.daemon_generation !== generation;
-      const result = negotiation
-        ? { protocol_version: 2, generation, pid: 123, started_at: "2026-08-02T00:00:00.000Z", capabilities: { custodialPollingV1: capable, custodialPollingOffersV1: offersCapable } }
-        : { status: "authorized", contract: "custodial_polling_v1", room_id: "room_exact", agent_session_id: "session_exact", room_cursor: "msg_7", configuration_revision: 3,
-          activation_id: "activation_exact", binding_epoch: 4, ...overrides };
-      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: !stale, result })}\n`);
-    });
-  });
-  try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
-    const env = {
-      LETAGENTS_EXECUTION_PROFILE: "supervised_mcp_polling", LETAGENTS_API_URL: "https://example.test",
-      LETAGENTS_SUPERVISOR_PROVIDER: "codex", LETAGENTS_SUPERVISOR_ENTRY_ID: "entry_exact",
-      LETAGENTS_SUPERVISOR_DAEMON_SOCKET: socketPath, LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "attempt_exact",
-      LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_exact", LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "session_exact",
-      LETAGENTS_SUPERVISOR_ROOM_ID: "room_exact",
-    };
-    const options = { trustedDaemonSocketPath: socketPath, cwd: root };
-    const invocation = { mcpRequestId: 1, roomCursor: "msg_900" };
-    await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options), /MCP request id/);
-    for (const mismatched of [{ requestedRoomId: "other" }, { requestedAgentSessionId: "other" }]) {
-      await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options, { ...invocation, ...mismatched }), /exact authority/);
-    }
-    assert.equal(requests.length, 0, "missing SDK identity must fail before negotiation");
-    await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options, invocation), /does not support/);
-    assert.equal(requests.length, 1);
-    capable = true;
-    await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options, invocation), /does not support custodialPollingOffersV1/);
-    assert.equal(requests.length, 2, "no receipt capability means no wait authorization or checkpoint fallback");
-    const read = await authorizeCustodialPolling("read_messages", undefined, env, options);
-    await authorizeCustodialPolling("read_messages", read, env, options);
-    assert.equal(requests.at(-1).params.process_incarnation_id, undefined);
-    assert.equal(requests.at(-1).params.room_cursor, undefined, "read_messages never acknowledges a cursor");
-    offersCapable = true;
-    const before = await authorizeCustodialPolling("wait_for_messages", undefined, env, options, invocation);
-    assert.equal(before.roomCursor, "msg_7", "the daemon's authoritative cursor wins over the requested cursor");
-    const numericRequest = requests.at(-1);
-    assert.equal(numericRequest.params.room_cursor, "msg_900");
-    assert.equal(numericRequest.params.mcp_request_id, 1);
-    assert.match(numericRequest.params.process_incarnation_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    await authorizeCustodialPolling("wait_for_messages", undefined, env, options, { mcpRequestId: "1", roomCursor: null });
-    assert.equal(requests.at(-1).params.mcp_request_id, "1");
-    assert.equal(requests.at(-1).params.room_cursor, null);
-    assert.equal(requests.at(-1).params.process_incarnation_id, numericRequest.params.process_incarnation_id, "one incarnation spans every request in this MCP process");
-    await authorizeCustodialPolling("wait_for_messages", before, env, options, { ...invocation, offeredFrontier: "msg_19" });
-    assert.equal(requests.at(-1).params.mcp_request_id, 1);
-    assert.equal(requests.at(-1).params.process_incarnation_id, numericRequest.params.process_incarnation_id);
-    assert.equal(requests.at(-1).params.expected_activation_id, "activation_exact");
-    assert.equal(requests.at(-1).params.expected_binding_epoch, 4);
-    assert.equal(requests.at(-1).params.input_cursor, "msg_7");
-    assert.equal(requests.at(-1).params.offered_frontier, "msg_19");
-    assert.equal(requests.at(-1).params.room_cursor, undefined, "RELEASE records an offer, not another ACK");
-    const count = requests.length;
-    await assert.rejects(authorizeCustodialPolling("wait_for_messages", before, env, options, { mcpRequestId: "1", roomCursor: null, offeredFrontier: "msg_19" }), /original invocation/);
-    assert.equal(requests.length, count, "numeric and string SDK IDs cannot be substituted at release");
-    for (const malformed of [{ activation_id: null }, { binding_epoch: "4" }, { binding_epoch: 0 }, { room_cursor: null }, { room_cursor: "invalid" }]) {
-      overrides = malformed;
-      await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options, invocation), /rejected or became stale/);
-    }
-    for (const stale of [{ activation_id: "successor" }, { binding_epoch: 5 }, { room_cursor: "msg_8" }]) {
-      overrides = stale;
-      await assert.rejects(authorizeCustodialPolling("wait_for_messages", before, env, options, { ...invocation, offeredFrontier: "msg_19" }), /rejected or became stale/);
-    }
-    overrides = {};
-    const negotiations = requests.filter(r => r.method === "daemon.negotiate").length;
-    generation++;
-    await assert.rejects(authorizeCustodialPolling("wait_for_messages", before, env, options, { ...invocation, offeredFrontier: "msg_19" }), /stale/);
-    assert.equal(requests.filter((r) => r.method === "daemon.negotiate").length, negotiations, "release must not negotiate a successor");
-    assert.equal(requests.at(-1).params.daemon_generation, 17);
-    assert.equal(requests.at(-1).params.expected_configuration_revision, 3);
-    assert.equal(requests.at(-1).params.phase, "release");
-    assert.equal(requests.some(request => request.method === "supervisor.checkpoint_worker_cursor"), false);
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(root, { recursive: true, force: true });
-  }
-});
 
 test("supervisor bridge is inert outside a daemon-supervised provider", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-absent-"));

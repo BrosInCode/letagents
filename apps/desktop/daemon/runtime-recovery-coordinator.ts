@@ -174,18 +174,11 @@ export class RuntimeRecoveryCoordinator {
             exactLegacyCorrectionApplied = true;
           }
         }
-        if (entry.delivery_mode === "daemon_inbox"
-          && control.has_correction
+        if (control.has_correction
           && correctionText
           && ["prepared", "retryable"].includes(control.status)
           && (correctionStrategy === null || correctionStrategy === "native")) {
           correctionStrategy = "stop_then_resend";
-        } else if ((entry.delivery_mode ?? "mcp_polling") !== "daemon_inbox"
-          && control.has_correction
-          && correctionText
-          && correctionStrategy === null
-          && ["prepared", "retryable"].includes(control.status)) {
-          correctionStrategy = "native";
         }
 
         const missingCorrectionIntent = control.has_correction && (!correctionText || !correctionStrategy);

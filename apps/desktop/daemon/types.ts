@@ -164,12 +164,8 @@ export type DaemonAgentConfiguration = {
   config_revision?: number;
   /** Revision most recently consumed by the current provider runtime. */
   runtime_configuration_revision?: number;
-  /** Explicit inbox owner; never infer daemon delivery from native policy. */
+  /** Explicit inbox owner; daemon_inbox is the sole supervised delivery mode. */
   delivery_mode?: DaemonAgentDeliveryMode;
-  /** Daemon-owned polling custody, never accepted from the flat manifest. */
-  polling_contract?: "custodial_polling_v1" | null;
-  /** Present only while a legacy Codex polling turn is being fenced. */
-  delivery_cutover?: DaemonDeliveryCutover | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
   provider_launch_policy?: unknown;
   /**
@@ -188,20 +184,7 @@ export type DaemonAgentConfiguration = {
 };
 
 /** Durable owner of room ingress for one supervised provider execution. */
-export type DaemonAgentDeliveryMode = "mcp_polling" | "daemon_inbox";
-
-/** Durable one-way handoff from legacy polling to daemon-owned ingress. */
-export type DaemonDeliveryCutover = {
-  work_attempt_id: string;
-  execution_generation_id: string;
-  provider_continuation_id: string;
-  /** Null only before the one permitted active-turn discovery completes. */
-  provider_turn_id: string | null;
-  phase: "prepared" | "retryable" | "dispatching" | "uncertain";
-  /** Redacted operator-facing reason when the handoff remains fenced. */
-  error?: string | null;
-  updated_at: string;
-};
+export type DaemonAgentDeliveryMode = "daemon_inbox";
 
 /** Requested launch/control state. This is intent, not agent identity or observed runtime. */
 export type DaemonAgentLaunchIntent = {
@@ -219,8 +202,6 @@ export type DaemonProviderConnection =
   | { kind: "opencode_server"; url: string; pid: number | null; processIdentity?: string | null; serverAuthPath: string };
 
 export type DaemonProviderRuntimeReference = {
-  /** Non-secret worker identity actually installed in this native runtime's MCP environment. */
-  custodial_launch_agent_session_id?: string | null;
   work_attempt_id: string;
   provider_continuation_id: string;
   provider_connection: DaemonProviderConnection | null;
@@ -343,7 +324,6 @@ export type DaemonManifestEntry = {
   last_error?: string | null;
   permission_profile_id: string | null;
   delivery_mode?: DaemonAgentDeliveryMode;
-  delivery_cutover?: DaemonDeliveryCutover | null;
   provider_launch_policy?: unknown;
   created_by: string;
   created_at: string;
@@ -379,8 +359,6 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
   } | null;
   /** Opaque exact native process birth; absent on older supervisors. */
   runtime_generation_id?: string | null;
-  /** Read-only credential contract from configuration, never caller-owned manifest input. */
-  polling_contract?: "custodial_polling_v1" | null;
   /**
    * Read-only: this agent uses its owner's own provider setup ("on"), will
    * once it restarts, or still does until it restarts. Absent means off.

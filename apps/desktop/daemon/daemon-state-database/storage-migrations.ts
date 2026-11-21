@@ -16,7 +16,6 @@ import type { DatabaseSync } from "node:sqlite";
 import { migrateExecutionStorageV21ToV22, migrateExecutionStorageV22ToV23, migrateExecutionStorageV23ToV24, migrateExecutionStorageV24ToV25, validateRuntimeFailureEffectMigrationSource } from "../execution-storage-schema.js";
 import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { applyExecutionApprovalPublicationSchema, validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
-import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { SCHEMA_VERSION, applyAgentAvatarColumn, applyWorkerExecutionBindings, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyDaemonEfficiencyMigration, run, schemaMethods } from "./shared.js";
 
 export const storageMigrations = schemaMethods({
@@ -70,12 +69,10 @@ migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
     applyRoomWorkPublicationSchema(database);
-    applyLifecycleProjectionLedgerSchema(database);
     this.freezeLegacyActiveRuntimeBirths(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     validateRoomWorkPublicationSchema(database);
-    validateLifecycleProjectionLedgerSchema(database);
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
@@ -101,11 +98,9 @@ migrateLifecycleProjectionStorage(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
-    applyLifecycleProjectionLedgerSchema(database);
     this.freezeLegacyActiveRuntimeBirths(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
-    validateLifecycleProjectionLedgerSchema(database);
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
@@ -132,7 +127,6 @@ migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
     this.freezeLegacyActiveRuntimeBirths(database);
-    resetLegacyLifecycleProjectionLedgerSchema(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
@@ -160,7 +154,6 @@ migrateLifecycleEffectStorage(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
-    resetLegacyLifecycleProjectionLedgerSchema(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
@@ -187,7 +180,6 @@ migrateRuntimeFailureEffectStorage(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
-    resetLegacyLifecycleProjectionLedgerSchema(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
@@ -238,10 +230,8 @@ migrateLifecycleProjectionProviderSet(database: DatabaseSync): void {
   try {
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
-    resetLegacyLifecycleProjectionLedgerSchema(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
-    validateLifecycleProjectionLedgerSchema(database);
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);

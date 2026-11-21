@@ -65,7 +65,7 @@ test("runtime readiness exposes only the active profile's actual registered capa
   for (const apiUrl of ["https://letagents.chat", LOCAL_ROOM_API_ORIGIN]) {
     for (const [profile, provider] of [
       ["supervised_room_turn", "codex"], ["supervised_room_turn", "cursor"],
-      ["supervised_mcp_polling", "codex"], ["autonomous_mcp_worker", null],
+      ["autonomous_mcp_worker", null],
     ] as const) {
       const server = new McpServer({ name: "readiness-test", version: "1" });
       const client = new Client({ name: "readiness-reader", version: "1" });
@@ -105,7 +105,7 @@ test("autonomous MCP workers retain the established full tool registry", () => {
 });
 
 test('workspace capture tools are available to independent callers without duplicating supervised capture', () => {
-  for (const profile of ['autonomous_mcp_worker', 'interactive_desktop', 'supervised_room_turn', 'supervised_mcp_polling'] as const) {
+  for (const profile of ['autonomous_mcp_worker', 'interactive_desktop', 'supervised_room_turn'] as const) {
     for (const name of ['begin_workspace_capture', 'publish_workspace_capture']) {
       assert.equal(discovered(profile).has(name), profile === 'autonomous_mcp_worker' || profile === 'interactive_desktop');
     }
@@ -131,7 +131,6 @@ test("only the npm-package profiles offer file attachments on send_message and s
     ["supervised_room_turn", "claude-code", {}, false],
     ["supervised_room_turn", "cursor", {}, false],
     ["supervised_room_turn", "codex", { executionOwner: "daemon" }, false],
-    ["supervised_mcp_polling", "codex", {}, false],
   ];
   for (const [profile, provider, options, offered] of cases) {
     const found = schemas(profile, provider, options);
@@ -148,20 +147,11 @@ test("interactive desktop sessions retain rental tools", () => {
   assert.equal(names.has("rental_read_file"), true);
 });
 
-test("custodial polling advertises the restricted real tool surface with delivery enabled", () => {
-  const names = discovered("supervised_mcp_polling", "codex");
-  assert.deepEqual([...names].sort(), [...discovered("supervised_room_turn", "codex")].filter(name => !["set_reply_thread", "set_reply_gif", "set_reply_attachments"].includes(name)).concat("wait_for_messages").sort());
-  assert.deepEqual(letAgentsRuntimeContract().profiles.supervised_mcp_polling, {
-    contract: "custodial_polling_v1", tools: [...names].sort(),
-  });
-});
-
 
 test("every cloud profile can read room guidelines, and reading them is never a mutation", () => {
   for (const [profile, provider] of [
     ["autonomous_mcp_worker", null], ["interactive_desktop", null],
     ["supervised_room_turn", "cursor"], ["supervised_room_turn", "codex"], ["supervised_room_turn", "claude-code"],
-    ["supervised_mcp_polling", "codex"],
   ] as const) {
     assert.equal(discovered(profile, provider).has("get_room_guidelines"), true, `${profile}/${provider} reads guidelines`);
   }
@@ -172,7 +162,6 @@ test("every cloud profile can wait with a wake rule; listing is a read and chang
   for (const [profile, provider] of [
     ["autonomous_mcp_worker", null], ["interactive_desktop", null],
     ["supervised_room_turn", "cursor"], ["supervised_room_turn", "codex"], ["supervised_room_turn", "claude-code"],
-    ["supervised_mcp_polling", "codex"],
   ] as const) {
     for (const name of ["add_wake_rule", "list_wake_rules", "cancel_wake_rule", "confirm_wake_email"]) {
       assert.equal(discovered(profile, provider).has(name), true, `${profile}/${provider} has ${name}`);
@@ -230,7 +219,7 @@ test("local executor construction refuses incomplete, extra or nonfunction handl
 
 
 test("thread routing is a strict bounded-only control, truthfully classified as a mutation", async () => {
-  for (const profile of ["autonomous_mcp_worker", "interactive_desktop", "supervised_mcp_polling"] as const) {
+  for (const profile of ["autonomous_mcp_worker", "interactive_desktop"] as const) {
     assert.equal(discovered(profile).has("set_reply_thread"), false, profile);
   }
   const server = new McpServer({ name: "thread-control", version: "1" });
@@ -254,7 +243,7 @@ test("thread routing is a strict bounded-only control, truthfully classified as 
 });
 
 test("reply attachments are a strict bounded-only control for supervised room turns, classified as a mutation", async () => {
-  for (const profile of ["autonomous_mcp_worker", "interactive_desktop", "supervised_mcp_polling"] as const) {
+  for (const profile of ["autonomous_mcp_worker", "interactive_desktop"] as const) {
     assert.equal(discovered(profile).has("set_reply_attachments"), false, profile);
   }
   assert.equal(supervisedToolIsMutation("set_reply_attachments"), true);
@@ -307,7 +296,7 @@ test("the daemon, which runs every supervised tool call, has the ask tool handle
 
 test("no profile offers the local Codex session tools that letagents 0.12.46 removed", () => {
   const profiles: Array<[LetAgentsExecutionProfile, string | null]> = [
-    ["autonomous_mcp_worker", null], ["interactive_desktop", null], ["supervised_mcp_polling", "codex"],
+    ["autonomous_mcp_worker", null], ["interactive_desktop", null],
     ["supervised_room_turn", "codex"], ["supervised_room_turn", "cursor"], ["supervised_room_turn", "claude-code"],
   ];
   for (const [profile, provider] of profiles) {

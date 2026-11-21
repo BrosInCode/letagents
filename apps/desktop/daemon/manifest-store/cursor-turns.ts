@@ -7,7 +7,6 @@
  */
 import { sameProviderActionConnectionSnapshot } from "../provider-action-port.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
-import type { LifecycleAuthorityMode } from "../lifecycle-authority-mode.js";
 import type { DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
 import { type Row, ManifestConflictError, nullableString, run, storeMethods } from "./shared.js";
 
@@ -35,11 +34,11 @@ export const cursorTurns = storeMethods({
       expectedProviderConnection: DaemonProviderConnection | null;
       providerConnection: Extract<DaemonProviderConnection, { kind: "cursor_cli" }>;
       configurationRevision: number;
-      requestedAuthorityMode: LifecycleAuthorityMode;
+      requestedAuthorityMode?: "typed";
       observedAt: string;
     },
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode }> {
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: "typed" }> {
     if (!input.providerTurnId.trim() || !input.inboxItemId.trim() || !input.providerContinuationId.trim()) {
       throw new Error("Cursor prepared-turn checkpoint requires exact inbox and provider turn ids.");
     }
@@ -133,15 +132,19 @@ export const cursorTurns = storeMethods({
       const runtimeGenerationId = executionRuntimeStorageIdentity(input.agentId,
         input.executionGenerationId, input.providerConnection.kind,
         processPid, processIdentity);
-      const authorityMode = materializeRuntimeIdentity(database, {
+      const persistedAuthority = materializeRuntimeIdentity(database, {
         agentId: input.agentId,
         executionGenerationId: input.executionGenerationId,
         runtimeGenerationId,
         provider: "cursor",
-        authorityMode: input.requestedAuthorityMode,
+        authorityMode: "typed",
         configRevision: input.configurationRevision,
         createdAtMs: Date.parse(input.observedAt),
       });
+      if (persistedAuthority !== "typed") {
+        throw new Error("Cursor prepared turn retained an incompatible frozen lifecycle authority.");
+      }
+      const authorityMode: "typed" = "typed";
       if (!persistedTurnId) {
         const nextAttemptCount = Number(row.attempt_count) + 1;
         run(database.prepare(`UPDATE supervised_agent_inbox

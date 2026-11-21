@@ -7,8 +7,6 @@
  */
 import { randomUUID } from "node:crypto";
 import { sameProviderActionConnectionSnapshot } from "../provider-action-port.js";
-import { assertNoPollingActivation } from "../custodial-polling-activation.js";
-import { assertNoDeliveryDrain } from "../delivery-drain.js";
 import { pruneSupervisedAgentHistory, readDurableNativeFailure, settleSupervisedTerminalItem } from "../supervised-agent-history-retention.js";
 import { projectDaemonManifestEntry } from "../manifest-entry-projection.js";
 import type { DaemonAgentDeliveryMode, DaemonManifestEntry, DaemonProviderConnection, DaemonTurnControlEffect } from "../types.js";
@@ -43,8 +41,6 @@ export const turnControl = storeMethods({
     }
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const current = this.readEntryFromDatabase(database, input.agentId);
-      assertNoDeliveryDrain(database, input.agentId);
-      assertNoPollingActivation(database, input.agentId);
       if (!current
         || current.room_id !== input.roomId
         || current.desired_state !== "running"
@@ -53,14 +49,11 @@ export const turnControl = storeMethods({
         || current.provider_ref?.execution_generation_id !== input.executionGenerationId
         || current.provider_ref.provider_continuation_id !== input.providerContinuationId
         || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, input.providerConnection)
-        || (current.delivery_mode ?? "mcp_polling") !== input.deliveryMode) {
+        || (current.delivery_mode ?? "daemon_inbox") !== input.deliveryMode) {
         throw new ManifestConflictError("Turn-control preparation lost its exact execution authority.");
       }
       if (database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') LIMIT 1").get(input.agentId)) {
         throw new ManifestConflictError("Turn-control preparation is blocked by a pending room move.");
-      }
-      if (current.delivery_cutover) {
-        throw new ManifestConflictError("Turn-control preparation is blocked by an unresolved delivery cutover.");
       }
       const existing = current.turn_control;
       if (existing?.action_id === input.actionId) {
@@ -217,7 +210,7 @@ export const turnControl = storeMethods({
         || current.provider_ref?.execution_generation_id !== input.executionGenerationId
         || current.provider_ref.provider_continuation_id !== input.providerContinuationId
         || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, input.providerConnection)
-        || (current.delivery_mode ?? "mcp_polling") !== input.deliveryMode
+        || (current.delivery_mode ?? "daemon_inbox") !== input.deliveryMode
         || !control
         || control.action_id !== input.actionId
         || control.work_attempt_id !== input.workAttemptId

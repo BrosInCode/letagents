@@ -663,7 +663,7 @@ test("Codex adapter launches app-server, maps attested thread policy, and boots 
 
   const handle = await adapter.spawn(spawnRequest({ launchPolicy: policy }));
 
-  assert.equal(handle.observedState(), "working");
+  assert.equal(handle.observedState(), "idle");
   assert.equal(handle.providerContinuationId, "thread-1");
   assert.deepEqual(handle.providerConnection, {
     kind: "codex_app_server",
@@ -693,15 +693,11 @@ test("Codex adapter launches app-server, maps attested thread policy, and boots 
     false,
     "a fresh start must never probe resume with a synthetic continuation",
   );
-
-  const turnStart = requestByMethod(harness.clients[0]!, "turn/start");
-  const prompt = ((turnStart.params as { input: Array<{ text: string }> }).input[0]?.text) ?? "";
-  assert.match(prompt, /join_room/);
-  assert.match(prompt, /focus_37/);
-  assert.match(prompt, /register_agent_session/);
-  assert.match(prompt, /cwd="\/tmp\/letagents-work-attempt"/, "registration binds from the exact daemon-owned worktree rather than the MCP process cwd");
-  assert.match(prompt, /wait_for_messages/);
-  assert.match(prompt, /LanternSparrow/);
+  assert.equal(
+    harness.clients[0]!.requests.some((entry) => entry.method === "turn/start"),
+    false,
+    "daemon-inbox spawn starts idle without an initial polling turn",
+  );
   assert.equal(await adapter.attach({
     workAttemptId: spawnRequest().workAttemptId,
     providerContinuationId: "thread-1",
@@ -710,7 +706,7 @@ test("Codex adapter launches app-server, maps attested thread policy, and boots 
 
   assert.deepEqual(adapter.capabilities(), {
     execution: { controlProbe: "rpc", approvals: { kinds: ["command", "file_change", "network"], recovery: "connection_only", denyScope: "request" } },
-    deliveryModes: ["mcp_polling", "daemon_inbox"],
+    deliveryModes: ["daemon_inbox"],
     resume: true,
     midTurnInjection: false,
     midTurnCorrection: true,

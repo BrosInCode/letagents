@@ -111,7 +111,8 @@ export function runtimeReadySubscription(
 ): NativeExecutionSubscription {
   const processIdentity = handle.providerConnection?.processIdentity ?? null;
   const pid = handle.providerConnection?.pid ?? handle.pid;
-  const sourceId = `runtime-ready:${handle.workAttemptId}:${processIdentity ?? "unknown"}`;
+  const safeIdentity = (processIdentity ?? "unknown").replace(/[^A-Za-z0-9_.:/-]+/g, "_");
+  const sourceId = `runtime-ready:${handle.workAttemptId}:${pid ?? "none"}:${safeIdentity}`;
   listener({
     sourceId,
     sequence: 1,
@@ -364,7 +365,7 @@ export async function observationDaemonFixture(onExecution: NonNullable<Provider
       executionGenerationId: execution.execution_generation_id,
       providerConnection: handle.providerConnection!,
       appliedRevision: 1,
-      requestedAuthorityMode: "typed_shadow",
+      requestedAuthorityMode: "typed",
       observedAtMs: Date.now(),
     });
     internals.manifestGeneration = birth.generation;

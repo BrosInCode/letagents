@@ -9,11 +9,8 @@ import test from "node:test";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase, openDaemonStateObservationDatabase, openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 import { validateHostToolRuleSchema } from "../host-tool-rules.js";
-import { applyPollingActivationSchema, applyPollingOfferSchema, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import { RoomWorkPublicationStore, validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
-import { LifecycleProjectionLedger, validateLegacyLifecycleProjectionLedgerSchema,
-  validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import { assertKilledBySelf, CHILD_PROCESS_TIMEOUT_MS } from "../../electron/__tests__/platform.js";
@@ -113,13 +110,8 @@ function restoreV22Fixture(database: DatabaseSync): void {
 }
 
 function restoreV23Fixture(database: DatabaseSync): void {
-  restoreV24Fixture(database);
-  database.exec("DROP TABLE custodial_polling_activations; ALTER TABLE runtime_deployments DROP COLUMN custodial_launch_agent_session_id; UPDATE manifest_metadata SET schema_version=23 WHERE singleton=1; PRAGMA user_version=23");
-}
-
-function restoreV24Fixture(database: DatabaseSync): void {
-  restoreV25Fixture(database);
-  database.exec("DROP TABLE custodial_polling_offers; UPDATE manifest_metadata SET schema_version=24 WHERE singleton=1; PRAGMA user_version=24");
+  restoreV26Fixture(database);
+  database.exec("ALTER TABLE runtime_deployments DROP COLUMN custodial_launch_agent_session_id; UPDATE manifest_metadata SET schema_version=23 WHERE singleton=1; PRAGMA user_version=23");
 }
 
 function restoreExecutionApprovalProjectionV24Fixture(database: DatabaseSync): void {
@@ -163,16 +155,6 @@ function restoreExecutionDelegationV23Fixture(database: DatabaseSync): void {
   validateExecutionStorageSchema(database, 23);
 }
 
-function restoreV25Fixture(database: DatabaseSync): void {
-  restoreV26Fixture(database);
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM custodial_polling_activations").get()!.count, 0);
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM custodial_polling_offers").get()!.count, 0);
-  database.exec("DROP TABLE custodial_polling_offers; DROP TABLE custodial_polling_activations");
-  applyPollingActivationSchema(database, 24);
-  applyPollingOfferSchema(database, 25);
-  database.exec("UPDATE manifest_metadata SET schema_version=25 WHERE singleton=1; PRAGMA user_version=25");
-}
-
 function restoreV26Fixture(database: DatabaseSync): void {
   restoreV27Fixture(database);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM room_work_publications").get()!.count, 0);
@@ -181,50 +163,23 @@ function restoreV26Fixture(database: DatabaseSync): void {
 
 function restoreV27Fixture(database: DatabaseSync): void {
   restoreExecutionDelegationV23Fixture(database);
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0);
-  database.exec(`DROP TABLE lifecycle_projection_pairs;
-    DROP TABLE lifecycle_projection_lanes;
-    DROP TABLE lifecycle_projection_totals;
-    DROP TABLE execution_lifecycle_effects;
+  database.exec(`DROP TABLE execution_lifecycle_effects;
     UPDATE manifest_metadata SET schema_version=27 WHERE singleton=1;
     PRAGMA user_version=27`);
 }
 
 function restoreV28Fixture(database: DatabaseSync): void {
   restoreExecutionDelegationV23Fixture(database);
-  restoreLifecycleProjectionV1Fixture(database);
   database.exec("DROP TABLE execution_lifecycle_effects; UPDATE manifest_metadata SET schema_version=28 WHERE singleton=1; PRAGMA user_version=28");
 }
 
 function restoreV30Fixture(database: DatabaseSync): void {
   restoreExecutionDelegationV23Fixture(database);
-  restoreLifecycleProjectionV1Fixture(database);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects").get()!.count, 0);
   database.exec("DROP TABLE execution_lifecycle_effects");
   applyExecutionStorageSchema(database, 22);
   database.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
   validateExecutionStorageSchema(database, 22);
-}
-
-function restoreLifecycleProjectionV1Fixture(database: DatabaseSync): void {
-  const noDelete = String(database.prepare(
-    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='lifecycle_projection_total_no_delete'",
-  ).get()!.sql);
-  database.exec(`DROP TRIGGER lifecycle_projection_total_no_delete;
-    DELETE FROM lifecycle_projection_totals WHERE provider='open-model';
-    ${noDelete}`);
-  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
-  database.exec("PRAGMA writable_schema=ON");
-  database.prepare(`UPDATE sqlite_master SET sql=replace(sql, ?, '')
-    WHERE type='table' AND name IN ('lifecycle_projection_lanes','lifecycle_projection_totals')`).run(",'open-model'");
-  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
-  validateLegacyLifecycleProjectionLedgerSchema(database);
-}
-
-function restoreV31Fixture(database: DatabaseSync): void {
-  restoreExecutionDelegationV23Fixture(database);
-  restoreLifecycleProjectionV1Fixture(database);
-  database.exec("UPDATE manifest_metadata SET schema_version=31 WHERE singleton=1; PRAGMA user_version=31");
 }
 
 function restoreV32Fixture(database: DatabaseSync): void {
@@ -240,21 +195,6 @@ function restoreV33Fixture(database: DatabaseSync): void {
 function restoreV34Fixture(database: DatabaseSync): void {
   restoreExecutionApprovalProjectionV24Fixture(database);
   database.exec("UPDATE manifest_metadata SET schema_version=34 WHERE singleton=1; PRAGMA user_version=34");
-}
-
-function seedLifecycleProjectionV1Evidence(database: DatabaseSync): void {
-  const ledger = new LifecycleProjectionLedger(database, () => 100);
-  const base = { agentId: "comparator-agent", provider: "codex" as const,
-    workAttemptId: "comparator-attempt", executionGenerationId: "comparator-generation" };
-  for (const observation of [
-    { ...base, nativeEventId: "comparator-active", phase: "turn_active" as const, state: "working" as const },
-    { ...base, nativeEventId: "comparator-terminal", phase: "turn_terminal" as const, state: "terminal" as const },
-  ]) {
-    database.exec("BEGIN IMMEDIATE");
-    try { ledger.recordTypedInCurrentTransaction(observation); database.exec("COMMIT"); }
-    catch (error) { try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ } throw error; }
-    ledger.recordLegacy(observation);
-  }
 }
 
 /**
@@ -351,27 +291,6 @@ function seedRetirementInbox(database: DatabaseSync, agentId: string): void {
     now,
     now,
   );
-}
-
-function seedPollingActivations(database: DatabaseSync, phases: readonly ("complete" | "uncertain" | "active")[] = ["complete", "uncertain"]): void {
-  database.exec(`INSERT INTO execution_cutover_v2
-    (operation_id,request_id,agent_id,execution_generation_id,from_mode,to_mode,strategy,phase,created_at_ms,updated_at_ms,
-     authority_version,room_id,work_attempt_id,provider,native_continuation_id,native_connection_kind,native_connection_sha256,native_pid,native_process_identity)
-    VALUES('reverse','reverse-request','agent','reverse-generation','daemon_inbox','mcp_polling','drain','complete',100,110,
-     1,'room','attempt','codex','continuation','codex_app_server','${"a".repeat(64)}',123,'birth:123')`);
-  const insert = database.prepare(`INSERT INTO custodial_polling_activations
-    (operation_id,request_id,agent_id,room_id,work_attempt_id,execution_generation_id,reverse_operation_id,native_continuation_id,
-     native_connection_kind,native_connection_sha256,native_pid,native_process_identity,config_revision,agent_session_id,room_cursor,
-     phase,provider_turn_id,terminal_outcome,created_at_ms,updated_at_ms)
-    VALUES(?,?,'agent','room','attempt','polling-generation','reverse','continuation','codex_app_server',?,123,'birth:123',2,'session','msg_47',
-     'prepared',NULL,NULL,120,120)`);
-  for (const phase of phases) {
-    insert.run(phase, `request-${phase}`, "b".repeat(64));
-    database.prepare("UPDATE custodial_polling_activations SET phase='dispatching' WHERE operation_id=?").run(phase);
-    database.prepare("UPDATE custodial_polling_activations SET phase='active',provider_turn_id=? WHERE operation_id=?").run(`native-${phase}`, phase);
-    if (phase !== "active") database.prepare("UPDATE custodial_polling_activations SET phase=?,terminal_outcome=? WHERE operation_id=?")
-      .run(phase, phase === "complete" ? "completed" : null, phase);
-  }
 }
 
 function seedV18Evidence(database: DatabaseSync): void {
@@ -540,12 +459,12 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30, 33, 34]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
+for (const version of [17, 19, 20, 21, 22, 26, 27, 30, 33, 34]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
   const env = await fixture();
   try {
     (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture
-      : version === 21 ? restoreV21Fixture : version === 22 ? restoreV22Fixture : version === 24 ? restoreV24Fixture
-        : version === 25 ? restoreV25Fixture : version === 26 ? restoreV26Fixture : version === 27 ? restoreV27Fixture
+      : version === 21 ? restoreV21Fixture : version === 22 ? restoreV22Fixture
+        : version === 26 ? restoreV26Fixture : version === 27 ? restoreV27Fixture
           : version === 30 ? restoreV30Fixture : version === 33 ? restoreV33Fixture : restoreV34Fixture)(env.database);
     seedLegacyEvidence(env.database);
     if (version === 21) { seedV18Evidence(env.database); seedDormantCutovers(env.database); }
@@ -617,7 +536,6 @@ test("v30 marker recovery accepts only a complete exact-current lifecycle journa
     }
     const before = env.database.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all();
     restoreExecutionDelegationV23Fixture(env.database);
-    restoreLifecycleProjectionV1Fixture(env.database);
     env.database.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all(), before);
@@ -992,7 +910,7 @@ test("v19 upgrade preserves old outcomes, identity and rowids while advancing te
   } finally { await env.cleanup(); }
 });
 
-for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]) test(`fresh/legacy v${version} reaches current schema with constrained native failure slots and source identity`, async () => {
+for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27]) test(`fresh/legacy v${version} reaches current schema with constrained native failure slots and source identity`, async () => {
   const env = await fixture();
   try {
     if (version === 17) restoreV17Fixture(env.database);
@@ -1002,8 +920,6 @@ for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
     else if (version === 21) restoreV21Fixture(env.database);
     else if (version === 22) restoreV22Fixture(env.database);
     else if (version === 23) restoreV23Fixture(env.database);
-    else if (version === 24) restoreV24Fixture(env.database);
-    else if (version === 25) restoreV25Fixture(env.database);
     else if (version === 26) restoreV26Fixture(env.database);
     else if (version === 27) restoreV27Fixture(env.database);
     else if (version) {
@@ -1016,15 +932,8 @@ for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
     assert.deepEqual(legacyRows(env.database), before);
     assertEmptyHostToolRuleStorage(env.database);
     assert.ok(env.database.prepare("SELECT polling_contract FROM agent_configurations").all().every((row) => row.polling_contract === null));
-    validatePollingActivationSchema(env.database);
-    assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_activations").get()!.n, 0, "upgrades cannot manufacture operator activation intent");
-    validatePollingOfferSchema(env.database);
-    assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers").get()!.n, 0, "upgrades cannot manufacture released polling coverage");
     validateRoomWorkPublicationSchema(env.database);
     assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM room_work_publications").get()!.n, 0, "upgrades cannot attribute historical room work to current credentials");
-    validateLifecycleProjectionLedgerSchema(env.database);
-    assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM lifecycle_projection_pairs").get()!.n, 0,
-      "upgrades cannot invent historical classifier comparisons");
     env.database.exec("DELETE FROM supervised_agent_publications WHERE inbox_item_id='head'");
     const update = env.database.prepare("UPDATE supervised_agent_terminal_results SET outcome=?,normalized_text=?,evidence_source=? WHERE inbox_item_id='head'");
     for (const outcome of ["failed", "interrupted"]) {
@@ -1259,74 +1168,6 @@ test("v23 refuses missing, weakened or invalid polling custody before WAL and re
   }
 });
 
-test("v24 creates an empty activation journal and nullable launch receipt without backfilling v23 authority", async () => {
-  const env = await fixture();
-  try {
-    restoreV23Fixture(env.database); seedLegacyEvidence(env.database); seedV18Evidence(env.database); seedDormantCutovers(env.database);
-    env.database.exec(`INSERT INTO runtime_deployments
-      (agent_id,observed_state,workspace_path_present,work_attempt_id_present,provider_ref_present,provider_process_identity_present,
-       workplace_liveness_present,native_liveness_present,activity_present) VALUES('agent','stopped',0,0,0,0,0,0,0)`);
-    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('host_tool_rules','host_tool_rule_decisions','host_tool_rule_withdrawals','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_request_closures','execution_approval_projections','custodial_polling_activations','custodial_polling_offers','runtime_deployments','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
-    const schema = retainedSchema();
-    new DaemonStateSchema().createSchema(env.database);
-    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
-    assert.deepEqual(retainedSchema(), schema);
-    assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_activations").get()!.n, 0);
-    assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM runtime_deployments WHERE custodial_launch_agent_session_id IS NOT NULL").get()!.n, 0);
-    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
-    validateExecutionStorageSchema(env.database); validatePollingActivationSchema(env.database);
-    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_list(custodial_polling_activations)").all(), [],
-      "the journal cannot be erased by compatibility manifest replacement");
-    const columns = env.database.prepare("PRAGMA table_info(custodial_polling_activations)").all().map(row => String(row.name));
-    assert.ok(columns.every(column => !/token|bearer|secret|output|prompt/.test(column)));
-    const reopened = await openDaemonStateDatabase(env.path, database => new DaemonStateSchema().createSchema(database));
-    try { validatePollingActivationSchema(reopened); assert.deepEqual(legacyRows(reopened), before.legacy); }
-    finally { reopened.close(); }
-  } finally { await env.cleanup(); }
-});
-
-test("v24 journal DDL and paired version markers roll back together", async () => {
-  const env = await fixture();
-  try {
-    restoreV23Fixture(env.database); seedLegacyEvidence(env.database);
-    const before = { versions: versionPair(env.database), legacy: legacyRows(env.database),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() };
-    assert.throws(() => new DaemonStateSchema(database => {
-      validatePollingActivationSchema(database);
-      assert.deepEqual(versionPair(database), before.versions);
-      throw new Error("interrupt activation migration");
-    }).createSchema(env.database), /interrupt activation migration/);
-    assert.deepEqual({ versions: versionPair(env.database), legacy: legacyRows(env.database),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() }, before);
-    assert.equal(env.database.prepare("SELECT 1 FROM sqlite_master WHERE name='custodial_polling_activations'").get(), undefined);
-    new DaemonStateSchema().createSchema(env.database);
-    validatePollingActivationSchema(env.database);
-  } finally { await env.cleanup(); }
-});
-
-test("v24 refuses lost or weakened activation authority before WAL or repair writes", async () => {
-  for (const corruption of [
-    "DROP TABLE custodial_polling_activations",
-    "DROP INDEX custodial_polling_activation_one_unresolved",
-    "DROP TRIGGER custodial_polling_activation_identity_immutable",
-    "DROP TRIGGER custodial_polling_activation_phase",
-    "DROP TRIGGER custodial_polling_activation_predecessor",
-    "ALTER TABLE custodial_polling_activations ADD COLUMN unrelated TEXT",
-  ]) {
-    const env = await fixture();
-    try {
-      env.database.exec(`${corruption}; PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
-      const before = await readFile(env.path); let initialized = false;
-      await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }), /activation journal/);
-      assert.equal(initialized, false);
-      assert.deepEqual(await readFile(env.path), before);
-      assert.throws(() => new DaemonStateSchema().createSchema(env.database), /activation journal/);
-      assert.deepEqual(await readFile(env.path), before);
-    } finally { await env.cleanup(); }
-  }
-});
-
 test("v24 refuses a missing or weakened native launch receipt before WAL and never reconstructs it", async () => {
   for (const corruption of [
     "ALTER TABLE runtime_deployments DROP COLUMN custodial_launch_agent_session_id",
@@ -1344,163 +1185,12 @@ test("v24 refuses a missing or weakened native launch receipt before WAL and nev
   }
 });
 
-test("v25 adds empty offer storage without manufacturing coverage for old activations", async () => {
-  const env = await fixture();
-  try {
-    restoreV24Fixture(env.database); seedLegacyEvidence(env.database);
-    seedPollingActivations(env.database);
-    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database),
-      activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all() };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('host_tool_rules','host_tool_rule_decisions','host_tool_rule_withdrawals','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_request_closures','execution_approval_projections','custodial_polling_offers','custodial_polling_activations','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
-    const schema = retainedSchema();
-    new DaemonStateSchema().createSchema(env.database);
-    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database),
-      activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all().map(row => ({ ...row })) },
-      { ...before, activations: before.activations.map(row => ({ ...row, compacted_through_offer_id: null })) });
-    assert.deepEqual(retainedSchema(), schema, "only offers and the later activation compaction column may change");
-    assert.deepEqual(env.database.prepare("SELECT * FROM custodial_polling_offers").all(), [], "old activations have no inferred offer or ACK evidence");
-    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
-    assert.deepEqual({ ...env.database.prepare("SELECT generation,schema_version FROM manifest_metadata").get() },
-      { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION });
-    validatePollingOfferSchema(env.database); validatePollingActivationSchema(env.database); validateExecutionStorageSchema(env.database);
-    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
-    const columns = env.database.prepare("PRAGMA table_info(custodial_polling_offers)").all().map(row => String(row.name));
-    assert.ok(columns.every(column => !/token|bearer|secret|output|prompt/.test(column)));
-    const reopened = await openDaemonStateDatabase(env.path, database => new DaemonStateSchema().createSchema(database));
-    try {
-      validatePollingOfferSchema(reopened);
-      assert.deepEqual(reopened.prepare("SELECT * FROM custodial_polling_offers").all(), []);
-      assert.deepEqual(reopened.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all().map(row => ({ ...row })),
-        before.activations.map(row => ({ ...row, compacted_through_offer_id: null })));
-      assert.deepEqual(legacyRows(reopened), before.legacy);
-    } finally { reopened.close(); }
-  } finally { await env.cleanup(); }
-});
-
-test("v25 offer DDL and paired markers roll back together before commit", async () => {
-  const env = await fixture();
-  try {
-    restoreV24Fixture(env.database); seedLegacyEvidence(env.database);
-    const before = { versions: versionPair(env.database), legacy: legacyRows(env.database), typed: typedRows(env.database),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() };
-    assert.throws(() => new DaemonStateSchema(database => {
-      validatePollingOfferSchema(database);
-      assert.deepEqual(versionPair(database), before.versions);
-      throw new Error("interrupt offer migration");
-    }).createSchema(env.database), /interrupt offer migration/);
-    assert.deepEqual({ versions: versionPair(env.database), legacy: legacyRows(env.database), typed: typedRows(env.database),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() }, before);
-    assert.equal(env.database.prepare("SELECT 1 FROM sqlite_master WHERE name='custodial_polling_offers'").get(), undefined);
-    new DaemonStateSchema().createSchema(env.database);
-    validatePollingOfferSchema(env.database);
-    assert.deepEqual(env.database.prepare("SELECT * FROM custodial_polling_offers").all(), []);
-  } finally { await env.cleanup(); }
-});
-
-for (const version of [25, 26]) test(`v${version} refuses lost or weakened offer authority before WAL or initializer writes`, async () => {
-  for (const corruption of [
-    "DROP TABLE custodial_polling_offers",
-    "DROP INDEX custodial_polling_offer_one_root",
-    "DROP TRIGGER custodial_polling_offer_append",
-    "DROP TRIGGER custodial_polling_offer_immutable",
-    "DROP TRIGGER custodial_polling_offer_no_delete",
-    "ALTER TABLE custodial_polling_offers ADD COLUMN unrelated TEXT",
-    "UPDATE sqlite_master SET sql=replace(sql, 'CHECK(length(process_incarnation_id)=36)', '') WHERE name='custodial_polling_offers'",
-    "UPDATE sqlite_master SET sql=replace(sql, 'ON DELETE RESTRICT', 'ON DELETE CASCADE') WHERE name='custodial_polling_offers'",
-  ]) {
-    const env = await fixture();
-    try {
-      if (version === 25) restoreV25Fixture(env.database);
-      const schemaVersion = Number(env.database.prepare("PRAGMA schema_version").get()!.schema_version);
-      env.database.exec(`PRAGMA writable_schema=ON; ${corruption}; PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
-        PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
-      const before = await readFile(env.path); let initialized = false;
-      const versions = versionPair(env.database);
-      const schema = env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all();
-      await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }), /offer journal/);
-      assert.equal(initialized, false);
-      assert.deepEqual(await readFile(env.path), before);
-      assert.throws(() => new DaemonStateSchema().createSchema(env.database), /offer journal/);
-      assert.deepEqual(await readFile(env.path), before);
-      assert.deepEqual(versionPair(env.database), versions);
-      assert.deepEqual(env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(), schema);
-    } finally { await env.cleanup(); }
-  }
-});
-
-for (const interrupted of [false, true]) test(`v26 preserves every v25 offer, ACK and row identity${interrupted ? " after rollback" : " without migration compaction"}`, async () => {
-  const env = await fixture();
-  try {
-    restoreV25Fixture(env.database); seedLegacyEvidence(env.database); seedPollingActivations(env.database, ["complete", "active"]);
-    const insert = env.database.prepare(`INSERT INTO custodial_polling_offers
-      (rowid,offer_id,activation_id,process_incarnation_id,mcp_request_id,binding_epoch,input_cursor,offered_frontier,predecessor_offer_id,created_at_ms,acknowledged_at_ms)
-      VALUES(?,?,'active','11111111-1111-4111-8111-111111111111',?,?,?,?,?,?,NULL)`);
-    let cursor = "msg_47";
-    env.database.exec("BEGIN IMMEDIATE");
-    try {
-      for (let index = 0; index < 260; index++) {
-        const id = `offer-${index}`; const frontier = `msg_${48 + index}`;
-        insert.run(71 + index * 3, id, JSON.stringify(index % 2 === 0 ? index : `request-${index}`), 1, cursor, frontier,
-          index === 0 ? null : `offer-${index - 1}`, 1000 + index);
-        if (index % 2 === 0) {
-          env.database.prepare("UPDATE custodial_polling_offers SET acknowledged_at_ms=? WHERE offer_id=?").run(2000 + index, id);
-          cursor = frontier;
-        }
-      }
-      env.database.exec("COMMIT");
-    } catch (error) { env.database.exec("ROLLBACK"); throw error; }
-    validatePollingActivationSchema(env.database, 24); validatePollingOfferSchema(env.database, 25);
-    const offers = env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all();
-    const activations = env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all();
-    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('host_tool_rules','host_tool_rule_decisions','host_tool_rule_withdrawals','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_request_closures','execution_approval_projections','custodial_polling_offers','custodial_polling_activations','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
-    const schema = retainedSchema();
-    const activationRoot = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='custodial_polling_activations'").get();
-    if (interrupted) {
-      assert.throws(() => new DaemonStateSchema(database => {
-        validatePollingActivationSchema(database); validatePollingOfferSchema(database);
-        assert.deepEqual(versionPair(database), before.versions);
-        assert.deepEqual(database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(), offers);
-        throw new Error("interrupt offer retention migration");
-      }).createSchema(env.database), /interrupt offer retention migration/);
-      assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database),
-        schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() }, before);
-      assert.deepEqual(env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(), offers);
-      assert.deepEqual(env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all(), activations);
-      assert.deepEqual(env.database.prepare("SELECT name FROM temp.sqlite_master WHERE name='polling_offer_migration'").all(), []);
-      validatePollingActivationSchema(env.database, 24); validatePollingOfferSchema(env.database, 25);
-    }
-    new DaemonStateSchema().createSchema(env.database);
-    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, { legacy: before.legacy, typed: before.typed });
-    assert.deepEqual(env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(), offers, "migration keeps all 260 offers, including superseded unACKed rows and the tail");
-    assert.deepEqual(env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all().map(row => ({ ...row })),
-      activations.map(row => ({ ...row, compacted_through_offer_id: null })), "migration does not invent a compaction watermark");
-    assert.deepEqual(retainedSchema(), schema);
-    assert.deepEqual(env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='custodial_polling_activations'").get(), activationRoot);
-    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
-    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, DAEMON_STATE_SCHEMA_VERSION);
-    validatePollingActivationSchema(env.database); validatePollingOfferSchema(env.database);
-    assert.throws(() => validatePollingActivationSchema(env.database, 24), /activation journal/);
-    assert.throws(() => validatePollingOfferSchema(env.database, 25), /offer journal/);
-    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
-    const reopened = await openDaemonStateDatabase(env.path, database => new DaemonStateSchema().createSchema(database));
-    try {
-      assert.deepEqual(reopened.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(), offers, "ordinary reopen also cannot prune history");
-      assert.deepEqual(reopened.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all().map(row => ({ ...row })),
-        activations.map(row => ({ ...row, compacted_through_offer_id: null })));
-    } finally { reopened.close(); }
-  } finally { await env.cleanup(); }
-});
-
 test("v27 adds empty room publication provenance without changing retained authority", async () => {
   const env = await fixture();
   try {
-    restoreV26Fixture(env.database); seedLegacyEvidence(env.database); seedPollingActivations(env.database);
+    restoreV26Fixture(env.database); seedLegacyEvidence(env.database);
     const retained = () => ({ legacy: legacyRows(env.database), typed: typedRows(env.database),
-      activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all(),
-      offers: env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('host_tool_rules','host_tool_rule_decisions','host_tool_rule_withdrawals','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_request_closures','execution_approval_projections','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all() });
+      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('host_tool_rules','host_tool_rule_decisions','host_tool_rule_withdrawals','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_request_closures','execution_approval_projections','room_work_publications') ORDER BY type,name").all() });
     const before = retained();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(retained(), before);
@@ -1534,150 +1224,25 @@ test("v27 publication DDL and paired markers roll back without adopting old capt
   } finally { await env.cleanup(); }
 });
 
-test("v28 adds empty lifecycle comparison evidence without changing retained authority", async () => {
-  const env = await fixture();
-  try {
-    restoreV27Fixture(env.database); seedLegacyEvidence(env.database); seedPollingActivations(env.database);
-    const retained = () => ({
-      legacy: legacyRows(env.database),
-      typed: typedRows(env.database),
-      activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all(),
-      offers: env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(),
-      publications: env.database.prepare("SELECT rowid,* FROM room_work_publications ORDER BY rowid").all(),
-      schema: env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-        WHERE tbl_name NOT IN ('host_tool_rules','host_tool_rule_decisions','host_tool_rule_withdrawals','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_request_closures','execution_approval_projections','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals')
-        ORDER BY type,name`).all(),
-    });
-    const before = retained();
-    new DaemonStateSchema().createSchema(env.database);
-    assert.deepEqual(retained(), before);
-    validateLifecycleProjectionLedgerSchema(env.database);
-    assert.deepEqual(env.database.prepare("SELECT * FROM lifecycle_projection_lanes").all(), []);
-    assert.deepEqual(env.database.prepare("SELECT * FROM lifecycle_projection_pairs").all(), []);
-    assert.deepEqual(env.database.prepare("SELECT provider FROM lifecycle_projection_totals ORDER BY provider")
-      .all().map((row) => row.provider), ["claude-code", "codex", "cursor", "open-model"]);
-    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
-    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, DAEMON_STATE_SCHEMA_VERSION);
-  } finally { await env.cleanup(); }
-});
-
-test("v28 lifecycle comparison DDL and paired markers roll back together", async () => {
-  const env = await fixture();
-  try {
-    restoreV27Fixture(env.database); seedLegacyEvidence(env.database);
-    const before = {
-      versions: versionPair(env.database),
-      legacy: legacyRows(env.database),
-      typed: typedRows(env.database),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(),
-    };
-    assert.throws(() => new DaemonStateSchema((database) => {
-      validateLifecycleProjectionLedgerSchema(database);
-      assert.deepEqual(versionPair(database), before.versions);
-      throw new Error("interrupt lifecycle projection migration");
-    }).createSchema(env.database), /interrupt lifecycle projection migration/);
-    assert.deepEqual({
-      versions: versionPair(env.database),
-      legacy: legacyRows(env.database),
-      typed: typedRows(env.database),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(),
-    }, before);
-    assert.equal(env.database.prepare("SELECT 1 FROM sqlite_master WHERE name='lifecycle_projection_lanes'").get(), undefined);
-    new DaemonStateSchema().createSchema(env.database);
-    validateLifecycleProjectionLedgerSchema(env.database);
-  } finally { await env.cleanup(); }
-});
-
-test("v28 refuses malformed lifecycle comparison storage before WAL or initializer writes", async () => {
-  for (const corruption of [
-    "DROP TABLE lifecycle_projection_pairs",
-    "DROP TRIGGER lifecycle_projection_pair_immutable",
-    "ALTER TABLE lifecycle_projection_totals ADD COLUMN unrelated TEXT",
-  ]) {
-    const env = await fixture();
-    try {
-      env.database.exec(`${corruption}; PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
-      const before = await readFile(env.path); let initialized = false;
-      await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }), /Lifecycle projection ledger/);
-      assert.equal(initialized, false);
-      assert.deepEqual(await readFile(env.path), before);
-      assert.throws(() => new DaemonStateSchema().createSchema(env.database), /Lifecycle projection ledger/);
-      assert.deepEqual(await readFile(env.path), before);
-    } finally { await env.cleanup(); }
-  }
-});
-
-test("v32 starts a fresh four-provider comparator epoch without changing operational authority", async () => {
-  const env = await fixture();
-  try {
-    seedLegacyEvidence(env.database);
-    seedLifecycleProjectionV1Evidence(env.database);
-    restoreV31Fixture(env.database);
-    const retained = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
-    assert.equal(env.database.prepare("SELECT compared_segments FROM lifecycle_projection_totals WHERE provider='codex'")
-      .get()!.compared_segments, 1);
-
-    new DaemonStateSchema().createSchema(env.database);
-
-    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, retained);
-    assert.deepEqual(env.database.prepare("SELECT * FROM lifecycle_projection_lanes").all(), []);
-    assert.deepEqual(env.database.prepare("SELECT * FROM lifecycle_projection_pairs").all(), []);
-    assert.deepEqual(env.database.prepare(`SELECT provider,compared_segments,matched,missing_in_typed,
-      missing_in_legacy,paired_but_different,conflicts,observation_unavailable
-      FROM lifecycle_projection_totals ORDER BY provider`).all().map((row) => ({ ...row })), [
-      "claude-code", "codex", "cursor", "open-model",
-    ].map((provider) => ({ provider, compared_segments: 0, matched: 0, missing_in_typed: 0,
-      missing_in_legacy: 0, paired_but_different: 0, conflicts: 0, observation_unavailable: 0 })));
-    validateLifecycleProjectionLedgerSchema(env.database);
-    const reopened = await openDaemonStateDatabase(env.path, database => new DaemonStateSchema().createSchema(database));
-    try { assert.deepEqual(reopened.prepare("SELECT * FROM lifecycle_projection_pairs").all(), []); }
-    finally { reopened.close(); }
-  } finally { await env.cleanup(); }
-});
-
-test("v32 comparator epoch reset and version markers roll back together", async () => {
-  const env = await fixture();
-  try {
-    seedLifecycleProjectionV1Evidence(env.database);
-    restoreV31Fixture(env.database);
-    const before = {
-      versions: versionPair(env.database),
-      lanes: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_lanes ORDER BY rowid").all(),
-      pairs: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_pairs ORDER BY rowid").all(),
-      totals: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_totals ORDER BY rowid").all(),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE name GLOB 'lifecycle_projection_*' ORDER BY type,name").all(),
-    };
-    assert.throws(() => new DaemonStateSchema((database) => {
-      validateLifecycleProjectionLedgerSchema(database);
-      throw new Error("interrupt comparator epoch reset");
-    }).createSchema(env.database), /interrupt comparator epoch reset/);
-    assert.deepEqual({
-      versions: versionPair(env.database),
-      lanes: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_lanes ORDER BY rowid").all(),
-      pairs: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_pairs ORDER BY rowid").all(),
-      totals: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_totals ORDER BY rowid").all(),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE name GLOB 'lifecycle_projection_*' ORDER BY type,name").all(),
-    }, before);
-    validateLegacyLifecycleProjectionLedgerSchema(env.database);
-  } finally { await env.cleanup(); }
-});
-
-test("v32 refuses a corrupt three-provider comparator before WAL conversion or reset", async () => {
-  const env = await fixture();
-  try {
-    restoreV31Fixture(env.database);
-    env.database.exec("DROP TRIGGER lifecycle_projection_pair_immutable; PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE");
-    const before = await readFile(env.path);
-    let initialized = false;
-
-    await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }),
-      /Lifecycle projection ledger/);
-    assert.equal(initialized, false);
-    assert.deepEqual(await readFile(env.path), before);
-    assert.throws(() => new DaemonStateSchema().createSchema(env.database), /Lifecycle projection ledger/);
-    assert.deepEqual(await readFile(env.path), before);
-  } finally { await env.cleanup(); }
-});
+function seedHistoricalRuntimeIdentity(database: DatabaseSync, input: {
+  agentId: string;
+  executionGenerationId: string;
+  runtimeGenerationId: string;
+  provider: "codex" | "claude-code" | "cursor" | "open-model";
+  authorityMode: "legacy" | "typed_shadow" | "typed";
+  configRevision: number;
+  createdAtMs: number;
+}): void {
+  database.prepare(`INSERT OR IGNORE INTO execution_generations(execution_generation_id,agent_id,created_at_ms)
+    VALUES(?,?,?)`).run(input.executionGenerationId, input.agentId, input.createdAtMs);
+  database.prepare(`INSERT INTO execution_runtime_generations
+    (runtime_generation_id,execution_generation_id,agent_id,provider,authority_mode,
+     runtime_state,control_state,continuation_state,config_revision,created_at_ms)
+    VALUES(?,?,?,?,?,'ready','responsive','available',?,?)`).run(
+    input.runtimeGenerationId, input.executionGenerationId, input.agentId,
+    input.provider, input.authorityMode, input.configRevision, input.createdAtMs,
+  );
+}
 
 test("v33 retires incompatible Codex births without replaying work or deleting history", async () => {
   const env = await fixture();
@@ -1727,7 +1292,7 @@ test("v33 retires incompatible Codex births without replaying work or deleting h
       ["codex-polling-typed", pollingTyped, "codex", "typed"],
       ["claude-legacy", claude, "claude-code", "legacy"],
     ] as const) {
-      materializeRuntimeIdentity(env.database, {
+      seedHistoricalRuntimeIdentity(env.database, {
         agentId,
         executionGenerationId: birth.executionGenerationId,
         runtimeGenerationId: birth.runtimeGenerationId!,
@@ -1791,11 +1356,11 @@ test("v33 retires incompatible Codex births without replaying work or deleting h
     assert.deepEqual(desired, {
       "claude-legacy": "running",
       "codex-birthless": "running",
-      "codex-events-shadow": "running",
+      "codex-events-shadow": "stopped",
       "codex-legacy": "stopped",
       "codex-missing": "stopped",
-      "codex-polling-shadow": "running",
-      "codex-polling-typed": "stopped",
+      "codex-polling-shadow": "stopped",
+      "codex-polling-typed": "running",
       "codex-shadow": "stopped",
       "codex-typed": "running",
     });
@@ -1803,11 +1368,11 @@ test("v33 retires incompatible Codex births without replaying work or deleting h
       ORDER BY agent_id`).all().map((row) => ({ ...row })), [
       { agent_id: "claude-legacy", state: "pending", terminal_reason: null },
       { agent_id: "codex-birthless", state: "pending", terminal_reason: null },
-      { agent_id: "codex-events-shadow", state: "pending", terminal_reason: null },
+      { agent_id: "codex-events-shadow", state: "acknowledged_no_reply", terminal_reason: "upgrade_authority_unavailable" },
       { agent_id: "codex-legacy", state: "acknowledged_no_reply", terminal_reason: "upgrade_authority_unavailable" },
       { agent_id: "codex-missing", state: "acknowledged_no_reply", terminal_reason: "upgrade_authority_unavailable" },
-      { agent_id: "codex-polling-shadow", state: "pending", terminal_reason: null },
-      { agent_id: "codex-polling-typed", state: "acknowledged_no_reply", terminal_reason: "upgrade_authority_unavailable" },
+      { agent_id: "codex-polling-shadow", state: "acknowledged_no_reply", terminal_reason: "upgrade_authority_unavailable" },
+      { agent_id: "codex-polling-typed", state: "pending", terminal_reason: null },
       { agent_id: "codex-shadow", state: "acknowledged_no_reply", terminal_reason: "upgrade_authority_unavailable" },
       { agent_id: "codex-typed", state: "pending", terminal_reason: null },
     ]);
@@ -1828,7 +1393,7 @@ test("v33 retires incompatible Codex births without replaying work or deleting h
     assert.deepEqual(env.database.prepare("SELECT * FROM work_attempts WHERE work_attempt_id='attempt-codex-legacy'").get(), preserved.workspace);
     assert.deepEqual(env.database.prepare("SELECT * FROM work_attempt_executions WHERE execution_generation_id=?")
       .get(legacy.executionGenerationId), preserved.execution);
-    assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox_events WHERE idempotency_key='v33_incompatible_codex_birth_retired'").get()!.n, 4);
+    assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox_events WHERE idempotency_key='v33_incompatible_codex_birth_retired'").get()!.n, 5);
     assert.deepEqual(versionPair(env.database).map((row) => ({ ...(row as Row) })), [
       { user_version: DAEMON_STATE_SCHEMA_VERSION },
       { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION },
@@ -1847,7 +1412,7 @@ test("v33 Codex retirement and schema markers roll back atomically", async () =>
       agentId: "codex-rollback", provider: "codex", connectionKind: "codex_app_server",
     });
     env.database.exec("BEGIN IMMEDIATE");
-    materializeRuntimeIdentity(env.database, {
+    seedHistoricalRuntimeIdentity(env.database, {
       agentId: "codex-rollback",
       executionGenerationId: birth.executionGenerationId,
       runtimeGenerationId: birth.runtimeGenerationId!,
@@ -2087,7 +1652,7 @@ test("v29 freezes only exact active pre-B1 native births as legacy", async () =>
       agentId: "already-frozen", provider: "codex", connectionKind: "codex_app_server",
     });
     env.database.exec("BEGIN IMMEDIATE");
-    materializeRuntimeIdentity(env.database, {
+    seedHistoricalRuntimeIdentity(env.database, {
       agentId: "already-frozen",
       executionGenerationId: preserved.executionGenerationId,
       runtimeGenerationId: preserved.historicalRuntimeGenerationId!,
@@ -2247,30 +1812,6 @@ test("v27 preserves publication receipts across reopen and refuses malformed jou
         assert.throws(() => new DaemonStateSchema().createSchema(env.database), /Room work publication/);
         assert.deepEqual(await readFile(env.path), before);
       }
-    } finally { await env.cleanup(); }
-  }
-});
-
-test("v26 refuses missing or weakened compaction authority before WAL or repair writes", async () => {
-  for (const corruption of [
-    "DROP TRIGGER custodial_polling_compaction_forward",
-    "UPDATE sqlite_master SET sql=replace(sql, 'CHECK(compacted_through_offer_id IS NULL OR length(trim(compacted_through_offer_id))>0)', '') WHERE name='custodial_polling_activations'",
-    "UPDATE sqlite_master SET sql=replace(sql, 'FOREIGN KEY(predecessor_offer_id) REFERENCES custodial_polling_offers(offer_id) ON DELETE SET NULL', 'FOREIGN KEY(predecessor_offer_id) REFERENCES custodial_polling_offers(offer_id) ON DELETE RESTRICT') WHERE name='custodial_polling_offers'",
-    "DROP TRIGGER custodial_polling_offer_no_delete; CREATE TRIGGER custodial_polling_offer_no_delete BEFORE DELETE ON custodial_polling_offers BEGIN SELECT 1; END",
-  ]) {
-    const env = await fixture();
-    try {
-      const schemaVersion = Number(env.database.prepare("PRAGMA schema_version").get()!.schema_version);
-      env.database.exec(`PRAGMA writable_schema=ON; ${corruption}; PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
-        PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
-      const before = await readFile(env.path); const versions = versionPair(env.database);
-      let initialized = false;
-      await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }), /activation journal|offer journal/);
-      assert.equal(initialized, false);
-      assert.deepEqual(await readFile(env.path), before);
-      assert.throws(() => new DaemonStateSchema().createSchema(env.database), /activation journal|offer journal/);
-      assert.deepEqual(await readFile(env.path), before);
-      assert.deepEqual(versionPair(env.database), versions);
     } finally { await env.cleanup(); }
   }
 });

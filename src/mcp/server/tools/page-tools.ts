@@ -63,7 +63,7 @@ function assertPagePublishingAvailable(): void {
     throw new Error(`The remote LetAgents MCP endpoint cannot read files on your computer. Publish pages through the npm package (npx letagents). ${NOTHING_PUBLISHED}`);
   }
   const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
-  if (getDaemonToolExecutionContext() || profile === "supervised_room_turn" || profile === "supervised_mcp_polling") {
+  if (getDaemonToolExecutionContext() || profile === "supervised_room_turn") {
     throw new Error(`Desktop room agents cannot publish a page from a file yet. ${NOTHING_PUBLISHED}`);
   }
   if (isLocalRoomApi(getApiUrl())) throw new Error(`Local rooms have no pages. ${NOTHING_PUBLISHED}`);

@@ -390,7 +390,7 @@ export class TurnControlCoordinator {
     const capabilities = await this.ports.providerPort?.capabilities(input.workAttemptId, entry.provider);
     const capability = capabilities?.turnControl ?? "unsupported";
     const correction = input.correction?.trim() || null;
-    const stopThenResend = Boolean(correction) && (entry.delivery_mode ?? "mcp_polling") === "daemon_inbox";
+    const stopThenResend = Boolean(correction);
     let nativeCorrection = stopThenResend ? null : correction;
     let correctionStrategy: "native" | "stop_then_resend" | null = correction
       ? stopThenResend ? "stop_then_resend" : "native"
@@ -490,11 +490,11 @@ export class TurnControlCoordinator {
       providerConnection: ref.provider_connection ?? null,
       executionGenerationId: binding.execution_generation_id,
       daemonGeneration: this.ports.authority.currentGeneration(),
-      deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      deliveryMode: "daemon_inbox" as const,
     };
     const interruptedDelivery: { current: SupervisedDeliveryInterruptReservation | null } = { current: null };
     let foldCompletedRetryWithoutNativeControl = false;
-    if (retryingControl && existingControl?.inbox_item_id && (entry.delivery_mode ?? "mcp_polling") === "daemon_inbox") {
+    if (retryingControl && existingControl?.inbox_item_id) {
       await this.ports.wakeDelivery(entry.id);
       for (let observation = 0; observation < 500; observation += 1) {
         const active = this.ports.delivery?.activeTurn(deliveryAgent);
@@ -525,7 +525,7 @@ export class TurnControlCoordinator {
           executionGenerationId: input.executionGenerationId,
           providerContinuationId: ref.provider_continuation_id,
           providerConnection: ref.provider_connection,
-          deliveryMode: entry.delivery_mode ?? "mcp_polling",
+          deliveryMode: "daemon_inbox",
           hasCorrection: Boolean(correction),
           correctionText: correction,
           correctionStrategy,
@@ -545,7 +545,6 @@ export class TurnControlCoordinator {
         || recoveredEntry.provider_ref?.execution_generation_id !== input.executionGenerationId
         || recoveredEntry.provider_ref.provider_continuation_id !== ref.provider_continuation_id
         || !sameProviderActionConnectionSnapshot(recoveredEntry.provider_ref.provider_connection, ref.provider_connection)
-        || (recoveredEntry.delivery_mode ?? "mcp_polling") !== (entry.delivery_mode ?? "mcp_polling")
         || recovered?.action_id !== input.actionId
         || recovered.target_room_id !== input.roomId
         || recovered.target_source_message_id !== input.sourceMessageId
@@ -573,7 +572,7 @@ export class TurnControlCoordinator {
         linkedState: linked?.state ?? null,
       };
     }
-    if ((entry.delivery_mode ?? "mcp_polling") === "daemon_inbox") {
+    {
       if (prepared.linkedInboxItemId) {
         interruptedDelivery.current = this.ports.delivery?.captureActiveDeliveryInterrupt(deliveryAgent, input.actionId) ?? null;
         if (interruptedDelivery.current?.inboxItemId !== prepared.linkedInboxItemId) {
@@ -634,7 +633,7 @@ export class TurnControlCoordinator {
                 executionGenerationId: input.executionGenerationId,
                 providerContinuationId: ref.provider_continuation_id,
                 providerConnection: ref.provider_connection,
-                deliveryMode: entry.delivery_mode ?? "mcp_polling",
+                deliveryMode: "daemon_inbox",
                 providerTurnId: turnId,
                 observedAt: checkpointedAt,
               }, this.ports.authority.fenceCommit);
@@ -648,7 +647,7 @@ export class TurnControlCoordinator {
           },
           markDispatched: async () => {
             if (dispatchMarked) return;
-            if ((entry.delivery_mode ?? "mcp_polling") === "daemon_inbox" && !interruptedDelivery.current) {
+            if (!interruptedDelivery.current) {
               throw new Error("Turn control cannot dispatch without reserving the exact active daemon-inbox invocation.");
             }
             await this.ports.updateManifestEntry(entry.id, (current) => {
@@ -659,7 +658,6 @@ export class TurnControlCoordinator {
                 || current.provider_ref?.execution_generation_id !== input.executionGenerationId
                 || current.provider_ref.provider_continuation_id !== ref.provider_continuation_id
                 || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, ref.provider_connection)
-                || (current.delivery_mode ?? "mcp_polling") !== (entry.delivery_mode ?? "mcp_polling")
                 || this.ports.currentHandle(entry.id) !== handle) {
                 throw new Error("Turn control lost its durable prepared journal before native dispatch.");
               }

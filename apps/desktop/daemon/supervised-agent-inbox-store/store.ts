@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { assertNoDeliveryDrain } from "../delivery-drain.js";
-import { assertNoPollingActivation } from "../custodial-polling-activation.js";
 import type { SupervisedInboxItem, Row, ProviderContinuationRepair } from "./types.js";
 import { run } from "./sql.js";
 import { rowToItem, rowToContinuationRepair } from "./row-mapping.js";
@@ -33,8 +31,6 @@ export class SupervisedAgentInboxStore extends InboxDeliveryStore {
     missing_continuation: string;
   }): Promise<ProviderContinuationRepair> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      assertNoDeliveryDrain(database, input.agent_id);
-      assertNoPollingActivation(database, input.agent_id);
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
       if (!row) throw new Error("The blocked room message no longer exists.");
       const item = rowToItem(row);

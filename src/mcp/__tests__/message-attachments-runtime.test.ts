@@ -28,10 +28,8 @@ test("file attachments are refused where this process cannot read the agent's fi
   });
   const prior = process.env.LETAGENTS_EXECUTION_PROFILE;
   try {
-    for (const profile of ["supervised_room_turn", "supervised_mcp_polling"]) {
-      process.env.LETAGENTS_EXECUTION_PROFILE = profile;
-      assert.throws(() => assertMessageFileAttachmentsAvailable(), /set_reply_attachments/, profile);
-    }
+    process.env.LETAGENTS_EXECUTION_PROFILE = "supervised_room_turn";
+    assert.throws(() => assertMessageFileAttachmentsAvailable(), /set_reply_attachments/, "supervised_room_turn");
   } finally {
     if (prior === undefined) delete process.env.LETAGENTS_EXECUTION_PROFILE;
     else process.env.LETAGENTS_EXECUTION_PROFILE = prior;

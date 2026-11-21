@@ -494,22 +494,17 @@ export function codexAppServerEnvironment(
   const configuredEnv = options.env && Object.keys(options.env).length
     ? { ...runtimeEnv, ...options.env }
     : runtimeEnv;
-  const custodialPolling = configuredEnv.LETAGENTS_EXECUTION_PROFILE === "supervised_mcp_polling";
   const rental = isRentalCredentialIsolationRequested(configuredEnv);
   const commitEnvironment = rental ? {} : options.commitEnvironment ?? {};
   const env = rental
     ? rentalIsolatedChildEnvironment(configuredEnv)
     : { ...configuredEnv, ...commitEnvironment };
-  if (rental || configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1" || custodialPolling) {
-    // A custodial supervised worker borrows exact-generation authority from the
-    // daemon. Ambient desktop owner or fixed worker credentials would bypass
-    // that fence and would also leak into provider-started shell commands.
+  if (rental || configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1") {
+    // A supervised worker borrows exact-generation authority from the daemon.
+    // Ambient desktop owner or fixed worker credentials would bypass that fence
+    // and would also leak into provider-started shell commands.
     delete env.LETAGENTS_TOKEN;
     delete env.LETAGENTS_AGENT_SESSION_BEARER;
-    if (custodialPolling) {
-      delete env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
-      delete env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID;
-    }
   }
   // Codex hands its own environment to every hook, the notifier and every
   // command. With the owner's setup on those are the owner's programs, so the

@@ -1,13 +1,12 @@
 /**
  * Builds room delivery: continuation repair, room moves, provider checkpoints,
  * supervised delivery, the read model, terminals, configuration apply,
- * cutovers and desired states.
+ * and desired states.
  */
 import { ContinuationRepairCoordinator } from "../continuation-repair-coordinator.js";
 import { redactCredentialText } from "../credential-redaction.js";
 import { DaemonReadModel } from "../daemon-read-model.js";
 import { launchProgress } from "../launch-progress.js";
-import { DeliveryCutoverExecutionCoordinator } from "../delivery-cutover-execution-coordinator.js";
 import { DesiredStateCoordinator } from "../desired-state-coordinator.js";
 import { ProviderCheckpointCoordinator } from "../provider-checkpoint-coordinator.js";
 import { ProviderTerminalCoordinator } from "../provider-terminal-coordinator.js";
@@ -26,7 +25,6 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
   protected readonly supervisedDelivery: SupervisedAgentDelivery | null;
   protected readonly supervisedDeliveryLifecycle: SupervisedDeliveryLifecycleCoordinator;
   protected readonly runtimeConfigurationApply: RuntimeConfigurationApplyCoordinator;
-  protected readonly deliveryCutoverExecution: DeliveryCutoverExecutionCoordinator;
   protected readonly providerCheckpoints: ProviderCheckpointCoordinator;
   protected readonly providerTerminals: ProviderTerminalCoordinator;
 
@@ -167,7 +165,6 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
         supportsRoomTurns: () => Boolean(this.providerPort?.runRoomTurn),
         supportsContinuationRepair: () => Boolean(this.providerPort?.repairContinuation),
       },
-      recoveryDiagnostics: () => this.providerStreams.recoveryDiagnostics(),
       manifest: this.store,
       bindings: this.workerBindings,
       inbox: this.supervisedInbox,
@@ -186,9 +183,6 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
       manifest: this.store,
       roomMoves: {
         reconcile: (move) => this.roomMoves.reconcile(move),
-      },
-      cutovers: {
-        start: (entryId) => this.deliveryCutovers.start(entryId),
       },
       inbox: this.supervisedInbox,
       bindings: this.workerBindings,
@@ -243,18 +237,6 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
         isHandoffScheduled: () => this.handoffScheduled,
       },
       requestConvergence: (entryId) => this.requestConvergence(entryId),
-    });
-    this.deliveryCutoverExecution = new DeliveryCutoverExecutionCoordinator({
-      isHandoffScheduled: () => this.handoffScheduled,
-      ...(providerPort ? { provider: providerPort } : {}),
-      getEntry: (entryId) => this.store.getEntry(entryId),
-      getAttempt: (workAttemptId) => this.durability.getAttempt(workAttemptId),
-      updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
-      getLiveHandle: (entryId) => this.liveHandles.get(entryId),
-      startDelivery: (entryId) => this.startSupervisedDelivery(entryId, "wake"),
-      observation: this.deliveryCutovers,
-      drain: { store: this.store, authority: this.authority, entries: this.entryConcurrency, delivery: this.supervisedDelivery },
-      polling: { bindings: this.workerBindings, currentHostGrant: (entry) => this.workerAuthority.currentHostGrant(entry) },
     });
     this.desiredStates = new DesiredStateCoordinator({
       store: this.store,

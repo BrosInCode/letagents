@@ -31,8 +31,7 @@ export type WireEntry = {
   condition: DesktopSupervisorManifestEntry["condition"];
   last_error?: string | null;
   permission_profile_id: string | null;
-  delivery_mode?: "mcp_polling" | "daemon_inbox";
-  polling_contract?: "custodial_polling_v1" | null;
+  delivery_mode?: "daemon_inbox";
   home_harness?: string;
   permission_pending?: boolean;
   provider_launch_policy?: unknown;

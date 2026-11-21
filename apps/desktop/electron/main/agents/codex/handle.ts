@@ -78,7 +78,6 @@ export class CodexProviderHandle implements ProviderHandle {
   launchNotices: readonly string[] = [];
   /** What this runtime's launch, or its last repair that the daemon recorded, found about its reasoning effort. A repair does not say it again. */
   effortNotice: string | null = null;
-  custodyLaunchAgentSessionId?: string;
   managedLaunchContract?: string;
   readonly execution: ProviderExecutionObserver;
   readonly nativeActiveTurns = new Map<string, { providerContinuationId: string; providerTurnId: string }>();
@@ -120,7 +119,7 @@ export class CodexProviderHandle implements ProviderHandle {
     readonly pid: number | null,
     providerContinuationId: string,
     readonly providerConnection: ProviderConnectionRef,
-    readonly lifecycleAuthorityMode: "legacy" | "typed_shadow" | "typed",
+    readonly lifecycleAuthorityMode: "typed",
     readonly client: CodexAdapterRpc,
     readonly launch: CodexAppServerLaunch,
     now: () => string,

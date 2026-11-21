@@ -42,8 +42,7 @@ export type StoredAgentConfiguration = {
   provider_launch_policy: unknown;
   config_revision: number;
   runtime_configuration_revision: number;
-  polling_contract?: DaemonAgentConfiguration["polling_contract"];
-  /** How room messages reach the agent. Absent is read as the older polling delivery. */
+  /** How room messages reach the agent. daemon_inbox is the sole supervised delivery mode. */
   delivery_mode?: string;
   /** The owner says this Open Model agent's model reads images. */
   image_input: boolean;
@@ -198,7 +197,7 @@ export class ManifestAdministrationCoordinator {
     if (!["running", "paused", "stopped"].includes(entry.desired_state)) {
       throw new Error("Invalid desired state.");
     }
-    if (entry.delivery_mode !== undefined && !["mcp_polling", "daemon_inbox"].includes(entry.delivery_mode)) {
+    if (entry.delivery_mode !== undefined && entry.delivery_mode !== "daemon_inbox") {
       throw new Error("Invalid delivery mode.");
     }
     // Refused when the agent is saved, not first at its launch.
@@ -225,9 +224,6 @@ export class ManifestAdministrationCoordinator {
   }
 
   async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
-    if (Object.hasOwn(entry, "polling_contract")) {
-      throw new Error("Polling custody is daemon-owned and cannot be supplied to manifest.put.");
-    }
     if (namesHomeHarness(entry.provider_launch_policy)) {
       throw new Error("An agent's use of its owner's own setup is turned on in the desktop app and cannot be supplied to manifest.put.");
     }

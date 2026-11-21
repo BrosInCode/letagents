@@ -24,11 +24,6 @@ import {
 } from "./provider-action-port.js";
 import { deriveProviderConfigurationSnapshot, entryLaunchPolicy, ownerSetupRef } from "./provider-configuration.js";
 import { isCursorChildConnection } from "./provider-state-policy.js";
-import {
-  lifecycleAuthorityModeForProvider,
-  lifecycleAuthorityProviderSchema,
-  type LifecycleAuthorityMode,
-} from "./lifecycle-authority-mode.js";
 import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
 import { DaemonFenceLostError } from "./singleton.js";
 import {
@@ -58,10 +53,8 @@ import type { ProviderInstallationToken } from "./provider-stream-coordinator.js
 import type { SupervisedAgentInboxStore, SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 
 import { ProviderStopError } from "./daemon-error-policy.js";
-import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import { ACTIVITY_RECORD_CONTINUED_NOTICE, ACTIVITY_RECORD_STOPPED_NOTICE } from "./runtime-recovery-journal.js";
 import { EXIT_UNSETTLED_NOTICE } from "./provider-terminal-coordinator.js";
-import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 import type { ConvergencePacing } from "./convergence-pacer.js";
 import { launchProgress } from "./launch-progress.js";
 import { turnStartLatency } from "./turn-start-latency.js";
@@ -103,7 +96,6 @@ type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 export type ConvergenceRequestKind = "owned" | "rehydration";
 
 export type ProviderExecutionConfiguration = {
-  polling_contract?: "custodial_polling_v1" | null;
   provider: string;
   model: string | null;
   reasoning_effort: DaemonManifestEntry["reasoning_effort"];
@@ -119,8 +111,6 @@ export type ProviderExecutionStore = {
   pendingRuntimeRecovery(agentId: string): Promise<unknown>;
   /** Archive what the agent's exited runtimes left unfinished in its execution record. Resolves with the runtimes archived. */
   archiveExitedRuntimes?(agentId: string, commitFence: CommitFence): Promise<string[]>;
-  unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
-  unresolvedPollingActivation(agentId: string): Promise<PollingActivationRecord | null>;
   load(): Promise<{ generation: number; entries: DaemonManifestEntry[] }>;
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
   getAgentConfiguration(entryId: string): Promise<ProviderExecutionConfiguration | undefined>;
@@ -129,7 +119,7 @@ export type ProviderExecutionStore = {
     executionGenerationId: string;
     providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
     configurationRevision: number;
-  }): Promise<LifecycleAuthorityMode | null>;
+  }): Promise<"typed" | null>;
   replaceEntry(
     expectedGeneration: number,
     entry: DaemonManifestEntry,
@@ -152,11 +142,11 @@ export type ProviderExecutionStore = {
       providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
       appliedRevision: number;
       managedLaunchContract?: string;
-      requestedAuthorityMode: LifecycleAuthorityMode;
+      requestedAuthorityMode: "typed";
       observedAtMs: number;
     },
     commitFence: CommitFence,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode | null }>;
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: "typed" | null }>;
 };
 
 export type ProviderExecutionDurability = Pick<
@@ -180,12 +170,6 @@ export type ProviderExecutionStreams = {
     handle: ProviderActionHandle,
     executionGenerationId: string,
     mayStartDelivery?: () => boolean,
-  ): Promise<void>;
-  stageWorkerBindingAfterResume(
-    entry: DaemonManifestEntry,
-    priorBinding: WorkerSessionBinding,
-    successorExecutionGenerationId: string,
-    handle: ProviderActionHandle,
   ): Promise<void>;
   fenceTerminalOnce(handle: ProviderActionHandle, actionId: string): Promise<void>;
 };
@@ -350,7 +334,7 @@ export class ProviderExecutionCoordinator {
    */
   async providerRef(
     entry: DaemonManifestEntry,
-    lifecycleAuthorityMode?: LifecycleAuthorityMode,
+    lifecycleAuthorityMode?: "typed",
     appliedRevision?: number,
   ): Promise<ProviderActionRef> {
     const ref = entry.provider_ref;
@@ -366,7 +350,7 @@ export class ProviderExecutionCoordinator {
     };
   }
 
-  private async frozenLifecycleAuthority(entry: DaemonManifestEntry): Promise<LifecycleAuthorityMode | null> {
+  private async frozenLifecycleAuthority(entry: DaemonManifestEntry): Promise<"typed" | null> {
     const ref = entry.provider_ref;
     if (!ref?.provider_connection) return null;
     const appliedRevision = (await this.options.store.getAgentConfiguration(entry.id))?.runtime_configuration_revision;
@@ -516,7 +500,6 @@ export class ProviderExecutionCoordinator {
     if (this.options.authority.isHandoffScheduled()
       || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch) return null;
     const current = await this.options.store.getEntry(entryId);
-    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return null;
     if (this.options.authority.isHandoffScheduled()
       || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch
       || current?.desired_state !== "running") return null;
@@ -785,7 +768,7 @@ export class ProviderExecutionCoordinator {
     handle: ProviderActionHandle,
     executionGenerationId: string,
     appliedRevision: number,
-    requestedAuthorityMode: LifecycleAuthorityMode,
+    requestedAuthorityMode: "typed",
   ): Promise<void> {
     const providerConnection = handle.providerConnection;
     if (!handle.providerContinuationId || !providerConnection) {
@@ -840,7 +823,6 @@ export class ProviderExecutionCoordinator {
         provider_continuation_id: handle.providerContinuationId,
         provider_connection: structuredClone(handle.providerConnection),
         execution_generation_id: executionGenerationId,
-        ...(handle.custodyLaunchAgentSessionId ? { custodial_launch_agent_session_id: handle.custodyLaunchAgentSessionId } : {}),
       },
     };
   }
@@ -851,7 +833,7 @@ export class ProviderExecutionCoordinator {
     handle: ProviderActionHandle,
     executionGenerationId: string,
     appliedRevision: number,
-    requestedAuthorityMode: LifecycleAuthorityMode,
+    requestedAuthorityMode: "typed",
   ): Promise<void> {
     if (this.options.authority.isHandoffScheduled()) {
       await this.persistReturnedProviderForHandoff(
@@ -892,7 +874,7 @@ export class ProviderExecutionCoordinator {
     handle: ProviderActionHandle,
     executionGenerationId: string,
     appliedRevision: number,
-    requestedAuthorityMode: LifecycleAuthorityMode,
+    requestedAuthorityMode: "typed",
   ): Promise<void> {
     if (!handle.providerContinuationId) {
       throw new Error("Provider launch did not return a durable continuation id.");
@@ -985,9 +967,6 @@ export class ProviderExecutionCoordinator {
     entry: DaemonManifestEntry,
     mayStartDelivery: () => boolean,
   ): Promise<ProviderActionHandle | null> {
-    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entry.id))) return null;
-    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
-    if (activation && !matchesPollingActivationRuntime(activation, entry)) return null;
     const ref = entry.provider_ref;
     if (!ref) return null;
     const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
@@ -1061,9 +1040,6 @@ export class ProviderExecutionCoordinator {
       return null;
     }
     const handle = attachment;
-    if (activation && !matchesPollingActivationRuntime(activation, entry, handle)) {
-      throw new Error("Attached provider does not match the unresolved polling activation.");
-    }
     if (handle.workAttemptId !== ref.work_attempt_id
       || handle.providerContinuationId !== ref.provider_continuation_id) {
       throw new Error("Attached provider does not match the durable provider continuation.");
@@ -1130,9 +1106,7 @@ export class ProviderExecutionCoordinator {
                 executionGenerationId: ref.execution_generation_id,
                 providerConnection: recoveredConnection,
                 appliedRevision: appliedRevision!,
-                // This process predates native-birth capture. Recovering its
-                // connection must not infer authority from the current release.
-                requestedAuthorityMode: "legacy",
+                requestedAuthorityMode: "typed",
                 observedAtMs: this.options.nowMs(),
               },
               this.options.authority.fenceCommit,
@@ -1155,34 +1129,6 @@ export class ProviderExecutionCoordinator {
       ref.execution_generation_id,
       mayStartDelivery,
     );
-    const binding = await this.options.bindings.get(authoritativeEntry.id);
-    if ((authoritativeEntry.delivery_mode ?? "mcp_polling") === "mcp_polling"
-      && !await this.options.host.requiresGrant(authoritativeEntry)
-      && binding && binding.execution_generation_id !== ref.execution_generation_id) {
-      try {
-        await this.options.streams.stageWorkerBindingAfterResume(
-          authoritativeEntry,
-          binding,
-          ref.execution_generation_id,
-          handle,
-        );
-        await this.options.transition(
-          authoritativeEntry.id,
-          "recovering",
-          "coordination_blocked",
-          "reattached resumed provider awaits exact worker wait evidence",
-          "daemon-convergence",
-        );
-      } catch (error) {
-        await this.options.transition(
-          authoritativeEntry.id,
-          "recovering",
-          "coordination_blocked",
-          `reattached provider worker binding could not be staged: ${error instanceof Error ? error.message : "unknown binding recovery failure"}`,
-          "daemon-convergence",
-        );
-      }
-    }
     return handle;
   }
 
@@ -1192,7 +1138,6 @@ export class ProviderExecutionCoordinator {
     if (kind === "owned") this.failedLaunchAdmissions.delete(entryId);
     await this.options.settleRuntimeApprovals(entryId);
     if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
-    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return;
     let entry = await this.options.store.getEntry(entryId);
     if (!entry) {
       this.failedLaunchAdmissions.delete(entryId);
@@ -1235,8 +1180,6 @@ export class ProviderExecutionCoordinator {
     kind: ConvergenceRequestKind,
   ): Promise<void> {
     let entry = initialEntry;
-    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
-    if (activation && !matchesPollingActivationRuntime(activation, entry, this.options.streams.get(entry.id))) return;
     let launchControlEpoch = initialControlEpoch;
     if (entry.condition === "quarantined") return;
     if (entry.id.startsWith("supervised_rental_")) {
@@ -1361,7 +1304,7 @@ export class ProviderExecutionCoordinator {
     const { supervisorGrant: _secret, ...grantIdentity } = grant ?? { supervisorGrant: null };
     return createHash("sha256").update(JSON.stringify({
       entryId: entry.id, roomId: entry.room_id, provider: entry.provider,
-      deliveryMode: entry.delivery_mode ?? "mcp_polling", desiredState: entry.desired_state,
+      deliveryMode: entry.delivery_mode ?? "daemon_inbox", desiredState: entry.desired_state,
       daemonGeneration: this.options.authority.currentDaemonGeneration(), controlEpoch,
       configurationRevision: configuration.config_revision,
       workAttemptId: entry.work_attempt_id, workspace: entry.workspace_path,
@@ -1375,8 +1318,6 @@ export class ProviderExecutionCoordinator {
     handle: ProviderActionHandle,
   ): Promise<void> {
     let entry = initialEntry;
-    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
-    if (activation && !matchesPollingActivationRuntime(activation, entry, handle)) return;
     const grant = this.options.host.currentGrant(entry);
     const daemonGeneration = this.options.authority.currentDaemonGeneration();
     const controlEpoch = this.options.concurrency.currentControlEpoch(entry.id);
@@ -1597,9 +1538,7 @@ export class ProviderExecutionCoordinator {
     initialControlEpoch: number,
   ): Promise<void> {
     // Unresolved native dispatch may recover its exact handle, never replay in a successor.
-    if (await this.options.store.pendingRuntimeRecovery(initialEntry.id)
-      || await this.options.store.unresolvedDeliveryDrain(initialEntry.id)
-      || await this.options.store.unresolvedPollingActivation(initialEntry.id)) return;
+    if (await this.options.store.pendingRuntimeRecovery(initialEntry.id)) return;
     const launchTiming = turnStartLatency.beginLaunch(initialEntry.id, initialEntry.provider);
     launchProgress.begin(initialEntry.id, () => (this.options.notifyLaunchProgressChanged ?? this.options.notifyProgressChanged)?.());
     let entry = initialEntry;
@@ -1662,9 +1601,6 @@ export class ProviderExecutionCoordinator {
           roomCursor: priorBinding.room_cursor ?? null,
         }
       : null;
-    // Resume must name the lifecycle authority the saved runtime was born
-    // under, exactly as attach does; without it a typed birth is read back as
-    // typed_shadow and every daemon-inbox resume is refused.
     const ref = entry.provider_ref ? await this.providerRef(entry, await this.frozenLifecycleAuthority(entry) ?? undefined) : null;
     const requiresGrant = await this.options.host.requiresGrant(entry);
     const mintedAuthorization = requiresGrant
@@ -1684,7 +1620,7 @@ export class ProviderExecutionCoordinator {
     );
     if (!currentAfterCapabilities) return;
     entry = currentAfterCapabilities;
-    const deliveryMode = entry.delivery_mode ?? "mcp_polling";
+    const deliveryMode = entry.delivery_mode ?? "daemon_inbox";
     if (capabilities.deliveryModes && !capabilities.deliveryModes.includes(deliveryMode)) {
       await this.options.transition(
         entry.id,
@@ -1695,10 +1631,7 @@ export class ProviderExecutionCoordinator {
       );
       return;
     }
-    const requestedAuthorityMode = lifecycleAuthorityModeForProvider(
-      lifecycleAuthorityProviderSchema.parse(entry.provider),
-      deliveryMode,
-    );
+    const requestedAuthorityMode = "typed" as const;
     const resumed = Boolean(ref && capabilities.resume);
     if (requiresGrant) {
       const grant = this.options.host.currentGrant(entry);
@@ -1844,9 +1777,8 @@ export class ProviderExecutionCoordinator {
       reasoningEffort: launchSnapshot.reasoningEffort,
       permissionProfileId: launchSnapshot.permissionProfileId,
       configurationRevision: launchSnapshot.configurationRevision,
-      deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      deliveryMode: entry.delivery_mode ?? "daemon_inbox",
       lifecycleAuthorityMode: requestedAuthorityMode,
-      ...(launchConfiguration.polling_contract ? { pollingContract: launchConfiguration.polling_contract } : {}),
       agentDisplayName: entry.display_name,
       actionId: `manifest:${entry.id}:generation:${generationNumber}`,
       supervisorEntryId: entry.id,
@@ -1883,9 +1815,7 @@ export class ProviderExecutionCoordinator {
           supervisorWorkerSession: {
             agentSessionId: mintedHostSession.agentSessionId,
             apiUrl: mintedHostSession.apiUrl,
-            roomCursor: launchConfiguration.polling_contract
-              ? resumeWorker?.roomCursor ?? attempt.checkpoints.at(-1)?.room_cursor ?? null
-              : null,
+            roomCursor: null,
           },
         });
       }
@@ -1966,9 +1896,7 @@ export class ProviderExecutionCoordinator {
           if (this.options.authority.isHandoffScheduled()) return;
           if (handle.launchNotices?.length) await this.recordLaunchNotices(entry.id, handle.launchNotices);
           await this.options.durability.checkpoint(attempt.work_attempt_id, {
-            room_cursor: launchConfiguration.polling_contract
-              ? spawn.supervisorWorkerSession?.roomCursor ?? null
-              : null,
+            room_cursor: null,
             provider_continuation_id: handle.providerContinuationId,
           });
           let control = await this.revalidateReturnedProviderControl(
@@ -2139,14 +2067,6 @@ export class ProviderExecutionCoordinator {
       releaseLaunchSlot();
     }
     if (!handle) throw new Error("Provider launch returned no handle.");
-    if (requestedAuthorityMode !== "typed" && (["failed", "stopped"].includes(handle.observedState)
-      || (handle.observedState === "idle" && !requiresGrant))) {
-      await this.options.streams.fenceTerminalOnce(
-        handle,
-        `manifest:${entry.id}:returned-terminal:${generationNumber}`,
-      );
-      return;
-    }
     // A live handle is the launch succeeding, whatever binding work follows.
     // Resetting here, not only on the plain path below, keeps grant-bound and
     // resumed agents from carrying exhausted retry budgets into their next
@@ -2155,46 +2075,6 @@ export class ProviderExecutionCoordinator {
     if (requiresGrant) {
       const current = await this.options.store.getEntry(entry.id);
       if (current) await this.convergeAttachedHandle(current, handle);
-      return;
-    }
-    if ((entry.delivery_mode ?? "mcp_polling") === "mcp_polling" && priorBinding && !resumed) {
-      await this.options.transition(
-        entry.id,
-        "recovering",
-        "coordination_blocked",
-        "fresh provider generation cannot inherit a terminal worker credential; awaiting exact bind",
-        "daemon-convergence",
-      );
-      return;
-    }
-    if ((entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
-      && resumed && priorBinding && !reusesActiveCursorExecution) {
-      try {
-        const current = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
-        if (!current) return;
-        await this.options.streams.stageWorkerBindingAfterResume(
-          current,
-          priorBinding,
-          execution.execution_generation_id,
-          handle,
-        );
-      } catch (error) {
-        await this.options.transition(
-          entry.id,
-          "recovering",
-          "coordination_blocked",
-          `resumed provider worker binding could not be staged: ${error instanceof Error ? error.message : "unknown binding recovery failure"}`,
-          "daemon-convergence",
-        );
-        return;
-      }
-      await this.options.transition(
-        entry.id,
-        "recovering",
-        "coordination_blocked",
-        "resumed provider awaits exact worker wait evidence",
-        "daemon-convergence",
-      );
       return;
     }
     await this.options.transition(
@@ -2212,14 +2092,10 @@ export class ProviderExecutionCoordinator {
     let handle = this.options.streams.get(entry.id) ?? null;
     // The exit being recorded is what stops or pauses this entry.
     if (!handle && this.options.exitSettling?.(entry.id)) return;
-    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
-    if (activation && !matchesPollingActivationRuntime(activation, entry, handle ?? undefined)) return;
-    if (activation && !this.options.provider.stopRef) throw new Error("Polling activation requires exact-reference provider stop.");
-    const exactActivationRef = activation ? entry.provider_ref : null;
     const exactCursorRef = entry.provider_ref?.provider_connection?.kind === "cursor_cli"
       ? entry.provider_ref
       : null;
-    const exactStopRef = exactActivationRef ?? (!handle ? exactCursorRef : null);
+    const exactStopRef = !handle ? exactCursorRef : null;
     if (exactStopRef && this.options.provider.stopRef) {
       await this.options.transition(
         entry.id,

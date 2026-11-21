@@ -1,6 +1,5 @@
 import { RoomLatencyTrace } from "./room-latency-trace.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
-import { deliveryDrainBlocksRuntime } from "./delivery-drain.js";
 import type { ManifestStore } from "./manifest-store.js";
 import {
   sameProviderActionConnectionSnapshot,
@@ -21,7 +20,6 @@ import type {
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
 import type { PreparedRuntime } from "./execution-capture-coordinator.js";
-import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
 
 type ProviderCheckpointAuthority = {
   isHandoffScheduled: () => boolean;
@@ -49,7 +47,7 @@ export type ProviderCheckpointCoordinatorOptions = {
     entry: NonNullable<Awaited<ReturnType<ManifestStore["getEntry"]>>>;
     handle: ProviderActionHandle,
     executionGenerationId: string,
-    authorityMode?: ReturnType<typeof lifecycleAuthorityModeForProvider> | null;
+    authorityMode?: "typed" | null;
   }) => void;
 };
 
@@ -166,7 +164,7 @@ export class ProviderCheckpointCoordinator {
             expectedProviderConnection: expectedConnection,
             providerConnection,
             configurationRevision: configurationRevision!,
-            requestedAuthorityMode: lifecycleAuthorityModeForProvider("cursor", "daemon_inbox"),
+            requestedAuthorityMode: "typed",
             observedAt: new Date(this.nowMs()).toISOString(),
           },
           (commit) => this.authority.fenceCommit(commit),
@@ -437,9 +435,6 @@ export class ProviderCheckpointCoordinator {
     const timing = new RoomLatencyTrace("authority");
     try {
       if (this.authority.isHandoffScheduled()) return false;
-      const drain = await this.store.unresolvedDeliveryDrain(authority.agentId);
-      timing.mark("drain");
-      if (deliveryDrainBlocksRuntime(drain)) return false;
       try {
         await this.authority.assertCurrent();
       } catch {

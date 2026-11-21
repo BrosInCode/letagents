@@ -227,20 +227,6 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
     );
   }
 
-  protected stageWorkerBindingAfterResume(
-    entry: DaemonManifestEntry,
-    priorBinding: WorkerSessionBinding,
-    successorExecutionGenerationId: string,
-    handle: ProviderActionHandle,
-  ): Promise<void> {
-    return this.providerStreams.stageWorkerBindingAfterResume(
-      entry,
-      priorBinding,
-      successorExecutionGenerationId,
-      handle,
-    );
-  }
-
   protected handleProviderStream(
     entryId: string,
     handle: ProviderActionHandle,

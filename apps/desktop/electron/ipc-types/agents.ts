@@ -105,9 +105,7 @@ export interface DesktopAgentProviderSetupResult {
   detail: string | null;
 }
 
-export type DesktopManagedAgentDeliveryMode =
-  | "mcp_polling"
-  | "daemon_inbox";
+export type DesktopManagedAgentDeliveryMode = "daemon_inbox";
 
 export type DesktopManagedAgentEffort =
   | "low"
@@ -256,20 +254,6 @@ export interface DesktopManagedAgentPublicChangeSummary {
 export type DesktopSupervisorDesiredState = "running" | "paused" | "stopped";
 export type DesktopSupervisorObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
 export type DesktopSupervisorCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
-export type DesktopLifecycleProjectionProvider = "codex" | "claude-code" | "cursor" | "open-model";
-export type DesktopLifecycleCaptureAdmissionStatus = "pending" | "ready" | "unavailable";
-export interface DesktopLifecycleProjectionDiagnostics {
-  available: boolean;
-  providers: Record<DesktopLifecycleProjectionProvider, {
-    comparedSegments: number;
-    matched: number;
-    missingInTyped: number;
-    missingInLegacy: number;
-    pairedButDifferent: number;
-    conflicts: number;
-    observationUnavailable: number;
-  }>;
-}
 
 export interface DesktopSupervisorDaemonStatus {
   maintenanceHoldId?: string | null;
@@ -279,12 +263,6 @@ export interface DesktopSupervisorDaemonStatus {
   generation: number;
   pid: number;
   startedAt: string;
-  recoveryDiagnostics: {
-    daemonInboxWaitEvidenceDependency: number;
-    lifecycleProjection: DesktopLifecycleProjectionDiagnostics;
-    lifecycleCaptureAdmission: Record<DesktopLifecycleProjectionProvider, DesktopLifecycleCaptureAdmissionStatus>;
-    lifecycleLocalConformanceEligible: Record<DesktopLifecycleProjectionProvider, boolean>;
-  } | null;
   capabilities: {
     roomDeliveryRetry: boolean;
     providerContinuationRepair: boolean;
@@ -716,8 +694,6 @@ export interface DesktopSupervisorManifestEntry {
   permissionProfileId: string | null;
   /** Durable room-ingress owner for this supervised provider. */
   deliveryMode: DesktopManagedAgentDeliveryMode;
-  /** Read-only daemon-owned custody; selecting delivery mode cannot enable it. */
-  pollingContract?: "custodial_polling_v1" | null;
   /**
    * Read-only: this agent uses its owner's own provider setup ("on"), will
    * once it restarts, or still does until it restarts. Absent means off.

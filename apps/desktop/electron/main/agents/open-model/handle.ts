@@ -28,7 +28,7 @@ export class OpenModelHandle implements ProviderHandle {
     readonly workAttemptId: string,
     readonly pid: number,
     readonly providerContinuationId: string,
-    readonly lifecycleAuthorityMode: "legacy" | "typed_shadow" | "typed",
+    readonly lifecycleAuthorityMode: "typed",
     readonly providerConnection: Extract<ProviderConnectionRef, { kind: "opencode_server" }>,
     readonly client: OpenCodeServerClient,
     readonly configuredModel: string,

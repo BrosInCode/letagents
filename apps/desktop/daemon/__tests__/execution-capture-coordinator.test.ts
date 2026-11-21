@@ -38,12 +38,12 @@ function successor(f: ReturnType<typeof fixture>, birth: string): ProviderAction
   new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
     runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", handle.providerConnection!.kind,
       handle.providerConnection!.pid!, birth),
-    provider: "codex", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+    provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
   return handle;
 }
 
 function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server", onExecution?: NonNullable<ProviderActionPort["onExecution"]>, changed?: (agentId: string) => void,
-  db = new DatabaseSync(":memory:"), authorityMode: "typed_shadow" | "typed" = "typed_shadow") {
+  db = new DatabaseSync(":memory:"), authorityMode: "typed" = "typed") {
   db.exec("PRAGMA foreign_keys=ON");
   new DaemonStateSchema().createSchema(db);
   db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${now}',0);
@@ -139,7 +139,7 @@ function secondCaptureLane(f: ReturnType<typeof fixture>) {
     executionGenerationId: generation, handle, nonce: Symbol("second-installation") });
   new ExecutionShadowStore(f.db).registerRuntime({ agentId, executionGenerationId: generation,
     runtimeGenerationId: executionRuntimeStorageIdentity(agentId, generation, "codex_app_server", 42, "birth-secret"),
-    provider: "codex", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+    provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
   return { agentId, handle, token };
 }
 
@@ -398,22 +398,6 @@ test("typed lifecycle startup scan advances past a full unavailable batch", asyn
   } finally { await coordinator.close(); }
 });
 
-test("capture preserves a pre-existing birth mode and rejects policy mismatch", async () => {
-  const f = fixture();
-  try {
-    const runtimeGenerationId = executionRuntimeStorageIdentity("agent", "generation", "codex_app_server", 42, "birth-secret");
-    const shadow = new ExecutionShadowStore(f.db);
-    f.db.prepare("DELETE FROM execution_runtime_generations WHERE runtime_generation_id=?").run(runtimeGenerationId);
-    assert.equal(shadow.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId,
-      provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: 100 }), "typed");
-    await f.install(); f.emit(ready); await flush();
-    assert.equal(f.db.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE runtime_generation_id=?")
-      .get(runtimeGenerationId)?.authority_mode, "typed", "capture cannot rewrite the exact birth to the current release policy");
-    assert.equal(f.admission(), "unavailable",
-      "the installed typed-shadow expectation never silently adopts a different frozen mode");
-  } finally { f.capture.close(); }
-});
-
 test("drain remembers a found runtime birth but never a missing one", async (t) => {
   const f = fixture();
   try {
@@ -442,32 +426,10 @@ test("drain remembers a found runtime birth but never a missing one", async (t) 
     const before = lookups;
     new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
       runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", "codex_app_server", 42, late),
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+      provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
     f.capture.refresh("agent"); await flush();
     assert.ok(lookups > before, "the earlier miss was not remembered");
     assert.equal(f.facts().length, 23, "the late birth's fact is captured");
-  } finally { f.capture.close(); }
-});
-
-test("Open Model births use the same closed typed-shadow release policy", async () => {
-  const f = fixture("opencode_server");
-  try {
-    f.bindTurn();
-    await f.install();
-    f.emit(ready);
-    f.emit({ ...active, nativeEventId: "open-model-active" });
-    f.emit({ ...terminal, nativeEventId: "open-model-terminal" });
-    await flush();
-    assert.deepEqual({ ...f.db.prepare("SELECT provider,authority_mode FROM execution_runtime_generations").get() },
-      { provider: "open-model", authority_mode: "typed_shadow" });
-    assert.equal(f.admission(), "ready");
-    assert.deepEqual(f.db.prepare(`SELECT native_event_id,typed_phase,typed_state FROM lifecycle_projection_pairs
-      ORDER BY typed_sequence`).all().map(row => ({ ...row })), [
-      { native_event_id: "open-model-active", typed_phase: "turn_active", typed_state: "working" },
-      { native_event_id: "open-model-terminal", typed_phase: "turn_terminal", typed_state: "terminal" },
-    ]);
-    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'").get()?.observed_state,
-      "working", "Open Model shadow capture cannot become operational authority");
   } finally { f.capture.close(); }
 });
 
@@ -583,70 +545,11 @@ test("capture replays native facts only after the exact committed turn binding, 
     assert.deepEqual({ ...f.position() }, { last_source_sequence: 4, max_observed_sequence: 4 });
     assert.deepEqual(f.db.prepare("SELECT * FROM supervised_agent_inbox").all(), receipt);
     assert.deepEqual({ ...f.db.prepare("SELECT provider,config_revision,runtime_state,authority_mode FROM execution_runtime_generations").get() },
-      { provider: "codex", config_revision: 2, runtime_state: "ready", authority_mode: "typed_shadow" }, "actual running provider/applied revision, not desired configuration");
+      { provider: "codex", config_revision: 2, runtime_state: "ready", authority_mode: "typed" }, "actual running provider/applied revision, not desired configuration");
     assert.equal(f.db.prepare("SELECT state FROM execution_turns").get()!.state, "terminal");
     assert.doesNotMatch(JSON.stringify(f.facts()), /PRIVATE|birth-secret|localhost|private/);
     await f.install(); await flush();
     assert.equal(f.facts().length, 4, "same-source reconnect skips the committed replay prefix");
-  } finally { f.capture.close(); }
-});
-
-test("typed and legacy lifecycle checkpoints meet in the durable comparator without changing execution", async () => {
-  const f = fixture();
-  try {
-    f.bindTurn(); await f.install(); f.emit(ready);
-    f.emit({ ...active, nativeEventId: "native-active" });
-    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
-      executionGenerationId: "generation", nativeEventId: "native-active", phase: "turn_active", state: "working" });
-    f.emit({ ...terminal, nativeEventId: "native-terminal" });
-    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
-      executionGenerationId: "generation", nativeEventId: "native-terminal", phase: "turn_terminal", state: "terminal" });
-    await flush();
-    assert.deepEqual(f.capture.lifecycleProjectionDiagnostics().providers.codex, {
-      comparedSegments: 1, matched: 2, missingInTyped: 0, missingInLegacy: 0,
-      pairedButDifferent: 0, conflicts: 0, observationUnavailable: 0,
-    });
-    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'").get()!.observed_state, "working");
-  } finally { f.capture.close(); }
-});
-
-test("busy lifecycle storage retries the bounded raw witness without blocking or losing it", async () => {
-  const f = fixture();
-  const exec = f.db.exec.bind(f.db);
-  let busy = true;
-  try {
-    f.db.exec = sql => {
-      if (busy && sql === "BEGIN IMMEDIATE") { busy = false; throw new Error("database is locked"); }
-      return exec(sql);
-    };
-    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
-      executionGenerationId: "generation", nativeEventId: "raw-active", phase: "turn_active", state: "working" });
-    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0,
-      "the provider callback performs no synchronous SQLite write");
-    await flush();
-    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0);
-    f.db.exec = exec;
-    await delay(40); await flush();
-    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 1);
-    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 0,
-      "a retained witness is retried rather than declared lost");
-  } finally { f.db.exec = exec; f.capture.close(); }
-});
-
-test("raw lifecycle queue overflow is bounded and becomes durable unavailability", async () => {
-  const f = fixture();
-  try {
-    for (let index = 0; index < 257; index++) f.capture.recordLegacyLifecycle({
-      agentId: "agent", provider: "codex", workAttemptId: "workspace", executionGenerationId: "generation",
-      nativeEventId: `raw-${index}`, phase: "turn_active", state: "working",
-    });
-    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 1);
-    for (let attempt = 0; attempt < 30
-      && Number(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count) < 256; attempt++) {
-      await delay(5);
-    }
-    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 256);
-    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 1);
   } finally { f.capture.close(); }
 });
 
@@ -1206,7 +1109,7 @@ test("a Cursor child whose turn a replaced daemon left open is archived once the
       sameBirthIdentity: (actual: string, expected: string) => actual.trim() === expected.trim() };
     const ended = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 44, birth);
     store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: ended,
-      provider: "cursor", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+      provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
     store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation", runtimeGenerationId: ended,
       attemptId: store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "ended-message", executionGenerationId: "generation",
         workspaceId: "workspace", createdAtMs: Date.parse(now) }),
@@ -1217,7 +1120,7 @@ test("a Cursor child whose turn a replaced daemon left open is archived once the
     // The next child's turn is no longer refused by the one left open, and that child is the lane's own.
     const next = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 43, "birth-next");
     store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: next,
-      provider: "cursor", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+      provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
     f.bindTurn("next-native-turn", "next-message", "dispatching");
     const attemptId = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "next-message",
       executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: Date.parse(now) });
@@ -1237,7 +1140,7 @@ test("outside Cursor, a runtime of a generation without a recorded terminal is n
       const provider = { codex_app_server: "codex", claude_cli: "claude-code", opencode_server: "open-model" } as const;
       const other = executionRuntimeStorageIdentity("agent", "generation", kind, 43, "birth-other");
       store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: other,
-        provider: provider[kind], authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+        provider: provider[kind], authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
       store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation", runtimeGenerationId: other,
         attemptId: store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "settled-message", executionGenerationId: "generation",
           workspaceId: "workspace", createdAtMs: Date.parse(now) }),
@@ -1539,7 +1442,7 @@ test("same-source Cursor advance keeps identical process evidence separate when 
     f.db.exec("UPDATE runtime_deployments SET provider_connection_pid=43,provider_process_identity='birth-secret'");
     new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
       runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 43, "birth-secret"),
-      provider: "cursor", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+      provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
     f.advance(); f.capture.prepared({ agentId: "agent", handle: f.handle, executionGenerationId: "generation", connection: next, configurationRevision: 2 });
     f.emit(ready, "birth-secret", 43); await flush();
     assert.equal(f.facts().length, 3);

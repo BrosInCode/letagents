@@ -23,7 +23,7 @@ export const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
     controlProbe: "unsupported",
     approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
   },
-  deliveryModes: ["mcp_polling", "daemon_inbox"],
+  deliveryModes: ["daemon_inbox"],
   // `--resume <session_id>` is the documented continuation across per-turn
   // children; the adapter asserts the session identity echo per turn. Subject
   // to TrailDelta's task_38 spike cell.

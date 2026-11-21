@@ -3,12 +3,9 @@ import { applyManagedLaunchContractSchema } from "../managed-launch-contract.js"
 import { applyHostToolRuleSchema } from "../host-tool-rules.js";
 import { applyPreparedRoomContextSchema } from "../prepared-room-context.js";
 import type { DatabaseSync } from "node:sqlite";
-import { applyPollingActivationSchema, applyPollingOfferSchema, migratePollingOffersV25ToV26 } from "../custodial-polling-activation.js";
 import { applyRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { applyExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
-import { applyLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
-import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
-import { lifecycleAuthorityModeForProvider } from "../lifecycle-authority-mode.js";
+import { executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import { applyRuntimeRecoverySchema } from "../runtime-recovery-journal.js";
 import { applyApprovalRequestClosureSchema } from "../execution-approval-journal.js";
 import { applyWorkerExecutionBindings, type Row, POLLING_CONTRACT_COLUMN, CUSTODIAL_LAUNCH_SESSION_COLUMN, TERMINAL_RESULTS_INDEX, terminalResultsSql, validatePollingContract, validateCustodialLaunchSession, validateTerminalResults, schemaMethods } from "./shared.js";
@@ -74,21 +71,21 @@ freezeLegacyActiveRuntimeBirths(database: DatabaseSync): void {
     const connectionKind = String(candidate.connection_kind);
     const connectionPid = Number(candidate.connection_pid);
     const processIdentity = String(candidate.process_identity);
-    materializeRuntimeIdentity(database, {
+    const runtimeGenerationId = executionRuntimeStorageIdentity(
       agentId,
       executionGenerationId,
-      runtimeGenerationId: executionRuntimeStorageIdentity(
-        agentId,
-        executionGenerationId,
-        connectionKind,
-        connectionPid,
-        processIdentity,
-      ),
-      provider: String(candidate.provider) as "codex" | "claude-code" | "cursor" | "open-model",
-      authorityMode: "legacy",
-      configRevision: Number(candidate.config_revision),
-      createdAtMs: 0,
-    });
+      connectionKind,
+      connectionPid,
+      processIdentity,
+    );
+    database.prepare(`INSERT OR IGNORE INTO execution_generations
+      (execution_generation_id,agent_id,created_at_ms) VALUES(?,?,0)`)
+      .run(executionGenerationId, agentId);
+    database.prepare(`INSERT OR IGNORE INTO execution_runtime_generations
+      (runtime_generation_id,execution_generation_id,agent_id,provider,authority_mode,
+       runtime_state,control_state,continuation_state,config_revision,created_at_ms)
+      VALUES(?,?,?,?,'legacy','starting','connecting','available',?,0)`)
+      .run(runtimeGenerationId, executionGenerationId, agentId, String(candidate.provider), Number(candidate.config_revision));
   }
   for (const candidate of candidates) {
     const runtimeGenerationId = executionRuntimeStorageIdentity(
@@ -152,9 +149,7 @@ retireIncompatibleCodexRuntimeBirths(database: DatabaseSync): void {
     if (deliveryMode !== "mcp_polling" && deliveryMode !== "desktop_events" && deliveryMode !== "daemon_inbox") {
       throw new Error("Incompatible Codex birth has no valid durable delivery mode.");
     }
-    // Defensive: every caller runs after the v49 rewrite, so a birth cannot
-    // say "desktop_events" here any more; an old value still means polling.
-    const expectedAuthorityMode = lifecycleAuthorityModeForProvider("codex", deliveryMode === "daemon_inbox" ? "daemon_inbox" : "mcp_polling");
+    const expectedAuthorityMode = "typed";
     const configRevision = Number(candidate.config_revision);
     let compatible = false;
     if (executionGenerationId && connectionKind && Number.isSafeInteger(connectionPid)
@@ -238,18 +233,8 @@ applyCurrentConfigurationShape(database: DatabaseSync): void {
     database.exec(`ALTER TABLE runtime_deployments ADD COLUMN ${CUSTODIAL_LAUNCH_SESSION_COLUMN}`);
   }
   validateCustodialLaunchSession(database);
-  if (this.tableColumns(database, "custodial_polling_activations").size
-    && !this.tableColumns(database, "custodial_polling_activations").has("compacted_through_offer_id")) {
-    applyPollingActivationSchema(database, 24);
-    applyPollingOfferSchema(database, 25);
-    migratePollingOffersV25ToV26(database);
-  } else {
-    applyPollingActivationSchema(database);
-    applyPollingOfferSchema(database);
-  }
   applyRoomWorkPublicationSchema(database);
   applyExecutionApprovalPublicationSchema(database);
-  applyLifecycleProjectionLedgerSchema(database);
   this.freezeLegacyActiveRuntimeBirths(database);
   this.retireIncompatibleCodexRuntimeBirths(database);
 },

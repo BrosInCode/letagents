@@ -87,9 +87,6 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     void this.roomTurnAttachments.sweep();
     for (const entry of (await this.store.load()).entries) {
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);
-      if (await this.store.unresolvedDeliveryDrain(entry.id) || await this.store.unresolvedPollingActivation(entry.id)) {
-        void this.deliveryCutovers.start(entry.id).catch(() => undefined);
-      }
     }
     if (this.providerPort && this.autoConverge) {
       for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id, "rehydration");
@@ -115,7 +112,6 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
       () => this.typedLifecycleEffects?.close(),
       () => this.wakeRoomMoveReconciliationWaiters(), () => this.notifyStateChanged(), () => this.workerRuntimeCustody.destroyAllCredentials(),
       () => executionDelegationDrain,
-      () => this.deliveryCutovers.fenceAndDrain(),
       () => this.supervisedDelivery?.fenceAndDrain(),
       () => this.fenceAndDrainRoomMoveReconciliations(),
       () => this.boundedEffects.drainJournalReservations(),
@@ -156,7 +152,6 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     this.wakeRoomMoveReconciliationWaiters();
     const failures: unknown[] = [...this.handoffCleanupFailures];
     try { await this.activityWrites.close(); } catch (error) { failures.push(error); }
-    try { await this.deliveryCutovers.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.supervisedDelivery?.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.fenceAndDrainRoomMoveReconciliations(); } catch (error) { failures.push(error); }
     const captureSync = (operation: () => void): void => {

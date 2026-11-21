@@ -3,10 +3,8 @@ import { validateRoomWorkspaceSchema, validateRoomWorkspaceReviewSchema } from "
 import type { DatabaseSync } from "node:sqlite";
 import { validateExecutionStorageSchema, validateRuntimeFailureEffectMigrationSource } from "../execution-storage-schema.js";
 import { readDurableNativeFailure } from "../supervised-agent-history-retention.js";
-import { validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import { validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
-import { validateLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { validateApprovalRequestClosureSchema } from "../execution-approval-journal.js";
 import { SCHEMA_VERSION, type Row, validatePollingContract, validateCustodialLaunchSession, validateTerminalResults } from "./shared.js";
 
@@ -34,12 +32,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion >= 38) validateRoomWorkspaceSchema(database);
   if (existingVersion >= 36) validateExecutionApprovalPublicationSchema(database);
   if (existingVersion >= 27) validateRoomWorkPublicationSchema(database, existingVersion < 37);
-  if (existingVersion >= 28) {
-    if (existingVersion < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
-    else validateLifecycleProjectionLedgerSchema(database);
-  }
-  if (existingVersion >= 25) validatePollingOfferSchema(database, existingVersion >= 26 ? 26 : 25);
-  if (existingVersion >= 24) { validatePollingActivationSchema(database, existingVersion >= 26 ? 26 : 24); validateCustodialLaunchSession(database); }
+  if (existingVersion >= 24) validateCustodialLaunchSession(database);
   if (existingVersion >= 23) validatePollingContract(database);
   if (existingVersion >= 18) {
     if (existingVersion === 30) validateRuntimeFailureEffectMigrationSource(database);

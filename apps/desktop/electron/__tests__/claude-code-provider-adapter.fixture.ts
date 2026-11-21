@@ -917,7 +917,7 @@ export const WAITS_FOR_ANSWER = "Waiting for Claude's answer about background wo
  * The adapter looks at a held turn again at a short pace, so a limit that the clock has passed ends the turn
  * within a moment of real time.
  */
-export async function claudeBackgroundHarness(options: { lifecycleAuthorityMode?: "typed" | "typed_shadow"; /** An agent that asks its owner before it writes. */ asksForApproval?: boolean } = {}) {
+export async function claudeBackgroundHarness(options: { lifecycleAuthorityMode?: "typed"; /** An agent that asks its owner before it writes. */ asksForApproval?: boolean } = {}) {
   const harness = createHarness(options.asksForApproval ? { versionOutput: "2.1.278 (Claude Code)" } : {});
   const stream: ProviderStreamEvent[] = [];
   const activity: ProviderActivityEvent[] = [];

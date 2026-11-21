@@ -26,8 +26,6 @@ const CONFIRMED_BINDING_VERIFY_TIMEOUT_MS = 250;
 const SUPERVISOR_CONTEXT_FILE = ".letagents-supervisor-context.json";
 const WORK_ATTEMPT_MARKER_FILE = ".letagents-work-attempt.json";
 const MAX_SUPERVISOR_CONTEXT_BYTES = 4 * 1024;
-// An SDK request id is unique only within this MCP process lifetime.
-const CUSTODIAL_POLLING_PROCESS_INCARNATION_ID = randomUUID();
 
 type SupervisorResponse = { version?: number; id?: string; ok?: boolean; error?: string; result?: unknown };
 type SupervisorBridgeOptions = {
@@ -56,102 +54,10 @@ type ResolvedSupervisorCoordinates = SupervisorCoordinates & {
   supervisorContextCwd: string | null;
 };
 type NegotiatedSupervisor = {
-  custodialPollingV1: boolean;
-  custodialPollingOffersV1: boolean;
   protocolVersion: number;
   daemonIdentity: string | null;
   generation: number | null;
 };
-
-export type CustodialPollingAuthorization = {
-  roomId: string;
-  agentSessionId: string;
-  roomCursor: string | null;
-  configurationRevision: number;
-  coordinates: ResolvedSupervisorCoordinates;
-  negotiated: NegotiatedSupervisor;
-  apiUrl: string;
-  wait?: { processIncarnationId: string; mcpRequestId: string | number; activationId: string; bindingEpoch: number };
-};
-export type CustodialPollingWaitRequest = {
-  mcpRequestId: string | number;
-  roomCursor: string | null;
-  offeredFrontier?: string;
-  requestedRoomId?: string;
-  requestedAgentSessionId?: string;
-};
-
-/** Release reuses BEFORE's exact generation; it never authorizes against a successor. */
-export async function authorizeCustodialPolling(
-  toolName: string,
-  prior?: CustodialPollingAuthorization,
-  env: NodeJS.ProcessEnv = process.env,
-  options: SupervisorBridgeOptions = {},
-  waitRequest?: CustodialPollingWaitRequest,
-): Promise<CustodialPollingAuthorization> {
-  const wait = waitRequest ? { ...waitRequest } : undefined;
-  if (toolName === "wait_for_messages") {
-    if (!wait || !(typeof wait.mcpRequestId === "string" || Number.isSafeInteger(wait.mcpRequestId))) {
-      throw new Error("Custodial wait is missing its exact MCP request id.");
-    }
-    if (!(wait.roomCursor === null || (typeof wait.roomCursor === "string" && parseRoomMessageNumber(wait.roomCursor) !== null))
-      || (prior && (!prior.wait || prior.wait.processIncarnationId !== CUSTODIAL_POLLING_PROCESS_INCARNATION_ID
-        || prior.wait.mcpRequestId !== wait.mcpRequestId || typeof wait.offeredFrontier !== "string"
-        || parseRoomMessageNumber(wait.offeredFrontier) === null || prior.roomCursor === null
-        || parseRoomMessageNumber(wait.offeredFrontier)! < parseRoomMessageNumber(prior.roomCursor)!))) {
-      throw new Error("Custodial wait receipt does not match its original invocation and cursor.");
-    }
-  } else if (wait || prior?.wait) throw new Error("Only custodial wait may acknowledge or offer a cursor.");
-  if (env.LETAGENTS_EXECUTION_PROFILE?.trim() !== "supervised_mcp_polling") throw new Error("Custodial polling profile required.");
-  if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() === "1"
-    || env.LETAGENTS_TOKEN?.trim() || env.LETAGENTS_AGENT_SESSION_BEARER?.trim()) {
-    throw new Error("Custodial polling refuses bounded flags and environment credentials.");
-  }
-  const coordinates = prior?.coordinates ?? await resolveSupervisorCoordinates(supervisedContextSession(env), env, options);
-  if (!coordinates?.roomId || !coordinates.agentSessionId) throw new Error("Custodial polling lacks exact worker coordinates.");
-  if ((wait?.requestedRoomId && wait.requestedRoomId !== coordinates.roomId)
-    || (wait?.requestedAgentSessionId && wait.requestedAgentSessionId !== coordinates.agentSessionId)) {
-    throw new Error("Custodial wait room or worker identity does not match its exact authority.");
-  }
-  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const negotiated = prior?.negotiated ?? await negotiateSupervisor(coordinates.socketPath, timeoutMs);
-  if (!negotiated.custodialPollingV1 || negotiated.generation === null) throw new Error("Daemon does not support custodial_polling_v1.");
-  if (wait && !negotiated.custodialPollingOffersV1) throw new Error("Daemon does not support custodialPollingOffersV1; refusing an unjournaled wait.");
-  const apiUrl = prior?.apiUrl ?? env.LETAGENTS_API_URL?.trim();
-  if (!apiUrl) throw new Error("Custodial polling requires an explicit API URL.");
-  const response = await supervisorRequest(coordinates.socketPath, {
-    version: negotiated.protocolVersion, id: randomUUID(), method: "supervisor.authorize_custodial_polling",
-    params: {
-      entry_id: coordinates.entryId, room_id: coordinates.roomId, work_attempt_id: coordinates.workAttemptId,
-      execution_generation_id: coordinates.executionGenerationId, agent_session_id: coordinates.agentSessionId,
-      daemon_generation: negotiated.generation, api_url: apiUrl, contract: "custodial_polling_v1",
-      phase: prior ? "release" : "before", tool_name: toolName,
-      ...(prior ? { expected_configuration_revision: prior.configurationRevision } : {}),
-      ...(wait ? {
-        process_incarnation_id: CUSTODIAL_POLLING_PROCESS_INCARNATION_ID, mcp_request_id: wait.mcpRequestId,
-        ...(prior ? { expected_activation_id: prior.wait!.activationId, expected_binding_epoch: prior.wait!.bindingEpoch,
-          input_cursor: prior.roomCursor, offered_frontier: wait.offeredFrontier } : { room_cursor: wait.roomCursor }),
-      } : {}),
-    },
-  }, timeoutMs);
-  const result = response.result as Record<string, unknown> | undefined;
-  if (!response.ok || response.version !== negotiated.protocolVersion || !result || result.status !== "authorized" || result.contract !== "custodial_polling_v1"
-    || result.room_id !== coordinates.roomId || result.agent_session_id !== coordinates.agentSessionId
-    || !Number.isSafeInteger(result.configuration_revision) || Number(result.configuration_revision) < 1
-    || (prior && result.configuration_revision !== prior.configurationRevision)
-    || (wait && (typeof result.activation_id !== "string" || !result.activation_id.trim()
-      || !Number.isSafeInteger(result.binding_epoch) || Number(result.binding_epoch) < 1
-      || typeof result.room_cursor !== "string"
-      || (prior && (result.activation_id !== prior.wait!.activationId || result.binding_epoch !== prior.wait!.bindingEpoch
-        || result.room_cursor !== prior.roomCursor))))
-    || !(result.room_cursor === null || (typeof result.room_cursor === "string" && parseRoomMessageNumber(result.room_cursor) !== null))) {
-    throw new Error("Custodial polling authority was rejected or became stale.");
-  }
-  return { coordinates, negotiated, apiUrl, roomId: coordinates.roomId, agentSessionId: coordinates.agentSessionId,
-    roomCursor: result.room_cursor as string | null, configurationRevision: Number(result.configuration_revision),
-    ...(wait ? { wait: { processIncarnationId: CUSTODIAL_POLLING_PROCESS_INCARNATION_ID, mcpRequestId: wait.mcpRequestId,
-      activationId: String(result.activation_id), bindingEpoch: Number(result.binding_epoch) } } : {}) };
-}
 
 const confirmedBindingsBySession = new Map<string, string>();
 const confirmedRequestsBySession = new Map<string, string>();
@@ -382,8 +288,7 @@ export async function borrowCurrentSupervisedWorkerCredential(
   env: NodeJS.ProcessEnv = process.env,
   options: SupervisorBridgeOptions = {},
 ): Promise<SupervisedCredentialBorrowResult> {
-  if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1"
-    && env.LETAGENTS_EXECUTION_PROFILE?.trim() !== "supervised_mcp_polling") {
+  if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1") {
     return { state: "not_supervised" };
   }
   const seed = supervisedContextSession(env);
@@ -983,9 +888,7 @@ async function negotiateSupervisor(socketPath: string, timeoutMs: number): Promi
   const daemonIdentity = hasCompleteIdentity
     ? [result.generation, result.pid, result.started_at].join(":")
     : null;
-  return { protocolVersion, daemonIdentity, generation: hasCompleteIdentity ? Number(result.generation) : null,
-    custodialPollingV1: (result.capabilities as Record<string, unknown> | undefined)?.custodialPollingV1 === true,
-    custodialPollingOffersV1: (result.capabilities as Record<string, unknown> | undefined)?.custodialPollingOffersV1 === true };
+  return { protocolVersion, daemonIdentity, generation: hasCompleteIdentity ? Number(result.generation) : null };
 }
 
 class SupervisorTransportError extends Error {

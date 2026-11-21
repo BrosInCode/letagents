@@ -102,9 +102,6 @@ export class ClaudeAdapterNativeExecution extends ClaudeAdapterCore {
       return nativeLifecycle;
     } else if (message.type === "result"
       && (message.user_message_uuid === turnId || contextualInterruptTurnId === turnId)) {
-      const hasLegacyTerminalShape = typeof message.subtype === "string" && Boolean(message.subtype)
-        && (message.subtype === "success" ? typeof message.is_error === "boolean" : message.is_error === true);
-      if (handle.lifecycleAuthorityMode !== "typed" && !hasLegacyTerminalShape) return null;
       const terminalDiscriminator = claudeTerminalDiscriminator(message);
       const subtype = typeof message.subtype === "string" ? message.subtype.toLowerCase() : "";
       const turnOutcome = contextualInterruptTurnId === turnId || subtype === "interrupted" ? "interrupted"

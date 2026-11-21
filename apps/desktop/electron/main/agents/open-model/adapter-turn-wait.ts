@@ -9,7 +9,7 @@ import { OpenCodeBoundedTurnError, OpenCodeTerminalTurnError, openCodeRetryStatu
 import { OpenModelAdapterBase } from "./adapter-base.js";
 import { OpenModelHandle } from "./handle.js";
 import { SESSION_ORDERING_SCAN_LIMIT } from "./types.js";
-import { nextEventBefore, resolveBeforeDeadline } from "./runtime-launch.js";
+import { resolveBeforeDeadline } from "./runtime-launch.js";
 
 export abstract class OpenModelAdapterTurnWait extends OpenModelAdapterBase {
   /**
@@ -47,7 +47,6 @@ export abstract class OpenModelAdapterTurnWait extends OpenModelAdapterBase {
     recordEnding = false,
   ): Promise<ProviderRoomTurnResult> {
     const deadline = Date.now() + this.turnTimeoutMs;
-    const softBounds = handle.lifecycleAuthorityMode === "typed";
     let durationAttentionSent = false;
     let stepAttentionSent = false;
     const emittedLengths = new Map<string, number>();
@@ -129,18 +128,12 @@ export abstract class OpenModelAdapterTurnWait extends OpenModelAdapterBase {
     };
     const enforceStepBound = (assistantCount: number): void => {
       if (assistantCount <= this.maxAssistantSteps) return;
-      if (!softBounds) {
-        throw new OpenCodeBoundedTurnError(
-          `OpenCode exceeded the bounded turn limit of ${this.maxAssistantSteps} assistant steps.`,
-        );
-      }
       if (!stepAttentionSent) {
         stepAttentionSent = true;
         emitAttention("step_guardrail");
       }
     };
     const nextObservedEvent = async (): Promise<IteratorResult<OpenCodeEvent>> => {
-      if (!softBounds) return nextEventBefore(events, deadline);
       if (durationAttentionSent) return events.next();
       const pending = events.next();
       const remainingMs = deadline - Date.now();
@@ -276,7 +269,7 @@ export abstract class OpenModelAdapterTurnWait extends OpenModelAdapterBase {
       }
       if (keepsRetryingDeniedCalls()) return await this.endDeniedTurn(handle, turnId);
 
-      while (softBounds || Date.now() < deadline) {
+      while (true) {
         if (controller.signal.aborted) {
           throw new Error("OpenCode turn observation detached.");
         }
