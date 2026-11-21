@@ -227,7 +227,7 @@ test("the boundary reports the optional operations of its adapter as data", () =
 });
 
 test("each public operation of the boundary is listed as a data operation or as a transitional operation", () => {
-  const internal = new Set(["constructor", "has", "inspectIfHeld", "required", "matches", "held", "continuation", "terminal", "installed", "snapshot"]);
+  const internal = new Set(["constructor", "has", "inspectIfHeld", "required", "matches", "held", "continuation", "terminal", "installed", "snapshot", "reference", "stopOptions"]);
   const listed = new Set<string>([...DATA_OPERATIONS, ...Object.keys(TRANSITIONAL_OPERATIONS)]);
   const actual = Object.getOwnPropertyNames(ProviderRuntimeBoundary.prototype).filter((name) => !internal.has(name));
   assert.deepEqual(actual.filter((name) => !listed.has(name)), [], "an operation that is in no list");
@@ -240,6 +240,11 @@ test("the router gives the daemon no provider object: a public handle reads plai
   const handle = await router.spawn({ ...SPAWN, provider: "codex" });
 
   for (const key of Object.keys(handle) as Array<keyof typeof handle>) assertPlainWireValue(handle[key] ?? null, String(key));
+  assert.deepEqual(JSON.parse(JSON.stringify(handle)), {
+    workAttemptId: "attempt-1", pid: 4242, providerContinuationId: "thread-1",
+    providerConnection: { kind: "codex_app_server", url: "ws://127.0.0.1:1", pid: 4242, processIdentity: "birth-1" },
+    observedState: "idle",
+  }, "the JSON form of a handle has data fields only");
   assert.notEqual(handle.providerConnection, handles[0]!.providerConnection, "a copy, not the adapter's own object");
   handles[0]!.state = "working";
   assert.equal(handle.observedState, "working");
@@ -248,4 +253,170 @@ test("the router gives the daemon no provider object: a public handle reads plai
   const source = readFileSync(new URL("../provider-action-port-router.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\bProviderHandle\b/);
   assert.doesNotMatch(source, /adapter\.(?!capabilities\b)[a-zA-Z]+\(/, "the router calls the adapter only through the boundary");
+});
+
+/** An adapter that records which handle each call was made on, and lets a test end a handle. */
+function recordingAdapter(pidOf: (index: number) => number = () => 4242) {
+  const handles: FakeHandle[] = [];
+  const calls: Array<{ operation: string; handle: FakeHandle }> = [];
+  const exitListeners = new Map<FakeHandle, Array<(terminal: ProviderTerminalPayload) => void>>();
+  const record = (operation: string, handle: ProviderHandle) => { calls.push({ operation, handle: handle as FakeHandle }); };
+  const adapter = {
+    id: "codex",
+    capabilities: () => ({ resume: true, midTurnInjection: true, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: true }),
+    spawn: async (request: ProviderSpawnRequest) => {
+      const index = handles.length;
+      const handle = new FakeHandle(request.workAttemptId, pidOf(index));
+      handle.providerConnection = { kind: "codex_app_server", url: "ws://127.0.0.1:1", pid: pidOf(index), processIdentity: `birth-${index}` };
+      handles.push(handle);
+      return handle;
+    },
+    attach: async () => handles.at(-1) ?? null,
+    resume: async () => { throw new Error("not used"); },
+    poke: async (handle: ProviderHandle) => { record("poke", handle); },
+    controlTurn: async (handle: ProviderHandle) => { record("controlTurn", handle); return { capability: "native_interrupt", interrupted: true, resumed: false, state: "idle" }; },
+    inspectTurn: async (handle: ProviderHandle) => { record("inspectTurn", handle); return "unknown"; },
+    runRoomTurn: async (handle: ProviderHandle) => { record("runRoomTurn", handle); return { turnId: "t", outcome: "no_reply", text: null }; },
+    stopIdle: async (handle: ProviderHandle) => { record("stopIdle", handle); return TERMINAL; },
+    stop: async (handle: ProviderHandle) => { record("stop", handle); return TERMINAL; },
+    onExit: (handle: ProviderHandle, listener: (terminal: ProviderTerminalPayload) => void) => {
+      const list = exitListeners.get(handle as FakeHandle) ?? [];
+      list.push(listener);
+      exitListeners.set(handle as FakeHandle, list);
+      // The router's own exit watch is the first listener of each handle; later ones are calls of a test.
+      if (list.length > 1) record("onExit", handle);
+      return () => undefined;
+    },
+    onStream: (handle: ProviderHandle) => { record("onStream", handle); return () => undefined; },
+  } as unknown as SupervisedProviderAdapter;
+  const exit = (index: number) => { for (const listener of exitListeners.get(handles[index]!) ?? []) listener(TERMINAL); };
+  return { adapter, handles, calls, exit };
+}
+
+const STALE = /not owned by the current daemon generation/;
+
+async function assertEveryCallRefused(router: ProviderActionPortRouter, stale: Awaited<ReturnType<ProviderActionPortRouter["spawn"]>>): Promise<void> {
+  await assert.rejects(router.stop(stale), STALE);
+  await assert.rejects(router.stop(stale, { force: true }), STALE);
+  await assert.rejects(router.poke(stale, "hello"), STALE);
+  await assert.rejects(router.controlTurn(stale, null), STALE);
+  await assert.rejects(router.inspectTurn(stale, "turn-1"), STALE);
+  await assert.rejects(router.runRoomTurn(stale, { inboxItemId: "i", sourceMessage: {}, activation: {}, actionId: "a" }), STALE);
+  await assert.rejects(router.stopIdle(stale, () => undefined), STALE);
+  await assert.rejects(router.onExit(stale, () => undefined), STALE);
+  await assert.rejects(router.onStream(stale, () => undefined), STALE);
+  assert.equal(await router.readUsage(stale).catch(() => "refused"), "refused");
+}
+
+for (const order of ["exit before the replacement", "replacement before the exit", "replacement with no exit"] as const) {
+  test(`a handle of a replaced runtime reaches no adapter call on its replacement (${order}; equal continuation and process id, another birth)`, async () => {
+    const { adapter, handles, calls, exit } = recordingAdapter();
+    const router = new ProviderActionPortRouter({ codex: async () => adapter });
+    const first = await router.spawn({ ...SPAWN, provider: "codex" });
+    if (order === "exit before the replacement") exit(0);
+    const second = await router.spawn({ ...SPAWN, provider: "codex" });
+    if (order === "replacement before the exit") exit(0);
+
+    // What a handle shows cannot tell the two runtimes apart, except by the process birth.
+    assert.equal(first.pid, second.pid);
+    assert.equal(first.providerContinuationId, second.providerContinuationId);
+    assert.notEqual(first.providerConnection?.processIdentity, second.providerConnection?.processIdentity);
+
+    await assertEveryCallRefused(router, first);
+    assert.deepEqual(calls, [], "no call on any runtime for the replaced handle");
+
+    await router.stop(second);
+    assert.deepEqual(calls.map((call) => [call.operation, handles.indexOf(call.handle)]), [["stop", 1]]);
+  });
+}
+
+test("a Cursor handle of a replaced runtime is refused, also when the process id differs", async () => {
+  const { adapter, calls, exit } = recordingAdapter((index) => 5000 + index);
+  const router = new ProviderActionPortRouter({ cursor: async () => adapter });
+  const first = await router.spawn({ ...SPAWN, provider: "cursor" });
+  exit(0);
+  const second = await router.spawn({ ...SPAWN, provider: "cursor" });
+  assert.notEqual(first.pid, second.pid);
+  await assertEveryCallRefused(router, first);
+  assert.deepEqual(calls, []);
+  await router.poke(second, "hello");
+  assert.equal(calls.length, 1);
+});
+
+test("each handle of the installed runtime is accepted, and a handle that the router did not make is refused", async () => {
+  const { adapter, handles, calls } = recordingAdapter();
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const spawned = await router.spawn({ ...SPAWN, provider: "codex" });
+  const attached = await router.attach({ workAttemptId: "attempt-1", providerContinuationId: "thread-1", provider: "codex" });
+  assert.ok(attached && !("state" in attached));
+  assert.notEqual(attached, spawned, "a second handle object of the same runtime");
+
+  await router.poke(spawned, "one");
+  await router.poke(attached, "two");
+  assert.deepEqual(calls.map((call) => handles.indexOf(call.handle)), [0, 0]);
+
+  const copy = { workAttemptId: spawned.workAttemptId, pid: spawned.pid, providerContinuationId: spawned.providerContinuationId, providerConnection: spawned.providerConnection, observedState: spawned.observedState };
+  await assert.rejects(router.poke(copy, "three"), STALE);
+  await assert.rejects(router.stop(JSON.parse(JSON.stringify(spawned))), STALE);
+  assert.equal(calls.length, 2, "an object with equal fields that is not a copy of a handle names no runtime");
+
+  // A copy of a handle names the runtime of that handle, and no other.
+  await router.poke({ ...spawned }, "four");
+  assert.deepEqual(calls.map((call) => handles.indexOf(call.handle)), [0, 0, 0]);
+  await router.spawn({ ...SPAWN, provider: "codex" });
+  await assert.rejects(router.poke({ ...spawned }, "five"), STALE);
+  await assert.rejects(router.poke({ ...attached }, "six"), STALE);
+  assert.equal(calls.length, 3);
+});
+
+test("an input that is declared data is checked before a property is read and before the adapter is called", async () => {
+  let stops = 0;
+  let inspections = 0;
+  const seen: unknown[] = [];
+  const { adapter } = fakeAdapter({
+    stop: async () => { stops += 1; return TERMINAL; },
+    stopRef: async () => { stops += 1; return TERMINAL; },
+    inspectPermissionProfile: async (_handle, request) => { inspections += 1; seen.push(request); return { network: true }; },
+    inspectPermissionFileChanges: async () => { inspections += 1; return null; },
+    inspectPermissionMcpToolCall: async () => { inspections += 1; return null; },
+    replyPermission: async () => { inspections += 1; return { outcome: "sent" as const, scope: "request" as const }; },
+  });
+  const boundary = new ProviderRuntimeBoundary("codex", adapter);
+  const runtime = await boundary.spawn(SPAWN);
+
+  // Stop options with an accessor: the accessor is never evaluated.
+  let reads = 0;
+  const options = { get force() { reads += 1; return true; } };
+  await assert.rejects(boundary.stop(runtime.ref, options), ProviderBoundaryValueError);
+  await assert.rejects(boundary.stopRef({ workAttemptId: "attempt-1", providerContinuationId: "thread-1" }, options), ProviderBoundaryValueError);
+  assert.deepEqual([reads, stops], [0, 0]);
+
+  // A runtime reference with an accessor, with a function, and with a field that the schema does not have.
+  let refReads = 0;
+  const accessorRef = { provider: "codex", workAttemptId: "attempt-1", get runtimeId() { refReads += 1; return runtime.ref.runtimeId; } };
+  for (const ref of [accessorRef, { ...runtime.ref, extra: () => undefined }, { ...runtime.ref, extra: 1 }]) {
+    assert.throws(() => boundary.inspect(ref as never), ProviderBoundaryValueError);
+    assert.throws(() => boundary.inspectIfHeld(ref as never), ProviderBoundaryValueError);
+    assert.throws(() => boundary.release(ref as never), ProviderBoundaryValueError);
+    await assert.rejects(boundary.stop(ref as never), ProviderBoundaryValueError);
+  }
+  assert.deepEqual([refReads, stops], [0, 0]);
+  assert.equal(boundary.inspect(runtime.ref).pid, 4242, "the runtime is still held");
+
+  // A permission request that holds a function reaches no adapter.
+  const bad = { method: "item/permissions/requestApproval", params: { privateCallback: () => undefined } } as never;
+  await assert.rejects(boundary.inspectPermissionProfile(runtime.ref, bad), ProviderBoundaryValueError);
+  await assert.rejects(boundary.inspectPermissionFileChanges(runtime.ref, bad), ProviderBoundaryValueError);
+  await assert.rejects(boundary.inspectPermissionMcpToolCall(runtime.ref, bad), ProviderBoundaryValueError);
+  assert.throws(() => boundary.replyPermission(runtime.ref, bad, "once"), ProviderBoundaryValueError);
+  assert.equal(inspections, 0);
+
+  // A plain request passes, and the adapter gets the same object: the Codex adapter matches it by identity.
+  const good = { method: "item/permissions/requestApproval", params: { threadId: "thread-1" } } as never;
+  assert.deepEqual(await boundary.inspectPermissionProfile(runtime.ref, good), { network: true });
+  assert.equal(seen[0], good);
+
+  // Plain stop options pass.
+  await boundary.stop(runtime.ref, { force: true });
+  assert.equal(stops, 1);
 });

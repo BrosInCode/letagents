@@ -73,7 +73,10 @@ const bundledRuntimeVerifierFromBuild: BundledRuntimeVerifier = async () => {
 function publicHandle(boundary: ProviderRuntimeBoundary, installed: ProviderRuntimeSnapshot, appliedConfigurationRevision?: number): ProviderActionHandle {
   let last = installed;
   const now = () => (last = boundary.inspectIfHeld(installed.ref) ?? last);
-  return {
+  const token: OriginToken = Object.freeze({});
+  handleOrigins.set(token, { boundary, runtime: installed.ref });
+  const handle: ProviderActionHandle & { [RUNTIME_ORIGIN]: OriginToken } = {
+    [RUNTIME_ORIGIN]: token,
     workAttemptId: installed.ref.workAttemptId,
     ...(installed.managedLaunchContract ? { managedLaunchContract: installed.managedLaunchContract } : {}),
     get pid() { return now().pid; },
@@ -84,6 +87,29 @@ function publicHandle(boundary: ProviderRuntimeBoundary, installed: ProviderRunt
     ...(installed.ownerSetup === true ? { ownerSetup: true as const } : {}),
     get observedState() { return now().observedState; },
   };
+  return handle;
+}
+
+/**
+ * The runtime that a handle of this module was made for. A call names its
+ * runtime by this record and by nothing that the handle shows: the fields of a
+ * handle can be equal for two runtimes of one work attempt.
+ *
+ * The handle holds an empty token under a symbol that only this module has,
+ * as an enumerable property, so a copy of a handle (`{ ...handle }`) names the
+ * same runtime as the handle. The record is found by the identity of the
+ * token, and it is kept here: the handle gives no way to the boundary. An
+ * object that was not copied from a handle has no token of this module, so it
+ * names no runtime.
+ */
+type HandleOrigin = { readonly boundary: ProviderRuntimeBoundary; readonly runtime: ProviderRuntimeRef };
+type OriginToken = Readonly<Record<string, never>>;
+const RUNTIME_ORIGIN: unique symbol = Symbol("letagents.providerRuntimeOrigin");
+const handleOrigins = new WeakMap<OriginToken, HandleOrigin>();
+
+function originOf(handle: ProviderActionHandle): HandleOrigin | undefined {
+  const token = (handle as { [RUNTIME_ORIGIN]?: unknown } | null)?.[RUNTIME_ORIGIN];
+  return typeof token === "object" && token !== null ? handleOrigins.get(token as OriginToken) : undefined;
 }
 
 /**
@@ -674,8 +700,15 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   }
 
   private required(handle: ProviderActionHandle): Installed {
-    const remembered = this.handles.get(handle.workAttemptId);
-    const installed = remembered?.runtime ? remembered.boundary.inspectIfHeld(remembered.runtime) : null;
+    // The handle must be one that this module made, for the exact runtime that the work attempt names now.
+    // A handle of a replaced runtime is refused, also when its continuation and process id are equal.
+    const origin = originOf(handle);
+    const remembered = origin ? this.handles.get(origin.runtime.workAttemptId) : undefined;
+    const installed = origin && remembered?.runtime
+      && remembered.boundary === origin.boundary
+      && remembered.runtime.runtimeId === origin.runtime.runtimeId
+      && origin.runtime.workAttemptId === handle.workAttemptId
+      ? remembered.boundary.inspectIfHeld(remembered.runtime) : null;
     if (!remembered || !installed
       || installed.providerContinuationId !== handle.providerContinuationId
       || (remembered.provider !== "cursor" && installed.pid !== handle.pid)) {

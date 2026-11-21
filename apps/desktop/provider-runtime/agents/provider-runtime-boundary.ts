@@ -285,12 +285,14 @@ export class ProviderRuntimeBoundary {
 
   /** As `inspect`, but null for a reference that is not held. */
   inspectIfHeld(ref: ProviderRuntimeRef): ProviderRuntimeSnapshot | null {
+    this.reference(ref);
     const handle = this.handles.get(ref.runtimeId);
     return handle && this.matches(ref, handle) ? this.snapshot("inspect", ref, handle) : null;
   }
 
   /** Forget a runtime that the daemon no longer names. Its reference is stale from here. */
   release(ref: ProviderRuntimeRef): void {
+    this.reference(ref);
     const handle = this.handles.get(ref.runtimeId);
     if (handle && this.matches(ref, handle)) this.handles.delete(ref.runtimeId);
   }
@@ -335,11 +337,13 @@ export class ProviderRuntimeBoundary {
   }
 
   compactionProgress(workAttemptId: string): { state: "compacting"; startedAt: string } | null {
+    guarded("compactionProgress", "workAttemptId", workAttemptId);
     return guarded("compactionProgress", "result", this.adapter.compactionProgress?.(workAttemptId) ?? null);
   }
 
   /** `ref` is the runtime that the daemon names for the work attempt, when it names one. */
   runtimeCustody(workAttemptId: string, ref?: ProviderRuntimeRef): "absent" | "owned" | "unknown" | undefined {
+    guarded("runtimeCustody", "workAttemptId", workAttemptId);
     const state = this.adapter.runtimeCustody?.(workAttemptId, ref ? this.held(ref) : undefined);
     return state === undefined ? undefined : guarded("runtimeCustody", "result", state);
   }
@@ -356,34 +360,41 @@ export class ProviderRuntimeBoundary {
   ): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }> {
     const handle = this.held(ref);
     guarded("correlatePermissionTurn", "request", request);
+    if (options !== undefined) guarded("correlatePermissionTurn", "options", options);
     return guarded("correlatePermissionTurn", "result", await this.required("correlatePermissionTurn")(handle, request, options));
   }
 
   async inspectPermissionFileChanges(ref: ProviderRuntimeRef, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null> {
     const handle = this.held(ref);
+    // Checked in place and not copied: the Codex adapter matches this request by object identity.
+    guarded("inspectPermissionFileChanges", "request", request);
     return guarded("inspectPermissionFileChanges", "result", await this.required("inspectPermissionFileChanges")(handle, request));
   }
 
   async inspectPermissionProfile(ref: ProviderRuntimeRef, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null> {
     const handle = this.held(ref);
+    // Checked in place and not copied: the Codex adapter matches this request by object identity.
+    guarded("inspectPermissionProfile", "request", request);
     return guarded("inspectPermissionProfile", "result", await this.required("inspectPermissionProfile")(handle, request));
   }
 
   async inspectPermissionMcpToolCall(ref: ProviderRuntimeRef, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null> {
     const handle = this.held(ref);
+    // Checked in place and not copied: the Codex adapter matches this request by object identity.
+    guarded("inspectPermissionMcpToolCall", "request", request);
     return guarded("inspectPermissionMcpToolCall", "result", await this.required("inspectPermissionMcpToolCall")(handle, request));
   }
 
   async stop(ref: ProviderRuntimeRef, options?: ProviderBoundaryStopOptions): Promise<ProviderTerminalPayload> {
     const handle = this.held(ref);
-    if (options) conforming("stop", providerStopOptionsSchema, options);
+    this.stopOptions("stop", options);
     return this.terminal("stop", await this.adapter.stop(handle, options));
   }
 
   /** Stop an exact durable process birth. The runtime needs no reference here: this boundary may never have held it. */
   async stopRef(continuation: ProviderContinuationRef, options?: ProviderBoundaryStopOptions): Promise<ProviderTerminalPayload> {
     this.continuation("stopRef", continuation);
-    if (options) conforming("stopRef", providerStopOptionsSchema, options);
+    this.stopOptions("stopRef", options);
     return this.terminal("stopRef", await this.required("stopRef")(continuation, options));
   }
 
@@ -444,6 +455,8 @@ export class ProviderRuntimeBoundary {
     options?: ProviderPermissionDispatchOptions,
   ): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }> {
     const handle = this.held(ref);
+    guarded("replyPermission", "request", request);
+    guarded("replyPermission", "reply", reply);
     return this.required("replyPermission")(handle, request, reply, options);
   }
 
@@ -470,10 +483,23 @@ export class ProviderRuntimeBoundary {
     return ref.provider === this.provider && ref.workAttemptId === handle.workAttemptId;
   }
 
+  /** Check a runtime reference as a value, before any of its properties is read. */
+  private reference(ref: ProviderRuntimeRef): ProviderRuntimeRef {
+    guarded("runtime", "ref", ref);
+    return conforming("runtime", providerRuntimeRefSchema, ref);
+  }
+
   private held(ref: ProviderRuntimeRef): ProviderHandle {
-    const handle = typeof ref?.runtimeId === "string" ? this.handles.get(ref.runtimeId) : undefined;
+    this.reference(ref);
+    const handle = this.handles.get(ref.runtimeId);
     if (!handle || !this.matches(ref, handle)) throw new StaleProviderRuntimeRefError();
     return handle;
+  }
+
+  private stopOptions(operation: string, options: ProviderBoundaryStopOptions | undefined): void {
+    if (options === undefined) return;
+    guarded(operation, "options", options);
+    conforming(operation, providerStopOptionsSchema, options);
   }
 
   private continuation(operation: string, continuation: ProviderContinuationRef): void {
