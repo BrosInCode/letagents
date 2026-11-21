@@ -1,12 +1,14 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 import { connectDaemon, daemonEndpoint } from "../../../../../shared/daemon-endpoint.mjs";
+import { processTreeHelperPath } from "../../../../../shared/process-tree.mjs";
 import { materializeNodeShim, type MaterializeNodeShimOptions } from "./executable-shim.js";
 import { FakeRoomServer } from "./fake-room-server.js";
 import { EdgeSqliteInspector } from "./sqlite-inspector.js";
@@ -55,8 +57,8 @@ export interface EdgeDaemonOptions {
   keepHome?: boolean;
   /** Optional parent directory where the isolated `letagents-edge-*` home folder is created. Defaults to `os.tmpdir()`. */
   tempRoot?: string;
-  /** Optional process-table enumerator override (defaults to OS `ps` / PowerShell lookup). */
-  listProcesses?: () => ProcessSnapshotEntry[];
+  /** Optional process-table enumerator override (defaults to OS `ps` / native Windows lookup). */
+  listProcesses?: (extraPids?: Iterable<number>) => ProcessSnapshotEntry[];
 }
 
 export interface EdgeDaemonStatus {
@@ -355,33 +357,6 @@ function allowedHostEnvironment(source: NodeJS.ProcessEnv = process.env): Record
   return out;
 }
 
-function readProcessCommandLine(pid: number): string | null {
-  if (!Number.isInteger(pid) || pid <= 1) return null;
-  try {
-    if (process.platform === "win32") {
-      const output = execFileSync(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CommandLine`,
-        ],
-        { encoding: "utf8", timeout: 3_000, stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
-      ).trim();
-      return output || null;
-    }
-    const output = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
-      encoding: "utf8",
-      timeout: 3_000,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    return output || null;
-  } catch {
-    return null;
-  }
-}
-
 export interface ProcessSnapshotEntry {
   pid: number;
   ppid: number;
@@ -389,25 +364,251 @@ export interface ProcessSnapshotEntry {
   command: string;
 }
 
-export function listOsProcesses(): ProcessSnapshotEntry[] {
-  const command = process.platform === "win32" ? "powershell.exe" : "ps";
+export interface ProcessListDiagnostics {
+  method: "ps" | "tasklist+process-tree-helper" | "powershell-fallback";
+  totalTasks: number;
+  helperCalls: number;
+  elapsedMs: number;
+}
+
+const WINDOWS_EDGE_PROCESS_IMAGES = new Set([
+  "node.exe",
+  "cmd.exe",
+  "letagents-process-tree.exe",
+  "codex.exe",
+  "opencode.exe",
+  "claude.exe",
+  "cursor-agent.exe",
+  "agent.exe",
+  "electron.exe",
+  "letagents.exe",
+  "git.exe",
+  "bash.exe",
+  "sh.exe",
+  "bun.exe",
+]);
+
+let lastProcessListDiagnosticsValue: ProcessListDiagnostics | null = null;
+
+export function lastProcessListDiagnostics(): ProcessListDiagnostics | null {
+  return lastProcessListDiagnosticsValue ? { ...lastProcessListDiagnosticsValue } : null;
+}
+
+function resolveWindowsProcessTreeHelper(): string | null {
+  if (process.platform !== "win32") return null;
+  const configured =
+    process.env.LETAGENTS_PROCESS_TREE_HELPER?.trim() ||
+    process.env.LETAGENTS_TEST_PROCESS_TREE_HELPER?.trim() ||
+    "";
+  return processTreeHelperPath({
+    platform: "win32",
+    env: {
+      ...process.env,
+      ...(configured ? { LETAGENTS_PROCESS_TREE_HELPER: configured } : {}),
+    },
+  });
+}
+
+export function parseWindowsTasklistCsv(output: string): Array<{ image: string; pid: number }> {
+  const entries: Array<{ image: string; pid: number }> = [];
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.replace(/^\uFEFF/, "").trim();
+    if (!line || !line.startsWith('"')) continue;
+    const match = /^"([^"]+)","(\d+)"/.exec(line);
+    if (!match) continue;
+    const pid = Number.parseInt(match[2]!, 10);
+    if (Number.isInteger(pid) && pid > 1) {
+      entries.push({ image: match[1]!, pid });
+    }
+  }
+  return entries;
+}
+
+export function selectWindowsEdgeProcessCandidates(
+  tasks: ReadonlyArray<{ image: string; pid: number }>,
+  options: {
+    currentPid?: number;
+    extraPids?: Iterable<number>;
+    extraImageNames?: Iterable<string>;
+  } = {},
+): Array<{ image: string; pid: number }> {
+  const currentPid = options.currentPid ?? process.pid;
+  const extraPids = new Set<number>();
+  for (const pid of options.extraPids ?? []) {
+    if (Number.isInteger(pid) && pid > 1) extraPids.add(pid);
+  }
+  const images = new Set(WINDOWS_EDGE_PROCESS_IMAGES);
+  const currentExecImage = basename(process.execPath).toLowerCase();
+  if (currentExecImage) images.add(currentExecImage);
+  const overrideDaemonCmd = process.env.LETAGENTS_EDGE_DAEMON_CMD?.trim();
+  if (overrideDaemonCmd) {
+    const overrideImage = basename(overrideDaemonCmd).toLowerCase();
+    if (overrideImage) images.add(overrideImage);
+  }
+  for (const image of options.extraImageNames ?? []) {
+    if (image.trim()) images.add(image.trim().toLowerCase());
+  }
+  return tasks.filter(
+    (task) => task.pid === currentPid || extraPids.has(task.pid) || images.has(task.image.toLowerCase()),
+  );
+}
+
+export function execWithTimeoutRetry<T>(
+  operation: () => T,
+  maxAttempts = 2,
+): T {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return operation();
+    } catch (error) {
+      lastError = error;
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (attempt < maxAttempts && code === "ETIMEDOUT") continue;
+      throw error;
+    }
+  }
+  throw lastError;
+}
+
+function execProcessList(command: string, args: readonly string[], timeoutMs: number): string {
+  return execWithTimeoutRetry(
+    () =>
+      execFileSync(command, [...args], {
+        encoding: "utf8",
+        timeout: timeoutMs,
+        maxBuffer: 16 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+        ...(process.platform === "win32" ? { windowsHide: true } : {}),
+      }),
+    2,
+  );
+}
+
+function queryWindowsHelperProcessInfo(
+  helperPath: string,
+  pid: number,
+  options: { required?: boolean } = {},
+): ProcessSnapshotEntry | null {
+  return execWithTimeoutRetry(() => {
+    const result = spawnSync(helperPath, ["info", String(pid)], {
+      encoding: "utf8",
+      timeout: 10_000,
+      maxBuffer: 4 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    if (result.error) throw result.error;
+    // Exit 2 = process exited between tasklist and info.
+    if (result.status === 2) {
+      if (options.required) throw new Error(`letagents-process-tree.exe reported required pid ${pid} absent.`);
+      return null;
+    }
+    // Exit 3 = access denied (higher-privilege process not spawned by this unprivileged test runner).
+    if (result.status === 3) {
+      if (options.required) throw new Error(`letagents-process-tree.exe could not open required pid ${pid} (access denied).`);
+      return null;
+    }
+    if (result.status !== 0) {
+      const stderr = String(result.stderr || "").trim();
+      throw new Error(`letagents-process-tree.exe info ${pid} exited with code ${result.status}${stderr ? `: ${stderr}` : ""}`);
+    }
+    const parsed = JSON.parse(String(result.stdout || "").trim()) as {
+      pid?: unknown;
+      parentPid?: unknown;
+      exited?: unknown;
+      image?: unknown;
+      commandLine?: unknown;
+    };
+    if (parsed.pid !== pid) {
+      throw new Error(`letagents-process-tree.exe info ${pid} returned unexpected pid ${String(parsed.pid)}.`);
+    }
+    if (parsed.exited === true) return null;
+    const ppid = typeof parsed.parentPid === "number" && Number.isInteger(parsed.parentPid) ? parsed.parentPid : 0;
+    const command =
+      typeof parsed.commandLine === "string" && parsed.commandLine.length > 0
+        ? parsed.commandLine
+        : typeof parsed.image === "string"
+          ? parsed.image
+          : "";
+    return { pid, ppid, pgid: pid, command };
+  }, 2);
+}
+
+function readProcessCommandLine(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
   try {
     if (process.platform === "win32") {
-      const output = execFileSync(
+      const helperPath = resolveWindowsProcessTreeHelper();
+      if (helperPath) {
+        const info = queryWindowsHelperProcessInfo(helperPath, pid);
+        return info?.command || null;
+      }
+      const output = execProcessList(
         "powershell.exe",
         [
           "-NoProfile",
           "-NonInteractive",
           "-Command",
-          "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)\t$($_.ParentProcessId)\t$($_.CommandLine)\" }",
+          `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -Property CommandLine).CommandLine`,
         ],
-        {
-          encoding: "utf8",
-          timeout: 10_000,
-          maxBuffer: 16 * 1024 * 1024,
-          stdio: ["ignore", "pipe", "pipe"],
-          windowsHide: true,
-        },
+        25_000,
+      ).trim();
+      return output || null;
+    }
+    const output = execProcessList("ps", ["-p", String(pid), "-o", "command="], 5_000).trim();
+    return output || null;
+  } catch {
+    return null;
+  }
+}
+
+export function listOsProcesses(extraPids?: Iterable<number>): ProcessSnapshotEntry[] {
+  const startedAt = performance.now();
+  if (process.platform === "win32") {
+    const helperPath = resolveWindowsProcessTreeHelper();
+    if (helperPath) {
+      try {
+        const rawCsv = execProcessList("tasklist.exe", ["/FO", "CSV", "/NH"], 15_000);
+        const tasks = parseWindowsTasklistCsv(rawCsv);
+        if (!tasks.some((task) => task.pid === process.pid)) {
+          throw new Error(`tasklist.exe output did not contain current runner pid ${process.pid} (parsed ${tasks.length} rows).`);
+        }
+        const candidates = selectWindowsEdgeProcessCandidates(tasks, { extraPids });
+        const entries: ProcessSnapshotEntry[] = [];
+        let helperCalls = 0;
+        for (const candidate of candidates) {
+          helperCalls += 1;
+          const info = queryWindowsHelperProcessInfo(helperPath, candidate.pid, {
+            required: candidate.pid === process.pid,
+          });
+          if (info) entries.push(info);
+        }
+        if (!entries.some((entry) => entry.pid === process.pid)) {
+          throw new Error(`letagents-process-tree.exe did not report current runner pid ${process.pid}.`);
+        }
+        lastProcessListDiagnosticsValue = {
+          method: "tasklist+process-tree-helper",
+          totalTasks: tasks.length,
+          helperCalls,
+          elapsedMs: Math.round(performance.now() - startedAt),
+        };
+        return entries;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`OS process enumeration failed (tasklist.exe + letagents-process-tree.exe): ${detail}`, { cause: error });
+      }
+    }
+    try {
+      const output = execProcessList(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CommandLine | ForEach-Object { \"$($_.ProcessId)\t$($_.ParentProcessId)\t$($_.CommandLine)\" }",
+        ],
+        25_000,
       );
       const entries: ProcessSnapshotEntry[] = [];
       for (const line of output.split(/\r?\n/)) {
@@ -425,14 +626,20 @@ export function listOsProcesses(): ProcessSnapshotEntry[] {
       if (entries.length === 0) {
         throw new Error("powershell.exe returned an empty process list.");
       }
+      lastProcessListDiagnosticsValue = {
+        method: "powershell-fallback",
+        totalTasks: entries.length,
+        helperCalls: 0,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      };
       return entries;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`OS process enumeration failed (powershell.exe): ${detail}`, { cause: error });
     }
-    const output = execFileSync("ps", ["-axo", "pid=,ppid=,pgid=,command="], {
-      encoding: "utf8",
-      timeout: 5_000,
-      maxBuffer: 16 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+  }
+  try {
+    const output = execProcessList("ps", ["-axo", "pid=,ppid=,pgid=,command="], 5_000);
     const entries: ProcessSnapshotEntry[] = [];
     for (const line of output.split(/\r?\n/)) {
       const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(line);
@@ -447,10 +654,16 @@ export function listOsProcesses(): ProcessSnapshotEntry[] {
     if (entries.length === 0) {
       throw new Error("ps returned an empty process list.");
     }
+    lastProcessListDiagnosticsValue = {
+      method: "ps",
+      totalTasks: entries.length,
+      helperCalls: 0,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    };
     return entries;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`OS process enumeration failed (${command}): ${detail}`, { cause: error });
+    throw new Error(`OS process enumeration failed (ps): ${detail}`, { cause: error });
   }
 }
 
@@ -463,10 +676,11 @@ export function listOsProcesses(): ProcessSnapshotEntry[] {
  */
 export function findProcessesReferencingPath(
   needle: string,
-  listProcesses: () => ProcessSnapshotEntry[] = listOsProcesses,
+  listProcesses: (extraPids?: Iterable<number>) => ProcessSnapshotEntry[] = listOsProcesses,
+  extraPids?: Iterable<number>,
 ): ProcessSnapshotEntry[] {
   const normalized = needle.replaceAll("\\", "/").toLowerCase();
-  const processes = listProcesses();
+  const processes = listProcesses(extraPids);
   if (!normalized) return [];
   return processes.filter(
     (entry) =>
@@ -755,7 +969,7 @@ export class EdgeDaemonHarness {
     private readonly keepHome: boolean,
     private readonly approvalKeyPair: { publicKeyBase64: string; privateKey: KeyObject; keyFingerprint: string },
     shimPaths: Record<string, string>,
-    private readonly listProcesses: () => ProcessSnapshotEntry[] = listOsProcesses,
+    private readonly listProcesses: (extraPids?: Iterable<number>) => ProcessSnapshotEntry[] = listOsProcesses,
   ) {
     this.stateDir = join(homeDir, ".letagents");
     this.databasePath = join(this.stateDir, "daemon-state.sqlite");
@@ -1196,9 +1410,13 @@ export class EdgeDaemonHarness {
       }
 
       const normalizedHome = this.homeDir.replaceAll("\\", "/").toLowerCase();
+      const extraTrackedPids = new Set<number>(this.trackedProviderPids);
+      for (const proc of this.allProcesses) {
+        if (proc.child.pid) extraTrackedPids.add(proc.child.pid);
+      }
       let snapshot: ProcessSnapshotEntry[] = [];
       try {
-        snapshot = this.listProcesses();
+        snapshot = this.listProcesses(extraTrackedPids);
       } catch (error) {
         cleanupError = new Error(
           `Edge harness dispose could not verify process cleanup for ${this.homeDir}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1263,39 +1481,46 @@ export class EdgeDaemonHarness {
           }
         }
 
-        await terminateProcessTrees([...targetsByPid.values()]);
+        if (targetsByPid.size === 0) {
+          // The initial snapshot already confirmed zero live daemon PIDs and zero processes
+          // referencing this isolated home; avoid redundant PowerShell/ps spawns on clean exits.
+          verifiedClean = true;
+          this.trackedProviderPids.clear();
+        } else {
+          await terminateProcessTrees([...targetsByPid.values()]);
 
-        // 4. Re-scan once in case a parent spawned a child right before exiting, then verify zero survivors.
-        try {
-          const stragglers = findProcessesReferencingPath(this.homeDir, this.listProcesses);
-          if (stragglers.length > 0) {
-            await terminateProcessTrees(stragglers.map((entry) => ({ pid: entry.pid, pgid: entry.pgid })));
-          }
-          const remaining = findProcessesReferencingPath(this.homeDir, this.listProcesses);
-          const survivingTargets = [...targetsByPid.keys()].filter((pid) => isPidAlive(pid));
-          const survivingDaemons = this.allProcesses
-            .map((proc) => proc.child.pid)
-            .filter((pid): pid is number => typeof pid === "number" && isPidAlive(pid));
-          const survivingPids = [...new Set([...survivingTargets, ...survivingDaemons])].filter(
-            (pid) => !remaining.some((entry) => entry.pid === pid),
-          );
-          if (remaining.length > 0 || survivingPids.length > 0) {
-            const detail = [
-              ...remaining.map((entry) => `pid=${entry.pid} cmd=${entry.command}`),
-              ...survivingPids.map((pid) => `pid=${pid} (still alive)`),
-            ].join("; ");
-            cleanupError = new Error(
-              `Edge harness dispose left live processes referencing ${this.homeDir}: ${detail}`,
+          // 4. Re-scan after termination; only run a third verification pass if stragglers were found.
+          try {
+            let remaining = findProcessesReferencingPath(this.homeDir, this.listProcesses, extraTrackedPids);
+            if (remaining.length > 0) {
+              await terminateProcessTrees(remaining.map((entry) => ({ pid: entry.pid, pgid: entry.pgid })));
+              remaining = findProcessesReferencingPath(this.homeDir, this.listProcesses, extraTrackedPids);
+            }
+            const survivingTargets = [...targetsByPid.keys()].filter((pid) => isPidAlive(pid));
+            const survivingDaemons = this.allProcesses
+              .map((proc) => proc.child.pid)
+              .filter((pid): pid is number => typeof pid === "number" && isPidAlive(pid));
+            const survivingPids = [...new Set([...survivingTargets, ...survivingDaemons])].filter(
+              (pid) => !remaining.some((entry) => entry.pid === pid),
             );
-          } else {
-            verifiedClean = true;
-            this.trackedProviderPids.clear();
+            if (remaining.length > 0 || survivingPids.length > 0) {
+              const detail = [
+                ...remaining.map((entry) => `pid=${entry.pid} cmd=${entry.command}`),
+                ...survivingPids.map((pid) => `pid=${pid} (still alive)`),
+              ].join("; ");
+              cleanupError = new Error(
+                `Edge harness dispose left live processes referencing ${this.homeDir}: ${detail}`,
+              );
+            } else {
+              verifiedClean = true;
+              this.trackedProviderPids.clear();
+            }
+          } catch (error) {
+            cleanupError = new Error(
+              `Edge harness dispose failed final survivor verification for ${this.homeDir}: ${error instanceof Error ? error.message : String(error)}`,
+              { cause: error },
+            );
           }
-        } catch (error) {
-          cleanupError = new Error(
-            `Edge harness dispose failed final survivor verification for ${this.homeDir}: ${error instanceof Error ? error.message : String(error)}`,
-            { cause: error },
-          );
         }
       }
     } finally {

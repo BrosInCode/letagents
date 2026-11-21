@@ -14,8 +14,12 @@ import { parseProviderReplayTranscript } from "../../electron/__tests__/provider
 import { parseCodexEdgeTranscript } from "./edge/codex/parser.mjs";
 import {
   EDGE_DAEMON_UNSUPPORTED_REASON,
+  execWithTimeoutRetry,
   findProcessesReferencingPath,
+  lastProcessListDiagnostics,
   listOsProcesses,
+  parseWindowsTasklistCsv,
+  selectWindowsEdgeProcessCandidates,
   startEdgeDaemon,
 } from "./edge/daemon-edge-harness.js";
 import { materializeNodeShim } from "./edge/executable-shim.js";
@@ -216,6 +220,92 @@ test("process enumeration failure cannot satisfy zero-process assertions or sile
     }
     await harness.dispose().catch(() => undefined);
   }
+});
+
+test("Windows tasklist CSV parser, candidate filter, timeout retry, and live OS enumeration diagnostics", (t) => {
+  const sampleCsv = [
+    '\uFEFF"System Idle Process","0","Services","0","8 K"',
+    '"System","4","Services","0","144 K"',
+    '"svchost.exe","892","Services","0","15,320 K"',
+    '"MsMpEng.exe","2104","Services","0","120,000 K"',
+    '"node.exe","5412","Console","1","45,120 K"',
+    '"cmd.exe","6120","Console","1","4,012 K"',
+    '"letagents-process-tree.exe","6118","Console","1","2,100 K"',
+    '"codex.exe","7001","Console","1","22,000 K"',
+    '"custom-daemon.exe","7777","Console","1","12,000 K"',
+    "INFO: No tasks are running which match the specified criteria.",
+  ].join("\r\n");
+
+  const parsed = parseWindowsTasklistCsv(sampleCsv);
+  assert.deepEqual(
+    parsed.map((row) => [row.image, row.pid]),
+    [
+      ["System", 4],
+      ["svchost.exe", 892],
+      ["MsMpEng.exe", 2104],
+      ["node.exe", 5412],
+      ["cmd.exe", 6120],
+      ["letagents-process-tree.exe", 6118],
+      ["codex.exe", 7001],
+      ["custom-daemon.exe", 7777],
+    ],
+  );
+
+  const selected = selectWindowsEdgeProcessCandidates(parsed, {
+    currentPid: 5412,
+    extraPids: [7777],
+  });
+  assert.deepEqual(
+    selected.map((row) => row.pid),
+    [5412, 6120, 6118, 7001, 7777],
+    "Expected candidate filter to skip OS services while keeping node/cmd/helper/providers/tracked PIDs",
+  );
+
+  // Retry once on ETIMEDOUT, fail immediately on non-timeout errors.
+  let timeoutAttempts = 0;
+  const recovered = execWithTimeoutRetry(() => {
+    timeoutAttempts += 1;
+    if (timeoutAttempts === 1) {
+      const err = new Error("timed out") as NodeJS.ErrnoException;
+      err.code = "ETIMEDOUT";
+      throw err;
+    }
+    return "ok";
+  }, 2);
+  assert.equal(recovered, "ok");
+  assert.equal(timeoutAttempts, 2);
+
+  let enoentAttempts = 0;
+  assert.throws(
+    () =>
+      execWithTimeoutRetry(() => {
+        enoentAttempts += 1;
+        const err = new Error("missing binary") as NodeJS.ErrnoException;
+        err.code = "ENOENT";
+        throw err;
+      }, 2),
+    /missing binary/,
+  );
+  assert.equal(enoentAttempts, 1, "Expected non-timeout errors to fail immediately without retry");
+
+  // Live OS enumeration smoke check + Windows native helper proof.
+  const live = listOsProcesses();
+  assert.ok(live.some((entry) => entry.pid === process.pid), "Expected listOsProcesses() to include current runner pid");
+  const diag = lastProcessListDiagnostics();
+  assert.ok(diag, "Expected process list diagnostics after listOsProcesses()");
+  if (
+    process.platform === "win32" &&
+    (process.env.LETAGENTS_PROCESS_TREE_HELPER?.trim() || process.env.LETAGENTS_TEST_PROCESS_TREE_HELPER?.trim())
+  ) {
+    assert.equal(
+      diag.method,
+      "tasklist+process-tree-helper",
+      `Expected Windows CI to use tasklist + letagents-process-tree.exe instead of PowerShell, got ${JSON.stringify(diag)}`,
+    );
+  }
+  t.diagnostic(
+    `edge process list diagnostics: method=${diag.method} totalTasks=${diag.totalTasks} helperCalls=${diag.helperCalls} elapsedMs=${diag.elapsedMs}`,
+  );
 });
 
 test("all committed Codex and Open Model edge fixtures parse strictly and have zero redaction leaks", () => {
