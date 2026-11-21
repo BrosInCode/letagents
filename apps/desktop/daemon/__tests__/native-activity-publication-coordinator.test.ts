@@ -62,3 +62,304 @@ test("a run that recovers the handoff starts delivery", async (t) => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(deliveries(), 1);
 });
+
+const HEARTBEAT_MS = 15_000;
+const LOCAL_ROOM_API = "letagents-local://rooms";
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+/** A coordinator with a clock, a publication journal and a room server that the test controls. */
+function room(options: { apiUrl?: string } = {}) {
+  const clock = { now: Date.parse("2026-11-20T10:00:00.000Z") };
+  const startedAt = clock.now;
+  const state = {
+    binding: { ...binding, api_url: options.apiUrl ?? binding.api_url },
+    entry: { ...blocked(), observed_state: "idle", condition: "none", last_error: null } as DaemonManifestEntry,
+    /** What the room server does with a publication. */
+    server: "accepts" as "accepts" | "refuses" | "unreachable",
+    /** Each next request waits for its entry before it reaches the room server (`request`) or before its answer comes back (`answer`). */
+    network: [] as Array<{ request?: Promise<void>; answer?: Promise<void> }>,
+  };
+  /** The publications that reached the room server, with the second they were sent in. */
+  const sent: Array<{ at: number; method: string; status: "working" | "idle"; summary: string | null; sequence: number }> = [];
+  let reservations = 0;
+  let deliveries = 0;
+  let timers: Array<{ at: number; run: () => void }> = [];
+  const coordinator = new NativeActivityPublicationCoordinator({
+    bindings: {
+      get: async () => state.binding,
+      credentialFor: async () => "bearer",
+      publish: async (_entryId: string, _ms: number, send: (input: unknown) => Promise<{ accepted: boolean }>) => {
+        reservations += 1;
+        const reserved = { sequence: reservations, observed_at: new Date(clock.now).toISOString() };
+        return { ...await send({ binding: state.binding, ...reserved }), ...reserved };
+      },
+    } as never,
+    updateEntry: async (_id, update) => (state.entry = update(state.entry)),
+    startDelivery: async () => { deliveries += 1; },
+    publishWorkerActivity: async (input) => {
+      const at = (clock.now - startedAt) / 1_000;
+      const slow = state.network.shift();
+      await slow?.request;
+      if (state.server === "unreachable") throw new TypeError("fetch failed");
+      sent.push({ at, method: input.method, status: input.status, summary: input.activitySummary ?? null, sequence: input.sequence });
+      const accepted = state.server === "accepts";
+      await slow?.answer;
+      return accepted;
+    },
+  }, {
+    heartbeatIntervalMs: HEARTBEAT_MS,
+    nowMs: () => clock.now,
+    setTimeout: ((run: () => void, delayMs: number) => {
+      const timer = { at: clock.now + delayMs, run };
+      timers.push(timer);
+      return timer;
+    }) as never,
+    clearTimeout: ((timer: unknown) => { timers = timers.filter((candidate) => candidate !== timer); }) as never,
+  });
+  /** Move the clock, and let the activity-line timers that came due run to their end. */
+  const advance = async (ms: number) => {
+    clock.now += ms;
+    const due = timers.filter((timer) => timer.at <= clock.now);
+    timers = timers.filter((timer) => timer.at > clock.now);
+    for (const timer of due) timer.run();
+    if (due.length) await settle();
+  };
+  const heartbeat = (status: "working" | "idle" = "idle") => coordinator.publishIfDue("agent-1", "native_harness.heartbeat", status);
+  return { clock, state, sent, coordinator, advance, heartbeat, reservations: () => reservations, deliveries: () => deliveries };
+}
+
+test("the first publication for a binding is sent; the same status is not sent again before it is due", async () => {
+  const r = room();
+  assert.equal(await r.heartbeat(), true);
+  await r.advance(HEARTBEAT_MS);
+  assert.equal(await r.heartbeat(), false);
+  await r.advance(HEARTBEAT_MS);
+  assert.equal(await r.heartbeat(), false);
+  assert.deepEqual(r.sent, [{ at: 0, method: "native_harness.heartbeat", status: "idle", summary: null, sequence: 1 }]);
+  assert.equal(r.reservations(), 1, "a publication that is not sent reserves no sequence in the journal");
+});
+
+test("a status that the room does not have is sent at once", async () => {
+  const r = room();
+  await r.heartbeat("idle");
+  await r.advance(1_000);
+  assert.equal(await r.coordinator.publishIfDue("agent-1", "item/started", "working"), true);
+  await r.advance(1_000);
+  assert.equal(await r.coordinator.publishIfDue("agent-1", "item/updated", "working"), false);
+  await r.advance(1_000);
+  assert.equal(await r.coordinator.publishIfDue("agent-1", "turn/completed", "idle"), true);
+  assert.deepEqual(r.sent.map(({ at, method, status }) => [at, method, status]), [
+    [0, "native_harness.heartbeat", "idle"], [1, "item/started", "working"], [3, "turn/completed", "idle"],
+  ]);
+});
+
+test("an idle status is sent again after two and a half heartbeats, a working status after half a heartbeat", async () => {
+  const idle = room();
+  await idle.heartbeat("idle");
+  await idle.advance(37_499);
+  assert.equal(await idle.heartbeat("idle"), false);
+  await idle.advance(1);
+  assert.equal(await idle.heartbeat("idle"), true);
+  // A clock that was set back must not hold the refresh off for as long as it was set back.
+  await idle.advance(-3_600_000);
+  assert.equal(await idle.heartbeat("idle"), true);
+
+  const working = room();
+  await working.heartbeat("working");
+  await working.advance(7_499);
+  assert.equal(await working.heartbeat("working"), false);
+  await working.advance(1);
+  assert.equal(await working.heartbeat("working"), true);
+});
+
+test("five idle minutes of heartbeats are 7 publications; every one of the 20 was sent before", async () => {
+  const gated = room();
+  const always = room();
+  for (let tick = 0; tick < 20; tick += 1) {
+    await gated.heartbeat();
+    await always.coordinator.publish("agent-1", "native_harness.heartbeat", "idle");
+    await gated.advance(HEARTBEAT_MS);
+    await always.advance(HEARTBEAT_MS);
+  }
+  assert.equal(always.sent.length, 20);
+  assert.deepEqual(gated.sent.map((publication) => publication.at), [0, 45, 90, 135, 180, 225, 270]);
+  assert.equal(gated.reservations(), 7);
+});
+
+test("a working agent's heartbeat is sent every time, as before", async () => {
+  const r = room();
+  // Another writer can set the presence row to idle at any time; the next heartbeat puts "working" back.
+  for (let tick = 0; tick < 20; tick += 1) {
+    assert.equal(await r.heartbeat("working"), true);
+    await r.advance(HEARTBEAT_MS);
+  }
+  assert.deepEqual(r.sent.map((publication) => publication.at), Array.from({ length: 20 }, (_, tick) => tick * 15));
+});
+
+test("a minute of working events is one publication for the change and one refresh each 7.5 seconds", async () => {
+  const r = room();
+  await r.heartbeat("idle");
+  // Ten provider events each second, and the heartbeat every 15 seconds.
+  for (let event = 1; event <= 600; event += 1) {
+    await r.advance(100);
+    await r.coordinator.publishIfDue("agent-1", "item/agentMessage/delta", "working", new Date(r.clock.now).toISOString());
+    if (event % 150 === 0) await r.heartbeat("working");
+  }
+  assert.deepEqual(r.sent.map(({ at, method, status }) => [at, method, status]), [
+    [0, "native_harness.heartbeat", "idle"],
+    ...[0.1, 7.6, 15.1, 22.6, 30.1, 37.6, 45.1, 52.6].map((at) => [at, "item/agentMessage/delta", "working"]),
+  ]);
+  assert.equal(r.reservations(), 9, "8 working publications; 604 before");
+});
+
+test("a publication that fails is made again by the next call", async () => {
+  const r = room();
+  r.state.server = "unreachable";
+  await assert.rejects(r.heartbeat(), /fetch failed/);
+  r.state.server = "accepts";
+  await r.advance(HEARTBEAT_MS);
+  assert.equal(await r.heartbeat(), true, "nothing was accepted yet");
+  // A refresh that fails is made again by the next heartbeat, and then the count starts again.
+  await r.advance(3 * HEARTBEAT_MS);
+  r.state.server = "unreachable";
+  await assert.rejects(r.heartbeat(), /fetch failed/);
+  r.state.server = "accepts";
+  await r.advance(HEARTBEAT_MS);
+  assert.equal(await r.heartbeat(), true);
+  await r.advance(HEARTBEAT_MS);
+  assert.equal(await r.heartbeat(), false);
+  assert.deepEqual(r.sent.map((publication) => publication.at), [15, 75]);
+});
+
+test("after a failed publication nothing is known about the room's copy", async () => {
+  const r = room();
+  await r.heartbeat("idle");
+  // The request may have reached the server before the connection broke: the room may show the agent as working.
+  r.state.server = "unreachable";
+  await r.advance(1_000);
+  await assert.rejects(r.coordinator.publish("agent-1", "native_harness.activity_summary", "working"), /fetch failed/);
+  r.state.server = "accepts";
+  await r.advance(1_000);
+  assert.equal(await r.heartbeat("idle"), true, "the idle status is sent again, although it was the last one accepted");
+});
+
+test("a publication that the room server refuses is not counted as known there", async () => {
+  const r = room();
+  r.state.server = "refuses";
+  await assert.rejects(r.heartbeat(), /rejected a stale daemon observation/);
+  r.state.server = "accepts";
+  assert.equal(await r.heartbeat(), true);
+  assert.equal(r.sent.length, 2);
+});
+
+test("a new binding has told the room nothing yet", async () => {
+  const r = room();
+  await r.heartbeat();
+  for (const change of [{ agent_session_id: "session-2" }, { execution_generation_id: "gen-2" }, { room_id: "room-2" }]) {
+    r.state.binding = { ...r.state.binding, ...change };
+    assert.equal(await r.heartbeat(), true, `${Object.keys(change)[0]} changed`);
+    assert.equal(await r.heartbeat(), false);
+  }
+  assert.equal(r.sent.length, 4);
+});
+
+for (const [has, changes] of [["idle", "working"], ["working", "idle"]] as const) {
+  test(`a status the room has (${has}) is not left out while the other one is on its way`, async () => {
+    const r = room();
+    await r.heartbeat(has);
+    // A slow request: the change to the other status has not reached the room server yet.
+    const slow = deferred();
+    r.state.network.push({ request: slow.promise });
+    const onItsWay = r.coordinator.publishIfDue("agent-1", "item/updated", changes);
+    await settle();
+    // The agent's state goes back before that request arrives.
+    assert.equal(await r.heartbeat(has), true, "it goes out too, although it is what the room accepted last");
+    slow.resolve();
+    await onItsWay;
+    assert.deepEqual(r.sent.map(({ status, sequence }) => [status, sequence]), [[has, 1], [has, 3], [changes, 2]],
+      "the later status has the higher sequence, so the server keeps it whichever request arrives first");
+    assert.equal(await r.heartbeat(has), false, "and it is what the daemon takes the room to have");
+    assert.equal(r.reservations(), 3);
+  });
+}
+
+test("answers that come back out of order leave the newest publication as the room's copy", async () => {
+  const r = room();
+  const slow = deferred();
+  r.state.network.push({ answer: slow.promise });
+  const first = r.coordinator.publish("agent-1", "native_harness.heartbeat", "idle");
+  await settle();
+  assert.equal(await r.coordinator.publish("agent-1", "item/started", "working"), true);
+  slow.resolve();
+  assert.equal(await first, true);
+  assert.deepEqual(r.sent.map(({ status, sequence }) => [status, sequence]), [["idle", 1], ["working", 2]]);
+  assert.equal(await r.heartbeat("working"), false, "the room has the working status of sequence 2");
+  assert.equal(await r.heartbeat("idle"), true);
+});
+
+test("an entry that waits for its credential handoff is recovered by publish, which always sends", async () => {
+  const r = room();
+  assert.equal(await r.coordinator.publish("agent-1", "native_harness.bound", "working"), true);
+  r.state.entry = blocked();
+  await r.advance(5_000);
+  // The gated entry point is not for this entry: the room has the status, so nothing would be sent or recovered.
+  assert.equal(await r.heartbeat("working"), false);
+  assert.equal(r.state.entry.condition, "coordination_blocked");
+  assert.equal(await r.coordinator.publish("agent-1", "native_harness.heartbeat", "working"), true);
+  await settle();
+  assert.equal(r.state.entry.condition, "none");
+  assert.equal(r.state.entry.observed_state, "working");
+  assert.equal(r.state.entry.last_error, null);
+  assert.equal(r.deliveries(), 1);
+  assert.equal(r.sent.length, 2);
+});
+
+test("an activity line that the room does not have makes a working publication due", async () => {
+  const r = room();
+  let permitted: "working" | null = "working";
+  r.coordinator.observeActivitySummary("agent-1", "Reading files", () => permitted);
+  await r.advance(0);
+  await r.advance(5_000);
+  assert.equal(await r.heartbeat("working"), false, "the room has this status and this line");
+  // A changed line that could not be published at its time, because the agent's bearer was being rotated.
+  permitted = null;
+  r.coordinator.observeActivitySummary("agent-1", "Running tests", () => permitted);
+  await r.advance(0);
+  assert.equal(r.sent.length, 1);
+  await r.advance(1_000);
+  assert.equal(await r.heartbeat("working"), true, "the next heartbeat carries the line that waits, before the status is due again");
+  await r.advance(5_000);
+  assert.equal(await r.heartbeat("working"), false);
+  assert.deepEqual(r.sent.map(({ at, method, summary }) => [at, method, summary]), [
+    [0, "native_harness.activity_summary", "Reading files"],
+    [6, "native_harness.heartbeat", "Running tests"],
+  ]);
+});
+
+test("an idle heartbeat that is not sent still clears a line that waits", async () => {
+  const r = room();
+  await r.heartbeat("idle");
+  r.coordinator.observeActivitySummary("agent-1", "Reading files", () => null);
+  await r.advance(0);
+  await r.advance(HEARTBEAT_MS);
+  assert.equal(await r.heartbeat("idle"), false);
+  await r.advance(HEARTBEAT_MS);
+  assert.equal(await r.heartbeat("working"), true);
+  assert.equal(r.sent.at(-1)!.summary, null, "the next turn does not start with the line of the last one");
+});
+
+test("a local room gets every publication, as before", async () => {
+  const r = room({ apiUrl: LOCAL_ROOM_API });
+  for (let tick = 0; tick < 4; tick += 1) {
+    assert.equal(await r.heartbeat(), true);
+    await r.advance(HEARTBEAT_MS);
+  }
+  assert.deepEqual(r.sent.map((publication) => publication.at), [0, 15, 30, 45]);
+});

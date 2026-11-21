@@ -1,6 +1,8 @@
 import type { DaemonManifestEntry } from "./types.js";
 import type { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../shared/room-api-origin.mjs";
+import { withUserAgent } from "../../../shared/client-user-agent.mjs";
+import { DAEMON_USER_AGENT } from "./client-identity.js";
 import type { ExecuteDaemonToolInput, ExecuteDaemonToolResult } from "./supervised-tool-runtime.js";
 
 export type LocalSupervisorGrant = {
@@ -41,7 +43,8 @@ export async function roomRequest(url: string, init?: RequestInit): Promise<Resp
     if (parsed.host !== "rooms" || parsed.username || parsed.password || parsed.hash) throw new Error("Invalid local room authority.");
     return (await localRoomRuntime()).requestLocalSupervisor(url, init);
   }
-  return fetch(url, init);
+  // Every request of the daemon to a room server names the daemon and its build.
+  return fetch(url, { ...init, headers: withUserAgent(init?.headers, DAEMON_USER_AGENT) });
 }
 
 export { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN };

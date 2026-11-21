@@ -172,7 +172,7 @@ export function useAppSettingsActions(context: unknown) {
         ]);
       }
       if (refreshTargets.includes("active_room") && !archivedActiveRoom) {
-        await app.refreshSelectedSnapshot(rootRoomSnapshot.value);
+        await app.refreshActiveRoom();
       }
       if (refreshTargets.includes("foreground")) {
         app.refreshForegroundData();

@@ -179,6 +179,77 @@ test("forgetting a room by its id fences a pending join under its join code", as
   await assert.rejects(byCodeAgain, /forbidden/);
 });
 
+// A room that is open was built from the join remembered then. No stream event
+// carries a room's name, role or focus state, so the join that replaces an old
+// answer is the only place a change can be seen.
+test("a join whose answer differs from the remembered one tells the listener once; the same answer does not", async (t) => {
+  const { subject, calls } = await loadRoomInfo(t);
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  const changes: string[][] = [];
+  subject.onJoinedRoomInfoChange((roomIdentifiers) => { changes.push([...roomIdentifiers]); });
+  const alias = "ABCX-7291";
+  const room = "design-lounge";
+  subject.rememberJoinedRoomInfo(alias, { room_id: room, name: "Design lounge", role: "participant" });
+  assert.equal(subject.joinedRoomInfoRemainingMs(room), subject.JOINED_ROOM_INFO_TTL_MS);
+  now += subject.JOINED_ROOM_INFO_TTL_MS - 1;
+  assert.equal(subject.joinedRoomInfoRemainingMs(room), 1, "the remembered join still answers");
+  await subject.getJoinedRoomInfo(room);
+  assert.equal(calls.length, 0);
+
+  now += 1;
+  assert.equal(subject.joinedRoomInfoRemainingMs(room), 0, "the remembered join ended");
+  // Fields the app does not show (here a server time) are no change.
+  const same = subject.getJoinedRoomInfo(room);
+  await tick();
+  calls[0].resolve({ room_id: room, name: "Design lounge", role: "participant", server_time: "later" });
+  await same;
+  assert.deepEqual(changes, [], "the same room info is no change");
+
+  now += subject.JOINED_ROOM_INFO_TTL_MS + 1;
+  const promoted = subject.getJoinedRoomInfo(room, { create: false });
+  const sharing = subject.getJoinedRoomInfo(room, { create: false });
+  await tick();
+  assert.equal(calls.length, 2, "both callers share one join");
+  calls[1].resolve({ room_id: room, name: "Design lounge", role: "admin" });
+  await Promise.all([promoted, sharing]);
+  assert.deepEqual(changes, [[room]], "one notice for one changed answer, however many callers shared it");
+
+  // A first join has no earlier answer that the room on screen could contradict.
+  const first = subject.getJoinedRoomInfo("quiet-corner");
+  await tick();
+  calls[2].resolve({ room_id: "quiet-corner", name: "Quiet corner" });
+  await first;
+  assert.deepEqual(changes, [[room]]);
+
+  // A listener that throws never fails the join.
+  subject.onJoinedRoomInfoChange(() => { throw new Error("listener failed"); });
+  now += subject.JOINED_ROOM_INFO_TTL_MS + 1;
+  const renamed = subject.getJoinedRoomInfo(room);
+  await tick();
+  calls[3].resolve({ room_id: room, name: "Design studio", role: "admin" });
+  assert.equal((await renamed).name, "Design studio");
+  subject.onJoinedRoomInfoChange(null);
+});
+
+test("a join answered after the room was forgotten tells no listener", async (t) => {
+  const { subject, calls } = await loadRoomInfo(t);
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  const changes: string[][] = [];
+  subject.onJoinedRoomInfoChange((roomIdentifiers) => { changes.push([...roomIdentifiers]); });
+  subject.rememberJoinedRoomInfo("alerts-demo", { room_id: "alerts-demo", role: "admin" });
+  now += subject.JOINED_ROOM_INFO_TTL_MS + 1;
+  const pending = subject.getJoinedRoomInfo("alerts-demo");
+  await tick();
+  // The stream lost the room while the join was on its way: its answer is not stored, so it is no news.
+  subject.forgetJoinedRoomInfo("alerts-demo");
+  calls[0].resolve({ room_id: "alerts-demo", role: "participant" });
+  await pending;
+  assert.deepEqual(changes, []);
+  subject.onJoinedRoomInfoChange(null);
+});
+
 test("sign-out clears joined rooms again after the token is removed", async (t) => {
   const events: string[] = [];
   let release: () => void = () => {};

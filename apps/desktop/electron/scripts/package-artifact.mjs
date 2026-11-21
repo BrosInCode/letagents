@@ -398,6 +398,7 @@ const required = [
     "shared/agent-live-trace.mjs",
     "shared/attachment-content.mjs",
     "shared/attachment-download.mjs",
+    "shared/client-user-agent.mjs",
     "shared/codex-owner-isolation.mjs",
     "shared/codex-read-only-room-tools.mjs",
     "shared/credential-paths.mjs",

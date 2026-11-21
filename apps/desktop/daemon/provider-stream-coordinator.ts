@@ -13,6 +13,7 @@ import type {
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import { DaemonFenceLostError } from "./singleton.js";
 import {
+  awaitsCredentialHandoff,
   isCorrelatedNonemptyWaitResult,
   isHumanRoomActivityEvent,
   isSupervisedQuietPollContinuation,
@@ -242,11 +243,17 @@ export type ProviderStreamCoordinatorOptions = {
     activityOnly: boolean,
     position?: "exact" | "after_latest",
   ): Promise<void>;
+  /**
+   * `whenDue`: no caller waits on the answer, so the publication may be left
+   * out while the room already has what it says (see publishIfDue of the
+   * native activity publication coordinator).
+   */
   publishNativeActivity(
     entryId: string,
     method: string,
     status: "working" | "idle",
     observedAt?: string,
+    whenDue?: boolean,
   ): Promise<unknown>;
   /** The line the owner sees in the live strip, for every room member; null when the turn ends. */
   observeActivitySummary?(entryId: string, summary: string | null, status: LiveActivitySummaryStatus): void;
@@ -802,10 +809,8 @@ export class ProviderStreamCoordinator {
           || !this.isCurrentInstallation(heartbeatInstallation)) return;
         if (this.options.runtimeCustody.liveBinding(entryId)?.executionGenerationId
           !== manifestEntry.provider_ref?.execution_generation_id) return;
-        const retriesCredentialHandoff = manifestEntry.desired_state === "running"
-          && manifestEntry.observed_state === "recovering"
-          && manifestEntry.condition === "coordination_blocked"
-          && manifestEntry.last_error === "Provider is running; waiting for desktop credential handoff.";
+        const retriesCredentialHandoff = manifestEntry.observed_state === "recovering"
+          && awaitsCredentialHandoff(manifestEntry);
         const publishesLiveness = ["working", "idle"].includes(manifestEntry.observed_state)
           || retriesCredentialHandoff;
         // A recovering agent still holds its bound bearer. Keep renewing and
@@ -860,11 +865,7 @@ export class ProviderStreamCoordinator {
         nextEndedHandleHandOff = 1;
         if (custodyOnly) return;
         const status = current.observedState === "idle" ? "idle" : "working";
-        await this.options.publishNativeActivity(
-          entryId,
-          "native_harness.heartbeat",
-          status,
-        );
+        await this.announceLiveness(manifestEntry, "native_harness.heartbeat", status);
       })().catch(() => undefined));
     }, this.options.heartbeat.intervalMs);
     heartbeat.unref?.();
@@ -1296,6 +1297,22 @@ export class ProviderStreamCoordinator {
   }
 
   /**
+   * Tell the room that the agent is there, from the heartbeat or a provider
+   * event. Nobody waits on the answer, so the publication may be left out
+   * while the room already has what it says. One case needs the answer: an
+   * entry that waits for its credential handoff is recovered only by an
+   * accepted publication, so that one is always sent.
+   */
+  private announceLiveness(
+    entry: DaemonManifestEntry,
+    method: string,
+    status: "working" | "idle",
+    observedAt?: string,
+  ): Promise<unknown> {
+    return this.options.publishNativeActivity(entry.id, method, status, observedAt, !awaitsCredentialHandoff(entry));
+  }
+
+  /**
    * The status an early activity-line publication may report, or null when
    * the heartbeat would not announce liveness now. Same conditions as the
    * heartbeat: the exact current runtime and binding generation, an entry that
@@ -1515,8 +1532,8 @@ export class ProviderStreamCoordinator {
       // This is authenticated worker-binding proof, not raw stream lifecycle
       // classification. Its coordinator may recover only the exact credential-
       // handoff latch after the remote publication accepts the scoped bearer.
-      await this.options.publishNativeActivity(
-        entryId,
+      await this.announceLiveness(
+        entry,
         sanitizedEvent.method,
         lifecycle === "working" && !quietlyPolling ? "working" : "idle",
         event.observedAt,

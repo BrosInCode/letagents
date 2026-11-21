@@ -13,6 +13,7 @@ import {
   loadFocusRooms,
   loadParticipants,
   loadPresence,
+  POLL_ONLY_ROOM_SOURCES,
 } from "./fetch-data.js";
 import {
   mapBoardSettings,
@@ -93,13 +94,7 @@ export async function fetchRoomLiveMetadata(
   });
 }
 
-const ALL_LIVE_METADATA_SOURCES: readonly DesktopRoomLiveMetadataSourceKey[] = [
-  "focusRooms",
-  "participants",
-  "presence",
-  "activityHistory",
-  "boardSettings",
-];
+const ALL_LIVE_METADATA_SOURCES = POLL_ONLY_ROOM_SOURCES;
 
 /** The renderer sends this option over IPC, so read it as untrusted input. */
 function requestedLiveMetadataSources(

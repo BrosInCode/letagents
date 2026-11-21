@@ -676,6 +676,13 @@ export interface DesktopRoomSnapshot {
    * a degraded state instead of a false-empty view. Defaults to all-ready.
    */
   sourceStates: DesktopSnapshotSourceStates;
+  /**
+   * The sources this snapshot did not read: their sections are empty
+   * placeholders, not room state. Absent on a complete snapshot. A read that
+   * asked only for the stream-fed sources names the others here, and the
+   * renderer takes those sections from the snapshot on screen.
+   */
+  unloadedSources?: readonly DesktopSnapshotSourceKey[];
 }
 
 /**
@@ -717,6 +724,14 @@ export interface DesktopRoomSnapshotOptions {
    * as the workspace room is on first open.
    */
   create?: boolean;
+  /**
+   * "stream_fed": read only the sources the room stream feeds (messages,
+   * tasks, reasoning, live activity, artifacts and GitHub events). A stream
+   * gap can have changed only these; the other sources are read by the
+   * periodic metadata read. The snapshot names what it left out in
+   * `unloadedSources`. Default: every source.
+   */
+  sources?: "stream_fed";
 }
 
 export type DesktopRoomLiveMetadataSourceStates = Record<

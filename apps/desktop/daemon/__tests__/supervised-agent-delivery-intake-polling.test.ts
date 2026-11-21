@@ -504,6 +504,43 @@ test("poll-error backoff grows, caps, and resets after a healthy poll", async ()
   }
 });
 
+test("a lane asks for a long hold only while its health says observing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-poll-hold-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
+  try {
+    const polls: Array<{ health: string | undefined; observing: boolean | undefined }> = [];
+    delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+      poll: async ({ observing, signal }) => {
+        polls.push({ health: (await store.ingressHealth(agent.agentId))?.state, observing });
+        if (polls.length === 3) throw new Error("outage");
+        if (polls.length < 6) return {};
+        return new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true }));
+      },
+      publish: async () => { throw new Error("must not publish"); },
+    }, currentAuthority, 50, undefined, async () => {});
+    void delivery.start(agent);
+    await waitFor(() => polls.length >= 6);
+    await delivery.fenceAndDrain();
+    // What the owner reads about the lane waits for the answer of a poll that is not observing: that poll must not be held long.
+    assert.deepEqual(polls, [
+      { health: "starting", observing: false },
+      { health: "observing", observing: true },
+      { health: "observing", observing: true },
+      { health: "backoff", observing: false },
+      { health: "observing", observing: true },
+      { health: "observing", observing: true },
+    ]);
+    await store.close();
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    removeTestDirectory(root);
+  }
+});
+
 test("successful polling cycles release backoff listeners instead of accumulating them", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-poll-listeners-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));

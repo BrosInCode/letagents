@@ -204,6 +204,90 @@ test("focus snapshots load history and every resource from the canonical joined 
   }
 });
 
+test("a stream-fed snapshot requests only the sources the room stream feeds and names the rest as not loaded", async () => {
+  const previous = globalThis.fetch;
+  const room = "stream_fed_room";
+  const requests: string[] = [];
+  const stub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const route = url.pathname.replace(`/rooms/${room}`, "") + (url.searchParams.get("kind") === "live" ? "?kind=live" : "");
+    requests.push(`${(init?.method || "GET").toUpperCase()} ${route}`);
+    const json = (body: unknown) => new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+    if (route === "/join") return json({ room_id: room, display_name: "Stream fed", kind: "main", authenticated: true });
+    if (route === "/messages") return json({ messages: [{ id: "msg_1", sender: "Emmy", text: "Missed", timestamp: "2026-11-20T00:00:00.000Z" }] });
+    if (route === "/tasks") return json({ tasks: [{ id: "task_1", title: "Card", status: "accepted" }], has_more: false });
+    if (route === "/reasoning-sessions" || route === "/reasoning-sessions?kind=live") return json({ sessions: [] });
+    if (route === "/artifacts") return json({ artifacts: [] });
+    if (route === "/events") return json({ events: [], has_more: false });
+    // A poll-only route must not be asked; its data would make the assertions below fail.
+    if (route === "/participants") return json({ participants: [{ participant_key: "human:emmy", kind: "human", display_name: "Emmy" }], hidden_count: 5 });
+    if (route === "/focus-rooms") return json({ focus_rooms: [] });
+    if (route === "/presence") return json({ presence: [] });
+    if (route === "/activity-history") return json({ entries: [] });
+    if (route === "/board-settings") return json({ pending_intent_count: 4 });
+    return json({ error: `unexpected ${route}` });
+  }) as typeof fetch;
+  (globalThis as { fetch: typeof fetch }).fetch = stub;
+  try {
+    const { fetchRoomSnapshot } = await import("../main/rooms/snapshot.js");
+
+    const partial = await fetchRoomSnapshot(room, { sources: "stream_fed" });
+    assert.deepEqual([...requests].sort(), [
+      "GET /artifacts",
+      "GET /events",
+      "GET /messages",
+      "GET /reasoning-sessions",
+      "GET /reasoning-sessions?kind=live",
+      "GET /tasks",
+      "POST /join",
+    ]);
+    assert.equal(partial.access.status, "ready");
+    assert.deepEqual(partial.messages.map((message) => message.id), ["msg_1"]);
+    assert.deepEqual(partial.tasks.map((task) => task.id), ["task_1"]);
+    assert.deepEqual(
+      [...(partial.unloadedSources ?? [])].sort(),
+      ["activityHistory", "boardSettings", "focusRooms", "participants", "presence"],
+    );
+    // The sections it left out are empty placeholders, with no failure reported for them.
+    assert.deepEqual(partial.participants, []);
+    assert.equal(partial.participantHiddenCount, 0);
+    assert.equal(partial.sourceStates.participants.status, "ready");
+    assert.equal(partial.sourceStates.messages.status, "ready");
+    assert.equal(partial.sourceStates.tasks.status, "ready");
+
+    // The default read still asks for every source and is complete. The join is remembered from the first read.
+    requests.length = 0;
+    const full = await fetchRoomSnapshot(room);
+    assert.equal(requests.length, 11);
+    for (const route of ["/participants", "/focus-rooms", "/presence", "/activity-history", "/board-settings"]) {
+      assert.ok(requests.includes(`GET ${route}`), `${route} is read by a full snapshot`);
+    }
+    assert.equal(full.unloadedSources, undefined);
+    assert.equal(full.participantHiddenCount, 5);
+    assert.equal(full.boardSettings.pendingIntentCount, 4);
+  } finally {
+    (globalThis as { fetch: typeof fetch }).fetch = previous;
+  }
+});
+
+test("only known snapshot option values cross the renderer bridge", async () => {
+  const { roomSnapshotOptionsFromRenderer } = await import("../main/ipc-handlers/rooms.js");
+  assert.equal(roomSnapshotOptionsFromRenderer(undefined), undefined);
+  assert.equal(roomSnapshotOptionsFromRenderer(null), undefined);
+  assert.equal(roomSnapshotOptionsFromRenderer("stream_fed"), undefined);
+  assert.equal(roomSnapshotOptionsFromRenderer({}), undefined);
+  assert.equal(roomSnapshotOptionsFromRenderer({ create: true, sources: "everything", other: 1 }), undefined);
+  assert.deepEqual(roomSnapshotOptionsFromRenderer({ create: false }), { create: false });
+  assert.deepEqual(roomSnapshotOptionsFromRenderer({ sources: "stream_fed" }), { sources: "stream_fed" });
+  assert.deepEqual(
+    roomSnapshotOptionsFromRenderer({ create: false, sources: "stream_fed", forceCloudMessages: true }),
+    { create: false, sources: "stream_fed" },
+  );
+});
+
 test("buildRoomLiveMetadata degrades a failed source to its fallback while recording the error", async () => {
   const metadata = buildRoomLiveMetadata("room_degraded", {
     focusRooms: await loadSource(Promise.resolve({ focus_rooms: [] }), { focus_rooms: [] }),

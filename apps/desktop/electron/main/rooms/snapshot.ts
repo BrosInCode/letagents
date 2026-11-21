@@ -85,7 +85,10 @@ export async function fetchRoomSnapshot(
     const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, roomIdentifier);
     const joined = await getJoinedRoomInfo(cloudRoomIdentifier, { create });
     const canonicalRoomIdentifier = canonicalJoinedRoomIdentifier(cloudRoomIdentifier, joined);
-    const snapshotData = await fetchRoomSnapshotData(canonicalRoomIdentifier);
+    const snapshotData = await fetchRoomSnapshotData(
+      canonicalRoomIdentifier,
+      options?.sources === "stream_fed" ? { sources: "stream_fed" } : {},
+    );
     return createReadyRoomSnapshot(canonicalRoomIdentifier, joined, snapshotData, storage);
   } catch (error) {
     if (error instanceof DesktopApiError) {

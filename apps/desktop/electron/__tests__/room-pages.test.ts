@@ -995,6 +995,35 @@ test("work item watches: a pointer re-runs after 250 ms, a quiet watch polls eve
   assert.ok(pushed.every((message) => (message as { event: string }).event === "watch"));
 });
 
+// An edit of a sprint or a release sends no room event. Until 2026-11 every
+// stream keep-alive counted as a gap, so every watch ran again every 15 seconds.
+test("a planning watch runs again every minute, and at once after a task change; a task watch only after a change", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const runs: Record<string, number> = { "planning.get": 0, "tasks.list": 0 };
+  const lease = {};
+  const local = createPageWatches<object>({
+    run: async (_lease, method) => { runs[method] = (runs[method] ?? 0) + 1; return { method }; },
+    push: () => undefined,
+    methods: new Set(["planning.get", "tasks.list"]),
+  });
+  const settle = async (ms: number) => { t.mock.timers.tick(ms); await flushImmediates(); };
+  local.start(lease, "plan", "planning.get", {});
+  local.start(lease, "board", "tasks.list", {});
+  await flushImmediates();
+  assert.deepEqual(runs, { "planning.get": 1, "tasks.list": 1 });
+  await settle(59_000);
+  assert.deepEqual(runs, { "planning.get": 1, "tasks.list": 1 });
+  await settle(1_000);
+  assert.deepEqual(runs, { "planning.get": 2, "tasks.list": 1 }, "the plan is read again after a minute; the board has its own events");
+  local.notify(lease, "tasks");
+  await settle(PAGE_WATCH_DEBOUNCE_MS);
+  assert.deepEqual(runs, { "planning.get": 3, "tasks.list": 2 }, "a task change runs both at once");
+  // Each run sets the next one, so step a minute at a time.
+  for (let minute = 0; minute < 3; minute += 1) await settle(60_000);
+  assert.deepEqual(runs, { "planning.get": 6, "tasks.list": 2 });
+  local.stopAll(lease);
+});
+
 test("watch re-runs batch per lease and spend the page's call budget: a pointer storm waits, nothing is dropped", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const settle = async (ms: number) => { t.mock.timers.tick(ms); await flushImmediates(); };
