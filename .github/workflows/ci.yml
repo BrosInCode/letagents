@@ -492,7 +492,7 @@ jobs:
       - name: Test the shared modules the MCP server depends on
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
-        run: node --import tsx --test apps/desktop/daemon/__tests__/workspace-capture.test.ts apps/desktop/daemon/__tests__/workspace-capture-git-for-windows.test.ts apps/desktop/daemon/__tests__/workspace-change-capture.test.ts apps/desktop/daemon/__tests__/permission-review.test.ts
+        run: node --conditions=letagents-source --import tsx --test apps/desktop/daemon/__tests__/workspace-capture.test.ts apps/desktop/daemon/__tests__/workspace-capture-git-for-windows.test.ts apps/desktop/daemon/__tests__/workspace-change-capture.test.ts apps/desktop/daemon/__tests__/permission-review.test.ts
 
   # The Windows process-tree helper (apps/desktop/native/win-process-tree):
   # built with the runner's MSVC, checked against its seal, and proved on a
