@@ -730,9 +730,12 @@ export type ProviderNativePermissionEvent =
  * class that does not meet it fails to compile in this package. The daemon
  * imports the type from here and has no second definition.
  *
- * Each argument and result is plain data, a callback or an AbortSignal. No
- * call hands out a provider object, so the contract can later cross a process
- * border.
+ * This interface is the implementation side. The daemon does not call it: it
+ * calls ProviderRuntimeBoundary (provider-runtime-boundary.ts), which keeps
+ * the handles of this interface inside the package and gives the daemon a
+ * runtime reference that is plain data. The callbacks and AbortSignals here
+ * still pass through that boundary; its TRANSITIONAL_OPERATIONS list names
+ * each one.
  */
 export interface SupervisedProviderAdapter extends ProviderAdapter {
   controlTurn(handle: ProviderHandle, correction?: string | null, options?: ProviderTurnControlOptions): Promise<ProviderTurnControlResult>;
