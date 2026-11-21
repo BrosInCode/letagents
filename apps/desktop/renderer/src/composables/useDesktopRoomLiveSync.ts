@@ -23,6 +23,13 @@ interface DesktopRoomLiveSyncOptions {
    * Absent: always (the earlier behaviour).
    */
   activityHistoryVisible?: Readonly<Ref<boolean>>;
+  /**
+   * Reads the whole selected room through the stream's read barrier, so
+   * stream events that arrive while the read runs are applied over it.
+   * Resolves to false when no stream of that room runs; the full refresh
+   * then reads on its own. Absent: always on its own (the earlier behaviour).
+   */
+  readRoomThroughStream?: (roomIdentifier: string) => Promise<boolean>;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   selectedRoomIdentifier: ComputedRef<string | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
@@ -241,6 +248,10 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
    * events, manual refresh, and missing-thread backfill. Because there is no SSE
    * replay, this stays a full rebuild so it can reconcile anything missed during
    * an outage. NOT used by the periodic interval tick.
+   *
+   * While the room's stream runs, the read goes through the stream's read
+   * barrier (`readRoomThroughStream`). A read made here on its own puts the
+   * room on screen without the events that arrived while it ran.
    */
   async function refreshSelectedRoomSnapshotFromServer(): Promise<void> {
     const roomIdentifier = options.selectedRoomIdentifier.value;
@@ -254,9 +265,17 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     const sessionGeneration = options.sessionGeneration.value;
     const refreshSequence = ++liveMetadataRefreshSequence;
     try {
+      const workers = desktopIpc.workers.list().catch(() => options.workers.value);
+      if (options.readRoomThroughStream && await options.readRoomThroughStream(roomIdentifier)) {
+        const nextWorkers = await workers;
+        if (!isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration, request.context)) {
+          options.workers.value = nextWorkers;
+        }
+        return;
+      }
       const [snapshot, nextWorkers] = await Promise.all([
         desktopIpc.room.getSnapshot(roomIdentifier),
-        desktopIpc.workers.list().catch(() => options.workers.value),
+        workers,
       ]);
       if (request.invalidated || isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration, request.context)) return;
       options.workers.value = nextWorkers;

@@ -27,6 +27,9 @@ export function useAppRoomData(context: unknown) {
   function setRoomActivityHistoryVisible(visible: boolean): void {
     activityTabsOnScreen.value = Math.max(0, activityTabsOnScreen.value + (visible ? 1 : -1));
   }
+  // The explicit room refresh reads through the stream's read barrier. The
+  // data layer below owns that barrier and is created after the live sync.
+  let readRoomThroughStream: ((roomIdentifier: string) => Promise<boolean>) | null = null;
   const {
     clearLiveMetadataRefreshInterval,
     clearLiveMetadataRefreshTimer,
@@ -41,6 +44,7 @@ export function useAppRoomData(context: unknown) {
   } = useDesktopRoomLiveSync({
     accountId: computed(() => authStatus.value?.account?.id || null),
     activityHistoryVisible: roomActivityHistoryVisible,
+    readRoomThroughStream: (roomIdentifier) => readRoomThroughStream?.(roomIdentifier) ?? Promise.resolve(false),
     rootRoomSnapshot,
     selectedRoomIdentifier,
     selectedSnapshot,
@@ -57,8 +61,10 @@ export function useAppRoomData(context: unknown) {
     handleRoomRenamed,
     handleRoomStreamEvent,
     invalidateSession,
+    readSelectedRoomThroughStream,
     refresh,
     refreshAccountRooms,
+    refreshActiveRoom,
     refreshSelectedSnapshot,
     repoStatusValue,
     selectedSnapshotLoading,
@@ -88,7 +94,8 @@ export function useAppRoomData(context: unknown) {
     syncRoomStream: syncDesktopRoomStream,
     workers,
   });
-  Object.assign(app, { clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom, handleContentDeleted, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms, refreshSelectedSnapshot, selectedSnapshotLoading, syncSelectedRoomStream });
+  readRoomThroughStream = readSelectedRoomThroughStream;
+  Object.assign(app, { clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom, handleContentDeleted, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms, refreshActiveRoom, refreshSelectedSnapshot, selectedSnapshotLoading, syncSelectedRoomStream });
 
   const authSnapshotPending = computed(() =>
     isAuthSnapshotPending({
@@ -103,7 +110,7 @@ export function useAppRoomData(context: unknown) {
     roomAgentWorkStatus, roomAgentWorkTruncated, scheduleLiveMetadataRefresh,
     syncDesktopRoomStream, clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom, handleContentDeleted,
     handleRoomRenamed, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms,
-    refreshSelectedSnapshot, repoStatusValue, selectedSnapshotLoading, syncSelectedRoomStream,
+    refreshActiveRoom, refreshSelectedSnapshot, repoStatusValue, selectedSnapshotLoading, syncSelectedRoomStream,
     upsertSelectedTask, authSnapshotPending, setRoomActivityHistoryVisible,
   };
 }

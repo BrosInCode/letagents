@@ -406,6 +406,54 @@ describe("useDesktopRoomLiveSync full-refresh path", () => {
     assert.deepEqual(harness.getLiveMetadataRequests, []);
   });
 
+  // The data layer holds the stream's events back while a room read runs and
+  // applies them over it. A read made here on its own cannot do that.
+  it("hands the full refresh to the stream's read barrier while a stream of the room runs", async () => {
+    const throughStream: string[] = [];
+    const read = deferred<boolean>();
+    const harness = createHarness({
+      readRoomThroughStream: (roomIdentifier) => { throughStream.push(roomIdentifier); return read.promise; },
+    });
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    const shown = harness.selectedSnapshot.value;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      assert.deepEqual(throughStream, [ROOM]);
+      // A second request while the read runs is one trailing read, as before.
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      assert.deepEqual(throughStream, [ROOM]);
+      read.resolve(true);
+      await harness.settle();
+    });
+
+    assert.deepEqual(throughStream, [ROOM, ROOM], "the request that came during the read is read once more");
+    assert.deepEqual(harness.getSnapshotRequests, [], "no read of its own beside the barrier's");
+    assert.strictEqual(harness.selectedSnapshot.value, shown, "the barrier's owner puts its read on screen, not this refresh");
+    assert.equal(harness.workersListCalls, 2, "the worker list is still read with each refresh");
+  });
+
+  it("reads on its own when no stream of the room runs", async () => {
+    const throughStream: string[] = [];
+    const harness = createHarness({
+      readRoomThroughStream: async (roomIdentifier) => { throughStream.push(roomIdentifier); return false; },
+    });
+    harness.currentRoomId.value = ROOM;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      await harness.settle();
+    });
+
+    assert.deepEqual(throughStream, [ROOM]);
+    assert.deepEqual(harness.getSnapshotRequests, [ROOM]);
+    assert.ok(harness.selectedSnapshot.value, "its own read goes on screen as before");
+  });
+
   it("coalesces overlapping full refreshes and applies the trailing canonical snapshot with the same merge semantics", async () => {
     const harness = createHarness();
     harness.currentRoomId.value = ROOM;
@@ -1048,7 +1096,10 @@ function unchangedRoomAgentWork(cursor = WORK_CURSOR): DesktopRoomAgentWorkPollR
   };
 }
 
-function createHarness(input: { activityHistoryVisible?: Ref<boolean> } = {}) {
+function createHarness(input: {
+  activityHistoryVisible?: Ref<boolean>;
+  readRoomThroughStream?: (roomIdentifier: string) => Promise<boolean>;
+} = {}) {
   const accountId = ref<string | null>("account_1");
   const currentRoomId = ref<string | null>(null);
   const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
@@ -1079,6 +1130,7 @@ function createHarness(input: { activityHistoryVisible?: Ref<boolean> } = {}) {
   const sync = useDesktopRoomLiveSync({
     accountId: computed(() => accountId.value),
     ...(input.activityHistoryVisible ? { activityHistoryVisible: input.activityHistoryVisible } : {}),
+    ...(input.readRoomThroughStream ? { readRoomThroughStream: input.readRoomThroughStream } : {}),
     rootRoomSnapshot,
     selectedRoomIdentifier: computed(() => currentRoomId.value),
     selectedSnapshot,

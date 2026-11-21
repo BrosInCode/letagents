@@ -151,6 +151,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   // The stream token under which a full read of the stream's room last landed
   // on screen. A read after a gap may leave sections out only then.
   let fullReadStreamToken: number | null = null;
+  // A full read that was asked for while another read of the room held the
+  // stream's events back. That read began earlier, so one more follows it.
+  let queuedFullRead: { roomKey: string; streamToken: number } | null = null;
   let bufferedStreamEvents: DesktopRoomStreamEvent[] = [];
   let bufferedStreamEventBytes = 0;
   let streamBufferOverflow = false;
@@ -438,11 +441,16 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         ? options.selectedMcpTargetIds.value
         : defaultMcpTargetSelection(nextMcpInstallState);
       options.reconcileActiveEntry();
+      // The read goes on screen first (this call shows the root room before
+      // its first await). The stream events held back while the read ran are
+      // then applied over it. Applied before it, they met the room as it was
+      // before the read (nothing at a cold start) and were lost.
+      const selection = refreshSelectedSnapshot(nextRootRoomSnapshot, { rootRead: true });
       if (nextRootRoomSnapshot.roomIdentifier) {
         if (rootReadMatchesBarrier) queueRepairReadIfGapChanged(nextRootRoomSnapshot.roomIdentifier, rootRepairToken);
         finishRoomSnapshotBarrier(nextRootRoomSnapshot.roomIdentifier, rootBarrierToken);
       }
-      await refreshSelectedSnapshot(nextRootRoomSnapshot, { rootRead: true });
+      await selection;
       // The root read above is fresh; when it is the room shown, it may be kept.
       if (sessionIsCurrent(sessionGeneration)) {
         rememberFreshSelectedSnapshot(nextRootRoomSnapshot, [requestedRootRoomIdentifier]);
@@ -633,6 +641,53 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     fullReadStreamToken = streamToken;
   }
 
+  /**
+   * The room on screen, when a full read under the current stream put it
+   * there: it is newer than `earlier`, a read of the same room that began
+   * before that stream. Null when the screen holds anything else.
+   */
+  function roomReadUnderCurrentStream(earlier: DesktopRoomSnapshot): DesktopRoomSnapshot | null {
+    const shown = options.selectedSnapshot.value;
+    if (fullReadStreamToken === null || fullReadStreamToken !== activeStreamToken) return null;
+    if (!snapshotCoversRoomCopy(shown, earlier) || !snapshotMatchesRoom(shown, activeStreamRoom)) return null;
+    if (cachedPaint && snapshotMatchesRoom(shown, cachedPaint.roomIdentifier)) return null;
+    return shown;
+  }
+
+  /** Whether a full read waits for this room under the current stream; a wait for anything else is dropped. */
+  function fullReadIsQueued(roomKey: string | null): boolean {
+    if (!queuedFullRead) return false;
+    if (queuedFullRead.roomKey === roomKey && queuedFullRead.streamToken === activeStreamToken) return true;
+    queuedFullRead = null;
+    return false;
+  }
+
+  /**
+   * A full read of the selected room for the explicit refresh (a board
+   * action, a tab that asks for fresh data, a missing thread). It goes
+   * through the stream's read barrier: the events that arrive while the read
+   * runs are held back and applied over it. Read on its own, the room went on
+   * screen without them, and the last event of a task or of a reasoning
+   * session stayed lost until the next read.
+   *
+   * False when no stream of this room runs: nothing can race the read then,
+   * and the caller reads on its own.
+   */
+  async function readSelectedRoomThroughStream(roomIdentifier: string): Promise<boolean> {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    if (!roomKey || normalizeRoomIdentifier(activeStreamRoom) !== roomKey) return false;
+    if (!snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)) return false;
+    if (streamReconcileRoom) {
+      if (normalizeRoomIdentifier(streamReconcileRoom) !== roomKey) return false;
+      // A read of this room holds the events back now, and it began before
+      // this request: one full read follows it.
+      queuedFullRead = { roomKey, streamToken: activeStreamToken };
+      return true;
+    }
+    await reconcileRoomStreamSnapshot(roomIdentifier, false, true).catch(() => undefined);
+    return true;
+  }
+
   async function refreshSelectedSnapshotNow(
     baseRootSnapshot: DesktopRoomSnapshot | null,
     rootRead = false,
@@ -682,7 +737,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         options.rootRoomSnapshot.value = nextRootSnapshot;
         const aliases = [roomIdentifier, openedContext.openedRoom?.roomIdentifier];
         cachedSelectedSnapshots.noteFreshAccess(nextRootSnapshot, aliases);
-        setSelectedSnapshot(mergeFreshSelectedSnapshot(nextRootSnapshot), { cache: false, activitySnapshot: true });
+        // This read began at the click, before the room's stream. The read
+        // that the new connection asks for begins after it. When that one is
+        // on screen already, with the events that came after it, this read is
+        // the older of the two and must not go over it.
+        setSelectedSnapshot(
+          roomReadUnderCurrentStream(nextRootSnapshot) ?? mergeFreshSelectedSnapshot(nextRootSnapshot),
+          { cache: false, activitySnapshot: true },
+        );
         rememberFreshSelectedSnapshot(nextRootSnapshot, aliases);
         options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
         options.rememberRootRoomSnapshot(nextRootSnapshot, {
@@ -870,7 +932,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     if (reconcilePending && (
       roomKey
       && normalizeRoomIdentifier(activeStreamRoom) === roomKey
-      && pendingVerifiedRecoveries.get(roomKey) === activeStreamToken
+      && (pendingVerifiedRecoveries.get(roomKey) === activeStreamToken || fullReadIsQueued(roomKey))
     )) {
       scheduleRoomStreamReconciliation(roomIdentifier);
     }
@@ -1096,18 +1158,28 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
   }
 
-  async function reconcileRoomStreamSnapshot(roomIdentifier: string, replaceMessages = false): Promise<void> {
+  async function reconcileRoomStreamSnapshot(
+    roomIdentifier: string,
+    replaceMessages = false,
+    fullRead = false,
+  ): Promise<void> {
     const generation = ++streamReconcileGeneration;
     const roomKey = normalizeRoomIdentifier(roomIdentifier);
     const deliveryRepairToken = roomKey
       ? pendingDeliveryRepairs.get(roomKey)?.token ?? null
       : null;
     const streamToken = activeStreamToken;
+    // A full read that waited for an earlier read is this read: it begins now.
+    const refresh = fullRead || fullReadIsQueued(roomKey);
+    if (refresh) queuedFullRead = null;
     streamReconcileRoom = roomIdentifier;
     resetBufferedStreamEvents();
     try {
-      // Content deletion replaces the room's messages and keeps the full read.
-      const read = await getRoomSnapshot(roomIdentifier, replaceMessages ? undefined : gapReadOptions(roomIdentifier));
+      // Content deletion replaces the room's messages and keeps the full read; so does an explicit refresh.
+      const read = await getRoomSnapshot(
+        roomIdentifier,
+        replaceMessages || refresh ? undefined : gapReadOptions(roomIdentifier),
+      );
       if (
         generation !== streamReconcileGeneration
         || !roomKey
@@ -1144,6 +1216,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       rememberFreshSelectedSnapshot(snapshot, [roomIdentifier]);
       // Only a read that asked for every source counts: `read`, not the completed `snapshot`.
       noteFullReadOnScreen(read, streamToken);
+      // An explicit refresh also renews the kept copy of the room, as it always did.
+      if (refresh && options.rootRoomSnapshot.value && roomSnapshotsMatch(options.rootRoomSnapshot.value, snapshot)) {
+        options.rootRoomSnapshot.value = mergeRoomSnapshotMessages(options.rootRoomSnapshot.value, snapshot);
+      }
       const pending = streamBufferOverflow ? [] : bufferedStreamEvents;
       const overflowed = streamBufferOverflow;
       resetBufferedStreamEvents();
@@ -1162,7 +1238,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         resetBufferedStreamEvents();
         streamReconcileRoom = null;
         for (const buffered of pending) handleRoomStreamEvent(buffered);
-        if (overflowed && normalizeRoomIdentifier(activeStreamRoom) === roomKey) {
+        if (
+          normalizeRoomIdentifier(activeStreamRoom) === roomKey
+          && (overflowed || fullReadIsQueued(roomKey))
+        ) {
           scheduleRoomStreamReconciliation(roomIdentifier);
         }
       }
@@ -1211,6 +1290,21 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     // is on screen. The full read scheduled below is the real refresh.
     if (!selectedRoomReusesRootSnapshot(options.rootRoomSnapshot.value)) scheduleSelectedSnapshotRefresh();
     options.scheduleLiveMetadataRefresh(0);
+  }
+
+  /**
+   * Read the room on screen again after something outside the stream changed
+   * it (an App Agent action). For the main room `refreshSelectedSnapshot`
+   * reads nothing: it shows the room as it is. So the main room takes the
+   * full refresh, and every other room its own read.
+   */
+  async function refreshActiveRoom(): Promise<void> {
+    const root = options.rootRoomSnapshot.value;
+    if (selectedRoomReusesRootSnapshot(root)) {
+      options.scheduleLiveMetadataRefresh(0);
+      return;
+    }
+    await refreshSelectedSnapshot(root);
   }
 
   /** Whether refreshSelectedSnapshot would show the root snapshot as-is. */
@@ -1426,8 +1520,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     handleRoomRenamed,
     handleRoomStreamEvent,
     invalidateSession,
+    readSelectedRoomThroughStream,
     refresh,
     refreshAccountRooms,
+    refreshActiveRoom,
     refreshSelectedSnapshot,
     repoStatusValue,
     selectedSnapshotLoading,
