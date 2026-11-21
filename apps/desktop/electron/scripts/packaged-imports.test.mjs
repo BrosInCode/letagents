@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -117,13 +117,24 @@ test("the check fails when a second import map gives import and require two diff
   try {
     // CommonJS resolution of this map gives the shared file of the app, and
     // ESM resolution gives a copy. The adapters are ESM, so they load the copy.
+    // A target must stay inside its own package, so the require target is a
+    // link to the app's shared file (a second copy where links need a right).
     const agents = join(app, "dist-electron", "main", "agents");
+    mkdirSync(join(agents, "same"));
     mkdirSync(join(agents, "copy"));
+    try {
+      symlinkSync(join(app, "dist-provider-runtime", "shared.js"), join(agents, "same", "shared.js"));
+    } catch {
+      copyFileSync(join(app, "dist-provider-runtime", "shared.js"), join(agents, "same", "shared.js"));
+    }
     writeFileSync(join(agents, "copy", "shared.js"), "export const shared = 2;\n");
     writeFileSync(join(agents, "package.json"), JSON.stringify({
       type: "module",
-      imports: { "#provider-runtime/*.js": { require: "../../../dist-provider-runtime/*.js", import: "./copy/*.js" } },
+      imports: { "#provider-runtime/*.js": { require: "./same/*.js", import: "./copy/*.js" } },
     }));
+    // The map is valid: an ES module in that folder really loads the copy.
+    writeFileSync(join(agents, "probe.mjs"), 'import { shared } from "#provider-runtime/shared.js";\nprocess.stdout.write(String(shared));\n');
+    assert.equal(execFileSync(process.execPath, [join(agents, "probe.mjs")], { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "" } }), "2");
     const result = runCheck(app);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /agents.package\.json declares import names/);
