@@ -1027,7 +1027,7 @@ test("an attempt whose time ends after its write of the exit has landed, before 
   recording.letStoreGo();
   await flush();
   assert.equal(recording.waiting(), false, "the last attempt ends the recording");
-  // It compared the manifest's terminal with its own, evidence and all, found them different, and wrote the exit a second time.
+  // It used to compare the manifest's terminal with its own, evidence and all, find them different, and write the exit a second time.
   assert.equal(recording.asked("recording the exit in the manifest"), 1, "it finds the exit in the manifest, and does not ask for it to be written again");
   assert.deepEqual([done.projections, done.convergence, done.deliveries, done.told], [1, 1, 1, 0], "the exit is recorded once, and the entry is converged once");
   assert.deepEqual(recording.refused, []);
@@ -1036,6 +1036,31 @@ test("an attempt whose time ends after its write of the exit has landed, before 
   await pass(60_000);
   assert.deepEqual(done, end, "and nothing follows");
 });
+
+for (const manifestHolds of ["the terminal of the exit before it, which ended a second earlier", "this exit's terminal, and an agent that is not failed"] as const) {
+  test(`an exit is written when the manifest holds ${manifestHolds}`, async () => {
+    const flush = async () => { for (let turn = 0; turn < 8; turn += 1) await new Promise<void>(resolve => setImmediate(resolve)); };
+    const recording = countedTerminalRecording();
+    const { coordinator, done, entry } = recording;
+    // This exit as the manifest keeps it, once it is recorded: the agent is failed, with this terminal.
+    const own = coordinator.terminalPayload(terminal, "daemon-provider", connection);
+    const exitBefore = manifestHolds.startsWith("the terminal of the exit before it");
+    // An exit is already recorded only when the manifest holds its terminal, to the end time, and the state it leads to.
+    entry.observed_state = exitBefore ? "failed" : "idle";
+    entry.reconciliation = {
+      exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: entry.observed_state, next_restart_at_ms: null,
+      completed_action_ids: [], last_action_sequence: 0, pending_action: null,
+      last_terminal: exitBefore ? { ...own, ended_at: new Date(Date.parse(terminal.endedAt) - 1_000).toISOString() } : own,
+    };
+
+    await coordinator.handleTerminal(installation, terminal);
+    await flush();
+    assert.equal(recording.waiting(), false);
+    assert.equal(done.projections, 1, "the exit is written in the manifest");
+    assert.deepEqual([entry.observed_state, entry.reconciliation?.last_terminal?.ended_at], ["failed", terminal.endedAt]);
+    assert.deepEqual([done.saves, done.approvals, done.convergence, done.deliveries, done.told], [1, 1, 1, 1, 0]);
+  });
+}
 
 test("an operator's recovery supersedes an exit that is still being recorded, and an update or a retirement waits for an exit no longer than its bound", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
