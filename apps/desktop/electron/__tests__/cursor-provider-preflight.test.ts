@@ -99,7 +99,7 @@ process.exit(2);
 `);
 
 const { runDesktopCursorProviderPreflight } = await import("../main/agents/cursor-provider-preflight.js");
-const { clearProbeCache } = await import("../main/agents/provider-probe-cache.js");
+const { clearProbeCache } = await import("#provider-runtime/provider-probe-cache.js");
 const { CursorIdentityAuthRequiredError } = await import("../main/agents/cursor-provider-adapter.js");
 const cursorProvider: DesktopAgentProvider = {
   id: "cursor",

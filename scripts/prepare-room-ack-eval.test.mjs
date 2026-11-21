@@ -92,6 +92,7 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
     "mcp-tests-windows": checks,
     "desktop-tests-windows": checks,
     "desktop-edge-tests-macos": checks,
+    "desktop-packaged-smoke": checks,
     "process-tree-windows": checks,
     "integration-tests": gate,
     "npm-publish": staging,

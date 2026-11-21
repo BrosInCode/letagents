@@ -33,7 +33,7 @@ import {
   type LetAgentsMcpRuntime,
 } from "./letagents-mcp-runtime.js";
 import { managedAgentPermissionProfileForProvider } from "./managed-agent-permission-profiles.js";
-import { cachedProbe, probeKey } from "./provider-probe-cache.js";
+import { cachedProbe, probeKey } from "#provider-runtime/provider-probe-cache.js";
 import { assertSupervisedWorkspaceGenerationSupported } from "./supervised-workspace-generation.js";
 import { apiUrl as desktopApiUrl, workspaceRoot as sourceWorkspaceRoot } from "../paths.js";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";

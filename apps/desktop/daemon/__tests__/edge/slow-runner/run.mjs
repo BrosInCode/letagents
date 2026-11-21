@@ -40,7 +40,7 @@ const files = readdirSync(testsDir).filter((name) => /^daemon-edge-.*\.test\.ts$
 
 const result = spawnSync(
   process.execPath,
-  ["--import", "tsx", "--test", "--test-timeout=180000", ...files, ...process.argv.slice(2)],
+  ["--conditions=letagents-source", "--import", "tsx", "--test", "--test-timeout=180000", ...files, ...process.argv.slice(2)],
   {
     cwd: desktopRoot,
     stdio: "inherit",

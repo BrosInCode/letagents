@@ -26,7 +26,7 @@ import {
   sensitiveCodexAppServerEnvValues,
 } from "./codex-app-server.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
-import { cachedProbe, clearProbeCache, probeKey } from "./provider-probe-cache.js";
+import { cachedProbe, clearProbeCache, probeKey } from "#provider-runtime/provider-probe-cache.js";
 import {
   openCodeInstallCommand,
   resolveOpenCodeBinary,

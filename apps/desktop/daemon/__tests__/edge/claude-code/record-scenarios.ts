@@ -17,7 +17,7 @@ import { startEdgeDaemon, type EdgeAgentRegistration, type EdgeDaemonHarness } f
 // answer of each turn is known beforehand. The room server and the room's MCP
 // server are the stand-ins of the edge harness.
 //
-//   LETAGENTS_RECORD_LIVE_CLAUDE=1 node --import tsx \
+//   LETAGENTS_RECORD_LIVE_CLAUDE=1 node --conditions=letagents-source --import tsx \
 //     daemon/__tests__/edge/claude-code/record-scenarios.ts --out /tmp/claude-captures [--scenario simple]
 //
 // The captures are raw. `redact-capture.ts` makes the fixtures from them.
