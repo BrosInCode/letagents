@@ -595,3 +595,48 @@ test("withProtectedStateUpgrade sets validateFullState only on schema upgrade or
   }, {}, async () => {});
   assert.deepEqual(compactionFlags, [true, false]);
 });
+
+test("withProtectedStateUpgrade sets validateFullState after a compaction copy whose checkpoint is busy", async t => {
+  const fragmented = await fragmentedStateFixture(t);
+  fragmented.database.close();
+  const pagesBefore = Number(new DatabaseSync(fragmented.path, { readOnly: true }).prepare("PRAGMA page_count").get()!.page_count);
+  // An open read snapshot pins the WAL: the copy commits, the checkpoint cannot finish.
+  const reader = new DatabaseSync(fragmented.path, { readOnly: true });
+  reader.exec("BEGIN");
+  reader.prepare("SELECT rowid FROM maintenance_child").get();
+  const flags: boolean[] = [];
+  try {
+    await withProtectedStateUpgrade(fragmented.path, async ({ validateFullState }) => {
+      flags.push(validateFullState);
+    }, {}, async () => {});
+  } finally { reader.exec("ROLLBACK"); reader.close(); }
+  const after = new DatabaseSync(fragmented.path, { readOnly: true });
+  try {
+    assert.ok(Number(after.prepare("PRAGMA page_count").get()!.page_count) < pagesBefore / 4, "the compact copy replaced the content");
+    assert.equal(after.prepare("SELECT reason FROM migration_failures WHERE migration_key='state-space-maintenance'").get()?.reason, "checkpoint_busy");
+  } finally { after.close(); }
+  assert.deepEqual(flags, [true], "rewritten content is read in full even though the WAL is not reclaimed yet");
+});
+
+test("withProtectedStateUpgrade sets validateFullState again while an upgrade backup has no receipt", async t => {
+  const upgrade = await realStateFixture(t);
+  const flags: boolean[] = [];
+  await assert.rejects(withProtectedStateUpgrade(upgrade.path, async ({ validateFullState }) => {
+    flags.push(validateFullState);
+    throw new Error("a migrated row does not parse");
+  }, { getBackupKey: upgrade.getBackupKey }), /does not parse/);
+  // The schema is current now, so no new backup is made, but the first backup was never validated.
+  await withProtectedStateUpgrade(upgrade.path, async ({ validateFullState }) => {
+    flags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  // Only the start that made the backup can write its receipt, so every later
+  // start keeps the full read, as before this change.
+  await withProtectedStateUpgrade(upgrade.path, async ({ validateFullState }) => {
+    flags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  assert.deepEqual(flags, [true, true, true]);
+  const database = new DatabaseSync(upgrade.path, { readOnly: true });
+  try {
+    assert.equal(database.prepare("SELECT 1 FROM migration_records WHERE migration_key='encrypted-state-recovery-backup'").get(), undefined);
+  } finally { database.close(); }
+});
