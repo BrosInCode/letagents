@@ -673,7 +673,7 @@ jobs:
               fi
               echo "Daemon shard ${shard} runs ${#files[@]} files:"
               printf '  %s\n' "${files[@]}"
-              if printf '%s\n' "${files[@]}" | grep -q 'daemon-edge-'; then
+              if printf '%s\n' "${files[@]}" | grep -qE '(^|/)(daemon-edge-|edge-)'; then
                 npm run build:electron || status=1
                 npm run build:daemon || status=1
               fi
