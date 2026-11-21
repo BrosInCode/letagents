@@ -77,32 +77,23 @@ export type ExecutionApprovalRecord = {
 type Row = Record<string, unknown>;
 // Closing a provider prompt is independent of acknowledging the chosen decision.
 // Retain only exact structural identity; never retain the request payload.
-const legacyClosureSchema = `CREATE TABLE execution_approval_request_closures (
+const closureSchema = `CREATE TABLE execution_approval_request_closures (
   request_id TEXT NOT NULL,
   request_version INTEGER NOT NULL,
-  decision_id TEXT NOT NULL REFERENCES execution_approval_decisions(decision_id) ON DELETE CASCADE,
-  dispatch_id TEXT NOT NULL,
+  decision_id TEXT REFERENCES execution_approval_decisions(decision_id) ON DELETE CASCADE,
+  dispatch_id TEXT,
   observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
   PRIMARY KEY(request_id,request_version),
   FOREIGN KEY(request_id,request_version) REFERENCES execution_approval_requests(request_id,request_version) ON DELETE CASCADE
 ) STRICT`;
-const closureSchema = legacyClosureSchema.replace("decision_id TEXT NOT NULL", "decision_id TEXT")
-  .replace("dispatch_id TEXT NOT NULL", "dispatch_id TEXT");
 const normalizeClosureSql = (sql: string) => sql.replace(/IF NOT EXISTS /gi, "").replace(/\s+/g, " ").trim();
 export function applyApprovalRequestClosureSchema(db: DatabaseSync): void {
-  const row = db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get();
-  if (row && normalizeClosureSql(String(row.sql)) === normalizeClosureSql(legacyClosureSchema)) {
-    // The caller owns the migration transaction. Preserve every historical receipt.
-    db.exec(`CREATE TEMP TABLE approval_closures_v44 AS SELECT * FROM execution_approval_request_closures;
-      DROP TABLE execution_approval_request_closures; ${closureSchema};
-      INSERT INTO execution_approval_request_closures SELECT * FROM approval_closures_v44;
-      DROP TABLE approval_closures_v44`);
-  } else db.exec(closureSchema.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+  db.exec(closureSchema.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
   validateApprovalRequestClosureSchema(db);
 }
-export function validateApprovalRequestClosureSchema(db: DatabaseSync, legacy = false): void {
+export function validateApprovalRequestClosureSchema(db: DatabaseSync): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get();
-  if (!row || normalizeClosureSql(String(row.sql)) !== normalizeClosureSql(legacy ? legacyClosureSchema : closureSchema)) {
+  if (!row || normalizeClosureSql(String(row.sql)) !== normalizeClosureSql(closureSchema)) {
     throw new Error("Approval request closure storage is missing or invalid.");
   }
 }
@@ -204,14 +195,14 @@ function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agent
   // and the owner's own answer to it may proceed then. Anything that depends on
   // the configuration in force (an automatic or delegated decision, a saved
   // tool rule) may not. The saved revision can never trail the applied one.
-  const configuration = db.prepare("SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?").get(expected.agentId);
+  const configuration = db.prepare("SELECT config_revision,runtime_configuration_revision FROM agents WHERE agent_id=?").get(expected.agentId);
   if (configuration?.runtime_configuration_revision !== owned.configurationRevision
     || (configuration.config_revision !== owned.configurationRevision
       && (!savedEditMayWait || (configuration.config_revision as number) < owned.configurationRevision))
     || !db.prepare("SELECT 1 FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=? AND terminal_json IS NULL")
       .get(owned.executionGenerationId, owned.workAttemptId)) reject("missing_turn");
   const head = db.prepare(`SELECT inbox_item_id,room_id,state,provider_turn_id,outcome,source_message_id,created_at
-    FROM supervised_agent_inbox WHERE agent_id=?
+    FROM inbox_items WHERE agent_id=?
     AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
     ORDER BY fifo_sequence LIMIT 1`).get(expected.agentId);
   if (!head || head.inbox_item_id !== owned.inboxItemId || head.room_id !== expected.roomId
@@ -399,21 +390,18 @@ export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: stri
   // are not authority to settle an earlier native birth's requests.
   const completedTurns = db.prepare(`SELECT DISTINCT r.request_id,r.request_version
     FROM execution_approval_requests r
-    JOIN execution_turns t ON t.turn_id=r.turn_id AND t.agent_id=r.agent_id AND t.room_id=r.room_id
+    JOIN runs t ON t.turn_id=r.turn_id AND t.agent_id=r.agent_id AND t.room_id=r.room_id
       AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
       AND t.provider_continuation_id=r.provider_continuation_id AND t.provider_turn_id=r.provider_turn_id
     JOIN execution_runtime_generations g ON g.runtime_generation_id=r.runtime_generation_id
       AND g.execution_generation_id=r.execution_generation_id AND g.agent_id=r.agent_id
     JOIN execution_facts f ON f.turn_id=t.turn_id AND f.agent_id=r.agent_id
       AND f.execution_generation_id=r.execution_generation_id AND f.runtime_generation_id=r.runtime_generation_id
-    JOIN execution_lifecycle_effects e ON e.fact_id=f.fact_id AND e.fact_sequence=f.sequence
-      AND e.agent_id=f.agent_id AND e.observer_epoch=f.observer_epoch
-      AND e.observer_execution_generation_id=r.execution_generation_id AND e.observer_runtime_generation_id=r.runtime_generation_id
-    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND t.state='terminal'
+      AND f.observer_execution_generation_id=r.execution_generation_id
+      AND f.observer_runtime_generation_id=r.runtime_generation_id
+    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND g.authority_mode='typed' AND t.state='terminal'
       AND t.ended_at_ms>=r.created_at_ms AND f.domain='turn' AND f.kind='state_changed' AND f.state='terminal'
       AND f.turn_outcome IN ('completed','failed','interrupted') AND f.observed_at_ms>=r.created_at_ms
-      AND e.subject_authority_mode='typed' AND e.observer_authority_mode='typed'
-      AND e.effect_kind='manifest_idle' AND e.state='applied'
       AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
         WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
   const rows = db.prepare(`SELECT DISTINCT r.request_id,r.request_version,r.execution_generation_id,

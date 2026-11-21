@@ -14,16 +14,15 @@ type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 export type ManifestTransitionPorts = {
   store: {
     getEntry(entryId: string, activityMode?: "full" | "summary"): Promise<DaemonManifestEntry | undefined>;
+    getEntryWithVersion(entryId: string, activityMode?: "full" | "summary"): Promise<{ entry: DaemonManifestEntry; version: number } | undefined>;
     replaceEntry(
-      expectedGeneration: number,
+      expectedVersion: number,
       entry: DaemonManifestEntry,
       commitFence: CommitFence,
       roomMoveCancellation?: { agentId: string; detail: string },
-    ): Promise<{ generation: number; entry: DaemonManifestEntry }>;
+    ): Promise<{ version: number; entry: DaemonManifestEntry }>;
   };
   authority: {
-    currentManifestGeneration(): number;
-    acceptManifestGeneration(generation: number): void;
     assertCurrent(): Promise<void>;
     serializeMutation<T>(operation: () => Promise<T>): Promise<T>;
     serializeCommit<T>(operation: () => Promise<T>): Promise<T>;
@@ -77,17 +76,16 @@ export class ManifestTransitionCoordinator {
         }) as DaemonManifestEntry;
         if (update(guarded) === guarded) return scalars;
       }
-      const entry = await this.ports.store.getEntry(entryId);
-      if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
-      const updated = update(entry);
-      if (updated === entry) return entry;
+      const loaded = await this.ports.store.getEntryWithVersion(entryId);
+      if (!loaded) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+      const updated = update(loaded.entry);
+      if (updated === loaded.entry) return loaded.entry;
       const next = await this.ports.store.replaceEntry(
-        this.ports.authority.currentManifestGeneration(),
+        loaded.version,
         updated,
         this.ports.authority.fenceCommit,
         roomMoveCancellation,
       );
-      this.ports.authority.acceptManifestGeneration(next.generation);
       return next.entry;
     });
   }
@@ -116,8 +114,9 @@ export class ManifestTransitionCoordinator {
     commitFence?: CommitFence,
   ): Promise<void> {
     await this.ports.authority.assertCurrent();
-    const entry = await this.ports.store.getEntry(entryId);
-    if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+    const loaded = await this.ports.store.getEntryWithVersion(entryId);
+    if (!loaded) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+    const entry = loaded.entry;
     const safeCause = redactCredentialText(cause).value;
     const safeActor = redactCredentialText(actor).value;
     const candidateReconciliation = reconciliation
@@ -169,11 +168,10 @@ export class ManifestTransitionCoordinator {
       reconciliation_notices: notices.slice(-32),
     };
     const next = await this.ports.store.replaceEntry(
-      this.ports.authority.currentManifestGeneration(),
+      loaded.version,
       updated,
       commitFence ?? this.ports.authority.fenceCommit,
     );
-    this.ports.authority.acceptManifestGeneration(next.generation);
     await this.ports.authority.serializeCommit(async () => {
       await this.ports.authority.assertCurrent();
       await this.ports.audit.append({
@@ -183,7 +181,7 @@ export class ManifestTransitionCoordinator {
         to,
         cause: safeCause,
         actor: safeActor,
-        generation: next.generation,
+        generation: next.version,
       });
     });
   }

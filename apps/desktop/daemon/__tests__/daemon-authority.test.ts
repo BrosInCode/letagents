@@ -15,18 +15,6 @@ function deferred(): Deferred {
   return { promise, resolve };
 }
 
-test("owns a compatibility manifest generation getter and setter", () => {
-  const authority = new DaemonAuthority({
-    assertCurrent: async () => undefined,
-    isHandoffScheduled: () => false,
-    notifyStateChanged: () => undefined,
-  }, 4);
-
-  assert.equal(authority.generation, 4);
-  authority.generation = 9;
-  assert.equal(authority.generation, 9);
-});
-
 test("serializes manifest mutations and releases the queue after operation rejection", async () => {
   const firstEntered = deferred();
   const releaseFirst = deferred();

@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite";
 import type { ExecutionDelegationDecisionCoordinatorOptions } from "./execution-delegation-decision-coordinator.js";
 import { ExecutionDelegationDecisionCoordinator } from "./execution-delegation-decision-coordinator.js";
 import type { ExecutionDelegationSyncOptions } from "./execution-delegation-sync-coordinator.js";
@@ -9,7 +10,7 @@ import {
 import type { InstallHostGrantInput, WorkerAuthorityCoordinator } from "./worker-authority-coordinator.js";
 
 type ApprovalPublicationOptions = Omit<ExecutionApprovalPublisherOptions, "approvals" | "entries" | "authority"> & {
-  path: string;
+  database: () => DatabaseSync | null;
 };
 
 type Options = {
@@ -72,8 +73,10 @@ export class ExecutionDelegationCoordinator {
   start(): void {
     const options = this.options.approvalPublication;
     if (this.fenced || !options || this.approvalPublisher !== undefined) return;
-    const { path, ...publisherOptions } = options;
-    this.approvalPublisher = ExecutionApprovalPublisher.open(path, {
+    const database = options.database();
+    if (!database) return;
+    const { database: _database, ...publisherOptions } = options;
+    this.approvalPublisher = ExecutionApprovalPublisher.attach(database, {
       ...publisherOptions,
       approvals: this.options.approvals,
       entries: this.options.entries,

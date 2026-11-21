@@ -28,7 +28,7 @@ async function fixture(t: TestContext, messages = [peer(10), peer(11), peer(12)]
   if (pin) pins.pin(origin, messages.map(item => item.source_message_id));
   t.after(async () => { await store.close(); db.close(); await rm(dir, { recursive: true, force: true }); });
   return { db, pins, get store() { return store; }, async restart() { await store.close(); store = new SupervisedAgentInboxStore(path); },
-    pendingReports() { return db.prepare(`SELECT source_message_id FROM supervised_agent_inbox i WHERE ${PENDING_PEER_REPORT_SQL} ORDER BY fifo_sequence`).all().map(row => row.source_message_id); } };
+    pendingReports() { return db.prepare(`SELECT source_message_id FROM inbox_items i WHERE ${PENDING_PEER_REPORT_SQL} ORDER BY fifo_sequence`).all().map(row => row.source_message_id); } };
 }
 function memberIds(item: SupervisedInboxItem): string[] {
   return ((item.activation.queued_peer_messages as { messages?: Array<{ source_message_id: string }> })?.messages ?? []).map(row => row.source_message_id);

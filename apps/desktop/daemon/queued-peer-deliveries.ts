@@ -130,7 +130,7 @@ export function freezeQueuedPeers(database: DatabaseSync, head: SupervisedInboxI
 
 /** Only a successful final parent settlement, never observed context or a native checkpoint, settles members. */
 export function settleQueuedPeers(database: DatabaseSync, inboxItemId: string, timestamp: string): void {
-  const completed = database.prepare(`SELECT i.agent_id,i.room_id,i.source_message_id FROM supervised_agent_inbox i
+  const completed = database.prepare(`SELECT i.agent_id,i.room_id,i.source_message_id FROM inbox_items i
     JOIN supervised_agent_terminal_results t ON t.inbox_item_id=i.inbox_item_id AND t.agent_id=i.agent_id AND t.provider_turn_id=i.provider_turn_id
     JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id AND b.agent_id=i.agent_id
       AND b.room_id=i.room_id AND b.provider_turn_id=t.provider_turn_id AND b.origin_execution_generation_id=t.execution_generation_id
@@ -145,16 +145,16 @@ export function settleQueuedPeers(database: DatabaseSync, inboxItemId: string, t
   if (!saved) return;
   const members = JSON.parse(String(saved.detail)) as string[];
   for (const id of members) {
-    const child = database.prepare(`SELECT i.inbox_item_id FROM supervised_agent_inbox i
+    const child = database.prepare(`SELECT i.inbox_item_id FROM inbox_items i
       WHERE i.inbox_item_id=? AND i.agent_id=? AND i.room_id=? AND i.state='pending' AND i.attempt_count=0
         AND i.provider_turn_id IS NULL AND i.outcome IS NULL
         AND EXISTS (SELECT 1 FROM supervised_agent_inbox_events e WHERE e.inbox_item_id=i.inbox_item_id AND e.idempotency_key=?)
         AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=i.inbox_item_id)
-        AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.inbox_item_id=i.inbox_item_id)`)
+        AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.agent_id=i.agent_id AND a.turn_control_inbox_item_id=i.inbox_item_id)`)
       .get(id, String(completed.agent_id), String(completed.room_id), `${ASSIGNED}${inboxItemId}`);
     if (!child) continue;
     const detail = `Delivered in the same turn as ${String(completed.source_message_id)}; no separate native turn.`;
-    database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',last_error=?,updated_at=?,acknowledged_at=?
+    database.prepare(`UPDATE inbox_items SET state='acknowledged_no_reply',last_error=?,updated_at=?,acknowledged_at=?
       WHERE inbox_item_id=?`).run(detail, timestamp, timestamp, id);
     event(database, id, PEER_REPORT_PENDING, "no_reply", timestamp, detail);
   }
@@ -163,7 +163,7 @@ export function settleQueuedPeers(database: DatabaseSync, inboxItemId: string, t
 export type PeerReceiptResult = "no_reply" | "replied" | "cancelled";
 export function resolvePeerReceipt(database: DatabaseSync, inboxItemId: string, result: PeerReceiptResult, timestamp: string): void {
   if (!["no_reply", "replied", "cancelled"].includes(result)) throw new Error("Invalid grouped receipt result.");
-  const row = database.prepare(`SELECT 1 FROM supervised_agent_inbox i WHERE i.inbox_item_id=?
+  const row = database.prepare(`SELECT 1 FROM inbox_items i WHERE i.inbox_item_id=?
     AND i.state='acknowledged_no_reply' AND ${PENDING_PEER_REPORT_SQL}`).get(inboxItemId);
   if (row) event(database, inboxItemId, PEER_REPORT_RESOLVED, "no_reply", timestamp, `Remote receipt: ${result}.`);
 }

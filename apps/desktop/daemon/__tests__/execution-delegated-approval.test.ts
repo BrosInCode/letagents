@@ -53,16 +53,17 @@ function fixture(): DatabaseSync {
   applyExecutionStorageSchema(db);
   applyApprovalRequestClosureSchema(db);
   db.exec(`
-    CREATE TABLE agent_configurations(agent_id TEXT PRIMARY KEY,config_revision INTEGER,runtime_configuration_revision INTEGER);
+    CREATE TABLE host_tool_rule_withdrawals(decision_id TEXT PRIMARY KEY);
+    CREATE TABLE agents(agent_id TEXT PRIMARY KEY,config_revision INTEGER,runtime_configuration_revision INTEGER);
     CREATE TABLE work_attempt_executions(execution_generation_id TEXT,work_attempt_id TEXT,terminal_json TEXT);
-    CREATE TABLE supervised_agent_inbox(inbox_item_id TEXT,agent_id TEXT,room_id TEXT,state TEXT,provider_turn_id TEXT,
+    CREATE TABLE inbox_items(inbox_item_id TEXT,agent_id TEXT,room_id TEXT,state TEXT,provider_turn_id TEXT,
       outcome TEXT,source_message_id TEXT,created_at TEXT,fifo_sequence INTEGER);
     CREATE TABLE supervised_agent_terminal_results(inbox_item_id TEXT);
     CREATE TABLE supervised_agent_provider_turn_bindings(inbox_item_id TEXT,agent_id TEXT,room_id TEXT,work_attempt_id TEXT,
       provider_continuation_id TEXT,provider_turn_id TEXT,origin_execution_generation_id TEXT);
-    INSERT INTO agent_configurations VALUES('agent',1,1);
+    INSERT INTO agents VALUES('agent',1,1);
     INSERT INTO work_attempt_executions VALUES('generation','workspace',NULL);
-    INSERT INTO supervised_agent_inbox VALUES('inbox','agent','room','awaiting_result','native-turn',NULL,'message',
+    INSERT INTO inbox_items VALUES('inbox','agent','room','awaiting_result','native-turn',NULL,'message',
       '1970-01-01T00:00:00.100Z',1);
     INSERT INTO supervised_agent_provider_turn_bindings VALUES('inbox','agent','room','workspace','continuation','native-turn','generation');
     PRAGMA foreign_keys=ON;

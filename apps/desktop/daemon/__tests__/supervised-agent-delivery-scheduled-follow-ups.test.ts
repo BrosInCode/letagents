@@ -485,7 +485,7 @@ test("a series that ends on an action with an uncertain result says so on the ro
     const first = (await retry.scheduled())!;
     // The follow-up's turn starts an action that changes something outside, and fails before the action's result is known.
     const db = new DatabaseSync(retry.path);
-    db.prepare(`INSERT INTO supervised_agent_effects
+    db.prepare(`INSERT INTO effects
       (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
       VALUES ('effect',?,?,?,'turn-2','request','publish_room_artifact','{}',1,'executing',NULL,NULL,?,?)`)
       .run(agent.agentId, agent.roomId, "generation-1", new Date().toISOString(), new Date().toISOString());
@@ -572,11 +572,11 @@ test("the kind of a follow-up is read for one that waits for its time, and for n
     // The payload of every other row says a kind, and is not read for it: a message, a follow-up that ran, a message that is pending with a time,
     // and a follow-up that is pending with no time.
     const db = raw();
-    const say = db.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?");
+    const say = db.prepare("UPDATE inbox_items SET activation_json=? WHERE inbox_item_id=?");
     for (const row of [message!, ran!, later!]) say.run(JSON.stringify({ ...row.activation, task_continuity: { kind: "no_reply" } }), row.inbox_item_id);
-    db.prepare("UPDATE supervised_agent_inbox SET next_attempt_at_ms=? WHERE inbox_item_id=?").run(Date.now(), later!.inbox_item_id);
+    db.prepare("UPDATE inbox_items SET next_attempt_at_ms=? WHERE inbox_item_id=?").run(Date.now(), later!.inbox_item_id);
     assert.deepEqual(await kinds(), [undefined, undefined, "provider_fault", undefined]);
-    db.prepare("UPDATE supervised_agent_inbox SET next_attempt_at_ms=NULL WHERE inbox_item_id=?").run(waiting!.inbox_item_id);
+    db.prepare("UPDATE inbox_items SET next_attempt_at_ms=NULL WHERE inbox_item_id=?").run(waiting!.inbox_item_id);
     assert.deepEqual(await kinds(), [undefined, undefined, undefined, undefined], "a follow-up with no time does not wait for it");
     db.close();
   } finally { await retry.cleanup(); }
@@ -588,7 +588,7 @@ test("a kind that this daemon does not know does not make the follow-up invalid:
     await retry.say("1", 1);
     const [, followUp] = await retry.store().receipts(agent.agentId);
     const db = new DatabaseSync(retry.path);
-    db.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?")
+    db.prepare("UPDATE inbox_items SET activation_json=? WHERE inbox_item_id=?")
       .run(JSON.stringify({ ...followUp!.activation, task_continuity: { ...(followUp!.activation.task_continuity as object), kind: "rate_limit_v9" } }), followUp!.inbox_item_id);
     db.close();
     assert.equal((await retry.store().taskContinuation(followUp!.inbox_item_id))?.parentId, (followUp!.activation.task_continuity as { parentId: string }).parentId, "it is read, with no kind");
@@ -649,7 +649,7 @@ test("a note that asks the owner to send a message says whether a turn started f
   };
   const rawFollowUpText = async (text: string) => {
     const db = new DatabaseSync(retry.path);
-    db.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE source_message_id LIKE 'task-continuation:%'").run(text);
+    db.prepare("UPDATE inbox_items SET last_error=? WHERE source_message_id LIKE 'task-continuation:%'").run(text);
     db.close();
   };
   try {
@@ -658,7 +658,7 @@ test("a note that asks the owner to send a message says whether a turn started f
     assert.deepEqual((await retry.view())[1]!.follow_up, { for_message_id: "1", state: "ended", reason: "stopped_by_owner", later_person_turn: false, scheduled: null });
     // The failed message was a person's, and its turn is before the follow-up: it does not count.
     const db0 = new DatabaseSync(retry.path);
-    db0.prepare(`UPDATE supervised_agent_inbox SET source_message_json='{"id":"1","source":"browser"}' WHERE source_message_id='1'`).run();
+    db0.prepare(`UPDATE inbox_items SET source_message_json='{"id":"1","source":"browser"}' WHERE source_message_id='1'`).run();
     db0.close();
     assert.equal((await retry.view())[1]!.follow_up!.later_person_turn, false, "a turn before the follow-up");
     retry.providerRecovers();
@@ -668,7 +668,7 @@ test("a note that asks the owner to send a message says whether a turn started f
     assert.equal((await answered("3", { source: "browser", agent_identity: { name: "Oak" } })).later_person_turn, false, "an agent's identity");
     assert.equal((await answered("4", { source: "system", sender: "letagents" })).later_person_turn, false, "a system message");
     const db = new DatabaseSync(retry.path);
-    db.prepare("UPDATE supervised_agent_inbox SET source_message_json='not json' WHERE source_message_id IN ('2','3','4')").run();
+    db.prepare("UPDATE inbox_items SET source_message_json='not json' WHERE source_message_id IN ('2','3','4')").run();
     db.close();
     assert.equal((await retry.view())[1]!.follow_up!.later_person_turn, false, "bodies that cannot be read are not a person's");
     // The agent runs for a message of a person: the owner has sent one.
@@ -727,7 +727,7 @@ test("a follow-up that finds an action with an uncertain result before it starts
     await retry.say("1", 1);
     // While the follow-up waits, an action of the failed turn is found to have an uncertain result.
     const db = new DatabaseSync(retry.path);
-    db.prepare(`INSERT INTO supervised_agent_effects
+    db.prepare(`INSERT INTO effects
       (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
       VALUES ('effect',?,?,?,'turn-1','request','publish_room_artifact','{}',1,'uncertain',NULL,NULL,?,?)`)
       .run(agent.agentId, agent.roomId, "generation-1", new Date().toISOString(), new Date().toISOString());
@@ -749,7 +749,7 @@ test("a follow-up that finds an action with an uncertain result before it starts
     assert.equal(message!.error, retry.fault.error, "the failed message keeps the provider's own words");
     // A failed action is a result too.
     const db2 = new DatabaseSync(retry.path);
-    db2.prepare("UPDATE supervised_agent_effects SET state='uncertain' WHERE effect_id='effect'").run();
+    db2.prepare("UPDATE effects SET state='uncertain' WHERE effect_id='effect'").run();
     db2.close();
     assert.equal((await retry.view())[1]!.follow_up!.reason, "uncertain_action", "uncertain again: the reason is again the one that keeps the note");
     await retry.store().completeEffect({ effect_id: "effect", error: "The tool failed." });
@@ -757,16 +757,16 @@ test("a follow-up that finds an action with an uncertain result before it starts
     // An action that is still executing is not a result either, and neither is one that is kept as a tombstone, which is how an uncertain
     // action is kept when many are: the daemon asks the live table and the compact one.
     const db4 = new DatabaseSync(retry.path);
-    db4.prepare("UPDATE supervised_agent_effects SET state='executing' WHERE effect_id='effect'").run();
+    db4.prepare("UPDATE effects SET state='executing' WHERE effect_id='effect'").run();
     assert.equal((await retry.view())[1]!.follow_up!.reason, "uncertain_action", "executing");
-    db4.prepare("UPDATE supervised_agent_effects SET state='completed' WHERE effect_id='effect'").run();
+    db4.prepare("UPDATE effects SET state='completed' WHERE effect_id='effect'").run();
     assert.equal((await retry.view())[1]!.follow_up!.reason, "uncertain_resolved", "completed, and no tombstone");
-    db4.prepare(`INSERT INTO supervised_agent_effect_tombstones
+    db4.prepare(`INSERT INTO effect_tombstones
       (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_sha256,request_bytes,mutation,state,result_json,error,created_at,updated_at)
       VALUES ('tombstone',?,?,?,'turn-1','request-2','publish_room_artifact','0000000000000000000000000000000000000000000000000000000000000000',2,1,'uncertain',NULL,NULL,?,?)`)
       .run(agent.agentId, agent.roomId, "generation-1", new Date().toISOString(), new Date().toISOString());
     assert.equal((await retry.view())[1]!.follow_up!.reason, "uncertain_action", "a tombstone of the turn that is uncertain");
-    db4.prepare("DELETE FROM supervised_agent_effect_tombstones WHERE effect_id='tombstone'").run();
+    db4.prepare("DELETE FROM effect_tombstones WHERE effect_id='tombstone'").run();
     assert.equal((await retry.view())[1]!.follow_up!.reason, "uncertain_resolved");
     // Whatever else goes wrong in asking, a projection of every receipt does not fail for one of them, and the note stays.
     const store = retry.store() as unknown as { hasUncertainTaskEffects: () => boolean };
@@ -780,7 +780,7 @@ test("a follow-up that finds an action with an uncertain result before it starts
     const unbound = await retry.view();
     assert.deepEqual([unbound[1]!.follow_up!.reason, unbound[1]!.error], ["uncertain_action", FOLLOW_UP_ENDED_UNCERTAIN]);
     // The failed turn's receipt is no longer kept, so the daemon cannot ask about its actions. It does not say that they are resolved.
-    db4.prepare("DELETE FROM supervised_agent_inbox WHERE source_message_id='1'").run();
+    db4.prepare("DELETE FROM inbox_items WHERE source_message_id='1'").run();
     db4.close();
     const kept = await retry.view();
     assert.deepEqual([kept.length, kept[0]!.follow_up!.reason, kept[0]!.follow_up!.for_message_id, kept[0]!.error], [1, "uncertain_action", null, FOLLOW_UP_ENDED_UNCERTAIN]);
@@ -862,7 +862,7 @@ test("an owner who used Retry on a follow-up many times is still told on the roo
     // The ninth runs, and an action that it started has an uncertain result. No other follow-up is made, and the reason
     // is on the message the series began with, however far back that is.
     const db = new DatabaseSync(retry.path);
-    db.prepare(`INSERT INTO supervised_agent_effects
+    db.prepare(`INSERT INTO effects
       (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
       VALUES ('effect',?,?,?,?,'request','publish_room_artifact','{}',1,'executing',NULL,NULL,?,?)`)
       .run(agent.agentId, agent.roomId, "generation-1", `turn-${retry.sources.length + 1}`, new Date().toISOString(), new Date().toISOString());

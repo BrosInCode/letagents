@@ -26,7 +26,7 @@ test("operator not-applied never resurrects an ordinary user-cancelled exact tur
     turn_control: undefined,
   };
   try {
-    await store.write(0, [controlled]);
+    await store.write([controlled]);
     const row = await inbox.enqueueCorrection({
       agent_id: controlled.id,
       room_id: controlled.room_id,
@@ -67,7 +67,7 @@ test("operator not-applied never resurrects an ordinary user-cancelled exact tur
       agent_id: controlled.id,
       room_id: controlled.room_id,
     });
-    await assert.rejects(() => store.commitTurnControlState(journaled.generation, {
+    await assert.rejects(() => store.commitTurnControlState(journaled.version, {
       agentId: controlled.id,
       roomId: controlled.room_id,
       actionId: "ordinary-user-cancelled-action",
@@ -99,7 +99,7 @@ test("a native reply winning Stop preserves its intercepted thread choice across
       } },
     };
     try {
-      const initial = await store.write(0, [controlled]);
+      const initial = await store.write([controlled]);
       const [item] = await inbox.ingestPoll({ agent_id: controlled.id, room_id: controlled.room_id, last_observed_message_id: "msg_72",
         messages: [{ source_message_id: "msg_72", source_message: { id: "msg_72", text: "check in this thread" }, activation: { decision: "activate" } }] });
       assert.ok(item);
@@ -112,7 +112,7 @@ test("a native reply winning Stop preserves its intercepted thread choice across
         request: toolName === "set_reply_thread" ? {} : { thread_parent_id: "msg_72", text: "draft" }, mutation: true,
       });
       assert.equal(await inbox.hasInterceptedThreadReply(item.inbox_item_id), true);
-      const control = await store.prepareTurnControlState(initial.generation, {
+      const control = await store.prepareTurnControlState(initial.versions[controlled.id]!, {
         agentId: controlled.id, roomId: controlled.room_id, expectedInboxItemId: item.inbox_item_id,
         expectedSourceMessageId: "msg_72", expectedProviderTurnId: "turn-A", actionId: "stop", actionSequence: 1,
         workAttemptId: "attempt_1", executionGenerationId: "run_1", providerContinuationId: "thread_1",
@@ -121,14 +121,14 @@ test("a native reply winning Stop preserves its intercepted thread choice across
         recordedAt: new Date().toISOString(),
       });
       const db = new DatabaseSync(env.databasePath);
-      try { assert.equal(db.prepare("SELECT state FROM supervised_agent_effects WHERE effect_id=?").get(prepared.effect.effect_id)?.state, toolName === "set_reply_thread" ? "completed" : "failed"); }
+      try { assert.equal(db.prepare("SELECT state FROM effects WHERE effect_id=?").get(prepared.effect.effect_id)?.state, toolName === "set_reply_thread" ? "completed" : "failed"); }
       finally { db.close(); }
       await inbox.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: controlled.id,
         execution_generation_id: "run_1", provider_turn_id: "turn-A", outcome: "reply", text: "final answer", evidence: "stream",
         terminal_evidence: { turnId: "turn-A", providerContinuationId: "thread_1", outcome: "reply", text: "final answer", evidence: "stream" } });
-      const dispatching = await store.replaceEntry(control.generation, { ...control.entry,
+      const dispatching = await store.replaceEntry(control.version, { ...control.entry,
         turn_control: { ...control.entry.turn_control!, status: "dispatching", stages: ["interrupting"] } });
-      const resolved = await store.commitTurnControlState(dispatching.generation, {
+      const resolved = await store.commitTurnControlState(dispatching.version, {
         agentId: controlled.id, roomId: controlled.room_id, actionId: "stop", workAttemptId: "attempt_1",
         executionGenerationId: "run_1", mode: "native_applied", settleOriginal: true, activateCorrection: false,
         observedAt: new Date().toISOString(),
@@ -150,7 +150,7 @@ test("a durable grouped no-reply winning Stop settles its exact members through 
     last_turn_control_sequence: 0, provider_ref: { ...entry.provider_ref!, provider_connection: {
       kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "codex:4311" } } };
   try {
-    const initial = await store.write(0, [controlled]);
+    const initial = await store.write([controlled]);
     const messages = [72, 73].map(n => ({ source_message_id: `msg_${n}`,
       source_message: { id: `msg_${n}`, text: `My view ${n}.`, source: "agent", sender: `Peer ${n}`, thread_root_id: "msg_1",
         agent_identity: { actor_label: `Peer ${n}`, agent_key: `owner/peer${n}` } },
@@ -164,7 +164,7 @@ test("a durable grouped no-reply winning Stop settles its exact members through 
     const head = (await inbox.claimHead(controlled.id))!;
     assert.ok(head.activation.queued_peer_messages);
     await inbox.checkpointTurnStarted(head.inbox_item_id, "turn-A", TEST_PROVIDER_TURN_AUTHORITY);
-    const control = await store.prepareTurnControlState(initial.generation, {
+    const control = await store.prepareTurnControlState(initial.versions[controlled.id]!, {
       agentId: controlled.id, roomId: controlled.room_id, expectedInboxItemId: head.inbox_item_id, expectedSourceMessageId: "msg_72",
       expectedProviderTurnId: "turn-A", actionId: "stop", actionSequence: 1, workAttemptId: "attempt_1", executionGenerationId: "run_1",
       providerContinuationId: "thread_1", providerConnection: controlled.provider_ref!.provider_connection, deliveryMode: "daemon_inbox",
@@ -173,9 +173,9 @@ test("a durable grouped no-reply winning Stop settles its exact members through 
     await inbox.checkpointNormalizedTerminal({ inbox_item_id: head.inbox_item_id, agent_id: controlled.id, execution_generation_id: "run_1",
       provider_turn_id: "turn-A", outcome: "no_reply", text: null, evidence: "stream",
       terminal_evidence: { turnId: "turn-A", providerContinuationId: "thread_1", outcome: "no_reply", text: null, evidence: "stream" } });
-    const dispatching = await store.replaceEntry(control.generation, { ...control.entry,
+    const dispatching = await store.replaceEntry(control.version, { ...control.entry,
       turn_control: { ...control.entry.turn_control!, status: "dispatching", stages: ["interrupting"] } });
-    await store.commitTurnControlState(dispatching.generation, { agentId: controlled.id, roomId: controlled.room_id, actionId: "stop",
+    await store.commitTurnControlState(dispatching.version, { agentId: controlled.id, roomId: controlled.room_id, actionId: "stop",
       workAttemptId: "attempt_1", executionGenerationId: "run_1", mode: "native_applied", settleOriginal: true, activateCorrection: false,
       observedAt: new Date().toISOString(),
     }, current => ({ ...current, turn_control: { ...current.turn_control!, status: "completed", interrupted: false, resumed: false, state: "idle", stages: ["applied"] } }));
@@ -202,7 +202,7 @@ test("exact native failure wins every Stop resolution and admits only the new co
         ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined,
       };
       try {
-        await store.write(0, [controlled]);
+        await store.write([controlled]);
         const a = await inbox.enqueueCorrection({
           agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "A",
           source_message: { text: "A" }, activation: { decision: "activate" },
@@ -246,9 +246,9 @@ test("exact native failure wins every Stop resolution and admits only the new co
           try {
             corrupt.prepare("UPDATE supervised_agent_terminal_results SET terminal_evidence_json=? WHERE inbox_item_id=?")
               .run(JSON.stringify({ ...JSON.parse(validEvidence), providerContinuationId: "another-continuation" }), a.inbox_item_id);
-            await assert.rejects(() => store.commitTurnControlState(linked.generation, commitInput, (current) => current),
+            await assert.rejects(() => store.commitTurnControlState(linked.version, commitInput, (current) => current),
               /does not match its exact native terminal/);
-            assert.equal((await store.load()).generation, linked.generation);
+            assert.equal((await store.load()).versions[controlled.id]!, linked.version);
             assert.deepEqual(await inbox.get(a.inbox_item_id), before);
           } finally {
             corrupt.prepare("UPDATE supervised_agent_terminal_results SET terminal_evidence_json=? WHERE inbox_item_id=?")
@@ -256,14 +256,14 @@ test("exact native failure wins every Stop resolution and admits only the new co
             corrupt.close();
           }
         }
-        await assert.rejects(() => store.commitTurnControlState(linked.generation, commitInput, () => {
+        await assert.rejects(() => store.commitTurnControlState(linked.version, commitInput, () => {
           throw new Error("injected completion failure");
         }), /injected completion failure/);
         assert.deepEqual(await inbox.get(a.inbox_item_id), before, "terminalization and correction insertion roll back together");
-        assert.equal((await store.load()).generation, linked.generation);
+        assert.equal((await store.load()).versions[controlled.id]!, linked.version);
         assert.equal((await inbox.receipts(controlled.id)).length, 2);
 
-        const committed = await store.commitTurnControlState(linked.generation, commitInput, (current, result) => {
+        const committed = await store.commitTurnControlState(linked.version, commitInput, (current, result) => {
           assert.equal(result.original, "terminal_won");
           return {
             ...current,
@@ -336,7 +336,7 @@ test("turn-control commit atomically cancels A and inserts its correction before
         updated_at: "2026-08-05T10:00:00.000Z",
       },
     };
-    await store.write(0, [{ ...controlled, turn_control: undefined }]);
+    await store.write([{ ...controlled, turn_control: undefined }]);
     const a = await inbox.enqueueCorrection({
       agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "A",
       source_message: { text: "A" }, activation: { decision: "activate" },
@@ -348,7 +348,7 @@ test("turn-control commit atomically cancels A and inserts its correction before
     assert.equal((await inbox.claimHead(controlled.id))?.inbox_item_id, a.inbox_item_id);
     await inbox.checkpointTurnStarted(a.inbox_item_id, "turn-A", TEST_PROVIDER_TURN_AUTHORITY);
     const before = await store.load();
-    const linked = await store.replaceEntry(before.generation, {
+    const linked = await store.replaceEntry(before.versions[controlled.id]!, {
       ...before.entries[0]!,
       turn_control: {
         ...controlled.turn_control!,
@@ -357,7 +357,7 @@ test("turn-control commit atomically cancels A and inserts its correction before
         status: "dispatching",
       },
     });
-    const committed = await store.commitTurnControlState(linked.generation, {
+    const committed = await store.commitTurnControlState(linked.version, {
       agentId: controlled.id,
       roomId: controlled.room_id,
       actionId,
@@ -416,7 +416,7 @@ test("a linked retryable turn-control journal durably fences successor B after A
         recorded_at: "2026-08-05T10:15:00.000Z", updated_at: "2026-08-05T10:15:00.000Z",
       },
     };
-    await store.write(0, [{ ...controlled, turn_control: undefined }]);
+    await store.write([{ ...controlled, turn_control: undefined }]);
     const a = await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "barrier-A", source_message: { text: "A" }, activation: { decision: "activate" } });
     const b = await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "barrier-B", source_message: { text: "B" }, activation: { decision: "activate" } });
     await inbox.claimHead(controlled.id);
@@ -435,7 +435,7 @@ test("a linked retryable turn-control journal durably fences successor B after A
     assert.equal(await inbox.claimHead(controlled.id), null, "accepted action fences B even after A becomes terminal");
     assert.equal((await inbox.get(b.inbox_item_id))?.state, "pending");
 
-    const completed = await store.commitTurnControlState(linked.generation, {
+    const completed = await store.commitTurnControlState(linked.version, {
       agentId: controlled.id, roomId: controlled.room_id, actionId: "retryable-barrier",
       workAttemptId: "attempt_1", executionGenerationId: "run_1", mode: "native_applied",
       settleOriginal: false, activateCorrection: false, observedAt: "2026-08-05T10:15:01.000Z",
@@ -472,7 +472,7 @@ test("atomic completion repairs an untouched predecessor correction behind B wit
         recorded_at: "2026-08-05T10:20:00.000Z", updated_at: "2026-08-05T10:20:00.000Z",
       },
     };
-    await store.write(0, [{ ...controlled, turn_control: undefined }]);
+    await store.write([{ ...controlled, turn_control: undefined }]);
     const a = await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "legacy-A", source_message: { text: "A" }, activation: { decision: "activate" } });
     await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "legacy-B", source_message: { text: "B" }, activation: { decision: "activate" } });
     const preexistingCorrection = await inbox.enqueueCorrection({
@@ -489,7 +489,7 @@ test("atomic completion repairs an untouched predecessor correction behind B wit
         provider_turn_id: "turn-legacy-A", status: "dispatching",
       },
     });
-    const committed = await store.commitTurnControlState(linked.generation, {
+    const committed = await store.commitTurnControlState(linked.version, {
       agentId: controlled.id, roomId: controlled.room_id, actionId,
       workAttemptId: "attempt_1", executionGenerationId: "run_1", mode: "operator_applied",
       settleOriginal: true, activateCorrection: true, observedAt: "2026-08-05T10:20:01.000Z",
@@ -527,7 +527,7 @@ test("legacy admitted successor authority is preserved ahead of an accepted corr
     },
   };
   try {
-    await store.write(0, [{ ...controlled, turn_control: undefined }]);
+    await store.write([{ ...controlled, turn_control: undefined }]);
     const a = await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "legacy-terminal-A", source_message: { text: "A" }, activation: { decision: "activate" } });
     const b = await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "legacy-admitted-B", source_message: { text: "B" }, activation: { decision: "activate" } });
     await inbox.claimHead(controlled.id);
@@ -539,7 +539,7 @@ test("legacy admitted successor authority is preserved ahead of an accepted corr
       ...(await store.getEntry(controlled.id))!,
       turn_control: { ...controlled.turn_control!, inbox_item_id: a.inbox_item_id, provider_turn_id: "turn-legacy-terminal-A" },
     });
-    const committed = await store.commitTurnControlState(journaled.generation, {
+    const committed = await store.commitTurnControlState(journaled.version, {
       agentId: controlled.id, roomId: controlled.room_id, actionId,
       workAttemptId: "attempt_1", executionGenerationId: "run_1", mode: "operator_applied",
       settleOriginal: true, activateCorrection: true, observedAt: "2026-08-05T10:25:01.000Z",
@@ -581,7 +581,7 @@ test("turn-control transaction rolls back cancellation, FIFO shift, correction, 
         recorded_at: "2026-08-05T10:30:00.000Z", updated_at: "2026-08-05T10:30:00.000Z",
       },
     };
-    await store.write(0, [{ ...controlled, turn_control: undefined }]);
+    await store.write([{ ...controlled, turn_control: undefined }]);
     const a = await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "rollback-A", source_message: { text: "A" }, activation: { decision: "activate" } });
     await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "rollback-B", source_message: { text: "B" }, activation: { decision: "activate" } });
     await inbox.claimHead(controlled.id);
@@ -595,11 +595,11 @@ test("turn-control transaction rolls back cancellation, FIFO shift, correction, 
         status: "dispatching",
       },
     });
-    await assert.rejects(() => store.commitTurnControlState(linked.generation, {
+    await assert.rejects(() => store.commitTurnControlState(linked.version, {
       agentId: controlled.id, roomId: controlled.room_id, actionId, workAttemptId: "attempt_1", executionGenerationId: "run_1",
       mode: "native_applied", settleOriginal: true, activateCorrection: true, observedAt: "2026-08-05T10:30:01.000Z",
     }, () => { throw new Error("late projection failure"); }), /late projection failure/);
-    assert.equal((await store.load()).generation, linked.generation);
+    assert.equal((await store.load()).versions[controlled.id]!, linked.version);
     assert.equal((await store.getEntry(controlled.id))?.turn_control?.status, "dispatching");
     assert.deepEqual((await inbox.receipts(controlled.id)).map((item) => [item.source_message_id, item.fifo_sequence, item.state]), [
       ["rollback-A", 1, "dispatching"],
@@ -633,7 +633,7 @@ test("terminal runtime recovery never guesses an unlinked legacy journal's FIFO 
     },
   };
   try {
-    await store.write(0, [{ ...controlled, turn_control: undefined }]);
+    await store.write([{ ...controlled, turn_control: undefined }]);
     const a = await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "runtime-A", source_message: { text: "A" }, activation: { decision: "activate" } });
     await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "runtime-B", source_message: { text: "B" }, activation: { decision: "activate" } });
     await inbox.claimHead(controlled.id);
@@ -644,7 +644,7 @@ test("terminal runtime recovery never guesses an unlinked legacy journal's FIFO 
     assert.equal((await inbox.claimHead(controlled.id))?.inbox_item_id, b.inbox_item_id, "successor B acquired authority before the legacy journal was recovered");
     seedTerminalExecution(env.databasePath, "attempt_1", "run_1");
     const journaled = await store.replaceEntry(1, controlled);
-    const committed = await store.commitTurnControlState(journaled.generation, {
+    const committed = await store.commitTurnControlState(journaled.version, {
       agentId: controlled.id, roomId: controlled.room_id, actionId,
       workAttemptId: "attempt_1", executionGenerationId: "run_1", mode: "runtime_recovered",
       settleOriginal: true, activateCorrection: true, observedAt: "2026-08-05T10:40:01.000Z",
@@ -679,7 +679,7 @@ test("operator not-applied preserves blocked A and queues its accepted correctio
     ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined,
   };
   try {
-    await store.write(0, [controlled]);
+    await store.write([controlled]);
     const a = await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "blocked-A", source_message: { text: "A" }, activation: { decision: "activate" } });
     await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "blocked-B", source_message: { text: "B" }, activation: { decision: "activate" } });
     await inbox.claimHead(controlled.id);
@@ -696,7 +696,7 @@ test("operator not-applied preserves blocked A and queues its accepted correctio
         recorded_at: "2026-08-05T10:50:00.000Z", updated_at: "2026-08-05T10:50:00.000Z",
       },
     });
-    const committed = await store.commitTurnControlState(journaled.generation, {
+    const committed = await store.commitTurnControlState(journaled.version, {
       agentId: controlled.id, roomId: controlled.room_id, actionId,
       workAttemptId: "attempt_1", executionGenerationId: "run_1", mode: "operator_not_applied",
       settleOriginal: false, activateCorrection: true, observedAt: "2026-08-05T10:50:01.000Z",
@@ -751,7 +751,7 @@ test("idle stop-then-resend appends after terminal history instead of renumberin
         updated_at: "2026-08-05T11:00:00.000Z",
       },
     };
-    await store.write(0, [{ ...controlled, turn_control: undefined }]);
+    await store.write([{ ...controlled, turn_control: undefined }]);
     const historical = await inbox.enqueueCorrection({
       agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "historical",
       source_message: { text: "done" }, activation: { decision: "activate" },
@@ -764,7 +764,7 @@ test("idle stop-then-resend appends after terminal history instead of renumberin
       ...(await store.getEntry(controlled.id))!,
       turn_control: controlled.turn_control,
     });
-    await store.commitTurnControlState(prepared.generation, {
+    await store.commitTurnControlState(prepared.version, {
       agentId: controlled.id,
       roomId: controlled.room_id,
       actionId: "idle-correction",
@@ -799,7 +799,7 @@ test("operator applied retires an unlinked native-correction journal without gue
   const inbox = new SupervisedAgentInboxStore(env.databasePath, () => "2026-08-05T11:30:00.000Z");
   const actionId = "unlinked-native-applied";
   try {
-    await store.write(0, [{ ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined }]);
+    await store.write([{ ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined }]);
     const successor = await inbox.enqueueCorrection({
       agent_id: entry.id, room_id: entry.room_id, source_message_id: "already-admitted-successor",
       source_message: { text: "B" }, activation: { decision: "activate" },
@@ -817,7 +817,7 @@ test("operator applied retires an unlinked native-correction journal without gue
         recorded_at: "2026-08-05T11:30:00.000Z", updated_at: "2026-08-05T11:30:00.000Z",
       },
     });
-    const committed = await store.commitTurnControlState(journaled.generation, {
+    const committed = await store.commitTurnControlState(journaled.version, {
       agentId: entry.id, roomId: entry.room_id, actionId,
       workAttemptId: "attempt_1", executionGenerationId: "run_1", mode: "operator_applied",
       settleOriginal: false, activateCorrection: false, observedAt: "2026-08-05T11:30:01.000Z",
@@ -875,7 +875,7 @@ test("operator not-applied recovers only the exact provider turn or Cursor's pro
     turn_control: control("resolve-generic-null"),
   };
   try {
-    await store.write(0, [
+    await store.write([
       { ...exact, turn_control: undefined },
       { ...cursor, turn_control: undefined },
       { ...generic, turn_control: undefined },
@@ -892,7 +892,7 @@ test("operator not-applied recovers only the exact provider turn or Cursor's pro
       : candidate.id === cursor.id
         ? { ...candidate, turn_control: { ...cursor.turn_control!, inbox_item_id: cursorRow.inbox_item_id } }
         : { ...candidate, turn_control: { ...generic.turn_control!, inbox_item_id: genericRow.inbox_item_id } });
-    await store.write(1, linked);
+    await store.write(linked);
     const finishNotApplied = (current: DaemonManifestEntry) => ({
       ...current,
       turn_control: {
@@ -910,7 +910,7 @@ test("operator not-applied recovers only the exact provider turn or Cursor's pro
     assert.equal(recoveredExact?.state, "pending");
     assert.equal(recoveredExact?.provider_turn_id, "turn-exact");
     assert.equal(recoveredExact?.attempt_count, 1);
-    const cursorCommit = await store.commitTurnControlState(exactCommit.generation, {
+    const cursorCommit = await store.commitTurnControlState((await store.load()).versions[cursor.id]!, {
       agentId: cursor.id, roomId: cursor.room_id, actionId: "resolve-cursor-pre-native", workAttemptId: "attempt_1", executionGenerationId: "run_1",
       mode: "operator_not_applied", settleOriginal: false, activateCorrection: false, observedAt: "2026-08-05T12:00:02.000Z",
     }, finishNotApplied);
@@ -918,12 +918,13 @@ test("operator not-applied recovers only the exact provider turn or Cursor's pro
     assert.equal(recoveredCursor?.state, "pending");
     assert.equal(recoveredCursor?.provider_turn_id, null);
     assert.equal(recoveredCursor?.attempt_count, 0);
-    await assert.rejects(() => store.commitTurnControlState(cursorCommit.generation, {
+    const genericVersionBefore = (await store.load()).versions[generic.id]!;
+    await assert.rejects(() => store.commitTurnControlState(genericVersionBefore, {
       agentId: generic.id, roomId: generic.room_id, actionId: "resolve-generic-null", workAttemptId: "attempt_1", executionGenerationId: "run_1",
       mode: "operator_not_applied", settleOriginal: false, activateCorrection: false, observedAt: "2026-08-05T12:00:03.000Z",
     }, finishNotApplied), /null-turn control cannot be resumed/i);
     assert.equal((await inbox.get(genericRow.inbox_item_id))?.state, "dispatching");
-    assert.equal((await store.load()).generation, cursorCommit.generation, "rejected resolution rolls back the manifest generation");
+    assert.equal((await store.load()).versions[generic.id]!, genericVersionBefore, "rejected resolution rolls back the agent version");
   } finally {
     await inbox.close();
     await store.close();
@@ -959,7 +960,7 @@ test("historical not-applied recovery cannot send A's turn id through an unrelat
   let store = new ManifestStore(env.databasePath);
   let inbox = new SupervisedAgentInboxStore(env.databasePath, () => "2026-08-05T12:30:00.000Z");
   try {
-    await store.write(0, [agent]);
+    await store.write([agent]);
     const original = await inbox.enqueueCorrection({
       agent_id: agent.id,
       room_id: agent.room_id,
@@ -1044,7 +1045,7 @@ test("historical not-applied recovery cannot send A's turn id through an unrelat
         updated_at: "2026-08-05T12:30:01.000Z",
       },
     });
-    await assert.rejects(() => store.commitTurnControlState(journaled.generation, {
+    await assert.rejects(() => store.commitTurnControlState(journaled.version, {
       agentId: agent.id,
       roomId: agent.room_id,
       actionId: "resolve-historical-A",
@@ -1057,16 +1058,16 @@ test("historical not-applied recovery cannot send A's turn id through an unrelat
     }, finishNotApplied), /different or unverifiable provider-turn authority binding/i);
     assert.equal((await inbox.get(original.inbox_item_id))?.state, "dispatching", "A remains frozen instead of entering successor B");
     assert.equal((await store.getEntry(agent.id))?.turn_control?.status, "uncertain", "operator resolution remains unresolved");
-    assert.equal((await store.load()).generation, journaled.generation, "rejected recovery rolls back the manifest generation");
+    assert.equal((await store.load()).versions[agent.id]!, journaled.version, "rejected recovery rolls back the agent version");
 
-    const sameContinuation = await store.replaceEntry(journaled.generation, {
+    const sameContinuation = await store.replaceEntry(journaled.version, {
       ...(await store.getEntry(agent.id))!,
       provider_ref: {
         ...agent.provider_ref!,
         provider_continuation_id: "thread-old-A",
       },
     });
-    const recovered = await store.commitTurnControlState(sameContinuation.generation, {
+    const recovered = await store.commitTurnControlState(sameContinuation.version, {
       agentId: agent.id,
       roomId: agent.room_id,
       actionId: "resolve-historical-A",

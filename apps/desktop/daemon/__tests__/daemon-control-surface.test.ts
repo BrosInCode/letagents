@@ -115,21 +115,21 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
       const at = new Date().toISOString();
       const outcome = JSON.stringify(mode === "resume" ? { kind: "reply", text: "Saved answer", evidence: "stream" }
         : { kind: "unreadable", text: null, evidence: "none" });
-      beforeDb.prepare(`INSERT INTO supervised_agent_inbox
+      beforeDb.prepare(`INSERT INTO inbox_items
         (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,created_at,updated_at)
         VALUES('inbox',?,?,'source','{}','{}',1,'awaiting_result',1,'action','reply','turn',?,?,?)`)
         .run(id, entry.room_id, outcome, at, at);
       beforeDb.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES('inbox',?,?,?,?,'saved-conversation','turn')")
         .run(id, entry.room_id, attempt.work_attempt_id, execution.execution_generation_id);
       for (const [inboxId, sequence, providerTurn] of [["pending_old", 2, "retried-turn"], ["pending_new", 3, null]] as const) {
-        beforeDb.prepare(`INSERT INTO supervised_agent_inbox
+        beforeDb.prepare(`INSERT INTO inbox_items
           (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,created_at,updated_at)
           VALUES(?,?,?,?,'{}','{}',?,'pending',1,?,?,?,NULL,?,?)`)
           .run(inboxId, id, entry.room_id, inboxId, sequence, `action-${inboxId}`, `reply-${inboxId}`, providerTurn, at, at);
       }
       beforeDb.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES('pending_old',?,?,?,?,'saved-conversation','retried-turn')")
         .run(id, entry.room_id, attempt.work_attempt_id, execution.execution_generation_id);
-      beforeDb.prepare(`INSERT INTO supervised_agent_effects(effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,created_at,updated_at)
+      beforeDb.prepare(`INSERT INTO effects(effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,created_at,updated_at)
         VALUES('effect',?,?,?,'turn','request','send_message','{}',1,'executing',?,?)`)
         .run(id, entry.room_id, execution.execution_generation_id, at, at);
       const shadow = new ExecutionShadowStore(beforeDb);
@@ -147,22 +147,22 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
         providerContinuationId: "saved-conversation", providerTurnId: "turn" });
       shadow.observeSourcePosition(token.sourceId, token, 776);
       if (predecessors) {
-        beforeDb.prepare("UPDATE execution_turns SET state='lost',ended_at_ms=101 WHERE turn_id='captured-turn'").run();
+        beforeDb.prepare("UPDATE runs SET state='lost',ended_at_ms=101 WHERE turn_id='captured-turn'").run();
         for (const [index, old] of retired.entries()) {
           shadow.registerRuntime({ agentId: id, executionGenerationId: old.executionGenerationId,
             runtimeGenerationId: old.runtimeGenerationId, provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 50 });
           const oldAttempt = shadow.trackMessage({ agentId: id, roomId: entry.room_id, sourceMessageId: `old-${index}`,
             executionGenerationId: old.executionGenerationId, workspaceId: attempt.work_attempt_id, createdAtMs: 50 });
           // Retained legacy state: A's unresolved turn outlived its observer.
-          beforeDb.prepare(`INSERT INTO execution_turns VALUES(?,?,?,?,?,?,?,?,?,'possible',50,?)`)
+          beforeDb.prepare(`INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?,'possible',50,?)`)
             .run(`old-turn-${index}`, oldAttempt, id, entry.room_id, old.executionGenerationId, old.runtimeGenerationId, "saved-conversation", `old-native-turn-${index}`, index === 0 && mode === "resume" ? "active" : "lost", index === 0 && mode === "resume" ? null : 51);
-          beforeDb.prepare(`INSERT INTO supervised_agent_inbox
+          beforeDb.prepare(`INSERT INTO inbox_items
             (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,created_at,updated_at)
             VALUES(?,?,?,?,'{}','{}',?,'pending',1,?,?,?,NULL,?,?)`)
             .run(`old-inbox-${index}`, id, entry.room_id, `old-${index}`, index + 4, `old-action-${index}`, `old-reply-${index}`, `old-native-turn-${index}`, at, at);
           beforeDb.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,?,?,?,?,'saved-conversation',?)")
             .run(`old-inbox-${index}`, id, entry.room_id, attempt.work_attempt_id, old.executionGenerationId, `old-native-turn-${index}`);
-          if (index === 0 && mode === "fresh") beforeDb.prepare("UPDATE supervised_agent_inbox SET state='acknowledged' WHERE inbox_item_id=?").run(`old-inbox-${index}`);
+          if (index === 0 && mode === "fresh") beforeDb.prepare("UPDATE inbox_items SET state='acknowledged' WHERE inbox_item_id=?").run(`old-inbox-${index}`);
         }
         const old = retired[1]!;
         beforeDb.prepare(`UPDATE execution_observers SET execution_generation_id=?,runtime_generation_id=?,
@@ -239,7 +239,7 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
       const db = new DatabaseSync(paths.manifestPath);
       try {
         assert.equal(db.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE phase='complete'").get()!.n, 0);
-        assert.equal(db.prepare("SELECT state FROM execution_turns WHERE turn_id='old-turn-0'").get()!.state, "active");
+        assert.equal(db.prepare("SELECT state FROM runs WHERE turn_id='old-turn-0'").get()!.state, "active");
       } finally { db.close(); }
       changePredecessorAfterStop = false;
       predecessorState = "gone";
@@ -259,15 +259,15 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
       terminal.nativeRuntimeDeath, "manual recovery retains exact death evidence before resetting the reference");
     const afterDb = new DatabaseSync(paths.manifestPath);
     try {
-      assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='inbox'").get()!.state,
+      assert.equal(afterDb.prepare("SELECT state FROM inbox_items WHERE inbox_item_id='inbox'").get()!.state,
         mode === "resume" ? "awaiting_result" : "cancelled_by_user",
         "a saved answer remains publishable; an unreadable result cannot block or replay in the fresh conversation");
-      assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_effects WHERE effect_id='effect'").get()!.state, "uncertain");
-      assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='pending_old'").get()!.state, "cancelled_by_user",
+      assert.equal(afterDb.prepare("SELECT state FROM effects WHERE effect_id='effect'").get()!.state, "uncertain");
+      assert.equal(afterDb.prepare("SELECT state FROM inbox_items WHERE inbox_item_id='pending_old'").get()!.state, "cancelled_by_user",
         "an unresolved old turn returned to pending by a retry must not follow the replacement conversation");
-      assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='pending_new'").get()!.state, "pending",
+      assert.equal(afterDb.prepare("SELECT state FROM inbox_items WHERE inbox_item_id='pending_new'").get()!.state, "pending",
         "genuinely undispatched messages stay queued");
-      assert.equal(afterDb.prepare("SELECT state FROM execution_turns WHERE turn_id='captured-turn'").get()!.state, "lost");
+      assert.equal(afterDb.prepare("SELECT state FROM runs WHERE turn_id='captured-turn'").get()!.state, "lost");
       assert.equal(afterDb.prepare("SELECT state FROM execution_message_attempts WHERE source_message_id='source'").get()!.state,
         mode === "resume" ? "active" : "lost");
       const archive = JSON.parse(String(afterDb.prepare("SELECT observer_json FROM agent_runtime_recoveries WHERE runtime_generation_id=?")
@@ -277,8 +277,8 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
         assert.equal(afterDb.prepare("SELECT observer_json FROM agent_runtime_recoveries WHERE runtime_generation_id=?").get(retired[0]!.runtimeGenerationId)!.observer_json, null);
         for (const [index, old] of retired.entries()) {
           assert.equal(afterDb.prepare("SELECT phase FROM agent_runtime_recoveries WHERE runtime_generation_id=?").get(old.runtimeGenerationId)!.phase, "complete");
-          assert.equal(afterDb.prepare("SELECT state FROM execution_turns WHERE turn_id=?").get(`old-turn-${index}`)!.state, "lost");
-          assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id=?").get(`old-inbox-${index}`)!.state, index === 0 && mode === "fresh" ? "acknowledged" : "cancelled_by_user");
+          assert.equal(afterDb.prepare("SELECT state FROM runs WHERE turn_id=?").get(`old-turn-${index}`)!.state, "lost");
+          assert.equal(afterDb.prepare("SELECT state FROM inbox_items WHERE inbox_item_id=?").get(`old-inbox-${index}`)!.state, index === 0 && mode === "fresh" ? "acknowledged" : "cancelled_by_user");
         }
         assert.equal(afterDb.prepare("SELECT COUNT(*) AS n FROM execution_facts WHERE agent_id=?").get(id)!.n, 1, "no historical facts removed");
         const shadow = new ExecutionShadowStore(afterDb);
@@ -704,14 +704,14 @@ test("ready_reached_at survives a manifest round-trip, defaults absent, and a st
   try {
     const store = new ManifestStore(join(env.root, "manifest.json"));
     // An old manifest without the field loads as absent (defaults null downstream).
-    await store.write(0, [{ ...entry }]);
+    await store.write([{ ...entry }]);
     assert.equal((await store.load()).entries[0]?.ready_reached_at, undefined);
     // A set-once stamp survives save → load (i.e. a daemon restart round-trip).
-    await store.write(1, [{ ...entry, ready_reached_at: "2026-07-17T00:00:00.000Z" }]);
+    await store.write([{ ...entry, ready_reached_at: "2026-07-17T00:00:00.000Z" }]);
     assert.equal((await store.load()).entries[0]?.ready_reached_at, "2026-07-17T00:00:00.000Z");
     // A later stop (spread-preserving mutation) must not clear the stamp.
     const loaded = (await store.load()).entries[0]!;
-    await store.write(2, [{ ...loaded, desired_state: "stopped", observed_state: "absent" }]);
+    await store.write([{ ...loaded, desired_state: "stopped", observed_state: "absent" }]);
     const after = (await store.load()).entries[0];
     assert.equal(after?.ready_reached_at, "2026-07-17T00:00:00.000Z");
     assert.equal(after?.desired_state, "stopped");

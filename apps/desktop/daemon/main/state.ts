@@ -11,9 +11,9 @@ import type { createHostApprovalBridge } from "../host-approval-broker.js";
 import type { DaemonAuthority } from "../daemon-authority.js";
 import type { DaemonReadModel } from "../daemon-read-model.js";
 import type { DaemonStateWatch } from "../daemon-state-watch.js";
+import type { DaemonStateDatabase } from "../daemon-state-database.js";
 import type { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import type { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
-import type { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
 import type { DesiredStateCoordinator } from "../desired-state-coordinator.js";
 import type { WorkDurabilityStore } from "../durability-store.js";
 import type { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
@@ -68,8 +68,8 @@ export abstract class SupervisorDaemonState {
   protected maintenance: DaemonMaintenanceService | null = null;
   protected replyAttachmentSweep: NodeJS.Timeout | null = null;
   protected readonly liveHandles = new Map<string, ProviderActionHandle>();
+  protected stateDatabase: DaemonStateDatabase | null = null;
   protected executionCapture: ExecutionCaptureCoordinator | null = null;
-  protected typedLifecycleEffects: TypedLifecycleEffectCoordinator | null = null;
   protected roomWorkPublisher: RoomWorkPublisher | null = null;
   protected readonly handoffCleanupFailures: unknown[] = [];
   /**
@@ -132,12 +132,10 @@ export abstract class SupervisorDaemonState {
   protected abstract readonly liveRoomShare: LiveRoomSharePublisher;
   protected abstract readonly handoff: ProviderHandoffCoordinator;
 
-  protected get manifestGeneration(): number {
-    return this.authority.generation;
-  }
-
-  protected set manifestGeneration(generation: number) {
-    this.authority.generation = generation;
+  protected closeStateDatabase(): void {
+    const database = this.stateDatabase;
+    this.stateDatabase = null;
+    database?.close();
   }
 
   constructor(

@@ -111,14 +111,14 @@ async function withDaemon(run: (context: {
     const storedPolicy = (entryId: string) => {
       const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
       try {
-        const row = database.prepare("SELECT provider_launch_policy_json AS policy FROM agent_configurations WHERE agent_id=?").get(entryId) as { policy: string | null };
+        const row = database.prepare("SELECT provider_launch_policy_json AS policy FROM agents WHERE agent_id=?").get(entryId) as { policy: string | null };
         return JSON.parse(row.policy ?? "{}") as Record<string, unknown>;
       } finally { database.close(); }
     };
     const forceStoredKey = () => {
       const database = new DatabaseSync(paths.manifestPath);
       try {
-        database.exec(`UPDATE agent_configurations SET provider_launch_policy_present=1, provider_launch_policy_undefined=0,
+        database.exec(`UPDATE agents SET
           provider_launch_policy_json=json_set(coalesce(provider_launch_policy_json,'{}'), '$.${KEY}', json('false'))`);
       } finally { database.close(); }
     };
@@ -411,25 +411,6 @@ test("a signed request still cannot give a rental, a Cursor agent, or an Open Mo
       assert.equal((saved.result as { outcome?: string })?.outcome, "updated", `${id}: ${saved.error ?? JSON.stringify(saved.result)}`);
       assert.equal(Object.hasOwn(storedPolicy(id), KEY), false, id);
     }
-  });
-});
-
-test("an imported manifest never brings the owner's own setup with it", { timeout: 60_000 * WAIT_SCALE }, async () => {
-  const { createHash } = await import("node:crypto");
-  await withDaemon(async ({ configuration, storedPolicy }) => {
-    assert.equal((await configuration("supervised_imported")).home_harness, false);
-    assert.deepEqual(storedPolicy("supervised_imported"), { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } });
-  }, async (root) => {
-    const manifest = { generation: 3, entries: [agent("supervised_imported", "codex", {
-      desired_state: "stopped", observed_state: "stopped",
-      provider_launch_policy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, [KEY]: false },
-    })] };
-    await writeFile(join(root, "daemon-manifest.json"), JSON.stringify({
-      checksum: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"), manifest,
-    }));
-    // Proves the import ran, so the assertion above is about an imported row.
-    const store = new ManifestStore(join(root, "daemon-state.sqlite"), join(root, "daemon-manifest.json"));
-    try { assert.deepEqual((await store.load()).entries.map((item) => item.id), ["supervised_imported"]); } finally { await store.close(); }
   });
 });
 

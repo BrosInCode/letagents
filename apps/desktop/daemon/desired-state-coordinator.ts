@@ -4,8 +4,6 @@ import type { SupervisedAgentDelivery } from "./supervised-agent-delivery.js";
 import type { DaemonManifestEntry, DesiredState } from "./types.js";
 
 type DesiredStateAuthority = {
-  currentManifestGeneration: () => number;
-  acceptManifestGeneration: (generation: number) => void;
   assertCurrent: () => Promise<void>;
   serializeManifest: <T>(operation: () => Promise<T>) => Promise<T>;
   fenceCommit: (commit: () => Promise<void>) => Promise<void>;
@@ -74,21 +72,19 @@ export class DesiredStateCoordinator {
     try {
       updated = await this.authority.serializeManifest(async () => {
         await this.authority.assertCurrent();
-        const manifest = await this.store.load();
-        const entry = manifest.entries.find((candidate) => candidate.id === id);
-        if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-        const nextEntry = { ...entry, desired_state: desiredState };
-        const next = await this.store.write(
-          this.authority.currentManifestGeneration(),
-          manifest.entries.map((candidate) => candidate.id === id ? nextEntry : candidate),
+        const loaded = await this.store.getEntryWithVersion(id);
+        if (!loaded) throw new Error(`Unknown daemon manifest entry: ${id}`);
+        const nextEntry = { ...loaded.entry, desired_state: desiredState };
+        const next = await this.store.replaceEntry(
+          loaded.version,
+          nextEntry,
           (commit) => this.authority.fenceCommit(commit),
           desiredState === "running" ? undefined : {
             agentId: id,
             detail: `Room move cancelled because the agent lifecycle changed to ${desiredState} before destination membership was joined.`,
           },
         );
-        this.authority.acceptManifestGeneration(next.generation);
-        return nextEntry;
+        return next.entry;
       });
     } catch (error) {
       if (deliveryStopped) await this.restartDeliveryOrConverge(id);
@@ -137,22 +133,20 @@ export class DesiredStateCoordinator {
     try {
       result = await this.authority.serializeManifest(async () => {
         await this.authority.assertCurrent();
-        const manifest = await this.store.load();
-        const entry = manifest.entries.find((candidate) => candidate.id === id);
-        if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-        if (entry.desired_state !== expectedDesiredState) return { applied: false, entry };
-        const nextEntry = { ...entry, desired_state: desiredState };
-        const next = await this.store.write(
-          this.authority.currentManifestGeneration(),
-          manifest.entries.map((candidate) => candidate.id === id ? nextEntry : candidate),
+        const loaded = await this.store.getEntryWithVersion(id);
+        if (!loaded) throw new Error(`Unknown daemon manifest entry: ${id}`);
+        if (loaded.entry.desired_state !== expectedDesiredState) return { applied: false, entry: loaded.entry };
+        const nextEntry = { ...loaded.entry, desired_state: desiredState };
+        const next = await this.store.replaceEntry(
+          loaded.version,
+          nextEntry,
           (commit) => this.authority.fenceCommit(commit),
           desiredState === "running" ? undefined : {
             agentId: id,
             detail: `Room move cancelled because the agent lifecycle changed to ${desiredState} before destination membership was joined.`,
           },
         );
-        this.authority.acceptManifestGeneration(next.generation);
-        return { applied: true, entry: nextEntry };
+        return { applied: true, entry: next.entry };
       });
     } catch (error) {
       if (deliveryStopped) await this.restartDeliveryOrConverge(id);

@@ -107,17 +107,15 @@ test("pending ambiguous native actions hold before any redispatch", async () => 
       spawn: async () => { spawns += 1; return handle(2, "working"); },
     }),
     store: {
-      getEntry: async () => entry,
+      getEntryWithVersion: async () => ({ entry, version: 1 }),
       load: async () => ({ entries: [entry] }),
-      replaceEntriesBatch: async (_generation, entries) => {
+      replaceEntriesBatch: async (_versions, entries) => {
         entry = entries[0]!;
-        return { generation: 2 };
+        return { versions: { [entry.id]: 2 } };
       },
     },
     authority: {
       assertCurrent: async () => {},
-      currentManifestGeneration: () => 1,
-      acceptManifestGeneration: () => {},
       fenceCommit: async (commit) => { await commit(); },
       serializeManifest: async (operation) => operation(),
     },
@@ -182,18 +180,16 @@ test("replacement listener failure retains the predecessor and retries the promo
       },
     }),
     store: {
-      getEntry: async () => entry,
+      getEntryWithVersion: async () => ({ entry, version: generation }),
       load: async () => ({ entries: [entry] }),
       replaceEntriesBatch: async (_expected, entries) => {
         entry = entries[0]!;
         generation += 1;
-        return { generation };
+        return { versions: { [entry.id]: generation } };
       },
     },
     authority: {
       assertCurrent: async () => {},
-      currentManifestGeneration: () => generation,
-      acceptManifestGeneration: (next) => { generation = next; },
       fenceCommit: async (commit) => { await commit(); },
       serializeManifest: async (operation) => operation(),
     },
@@ -261,18 +257,23 @@ function cleanupHarness(input: {
   const coordinator = new ProviderReconciliationCoordinator({
     provider: provider({ onExit: input.onExit }),
     store: {
-      getEntry: async (entryId) => entries.get(entryId),
+      getEntryWithVersion: async (entryId) => {
+        const current = entries.get(entryId);
+        return current ? { entry: current, version: generation } : undefined;
+      },
       load: async () => ({ entries: [...entries.values()] }),
       replaceEntriesBatch: async (_expected, replacements) => {
-        for (const replacement of replacements) entries.set(replacement.id, replacement);
+        const versions: Record<string, number> = {};
         generation += 1;
-        return { generation };
+        for (const replacement of replacements) {
+          entries.set(replacement.id, replacement);
+          versions[replacement.id] = generation;
+        }
+        return { versions };
       },
     },
     authority: {
       assertCurrent: async () => {},
-      currentManifestGeneration: () => generation,
-      acceptManifestGeneration: (next) => { generation = next; },
       fenceCommit: async (commit) => { await commit(); },
       serializeManifest: async (operation) => operation(),
     },

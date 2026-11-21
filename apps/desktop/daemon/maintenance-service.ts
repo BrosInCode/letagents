@@ -51,6 +51,7 @@ export async function openDaemonMaintenance(ports: {
   store: Pick<ManifestStore, "load" | "getEntry" | "close">;
   socket: { stop(): Promise<void> };
   stores: { close(): Promise<void> }[];
+  closeDatabase?: () => void;
   status(): unknown;
   retire(): void;
 }): Promise<DaemonMaintenanceService | null> {
@@ -64,8 +65,11 @@ export async function openDaemonMaintenance(ports: {
       ports.retire();
       const results = await Promise.allSettled([ports.socket.stop(), ports.store.close(),
         ...ports.stores.map(store => store.close())]);
+      let dbCloseError: unknown;
+      try { ports.closeDatabase?.(); } catch (error) { dbCloseError = error; }
       await ports.singleton.release();
-      const failures = results.filter(result => result.status === "rejected");
+      const failures = results.filter(result => result.status === "rejected").map(r => r.reason);
+      if (dbCloseError !== undefined) failures.push(dbCloseError);
       if (failures.length) throw new AggregateError(failures, "Maintenance service shutdown failed.");
     },
   });

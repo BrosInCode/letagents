@@ -25,11 +25,14 @@ function harness() {
         reads.push(mode);
         return mode === "summary" ? { ...full, activity: full.activity!.slice(-1) } : full;
       },
-      replaceEntry: async (_generation, entry) => { replaced.push(entry); return { generation: 2, entry }; },
+      getEntryWithVersion: async (_id, mode = "full") => {
+        assert.equal(lockHeld, 1, "entry reads happen inside the manifest lock");
+        reads.push(mode);
+        return { version: 1, entry: mode === "summary" ? { ...full, activity: full.activity!.slice(-1) } : full };
+      },
+      replaceEntry: async (_version, entry) => { replaced.push(entry); return { version: 2, entry }; },
     },
     authority: {
-      currentManifestGeneration: () => 1,
-      acceptManifestGeneration: () => {},
       assertCurrent: async () => {},
       serializeMutation: async (operation) => { lockHeld += 1; try { return await operation(); } finally { lockHeld -= 1; } },
       serializeCommit: async (operation) => operation(),

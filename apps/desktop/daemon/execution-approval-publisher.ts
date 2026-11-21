@@ -5,7 +5,6 @@ import {
   parseExecutionApprovalPublicationInput,
   type ExecutionApprovalPublicationInput,
 } from "../../../shared/execution-approval-publication.mjs";
-import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
 import {
   ExecutionApprovalPublicationStore,
   publicationPinFrom,
@@ -41,6 +40,8 @@ export type ExecutionApprovalPublisherOptions = {
   daemonGeneration(): number;
   isClosing(): boolean;
   assertCurrent(): Promise<void>;
+  /** Synchronous generation fence check run inside every write transaction before COMMIT. */
+  assertWriteFence?(): void;
   publish?(input: ExecutionApprovalPublicationHttpInput): Promise<ExecutionApprovalPublicationHttpResult>;
   closePublication?(input: ExecutionApprovalPublicationCloseHttpInput): Promise<ExecutionApprovalPublicationCloseHttpResult>;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict"): void;
@@ -92,19 +93,14 @@ export class ExecutionApprovalPublisher {
   private closed = false;
   private scanAfter = "";
 
-  static open(path: string, options: ExecutionApprovalPublisherOptions): ExecutionApprovalPublisher | null {
-    try {
-      const publisher = new ExecutionApprovalPublisher(openDaemonStateObservationDatabase(path), options);
-      publisher.schedule(0);
-      return publisher;
-    } catch {
-      console.warn("[execution_approval_publication] storage_unavailable");
-      return null;
-    }
+  static attach(database: DatabaseSync, options: ExecutionApprovalPublisherOptions): ExecutionApprovalPublisher {
+    const publisher = new ExecutionApprovalPublisher(database, options);
+    publisher.schedule(0);
+    return publisher;
   }
 
   constructor(private readonly database: DatabaseSync, private readonly options: ExecutionApprovalPublisherOptions) {
-    this.store = new ExecutionApprovalPublicationStore(database);
+    this.store = new ExecutionApprovalPublicationStore(database, options.assertWriteFence);
   }
 
   /** Post-observation hint only; native inspection and SQLite work run on the coalesced lane. */
@@ -128,7 +124,6 @@ export class ExecutionApprovalPublisher {
     this.pendingAgents.clear();
     this.admissionRetryAt.clear();
     this.attemptedAt.clear();
-    try { this.database.close(); } catch { this.report("storage_unavailable"); }
   }
 
   private unavailable(): boolean { return this.closed || this.options.isClosing(); }

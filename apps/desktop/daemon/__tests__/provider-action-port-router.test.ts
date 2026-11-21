@@ -1487,7 +1487,7 @@ test("daemon restart quarantines pre-target turn controls for explicit resolutio
     },
   };
   try {
-    await new ManifestStore(paths.manifestPath).write(0, [entry, preparedEntry, appliedEntry, historicalEntry]);
+    await new ManifestStore(paths.manifestPath).write([entry, preparedEntry, appliedEntry, historicalEntry]);
     await daemon.start();
     const recoveredEntries = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     const recovered = recoveredEntries.find((candidate) => candidate.id === entry.id)?.turn_control;
@@ -1612,7 +1612,7 @@ test("operator-applied legacy native correction settles its interrupted FIFO row
   const router = new ProviderActionPortRouter({ codex: async () => fakeAdapter("codex", []) });
   let daemon: SupervisorDaemon | null = null;
   try {
-    await store.write(0, [{ ...seeded, turn_control: undefined }]);
+    await store.write([{ ...seeded, turn_control: undefined }]);
     const row = await inbox.enqueueCorrection({
       agent_id: seeded.id, room_id: seeded.room_id, source_message_id: "native-A",
       source_message: { text: "A" }, activation: { decision: "activate" },
@@ -1690,7 +1690,7 @@ test("operator resolution remains available after the controlled runtime is deta
   const store = new ManifestStore(paths.manifestPath);
   let daemon: SupervisorDaemon | null = null;
   try {
-    await store.write(0, [detached, replaced]);
+    await store.write([detached, replaced]);
     await store.close();
     const database = new DatabaseSync(paths.manifestPath);
     database.prepare(`INSERT INTO work_attempts

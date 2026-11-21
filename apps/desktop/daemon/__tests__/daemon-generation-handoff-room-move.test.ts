@@ -207,12 +207,14 @@ test("generation handoff reattaches the same provider and publishes its supervis
     }, "credential handoff latch self-heal");
     const recoveredFromStaleHandoff = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
     assert.equal(recoveredFromStaleHandoff.condition, "none");
-    assert.equal(recoveredFromStaleHandoff.last_error, null);
+    assert.equal(recoveredFromStaleHandoff.last_error ?? null, null);
     assert.equal(recoveredFromStaleHandoff.workplace_liveness?.detail, "scoped worker bearer verified");
     assert.ok(recoveredFromStaleHandoff.ready_reached_at);
     await eventually(async () => deliveryPolls > 0, "credential recovery resumes daemon inbox polling");
     await deliveryRecoveryInternals.supervisedDelivery.stop("supervised_handoff");
-    const manifestAfterFirstBind = await new ManifestStore(paths.manifestPath).load();
+    const firstBindReader = new ManifestStore(paths.manifestPath);
+    const manifestAfterFirstBind = await firstBindReader.load();
+    await firstBindReader.close();
     const workplaceObservedAtAfterFirstBind = manifestAfterFirstBind.entries
       .find((candidate) => candidate.id === "supervised_handoff")?.workplace_liveness?.observed_at;
     const repeatedBind = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
@@ -225,10 +227,12 @@ test("generation handoff reattaches the same provider and publishes its supervis
       api_url: apiUrl,
     });
     assert.equal(repeatedBind.ok, true, repeatedBind.error);
-    const manifestAfterRepeatedBind = await new ManifestStore(paths.manifestPath).load();
+    const repeatedBindReader = new ManifestStore(paths.manifestPath);
+    const manifestAfterRepeatedBind = await repeatedBindReader.load();
+    await repeatedBindReader.close();
     assert.equal(
-      manifestAfterRepeatedBind.generation,
-      manifestAfterFirstBind.generation,
+      manifestAfterRepeatedBind.versions["supervised_handoff"],
+      manifestAfterFirstBind.versions["supervised_handoff"],
       "an unchanged exact binding performs no full manifest commit",
     );
     assert.equal(

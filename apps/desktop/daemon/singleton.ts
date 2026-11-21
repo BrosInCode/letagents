@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, readFileSync } from "node:fs";
 import { open, readFile, rename, writeFile, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -112,6 +112,13 @@ export class DaemonSingleton {
     }
   }
 
+  /** Synchronous generation fence check for use inside a SQLite BEGIN IMMEDIATE transaction. */
+  assertCurrentSync(): void {
+    if (!this.lockHeld || this.readGenerationSync() !== this.generation) {
+      throw new DaemonFenceLostError("Supervisor generation fence was lost; exiting stale daemon.");
+    }
+  }
+
   async release(): Promise<void> {
     if (!this.lockHeld) return;
     this.lockHeld = false;
@@ -130,6 +137,20 @@ export class DaemonSingleton {
   private async readGeneration(): Promise<number> {
     try {
       const raw = await readFile(this.generationPath, "utf8");
+      const value = Number.parseInt(raw.trim(), 10);
+      if (!Number.isSafeInteger(value) || value < 0 || raw.trim() !== String(value)) {
+        throw new Error("Supervisor generation state is malformed; refusing to roll back fencing.");
+      }
+      return value;
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+      throw error;
+    }
+  }
+
+  private readGenerationSync(): number {
+    try {
+      const raw = readFileSync(this.generationPath, "utf8");
       const value = Number.parseInt(raw.trim(), 10);
       if (!Number.isSafeInteger(value) || value < 0 || raw.trim() !== String(value)) {
         throw new Error("Supervisor generation state is malformed; refusing to roll back fencing.");

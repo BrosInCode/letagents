@@ -329,7 +329,6 @@ export async function observationDaemonFixture(onExecution: NonNullable<Provider
     workerBindings: WorkerBindingStore; providerStreams: ProviderStreamCoordinator;
     providerCheckpoints: ProviderCheckpointCoordinator; executionCapture: ExecutionCaptureCoordinator | null;
     liveHandles: Map<string, ProviderActionHandle>;
-    manifestGeneration: number;
   };
   try {
     await daemon.start();
@@ -357,18 +356,16 @@ export async function observationDaemonFixture(onExecution: NonNullable<Provider
     const inserted = await daemonRequest(paths.socketPath, "manifest.put", { entry: stored });
     assert.equal(inserted.ok, true, inserted.error);
     handle.appliedConfigurationRevision = 1;
-    const persisted = await internals.store.load();
-    const current = persisted.entries.find((candidate) => candidate.id === id);
-    assert.ok(current);
-    const birth = await internals.store.checkpointProviderBirth(persisted.generation, {
-      entry: current,
+    const loaded = await internals.store.getEntryWithVersion(id);
+    assert.ok(loaded);
+    await internals.store.checkpointProviderBirth(loaded.version, {
+      entry: loaded.entry,
       executionGenerationId: execution.execution_generation_id,
       providerConnection: handle.providerConnection!,
       appliedRevision: 1,
       requestedAuthorityMode: "typed",
       observedAtMs: Date.now(),
     });
-    internals.manifestGeneration = birth.generation;
     return { ...env, id, paths, daemon, internals, handle, port, generation: execution.execution_generation_id,
       cleanup: async () => { await daemon.stop(); await env.cleanup(); } };
   } catch (error) {

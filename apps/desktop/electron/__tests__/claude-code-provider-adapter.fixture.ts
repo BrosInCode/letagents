@@ -577,9 +577,9 @@ export async function claudeDaemonFixture(options: {
       },
       /** The turns in the agent's execution record, and whether the record has a gap. */
       recorded: () => ({
-        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,rowid"),
         endings: read<{ provider_turn_id: string; n: number; outcome: string | null }>(`SELECT t.provider_turn_id, COUNT(*) AS n, MIN(f.turn_outcome) AS outcome
-          FROM execution_facts f JOIN execution_turns t USING(turn_id)
+          FROM execution_facts f JOIN runs t USING(turn_id)
           WHERE f.agent_id=? AND f.domain='turn' AND f.state='terminal' GROUP BY t.provider_turn_id ORDER BY MIN(f.sequence)`),
         gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
           .filter((observer) => observer.max !== observer.last).length,

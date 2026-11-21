@@ -16,7 +16,7 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
   }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; effect: SupervisedEffectRecord }> {
     const requestJson = serializeEffectJson(input.request, "request");
     return this.exclusive(async (database) => this.transactionFenced(database, () => {
-      const existing = database.prepare(`SELECT * FROM supervised_agent_effects
+      const existing = database.prepare(`SELECT * FROM effects
         WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND mcp_request_id=?`).get(
         input.agent_id, input.effect_execution_generation_id, input.provider_turn_id, input.mcp_request_id,
       ) as Row | undefined;
@@ -38,7 +38,7 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
         if (binding.inbox_item_id !== input.activating_inbox_item_id) throw new Error("The supervised room move lost its exact activating inbox turn.");
         effectId = effect.effect_id;
       } else {
-        const completedTurn = database.prepare(`SELECT effect_id FROM supervised_agent_effects
+        const completedTurn = database.prepare(`SELECT effect_id FROM effects
           WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
             AND tool_name='complete_room_turn' AND state='completed' LIMIT 1`).get(
           input.agent_id, input.effect_execution_generation_id, input.provider_turn_id,
@@ -61,7 +61,7 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
         created = true;
         effectId = randomUUID();
         const timestamp = this.now();
-      run(database.prepare(`INSERT INTO supervised_agent_effects
+      run(database.prepare(`INSERT INTO effects
         (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,1,'prepared',NULL,NULL,?,?)`),
         effectId, input.agent_id, input.room_id, input.effect_execution_generation_id, input.provider_turn_id,
@@ -74,9 +74,9 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
         room_move_operation_id: `room_move:${effectId}`,
       };
       const resultJson = serializeEffectJson(result, "prepared result");
-      const preparedEffect = rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row);
+      const preparedEffect = rowToEffect(database.prepare("SELECT * FROM effects WHERE effect_id=?").get(effectId) as Row);
       this.assertEffectResultCapacity(database, preparedEffect, resultJson);
-      run(database.prepare("UPDATE supervised_agent_effects SET result_json=?,updated_at=? WHERE effect_id=? AND state='prepared'"),
+      run(database.prepare("UPDATE effects SET result_json=?,updated_at=? WHERE effect_id=? AND state='prepared'"),
         resultJson, this.now(), effectId);
       const requestId = `bounded-effect:${effectId}`;
       const operationId = `room_move:${effectId}`;
@@ -89,8 +89,8 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
           throw new Error("Room-move request id is already bound to different coordinates.");
         }
       } else {
-        const unresolvedControl = database.prepare(`SELECT action_id FROM turn_control_journals
-          WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id);
+        const unresolvedControl = database.prepare(`SELECT 1 FROM agents
+          WHERE agent_id=? AND turn_control_status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id);
         if (unresolvedControl) throw new Error("Room move is blocked by unresolved turn control.");
         const timestamp = this.now();
         const sourceCursor = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?")
@@ -101,13 +101,13 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
         input.provider_turn_id, effectId, "prepared", timestamp, timestamp, sourceCursor ? 1 : 0,
         sourceCursor?.last_observed_message_id ?? null);
       }
-      return { created, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row) };
+      return { created, effect: rowToEffect(database.prepare("SELECT * FROM effects WHERE effect_id=?").get(effectId) as Row) };
     }, commitFence));
   }
 
   async preparedRoomMove(agentId: string, originExecutionGenerationId: string, providerTurnId: string): Promise<SupervisedEffectRecord | null> {
     return this.read(async (database) => {
-      const row = database.prepare(`SELECT * FROM supervised_agent_effects
+      const row = database.prepare(`SELECT * FROM effects
         WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND tool_name='join_room' AND state='prepared'
         ORDER BY created_at LIMIT 1`).get(agentId, originExecutionGenerationId, providerTurnId) as Row | undefined;
       return row ? rowToEffect(row) : null;
@@ -117,9 +117,9 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
   async preparedRoomMoves(agentId?: string): Promise<SupervisedEffectRecord[]> {
     return this.read(async (database) => {
       const rows = agentId
-        ? database.prepare(`SELECT * FROM supervised_agent_effects
+        ? database.prepare(`SELECT * FROM effects
           WHERE agent_id=? AND tool_name='join_room' AND state='prepared' ORDER BY created_at`).all(agentId) as Row[]
-        : database.prepare(`SELECT * FROM supervised_agent_effects
+        : database.prepare(`SELECT * FROM effects
           WHERE tool_name='join_room' AND state='prepared' ORDER BY created_at`).all() as Row[];
       return rows.map(rowToEffect);
     });
@@ -132,13 +132,13 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
   ): Promise<number> {
     return this.exclusive(async (database) => this.transactionFenced(database, () => {
-      const rows = database.prepare(`SELECT * FROM supervised_agent_inbox
+      const rows = database.prepare(`SELECT * FROM inbox_items
         WHERE agent_id=? AND room_id=? AND fifo_sequence>? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence`).all(input.agent_id, input.old_room_id, input.after_fifo_sequence) as Row[];
       const timestamp = this.now();
       for (const row of rows) {
         const item = rowToItem(row);
-        run(database.prepare(`UPDATE supervised_agent_inbox SET state='cancelled_by_room_move',last_error=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
+        run(database.prepare(`UPDATE inbox_items SET state='cancelled_by_room_move',last_error=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
           "Cancelled because the agent moved to another room.", timestamp, timestamp, item.inbox_item_id);
         this.settleTerminalItem(database, item, timestamp);
         this.recordEvent(database, item.inbox_item_id, `room_move_cancelled:${input.operation_id}:${item.fifo_sequence}`, "room_move_cancelled", timestamp, "Agent moved rooms after completing an earlier message.");
@@ -169,7 +169,7 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
     return this.exclusive(async (database) => this.transactionFenced(database, () => {
       // Prove exact operation ownership from the append-only cancellation
       // event before reviving each bounded source-room candidate.
-      const candidates = database.prepare(`SELECT i.* FROM supervised_agent_inbox i
+      const candidates = database.prepare(`SELECT i.* FROM inbox_items i
         WHERE i.agent_id=? AND i.room_id=? AND i.fifo_sequence>? AND i.state='cancelled_by_room_move'
         ORDER BY i.fifo_sequence`).all(input.agent_id, input.source_room_id, input.after_fifo_sequence) as Row[];
       const timestamp = this.now();
@@ -180,7 +180,7 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
           item.inbox_item_id, `room_move_cancelled:${input.operation_id}:${item.fifo_sequence}`,
         );
         if (!owned) continue;
-        run(database.prepare(`UPDATE supervised_agent_inbox SET state='pending',last_error=?,updated_at=?,acknowledged_at=NULL WHERE inbox_item_id=? AND state='cancelled_by_room_move'`),
+        run(database.prepare(`UPDATE inbox_items SET state='pending',last_error=?,updated_at=?,acknowledged_at=NULL WHERE inbox_item_id=? AND state='cancelled_by_room_move'`),
           "Room move rolled back; source-room delivery was restored without starting a duplicate provider turn.", timestamp, item.inbox_item_id);
         this.recordEvent(database, item.inbox_item_id, `room_move_rollback:${input.operation_id}:${item.fifo_sequence}`, "retry_scheduled", timestamp, "Source-room delivery restored after room-move rollback.");
         restored += 1;

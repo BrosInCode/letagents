@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DAEMON_STATE_SCHEMA_VERSION } from "../../daemon-state-database.js";
+import { DAEMON_STATE_USER_VERSION } from "../../daemon-state-database.js";
 import { serializeDaemonDeploymentId } from "../../manifest-entry-projection.js";
 import { ManifestStore } from "../../manifest-store.js";
 import type { ProviderActionHandle } from "../../provider-action-port.js";
@@ -15,8 +15,6 @@ import { WorkerBindingStore } from "../../worker-binding-store.js";
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../../execution-approval-journal.js";
 import type { ExecutionDelegationHostAuthority, RemoteExecutionDelegationRevision, ValidateExecutionDelegation } from "../../execution-delegation-journal.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity } from "../../execution-shadow-store.js";
-import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../../execution-storage-schema.js";
-import { validateLegacyLifecycleProjectionLedgerSchema } from "../../daemon-state-database/v52-compat-tables.js";
 import { removeTestDirectory } from "../../../electron/__tests__/harness.js";
 
 export const TEST_PROVIDER_TURN_AUTHORITY = {
@@ -25,48 +23,12 @@ export const TEST_PROVIDER_TURN_AUTHORITY = {
   provider_continuation_id: "thread_1",
 } as const;
 
-export function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync): void {
-  const noDelete = String(database.prepare(
-    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='lifecycle_projection_total_no_delete'",
-  ).get()!.sql);
-  database.exec(`DROP TRIGGER lifecycle_projection_total_no_delete;
-    DELETE FROM lifecycle_projection_totals WHERE provider='open-model';
-    ${noDelete}`);
-  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
-  database.enableDefensive?.(false); // Only the disposable three-provider legacy fixture.
-  database.exec("PRAGMA writable_schema=ON");
-  database.prepare(`UPDATE sqlite_master SET sql=replace(sql, ?, '')
-    WHERE type='table' AND name IN ('lifecycle_projection_lanes','lifecycle_projection_totals')`).run(",'open-model'");
-  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
-  database.enableDefensive?.(true);
-  validateLegacyLifecycleProjectionLedgerSchema(database);
-}
-
-export function restoreEmptyExecutionDelegationV23Fixture(database: DatabaseSync): void {
-  database.exec("DROP TABLE IF EXISTS host_tool_rule_withdrawals; DROP TABLE IF EXISTS host_tool_rule_decisions; DROP TABLE IF EXISTS host_tool_rules");
-  database.exec("DROP TABLE IF EXISTS execution_approval_request_closures");
-  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 0);
-  database.exec("DROP TRIGGER execution_approval_projection_immutable; DROP TABLE execution_approval_projections");
-  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_local_delegations").get()!.n, 0);
-  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions").get()!.n, 0);
-  const previous = new DatabaseSync(":memory:");
-  try {
-    applyExecutionStorageSchema(previous, 23);
-    const definitions = previous.prepare(`SELECT sql FROM sqlite_master
-      WHERE tbl_name IN ('execution_local_delegations','execution_approval_decisions') AND sql IS NOT NULL
-      ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END,name`).all();
-    database.exec("DROP TABLE execution_approval_decisions; DROP TABLE execution_local_delegations");
-    for (const row of definitions) database.exec(String(row.sql));
-  } finally { previous.close(); }
-  validateExecutionStorageSchema(database, 23);
-}
-
 export async function seedApprovalJournalTurn(env: Awaited<ReturnType<typeof fixture>>, store: ManifestStore, database: DatabaseSync,
   provider: "codex" | "open-model" = "codex"): Promise<ApprovalAuthority> {
   const providerConnection: ApprovalAuthority["providerConnection"] = provider === "codex"
     ? { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "birth" }
     : { kind: "opencode_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "birth", serverAuthPath: "/test/auth" };
-  await store.write(0, [{ ...entry, id: "agent", room_id: "room", provider, condition: "none", turn_control: undefined,
+  await store.write([{ ...entry, id: "agent", room_id: "room", provider, condition: "none", turn_control: undefined,
     reconciliation: undefined, reconciliation_notices: undefined, delivery_mode: "daemon_inbox", work_attempt_id: "workspace",
     provider_ref: { work_attempt_id: "workspace", execution_generation_id: "generation", provider_continuation_id: "continuation", provider_connection: providerConnection } }]);
   seedTerminalExecution(env.databasePath, "workspace", "generation");
@@ -167,7 +129,7 @@ export function localDelegationValidation(
 }
 
 export async function seedLocalDelegationManifest(store: ManifestStore): Promise<void> {
-  await store.write(0, [{
+  await store.write([{
     ...entry,
     id: "agent",
     room_id: "room",
@@ -207,7 +169,7 @@ export const entry: DaemonManifestEntry = {
   condition: "coordination_blocked",
   last_error: null,
   permission_profile_id: "workspace-write",
-  provider_launch_policy: { deliveryMode: "mcp_polling" },
+  provider_launch_policy: {},
   created_by: "user_1",
   created_at: "2026-07-19T00:00:00.000Z",
   source_repo_path: "/repo",
@@ -321,28 +283,9 @@ export function withImportedRuntimeIdentity(item: DaemonManifestEntry): DaemonMa
     : imported;
 }
 
-export function removePostV5DeliveryTables(database: DatabaseSync): void {
-  database.exec(`
-    -- Physical v1-v4 databases cannot contain the later v13 repair journal.
-    DROP TABLE IF EXISTS provider_continuation_repairs;
-    DROP TABLE IF EXISTS supervised_agent_provider_turn_bindings;
-    DROP TABLE IF EXISTS supervised_agent_publications;
-    DROP TABLE IF EXISTS supervised_agent_history_boundaries;
-    DROP TABLE IF EXISTS supervised_agent_pruned_sources;
-    DROP TABLE IF EXISTS supervised_agent_effects;
-    DROP TABLE IF EXISTS supervised_agent_ingress_health;
-    DROP TABLE IF EXISTS supervised_agent_observed_messages;
-    DROP TABLE IF EXISTS supervised_agent_terminal_results;
-    DROP TABLE IF EXISTS supervised_agent_inbox_events;
-    DROP TABLE IF EXISTS supervised_agent_ingress_cursors;
-    DROP TABLE IF EXISTS supervised_agent_inbox;
-  `);
-}
-
-export function assertRoomScopedV9DeliveryShape(database: DatabaseSync): void {
-  assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
-  assert.equal((database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, DAEMON_STATE_SCHEMA_VERSION);
-  const inbox = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as { sql: string };
+export function assertRoomScopedV1DeliveryShape(database: DatabaseSync): void {
+  assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_USER_VERSION);
+  const inbox = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='inbox_items'").get() as { sql: string };
   const observed = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_observed_messages'").get() as { sql: string };
   const publications = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_publications'").get() as { sql: string };
   assert.match(inbox.sql, /UNIQUE\s*\(\s*agent_id\s*,\s*room_id\s*,\s*source_message_id\s*\)/i);

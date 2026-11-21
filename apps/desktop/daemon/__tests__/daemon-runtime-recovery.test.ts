@@ -172,7 +172,7 @@ test(`explicit runtime recovery retires proven-dead ${providerId} without replac
     assert.equal(recovered.id, id);
     assert.equal(recovered.workspace_path, attempt.workspace_path);
     assert.equal(recovered.work_attempt_id, attempt.work_attempt_id);
-    assert.equal(recovered.provider_ref, null);
+    assert.equal(recovered.provider_ref ?? null, null);
     assert.equal(recovered.observed_state, "starting");
     assert.equal(recovered.condition, "none");
     assert.deepEqual(calls, { attach: 1, spawn: 0, resume: 0, converge: 1 });
@@ -377,7 +377,7 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
           // replaceEntry settles the inbox before replacing its runtime rows.
           // Fail at that boundary to prove a crash cannot leave a released FIFO
           // alongside the old continuation for startup convergence to resume.
-          database.exec(`CREATE TRIGGER reject_cursor_runtime_reset BEFORE DELETE ON agent_identities
+          database.exec(`CREATE TRIGGER reject_cursor_runtime_reset BEFORE UPDATE ON agents
             WHEN OLD.agent_id='recover_blocked_cursor'
             BEGIN SELECT RAISE(ABORT, 'injected runtime reset failure'); END`);
           assert.match((await recover()).error!, /injected runtime reset failure/);
@@ -400,7 +400,7 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
         assert.deepEqual(await internals.supervisedInbox.get(head.inbox_item_id), before);
         capture.prepare("UPDATE execution_runtime_generations SET runtime_state='exited',ended_at_ms=2 WHERE runtime_generation_id=?").run(oldRuntime);
         for (const [table, key, value, column, invalid] of [
-          ["execution_turns", "turn_id", oldTurn.turnId, "provider_continuation_id", "unrelated"],
+          ["runs", "turn_id", oldTurn.turnId, "provider_continuation_id", "unrelated"],
           ["execution_attempt_generations", "attempt_id", oldAttempt, "workspace_id", "unrelated"],
           ["execution_runtime_generations", "runtime_generation_id", oldRuntime, "provider", "codex"],
           ["execution_runtime_generations", "runtime_generation_id", oldRuntime, "control_state", "responsive"],
@@ -441,7 +441,7 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
       }
       assert.equal(result.ok, true, result.error);
       const recovered = (result.result as { entry: DaemonManifestEntryView }).entry;
-      assert.equal(recovered.provider_ref, null);
+      assert.equal(recovered.provider_ref ?? null, null);
       assert.equal(recovered.observed_state, "starting");
       assert.equal(recovered.condition, "none");
       assert.equal(recovered.work_attempt_id, attempt.work_attempt_id);
@@ -466,10 +466,10 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
       assert.equal(boundary.phase, "complete");
       assert.equal(JSON.parse(String(boundary.observer_json)).max_observed_sequence, 9);
       assert.deepEqual(capture.prepare("SELECT * FROM execution_facts WHERE runtime_generation_id=?").all(oldRuntime), oldFacts);
-      assert.equal(capture.prepare("SELECT state FROM execution_turns WHERE turn_id=?").get(oldTurn.turnId)!.state, missingTurn ? "terminal" : "lost");
+      assert.equal(capture.prepare("SELECT state FROM runs WHERE turn_id=?").get(oldTurn.turnId)!.state, missingTurn ? "terminal" : "lost");
       if (missingTurn) {
         assert.deepEqual(capture.prepare("SELECT * FROM execution_runtime_generations WHERE runtime_generation_id=?").get(oldRuntime), oldRuntimeBefore, "known predecessor retirement stays exact");
-        assert.equal(capture.prepare("SELECT COUNT(*) AS n FROM execution_turns WHERE provider_turn_id='cursor-crashed-turn'").get()!.n, 0, "recovery never invents the uncaptured turn");
+        assert.equal(capture.prepare("SELECT COUNT(*) AS n FROM runs WHERE provider_turn_id='cursor-crashed-turn'").get()!.n, 0, "recovery never invents the uncaptured turn");
         assert.equal(capture.prepare("SELECT runtime_state FROM execution_runtime_generations WHERE runtime_generation_id='uncaptured-next-child'").get()!.runtime_state, "starting", "uncaptured native history stays unknown");
       }
       assert.throws(() => shadow.observeSourcePosition(oldObserver.sourceId, oldObserver, 10), /stale_observer/);
@@ -532,13 +532,13 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
       const nextConnection = { kind: "cursor_cli" as const, pid: 7125, processIdentity: "replacement-child" };
       const nextHandle: ProviderActionHandle = { ...handle, observedState: "working", pid: nextConnection.pid,
         providerContinuationId: "fresh-continuation", providerConnection: nextConnection };
-      const birth = await internals.store.checkpointProviderBirth(internals.manifestGeneration, {
+      const currentVersion = (await internals.store.load()).versions[id]!;
+      await internals.store.checkpointProviderBirth(currentVersion, {
         entry: { ...recovered, provider_ref: { work_attempt_id: attempt.work_attempt_id,
           execution_generation_id: nextExecution.execution_generation_id, provider_continuation_id: nextHandle.providerContinuationId!,
           provider_connection: nextConnection } }, executionGenerationId: nextExecution.execution_generation_id,
         providerConnection: nextConnection, appliedRevision: 1, requestedAuthorityMode: "typed", observedAtMs: Date.now(),
       });
-      internals.manifestGeneration = birth.generation;
       await internals.supervisedInbox.transition(later.inbox_item_id, "dispatching");
       await internals.supervisedInbox.checkpointTurnStarted(later.inbox_item_id, "next-turn", {
         work_attempt_id: attempt.work_attempt_id, origin_execution_generation_id: nextExecution.execution_generation_id,
@@ -552,7 +552,7 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
           fact: { domain: "turn", kind: "state_changed", state, providerContinuationId: nextHandle.providerContinuationId!,
             providerTurnId: "next-turn", sideEffects: "none", ...(state === "terminal" ? { turnOutcome: "completed" as const } : {}) } });
       }
-      await eventually(async () => capture.prepare("SELECT state FROM execution_turns WHERE provider_turn_id='next-turn'").get()?.state === "terminal",
+      await eventually(async () => capture.prepare("SELECT state FROM runs WHERE provider_turn_id='next-turn'").get()?.state === "terminal",
         "the next captured turn completes beyond the retained lost turn");
       assert.equal(shadow.retainedMessageExecution(id, entry.room_id, "failed-message").availability, "available");
       capture.close();
@@ -747,7 +747,7 @@ test("runtime recovery atomically fails a pre-join room move without losing its 
     const recovered = (result.result as { entry: DaemonManifestEntryView }).entry;
     assert.equal(recovered.id, id);
     assert.equal(recovered.work_attempt_id, attempt.work_attempt_id);
-    assert.equal(recovered.provider_ref, null);
+    assert.equal(recovered.provider_ref ?? null, null);
     assert.equal(recovered.observed_state, "starting");
     assert.equal(attachCalls, 1);
     assert.equal(joinCalls, 0);
@@ -818,7 +818,7 @@ test("a provably-gone provider runtime auto-recovers with a fresh runtime instea
     await internals.recordSchedulerFailure(id, new OpenCodeRuntimeGoneError(), "daemon-convergence");
 
     const recovered = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
-    assert.equal(recovered.provider_ref, null, "the dead continuation is dropped so the next convergence spawns fresh");
+    assert.equal(recovered.provider_ref ?? null, null, "the dead continuation is dropped so the next convergence spawns fresh");
     assert.equal(recovered.observed_state, "failed", "a failed edge engages the crash-loop backoff/quarantine machinery");
     assert.equal(recovered.condition, "none", "the entry is not left blocked; it is eligible for a fresh runtime");
     assert.match(String(recovered.last_error), /starting a replacement/);
