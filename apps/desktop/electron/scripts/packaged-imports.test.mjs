@@ -95,6 +95,23 @@ test("the check fails when one adapter has a wrong import name", () => {
   }
 });
 
+test("the check fails when two users of one import name get two different files", () => {
+  const app = temporaryApp();
+  try {
+    // A second package.json below the build output gives the adapters their own
+    // meaning of the name: a second copy of the shared file.
+    const agents = join(app, "dist-electron", "main", "agents");
+    mkdirSync(join(agents, "copy"));
+    writeFileSync(join(agents, "copy", "shared.js"), "export const shared = 2;\n");
+    writeFileSync(join(agents, "package.json"), JSON.stringify({ type: "module", imports: { "#provider-runtime/*.js": "./copy/*.js" } }));
+    const result = runCheck(app);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /imports #provider-runtime\/shared\.js and gets .*copy.shared\.js, but the app's package\.json gives dist-provider-runtime.shared\.js/);
+  } finally {
+    rmSync(app, { recursive: true, force: true });
+  }
+});
+
 test("the check fails when an adapter entry file is missing", () => {
   const app = temporaryApp();
   try {

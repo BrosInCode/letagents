@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { isolatePackagedBundle, linksLeaving, resolutionRootsAbove } from "./packaged-artifact-isolation.mjs";
@@ -57,7 +58,7 @@ test("the copy keeps the files and refuses a parent with a package.json", async 
     mkdirSync(join(root, "clean"));
     const isolated = await isolatePackagedBundle(bundle, { parent: join(root, "clean") });
     assert.equal(isolated.bundle, join(isolated.root, "App"));
-    assert.equal((await import(join(isolated.bundle, "resources", "main.js"))).here, 1);
+    assert.equal((await import(pathToFileURL(join(isolated.bundle, "resources", "main.js")).href)).here, 1);
 
     mkdirSync(join(root, "checkout"));
     writeFileSync(join(root, "checkout", "package.json"), "{}");

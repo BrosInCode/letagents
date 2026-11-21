@@ -8,7 +8,10 @@
 //
 //   1. the app's package.json has no conditional import target;
 //   2. every "#..." import name in the shipped build output resolves to an
-//      existing file inside that build output, from the place that uses it;
+//      existing file inside that build output, from the place that uses it,
+//      and to the same file as from the app's own package.json. Node keeps
+//      one module for one file, so two users of one name that resolve to
+//      two files would each get their own copy of its state;
 //   3. each provider adapter entry file loads.
 //
 // This file imports nothing outside Node, because it runs inside the app.
@@ -53,6 +56,9 @@ export async function checkPackagedAppImports(appRoot, { log = console.log } = {
   }
 
   const importName = /(?:from\s*|import\s*\(\s*|import\s*|require\s*\(\s*)["'](#[^"']+)["']/g;
+  // What a name means in this app: its target from the app's package.json.
+  const resolveFromApp = createRequire(join(app, "package.json"));
+  const canonical = new Map();
   let resolved = 0;
   for (const folder of BUILD_FOLDERS) {
     const root = join(app, folder);
@@ -71,11 +77,21 @@ export async function checkPackagedAppImports(appRoot, { log = console.log } = {
         if (!BUILD_FOLDERS.some((buildFolder) => inside(join(app, buildFolder), target))) {
           throw new Error(`${relative(app, file)} imports ${match[1]}, which resolves outside the packaged build output: ${target}`);
         }
+        if (!canonical.has(match[1])) {
+          try {
+            canonical.set(match[1], realpathSync(resolveFromApp.resolve(match[1])));
+          } catch (error) {
+            throw new Error(`${match[1]} does not resolve from the package.json of the packaged app: ${error.message}`);
+          }
+        }
+        if (target !== canonical.get(match[1])) {
+          throw new Error(`${relative(app, file)} imports ${match[1]} and gets ${relative(app, target)}, but the app's package.json gives ${relative(app, canonical.get(match[1]))}; the two would be two copies of one module`);
+        }
         resolved += 1;
       }
     }
   }
-  log(`packaged-imports: ${resolved} import name use(s) resolve inside the app`);
+  log(`packaged-imports: ${resolved} use(s) of ${canonical.size} import name(s) resolve inside the app, each name to one file`);
 
   for (const entry of PROVIDER_ADAPTER_ENTRIES) {
     const path = ADAPTER_FOLDERS.map((folder) => join(app, folder, entry)).find((candidate) => existsSync(candidate));
