@@ -853,8 +853,9 @@ type WritingStep = typeof WRITING_STEPS[number];
  * A coordinator over ports that count what an exit's recording writes. The entry's queue and the stores are as the
  * daemon has them: each does one piece of work at a time, in the order it was asked, and a store writes through the
  * commit guard its caller gives it. `queueBusy` and `busyStore` start one of them busy: it does nothing until it is let go.
+ * With `manifestReturnsLate` the manifest writes the exit at once and returns to its caller only when it is let go.
  */
-function countedTerminalRecording(options: { queueBusy?: boolean; busyStore?: WritingStep; desiredState?: "stopped" } = {}) {
+function countedTerminalRecording(options: { queueBusy?: boolean; busyStore?: WritingStep; manifestReturnsLate?: boolean; desiredState?: "stopped" } = {}) {
   const liveHandles = new Map([["agent-1", handle]]);
   const entry: DaemonManifestEntry = { ...manifestEntry(), ...(options.desiredState ? { desired_state: options.desiredState } : {}) };
   /** What was done: manifest reads, the four writes, and what follows a recorded exit. */
@@ -909,14 +910,23 @@ function countedTerminalRecording(options: { queueBusy?: boolean; busyStore?: Wr
       queue = run.then(() => undefined, () => undefined);
       return run;
     },
-    serializeManifest: async operation => operation(),
+    // The manifest, as the daemon has it: one change at a time, in order.
+    serializeManifest: (operation) => {
+      const run = manifest.then(operation);
+      manifest = run.then(() => undefined, () => undefined);
+      return run;
+    },
     transitionOnce: (_id, state, condition, _cause, _actor, reconciliation, _notice, _terminal, guard) =>
       write("recording the exit in the manifest", guard, () => {
-        entry.observed_state = state; entry.condition = condition; entry.reconciliation = reconciliation; done.projections += 1;
-      }),
+        entry.observed_state = state; entry.condition = condition; done.projections += 1;
+        // The manifest keeps a terminal without its native death evidence. Only the execution record holds that.
+        const { native_runtime_death: _notKept, ...last_terminal } = reconciliation?.last_terminal ?? {} as ExecutionTerminalPayload;
+        entry.reconciliation = reconciliation?.last_terminal ? { ...reconciliation, last_terminal } : reconciliation;
+      }).then(() => options.manifestReturnsLate ? storeIsFree : undefined),
     requestConvergence: () => { done.convergence += 1; },
     exitUnsettled: () => { done.told += 1; },
   };
+  let manifest: Promise<unknown> = Promise.resolve();
   const coordinator = new ProviderTerminalCoordinator(ports);
   return {
     coordinator, entry, done, refused, saved: () => saved,
@@ -966,9 +976,10 @@ for (const busyStore of WRITING_STEPS) {
     await flush();
     assert.equal(recording.asked(busyStore), 1, "the first attempt has asked the store, and waits for it");
     const before = { ...done };
-    // The ordinary attempts' time ends. The last attempt comes to the same step and asks the store as well, behind the first.
+    // The ordinary attempts' time ends. The last attempt comes to the same step and waits as well: behind the first
+    // attempt in the store, or, for the manifest, for its turn there, which the first attempt's step still has.
     await pass(EXIT_SETTLEMENT_BOUNDS.settleMs + 250);
-    assert.equal(recording.asked(busyStore), 2, "the last attempt has asked the store too");
+    assert.equal(recording.asked(busyStore), busyStore === "recording the exit in the manifest" ? 1 : 2);
     assert.equal(recording.waiting(), true);
     assert.deepEqual([done.projections, done.convergence, done.told], [0, 0, 0], "while the store is busy the exit is not recorded");
 
@@ -979,6 +990,7 @@ for (const busyStore of WRITING_STEPS) {
     assert.deepEqual(recording.refused, [`${busyStore}, asked 1: The exit was not recorded in time; one last attempt follows.`],
       "the store writes nothing for the attempt that was given up, and what the last attempt asked for is written");
     assert.equal(recording.waiting(), false, "the last attempt records the exit");
+    assert.equal(recording.asked(busyStore), 2, "each attempt asked the store once");
     const written = { saves: done.saves, releases: done.releases, projections: done.projections };
     assert.deepEqual(written, { saves: 1, releases: stopped ? 1 : 0, projections: 1 }, "each thing is written once");
     // An attempt closes the approvals again when the attempt before it had closed them already: there are none left to close.
@@ -994,6 +1006,36 @@ for (const busyStore of WRITING_STEPS) {
     assert.equal(recording.refused.length, 1);
   });
 }
+
+test("an attempt whose time ends after its write of the exit has landed, before the manifest returns to it, leaves that write: the last attempt does not record the exit again", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const flush = async () => { for (let turn = 0; turn < 8; turn += 1) await new Promise<void>(resolve => setImmediate(resolve)); };
+  const pass = async (ms: number) => { for (let left = ms; left > 0; left -= 250) { t.mock.timers.tick(Math.min(250, left)); await flush(); } };
+  // A process whose death the provider itself witnessed, as Codex reports it. The manifest does not keep that evidence.
+  const witnessed: ProviderActionTerminal = { ...terminal, nativeRuntimeDeath: { kind: "codex_app_server", pid: 42, processIdentity: "codex:42" } };
+  const recording = countedTerminalRecording({ manifestReturnsLate: true });
+  const { coordinator, done } = recording;
+  void coordinator.handleTerminal(installation, witnessed).catch(() => undefined);
+  await flush();
+  assert.deepEqual([done.projections, recording.waiting()], [1, true], "the first attempt has written the exit, and the manifest has not returned to it");
+  assert.equal(recording.saved()?.native_runtime_death?.processIdentity, "codex:42", "the execution record holds the evidence");
+  assert.equal(recording.entry.reconciliation?.last_terminal?.native_runtime_death, undefined, "and the manifest does not");
+
+  // The ordinary attempts' time ends. The last attempt comes to the manifest behind the write that has not returned.
+  await pass(EXIT_SETTLEMENT_BOUNDS.settleMs + 250);
+  assert.deepEqual([done.projections, done.convergence, recording.waiting()], [1, 0, true], "the last attempt waits for the manifest");
+  recording.letStoreGo();
+  await flush();
+  assert.equal(recording.waiting(), false, "the last attempt ends the recording");
+  // It compared the manifest's terminal with its own, evidence and all, found them different, and wrote the exit a second time.
+  assert.equal(recording.asked("recording the exit in the manifest"), 1, "it finds the exit in the manifest, and does not ask for it to be written again");
+  assert.deepEqual([done.projections, done.convergence, done.deliveries, done.told], [1, 1, 1, 0], "the exit is recorded once, and the entry is converged once");
+  assert.deepEqual(recording.refused, []);
+  assert.equal(recording.entry.observed_state, "failed");
+  const end = { ...done };
+  await pass(60_000);
+  assert.deepEqual(done, end, "and nothing follows");
+});
 
 test("an operator's recovery supersedes an exit that is still being recorded, and an update or a retirement waits for an exit no longer than its bound", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });

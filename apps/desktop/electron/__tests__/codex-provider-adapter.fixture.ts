@@ -1199,7 +1199,7 @@ export async function codexDaemonFixture(options: {
        */
       exitSettlement: () => (daemon as unknown as { providerTerminals: {
         ports: { settleRuntimeApprovals(...args: unknown[]): Promise<void>; serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
-          serializeManifest<T>(operation: () => Promise<T>): Promise<T>;
+          serializeManifest<T>(operation: () => Promise<T>): Promise<T>; transitionOnce(...args: unknown[]): Promise<void>;
           durability: { recordTerminal(...args: unknown[]): Promise<unknown>; releaseTerminalExecutionFence(...args: unknown[]): Promise<void> };
           exitUnsettled(entryId: string, exitId: string): void };
         bounds: { settleMs: number; lastAttemptMs: number; recordMs: number }; settling(entryId: string): boolean;
@@ -1409,8 +1409,10 @@ export const EXIT_RECORDING_FAULTS = {
  * What an attempt to record an exit can wait for longer than it is given: the
  * agent's queue, or a store it writes to, busy with other work. Each holds
  * whatever the recording asks of it, in the order it was asked, until
- * `letGo`. `waiting` is how much it holds. A test calls `letGo` before the
- * daemon is stopped as well: a stop waits for an exit that is being recorded.
+ * `letGo`. `waiting` is how much it holds. The last one is the manifest at a
+ * later moment: it writes the exit at once, and holds only its answer. A test
+ * calls `letGo` before the daemon is stopped as well: a stop waits for an
+ * exit that is being recorded.
  */
 export const EXIT_RECORDING_WAITS = {
   "the agent's queue": (terminals: ExitSettlement) => {
@@ -1438,6 +1440,12 @@ export const EXIT_RECORDING_WAITS = {
     terminals.ports.durability = Object.create(original, {
       releaseTerminalExecutionFence: { value: async (...args: unknown[]) => { await busy.arrive(); return original.releaseTerminalExecutionFence(...args); } } });
     return { waiting: busy.waiting, letGo: () => { terminals.ports.durability = original; busy.letGo(); } };
+  },
+  "the manifest to return, after it has written the exit": (terminals: ExitSettlement) => {
+    const busy = busyUntilLetGo();
+    const original = terminals.ports.transitionOnce;
+    terminals.ports.transitionOnce = async (...args: unknown[]) => { await original(...args); await busy.arrive(); };
+    return { waiting: busy.waiting, letGo: () => { terminals.ports.transitionOnce = original; busy.letGo(); } };
   },
 } as const;
 

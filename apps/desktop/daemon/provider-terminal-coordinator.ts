@@ -143,6 +143,16 @@ function until<T>(cut: TerminalSettlement["cut"], step: Promise<T>): Promise<T> 
   return Promise.race([step, cut.promise]);
 }
 
+/**
+ * Whether the manifest already holds this terminal. The manifest keeps a
+ * terminal without its native death evidence, which only the execution
+ * record holds, so that part is left out of the comparison.
+ */
+function manifestHolds(last: ExecutionTerminalPayload | undefined, terminal: ExecutionTerminalPayload): boolean {
+  const kept = ({ native_runtime_death: _onlyInExecutionRecord, ...rest }: ExecutionTerminalPayload) => rest;
+  return last !== undefined && isDeepStrictEqual(kept(last), kept(terminal));
+}
+
 /** Owns terminal evidence, exact-handle retirement, and exit-state projection. */
 export class ProviderTerminalCoordinator {
   private readonly pending = new Map<ProviderInstallationToken, TerminalSettlement>();
@@ -510,8 +520,8 @@ export class ProviderTerminalCoordinator {
     // attempt after it begins under a new one, and this one is over: it
     // begins nothing more, it does nothing when its turn in the entry's queue
     // comes only then, and a step it left behind writes nothing when a store
-    // comes to it only then. What it wrote before stays, and the attempt
-    // after it finds that.
+    // comes to it only then. What it wrote before that stays: the attempt
+    // after it reads the saved terminal, and finds the exit in the manifest.
     const cut = owner.cut;
     const within = <T>(step: Promise<T>) => until(cut, step);
     const fence = this.fence(owner, cut);
@@ -702,8 +712,11 @@ export class ProviderTerminalCoordinator {
       if (expectedHandle && currentHandle && currentHandle !== expectedHandle) return;
       if (expectedInstallation && !this.matchesInstallation(entry, expectedInstallation)) return;
       const payload = this.terminalPayload(terminal, actor, expectedInstallation?.providerConnection ?? expectedHandle?.providerConnection ?? entry.provider_ref?.provider_connection);
+      // An attempt that was given up after it had written the exit here leaves
+      // that write behind, and the attempt after it does not write it again.
+      const recorded = manifestHolds(entry.reconciliation?.last_terminal, payload);
       if (entry.condition === "quarantined") {
-        if (commitFence && isDeepStrictEqual(entry.reconciliation?.last_terminal, payload)) return;
+        if (commitFence && recorded) return;
         await this.ports.transitionOnce(
           entryId,
           entry.observed_state,
@@ -750,8 +763,7 @@ export class ProviderTerminalCoordinator {
         ...advanceReconciliationState(entry.reconciliation, observedState, this.ports.nowMs()),
         last_terminal: payload,
       };
-      if (commitFence && entry.observed_state === observedState && entry.condition === "none"
-        && isDeepStrictEqual(entry.reconciliation?.last_terminal, payload)) return;
+      if (commitFence && entry.observed_state === observedState && entry.condition === "none" && recorded) return;
       await this.ports.transitionOnce(
         entryId,
         observedState,
