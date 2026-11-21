@@ -371,9 +371,24 @@ export interface ProcessListDiagnostics {
   elapsedMs: number;
 }
 
+/**
+ * Windows executable image names queried via `letagents-process-tree.exe info <pid>`
+ * after `tasklist.exe /FO CSV /NH`.
+ *
+ * Scope & trade-off: querying every Windows service (`svchost.exe`, etc.) via
+ * per-PID helper spawns would add hundreds of spawns per `dispose()`. Restricting
+ * name-based inspection to test/provider/shell executables keeps Windows scans to
+ * a handful of fast native helper calls while still always inspecting `process.pid`
+ * and every tracked daemon/provider PID regardless of image name. Limitation: an
+ * untracked child process whose image name is outside this set (for example a
+ * standalone `python.exe` not in `trackedProviderPids`) is not inspected for
+ * `homeDir` command-line matches.
+ */
 const WINDOWS_EDGE_PROCESS_IMAGES = new Set([
   "node.exe",
   "cmd.exe",
+  "powershell.exe",
+  "pwsh.exe",
   "letagents-process-tree.exe",
   "codex.exe",
   "opencode.exe",
