@@ -1473,13 +1473,14 @@ export function exitWaitClock(agent: Awaited<ReturnType<typeof codexDaemonFixtur
      * Lets the wait for an exit that cannot be recorded run out, the way the
      * fault makes it. A bound ends only once the recording has reached the
      * fault and waits on that bound, and no attempt is cut short on its way
-     * there: an attempt that is cut while it still waits for the entry's
-     * queue stays in that queue and runs again later, beside the last one.
-     * So the ordinary attempts' time ends when one of them is held by the
-     * fault, or, where the fault fails them, between two of them. After that
-     * a step that fails leaves nothing more to wait for; approvals that never
-     * close cost the last attempt half its time; a queue or a save that never
-     * answers costs it all of that time, and the save then has its own.
+     * there, so that the same steps follow in every run: the tests that use
+     * this are about a recording the fault stops, not about one that was
+     * still on its way to it. So the ordinary attempts' time ends when one of
+     * them is held by the fault, or, where the fault fails them, between two
+     * of them. After that a step that fails leaves nothing more to wait for;
+     * approvals that never close cost the last attempt half its time; a
+     * queue or a save that never answers costs it all of that time, and the
+     * save then has its own.
      *
      * `beforeItStops` is awaited before the last of those bounds, which is
      * the one whose end makes the daemon stop waiting for the exit and

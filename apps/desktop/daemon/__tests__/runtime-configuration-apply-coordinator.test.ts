@@ -10,6 +10,7 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
 
 import { DaemonAuthority } from "../daemon-authority.js";
+import { ImmutableExecutionError } from "../durability-store.js";
 import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import type { ProviderActionHandle, ProviderActionTerminal } from "../provider-action-port.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
@@ -843,6 +844,107 @@ for (const fault of ["approvals fail", "approvals never return", "the terminal c
     await coordinator.drain();
   });
 }
+
+/** A coordinator over ports that count what an exit's recording does, with the entry's queue and the store as the daemon has them. */
+function countedTerminalRecording(options: { queueBusy?: boolean; firstSaveIsSlow?: boolean } = {}) {
+  const liveHandles = new Map([["agent-1", handle]]);
+  const entry = manifestEntry();
+  const done = { reads: 0, saves: 0, approvals: 0, projections: 0, convergence: 0, deliveries: 0, told: 0 };
+  let saved: ExecutionTerminalPayload | null = null;
+  // The entry's queue: one operation at a time, in order. Busy, it runs nothing until it is let go.
+  let letQueueGo = () => {};
+  let queue: Promise<unknown> = options.queueBusy ? new Promise<void>(resolve => { letQueueGo = resolve; }) : Promise.resolve();
+  // The store: one save at a time, in order, and it keeps the first terminal it is given.
+  let letFirstSaveLand = () => {};
+  const firstSaveLands = options.firstSaveIsSlow ? new Promise<void>(resolve => { letFirstSaveLand = resolve; }) : Promise.resolve();
+  let store: Promise<unknown> = Promise.resolve();
+  const ports: ProviderTerminalPorts = {
+    authority: terminalAuthority, currentDaemonGeneration: () => 7, nowMs: () => Date.parse(terminal.endedAt), liveHandles,
+    manifest: { getEntry: async () => entry, load: async () => { done.reads += 1; return { entries: [entry] }; } },
+    durability: {
+      getAttempt: async () => ({ execution_generations: [{ execution_generation_id: "generation-1",
+        actor: "daemon-provider", generation: 7, terminal: saved }] }) as never,
+      recordTerminal: (_attempt, _execution, payload) => {
+        const first = (done.saves += 1) === 1;
+        const save = store.then(async () => {
+          if (first) await firstSaveLands;
+          if (saved) throw new ImmutableExecutionError("Execution terminal payloads are append-only and immutable.");
+          saved = structuredClone(payload);
+          return {} as never;
+        });
+        store = save.then(() => undefined, () => undefined);
+        return save;
+      },
+      releaseTerminalExecutionFence: async () => {},
+    },
+    runtimeCustody: { deletePendingResumeBinding: () => {} },
+    streams: { remove: exact => exact === installation && liveHandles.delete("agent-1"), isLatestInstallation: exact => exact === installation },
+    settleRuntimeApprovals: async () => { done.approvals += 1; },
+    delivery: { start: async () => { done.deliveries += 1; } },
+    serializeEntry: (_id, operation) => {
+      const run = queue.then(operation);
+      queue = run.then(() => undefined, () => undefined);
+      return run;
+    },
+    serializeManifest: async operation => operation(),
+    transitionOnce: async (_id, state, condition, _cause, _actor, reconciliation) => {
+      entry.observed_state = state; entry.condition = condition; entry.reconciliation = reconciliation; done.projections += 1;
+    },
+    requestConvergence: () => { done.convergence += 1; },
+    exitUnsettled: () => { done.told += 1; },
+  };
+  return { coordinator: new ProviderTerminalCoordinator(ports), entry, done, saved: () => saved, letQueueGo: () => letQueueGo(), letFirstSaveLand: () => letFirstSaveLand() };
+}
+
+test("an attempt whose time ends while it waits for the entry's queue does nothing when its turn comes: the last attempt records the exit, once", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const flush = async () => { for (let turn = 0; turn < 8; turn += 1) await new Promise<void>(resolve => setImmediate(resolve)); };
+  const pass = async (ms: number) => { for (let left = ms; left > 0; left -= 250) { t.mock.timers.tick(Math.min(250, left)); await flush(); } };
+  // Other work holds the entry's queue for longer than the ordinary attempts have.
+  const recording = countedTerminalRecording({ queueBusy: true });
+  const { coordinator, done } = recording;
+  void coordinator.handleTerminal(installation, terminal).catch(() => undefined);
+  // The ordinary attempts' time ends, and a moment later the last attempt takes its place in the queue.
+  await pass(EXIT_SETTLEMENT_BOUNDS.settleMs + 250);
+  assert.deepEqual(done, { reads: 0, saves: 0, approvals: 0, projections: 0, convergence: 0, deliveries: 0, told: 0 },
+    "the first attempt has not had its turn, and neither has the last one, which waits behind it");
+
+  recording.letQueueGo();
+  await flush();
+  assert.equal((coordinator as unknown as { pending: Map<unknown, unknown> }).pending.size, 0, "the last attempt records the exit as soon as the queue lets it");
+  // The attempt that was given up read the manifest, saved the terminal, closed the approvals and recorded the exit
+  // when its turn came, and the last attempt, behind it, then did the same work over again.
+  assert.deepEqual(done, { reads: 2, saves: 1, approvals: 1, projections: 1, convergence: 1, deliveries: 1, told: 0 },
+    "the exit is recorded by one attempt: the one that was given up does nothing when its turn comes");
+  assert.equal(recording.entry.reconciliation?.last_terminal?.terminal_cause, "stopped");
+  await pass(60_000);
+  assert.deepEqual(done, { reads: 2, saves: 1, approvals: 1, projections: 1, convergence: 1, deliveries: 1, told: 0 }, "and nothing follows");
+});
+
+test("an attempt that reads no saved terminal while the attempt before it is still saving one finishes from the terminal the store kept", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const flush = async () => { for (let turn = 0; turn < 8; turn += 1) await new Promise<void>(resolve => setImmediate(resolve)); };
+  const pass = async (ms: number) => { for (let left = ms; left > 0; left -= 250) { t.mock.timers.tick(Math.min(250, left)); await flush(); } };
+  // The first attempt's save is still under way when the ordinary attempts' time ends.
+  const recording = countedTerminalRecording({ firstSaveIsSlow: true });
+  const { coordinator, done } = recording;
+  void coordinator.handleTerminal(installation, terminal).catch(() => undefined);
+  await flush();
+  assert.equal(done.saves, 1, "the first attempt is saving the terminal");
+  await pass(EXIT_SETTLEMENT_BOUNDS.settleMs + 250);
+  assert.equal(done.saves, 2, "the last attempt read that no terminal was saved yet, and saves it as well");
+  assert.equal(recording.saved(), null);
+
+  // The first save lands. The store keeps it and refuses the second one.
+  recording.letFirstSaveLand();
+  await flush();
+  assert.equal(recording.saved()?.terminal_cause, "stopped");
+  assert.equal((coordinator as unknown as { pending: Map<unknown, unknown> }).pending.size, 0, "the exit's recording ends");
+  assert.deepEqual([done.approvals, done.projections, done.convergence, done.deliveries, done.told], [1, 1, 1, 1, 0],
+    "the last attempt goes on from the terminal the store kept: it closes the approvals and records the exit, with nothing left out to tell the owner of");
+  assert.equal(recording.entry.observed_state, "failed");
+  assert.equal(recording.entry.reconciliation?.last_terminal?.terminal_cause, "stopped");
+});
 
 test("an operator's recovery supersedes an exit that is still being recorded, and an update or a retirement waits for an exit no longer than its bound", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });

@@ -720,6 +720,49 @@ for (const fault of Object.keys(EXIT_RECORDING_FAULTS) as Array<keyof typeof EXI
   });
 }
 
+test("an attempt to record a crash that is given up while it waits for the agent's queue records nothing when its turn comes", async () => {
+  const { EXIT_UNSETTLED_NOTICE } = await import(new URL("../../daemon/provider-terminal-coordinator.ts", import.meta.url).href);
+  const agent = await codexDaemonFixture({ holdExits: true });
+  let endFault = () => {};
+  let letQueueGo = () => {};
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+    const terminals = agent.exitSettlement();
+    const wait = exitWaitClock(agent);
+    endFault = wait.fault("closing its approvals fails every time");
+    // Other work keeps the agent's queue for longer than the ordinary attempts have.
+    const queue = terminals.ports.serializeEntry;
+    const free = new Promise<void>((resolve) => { letQueueGo = resolve; });
+    let waiting = 0;
+    terminals.ports.serializeEntry = async (entryId, operation) => { waiting += 1; await free; return queue(entryId, operation); };
+
+    agent.exitProcess(0, "SIGKILL");
+    await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id) && waiting >= 1, "the first attempt waits for the agent's queue");
+    // The ordinary attempts' time ends while the first of them still waits, and the last attempt takes its place behind it.
+    wait.pass(terminals.bounds.settleMs);
+    await agent.eventually(() => waiting >= 2, "the last attempt waits for the queue as well");
+    assert.equal(agent.harness.launches.length, 1, "nothing replaces the process while its exit waits to be recorded");
+
+    terminals.ports.serializeEntry = queue;
+    letQueueGo();
+    await agent.eventually(() => !terminals.settling(agent.id), "the last attempt records the exit once the queue lets it through");
+    await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again");
+    await answerOnReplacement(agent, 2);
+    assert.equal(agent.published.at(-1), "Answer 2.");
+    // The attempt that was given up had its turn first. It used to record the crash as well, with the last attempt behind it.
+    assert.deepEqual((await agent.transitionCauses()).filter((cause) => /provider terminal/.test(cause)), ["provider terminal: crashed"], "the crash is recorded once");
+    const entry = (await agent.request("manifest.list")).result[0] as { activity?: Array<{ summary: string }>; reconciliation?: { exit_timestamps_ms?: number[] } };
+    assert.equal(entry.activity?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length, 1, "the owner reads once that the exit could not be recorded in full");
+    assert.equal(entry.reconciliation?.exit_timestamps_ms?.length, 1, "and it counts once toward the agent's crash-loop limit");
+    assert.equal(agent.harness.launches.length, 2, "one replacement");
+  } finally {
+    letQueueGo();
+    endFault();
+    await agent.cleanup();
+  }
+});
+
 for (const fault of ["closing its approvals never returns", "its entry's queue never answers"] as const) {
   test(`an agent restarted to apply a setting, whose stopped process cannot be recorded because ${fault}, runs again with the setting after a bounded wait`, async () => {
     const agent = await codexDaemonFixture();
