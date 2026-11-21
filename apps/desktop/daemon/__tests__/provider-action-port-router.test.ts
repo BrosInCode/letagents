@@ -28,7 +28,6 @@ const TEST_PROVIDER_TURN_AUTHORITY = {
   provider_continuation_id: "thread-native-resolution",
 } as const;
 import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
-import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
@@ -1223,15 +1222,6 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.ok(first.work_attempt_id);
     const firstGeneration = first.provider_ref?.execution_generation_id;
     assert.ok(firstGeneration);
-    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).bind({
-      entry_id: entry.id,
-      room_id: entry.room_id,
-      work_attempt_id: first.work_attempt_id!,
-      execution_generation_id: firstGeneration!,
-      agent_session_id: "agent_session_exact",
-      agent_session_token: "test-session-token",
-      api_url: "https://letagents.test",
-    });
     const controlParams = {
       id: entry.id,
       daemon_generation: ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation,
@@ -1265,7 +1255,6 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.match(unowned.error ?? "", /exact room message|exact room turn|durable authority binding/i);
     assert.equal(calls.some((call) => call.startsWith("control:")), false,
       "session-level provider control is never dispatched without an exact daemon-owned room turn");
-    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).unbind(entry.id);
     const fenceDirectory = join(dirname(first.workspace_path!), ".letagents-supervisor-workspace.fences");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "stopped" })).ok, true);
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "stopped", "Claude router stop");

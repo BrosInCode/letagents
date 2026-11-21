@@ -129,6 +129,37 @@ export const entryReads = storeMethods({
     return row?.authority_mode === "typed" ? "typed" : null;
   },
 
+  /**
+   * True when the exact persisted process birth is frozen under a retired
+   * pre-typed authority mode ("legacy" or "typed_shadow"), so live callers fail
+   * closed without launching a competitor and Stop uses exact-ref retirement.
+   */
+  async hasRetiredRuntimeLifecycleAuthority(input: {
+    agentId: string;
+    executionGenerationId: string;
+    providerConnection: DaemonProviderConnection;
+    configurationRevision: number;
+  }): Promise<boolean> {
+    const snapshot = structuredClone(input);
+    if (!snapshot.agentId || !snapshot.executionGenerationId
+      || snapshot.providerConnection.pid === null || !snapshot.providerConnection.processIdentity
+      || !Number.isSafeInteger(snapshot.configurationRevision) || snapshot.configurationRevision < 1) return false;
+    const provider = {
+      codex_app_server: "codex",
+      claude_cli: "claude-code",
+      cursor_cli: "cursor",
+      opencode_server: "open-model",
+    } as const;
+    const runtimeGenerationId = executionRuntimeStorageIdentity(snapshot.agentId,
+      snapshot.executionGenerationId, snapshot.providerConnection.kind,
+      snapshot.providerConnection.pid, snapshot.providerConnection.processIdentity);
+    const row = (await this.getDatabase()).prepare(`SELECT authority_mode FROM execution_runtime_generations
+      WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=? AND provider=? AND config_revision=?`)
+      .get(snapshot.agentId, snapshot.executionGenerationId, runtimeGenerationId,
+        provider[snapshot.providerConnection.kind], snapshot.configurationRevision) as Row | undefined;
+    return row?.authority_mode === "legacy" || row?.authority_mode === "typed_shadow";
+  },
+
   /** Bounded pending tail; the durable state, not this read, owns retries. */
   async listPendingTypedLifecycleEffects(agentId?: string, limit = 32, afterFactSequence = 0): Promise<PendingTypedLifecycleEffect[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128) throw new Error("Lifecycle effect read limit is invalid.");

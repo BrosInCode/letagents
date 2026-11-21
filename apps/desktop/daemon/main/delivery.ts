@@ -64,7 +64,6 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
           ? { repair: (handle, request, options) => providerPort.repairContinuation!(handle, request, options) }
           : {}),
         promote: (entryId, handle, executionGenerationId) => this.installProviderHandle(entryId, handle, executionGenerationId),
-        wakeDelivery: (entryId) => this.startSupervisedDelivery(entryId, "wake"),
       },
       recordNotices: async (entryId, notices) => { await this.providerExecution?.noteRepairNotices(entryId, notices); },
       notifyStateChanged: () => this.notifyStateChanged(),

@@ -14,7 +14,7 @@ import { isOpenModelReasoningEffort, resolveOpenModelEffortCatalog, type OpenMod
 import { resolveOpenModelLimits } from "../open-model-limits.js";
 import { OPENCODE_RUNTIME_VERSION } from "../opencode-runtime.js";
 import { OpenCodeServerClient, type OpenCodeRuntimeAuth } from "../opencode-server-client.js";
-import { type OpenCodeRuntimeControl, readRuntimeControl, safeRuntimeId, withRuntimeLaunchOwnership, writeRuntimeControl } from "./runtime-launch.js";
+import { type OpenCodeRuntimeControl, type OpenCodeWritableRuntimeControl, readRuntimeControl, safeRuntimeId, withRuntimeLaunchOwnership, writeRuntimeControl } from "./runtime-launch.js";
 import { OpenCodeRuntimeGoneError, OpenCodeStartTimeoutError } from "./errors.js";
 import { OpenModelAdapterTurnWait } from "./adapter-turn-wait.js";
 import { OpenModelHandle } from "./handle.js";
@@ -125,7 +125,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
       username: OPENCODE_SERVER_USERNAME,
       password: randomBytes(32).toString("base64url"),
     };
-    const initialControl: OpenCodeRuntimeControl = { ...auth, lifecycleAuthorityMode };
+    const initialControl: OpenCodeWritableRuntimeControl = { ...auth, lifecycleAuthorityMode };
     await writeRuntimeControl(authPath, initialControl);
     const pluginPath = join(runtimeRoot, "credential-boundary.mjs");
     await writeFile(pluginPath, credentialBoundaryPluginSource(), {
@@ -210,7 +210,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
     const launchNotice = req.workspaceKind === "room_scratch"
       ? await this.checkScratchWorkspaceBoundary(req.cwd, runtimeRoot, env)
       : null;
-    const intentControl: OpenCodeRuntimeControl = {
+    const intentControl: OpenCodeWritableRuntimeControl = {
       ...initialControl,
       startupIntent: { url },
     };

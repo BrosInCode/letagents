@@ -81,7 +81,6 @@ export type ContinuationRepairRuntime = {
     options: { checkpointReplacement: (providerContinuationId: string) => Promise<void> },
   ) => Promise<ProviderContinuationRepairResult>;
   promote(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): Promise<void>;
-  wakeDelivery?(entryId: string): Promise<void>;
 };
 
 export type ContinuationRepairCoordinatorOptions = {
@@ -302,15 +301,6 @@ export class ContinuationRepairCoordinator {
           result.replacementProviderContinuationId,
           continuityReset,
         );
-        // Promotion installs the replacement handle before inbox.commit() so a
-        // failed promotion never unblocks the head. If typed admission already
-        // started delivery before commit landed, wake the new pump now so the
-        // freshly pending head never waits for an unrelated poll.
-        if (continuityReset) {
-          await Promise.resolve()
-            .then(() => this.runtime.wakeDelivery?.(entry.id))
-            .catch(() => undefined);
-        }
         // The provider returns its owner-visible lines. A line that it streams waits for this lane, and
         // is dropped once the handle of a replaced conversation is promoted. The provider is told when
         // its lines are recorded: a line that was not recorded was not said. Neither step undoes the

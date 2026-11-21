@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
@@ -22,7 +23,12 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { type SupervisedDeliveryHttp } from "../supervised-agent-delivery.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
-import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
+import { defaultGetProcessIdentity, type ProviderProcessExit } from "../../electron/main/agents/provider-evidence.js";
+import {
+  OpenModelProviderAdapter,
+  type OpenModelProviderAdapterDependencies,
+} from "../../electron/main/agents/open-model-provider-adapter.js";
+import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import {
   runtimeReadySubscription,
@@ -2031,6 +2037,323 @@ test("persisted legacy and typed_shadow live runtimes fail closed once to coordi
       }, `${priorMode} agent restarts cleanly into a fresh typed generation`, 5_000);
       const freshExecutionGenerationId = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
         .find((candidate) => candidate.id === agentId)!.provider_ref!.execution_generation_id;
+      await second.stop();
+      second = null;
+
+      const verifyDb = new DatabaseSync(paths.manifestPath);
+      try {
+        const freshRow = verifyDb.prepare(
+          "SELECT authority_mode FROM execution_runtime_generations WHERE agent_id = ? AND execution_generation_id = ?",
+        ).get(agentId, freshExecutionGenerationId) as { authority_mode: string } | undefined;
+        assert.equal(freshRow?.authority_mode, "typed");
+      } finally {
+        verifyDb.close();
+      }
+    } finally {
+      await first.stop().catch(() => undefined);
+      await second?.stop().catch(() => undefined);
+      await env.cleanup();
+    }
+  }
+});
+
+test("persisted pre-typed Open Model sidecars and rows retire through real adapter exact birth fencing before fresh typed start", async () => {
+  for (const priorMode of ["legacy", "typed_shadow"] as const) {
+    const env = await fixture();
+    const paths = {
+      lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
+      manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+      attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+    };
+    const runtimeRoot = join(env.root, "opencode-runtime");
+    const source = await committedSourceRepository(env.root, `open-model-retired-${priorMode}`);
+    await primeDaemonBareRepository(env.root, source);
+    const agentId = `open_model_retired_${priorMode}`;
+    const roomId = `room_open_model_${priorMode}`;
+
+    const makeDeliveryHttp = (): SupervisedDeliveryHttp => ({
+      latest: async () => ({ messages: [] }),
+      poll: async ({ signal }) => new Promise((resolve) => {
+        if (signal.aborted) resolve({ messages: [] });
+        else signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+      }),
+      publish: async () => {},
+    });
+    let sessionSeq = 0;
+    const grantHttp = {
+      ...noWorkLeaseHttp,
+      createWorkerSession: async () => ({
+        sessionId: `session_om_${priorMode}_${++sessionSeq}`,
+        bearer: `bearer_om_${priorMode}_${sessionSeq}`,
+        bearerId: `bearer_id_om_${priorMode}_${sessionSeq}`,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      }),
+    };
+    const installGrantAndCredential = async (bootstrap: boolean) => {
+      const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_open_model_credential", {
+        entry_id: agentId,
+        api_key: "test-open-model-key",
+        base_url: "https://models.example.test/v1/",
+        model: "qwen/qwen3-coder",
+        daemon_generation: generation,
+      })).ok, true);
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+        entry_id: agentId,
+        room_id: roomId,
+        agent_key: `owner/${agentId}`,
+        grant_id: `grant_${agentId}_${generation}`,
+        supervisor_grant: `grant-secret-${agentId}`,
+        grant_generation: generation,
+        api_url: "http://127.0.0.1:9",
+        daemon_generation: generation,
+        host_id: "host-test",
+        installation_id: "installation-test",
+        grant_expires_at: "2099-01-01T00:00:00.000Z",
+      })).ok, true);
+      if (bootstrap) {
+        assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+          entry_id: agentId,
+          daemon_generation: generation,
+        })).ok, true);
+      }
+    };
+
+    // Shared simulated OpenCode process table across daemon restarts.
+    let nextPid = 8100;
+    let nextPort = 44100;
+    let nextSession = 0;
+    let launchCount = 0;
+    const liveProcesses = new Map<number, { birth: string; resolveExit: (exit: ProviderProcessExit) => void; exited: Promise<ProviderProcessExit> }>();
+    const sessions = new Set<string>();
+    let identityReads = 0;
+    let forceUnknownPid: number | null = null;
+    let ignoreSignals = false;
+    const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+    const createOpenModelRouter = () => new ProviderActionPortRouter({
+      "open-model": async () => new OpenModelProviderAdapter({
+        binary: "/opt/letagents/opencode",
+        runtimeRoot,
+        stopGraceMs: 40,
+        startTimeoutMs: 10_000,
+        turnTimeoutMs: 500,
+        dependencies: {
+          resolveMcpRuntime: () => ({ entryPath: join(env.root, "letagents-mcp-entry.js"), readRoots: [] }),
+          launch: () => {
+            launchCount += 1;
+            const pid = ++nextPid;
+            const birth = `opencode-birth-${pid}`;
+            let resolveExit!: (exit: ProviderProcessExit) => void;
+            const exited = new Promise<ProviderProcessExit>((resolve) => { resolveExit = resolve; });
+            liveProcesses.set(pid, { birth, resolveExit, exited });
+            const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+            Object.assign(child, { pid, unref() {} });
+            return { child, exited };
+          },
+          getProcessIdentity: (pid) => {
+            identityReads += 1;
+            if (forceUnknownPid === pid) return undefined;
+            return liveProcesses.get(pid)?.birth ?? null;
+          },
+          observeProcessExit: (pid) => liveProcesses.get(pid)?.exited ?? Promise.resolve({ type: "exit", code: null, signal: null }),
+          signalProcess: (pid, signal, identity) => {
+            signals.push({ pid, signal, identity });
+            if (ignoreSignals) return;
+            const live = liveProcesses.get(pid);
+            if (live && live.birth === identity) {
+              liveProcesses.delete(pid);
+              live.resolveExit({ type: "exit", code: 0, signal });
+            }
+          },
+          allocatePort: async () => ++nextPort,
+          discoverRuntimeConnection: async () => null,
+          probeGit: async () => null,
+          fetch: async (input, init) => {
+            const url = new URL(input);
+            if (url.pathname.endsWith("/models")) {
+              return new Response(JSON.stringify({ data: [{ id: "qwen/qwen3-coder", context_length: 262144 }] }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            if (url.pathname === "/global/health") {
+              return new Response(JSON.stringify({ healthy: true, version: "1.18.20" }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            if (url.pathname === "/session" && init?.method === "POST") {
+              const id = `ses_${priorMode}_${++nextSession}`;
+              sessions.add(id);
+              return new Response(JSON.stringify({ id }), { status: 200, headers: { "content-type": "application/json" } });
+            }
+            if (url.pathname === "/session") {
+              return new Response(JSON.stringify([...sessions].map((id) => ({ id }))), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            if (url.pathname === "/config") {
+              return new Response(JSON.stringify({ model: "letagents-open-model/qwen/qwen3-coder", permission: { "*": "allow" } }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
+          },
+        },
+      }),
+    });
+
+    const first = new SupervisorDaemon(paths, "darwin", createOpenModelRouter(), true, 15_000, undefined, {}, makeDeliveryHttp(), grantHttp);
+    let second: SupervisorDaemon | null = null;
+    try {
+      await first.start();
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
+        entry: {
+          ...entry,
+          id: agentId,
+          room_id: roomId,
+          provider: "open-model",
+          model: "qwen/qwen3-coder",
+          permission_profile_id: "full_access",
+          observed_state: "absent",
+          source_repo_path: source,
+          workspace_path: null,
+          work_attempt_id: null,
+        },
+      })).ok, true);
+      await installGrantAndCredential(true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.observed_state === "idle" && current.condition === "none";
+      }, `${priorMode} open-model seed ready`, 5_000);
+      const seeded = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+        .find((candidate) => candidate.id === agentId)!;
+      const originalConnection = seeded.provider_ref!.provider_connection;
+      assert.ok(originalConnection?.kind === "opencode_server" && originalConnection.pid && originalConnection.processIdentity);
+      const originalExecutionGenerationId = seeded.provider_ref!.execution_generation_id;
+      const originalWorkAttemptId = seeded.work_attempt_id!;
+      await first.stop();
+
+      // Simulate an older daemon's persisted pre-typed database row AND private server-auth.json sidecar.
+      const db = new DatabaseSync(paths.manifestPath);
+      try {
+        const updated = db.prepare(
+          "UPDATE execution_runtime_generations SET authority_mode = ? WHERE agent_id = ?",
+        ).run(priorMode, agentId);
+        assert.equal(updated.changes, 1);
+      } finally {
+        db.close();
+      }
+      const savedAuth = JSON.parse(await readFile(originalConnection.serverAuthPath, "utf8")) as Record<string, unknown>;
+      await writePrivateFileAtomically(
+        originalConnection.serverAuthPath,
+        `${JSON.stringify({ ...savedAuth, lifecycleAuthorityMode: priorMode })}\n`,
+      );
+
+      // Reset observation counters before starting the upgraded daemon while the old process survives.
+      identityReads = 0;
+      signals.length = 0;
+      const launchesBeforeUpgrade = launchCount;
+
+      second = new SupervisorDaemon(paths, "darwin", createOpenModelRouter(), true, 15_000, undefined, {}, makeDeliveryHttp(), grantHttp);
+      await second.start();
+      await installGrantAndCredential(false);
+
+      // 1. Live pre-typed runtime fails closed once to coordination_blocked without admitting or launching a competitor.
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.condition === "coordination_blocked";
+      }, `${priorMode} open-model blocks once`, 5_000);
+      assert.equal(launchCount, launchesBeforeUpgrade, `${priorMode} must not spawn beside surviving old OpenCode process`);
+      assert.equal(signals.length, 0, `${priorMode} running convergence must not kill before explicit Stop`);
+      const attemptsBeforeStop = await new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, paths.manifestPath)
+        .getAttempt(originalWorkAttemptId);
+      assert.equal(attemptsBeforeStop.execution_generations.length, 1, `${priorMode} must not create a junk execution generation`);
+      assert.equal(attemptsBeforeStop.execution_generations[0]!.terminal, null);
+
+      // 2. When process birth cannot be verified, Stop fails closed and never falsely reports stopped.
+      forceUnknownPid = originalConnection.pid;
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: agentId, desired_state: "stopped",
+      })).ok, true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.desired_state === "stopped"
+          && current.condition === "coordination_blocked"
+          && /could not be stopped/i.test(current.last_error ?? "");
+      }, `${priorMode} stop fails closed when birth cannot be verified`, 5_000);
+      const unverifiedStop = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+        .find((candidate) => candidate.id === agentId)!;
+      assert.notEqual(unverifiedStop.observed_state, "stopped");
+      assert.equal(signals.length, 0);
+      const attemptAfterUnverifiedStop = await new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, paths.manifestPath)
+        .getAttempt(originalWorkAttemptId);
+      assert.equal(attemptAfterUnverifiedStop.execution_generations[0]!.terminal, null);
+
+      // 2b. When the surviving process ignores TERM and KILL, Stop still refuses to report stopped or settle terminal.
+      forceUnknownPid = null;
+      ignoreSignals = true;
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: agentId, desired_state: "stopped",
+      })).ok, true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.condition === "coordination_blocked"
+          && /has not yet proved the recorded process birth is gone/i.test(current.last_error ?? "");
+      }, `${priorMode} stop fails closed while process survives`, 5_000);
+      assert.deepEqual(signals, [
+        { pid: originalConnection.pid, signal: "SIGTERM", identity: originalConnection.processIdentity },
+        { pid: originalConnection.pid, signal: "SIGKILL", identity: originalConnection.processIdentity },
+      ]);
+      const attemptAfterStubbornStop = await new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, paths.manifestPath)
+        .getAttempt(originalWorkAttemptId);
+      assert.equal(attemptAfterStubbornStop.execution_generations[0]!.terminal, null);
+
+      // 3. With verifiable process birth and real exit, Stop signals exact (pid, birth), records terminal, and stops cleanly.
+      ignoreSignals = false;
+      signals.length = 0;
+      identityReads = 0;
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: agentId, desired_state: "stopped",
+      })).ok, true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.observed_state === "stopped" && current.condition === "none";
+      }, `${priorMode} open-model stops via exact birth fencing`, 5_000);
+      assert.ok(identityReads >= 1, `${priorMode} stop must inspect exact process identity`);
+      assert.deepEqual(signals, [
+        { pid: originalConnection.pid, signal: "SIGTERM", identity: originalConnection.processIdentity },
+      ]);
+      assert.equal(liveProcesses.has(originalConnection.pid), false);
+      const attemptAfterStop = await new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, paths.manifestPath)
+        .getAttempt(originalWorkAttemptId);
+      assert.equal(attemptAfterStop.execution_generations[0]!.terminal?.terminal_cause, "stopped");
+
+      // 4. Starting fresh passes assertPriorStartupProcessGone, rewrites server-auth.json to typed, and converges to idle.
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: agentId, desired_state: "running",
+      })).ok, true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.observed_state === "idle"
+          && current.condition === "none"
+          && current.provider_ref?.execution_generation_id !== originalExecutionGenerationId;
+      }, `${priorMode} open-model starts fresh into typed generation`, 5_000);
+      const restarted = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+        .find((candidate) => candidate.id === agentId)!;
+      const freshExecutionGenerationId = restarted.provider_ref!.execution_generation_id;
+      const freshAuth = JSON.parse(await readFile(originalConnection.serverAuthPath, "utf8")) as {
+        lifecycleAuthorityMode?: string;
+      };
+      assert.equal(freshAuth.lifecycleAuthorityMode, "typed");
       await second.stop();
       second = null;
 

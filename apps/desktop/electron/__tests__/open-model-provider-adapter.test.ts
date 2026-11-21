@@ -5229,3 +5229,131 @@ test("Open Model opens staged room files only when its running runtime may read 
   assert.ok(attached && !("state" in attached));
   assert.equal(replacement.roomTurnFileAccess(attached), null);
 });
+
+test("Open Model refuses live pre-typed sidecars on attach, proves death or terminates via stopRef, and allows a fresh typed launch afterwards", async () => {
+  for (const priorMode of ["legacy", "typed_shadow"] as const) {
+    const { handle, harness, runtimeRoot } = await spawnAdapter({
+      workAttemptId: `wa-pre-typed-${priorMode}`,
+      lifecycleAuthorityMode: "typed",
+    });
+    const connection = handle.providerConnection;
+    assert.ok(connection?.kind === "opencode_server");
+    const saved = JSON.parse(await readFile(connection.serverAuthPath, "utf8")) as Record<string, unknown>;
+    await writePrivateFileAtomically(
+      connection.serverAuthPath,
+      `${JSON.stringify({ ...saved, lifecycleAuthorityMode: priorMode })}\n`,
+    );
+    const ref = {
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId!,
+      providerConnection: connection,
+    };
+
+    // 1. Live pre-typed runtime: attach refuses admission and resume refuses to spawn a competitor.
+    let identityState: string | null | undefined = connection.processIdentity!;
+    let identityReads = 0;
+    const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+    let killOnSignal: NodeJS.Signals | null = null;
+    const upgraded = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot,
+      stopGraceMs: 30,
+      startTimeoutMs: LAUNCH_BUDGET_MS,
+      turnTimeoutMs: 100,
+      dependencies: {
+        ...harness.dependencies,
+        getProcessIdentity: (pid) => {
+          if (pid !== connection.pid) return null;
+          identityReads += 1;
+          return identityState;
+        },
+        signalProcess: (pid, signal, identity) => {
+          signals.push({ pid, signal, identity });
+          if (killOnSignal === signal) identityState = null;
+        },
+      },
+    });
+    assert.equal(await upgraded.attach(ref), null, `${priorMode} live sidecar is never admitted to typed delivery`);
+    assert.ok(identityReads >= 1);
+    await assert.rejects(
+      upgraded.resume(ref, spawnRequest({ workAttemptId: handle.workAttemptId, lifecycleAuthorityMode: "typed" })),
+      /could not be authenticated/,
+    );
+    assert.equal(harness.launches.length, 1, `${priorMode} resume never launches a second writer`);
+
+    // 2. Unverifiable birth refuses to signal or report stopped.
+    identityState = undefined;
+    await assert.rejects(
+      upgraded.stopRef(ref, { graceMs: 20 }),
+      /process birth cannot be verified/,
+    );
+    assert.equal(signals.length, 0, `${priorMode} unverifiable birth sends zero signals`);
+
+    // 3. Stubborn surviving process escalates TERM -> KILL and refuses to claim stopped.
+    identityState = connection.processIdentity!;
+    killOnSignal = null;
+    await assert.rejects(
+      upgraded.stopRef(ref, { graceMs: 25 }),
+      /has not yet proved the recorded process birth is gone/,
+    );
+    assert.deepEqual(
+      signals.map(({ pid, signal, identity }) => ({ pid, signal, identity })),
+      [
+        { pid: connection.pid!, signal: "SIGTERM", identity: connection.processIdentity! },
+        { pid: connection.pid!, signal: "SIGKILL", identity: connection.processIdentity! },
+      ],
+    );
+
+    // 4. Reused PID (different birth) settles without signaling the unrelated process.
+    signals.length = 0;
+    identityState = "opencode-birth-reused-9999";
+    const reused = await upgraded.stopRef(ref, { graceMs: 25 });
+    assert.equal(reused.terminalCause, "stopped");
+    assert.equal(reused.providerContinuationId, ref.providerContinuationId);
+    assert.equal(signals.length, 0, `${priorMode} reused PID is never signaled`);
+
+    // 5. Already-dead pre-typed sidecar reports terminal on attach().
+    identityState = null;
+    const deadAttach = await upgraded.attach(ref);
+    assert.ok(deadAttach && "state" in deadAttach && deadAttach.state === "terminal");
+
+    // 6. Live pre-typed runtime killed cleanly via stopRef -> subsequent fresh spawn writes typed sidecar.
+    identityState = connection.processIdentity!;
+    killOnSignal = "SIGTERM";
+    const stopped = await upgraded.stopRef(ref, { graceMs: 50 });
+    assert.equal(stopped.terminalCause, "stopped");
+    assert.equal(stopped.providerContinuationId, ref.providerContinuationId);
+    assert.deepEqual(signals, [
+      { pid: connection.pid!, signal: "SIGTERM", identity: connection.processIdentity! },
+    ]);
+
+    // Fresh spawn now passes assertPriorStartupProcessGone and rewrites server-auth.json as typed.
+    let freshPid = 7100;
+    const freshLive = new Map<number, string>();
+    const freshAdapter = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot,
+      startTimeoutMs: LAUNCH_BUDGET_MS,
+      turnTimeoutMs: 100,
+      dependencies: {
+        ...harness.dependencies,
+        launch: (input) => {
+          const launched = harness.dependencies.launch(input);
+          const pid = ++freshPid;
+          freshLive.set(pid, `opencode-birth-${pid}`);
+          Object.assign(launched.child, { pid });
+          return launched;
+        },
+        getProcessIdentity: (pid) => freshLive.get(pid) ?? null,
+      },
+    });
+    const freshHandle = await freshAdapter.spawn(
+      spawnRequest({ workAttemptId: handle.workAttemptId, lifecycleAuthorityMode: "typed" }),
+    );
+    const freshAuth = JSON.parse(await readFile(connection.serverAuthPath, "utf8")) as {
+      lifecycleAuthorityMode?: string;
+    };
+    assert.equal(freshAuth.lifecycleAuthorityMode, "typed");
+    assert.equal((freshHandle as ProviderHandle & { lifecycleAuthorityMode: string }).lifecycleAuthorityMode, "typed");
+  }
+});

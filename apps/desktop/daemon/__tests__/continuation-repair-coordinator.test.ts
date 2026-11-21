@@ -242,56 +242,6 @@ test("replacement checkpoints inbox and attempt state before manifest commit, th
   ]);
 });
 
-test("replacement repair wakes delivery after inbox commit and ignores wake errors", async () => {
-  const woke: string[] = [];
-  let replaced!: Harness;
-  replaced = fixture({
-    repair: async (_handle, _request, options) => {
-      await options.checkpointReplacement("thread-new");
-      return {
-        handle: providerHandle("thread-new"),
-        outcome: "replaced",
-        previousProviderContinuationId: "thread-old",
-        replacementProviderContinuationId: "thread-new",
-      };
-    },
-    wakeDelivery: async (entryId) => {
-      replaced.events.push("runtime.wakeDelivery");
-      woke.push(entryId);
-    },
-  });
-  assert.equal(await replaced.subject.restore(replaced.input), "replaced");
-  assert.deepEqual(woke, ["agent-1"]);
-  assert.deepEqual(
-    replaced.events.slice(replaced.events.indexOf("runtime.promote")),
-    ["runtime.promote", "inbox.commit", "runtime.wakeDelivery", "notify"],
-  );
-
-  let wakeThrows!: Harness;
-  wakeThrows = fixture({
-    repair: async (_handle, _request, options) => {
-      await options.checkpointReplacement("thread-new");
-      return {
-        handle: providerHandle("thread-new"),
-        outcome: "replaced",
-        previousProviderContinuationId: "thread-old",
-        replacementProviderContinuationId: "thread-new",
-      };
-    },
-    wakeDelivery: () => { throw new Error("delivery wake failed"); },
-  });
-  assert.equal(await wakeThrows.subject.restore(wakeThrows.input), "replaced");
-  assert.deepEqual(wakeThrows.failures, []);
-  assert.deepEqual(wakeThrows.commits, [{ repairId: "repair-1", continuation: "thread-new", continuityReset: true }]);
-
-  const rematerializedWoke: string[] = [];
-  const rematerialized = fixture({
-    wakeDelivery: async (entryId) => { rematerializedWoke.push(entryId); },
-  });
-  assert.equal(await rematerialized.subject.restore(rematerialized.input), "restored");
-  assert.deepEqual(rematerializedWoke, []);
-});
-
 test("a repair's owner-visible lines are recorded once the repair is done, for a replaced and for a restored conversation", async () => {
   // A line that the provider streams during a repair waits for the lane this repair holds. When the
   // repair replaces the conversation, the handle is promoted first and the daemon then drops the line.
@@ -501,7 +451,6 @@ type FixtureOptions = {
   recordNoticesRejects?: boolean;
   /** The recorder throws before it returns a promise. */
   recordNoticesThrows?: boolean;
-  wakeDelivery?: (entryId: string) => Promise<void>;
 };
 
 type Harness = ReturnType<typeof fixture>;
@@ -629,7 +578,6 @@ function fixture(options: FixtureOptions = {}) {
         handle = nextHandle;
         if (harness) harness.handle = handle;
       },
-      ...(options.wakeDelivery ? { wakeDelivery: options.wakeDelivery } : {}),
     },
     // Not an `async` function: one that throws here throws to its caller, with no promise to reject.
     recordNotices: (entryId, notices) => {

@@ -36,8 +36,11 @@ export async function withRuntimeLaunchOwnership<T>(
   }
 }
 
+/** Persisted sidecar authority modes include pre-upgrade values for stop/retirement only. */
+export type OpenCodePersistedLifecycleAuthorityMode = "typed" | "typed_shadow" | "legacy";
+
 export type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
-  lifecycleAuthorityMode?: "typed";
+  lifecycleAuthorityMode?: OpenCodePersistedLifecycleAuthorityMode;
   startupIntent?: {
     url: string;
   };
@@ -51,6 +54,10 @@ export type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
     pid: number;
     processIdentity: string;
   };
+};
+
+export type OpenCodeWritableRuntimeControl = Omit<OpenCodeRuntimeControl, "lifecycleAuthorityMode"> & {
+  lifecycleAuthorityMode?: "typed";
 };
 
 export function defaultLaunch(input: {
@@ -199,7 +206,9 @@ export async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeC
     throw new Error("OpenCode server authentication sidecar is malformed.");
   }
   if (value.lifecycleAuthorityMode !== undefined
-    && value.lifecycleAuthorityMode !== "typed") {
+    && value.lifecycleAuthorityMode !== "typed"
+    && value.lifecycleAuthorityMode !== "typed_shadow"
+    && value.lifecycleAuthorityMode !== "legacy") {
     throw new Error("OpenCode server authentication sidecar contains an invalid lifecycle authority.");
   }
   if (value.startupIntent !== undefined
@@ -239,7 +248,7 @@ export async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeC
   };
 }
 
-export async function writeRuntimeControl(path: string, value: OpenCodeRuntimeControl): Promise<void> {
+export async function writeRuntimeControl(path: string, value: OpenCodeWritableRuntimeControl): Promise<void> {
   // Windows: in the private runtime folder the file is private from its exclusive create; no tool runs per write.
   if (ownerPrivatePlatform() === "win32") {
     await writePrivateFileAtomically(path, `${JSON.stringify(value)}\n`, { syncDirectory: false });

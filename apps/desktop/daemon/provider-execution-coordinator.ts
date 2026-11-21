@@ -121,6 +121,12 @@ export type ProviderExecutionStore = {
     providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
     configurationRevision: number;
   }): Promise<"typed" | null>;
+  hasRetiredRuntimeLifecycleAuthority?(input: {
+    agentId: string;
+    executionGenerationId: string;
+    providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
+    configurationRevision: number;
+  }): Promise<boolean>;
   replaceEntry(
     expectedGeneration: number,
     entry: DaemonManifestEntry,
@@ -1012,7 +1018,18 @@ export class ProviderExecutionCoordinator {
     }
     if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return null;
     const attachment = await this.options.provider.attach(attachRef);
-    if (!attachment) return null;
+    if (!attachment) {
+      if (ref.provider_connection
+        && await this.options.store.hasRetiredRuntimeLifecycleAuthority?.({
+          agentId: entry.id,
+          executionGenerationId: ref.execution_generation_id,
+          providerConnection: ref.provider_connection,
+          configurationRevision: appliedRevision!,
+        })) {
+        throw new ExecutionProtocolError("identity_mismatch");
+      }
+      return null;
+    }
     if (this.isAttachTerminal(attachment)) {
       const terminal = attachment.terminal;
       if (terminal.providerContinuationId
@@ -2098,54 +2115,14 @@ export class ProviderExecutionCoordinator {
       : null;
     const exactStopRef = !handle ? exactCursorRef : null;
     if (exactStopRef && this.options.provider.stopRef) {
-      await this.options.transition(
-        entry.id,
-        "stopping",
-        entry.condition,
-        `desired state changed to ${entry.desired_state}`,
-        "daemon-convergence",
-      );
-      const terminal = await this.options.provider.stopRef(await this.providerRef(entry), {
-        actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
-      });
-      const attempt = await this.options.durability.getAttempt(exactStopRef.work_attempt_id);
-      const execution = attempt.execution_generations.find(
-        (candidate) => candidate.execution_generation_id
-          === exactStopRef.execution_generation_id,
-      );
-      if (!execution) {
-        throw new Error(
-          "Provider exact-reference stop has no matching durable execution generation.",
-        );
-      }
-      if (!execution.terminal) {
-        await this.options.durability.recordTerminal(
-          exactStopRef.work_attempt_id,
-          exactStopRef.execution_generation_id,
-          {
-            ...this.options.terminalPayload(terminal, execution.actor, exactStopRef.provider_connection),
-            actor: execution.actor,
-            generation: execution.generation,
-          },
-        );
-        await this.options.settleRuntimeApprovals(entry.id);
-        if (entry.desired_state === "stopped") {
-          await this.options.durability.releaseTerminalExecutionFence(
-            exactStopRef.work_attempt_id,
-            exactStopRef.execution_generation_id,
-          );
-        }
-      }
-      await this.options.observeProviderExit(
-        entry.id,
-        terminal,
-        "daemon-provider",
-        exactStopRef.execution_generation_id,
-        handle ?? undefined,
-      );
+      await this.stopUnattachedExactRef(entry, exactStopRef);
       return;
     }
     if (!handle && entry.provider_ref) {
+      const ref = entry.provider_ref;
+      if (entry.provider === "open-model" || ref.provider_connection?.kind === "opencode_server") {
+        if (await this.stopUnattachedOpenModelRef(entry, ref)) return;
+      }
       try {
         handle = await this.attachLiveProvider(entry);
       } catch (error) {
@@ -2178,6 +2155,97 @@ export class ProviderExecutionCoordinator {
     );
   }
 
+  private async stopUnattachedExactRef(
+    entry: DaemonManifestEntry,
+    ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
+  ): Promise<void> {
+    await this.options.transition(
+      entry.id,
+      "stopping",
+      entry.condition,
+      `desired state changed to ${entry.desired_state}`,
+      "daemon-convergence",
+    );
+    const terminal = await this.options.provider.stopRef!(await this.providerRef(entry), {
+      actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
+    });
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (!execution) {
+      throw new Error(
+        "Provider exact-reference stop has no matching durable execution generation.",
+      );
+    }
+    if (!execution.terminal) {
+      await this.options.durability.recordTerminal(
+        ref.work_attempt_id,
+        ref.execution_generation_id,
+        {
+          ...this.options.terminalPayload(terminal, execution.actor, ref.provider_connection),
+          actor: execution.actor,
+          generation: execution.generation,
+        },
+      );
+      await this.options.settleRuntimeApprovals(entry.id);
+      if (entry.desired_state === "stopped") {
+        await this.options.durability.releaseTerminalExecutionFence(
+          ref.work_attempt_id,
+          ref.execution_generation_id,
+        );
+      }
+    }
+    await this.options.observeProviderExit(
+      entry.id,
+      terminal,
+      "daemon-provider",
+      ref.execution_generation_id,
+      undefined,
+    );
+  }
+
+  /**
+   * Stop an unattached Open Model runtime via exact process-birth fencing so
+   * pre-typed sidecars ("legacy" / "typed_shadow") or unresponsive HTTP servers
+   * never fall through a null attach() into a false "stopped" state.
+   */
+  private async stopUnattachedOpenModelRef(
+    entry: DaemonManifestEntry,
+    ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
+  ): Promise<boolean> {
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (!execution) {
+      throw new Error(
+        "Provider exact-reference stop has no matching durable execution generation.",
+      );
+    }
+    if (execution.terminal) {
+      await this.options.settleRuntimeApprovals(entry.id);
+      if (entry.desired_state === "stopped") {
+        await this.options.durability.releaseTerminalExecutionFence(
+          ref.work_attempt_id,
+          ref.execution_generation_id,
+        );
+      }
+      await this.options.transition(
+        entry.id,
+        entry.desired_state === "paused" ? "paused" : "stopped",
+        "none",
+        "desired state converged without a live provider",
+        "daemon-convergence",
+      );
+      return true;
+    }
+    const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
+    if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return false;
+    await this.stopUnattachedExactRef(entry, ref);
+    return true;
+  }
+
   /**
    * Stop a pre-upgrade runtime whose frozen authority_mode is not "typed"
    * without promoting it into typed observation or delivery.
@@ -2185,8 +2253,18 @@ export class ProviderExecutionCoordinator {
   private async stopRetiredPreTypedRuntime(entry: DaemonManifestEntry): Promise<void> {
     const ref = entry.provider_ref;
     if (!ref) return;
-    const attachment = await this.options.provider.attach(await this.providerRef(entry));
-    if (!attachment) {
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (execution?.terminal) {
+      await this.options.settleRuntimeApprovals(entry.id);
+      if (entry.desired_state === "stopped") {
+        await this.options.durability.releaseTerminalExecutionFence(
+          ref.work_attempt_id,
+          ref.execution_generation_id,
+        );
+      }
       await this.options.transition(
         entry.id,
         entry.desired_state === "paused" ? "paused" : "stopped",
@@ -2195,6 +2273,15 @@ export class ProviderExecutionCoordinator {
         "daemon-convergence",
       );
       return;
+    }
+    const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
+    if (capabilities.exactProcessStop && this.options.provider.stopRef) {
+      await this.stopUnattachedExactRef(entry, ref);
+      return;
+    }
+    const attachment = await this.options.provider.attach(await this.providerRef(entry));
+    if (!attachment) {
+      throw new Error("Retired pre-typed runtime could not be attached or proven stopped.");
     }
     let terminal: ProviderActionTerminal;
     if (this.isAttachTerminal(attachment)) {
@@ -2211,10 +2298,6 @@ export class ProviderExecutionCoordinator {
         actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
       });
     }
-    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
-    const execution = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
-    );
     if (execution && !execution.terminal) {
       await this.options.durability.recordTerminal(
         ref.work_attempt_id,
