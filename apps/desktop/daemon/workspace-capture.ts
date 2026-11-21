@@ -44,7 +44,7 @@ export class WorkspaceCapture {
       clearTimeout(queueTimer);
       timing.mark("queue_wait");
       if (this.closed || expired) throw new Error("Workspace capture is closed or expired.");
-      const worker = new Worker(new URL("../../../shared/workspace-turn-capture-worker.mjs", import.meta.url), {
+      const worker = new Worker(new URL("../../shared/workspace-turn-capture-worker.mjs", import.meta.url), {
         execArgv: [], workerData: { operation, args },
       });
       this.worker = worker;
