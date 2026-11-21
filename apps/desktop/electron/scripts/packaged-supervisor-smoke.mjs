@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 
 import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 import { isolatePackagedBundle } from "./packaged-artifact-isolation.mjs";
+import { launchPackagedApp } from "./packaged-launch.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const windows = process.platform === "win32";
@@ -86,47 +87,30 @@ function request(method, params) {
 }
 
 function launch() {
-  return new Promise((resolveLaunch, reject) => {
+  return launchPackagedApp({
+    executable,
     // macOS: with a scratch HOME there is no login keychain, so the first use of secure storage opens a
     // dialog to create one and the app waits for a person. Chromium's mock keychain keeps secure storage
     // working with no dialog. The switch belongs to this test start only; a shipped app is never started with it.
-    const child = spawn(executable, process.platform === "darwin" ? ["--use-mock-keychain"] : [], {
-      // Its own APPDATA: an installed app holds the single-instance lock of the real one.
-      env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1", ELECTRON_ENABLE_LOGGING: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let output = "";
-    let ready = false;
-    const timeout = setTimeout(() => {
-      // Report where the app waits before the kill; a timeout with no evidence cannot tell a hang from a slow start.
-      // A fault of the evidence step must not replace the launch failure or skip the kill.
-      void launchTimeoutEvidence(child.pid).catch((error) => `no evidence (${error instanceof Error ? error.message : String(error)})`).then((evidence) => {
-        child.kill("SIGKILL");
-        reject(new Error(`packaged Electron launch timed out after ${launchTimeoutMs} ms: ${output}\n${evidence}`));
-      });
-    }, launchTimeoutMs);
-    const capture = (chunk) => {
-      output += chunk;
-      if (!ready && output.includes("LETAGENTS_PACKAGED_SUPERVISOR_READY")) {
-        ready = true;
-        // Model the user quitting the packaged desktop process. The detached
-        // daemon must remain live and answer after this process is gone.
-        child.kill("SIGTERM");
-        child.stdout.destroy();
-        child.stderr.destroy();
-        child.unref();
-        clearTimeout(timeout);
-        resolveLaunch(output);
-      }
-    };
-    child.stdout.on("data", capture);
-    child.stderr.on("data", capture);
-    child.once("error", (error) => { clearTimeout(timeout); reject(error); });
-    child.once("exit", (code) => {
-      clearTimeout(timeout);
-      if (!ready) reject(new Error(`packaged Electron exited ${code}: ${output}`));
-    });
+    args: process.platform === "darwin" ? ["--use-mock-keychain"] : [],
+    // Its own APPDATA: an installed app holds the single-instance lock of the real one.
+    env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1", ELECTRON_ENABLE_LOGGING: "1" },
+    timeoutMs: launchTimeoutMs,
+    collectEvidence: launchTimeoutEvidence,
   });
+}
+
+/**
+ * The app turns a failed load of its approval signer into "no signer" and still starts the daemon,
+ * so a daemon that answers does not prove the signer. The daemon's challenge names the key it enrolled.
+ * On macOS this run uses mocked secure storage: it proves the enrollment path, not Keychain protection.
+ */
+async function assertSignerEnrolled() {
+  const challenge = await request("supervisor.host_approval_challenge");
+  if (!challenge || typeof challenge.keyFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(challenge.keyFingerprint)) {
+    throw new Error(`packaged daemon has no enrolled approval signer: ${JSON.stringify(challenge)}`);
+  }
+  console.log(`packaged-smoke: approval signer enrolled, key fingerprint ${challenge.keyFingerprint.slice(0, 12)}`);
 }
 
 /** What is known at a launch timeout: the app's call stacks (macOS), the daemon's answer, and the log files of the scratch home. */
@@ -202,6 +186,7 @@ async function runLaunchChecks() {
     throw new Error(`packaged app did not replace the development daemon: ${JSON.stringify({ predecessor, first })}`);
   }
   console.log(`packaged-smoke: daemon ${first.pid} generation ${first.generation} survived first app exit`);
+  await assertSignerEnrolled();
   console.log("packaged-smoke: relaunch");
   await launch();
   const second = await request("daemon.status");
