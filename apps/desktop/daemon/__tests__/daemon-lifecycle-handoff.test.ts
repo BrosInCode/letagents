@@ -1089,7 +1089,7 @@ test("the daemon entrypoint exits after a completed handoff instead of retaining
   skip: process.platform !== "darwin" ? "the production daemon entrypoint is macOS-only" : false,
 }, async () => {
   const env = await fixture();
-  const child = spawn(process.execPath, ["--import", "tsx", join(process.cwd(), "daemon/main.ts")], {
+  const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", join(process.cwd(), "daemon/main.ts")], {
     cwd: process.cwd(),
     env: { ...process.env, HOME: env.root, USERPROFILE: env.root },
     stdio: "ignore",
@@ -1148,7 +1148,7 @@ test("SIGTERM after authority release uses default process-only termination and 
     process.send({ type: "authority_released", providerPid: provider.pid });
     setInterval(() => {}, 1000);
   `;
-  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+  const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
     cwd: process.cwd(),
     env: { ...process.env, HOME: env.root, USERPROFILE: env.root },
     stdio: ["ignore", "ignore", "ignore", "ipc"],

@@ -677,7 +677,7 @@ test("current-schema child privately enrolls host approval verifier before readi
         });
         assert.equal(process.connected, false);
       `;
-      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
         stdio: ["ignore", "pipe", "pipe", "ipc"],
       });
       let output = ""; child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { output += data; });
@@ -1037,7 +1037,7 @@ test("real child requests its recovery key over private IPC and disconnects afte
     await reportStateRecoveryReady();
     assert.equal(process.connected, false);
   `;
-  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+  const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
   let output = "";
@@ -1092,7 +1092,7 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
   `;
   let child: ChildProcess | undefined;
   try {
-    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
     let output = "";

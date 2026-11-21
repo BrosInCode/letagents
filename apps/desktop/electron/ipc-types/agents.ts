@@ -3,16 +3,10 @@ import type { DesktopGitRoomInfo } from "./room.js";
 import type { DesktopMcpInstallTargetId } from "./setup.js";
 import type { RetainedExecutionDetail } from "../../shared/execution-protocol.js";
 import type {
-  DesktopAgentCommitIdentitySettings,
   DesktopAgentProviderId,
-  DesktopCursorMcpPolicy,
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
-  DesktopManagedAgentPermissionProfileRisk,
-  DesktopManagedAgentPermissionProfileStatus,
-  DesktopOpenModelSaveSettingsInput,
-  DesktopOpenModelSettingsStatus,
-} from "#provider-runtime/desktop-types.js";
+} from "../../shared/provider-desktop-types.js";
 export type {
   DesktopAgentCommitIdentitySettings,
   DesktopAgentProviderId,
@@ -23,7 +17,7 @@ export type {
   DesktopManagedAgentPermissionProfileStatus,
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
-} from "#provider-runtime/desktop-types.js";
+} from "../../shared/provider-desktop-types.js";
 
 export type DesktopAgentProviderCapability =
   | "external_mcp"

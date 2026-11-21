@@ -205,7 +205,7 @@ test("separate local writers racing to claim a task create exactly one work leas
   const children = actors.map(actor => {
     const identity = { agent_key: actor.grant.agentKey, session_id: actor.session.session_id,
       actor_label: actor.session.actor_label, agent_instance_id: `daemon:${actor.grant.entryId}`, supervised: true };
-    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", `
       const { claimLocalTaskWorkLease, getLocalTaskDatabase } = await import(${JSON.stringify(moduleUrl)});
       await getLocalTaskDatabase();
       process.stdout.write('ready');

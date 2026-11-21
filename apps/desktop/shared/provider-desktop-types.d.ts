@@ -1,7 +1,9 @@
 // Types that the provider runtime and the desktop app share. They were in
 // electron/ipc-types, which still exports each of them by the same name.
 // The provider runtime cannot import from the Electron folder, so their one
-// definition is here.
+// definition is here. This is a declaration file with a relative import path,
+// so each side reads it with no build step: the web app type check reads
+// electron/ipc-types before the provider runtime is built.
 
 export type DesktopMcpInstallTargetId = "claude-code" | "antigravity" | "cursor" | "codex";
 

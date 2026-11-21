@@ -1,6 +1,6 @@
 import type {
   DesktopManagedAgentPermissionProfileId,
-} from "../desktop-types.js";
+} from "../../shared/provider-desktop-types.js";
 import type {
   CursorReadOnlyMode,
   CursorSandboxMode,

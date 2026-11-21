@@ -86,7 +86,7 @@ test("Cursor conversations travel with sidecars and dependent sessions between u
   relocateCursorConversationNamespace(profile, first, resting, "session-one");
   // A new supervisor uses only deterministic paths and existing custody, not
   // an in-memory previous-workspace pointer or a scan for the newest store.
-  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+  const child = spawnSync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e",
     `import {relocateCursorConversationNamespace as move} from ${JSON.stringify(new URL("../../provider-runtime/agents/cursor-managed-profile.ts", import.meta.url).href)};
      move(${JSON.stringify(profile)}, ${JSON.stringify(resting)}, ${JSON.stringify(second)}, "session-one");`], { encoding: "utf8" });
   assert.equal(child.status, 0, child.stderr);

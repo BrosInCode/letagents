@@ -1,13 +1,12 @@
 import type {
-  DesktopMcpInstallConfigPath,
   DesktopMcpInstallTarget,
   DesktopMcpInstallTargetId,
-} from "#provider-runtime/desktop-types.js";
+} from "../../shared/provider-desktop-types.js";
 export type {
   DesktopMcpInstallConfigPath,
   DesktopMcpInstallTarget,
   DesktopMcpInstallTargetId,
-} from "#provider-runtime/desktop-types.js";
+} from "../../shared/provider-desktop-types.js";
 
 export interface DesktopMcpInstallState {
   completed: boolean;

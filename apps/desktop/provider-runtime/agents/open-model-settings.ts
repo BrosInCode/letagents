@@ -8,7 +8,7 @@ import { SettingsFileCache } from "../settings-file-cache.js";
 import type {
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
-} from "../desktop-types.js";
+} from "../../shared/provider-desktop-types.js";
 
 export const DEFAULT_OPEN_MODEL_BASE_URL = "https://openrouter.ai/api/v1";
 

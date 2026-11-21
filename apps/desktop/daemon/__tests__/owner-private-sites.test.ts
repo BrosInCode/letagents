@@ -326,12 +326,12 @@ test("the daemon entry check recognizes an escaped entry path without starting i
   await writeFile(imported, `import { isDaemonEntryPoint } from ${JSON.stringify(check)};\nexport default isDaemonEntryPoint(import.meta.url, process.argv[1]);\n`);
   await writeFile(entry, `import { isDaemonEntryPoint } from ${JSON.stringify(check)};\nimport imported from './imported.mjs';\nprocess.stdout.write(JSON.stringify({ entry: isDaemonEntryPoint(import.meta.url, process.argv[1]), imported }));\n`);
   const { execFileSync } = await import("node:child_process");
-  const output = execFileSync(process.execPath, ["--import", "tsx", entry], { encoding: "utf8" });
+  const output = execFileSync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", entry], { encoding: "utf8" });
   assert.deepEqual(JSON.parse(output), { entry: true, imported: false });
   if (process.platform !== "win32") {
     const linked = join(root, "Preview launcher.mjs");
     symlinkSync(entry, linked);
-    const linkedOutput = execFileSync(process.execPath, ["--import", "tsx", linked], { encoding: "utf8" });
+    const linkedOutput = execFileSync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", linked], { encoding: "utf8" });
     assert.deepEqual(JSON.parse(linkedOutput), { entry: true, imported: false });
   }
 });

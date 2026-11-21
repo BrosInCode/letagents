@@ -1,4 +1,4 @@
-import type { DesktopMcpInstallTarget } from "./desktop-types.js";
+import type { DesktopMcpInstallTarget } from "../shared/provider-desktop-types.js";
 
 export type McpServerJsonConfig = {
   mcpServers?: Record<

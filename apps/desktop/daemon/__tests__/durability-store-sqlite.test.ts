@@ -74,7 +74,7 @@ test("concurrent legacy importers serialize one valid record without poisoning m
     const completions: Promise<void>[] = [];
     let ready = 0;
     for (let index = 0; index < count; index += 1) {
-      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", childSource], {
+      const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "--eval", childSource], {
         cwd: process.cwd(),
         env: { ...process.env, ATTEMPTS_JSON: env.json, DATABASE_PATH: env.database, ATTEMPTS_ROOT: join(env.root, `attempt-data-${index}`), WORKTREES: join(env.root, `worktrees-${index}`) },
         stdio: ["ignore", "ignore", "pipe", "ipc"],

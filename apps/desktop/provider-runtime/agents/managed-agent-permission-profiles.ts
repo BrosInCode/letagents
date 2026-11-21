@@ -2,7 +2,7 @@ import type {
   DesktopAgentProviderId,
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
-} from "../desktop-types.js";
+} from "../../shared/provider-desktop-types.js";
 
 const CLAUDE_CODE_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {

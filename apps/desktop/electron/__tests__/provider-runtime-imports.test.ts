@@ -63,3 +63,22 @@ test("the daemon names no adapter file in the Electron build", () => {
     .map((file) => relative(desktopRoot, file).split(sep).join("/"));
   assert.deepEqual(offenders, []);
 });
+
+test("a test that starts a TypeScript child process gives it the source condition", () => {
+  // A child process does not get the conditions of its parent. Without the
+  // condition, "#provider-runtime/<file>.js" in the child means the build
+  // output. CI runs the tests with no build, so the child cannot load it; a
+  // machine with a build loads code that can be old.
+  const startsTsx = /\[\s*(["'])--import\1\s*,\s*(?:(["'])tsx\2|tsx[A-Za-z]*)/;
+  const offenders: string[] = [];
+  for (const folder of ["electron/__tests__", "daemon/__tests__", "renderer/__tests__"]) {
+    for (const file of sourceFiles(join(desktopRoot, folder))) {
+      if (!/\.test\.ts$/.test(file)) continue;
+      const lines = readFileSync(file, "utf8").split("\n");
+      lines.forEach((line, index) => {
+        if (startsTsx.test(line)) offenders.push(`${relative(desktopRoot, file).split(sep).join("/")}:${index + 1}`);
+      });
+    }
+  }
+  assert.deepEqual(offenders, [], "start the child with \"--conditions=letagents-source\" before \"--import\", \"tsx\"");
+});

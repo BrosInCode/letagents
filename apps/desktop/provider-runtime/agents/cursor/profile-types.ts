@@ -3,7 +3,7 @@
 import type {
   DesktopCursorMcpPolicy,
   DesktopManagedAgentPermissionProfileId,
-} from "../../desktop-types.js";
+} from "../../../shared/provider-desktop-types.js";
 import type { LetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
 
 export interface CursorManagedProfile {

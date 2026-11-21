@@ -1522,7 +1522,7 @@ test("desktop and MCP local chat writers allocate unique ids across processes", 
       });
       console.log(message.id);
     `;
-    return execFileAsync(process.execPath, ["--import", "tsx", "-e", code], {
+    return execFileAsync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "-e", code], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -1571,7 +1571,7 @@ test("local chat stores keep quote-replies top-level across a process restart", 
       });
       console.log("written");
     `;
-    await execFileAsync(process.execPath, ["--import", "tsx", "-e", writeCode], {
+    await execFileAsync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "-e", writeCode], {
       cwd: process.cwd(),
       env: childEnv,
     });
@@ -1592,7 +1592,7 @@ test("local chat stores keep quote-replies top-level across a process restart", 
         thread_root_number: row.thread_root_number == null ? null : Number(row.thread_root_number),
       }))));
     `;
-    const { stdout } = await execFileAsync(process.execPath, ["--import", "tsx", "-e", readCode], {
+    const { stdout } = await execFileAsync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "-e", readCode], {
       cwd: process.cwd(),
       env: childEnv,
     });
