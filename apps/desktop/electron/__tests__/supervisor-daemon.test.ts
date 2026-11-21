@@ -3515,7 +3515,11 @@ test("desktop replaces the pre-avatar implementation and accepts only the new ex
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.281",
+    // The daemon of the build before the adapters moved. It loads each adapter
+    // from dist-electron/main/agents at the first use of a provider, and those
+    // files are gone after an update at the same install path. So this app
+    // must replace it, and that needs a different implementation version.
+    "2.0.284-modern.1",
   );
   oldServer = old.server;
   try {
@@ -3536,7 +3540,7 @@ test("desktop replaces the pre-avatar implementation and accepts only the new ex
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.284-modern.1");
+    assert.equal(status.implementationVersion, "2.0.284-modern.2");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
