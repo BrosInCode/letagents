@@ -463,7 +463,8 @@ export class LifecycleAdministrationCoordinator {
   }
 
   async recoverEphemeralWorkspaces(): Promise<void> {
-    const manifest = await this.ports.store.load();
+    // Only work attempt IDs are used: summary mode reads no activity payloads.
+    const manifest = await this.ports.store.load("summary");
     const attached = new Set<string>();
     for (const entry of manifest.entries) {
       if (entry.work_attempt_id) attached.add(entry.work_attempt_id);
