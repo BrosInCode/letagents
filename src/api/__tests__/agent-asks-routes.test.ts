@@ -75,6 +75,27 @@ test("asking accepts only listed models and amounts, and returns a link", async 
   assert.match(full.body.error, /5 open requests/);
 });
 
+test("the Ask catalog lists GPT-6.2 models and accepts requests for them", async () => {
+  const h = harness();
+  const catalog = await h.request("get", "/agent-asks/models", {}, null);
+  assert.equal(catalog.code, 200);
+
+  const codexModels = catalog.body.models.filter((entry: { providerId: string }) => entry.providerId === "codex");
+  assert.deepEqual(codexModels.slice(0, 3), [
+    { providerId: "codex", model: null, label: "Codex (latest model)" },
+    { providerId: "codex", model: "gpt-6.2-sol", label: "GPT-6.2-Sol" },
+    { providerId: "codex", model: "gpt-6.2-astra", label: "GPT-6.2-Astra" },
+  ]);
+
+  for (const { model, label } of codexModels.slice(1, 3)) {
+    const ask = harness();
+    const result = await ask.request("post", "/rooms/room/agent-asks", { provider_id: "codex", model });
+    assert.equal(result.code, 201);
+    assert.equal(ask.calls[0][1].model, model);
+    assert.equal(ask.calls[0][1].modelLabel, label);
+  }
+});
+
 test("anonymous previews hide the note and room; signed-in previews show them", async () => {
   const h = harness();
   const anon = await h.request("get", `/agent-asks/link/${TOKEN}`, {}, null);
