@@ -21,6 +21,7 @@ import {
   parseWindowsHelperInfoResult,
   parseWindowsTasklistCsv,
   queryWindowsHelperInfoWithSettle,
+  resolveDefaultDaemonCommand,
   selectWindowsEdgeProcessCandidates,
   startEdgeDaemon,
 } from "./edge/daemon-edge-harness.js";
@@ -114,6 +115,23 @@ test("a POSIX shim starts the given runtime, in Node mode only when it is not th
     assert.ok(other.indexOf("export ELECTRON_RUN_AS_NODE") < other.indexOf("exec "), "Node mode is set before the program starts");
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a daemon command from outside starts in Node mode, so a packaged app needs no wrapper file", () => {
+  const saved = { cmd: process.env.LETAGENTS_EDGE_DAEMON_CMD, args: process.env.LETAGENTS_EDGE_DAEMON_ARGS };
+  try {
+    process.env.LETAGENTS_EDGE_DAEMON_CMD = "/Apps/LetAgents.app/Contents/MacOS/LetAgents";
+    process.env.LETAGENTS_EDGE_DAEMON_ARGS = JSON.stringify(["/Apps/LetAgents.app/Contents/Resources/app/dist-daemon/main.js"]);
+    const command = resolveDefaultDaemonCommand();
+    assert.equal(command.command, "/Apps/LetAgents.app/Contents/MacOS/LetAgents");
+    assert.deepEqual(command.env, { ELECTRON_RUN_AS_NODE: "1" });
+    assert.equal(command.useNodeIpc, false);
+  } finally {
+    for (const [name, value] of [["LETAGENTS_EDGE_DAEMON_CMD", saved.cmd], ["LETAGENTS_EDGE_DAEMON_ARGS", saved.args]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   }
 });
 

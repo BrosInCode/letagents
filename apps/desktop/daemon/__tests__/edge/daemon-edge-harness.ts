@@ -851,7 +851,11 @@ export function resolveDefaultDaemonCommand(): EdgeDaemonCommand {
   if (overrideCommand) {
     const rawArgs = process.env.LETAGENTS_EDGE_DAEMON_ARGS?.trim();
     const args = rawArgs ? (JSON.parse(rawArgs) as string[]) : [];
-    return { command: overrideCommand, args, useNodeIpc: false };
+    // A packaged app runs the daemon script only in Node mode, and the harness passes an allowlist of
+    // variables to the daemon. So the command gets the variable here, with no wrapper file: a wrapper
+    // would become "the program of the command", and the stand-ins must run under the daemon's real
+    // program. The variable has no effect on a plain Node program or on a daemon in another language.
+    return { command: overrideCommand, args, env: { ELECTRON_RUN_AS_NODE: "1" }, useNodeIpc: false };
   }
   const builtDaemon = join(DESKTOP_ROOT, "dist-daemon", "main.js");
   if (!existsSync(builtDaemon)) {
