@@ -1,4 +1,5 @@
 import { dirname } from "node:path";
+import { parseDaemonRpcParams } from "#daemon-contract/index.js";
 import { registerLocalBoardOwner } from "../../../shared/local-board-owner.mjs";
 import type { DaemonSingleton } from "./singleton.js";
 import type { ManifestStore } from "./manifest-store.js";
@@ -34,12 +35,9 @@ export class DaemonMaintenanceService {
     }
     if (!this.retiring && request.method === "manifest.list") return this.operations.list();
     if (!this.retiring && request.method === "manifest.get_entry") {
-      // The same exact-id rule the control router applies to this read.
-      const entryId = (request.params as { entry_id?: unknown } | null | undefined)?.entry_id;
-      if (typeof entryId !== "string" || !entryId.trim() || entryId !== entryId.trim()) {
-        throw new Error("manifest.get_entry requires an exact non-empty entry_id.");
-      }
-      return this.operations.getEntry(entryId);
+      // The same schema-derived exact-id rule the control router applies.
+      const { entry_id } = parseDaemonRpcParams("manifest.get_entry", request.params);
+      return this.operations.getEntry(entry_id);
     }
     throw new Error(DAEMON_MAINTENANCE_MESSAGE);
   }

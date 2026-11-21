@@ -1,4 +1,9 @@
 import { createDaemonMaintenance, readDaemonMaintenance, daemonMaintenancePath } from "../../../../shared/daemon-maintenance.mjs";
+import {
+  DAEMON_IMPLEMENTATION_VERSION,
+  DAEMON_PROTOCOL_VERSION,
+  DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT,
+} from "#daemon-contract/index.js";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { createCipheriv, createDecipheriv, createHash, createPrivateKey, randomBytes, sign as nativeSign } from "node:crypto";
@@ -1133,7 +1138,7 @@ function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
       inbox_item_id: "inbox_1", source_message_id: "msg_1", fifo_sequence: 7, state: "blocked", attempt_count: 3,
       canonical_message_id: "msg_reply_1",
       reply_client_message_id: "supervised-room:agent_1:msg_1:reply:v1",
-      provider_turn_id: null, blocked_by_message_id: null, error: "failed", updated_at: "2026-01-01T00:00:00.000Z",
+      provider_turn_id: null, blocked_by_message_id: null, error: "failed", failure_code: null, terminal_reason: null, updated_at: "2026-01-01T00:00:00.000Z",
       timeline: [{ event_sequence: 1, phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
     }],
   };
@@ -1852,7 +1857,7 @@ test("a state watch snapshot with trimmed receipt timelines keeps every receipt 
 
 test("legacy retained timeline indexes are never promoted to durable event sequences", () => {
   const legacy = wireEntryWithCausalProjection();
-  legacy.delivery_receipts![0]!.timeline = Array.from({ length: 64 }, (_, index) => ({
+  (legacy.delivery_receipts![0] as Record<string, unknown>).timeline = Array.from({ length: 64 }, (_, index) => ({
     phase: index === 63 ? "conversation_restored" : "queued",
     observed_at: "2026-01-01T00:00:00.000Z",
     detail: null,
@@ -1864,7 +1869,7 @@ test("legacy retained timeline indexes are never promoted to durable event seque
   );
 
   const withoutDurableReceiptOrder = wireEntryWithCausalProjection();
-  delete withoutDurableReceiptOrder.delivery_receipts![0]!.fifo_sequence;
+  delete (withoutDurableReceiptOrder.delivery_receipts![0] as Record<string, unknown>).fifo_sequence;
   assert.deepEqual(
     mapEntry(withoutDurableReceiptOrder).deliveryReceipts,
     [],
@@ -2901,8 +2906,10 @@ test("a supervised launch is saved running unless the caller asks for a paused r
 
 test("desktop and daemon implementation identities stay in lockstep", async () => {
   const daemonTypes = await readFile(daemonTypesPath, "utf8");
-  const daemonIdentity = daemonTypes.match(/DAEMON_IMPLEMENTATION_VERSION\s*=\s*"([^"]+)"/)?.[1];
-  assert.equal(daemonIdentity, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+  assert.match(daemonTypes, /from "#daemon-contract\/index\.js"/);
+  assert.match(daemonTypes, /\bDAEMON_IMPLEMENTATION_VERSION\b/);
+  assert.doesNotMatch(daemonTypes, /DAEMON_IMPLEMENTATION_VERSION\s*=\s*"/);
+  assert.equal(SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION, DAEMON_IMPLEMENTATION_VERSION);
 });
 
 test("a room-scoped list asks the daemon to scope and still filters what it gets back", async () => {
@@ -3009,8 +3016,9 @@ test("desktop and daemon agree on the state channel's activity summary limit", a
     join(dirname(fileURLToPath(import.meta.url)), "../../daemon/state-watch-projection.ts"),
     "utf8",
   );
-  const daemonLimit = projection.match(/STATE_WATCH_ACTIVITY_SUMMARY_LIMIT\s*=\s*(\d+)/)?.[1];
-  assert.equal(Number(daemonLimit), SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT);
+  assert.match(projection, /from "#daemon-contract\/index\.js"/);
+  assert.match(projection, /export const STATE_WATCH_ACTIVITY_SUMMARY_LIMIT = DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT;/);
+  assert.equal(SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT, DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT);
 });
 
 test("the state subscription bounds activity even if a daemon answers with history", async () => {
@@ -3532,8 +3540,9 @@ test("desktop replaces the pre-avatar implementation and accepts only the new ex
     const status = await client.ensureRunning();
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
+    assert.equal(status.protocolVersion, DAEMON_PROTOCOL_VERSION);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.284-modern.5");
+    assert.equal(status.implementationVersion, DAEMON_IMPLEMENTATION_VERSION);
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "types": ["node"],
+    "outDir": "dist-daemon-contract",
+    "rootDir": "daemon-contract"
+  },
+  "include": ["daemon-contract/**/*.ts"],
+  "exclude": ["daemon-contract/**/__tests__/**"]
+}

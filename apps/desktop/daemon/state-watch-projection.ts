@@ -1,3 +1,4 @@
+import { DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT } from "#daemon-contract/index.js";
 import type { DaemonActivityEvent, DaemonManifestEntryView } from "./types.js";
 
 type DeliveryReceipt = NonNullable<DaemonManifestEntryView["delivery_receipts"]>[number];
@@ -72,7 +73,7 @@ function projectStateWatchTimeline(timeline: DeliveryReceipt["timeline"]): Deliv
  * to one agent: `manifest.list` (initial load and stale-subscription repair),
  * `supervisor.watch_agent_stream`, and `supervisor.get_agent_inspector_detail`.
  */
-export const STATE_WATCH_ACTIVITY_SUMMARY_LIMIT = 16;
+export const STATE_WATCH_ACTIVITY_SUMMARY_LIMIT = DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT;
 
 /**
  * Keep the newest events by sequence and drop their payloads. Payloads are the

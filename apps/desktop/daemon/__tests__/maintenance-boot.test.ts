@@ -63,7 +63,9 @@ test("maintenance cold boot preserves all durable rows and refuses work until ex
       assert.equal(one.ok, true, one.error); assert.deepEqual(one.result, list.result[0]);
       const none = await request(paths.socketPath, "manifest.get_entry", { entry_id: "no_such_agent" });
       assert.equal(none.ok, true, none.error); assert.equal(none.result, null);
-      for (const params of [undefined, {}, { entry_id: "" }, { entry_id: " agent" }, { entry_id: 7 }]) {
+      const missingParams = await request(paths.socketPath, "manifest.get_entry", undefined);
+      assert.equal(missingParams.ok, false); assert.match(missingParams.error!, /params must be an object/);
+      for (const params of [{}, { entry_id: "" }, { entry_id: " agent" }, { entry_id: 7 }]) {
         const invalid = await request(paths.socketPath, "manifest.get_entry", params);
         assert.equal(invalid.ok, false); assert.match(invalid.error!, /requires an exact non-empty entry_id/);
       }

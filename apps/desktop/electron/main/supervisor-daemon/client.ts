@@ -14,20 +14,11 @@ import type {
 } from "../../ipc-types.js";
 import { apiUrl } from "#provider-runtime/paths.js";
 import { supervisedDeliveryModeForProvider } from "../agents/provider-registry.js";
-import {
-  BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS,
-  CONFIGURATION_APPLY_REQUEST_TIMEOUT_MS,
-  INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS,
-  MANIFEST_LIST_REQUEST_TIMEOUT_MS,
-  RECOVERY_REQUEST_TIMEOUT_MS,
-  RETIRE_REQUEST_TIMEOUT_MS,
-  SUPERVISOR_DAEMON_PROTOCOL_VERSION,
-  SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT,
-} from "./constants.js";
+import { SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT } from "./constants.js";
 import { mapAgentConfiguration, mapAgentInspectorDetail, mapRoomMove } from "./agent-mapping.js";
 import { mapActivity, mapEntry } from "./entry-mapping.js";
 import { supervisorStateWatchAcceptsStatus } from "./state-watch-policy.js";
-import type { DesktopSupervisorStateWatchResult, WireActivityEvent, WireEntry } from "./types.js";
+import type { DesktopSupervisorStateWatchResult, WireEntry } from "./types.js";
 import { nonEmptyString, record, validTurnControlActionId } from "./wire-values.js";
 import { SupervisorDaemonHostApprovalClient } from "./client-host-approvals.js";
 
@@ -64,13 +55,11 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     // request is the one an older daemon already understands.
     const params = {
       ...(roomIdentifier ? { room_id: roomIdentifier } : {}),
-      ...(options.activity === "summary" ? { activity: "summary" } : {}),
+      ...(options.activity === "summary" ? { activity: "summary" as const } : {}),
     };
-    const entries = await this.request<WireEntry[]>(
+    const entries = await this.call(
       "manifest.list",
       Object.keys(params).length > 0 ? params : undefined,
-      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
-      MANIFEST_LIST_REQUEST_TIMEOUT_MS,
     );
     return entries.map((entry) => mapEntry(entry)).filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier);
   }
@@ -83,12 +72,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
    */
   async getEntry(entryId: string): Promise<DesktopSupervisorManifestEntry | null> {
     await this.ensureRunning();
-    const entry = await this.request<WireEntry | null>(
-      "manifest.get_entry",
-      { entry_id: entryId },
-      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
-      MANIFEST_LIST_REQUEST_TIMEOUT_MS,
-    );
+    const entry = await this.call("manifest.get_entry", { entry_id: entryId });
     return entry ? mapEntry(entry) : null;
   }
 
@@ -121,19 +105,12 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     changedOnly: boolean,
   ): Promise<DesktopSupervisorStateWatchResult> {
     const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
-    const value = await this.request<{
-      daemon_generation: number;
-      sequence: number;
-      entries: WireEntry[];
-      complete?: unknown;
-      removed_entry_ids?: unknown;
-      entry_order?: unknown;
-    }>("manifest.watch_state", {
+    const value = await this.call("manifest.watch_state", {
       after_daemon_generation: input.afterDaemonGeneration,
       after_sequence: input.afterSequence,
       wait_ms: waitMs,
       ...(changedOnly ? { changed_only: true } : {}),
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true);
+    }, { unrefSocket: true });
     if (
       !Number.isSafeInteger(value.daemon_generation)
       || value.daemon_generation < 1
@@ -144,7 +121,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       throw new Error("Supervisor daemon returned an invalid state snapshot.");
     }
     const entries = value.entries.map((entry) => mapEntry(entry, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT));
-    if (value.complete !== false) {
+    if (!("complete" in value) || value.complete !== false) {
       return { complete: true, daemonGeneration: value.daemon_generation, sequence: value.sequence, entries };
     }
     const ids = (list: unknown): string[] | null =>
@@ -169,17 +146,11 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     signal?: AbortSignal;
   }): Promise<{ sequence: number; streamGeneration: number; droppedEvents: number; events: import("../../ipc-types/agents.js").DesktopAgentStreamEvent[]; ended: boolean }> {
     const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
-    const value = await this.request<{
-      sequence: number;
-      stream_generation: number;
-      dropped_events: number;
-      events: Array<{ sequence: number; observed_at: string; kind: string; method: string; summary: string | null; payload: unknown; latest_key?: string }>;
-      ended: boolean;
-    }>("supervisor.watch_agent_stream", {
+    const value = await this.call("supervisor.watch_agent_stream", {
       entry_id: input.entryId,
       after_sequence: input.afterSequence,
       wait_ms: waitMs,
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true, input.signal);
+    }, { unrefSocket: true, signal: input.signal });
     return {
       sequence: Number(value.sequence ?? input.afterSequence),
       streamGeneration: Number(value.stream_generation ?? 0),
@@ -205,13 +176,13 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     signal?: AbortSignal;
   }): Promise<import("../../ipc-types/agents.js").DesktopBackgroundCommandsBatch> {
     const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
-    const value = await this.request<{ version?: unknown; commands?: unknown; ended?: unknown }>("supervisor.watch_background_commands", {
+    const value = await this.call("supervisor.watch_background_commands", {
       entry_id: input.entryId,
       after_version: input.afterVersion,
       wait_ms: waitMs,
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true, input.signal);
+    }, { unrefSocket: true, signal: input.signal });
     return {
-      version: Number.isSafeInteger(value.version) ? value.version as number : input.afterVersion,
+      version: Number.isSafeInteger(value.version) ? value.version : input.afterVersion,
       commands: Array.isArray(value.commands) ? value.commands.slice(0, 16) : [],
       ended: value.ended === true,
     };
@@ -275,14 +246,14 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       last_worker_binding: null,
     };
     await this.ensureRunning();
-    return mapEntry(await this.request<WireEntry>("manifest.put", { entry }));
+    return mapEntry(await this.call("manifest.put", { entry }));
   }
 
   async setDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> {
     if (!nonEmptyString(id) || !["running", "paused", "stopped"].includes(desiredState)) throw new Error("Agent lifecycle requires an exact identity and desired state.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon."); }
-    return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
+    return mapEntry(await this.call("manifest.set_desired_state", { id, desired_state: desiredState }));
   }
 
   async recoverAgentRuntime(id: string, recovery?: import("../../ipc-types.js").DesktopSupervisorRuntimeRecoveryInput["recovery"]): Promise<DesktopSupervisorManifestEntry> {
@@ -298,13 +269,19 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       this.invalidateReadyStatus();
       throw new Error("This supervisor is too old for safe provider runtime recovery; rebuild the desktop daemon.");
     }
-    const result = await this.request<{ outcome: "recovering"; entry: WireEntry }>(
+    const result = await this.call(
       "supervisor.recover_agent_runtime",
-      { entry_id: id, daemon_generation: status.generation, ...(recovery ? { mode: recovery.mode,
-        operation_id: recovery.operationId, room_id: recovery.roomId,
-        execution_generation_id: recovery.executionGenerationId, runtime_generation_id: recovery.runtimeGenerationId } : {}) },
-      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
-      RECOVERY_REQUEST_TIMEOUT_MS,
+      recovery
+        ? {
+            entry_id: id,
+            daemon_generation: status.generation,
+            mode: recovery.mode,
+            operation_id: recovery.operationId,
+            room_id: recovery.roomId,
+            execution_generation_id: recovery.executionGenerationId,
+            runtime_generation_id: recovery.runtimeGenerationId,
+          }
+        : { entry_id: id, daemon_generation: status.generation },
     );
     return mapEntry(result.entry);
   }
@@ -319,7 +296,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       this.invalidateReadyStatus();
       throw new Error("This supervisor is too old for durable agent naming; rebuild the desktop daemon.");
     }
-    return mapEntry(await this.request<WireEntry>("manifest.set_display_name", {
+    return mapEntry(await this.call("manifest.set_display_name", {
       id,
       display_name: normalized,
     }));
@@ -332,7 +309,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       this.invalidateReadyStatus();
       throw new Error("This supervisor does not support room delivery retry.");
     }
-    await this.request<{ accepted: boolean }>("supervisor.retry_room_delivery", {
+    await this.call("supervisor.retry_room_delivery", {
       entry_id: input.entryId,
       room_id: input.roomId,
       source_message_id: input.sourceMessageId,
@@ -340,7 +317,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       execution_generation_id: input.executionGenerationId,
       agent_session_id: input.agentSessionId,
       daemon_generation: status.generation,
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
+    });
   }
 
   async restoreAgentConversation(input: import("../../ipc-types/agents.js").DesktopSupervisorConversationRestoreInput): Promise<void> {
@@ -349,7 +326,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       this.invalidateReadyStatus();
       throw new Error("This supervisor does not support provider conversation restoration.");
     }
-    await this.request<{ accepted: boolean }>("supervisor.restore_agent_conversation", {
+    await this.call("supervisor.restore_agent_conversation", {
       entry_id: input.entryId,
       room_id: input.roomId,
       source_message_id: input.sourceMessageId,
@@ -357,7 +334,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       execution_generation_id: input.executionGenerationId,
       agent_session_id: input.agentSessionId,
       daemon_generation: status.generation,
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
+    });
   }
 
   async skipRoomDelivery(input: import("../../ipc-types/agents.js").DesktopSupervisorRoomDeliverySkipInput): Promise<void> {
@@ -366,7 +343,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       this.invalidateReadyStatus();
       throw new Error("This supervisor does not support safely skipping a blocked room message.");
     }
-    await this.request<{ accepted: boolean }>("supervisor.skip_room_delivery", {
+    await this.call("supervisor.skip_room_delivery", {
       entry_id: input.entryId,
       room_id: input.roomId,
       source_message_id: input.sourceMessageId,
@@ -374,7 +351,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       execution_generation_id: input.executionGenerationId,
       agent_session_id: input.agentSessionId,
       daemon_generation: status.generation,
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
+    });
   }
 
   async compareAndSetDesiredState(
@@ -385,7 +362,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     if (!nonEmptyString(id) || !["running", "paused", "stopped"].includes(expectedDesiredState) || !["running", "paused", "stopped"].includes(desiredState)) throw new Error("Agent lifecycle compare-and-set requires exact typed fields.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon."); }
-    const result = await this.request<{ applied: boolean; entry: WireEntry }>("manifest.compare_and_set_desired_state", {
+    const result = await this.call("manifest.compare_and_set_desired_state", {
       id,
       expected_desired_state: expectedDesiredState,
       desired_state: desiredState,
@@ -409,7 +386,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       this.invalidateReadyStatus();
       throw new Error("The supervisor generation changed before turn control was sent.");
     }
-    return this.request<DesktopSupervisorTurnControlResult>("manifest.control_turn", {
+    return this.call("manifest.control_turn", {
       id: input.entryId,
       daemon_generation: input.daemonGeneration,
       room_id: input.roomId,
@@ -422,12 +399,12 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       action_id: input.actionId,
       action_sequence: input.actionSequence,
       correction: input.correction ?? null,
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
+    });
   }
 
   async resolveTurnControl(input: DesktopSupervisorTurnControlResolutionInput): Promise<DesktopSupervisorManifestEntry> {
     await this.ensureRunning();
-    return mapEntry(await this.request<WireEntry>("manifest.resolve_turn_control", {
+    return mapEntry(await this.call("manifest.resolve_turn_control", {
       id: input.entryId,
       work_attempt_id: input.workAttemptId,
       execution_generation_id: input.executionGenerationId,
@@ -438,21 +415,21 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
 
   async readAttempt(id: string): Promise<DesktopSupervisorAttemptDetail> {
     await this.ensureRunning();
-    const detail = await this.request<Record<string, unknown>>("attempt.read", { id }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+    const detail = await this.call("attempt.read", { id });
     return {
       entryId: String(detail.entry_id ?? id),
       workAttemptId: typeof detail.work_attempt_id === "string" ? detail.work_attempt_id : null,
       workspacePath: typeof detail.workspace_path === "string" ? detail.workspace_path : null,
       lastTerminal: detail.last_terminal && typeof detail.last_terminal === "object" ? detail.last_terminal as Record<string, unknown> : null,
       restartCount: Number(detail.restart_count ?? 0),
-      activity: Array.isArray(detail.activity) ? detail.activity.map((event) => mapActivity(event as WireActivityEvent)) : [],
+      activity: Array.isArray(detail.activity) ? detail.activity.map((event) => mapActivity(event)) : [],
     };
   }
   async getAgentInspectorDetail(input: import("../../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetailInput): Promise<import("../../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail> {
     if (!nonEmptyString(input.entryId) || !nonEmptyString(input.roomId) || (input.sourceMessageId !== undefined && input.sourceMessageId !== null && !nonEmptyString(input.sourceMessageId))) throw new Error("Agent inspector detail requires exact non-empty entry, room, and optional source identities.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentInspectorDetail) { this.invalidateReadyStatus(); throw new Error("This supervisor does not support agent inspector detail history."); }
-    const detail = await this.request<Record<string, unknown>>("supervisor.get_agent_inspector_detail", { entry_id: input.entryId, room_id: input.roomId, source_message_id: input.sourceMessageId ?? null }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+    const detail = await this.call("supervisor.get_agent_inspector_detail", { entry_id: input.entryId, room_id: input.roomId, source_message_id: input.sourceMessageId ?? null });
     return mapAgentInspectorDetail(detail, input);
   }
 
@@ -460,7 +437,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Agent configuration requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentInspectorSettings) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon."); }
-    const value = await this.request<Record<string, unknown>>("supervisor.get_agent_configuration", { entry_id: entryId, daemon_generation: daemonGeneration }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+    const value = await this.call("supervisor.get_agent_configuration", { entry_id: entryId, daemon_generation: daemonGeneration });
     return mapAgentConfiguration(value, entryId, daemonGeneration);
   }
 
@@ -470,7 +447,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       || !Object.hasOwn(input.configuration, "model") || !Object.hasOwn(input.configuration, "reasoningEffort") || !Object.hasOwn(input.configuration, "charter") || !Object.hasOwn(input.configuration, "permissionProfileId")) throw new Error("Agent configuration update requires exact typed coordinates and fields.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentInspectorSettings) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon."); }
-    const result = await this.request<Record<string, unknown>>("supervisor.update_agent_configuration", { entry_id: input.entryId, daemon_generation: input.daemonGeneration, expected_revision: input.expectedRevision, configuration: {
+    const result = await this.call("supervisor.update_agent_configuration", { entry_id: input.entryId, daemon_generation: input.daemonGeneration, expected_revision: input.expectedRevision, configuration: {
       model: input.configuration.model, reasoning_effort: input.configuration.reasoningEffort, charter: input.configuration.charter,
       permission_profile_id: input.configuration.permissionProfileId,
       ...(typeof input.configuration.imageInput === "boolean" ? { image_input: input.configuration.imageInput } : {}),
@@ -491,16 +468,11 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     }
     const status = await this.ensureRunning();
     if (!status.capabilities.agentInspectorSettings) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon."); }
-    const result = await this.request<Record<string, unknown>>(
-      "supervisor.apply_agent_configuration",
-      {
-        entry_id: input.entryId,
-        daemon_generation: input.daemonGeneration,
-        expected_configuration_revision: input.expectedConfigurationRevision,
-      },
-      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
-      CONFIGURATION_APPLY_REQUEST_TIMEOUT_MS,
-    );
+    const result = await this.call("supervisor.apply_agent_configuration", {
+      entry_id: input.entryId,
+      daemon_generation: input.daemonGeneration,
+      expected_configuration_revision: input.expectedConfigurationRevision,
+    });
     if (result.outcome !== "already_applied"
       && result.outcome !== "restarting"
       && result.outcome !== "busy_active_turn"
@@ -515,21 +487,21 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     if (!nonEmptyString(input.entryId) || !nonEmptyString(input.destinationRoomId) || !nonEmptyString(input.requestId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move preparation requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
-    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.prepare_room_move", { entry_id: input.entryId, destination_room_id: input.destinationRoomId, request_id: input.requestId, daemon_generation: input.daemonGeneration }), input.entryId);
+    return mapRoomMove(await this.call("supervisor.prepare_room_move", { entry_id: input.entryId, destination_room_id: input.destinationRoomId, request_id: input.requestId, daemon_generation: input.daemonGeneration }), input.entryId);
   }
 
   async commitRoomMove(input: import("../../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput): Promise<import("../../ipc-types/agents.js").DesktopSupervisorRoomMove> {
     if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move commit requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
-    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.commit_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 15_000), input.entryId, input.operationId);
+    return mapRoomMove(await this.call("supervisor.commit_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }), input.entryId, input.operationId);
   }
 
   async acknowledgeRoomMoveSourceRevocation(input: import("../../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput & { sourceAgentSessionId: string }): Promise<import("../../ipc-types/agents.js").DesktopSupervisorRoomMove> {
     if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !nonEmptyString(input.sourceAgentSessionId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move credential acknowledgement requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
-    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.acknowledge_room_move_source_revocation", {
+    return mapRoomMove(await this.call("supervisor.acknowledge_room_move_source_revocation", {
       operation_id: input.operationId, entry_id: input.entryId, source_agent_session_id: input.sourceAgentSessionId, daemon_generation: input.daemonGeneration,
     }), input.entryId, input.operationId);
   }
@@ -538,7 +510,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !nonEmptyString(input.error) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move rollback requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
-    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.rollback_room_move", {
+    return mapRoomMove(await this.call("supervisor.rollback_room_move", {
       operation_id: input.operationId, entry_id: input.entryId, error: input.error, daemon_generation: input.daemonGeneration,
     }), input.entryId, input.operationId);
   }
@@ -547,14 +519,14 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move status requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
-    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.get_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }), input.entryId, input.operationId);
+    return mapRoomMove(await this.call("supervisor.get_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }), input.entryId, input.operationId);
   }
 
   async getCurrentRoomMove(input: import("../../ipc-types/agents.js").DesktopSupervisorCurrentRoomMoveInput): Promise<import("../../ipc-types/agents.js").DesktopSupervisorRoomMove | null> {
     if (!nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Current room-move discovery requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
-    const result = await this.request<Record<string, unknown> | null>("supervisor.get_current_room_move", {
+    const result = await this.call("supervisor.get_current_room_move", {
       entry_id: input.entryId,
       daemon_generation: input.daemonGeneration,
     });
@@ -578,12 +550,19 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       || typeof grantRevokedWithoutWorkerSession !== "boolean") throw new Error("Retire requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon."); }
-    const result = await this.request<Record<string, unknown>>("supervisor.retire_agent", {
-      entry_id: entryId,
-      daemon_generation: daemonGeneration,
-      revoked_agent_session_id: revokedAgentSessionId,
-      grant_revoked_without_worker_session: grantRevokedWithoutWorkerSession,
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, RETIRE_REQUEST_TIMEOUT_MS);
+    const result = await this.call("supervisor.retire_agent", revokedAgentSessionId !== null
+      ? {
+          entry_id: entryId,
+          daemon_generation: daemonGeneration,
+          revoked_agent_session_id: revokedAgentSessionId,
+          grant_revoked_without_worker_session: false as const,
+        }
+      : {
+          entry_id: entryId,
+          daemon_generation: daemonGeneration,
+          revoked_agent_session_id: null,
+          grant_revoked_without_worker_session: grantRevokedWithoutWorkerSession,
+        }) as Record<string, unknown>;
     if (result.outcome === "retired") return { outcome: "retired" };
     if (result.outcome === "revocation_required") {
       if (result.revocation_kind === "worker_session"
@@ -621,12 +600,19 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       || typeof includeCleanupIdentity !== "boolean") throw new Error("Purge requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon."); }
-    const result = await this.request<Record<string, unknown>>("supervisor.purge_agent", {
-      entry_id: entryId,
-      daemon_generation: daemonGeneration,
-      revoked_agent_session_id: revokedAgentSessionId,
-      grant_revoked_without_worker_session: grantRevokedWithoutWorkerSession,
-    });
+    const result = await this.call("supervisor.purge_agent", revokedAgentSessionId !== null
+      ? {
+          entry_id: entryId,
+          daemon_generation: daemonGeneration,
+          revoked_agent_session_id: revokedAgentSessionId,
+          grant_revoked_without_worker_session: false as const,
+        }
+      : {
+          entry_id: entryId,
+          daemon_generation: daemonGeneration,
+          revoked_agent_session_id: null,
+          grant_revoked_without_worker_session: grantRevokedWithoutWorkerSession,
+        }) as Record<string, unknown>;
     if (result.outcome === "purged") {
       return {
         outcome: "purged",
@@ -655,7 +641,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
 
   async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null): Promise<DesktopSupervisorManifestEntry> {
     await this.ensureRunning();
-    return mapEntry(await this.request<WireEntry>("manifest.update_workplace_liveness", {
+    return mapEntry(await this.call("manifest.update_workplace_liveness", {
       id,
       state,
       detail,
@@ -670,7 +656,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
   }): Promise<"installed" | "stale"> {
     if (!input.credential.trim()) throw new Error("A supervised worker credential is required.");
     const status = await this.ensureRunning();
-    const result = await this.request<{ status?: unknown }>("supervisor.install_worker_credential", {
+    const result = await this.call("supervisor.install_worker_credential", {
       entry_id: input.entryId, room_id: input.roomId, work_attempt_id: input.workAttemptId,
       execution_generation_id: input.executionGenerationId, agent_session_id: input.agentSessionId,
       agent_session_token: input.credential, daemon_generation: status.generation,
@@ -696,7 +682,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     }
     const status = await this.ensureRunning();
     if (status.generation !== input.daemonGeneration) { this.invalidateReadyStatus(); return "stale"; }
-    const result = await this.request<{ status?: unknown }>(
+    const result = await this.call(
       "supervisor.install_open_model_credential",
       {
         entry_id: input.entryId,
@@ -743,7 +729,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     // Never let a request started against an old process install into its
     // successor. The daemon independently checks this fence too.
     if (status.generation !== input.daemonGeneration) { this.invalidateReadyStatus(); return "stale"; }
-    const result = await this.request<{ status?: unknown }>("supervisor.install_host_grant", {
+    const result = await this.call("supervisor.install_host_grant", {
       entry_id: input.entryId,
       room_id: input.roomId,
       agent_key: input.agentKey,
@@ -759,7 +745,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       daemon_generation: input.daemonGeneration,
       credential_only: Boolean(input.credentialOnly),
       ...(input.recoveryOnly ? { recovery_only: true } : {}),
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS);
+    });
     if (result.status === "installed" || result.status === "provider_unavailable") return result.status;
     this.invalidateReadyStatus();
     return "stale";
@@ -768,7 +754,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
   /** Queue exact host-side delegation discovery; no authority crosses IPC. */
   async syncExecutionDelegations(roomId: string): Promise<"queued" | "stale"> {
     const status = await this.ensureRunning();
-    const result = await this.request<{ status?: unknown }>("supervisor.sync_execution_delegations", {
+    const result = await this.call("supervisor.sync_execution_delegations", {
       room_id: roomId,
       daemon_generation: status.generation,
     });
@@ -780,11 +766,11 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
   async bootstrapRoomIngress(entryId: string, daemonGeneration: number, initialMessage?: string): Promise<"bootstrapped" | "existing" | "stale"> {
     const status = await this.ensureRunning();
     if (status.generation !== daemonGeneration) { this.invalidateReadyStatus(); return "stale"; }
-    const result = await this.request<{ status?: unknown }>("supervisor.bootstrap_room_ingress", {
+    const result = await this.call("supervisor.bootstrap_room_ingress", {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
       ...(initialMessage?.trim() ? { initial_message: initialMessage.trim() } : {}),
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS);
+    });
     if (result.status !== "bootstrapped" && result.status !== "existing") this.invalidateReadyStatus();
     return result.status === "bootstrapped" || result.status === "existing" ? result.status : "stale";
   }

@@ -1,3 +1,4 @@
+import { FOLLOW_UP_REASONS, type FollowUpReason } from "#daemon-contract/index.js";
 import { NO_REPLY_FAILURE, noReplyFailureKind } from "../../../shared/room-turn-no-reply.mjs";
 
 /** A snapshot of work already owned by the exact worker, never a new claim. */
@@ -81,8 +82,7 @@ export const FOLLOW_UP_REASONS_THAT_ASK_THE_OWNER = new Set<string>(["stopped_by
  * uncertain in the daemon's record; the daemon has no control for the owner to resolve it, and it leaves that state
  * only when the action's own completion is recorded, which then makes the reason `uncertain_resolved`.
  */
-export const FOLLOW_UP_REASONS = ["stopped_by_owner", "skipped", "agent_changed", "task_not_held", "uncertain_action", "uncertain_resolved", "attempts_failed", "ownership_unverified", "other"] as const;
-export type FollowUpReason = (typeof FOLLOW_UP_REASONS)[number];
+export { FOLLOW_UP_REASONS, type FollowUpReason };
 const ENDED_REASON_OF_TEXT: ReadonlyMap<string, FollowUpReason> = new Map<string, FollowUpReason>([
   [FOLLOW_UP_ENDED.stoppedByOwner, "stopped_by_owner"], [FOLLOW_UP_ENDED.skippedByOwner, "skipped"], [FOLLOW_UP_ENDED.agentChanged, "agent_changed"],
   [FOLLOW_UP_ENDED.taskNotHeld, "task_not_held"], [FOLLOW_UP_ENDED.uncertainEffects, "uncertain_action"], ...LEGACY_ENDED_TEXTS,

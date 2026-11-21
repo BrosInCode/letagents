@@ -803,11 +803,14 @@ test("the origin of a series of follow-ups is found however long it is, and the 
   assert.equal(followUpOrigin(item("a", "a"), find([]).load).inbox_item_id, "a", "one that names itself");
 });
 
-test("the daemon, the manifest wire and the desktop name the same reasons for a follow-up", () => {
+test("the daemon, the manifest wire and the desktop name the same reasons for a follow-up", async () => {
+  const contract = await import("#daemon-contract/index.js");
+  assert.equal(FOLLOW_UP_REASONS, contract.FOLLOW_UP_REASONS);
   const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
-  const listed = read("../../electron/main/supervisor-daemon/entry-mapping.ts").match(/const FOLLOW_UP_REASONS = \[([^\]]*)\]/)![1]!.match(/"[a-z_]+"/g)!.map((text) => text.slice(1, -1));
-  assert.deepEqual(listed, [...FOLLOW_UP_REASONS]);
-  for (const path of ["../types.ts", "../../electron/ipc-types/agents.ts"]) for (const reason of FOLLOW_UP_REASONS) assert.ok(read(path).includes(`"${reason}"`), `${path}: ${reason}`);
+  assert.match(read("../../electron/main/supervisor-daemon/entry-mapping.ts"), /FOLLOW_UP_REASONS\s*\}\s*from\s*"#daemon-contract\/index\.js"/);
+  for (const path of ["../../daemon-contract/wire-types.ts", "../../electron/ipc-types/agents.ts"]) {
+    for (const reason of FOLLOW_UP_REASONS) assert.ok(read(path).includes(`"${reason}"`), `${path}: ${reason}`);
+  }
 });
 
 test("when its owner skips the follow-up that waits for them after three attempts, the room message it is for says that they skipped it", async () => {

@@ -1,3 +1,4 @@
+import { FOLLOW_UP_REASONS } from "#daemon-contract/index.js";
 import { normalizeAgentAvatar } from "../../../../../shared/agent-avatar.mjs";
 import type { DesktopSupervisorActivityEvent, DesktopSupervisorManifestEntry } from "../../ipc-types.js";
 import { redactCredentialText, safeStreamPayload } from "#provider-runtime/agents/provider-evidence.js";
@@ -240,9 +241,6 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
       ...(followUp ? { followUp } : {}), timeline }];
   });
 }
-
-/** Keep in sync with FOLLOW_UP_REASONS in daemon/task-continuity.ts. A test reads both. */
-const FOLLOW_UP_REASONS = ["stopped_by_owner", "skipped", "agent_changed", "task_not_held", "uncertain_action", "uncertain_resolved", "attempts_failed", "ownership_unverified", "other"] as const;
 
 /** A follow-up is shown only when every part of it is what the daemon writes; anything else reads as none. */
 function projectFollowUp(value: unknown): import("../../ipc-types/agents.js").DesktopRoomAgentFollowUp | null {

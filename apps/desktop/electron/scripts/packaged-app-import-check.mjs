@@ -36,7 +36,7 @@ export const PROVIDER_ADAPTER_ENTRIES = [
 ];
 /** The folder of the adapter entry files in the shared package. */
 const ADAPTER_FOLDER = join("dist-provider-runtime", "agents");
-const BUILD_FOLDERS = ["dist-electron", "dist-daemon", "dist-provider-runtime"];
+const BUILD_FOLDERS = ["dist-electron", "dist-daemon", "dist-daemon-contract", "dist-provider-runtime"];
 
 function buildFiles(directory, found = [], pattern = /\.(js|mjs|cjs)$/) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
