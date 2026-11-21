@@ -11,6 +11,9 @@
 // The plan folder (LETAGENTS_EDGE_CLAUDE_REPLAY_DIR) holds:
 //
 //   launch-1.ndjson, launch-2.ndjson, ...  the transcript for each start, in order
+//   session-1.ndjson, ...                  optional: the rows Claude Code had in
+//                                          its own session file when that start
+//                                          ended; see "The session file" below
 //   hold-<label>                           a test makes this file to stop the
 //                                          replay before the inbound entry with
 //                                          that label, and removes it to go on
@@ -28,7 +31,16 @@
 // `<control-N>` the request id of a control request, each numbered by a
 // recorder in the order the daemon sent them. `<workspace>` is the cwd.
 
+//
+// The session file. Claude Code keeps each session in a file of its own,
+// `<config>/projects/<cwd, every other character as "-">/<session>.jsonl`. A
+// daemon that lost the program during a turn reads the end of the turn from
+// that file. So the file is part of what the program shows the daemon, and a
+// plan can hold its rows: when the start ends, for any reason, the stand-in
+// writes them where Claude Code would.
+
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -84,6 +96,9 @@ const optionValue = (name) => {
 };
 const sessionId = optionValue("--resume") ?? optionValue("--session-id");
 
+const bindings = new Map([["<workspace>", process.cwd()]]);
+if (sessionId) bindings.set("<session>", sessionId);
+
 let ended = false;
 for (const signal of ["SIGTERM", "SIGINT"]) {
   // A stop from the daemon ends the replay at once, by that signal, as it ends Claude Code.
@@ -92,9 +107,26 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
 }
 writeFileSync(join(claimDir, "launch.json"), `${JSON.stringify({ argv, cwd: process.cwd(), pid: process.pid, sessionId }, null, 2)}\n`);
 
+/** Leave the session file as Claude Code left it when this start ended. */
+function writeSessionFile() {
+  const rowsPath = join(planDir, `session-${launchIndex}.ndjson`);
+  if (!existsSync(rowsPath) || !sessionId) return;
+  const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(process.env.HOME?.trim() || homedir(), ".claude");
+  const projectDir = join(configDir, "projects", process.cwd().replace(/[^A-Za-z0-9]/g, "-"));
+  mkdirSync(projectDir, { recursive: true });
+  const rows = readFileSync(rowsPath, "utf8").split("\n").filter((line) => line.trim())
+    .map((line) => fillPlaceholders(JSON.parse(line)));
+  writeFileSync(join(projectDir, `${sessionId}.jsonl`), `${rows.join("\n")}\n`);
+}
+
 function end(outcome, exit) {
   if (ended) return;
   ended = true;
+  try {
+    writeSessionFile();
+  } catch (error) {
+    writeFileSync(join(claimDir, "session-error.txt"), `${error instanceof Error ? error.stack : String(error)}\n`);
+  }
   writeFileSync(join(claimDir, "exit.json"), `${JSON.stringify({ outcome, ...exit })}\n`);
   if (exit.signal && process.platform !== "win32") {
     // End by the recorded signal, so the daemon sees what it saw from Claude Code.
@@ -119,9 +151,6 @@ try {
 } catch (error) {
   fail(`start ${launchIndex} has no usable transcript: ${error instanceof Error ? error.message : String(error)}`);
 }
-
-const bindings = new Map([["<workspace>", process.cwd()]]);
-if (sessionId) bindings.set("<session>", sessionId);
 
 /** Put this run's ids into a recorded frame. A value is written as JSON text, so a Windows path stays valid. */
 function fillPlaceholders(frame) {
@@ -160,6 +189,9 @@ const outboundQueue = [];
 let stdinEnded = false;
 let wake = () => undefined;
 const nextEvent = () => new Promise((resolve) => { wake = resolve; });
+
+// The reader of stdout is gone: the daemon died. Claude Code ends then, and so does the replay.
+process.stdout.on("error", () => end("stdout_closed", { code: 1, signal: null }));
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 lines.on("line", (line) => {

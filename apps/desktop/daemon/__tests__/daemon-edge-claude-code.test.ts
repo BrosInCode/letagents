@@ -52,7 +52,7 @@ async function waitFor(what: string, done: () => boolean): Promise<void> {
 async function startClaudeScenario(name: string): Promise<ClaudeScenario> {
   const planDir = mkdtempSync(join(tmpdir(), `edge-claude-${name}-`));
   cpSync(join(FIXTURES, name), planDir, { recursive: true });
-  for (const file of readdirSync(planDir)) {
+  for (const file of readdirSync(planDir).filter((name) => name.startsWith("launch-"))) {
     const transcript = loadProviderReplayTranscript(join(planDir, file));
     assert.equal(transcript.start.provider, "claude-code");
     assert.equal(transcript.start.protocol, "claude-code.cli/stream-json-stdio");
@@ -148,6 +148,176 @@ describe(
         const prompts = scenario.prompts(1);
         assert.equal(prompts.length, 2);
         assert.match(prompts[1]!, /EDGE_SAY\[claude-ready\]/);
+
+        const sqlite = harness.openSqlite();
+        try {
+          assert.equal(sqlite.integrityCheck(), "ok");
+          const inbox = sqlite.inboxItems(agent.entryId);
+          assert.equal(inbox.length, 1);
+          assert.equal(inbox[0]!.state, "acknowledged");
+        } finally {
+          sqlite.close();
+        }
+      });
+    });
+
+    test("2. FIFO order for two queued room messages", async () => {
+      const scenario = await startClaudeScenario("fifo-two");
+      const { harness, agent } = scenario;
+      await inScenario(scenario, async () => {
+        await startAgentAndWaitIdle(scenario);
+
+        // Keep the first turn open, so the second message has to wait in the queue.
+        scenario.hold("t2-result");
+        harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[first-reply]" });
+        await scenario.reached(1, "t2-result");
+        harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[second-reply]" });
+        await harness.waitForEntry(
+          agent.entryId,
+          (entry) => (entry.room_agent_state?.inbox.pending_count ?? 0) >= 1 && entry.room_agent_state?.turn.state === "responding",
+          WAIT_MS,
+          "the second message in the queue behind the open turn",
+        );
+        assert.equal(harness.roomServer.publishedMessages(agent.roomId).length, 0);
+        scenario.release("t2-result");
+
+        await harness.roomServer.waitForPublishedMessages(agent.roomId, (messages) => messages.length >= 2, WAIT_MS);
+        await waitTurnIdle(scenario);
+        assert.deepEqual(
+          harness.roomServer.publishedMessages(agent.roomId).map((message) => message.text),
+          ["first-reply", "second-reply"],
+        );
+
+        // The stand-in does not compare prompt text, so the order is proved here:
+        // the daemon gave the program the first message first.
+        const prompts = scenario.prompts(1);
+        assert.equal(prompts.length, 3);
+        assert.match(prompts[1]!, /EDGE_SAY\[first-reply\]/);
+        assert.doesNotMatch(prompts[1]!, /EDGE_SAY\[second-reply\]/);
+        assert.match(prompts[2]!, /EDGE_SAY\[second-reply\]/);
+
+        const sqlite = harness.openSqlite();
+        try {
+          const inbox = sqlite.inboxItems(agent.entryId);
+          assert.deepEqual(inbox.map((item) => item.state), ["acknowledged", "acknowledged"]);
+        } finally {
+          sqlite.close();
+        }
+      });
+    });
+
+    test("3. interrupt during a turn", async () => {
+      const scenario = await startClaudeScenario("turn-interrupt");
+      const { harness, agent } = scenario;
+      await inScenario(scenario, async () => {
+        const { daemonGeneration } = await harness.startAgent(agent);
+        await harness.waitForEntry(
+          agent.entryId,
+          (entry) => entry.observed_state === "idle" && Boolean(entry.provider_ref?.provider_continuation_id),
+          WAIT_MS,
+          "claude idle with a session",
+        );
+
+        // The recording has no answer for this turn: after its start the program waits for the interrupt.
+        harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[never-sent]" });
+        const active = await harness.waitForEntry(
+          agent.entryId,
+          (entry) => entry.room_agent_state?.turn.state === "responding"
+            && Boolean(entry.room_agent_state.turn.provider_turn_id)
+            && Boolean(entry.room_agent_state.turn.inbox_item_id)
+            && Boolean(entry.room_agent_state.turn.source_message_id),
+          WAIT_MS,
+          "a responding turn",
+        );
+
+        const control = await harness.rpc.controlTurn({
+          id: agent.entryId,
+          daemon_generation: daemonGeneration,
+          room_id: agent.roomId,
+          work_attempt_id: active.provider_ref!.work_attempt_id,
+          execution_generation_id: active.provider_ref!.execution_generation_id,
+          provider_continuation_id: active.provider_ref!.provider_continuation_id,
+          provider_turn_id: active.room_agent_state!.turn.provider_turn_id!,
+          inbox_item_id: active.room_agent_state!.turn.inbox_item_id!,
+          source_message_id: active.room_agent_state!.turn.source_message_id!,
+          action_id: "edge-claude-interrupt-1",
+          action_sequence: 1,
+          correction: null,
+        });
+        assert.equal(control.state, "idle");
+        await waitTurnIdle(scenario);
+
+        // The interrupt went to the program as a control request, on the session that stays alive.
+        const outbound = readFileSync(join(scenario.planDir, "claim-1", "outbound.ndjson"), "utf8").split("\n").filter(Boolean)
+          .map((line) => JSON.parse(line) as { type: string; request?: { subtype?: string } });
+        assert.deepEqual(outbound.map((frame) => frame.request?.subtype ?? frame.type), ["user", "user", "interrupt"]);
+        assert.equal(existsSync(join(scenario.planDir, "claim-2")), false);
+        assert.equal(harness.roomServer.publishedMessages(agent.roomId).length, 0);
+
+        const sqlite = harness.openSqlite();
+        try {
+          const inbox = sqlite.inboxItems(agent.entryId);
+          assert.equal(inbox.length, 1);
+          assert.ok(
+            ["cancelled_by_user", "acknowledged_failed"].includes(String(inbox[0]!.state)),
+            `the interrupted turn settles with no reply, got ${String(inbox[0]!.state)}`,
+          );
+        } finally {
+          sqlite.close();
+        }
+      });
+    });
+
+    test("4. kill the daemon during a turn, restart it: no lost reply and no duplicate reply", async () => {
+      const scenario = await startClaudeScenario("kill-recover");
+      const { harness, agent } = scenario;
+      await inScenario(scenario, async () => {
+        await startAgentAndWaitIdle(scenario);
+
+        // The program has the room message and has not answered when the daemon dies.
+        scenario.hold("t2-assistant");
+        harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[survived-kill]" });
+        await scenario.reached(1, "t2-assistant");
+        await harness.waitForEntry(
+          agent.entryId,
+          (entry) => entry.room_agent_state?.turn.state === "responding" && Boolean(entry.room_agent_state.turn.provider_turn_id),
+          WAIT_MS,
+          "a responding turn that the daemon has recorded",
+        );
+        await harness.kill("SIGKILL");
+
+        // Claude Code does not live through a daemon restart. With its reader gone it ends,
+        // and the end of the turn is in its session file only.
+        scenario.release("t2-assistant");
+        await waitFor("the first start of the stand-in to end", () => existsSync(join(scenario.planDir, "claim-1", "exit.json")));
+        assert.equal(existsSync(join(scenario.planDir, "claim-1", "session-error.txt")), false);
+        assert.equal(harness.roomServer.publishedMessages(agent.roomId).length, 0);
+
+        const restarted = await harness.restart();
+        assert.ok(restarted.healthy);
+        await harness.reinstallCredentials(agent, restarted.generation);
+
+        await harness.roomServer.waitForPublishedMessages(agent.roomId, (messages) => messages.length >= 1, WAIT_MS);
+        const after = await harness.waitForEntry(
+          agent.entryId,
+          (entry) => entry.observed_state === "idle" && entry.room_agent_state?.turn.state === "idle"
+            && entry.room_agent_state.inbox.pending_count === 0,
+          WAIT_MS,
+          "claude idle on a new start, with an empty queue",
+        );
+        assert.equal(after.condition, "none");
+
+        // Idle with an empty queue: the daemon has nothing left to publish. One reply, the recorded one.
+        assert.deepEqual(harness.roomServer.publishedMessages(agent.roomId).map((message) => message.text), ["survived-kill"]);
+
+        // The room message went to the program once. The second start resumed the session and got the first prompt only.
+        assert.equal(scenario.prompts(1).filter((prompt) => prompt.includes("EDGE_SAY[survived-kill]")).length, 1);
+        assert.equal(scenario.prompts(2).filter((prompt) => prompt.includes("EDGE_SAY[survived-kill]")).length, 0);
+        const resumed = JSON.parse(readFileSync(join(scenario.planDir, "claim-2", "launch.json"), "utf8")) as { argv: string[]; sessionId: string };
+        const first = JSON.parse(readFileSync(join(scenario.planDir, "claim-1", "launch.json"), "utf8")) as { sessionId: string };
+        assert.ok(resumed.argv.includes("--resume"));
+        assert.equal(resumed.sessionId, first.sessionId);
+        assert.equal(existsSync(join(scenario.planDir, "claim-3")), false);
 
         const sqlite = harness.openSqlite();
         try {

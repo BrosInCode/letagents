@@ -31,11 +31,20 @@ import {
 //   wording, which the stand-in does not compare.
 // - Every frame goes through the redaction of the provider replay tests.
 // - Each inbound entry gets a label, `t<turn>-<kind>`, that a test can hold at.
+// - The rows of the program's own session file, when the recorder kept them
+//   (`session-N.jsonl`), are treated like frames and written as `session-N.ndjson`.
+//   The rows in which the program keeps its own requests to the model are left
+//   out: they hold the program's system prompt and a description of this
+//   machine, and no daemon reads them. The header counts them. For the same
+//   reason an `attachment` row keeps only the type of what it attaches, as in
+//   `__fixtures__/claude-code-result-shapes.json`.
 // - When the capture has no exit, because the daemon ended the recorder
 //   before it could write one, a requested exit by SIGTERM is added and the
 //   header says so.
 
 const PROTOCOL = "claude-code.cli/stream-json-stdio";
+/** Session rows that hold the program's requests to the model. */
+const SESSION_ROWS_LEFT_OUT: ReadonlySet<string> = new Set(["api-request", "api-request-shape", "api-request-blob"]);
 const FIXTURES = fileURLToPath(new URL("./fixtures", import.meta.url));
 
 const args = process.argv.slice(2);
@@ -66,6 +75,7 @@ function inboundKind(frame: JsonObject): string {
 const launches = readdirSync(captureDir).filter((name) => /^capture-\d+\.ndjson$/.test(name)).length;
 if (!launches) throw new Error(`No capture in ${captureDir}.`);
 const written: string[] = [];
+const sessions = new Map<number, string>();
 
 for (let index = 1; index <= launches; index += 1) {
   const launch = JSON.parse(readFileSync(join(captureDir, `launch-${index}.json`), "utf8")) as { argv: string[]; cwd: string };
@@ -121,6 +131,31 @@ for (let index = 1; index <= launches; index += 1) {
     return { type: entry.type, label: `t${turn}-${inboundKind(frame)}`, frame };
   });
 
+  const sessionPath = join(captureDir, `session-${index}.jsonl`);
+  let sessionText = "";
+  let sessionRowsLeftOut = 0;
+  if (existsSync(sessionPath)) {
+    const rows = readFileSync(sessionPath, "utf8").split("\n").filter(Boolean)
+      .filter((line) => !SESSION_ROWS_LEFT_OUT.has(String((JSON.parse(line) as JsonObject).type)) || (sessionRowsLeftOut += 1, false));
+    sessionText = rows.map((line) => {
+      let row = line;
+      for (const [value, name] of names) row = row.split(value).join(name);
+      const redacted = redactor.redactFrame(JSON.parse(row) as JsonObject);
+      // The row of a user message holds our prompt wording, as the frame that sent it does.
+      if (redacted.type === "user" && redacted.message && typeof redacted.message === "object" && !Array.isArray(redacted.message)
+        && Array.isArray(redacted.message.content)) {
+        redacted.message.content = [{ type: "text", text: "<prompt>" }];
+      }
+      if (redacted.type === "attachment" && redacted.attachment && typeof redacted.attachment === "object" && !Array.isArray(redacted.attachment)) {
+        redacted.attachment = { type: redacted.attachment.type ?? null };
+        // What the program showed the model for the attachment: the same text again.
+        delete redacted.rendered;
+        delete redacted.renderedRole;
+      }
+      return JSON.stringify(redacted);
+    }).join("\n") + "\n";
+  }
+
   const exitCaptured = entries.at(-1)?.type === "runtime_exit";
   if (!exitCaptured) {
     entries.push({ type: "runtime_exit", requested: true, transportClosedBeforeExit: false, code: null, signal: "SIGTERM" });
@@ -143,6 +178,7 @@ for (let index = 1; index <= launches; index += 1) {
       model: "stand-in: a local Messages API that answers each turn with a known text",
       roomServer: "stand-in: the fake room server of the edge harness",
       mcpServer: "stand-in: the MCP stub of the edge harness",
+      sessionFile: sessionText ? `session-${index}.ndjson: the program's own session file as it was when this start ended, without ${sessionRowsLeftOut} rows of its requests to the model` : "not kept",
       exit: exitCaptured ? "captured" : "not captured: the daemon ended the recorder first; a requested SIGTERM exit was added",
       launchArguments: launch.argv.map((argument) => {
         if (argument === sessionId) return "<session>";
@@ -159,9 +195,18 @@ for (let index = 1; index <= launches; index += 1) {
     throw new Error(`Start ${index} still holds what redaction should remove; nothing was written:\n${
       leaks.map((leak) => `  ${leak.rule} at line ${leak.line}, ${leak.path}`).join("\n")}`);
   }
+  if (sessionText) {
+    const sessionLeaks = findReplayLeaks(sessionText, context);
+    if (sessionLeaks.length) {
+      throw new Error(`The session file of start ${index} still holds what redaction should remove; nothing was written:\n${
+        sessionLeaks.map((leak) => `  ${leak.rule} at line ${leak.line}, ${leak.path}`).join("\n")}`);
+    }
+    sessions.set(index, sessionText);
+  }
   written.push(text);
 }
 
 mkdirSync(outDir, { recursive: true });
 written.forEach((text, at) => writeFileSync(join(outDir, `launch-${at + 1}.ndjson`), text));
+for (const [index, text] of sessions) writeFileSync(join(outDir, `session-${index}.ndjson`), text);
 console.log(`${scenario}: wrote ${written.length} transcript(s) to ${outDir}${existsSync(outDir) ? "" : " (missing)"}`);

@@ -112,6 +112,7 @@ interface ScenarioContext {
   agent: EdgeAgentRegistration;
   messages: MessagesStandIn;
   captureDir: string;
+  daemonGeneration: number;
 }
 
 async function waitIdle(context: ScenarioContext, what: string): Promise<void> {
@@ -133,6 +134,32 @@ async function waitForCapture(dir: string, index: number, pattern: RegExp, what:
   }
 }
 
+/**
+ * Copy the session file of the program as `session-<launch>.jsonl`, once it
+ * holds `turns` turns that the model ended. Claude Code writes the file as it
+ * works, so a copy made too early misses the end of the turn.
+ */
+async function snapshotSessionFile(homeDir: string, captureDir: string, launch: number, turns: number): Promise<void> {
+  const { readFileSync, copyFileSync } = await import("node:fs");
+  const root = join(homeDir, ".claude", "projects");
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    const files = existsSync(root)
+      ? (readdirSync(root, { recursive: true }) as string[]).filter((file) => file.endsWith(".jsonl"))
+      : [];
+    if (files.length > 1) throw new Error(`More than one session file in ${root}: ${files.join(", ")}.`);
+    if (files.length === 1) {
+      const ended = readFileSync(join(root, files[0]!), "utf8").split('"stop_reason":"end_turn"').length - 1;
+      if (ended >= turns) {
+        copyFileSync(join(root, files[0]!), join(captureDir, `session-${launch}.jsonl`));
+        return;
+      }
+    }
+    if (Date.now() > deadline) throw new Error(`The session file never held ${turns} ended turns.`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+}
+
 const SCENARIOS: Record<string, (context: ScenarioContext) => Promise<void>> = {
   /** One room message, one reply. */
   async simple({ harness, agent }) {
@@ -150,13 +177,50 @@ const SCENARIOS: Record<string, (context: ScenarioContext) => Promise<void>> = {
     const { harness, agent, messages, captureDir } = context;
     const release = messages.holdNext();
     harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[never-sent]" });
-    await waitForCapture(captureDir, 1, /"state":"started"[^\n]*\n(?![\s\S]*"state":"started")/, "the start of the room turn");
-    await harness.waitForEntry(agent.entryId, (entry) => entry.room_agent_state?.turn.state === "active", 60_000, "an active turn");
-    await harness.rpc.request("manifest.control_turn", { id: agent.entryId, action: "interrupt" }).catch((error: unknown) => {
-      console.error(`control_turn: ${error instanceof Error ? error.message : String(error)}`);
+    const active = await harness.waitForEntry(
+      agent.entryId,
+      (entry) => entry.room_agent_state?.turn.state === "responding"
+        && Boolean(entry.room_agent_state.turn.provider_turn_id)
+        && Boolean(entry.room_agent_state.turn.inbox_item_id),
+      60_000,
+      "a responding turn",
+    );
+    await waitForCapture(captureDir, 1, /"state":"started"[^\n]*\n[\s\S]*"state":"started"/, "the start of the room turn");
+    await harness.rpc.controlTurn({
+      id: agent.entryId,
+      daemon_generation: context.daemonGeneration,
+      room_id: agent.roomId,
+      work_attempt_id: active.provider_ref!.work_attempt_id,
+      execution_generation_id: active.provider_ref!.execution_generation_id,
+      provider_continuation_id: active.provider_ref!.provider_continuation_id,
+      provider_turn_id: active.room_agent_state!.turn.provider_turn_id!,
+      inbox_item_id: active.room_agent_state!.turn.inbox_item_id!,
+      source_message_id: active.room_agent_state!.turn.source_message_id!,
+      action_id: "edge-claude-interrupt-1",
+      action_sequence: 1,
+      correction: null,
     });
-    await waitIdle(context, "idle after the interrupt").catch((error: unknown) => console.error(String(error)));
     release();
+  },
+  /** The daemon dies during a room turn and starts again. */
+  async "kill-recover"(context) {
+    const { harness, agent, messages, captureDir } = context;
+    const release = messages.holdNext();
+    harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[survived-kill]" });
+    await harness.waitForEntry(
+      agent.entryId,
+      (entry) => entry.room_agent_state?.turn.state === "responding" && Boolean(entry.room_agent_state.turn.provider_turn_id),
+      60_000,
+      "a responding turn",
+    );
+    await waitForCapture(captureDir, 1, /"state":"started"[^\n]*\n[\s\S]*"state":"started"/, "the start of the room turn");
+    await harness.kill("SIGKILL");
+    release();
+    // The program ends by itself once its reader is gone. Keep its session file as it left it.
+    await snapshotSessionFile(harness.homeDir, captureDir, 1, 2);
+    const restarted = await harness.restart();
+    await harness.reinstallCredentials(agent, restarted.generation);
+    await harness.roomServer.waitForPublishedMessages(agent.roomId, (published) => published.length >= 1, 90_000);
   },
 };
 
@@ -195,9 +259,9 @@ async function record(name: string, outRoot: string): Promise<void> {
     model: "sonnet",
     permissionProfileId: "full_access",
   };
-  const context: ScenarioContext = { harness, agent, messages, captureDir };
+  const context: ScenarioContext = { harness, agent, messages, captureDir, daemonGeneration: 0 };
   try {
-    await harness.startAgent(agent);
+    context.daemonGeneration = (await harness.startAgent(agent)).daemonGeneration;
     await harness.waitForEntry(agent.entryId, (entry) => entry.observed_state === "idle", 90_000, "claude idle after its first prompt");
     await SCENARIOS[name]!(context);
     await waitIdle(context, "idle at the end of the scenario");
