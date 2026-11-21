@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -21,6 +22,11 @@ import { SupervisorDaemon } from "../main.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
+import {
+  OpenModelProviderAdapter,
+  type OpenModelProviderAdapterDependencies,
+} from "../../electron/main/agents/open-model-provider-adapter.js";
+import type { ProviderProcessExit } from "../../electron/main/agents/provider-evidence.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt-native-resolution",
@@ -471,6 +477,127 @@ test("provider router preserves Cursor's remembered-stop path", async () => {
   const handle = await router.spawn({ provider: "cursor", workAttemptId: "cursor-stop", roomId: "room", cwd: "/tmp/cursor", launchPolicy: {} });
   await router.stopRef({ provider: "cursor", workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection });
   assert.deepEqual(calls, ["claude-code:stop:cursor-stop"]);
+});
+
+test("provider router routes Open Model exact stopRef past a retired cached handle and preserves birth checks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-router-open-model-retired-"));
+  try {
+    const pid = 9401;
+    const birth = `opencode-birth-${pid}`;
+    let identityState: string | null | undefined = birth;
+    let identityReads = 0;
+    let resolveExit!: (exit: ProviderProcessExit) => void;
+    const exited = new Promise<ProviderProcessExit>((resolve) => { resolveExit = resolve; });
+    const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+    const adapter = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot: join(root, "opencode-runtime"),
+      stopGraceMs: 25,
+      startTimeoutMs: 10_000,
+      dependencies: {
+        resolveMcpRuntime: () => ({ entryPath: join(root, "letagents-mcp-entry.js"), readRoots: [] }),
+        launch: () => {
+          const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+          Object.assign(child, { pid, unref() {} });
+          return { child, exited };
+        },
+        getProcessIdentity: (candidatePid) => {
+          if (candidatePid !== pid) return null;
+          identityReads += 1;
+          return identityState;
+        },
+        observeProcessExit: () => exited,
+        signalProcess: (candidatePid, signal, identity) => {
+          signals.push({ pid: candidatePid, signal, identity });
+        },
+        allocatePort: async () => 44881,
+        discoverRuntimeConnection: async () => null,
+        probeGit: async () => null,
+        fetch: async (input, init) => {
+          const url = new URL(input);
+          if (url.pathname.endsWith("/models")) {
+            return new Response(JSON.stringify({ data: [{ id: "qwen/qwen3-coder", context_length: 262144 }] }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (url.pathname === "/global/health") {
+            return new Response(JSON.stringify({ healthy: true, version: "1.18.20" }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (url.pathname === "/session" && init?.method === "POST") {
+            return new Response(JSON.stringify({ id: "ses-retired-cached" }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      },
+    });
+    const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+    const cwd = join(root, "workspace");
+    await mkdir(cwd, { recursive: true });
+    const handle = await router.spawn({
+      provider: "open-model",
+      workAttemptId: "wa-retired-cached",
+      roomId: "room-1",
+      cwd,
+      workspaceKind: "git_worktree",
+      deliveryMode: "daemon_inbox",
+      lifecycleAuthorityMode: "typed",
+      permissionProfileId: "full_access",
+      launchPolicy: { permission: { "*": "allow" } },
+      configurationRevision: 1,
+      supervisorEntryId: "entry-retired-cached",
+      supervisorSocketPath: join(root, "daemon.sock"),
+      supervisorExecutionGenerationId: "gen-retired-cached",
+      supervisorWorkerSession: { agentSessionId: "session-retired-cached", roomCursor: null },
+      providerCredential: {
+        apiKey: "test-key",
+        baseUrl: "https://models.example.test/v1",
+        model: "qwen/qwen3-coder",
+      },
+    });
+    const ref: ProviderActionRef = {
+      provider: "open-model",
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId!,
+      providerConnection: structuredClone(handle.providerConnection),
+    };
+
+    // Process exits -> OpenModelProviderAdapter.finish() deletes the handle from adapter.handles,
+    // while ProviderActionPortRouter retains the retired handle entry for custody.
+    const exitedObserved = new Promise<void>((resolve) => {
+      void router.onExit(handle, () => resolve());
+    });
+    identityState = null;
+    resolveExit({ type: "exit", code: 0, signal: "SIGTERM" });
+    await exitedObserved;
+
+    // 1. Unverifiable birth still fails closed through adapter.stopRef (never stale adapter.stop).
+    identityReads = 0;
+    identityState = undefined;
+    await assert.rejects(
+      router.stopRef(ref, { graceMs: 20 }),
+      /process birth cannot be verified/,
+    );
+    assert.ok(identityReads >= 1);
+    assert.equal(signals.length, 0);
+
+    // 2. Confirmed absence settles cleanly via adapter.stopRef without "handle is stale or foreign".
+    identityReads = 0;
+    identityState = null;
+    const terminal = await router.stopRef(ref, { graceMs: 20, actionId: "stop-retired-om" });
+    assert.ok(identityReads >= 1);
+    assert.equal(terminal.terminalCause, "stopped");
+    assert.equal(terminal.providerContinuationId, "ses-retired-cached");
+    assert.equal(signals.length, 0);
+  } finally {
+    await removeTestDirectory(root);
+  }
 });
 
 test("provider router carries native shadow facts and probes without invoking legacy actions", async () => {

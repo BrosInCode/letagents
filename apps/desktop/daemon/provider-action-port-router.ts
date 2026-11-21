@@ -530,12 +530,13 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const adapter = await this.adapter(provider);
     // Protocol terminals can precede OS death. The exact-reference path
     // must prove the frozen birth is gone even when a cached handle exists.
-    if (adapter.stopRef && (provider === "codex" || options?.force)) {
+    if (adapter.stopRef && (provider === "codex" || provider === "open-model" || options?.force)) {
       const terminal = await adapter.stopRef(ref, options);
       if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);
       return terminal;
     }
     if (remembered?.handle
+      && !this.exits.get(remembered.handle)?.exited
       && remembered.handle.providerContinuationId === ref.providerContinuationId
       && sameProviderActionConnectionIdentity(remembered.handle.providerConnection, ref.providerConnection)) {
       const terminal = await adapter.stop(remembered.handle, options);

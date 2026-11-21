@@ -2158,14 +2158,21 @@ export class ProviderExecutionCoordinator {
   private async stopUnattachedExactRef(
     entry: DaemonManifestEntry,
     ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
+    alreadySettledTerminal = false,
   ): Promise<void> {
-    await this.options.transition(
-      entry.id,
-      "stopping",
-      entry.condition,
-      `desired state changed to ${entry.desired_state}`,
-      "daemon-convergence",
-    );
+    const targetState = entry.desired_state === "paused" ? "paused" : "stopped";
+    const settledAtTarget = alreadySettledTerminal
+      && entry.observed_state === targetState
+      && entry.condition === "none";
+    if (!settledAtTarget) {
+      await this.options.transition(
+        entry.id,
+        "stopping",
+        entry.condition,
+        `desired state changed to ${entry.desired_state}`,
+        "daemon-convergence",
+      );
+    }
     const terminal = await this.options.provider.stopRef!(await this.providerRef(entry), {
       actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
     });
@@ -2196,13 +2203,15 @@ export class ProviderExecutionCoordinator {
         ref.execution_generation_id,
       );
     }
-    await this.options.observeProviderExit(
-      entry.id,
-      terminal,
-      "daemon-provider",
-      ref.execution_generation_id,
-      undefined,
-    );
+    if (!settledAtTarget) {
+      await this.options.observeProviderExit(
+        entry.id,
+        terminal,
+        "daemon-provider",
+        ref.execution_generation_id,
+        undefined,
+      );
+    }
   }
 
   /**
@@ -2247,7 +2256,7 @@ export class ProviderExecutionCoordinator {
     }
     const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
     if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return false;
-    await this.stopUnattachedExactRef(entry, ref);
+    await this.stopUnattachedExactRef(entry, ref, Boolean(execution.terminal));
     return true;
   }
 
