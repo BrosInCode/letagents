@@ -10,6 +10,7 @@ import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../
 import { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import {
+  restoreThreeProviderLifecycleProjectionFixture,
   restoreEmptyExecutionDelegationV23Fixture,
   localDelegationAuthority,
   localDelegationRevision,
@@ -382,6 +383,7 @@ test("v29 lifecycle effect migration rolls back its journal and version markers 
     await initialized.load();
     await initialized.close();
     const historical = new DatabaseSync(env.databasePath);
+    restoreThreeProviderLifecycleProjectionFixture(historical);
     restoreEmptyExecutionDelegationV23Fixture(historical);
     historical.exec(`DROP TABLE execution_lifecycle_effects;
       UPDATE manifest_metadata SET schema_version=29 WHERE singleton=1;
@@ -419,6 +421,7 @@ test("v30 runtime-failure effect migration rolls back its schema and version mar
     await initialized.load();
     await initialized.close();
     const historical = new DatabaseSync(env.databasePath);
+    restoreThreeProviderLifecycleProjectionFixture(historical);
     restoreEmptyExecutionDelegationV23Fixture(historical);
     historical.exec("DROP TABLE execution_lifecycle_effects");
     applyExecutionStorageSchema(historical, 22);

@@ -17,6 +17,7 @@ import { validatePreparedRoomContextSchema } from "../prepared-room-context.js";
 import { validateRoomWorkspaceSchema, validateRoomWorkspaceReviewSchema } from "../room-workspace-store.js";
 import type { DatabaseSync } from "node:sqlite";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema, type ExecutionStorageSchemaVersion } from "../execution-storage-schema.js";
+import { validatePollingActivationSchema, validatePollingOfferSchema, validateLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./v52-compat-tables.js";
 import { validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
 import { validateRuntimeRecoverySchema } from "../runtime-recovery-journal.js";
@@ -365,14 +366,19 @@ repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 
   if (version >= 47) validateWorkerExecutionBindings(database);
   const storageVersion = executionStorageVersion ?? (version >= 35 ? 25 : version >= 34 ? 24 : version >= 31 ? 23 : version >= 30 ? 22 : 21);
   if (version >= 36) validateExecutionApprovalPublicationSchema(database);
+  if (version >= 28) {
+    if (version < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
+    else validateLifecycleProjectionLedgerSchema(database);
+  }
   if (version >= 41) validateRuntimeRecoverySchema(database);
   if (version >= 43) validatePreparedRoomContextSchema(database);
   if (version >= 44) validateHostToolRuleSchema(database);
   if (version >= 39) validateRoomWorkspaceReviewSchema(database);
   if (version >= 38) validateRoomWorkspaceSchema(database);
   if (version >= 27) validateRoomWorkPublicationSchema(database, version < 37);
+  if (version >= 25) validatePollingOfferSchema(database, version >= 26 ? 26 : 25);
   if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 24) {
-    validateCustodialLaunchSession(database);
+    validatePollingActivationSchema(database, version >= 26 ? 26 : 24); validateCustodialLaunchSession(database);
   }
   if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 23) validatePollingContract(database);
   if (!this.tableColumns(database, "supervised_agent_inbox_events").size

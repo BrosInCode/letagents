@@ -1209,7 +1209,15 @@ test("daemon convergence drives Claude through the router across stop and same-a
     await daemon.start();
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry })).ok, true);
     await installOwnedTestGrant(paths.socketPath, entry.id, entry.room_id);
-    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "idle", "Claude router start");
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as Array<DaemonManifestEntry & {
+        worker_binding?: { execution_generation_id: string } | null;
+      }>)[0];
+      return current?.observed_state === "idle"
+        && current.condition === "none"
+        && Boolean(current.provider_ref?.execution_generation_id)
+        && current.worker_binding?.execution_generation_id === current.provider_ref?.execution_generation_id;
+    }, "Claude router start");
     const first = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(first.provider_ref?.provider_connection?.kind, "claude_cli");
     assert.ok(first.work_attempt_id);

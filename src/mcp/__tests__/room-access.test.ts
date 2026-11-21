@@ -539,9 +539,11 @@ test("request_room_access with no sign-in starts the device flow", async () => {
 test("request_room_access is offered to the account's own MCP tools, not to supervised agents", () => {
   assert.ok(handlers("autonomous_mcp_worker").has("request_room_access"));
   assert.ok(handlers("interactive_desktop").has("request_room_access"));
-  const names = new Set<string>();
-  registerTools({ tool(name: string) { names.add(name); return {}; } } as unknown as McpServer, "supervised_room_turn", "codex");
-  assert.equal(names.has("request_room_access"), false, "supervised_room_turn");
+  for (const profile of ["supervised_room_turn", "supervised_mcp_polling"] as const) {
+    const names = new Set<string>();
+    registerTools({ tool(name: string) { names.add(name); return {}; } } as unknown as McpServer, profile, "codex");
+    assert.equal(names.has("request_room_access"), false, profile);
+  }
   let schema: Record<string, unknown> | null = null;
   registerTools({
     tool(name: string, ...registration: unknown[]) {

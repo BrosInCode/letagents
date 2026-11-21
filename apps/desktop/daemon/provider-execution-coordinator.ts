@@ -9,6 +9,7 @@ import {
   isEphemeralWorkspaceMarker,
   type EphemeralWorkspaceProvisioner,
 } from "./ephemeral-workspace-provisioner.js";
+import { ExecutionProtocolError } from "./execution-protocol.js";
 import { serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestConflictError } from "./manifest-store.js";
 import {
@@ -2144,7 +2145,17 @@ export class ProviderExecutionCoordinator {
       );
       return;
     }
-    if (!handle && entry.provider_ref) handle = await this.attachLiveProvider(entry);
+    if (!handle && entry.provider_ref) {
+      try {
+        handle = await this.attachLiveProvider(entry);
+      } catch (error) {
+        if (error instanceof ExecutionProtocolError && error.code === "identity_mismatch") {
+          await this.stopRetiredPreTypedRuntime(entry);
+          return;
+        }
+        throw error;
+      }
+    }
     if (handle) {
       await this.options.transition(
         entry.id,
@@ -2164,6 +2175,70 @@ export class ProviderExecutionCoordinator {
       "none",
       "desired state converged without a live provider",
       "daemon-convergence",
+    );
+  }
+
+  /**
+   * Stop a pre-upgrade runtime whose frozen authority_mode is not "typed"
+   * without promoting it into typed observation or delivery.
+   */
+  private async stopRetiredPreTypedRuntime(entry: DaemonManifestEntry): Promise<void> {
+    const ref = entry.provider_ref;
+    if (!ref) return;
+    const attachment = await this.options.provider.attach(await this.providerRef(entry));
+    if (!attachment) {
+      await this.options.transition(
+        entry.id,
+        entry.desired_state === "paused" ? "paused" : "stopped",
+        "none",
+        "desired state converged without a live provider",
+        "daemon-convergence",
+      );
+      return;
+    }
+    let terminal: ProviderActionTerminal;
+    if (this.isAttachTerminal(attachment)) {
+      terminal = attachment.terminal;
+    } else {
+      await this.options.transition(
+        entry.id,
+        "stopping",
+        entry.condition,
+        `desired state changed to ${entry.desired_state}`,
+        "daemon-convergence",
+      );
+      terminal = await this.options.provider.stop(attachment, {
+        actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
+      });
+    }
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (execution && !execution.terminal) {
+      await this.options.durability.recordTerminal(
+        ref.work_attempt_id,
+        ref.execution_generation_id,
+        {
+          ...this.options.terminalPayload(terminal, execution.actor, ref.provider_connection),
+          actor: execution.actor,
+          generation: execution.generation,
+        },
+      );
+      await this.options.settleRuntimeApprovals(entry.id);
+      if (entry.desired_state === "stopped") {
+        await this.options.durability.releaseTerminalExecutionFence(
+          ref.work_attempt_id,
+          ref.execution_generation_id,
+        );
+      }
+    }
+    await this.options.observeProviderExit(
+      entry.id,
+      terminal,
+      "daemon-provider",
+      ref.execution_generation_id,
+      undefined,
     );
   }
 }

@@ -6,6 +6,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { applyRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { applyExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
 import { executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
+import { applyPollingActivationSchema, applyPollingOfferSchema, migratePollingOffersV25ToV26, applyLifecycleProjectionLedgerSchema } from "./v52-compat-tables.js";
 import { applyRuntimeRecoverySchema } from "../runtime-recovery-journal.js";
 import { applyApprovalRequestClosureSchema } from "../execution-approval-journal.js";
 import { applyWorkerExecutionBindings, type Row, POLLING_CONTRACT_COLUMN, CUSTODIAL_LAUNCH_SESSION_COLUMN, TERMINAL_RESULTS_INDEX, terminalResultsSql, validatePollingContract, validateCustodialLaunchSession, validateTerminalResults, schemaMethods } from "./shared.js";
@@ -233,8 +234,18 @@ applyCurrentConfigurationShape(database: DatabaseSync): void {
     database.exec(`ALTER TABLE runtime_deployments ADD COLUMN ${CUSTODIAL_LAUNCH_SESSION_COLUMN}`);
   }
   validateCustodialLaunchSession(database);
+  if (this.tableColumns(database, "custodial_polling_activations").size
+    && !this.tableColumns(database, "custodial_polling_activations").has("compacted_through_offer_id")) {
+    applyPollingActivationSchema(database, 24);
+    applyPollingOfferSchema(database, 25);
+    migratePollingOffersV25ToV26(database);
+  } else {
+    applyPollingActivationSchema(database);
+    applyPollingOfferSchema(database);
+  }
   applyRoomWorkPublicationSchema(database);
   applyExecutionApprovalPublicationSchema(database);
+  applyLifecycleProjectionLedgerSchema(database);
   this.freezeLegacyActiveRuntimeBirths(database);
   this.retireIncompatibleCodexRuntimeBirths(database);
 },

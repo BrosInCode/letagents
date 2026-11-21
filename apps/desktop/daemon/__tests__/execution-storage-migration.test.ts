@@ -9,6 +9,7 @@ import test from "node:test";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase, openDaemonStateObservationDatabase, openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 import { validateHostToolRuleSchema } from "../host-tool-rules.js";
+import { applyPollingActivationSchema, applyPollingOfferSchema, validateLegacyLifecycleProjectionLedgerSchema } from "../daemon-state-database/v52-compat-tables.js";
 import { RoomWorkPublicationStore, validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
@@ -110,8 +111,13 @@ function restoreV22Fixture(database: DatabaseSync): void {
 }
 
 function restoreV23Fixture(database: DatabaseSync): void {
-  restoreV26Fixture(database);
-  database.exec("ALTER TABLE runtime_deployments DROP COLUMN custodial_launch_agent_session_id; UPDATE manifest_metadata SET schema_version=23 WHERE singleton=1; PRAGMA user_version=23");
+  restoreV24Fixture(database);
+  database.exec("DROP TABLE custodial_polling_activations; ALTER TABLE runtime_deployments DROP COLUMN custodial_launch_agent_session_id; UPDATE manifest_metadata SET schema_version=23 WHERE singleton=1; PRAGMA user_version=23");
+}
+
+function restoreV24Fixture(database: DatabaseSync): void {
+  restoreV25Fixture(database);
+  database.exec("DROP TABLE custodial_polling_offers; UPDATE manifest_metadata SET schema_version=24 WHERE singleton=1; PRAGMA user_version=24");
 }
 
 function restoreExecutionApprovalProjectionV24Fixture(database: DatabaseSync): void {
@@ -155,6 +161,16 @@ function restoreExecutionDelegationV23Fixture(database: DatabaseSync): void {
   validateExecutionStorageSchema(database, 23);
 }
 
+function restoreV25Fixture(database: DatabaseSync): void {
+  restoreV26Fixture(database);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM custodial_polling_activations").get()!.count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM custodial_polling_offers").get()!.count, 0);
+  database.exec("DROP TABLE custodial_polling_offers; DROP TABLE custodial_polling_activations");
+  applyPollingActivationSchema(database, 24);
+  applyPollingOfferSchema(database, 25);
+  database.exec("UPDATE manifest_metadata SET schema_version=25 WHERE singleton=1; PRAGMA user_version=25");
+}
+
 function restoreV26Fixture(database: DatabaseSync): void {
   restoreV27Fixture(database);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM room_work_publications").get()!.count, 0);
@@ -163,23 +179,46 @@ function restoreV26Fixture(database: DatabaseSync): void {
 
 function restoreV27Fixture(database: DatabaseSync): void {
   restoreExecutionDelegationV23Fixture(database);
-  database.exec(`DROP TABLE execution_lifecycle_effects;
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0);
+  database.exec(`DROP TABLE lifecycle_projection_pairs;
+    DROP TABLE lifecycle_projection_lanes;
+    DROP TABLE lifecycle_projection_totals;
+    DROP TABLE execution_lifecycle_effects;
     UPDATE manifest_metadata SET schema_version=27 WHERE singleton=1;
     PRAGMA user_version=27`);
 }
 
 function restoreV28Fixture(database: DatabaseSync): void {
   restoreExecutionDelegationV23Fixture(database);
+  restoreLifecycleProjectionV1Fixture(database);
   database.exec("DROP TABLE execution_lifecycle_effects; UPDATE manifest_metadata SET schema_version=28 WHERE singleton=1; PRAGMA user_version=28");
 }
 
 function restoreV30Fixture(database: DatabaseSync): void {
   restoreExecutionDelegationV23Fixture(database);
+  restoreLifecycleProjectionV1Fixture(database);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects").get()!.count, 0);
   database.exec("DROP TABLE execution_lifecycle_effects");
   applyExecutionStorageSchema(database, 22);
   database.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
   validateExecutionStorageSchema(database, 22);
+}
+
+function restoreLifecycleProjectionV1Fixture(database: DatabaseSync): void {
+  const noDelete = String(database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='lifecycle_projection_total_no_delete'",
+  ).get()!.sql);
+  database.exec(`DROP TRIGGER lifecycle_projection_total_no_delete;
+    DELETE FROM lifecycle_projection_totals WHERE provider='open-model';
+    ${noDelete}`);
+  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.enableDefensive?.(false);
+  database.exec("PRAGMA writable_schema=ON");
+  database.prepare(`UPDATE sqlite_master SET sql=replace(sql, ?, '')
+    WHERE type='table' AND name IN ('lifecycle_projection_lanes','lifecycle_projection_totals')`).run(",'open-model'");
+  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+  database.enableDefensive?.(true);
+  validateLegacyLifecycleProjectionLedgerSchema(database);
 }
 
 function restoreV32Fixture(database: DatabaseSync): void {
@@ -536,6 +575,7 @@ test("v30 marker recovery accepts only a complete exact-current lifecycle journa
     }
     const before = env.database.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all();
     restoreExecutionDelegationV23Fixture(env.database);
+    restoreLifecycleProjectionV1Fixture(env.database);
     env.database.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all(), before);
@@ -1190,7 +1230,7 @@ test("v27 adds empty room publication provenance without changing retained autho
   try {
     restoreV26Fixture(env.database); seedLegacyEvidence(env.database);
     const retained = () => ({ legacy: legacyRows(env.database), typed: typedRows(env.database),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('host_tool_rules','host_tool_rule_decisions','host_tool_rule_withdrawals','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_request_closures','execution_approval_projections','room_work_publications') ORDER BY type,name").all() });
+      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('host_tool_rules','host_tool_rule_decisions','host_tool_rule_withdrawals','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_request_closures','execution_approval_projections','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all() });
     const before = retained();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(retained(), before);

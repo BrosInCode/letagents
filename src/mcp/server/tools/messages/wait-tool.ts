@@ -37,8 +37,10 @@ import {
 } from "../../runtime.js";
 import {
   requireValidWorkerBearerRuntime,
+  isCustodialPolling,
   supervisedBoundedDeliveryDisabledToolResult,
 } from "../../runtime/worker-bearer.js";
+import { resolveWorkerToolIdentity } from "../../runtime/agent-sessions.js";
 import {
   attachAgentMessageActivations,
   createGlobalAgentAddressResolver,
@@ -600,16 +602,20 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       const targetProjectId = getFallbackProjectId();
       const localRoomId = targetRoomId ?? getCurrentRoom()?.room_id ?? targetProjectId;
       const sessionRoomId = targetRoomId ?? getCurrentRoom()?.room_id ?? localRoomId ?? null;
-      const routingStateSnapshot = getStoredAgentRoutingStateSnapshot(sessionRoomId ?? "");
+      const custodial = isCustodialPolling();
+      const routingStateSnapshot = custodial ? { complete: true } : getStoredAgentRoutingStateSnapshot(sessionRoomId ?? "");
       const localStorageEnabled = Boolean(
         localRoomId && await isLocalRoomStorageEnabled(localRoomId),
       );
       if (localStorageEnabled && !routingStateSnapshot.complete) {
         throw new Error("Local agent routing state is unavailable; retry after restoring the state file.");
       }
-      const identity = await ensureAgentIdentity();
-      const agentSession = resolveWaitAgentSession(sessionRoomId, agent_session_id);
-      if (agentSession) {
+      const exactIdentity = custodial ? await resolveWorkerToolIdentity({ roomId: sessionRoomId, agentSessionId: agent_session_id }) : null;
+      const identity = exactIdentity?.identity ?? await ensureAgentIdentity();
+      const agentSession = exactIdentity?.agentSession ?? resolveWaitAgentSession(sessionRoomId, agent_session_id);
+      if (custodial) {
+        if (!agentSession || !after_message_id) throw new Error("Custodial polling requires exact worker identity and durable cursor.");
+      } else if (agentSession) {
         // Registration (or a successor generation) must bind strictly once.
         // Later waits use a read-only exact verification capped at 250ms, so a
         // wedged daemon cannot consume the room-poll budget and an old worker

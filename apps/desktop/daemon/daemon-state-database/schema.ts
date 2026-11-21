@@ -304,7 +304,7 @@ createSchemaForVersion(database: DatabaseSync): void {
       model TEXT,
       charter TEXT NOT NULL,
       permission_profile_id TEXT,
-      delivery_mode TEXT NOT NULL DEFAULT 'daemon_inbox' CHECK (delivery_mode IN ('mcp_polling','daemon_inbox')),
+      delivery_mode TEXT NOT NULL DEFAULT 'mcp_polling' CHECK (delivery_mode IN ('mcp_polling','daemon_inbox')),
       delivery_cutover_json TEXT,
       provider_launch_policy_present INTEGER NOT NULL CHECK (provider_launch_policy_present IN (0, 1)),
       provider_launch_policy_undefined INTEGER NOT NULL CHECK (provider_launch_policy_undefined IN (0, 1)),
@@ -475,6 +475,23 @@ createSchemaForVersion(database: DatabaseSync): void {
       terminal_generation INTEGER,
       terminal_provider_continuation_id TEXT,
       PRIMARY KEY(agent_id, sort_order)
+    ) STRICT;
+
+    -- Unused since legacy provider lanes were retired. Kept for one release so
+    -- an older daemon (a downgrade, or a dev build sharing ~/.letagents) can
+    -- still open a database first created by this build; it read this table
+    -- unconditionally. Drop it once no older daemon can meet this database.
+    CREATE TABLE IF NOT EXISTS legacy_lane_owners (
+      reservation_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      owner_pid INTEGER NOT NULL,
+      owner_process_identity TEXT NOT NULL,
+      state TEXT NOT NULL,
+      session_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      sort_order INTEGER NOT NULL UNIQUE
     ) STRICT;
     `);
     this.schemaInitializationHook?.(database);

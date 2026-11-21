@@ -48,7 +48,7 @@ export function assertMessageFileAttachmentsAvailable(): void {
     throw new Error("The remote LetAgents MCP endpoint cannot read files on your computer. Attach files through the npm package (npx letagents).");
   }
   const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
-  if (getDaemonToolExecutionContext() || profile === "supervised_room_turn") {
+  if (getDaemonToolExecutionContext() || profile === "supervised_room_turn" || profile === "supervised_mcp_polling") {
     throw new Error("Desktop room agents attach files to their reply with set_reply_attachments.");
   }
   if (isLocalRoomApi(getApiUrl())) throw localRoomAttachmentError();
@@ -61,7 +61,7 @@ export function assertMessageFileAttachmentsAvailable(): void {
  */
 export function assertMessageFileContentsAvailable(): void {
   const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
-  if (getDaemonToolExecutionContext() || profile === "supervised_room_turn") {
+  if (getDaemonToolExecutionContext() || profile === "supervised_room_turn" || profile === "supervised_mcp_polling") {
     throw new Error("Desktop room agents attach files to their reply with set_reply_attachments.");
   }
   if (!currentSessionScope() && isLocalRoomApi(getApiUrl())) throw localRoomAttachmentError();

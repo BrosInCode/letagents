@@ -1,11 +1,15 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { parsePositivePgIntegerScopedId } from "../../../shared/message-contracts.mjs";
 import { SUPERVISED_READ_ONLY_TOOLS } from "../../../shared/supervised-read-tools.mjs";
 
 import type { LetAgentsExecutionProfile } from "./runtime/execution-profile.js";
 import { runWithCurrentSupervisedRoom } from "./runtime/room-state.js";
 import {
   completeCurrentSupervisedEffect,
+  authorizeCustodialPolling,
+  type CustodialPollingAuthorization,
+  type CustodialPollingWaitRequest,
   executeCurrentSupervisedTool,
   prepareCurrentSupervisedEffect,
   type PreparedSupervisedEffect,
@@ -20,6 +24,35 @@ export function supervisedToolIsMutation(toolName: string): boolean {
 // frames. A read result can be returned live to the provider without copying
 // the entire payload into the durable effect journal.
 const MAX_DURABLE_READ_RESULT_BYTES = 16 * 1024;
+
+/** Receipt only the bounded page actually returned by wait, never an API tail
+ * beyond that page or a cursor inferred from its last visible message. */
+function custodialWaitFrontier(result: CallToolResult, inputCursor: string, roomId: string): string {
+  const content = result.content;
+  if (result.isError || content.length !== 1 || content[0]?.type !== "text") throw new Error("Custodial wait returned no valid bounded page.");
+  let output: Record<string, unknown>;
+  try { output = JSON.parse(content[0].text) as Record<string, unknown>; }
+  catch { throw new Error("Custodial wait returned no valid bounded page."); }
+  if (!output || Array.isArray(output) || !Array.isArray(output.messages)
+    || (output.room_id !== undefined && output.room_id !== roomId)) throw new Error("Custodial wait returned no valid bounded page.");
+  const noProgress = output.messages.length === 0 && (output.truncated === undefined || output.truncated === false)
+    && (output.omitted_message_count === undefined || output.omitted_message_count === 0)
+    && (output.skipped_message_count === undefined || output.skipped_message_count === 0)
+    && (output.skipped_message_ids === undefined || (Array.isArray(output.skipped_message_ids) && output.skipped_message_ids.length === 0));
+  const frontier = output.last_observed_message_id;
+  if (frontier === undefined || frontier === null) {
+    if (!noProgress) {
+      throw new Error("Custodial wait is missing its bounded observed frontier.");
+    }
+    return inputCursor;
+  }
+  const number = parsePositivePgIntegerScopedId(frontier, "msg");
+  const inputNumber = parsePositivePgIntegerScopedId(inputCursor, "msg");
+  if (number === null || inputNumber === null || number < inputNumber || (number === inputNumber && !noProgress)) {
+    throw new Error("Custodial wait returned an invalid observed frontier.");
+  }
+  return String(frontier);
+}
 
 function instruction(text: string, data: Record<string, unknown> = {}): CallToolResult {
   const payload = { ...data, instruction: text };
@@ -52,6 +85,7 @@ export function durableCompletionResult(
  * Engine mechanics are not registered, so they are absent from discovery.
  */
 export interface SupervisedToolFacadeDependencies {
+  authorizePolling?: (toolName: string, prior?: CustodialPollingAuthorization, wait?: CustodialPollingWaitRequest) => Promise<CustodialPollingAuthorization>;
   executeTool?: (input: {
     toolName: string;
     input: unknown;
@@ -80,7 +114,7 @@ export function profileAwareToolServer(
   dependencies: SupervisedToolFacadeDependencies = productionDependencies,
   supervisedProvider: string | null = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null,
 ): McpServer {
-  if (profile !== "supervised_room_turn") return server;
+  if (profile !== "supervised_room_turn" && profile !== "supervised_mcp_polling") return server;
   return new Proxy(server, {
     get(target, property, receiver) {
       if (property !== "tool") {
@@ -92,6 +126,37 @@ export function profileAwareToolServer(
         const callback = registration.at(-1);
         if (typeof callback !== "function") throw new Error(`Tool ${name} has no callback.`);
         const wrapped = async (...call: unknown[]): Promise<CallToolResult> => {
+          if (profile === "supervised_mcp_polling") {
+            const authorize = dependencies.authorizePolling ?? ((toolName, prior, wait) => authorizeCustodialPolling(toolName, prior, process.env, {}, wait));
+            const input = call[0] as Record<string, unknown> | undefined;
+            const extra = (call.length > 1 ? call.at(-1) : undefined) as { requestId?: unknown } | undefined;
+            let wait: CustodialPollingWaitRequest | undefined;
+            if (name === "wait_for_messages") {
+              const requestId = extra?.requestId;
+              if (!(typeof requestId === "string" || (typeof requestId === "number" && Number.isSafeInteger(requestId)))) {
+                throw new Error("Custodial wait is missing its exact MCP request id.");
+              }
+              if (input?.after_message_id != null && typeof input.after_message_id !== "string") throw new Error("Custodial wait requires a valid requested cursor.");
+              if ((input?.room_id != null && typeof input.room_id !== "string")
+                || (input?.agent_session_id != null && typeof input.agent_session_id !== "string")) throw new Error("Custodial wait requires valid requested identity.");
+              wait = { mcpRequestId: requestId, roomCursor: input?.after_message_id as string | null | undefined ?? null,
+                ...(typeof input?.room_id === "string" ? { requestedRoomId: input.room_id } : {}),
+                ...(typeof input?.agent_session_id === "string" ? { requestedAgentSessionId: input.agent_session_id } : {}) };
+            }
+            const authority = await authorize(name, undefined, wait);
+            return dependencies.withRoom(authority.roomId, async () => {
+              if (input?.room_id && input.room_id !== authority.roomId) throw new Error("Custodial tool room does not match its exact authority.");
+              if (name === "wait_for_messages") {
+                if (!authority.roomCursor) throw new Error("Custodial polling has no durable cursor; refusing a tail fallback.");
+                call[0] = { ...input, after_message_id: authority.roomCursor };
+              }
+              const result = await callback(...call) as CallToolResult;
+              if (wait) await authorize(name, authority, { ...wait,
+                offeredFrontier: custodialWaitFrontier(result, authority.roomCursor!, authority.roomId) });
+              else if (name === "read_messages") await authorize(name, authority);
+              return result;
+            });
+          }
           const extra = (call.at(-1) ?? {}) as { requestId?: string | number };
           const input = call.length > 1 ? call[0] : {};
           if (extra.requestId === undefined || extra.requestId === null || String(extra.requestId).trim() === "") {

@@ -16,6 +16,7 @@ import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } fro
 import type { ExecutionDelegationHostAuthority, RemoteExecutionDelegationRevision, ValidateExecutionDelegation } from "../../execution-delegation-journal.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity } from "../../execution-shadow-store.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../../execution-storage-schema.js";
+import { validateLegacyLifecycleProjectionLedgerSchema } from "../../daemon-state-database/v52-compat-tables.js";
 import { removeTestDirectory } from "../../../electron/__tests__/harness.js";
 
 export const TEST_PROVIDER_TURN_AUTHORITY = {
@@ -23,6 +24,23 @@ export const TEST_PROVIDER_TURN_AUTHORITY = {
   origin_execution_generation_id: "run_1",
   provider_continuation_id: "thread_1",
 } as const;
+
+export function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync): void {
+  const noDelete = String(database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='lifecycle_projection_total_no_delete'",
+  ).get()!.sql);
+  database.exec(`DROP TRIGGER lifecycle_projection_total_no_delete;
+    DELETE FROM lifecycle_projection_totals WHERE provider='open-model';
+    ${noDelete}`);
+  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.enableDefensive?.(false); // Only the disposable three-provider legacy fixture.
+  database.exec("PRAGMA writable_schema=ON");
+  database.prepare(`UPDATE sqlite_master SET sql=replace(sql, ?, '')
+    WHERE type='table' AND name IN ('lifecycle_projection_lanes','lifecycle_projection_totals')`).run(",'open-model'");
+  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+  database.enableDefensive?.(true);
+  validateLegacyLifecycleProjectionLedgerSchema(database);
+}
 
 export function restoreEmptyExecutionDelegationV23Fixture(database: DatabaseSync): void {
   database.exec("DROP TABLE IF EXISTS host_tool_rule_withdrawals; DROP TABLE IF EXISTS host_tool_rule_decisions; DROP TABLE IF EXISTS host_tool_rules");
