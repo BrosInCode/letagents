@@ -48,6 +48,7 @@
     "test:electron": "npm run test:electron:files -- electron/__tests__/*.test.ts",
     "test:electron:files": "node --import tsx --test --test-concurrency=1 --test-timeout=600000 --experimental-test-module-mocks",
     "test:daemon": "npm run test:daemon:files -- daemon/__tests__/*.test.ts",
+    "test:daemon:edge": "node --import tsx --test --test-timeout=180000 daemon/__tests__/daemon-edge-*.test.ts daemon/__tests__/edge-*.test.ts",
     "test:daemon:files": "node --import tsx --test --test-timeout=600000",
     "test:packaging": "node --test --test-timeout=600000 electron/scripts/*.test.mjs",
     "test:clean-home": "node electron/scripts/run-with-clean-home.mjs -- npm test",
