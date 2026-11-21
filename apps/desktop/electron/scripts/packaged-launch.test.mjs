@@ -26,7 +26,7 @@ test("an exit before the ready line fails with the exit code", async () => {
   await assert.rejects(launchPackagedApp({ ...standIn(`console.log("starting"); process.exit(3);`), timeoutMs: 20_000 }), /packaged Electron exited 3: starting/);
 });
 
-test("a ready line that comes after the deadline does not pass", async () => {
+test("a ready line that comes after the deadline does not pass", { skip: process.platform === "win32" ? "the stand-in needs a POSIX signal" : false }, async () => {
   const evidence = heldEvidence();
   // The stand-in prints the ready line when it gets a signal, so the test decides when the line comes.
   const launch = launchPackagedApp({
@@ -48,7 +48,7 @@ test("a ready line that comes after the deadline does not pass", async () => {
   await evidence.begun;
   evidence.release();
   await settled;
-}, { skip: process.platform === "win32" ? "the stand-in needs a POSIX signal" : false });
+});
 
 test("an exit while the evidence is collected stays a timeout", async () => {
   const launch = launchPackagedApp({
