@@ -484,7 +484,13 @@ test("POSIX is untouched: a batch-looking name is not read, and the program is t
 
 function windowsInstallRoot(): { root: string; remove(): void } {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "provider install ")));
-  return { root, remove: () => rmSync(root, { recursive: true, force: true }) };
+  // The folder holds a program that has only just exited. On Windows such a
+  // file can still be open for a moment after its process is gone, for
+  // example while a scanner reads a program that has just started, and a
+  // removal in that moment fails with EBUSY. The removal is tried again for
+  // up to 5.5 seconds; what a test checks is done before it, and is not
+  // changed by it.
+  return { root, remove: () => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) };
 }
 
 /** A real program that prints what it was given, as a hard link of this node (a copy across volumes). */

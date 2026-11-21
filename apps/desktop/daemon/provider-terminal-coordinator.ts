@@ -74,6 +74,16 @@ export type ProviderTerminalPorts = {
  * to be recorded, so an update is not deferred by an exit that cannot be.
  */
 export const EXIT_SETTLEMENT_BOUNDS = { settleMs: 15_000, lastAttemptMs: 8_000, recordMs: 4_000 };
+/**
+ * What times those bounds: the process's own timers, outside tests. A test
+ * that runs a whole daemon can put its own in place and end each bound
+ * itself, instead of shortening the bounds and racing them against the work
+ * they bound.
+ */
+export type ExitSettlementTimers = {
+  set(callback: () => void, ms: number): object;
+  clear(timer: object): void;
+};
 /** The line an owner reads in the agent's activity when an exit could not be recorded in full. */
 export const EXIT_UNSETTLED_NOTICE = "LetAgents could not finish recording how this agent's last process ended, so it stopped waiting and carried on. Some of that process's last activity, or an approval it was waiting for, may be missing.";
 
@@ -98,7 +108,7 @@ type TerminalSettlement = {
   admitted: boolean;
   reportedCanonicalDifference?: boolean;
   /** Ends the wait: first for the ordinary attempts, then for the last one. */
-  deadline: ReturnType<typeof setTimeout> | null;
+  deadline: object | null;
   /** Rejected when the wait ends, so that a step that never returns is left behind. */
   cut: { promise: Promise<never>; reject(error: unknown): void };
   /** The ordinary attempts ran out of time; `last` once the last attempt has begun. */
@@ -136,8 +146,13 @@ export class ProviderTerminalCoordinator {
     PlannedConfigurationReplacement
   >();
 
-  /** Tests shorten these. */
+  /** Tests shorten these, or leave them and take over `timers`. */
   bounds = { ...EXIT_SETTLEMENT_BOUNDS };
+  /** Times the bounds; see ExitSettlementTimers. A bound never keeps the process alive. */
+  timers: ExitSettlementTimers = {
+    set: (callback, ms) => { const timer = setTimeout(callback, ms); timer.unref(); return timer; },
+    clear: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+  };
 
   constructor(private readonly ports: ProviderTerminalPorts) {}
 
@@ -277,8 +292,7 @@ export class ProviderTerminalCoordinator {
     };
     owner.ended = new Promise<void>((resolve) => { owner.end = resolve; });
     this.pending.set(installation, owner);
-    owner.deadline = setTimeout(() => this.settlementOverdue(owner), this.bounds.settleMs);
-    owner.deadline.unref();
+    owner.deadline = this.timers.set(() => this.settlementOverdue(owner), this.bounds.settleMs);
     try {
       if (!this.ports.streams.remove(installation)) {
         this.finishSettlement(owner, new TerminalOwnerLostError("Terminal removal lost its installation."));
@@ -370,9 +384,8 @@ export class ProviderTerminalCoordinator {
     owner.overdue = "due";
     const cut = owner.cut;
     owner.cut = settlementCut();
-    owner.deadline = setTimeout(() => this.abandonSettlement(owner,
+    owner.deadline = this.timers.set(() => this.abandonSettlement(owner,
       new TerminalSettlementOverdueError("The agent's last process ended, but LetAgents could not finish recording that in time. It stopped waiting and starts the agent again.")), this.bounds.lastAttemptMs);
-    owner.deadline.unref();
     cut.reject(new TerminalSettlementOverdueError("The exit was not recorded in time; one last attempt follows."));
     if (owner.operation) return; // Its failure starts the last attempt.
     owner.overdue = "last";
@@ -388,14 +401,13 @@ export class ProviderTerminalCoordinator {
   private abandonSettlement(owner: TerminalSettlement, error: unknown): void {
     if (this.pending.get(owner.installation) !== owner || owner.abandoned) return;
     if (owner.timer) { clearTimeout(owner.timer); owner.timer = null; }
-    if (owner.deadline) { clearTimeout(owner.deadline); owner.deadline = null; }
+    if (owner.deadline) { this.timers.clear(owner.deadline); owner.deadline = null; }
     const cut = owner.cut;
     owner.cut = settlementCut();
     cut.reject(error);
-    const give = setTimeout(() => owner.cut.reject(error), this.bounds.recordMs);
-    give.unref();
+    const give = this.timers.set(() => owner.cut.reject(error), this.bounds.recordMs);
     owner.abandoned = this.within(owner, this.recordAbandonedTerminal(owner)).catch(() => undefined).then(() => {
-      clearTimeout(give);
+      this.timers.clear(give);
       if (this.pending.get(owner.installation) !== owner) return;
       const entryId = owner.installation.entryId;
       try { this.ports.diagnostic?.(entryId, error); } catch { /* A diagnostic cannot change the outcome. */ }
@@ -454,7 +466,7 @@ export class ProviderTerminalCoordinator {
   private finishSettlement(owner: TerminalSettlement, error?: unknown): void {
     if (this.pending.get(owner.installation) !== owner) return;
     if (owner.timer) clearTimeout(owner.timer);
-    if (owner.deadline) clearTimeout(owner.deadline);
+    if (owner.deadline) this.timers.clear(owner.deadline);
     this.pending.delete(owner.installation);
     owner.end();
     this.completed.add(owner.installation);
@@ -526,7 +538,7 @@ export class ProviderTerminalCoordinator {
           const approvals = this.ports.settleRuntimeApprovals(entryId, this.fence(owner));
           // The last attempt gives this step half its time, and goes on without it.
           await within(owner.overdue ? Promise.race([approvals, new Promise<never>((_resolve, reject) => {
-            setTimeout(() => reject(new Error("Closing the ended runtime's approvals did not finish in time.")), this.bounds.lastAttemptMs / 2).unref();
+            this.timers.set(() => reject(new Error("Closing the ended runtime's approvals did not finish in time.")), this.bounds.lastAttemptMs / 2);
           })]) : approvals);
         } catch (error) {
           // The last attempt records the exit without this step. The approvals
