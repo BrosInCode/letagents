@@ -1,5 +1,5 @@
-import { chmod, mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { chmod, copyFile, mkdir, writeFile } from "node:fs/promises";
+import { extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export interface MaterializeNodeShimOptions {
@@ -13,6 +13,12 @@ export interface MaterializeNodeShimOptions {
   env?: Record<string, string>;
   /** Extra Node flags passed before the entry script (for example `["--import", "tsx"]`). */
   nodeArgs?: readonly string[];
+  /**
+   * Copy `scriptPath` into `binDir` and import the local copy. Useful for
+   * sandboxed provider probes (such as Cursor) that can read only inside the
+   * shim directory.
+   */
+  copyScript?: boolean;
   /** Override platform for unit testing shim generation. Defaults to `process.platform`. */
   platform?: NodeJS.Platform;
   /** Override Node executable path. Defaults to `process.execPath`. */
@@ -58,7 +64,13 @@ export async function materializeNodeShim(
 
   const entryFileName = `${baseName}.entry.mjs`;
   const entryPath = join(binDir, entryFileName);
-  const targetUrl = pathToFileURL(resolvedScript).href;
+  let targetScript = resolvedScript;
+  if (options.copyScript) {
+    const ext = extname(resolvedScript) || ".mjs";
+    targetScript = join(binDir, `${baseName}.script${ext}`);
+    await copyFile(resolvedScript, targetScript);
+  }
+  const targetUrl = pathToFileURL(targetScript).href;
   const entrySource = [
     `const bakedEnv = ${JSON.stringify(bakedEnv)};`,
     "for (const [key, value] of Object.entries(bakedEnv)) {",

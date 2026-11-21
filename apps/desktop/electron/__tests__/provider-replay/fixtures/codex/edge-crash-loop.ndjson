@@ -1,2 +1,0 @@
-{"type":"transcript_start","format":1,"provider":"codex","protocol":"codex.app-server/websocket","providerVersion":"0.153.4","scenario":"edge-crash-loop","capture":{"kind":"codex-edge-fixture","description":"Codex starts cleanly and crashes repeatedly until daemon applies backoff and quarantines the agent."}}
-{"type":"runtime_exit","requested":false,"transportClosedBeforeExit":false,"code":1,"signal":null}

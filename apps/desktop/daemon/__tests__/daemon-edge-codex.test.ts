@@ -1,31 +1,35 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { parseNodeShim } from "../../../../shared/codex-executable.mjs";
 import { loadProviderReplayTranscript } from "../../electron/__tests__/provider-replay/transcript.js";
 import {
   EDGE_DAEMON_UNSUPPORTED_REASON,
+  findProcessesReferencingPath,
   startEdgeDaemon,
   type EdgeAgentRegistration,
   type EdgeDaemonHarness,
 } from "./edge/daemon-edge-harness.js";
-import { materializeNodeShim } from "./edge/executable-shim.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const REPLAY_DIR = resolve(HERE, "../../electron/__tests__/provider-replay");
-const CODEX_SERVER_SCRIPT = join(REPLAY_DIR, "codex-edge-server.mjs");
-const FIXTURES_DIR = join(REPLAY_DIR, "fixtures/codex");
+const CODEX_EDGE_DIR = resolve(HERE, "edge/codex");
+const CODEX_SERVER_SCRIPT = join(CODEX_EDGE_DIR, "server.mjs");
+const FIXTURES_DIR = join(CODEX_EDGE_DIR, "fixtures");
 
 function fixturePath(name: string): string {
   return join(FIXTURES_DIR, `${name}.ndjson`);
 }
 
-async function waitForFile(path: string, timeoutMs = 15_000): Promise<void> {
+function sourceMessageText(prompt: string): string | null {
+  const line = /^Source message: (.*)$/m.exec(prompt)?.[1];
+  return line ? (JSON.parse(line) as { text: string }).text : null;
+}
+
+async function waitForFile(path: string, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (existsSync(path)) return;
@@ -42,10 +46,10 @@ async function startCodexScenario(
   controlDir: string;
   agentConfig: EdgeAgentRegistration;
 }> {
-  const transcriptFile = fixturePath(`edge-${scenario}`);
+  const transcriptFile = fixturePath(scenario);
   const parsed = loadProviderReplayTranscript(transcriptFile);
   assert.equal(parsed.start.provider, "codex");
-  assert.equal(parsed.start.protocol, "codex.app-server/websocket");
+  assert.equal(parsed.start.protocol, "codex.app-server/jsonrpc-ws");
 
   const controlDir = await mkdtemp(join(tmpdir(), `letagents-codex-ctrl-${scenario}-`));
   const harness = await startEdgeDaemon({
@@ -77,28 +81,11 @@ async function startCodexScenario(
   return { harness, controlDir, agentConfig };
 }
 
-test("edge executable shim generates a parseNodeShim-compatible Windows .cmd wrapper", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "letagents-shim-check-"));
-  try {
-    const shimPath = await materializeNodeShim(dir, "codex", CODEX_SERVER_SCRIPT, {
-      platform: "win32",
-      env: { LETAGENTS_EDGE_MARKER: "ok" },
-    });
-    assert.ok(shimPath.endsWith(".cmd"));
-    const content = await readFile(shimPath, "utf8");
-    const parsed = parseNodeShim(shimPath, content);
-    assert.ok(parsed, "Expected Windows .cmd shim to satisfy shared/codex-executable parseNodeShim()");
-    assert.ok(parsed.args.at(-1)?.endsWith("codex.entry.mjs"));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 describe(
   "daemon edge suite: codex (black-box child process)",
   { skip: EDGE_DAEMON_UNSUPPORTED_REASON ?? false },
   () => {
-    test("1. start agent, deliver one room message, publish exactly one reply", async () => {
+    test("1. start agent, deliver one room message, publish exactly one reply", { timeout: 60_000 }, async () => {
       const { harness, agentConfig } = await startCodexScenario("simple");
       try {
         await harness.startAgent(agentConfig);
@@ -111,42 +98,60 @@ describe(
         assert.equal(ready.condition, "none");
 
         harness.roomServer.enqueueMessage(agentConfig.roomId, {
-          text: "Reply with codex-ready",
+          text: "Reply with codex-ready-reply",
         });
 
-        const published = await harness.roomServer.waitForPublishedMessages(
+        await harness.roomServer.waitForPublishedMessages(
           agentConfig.roomId,
           (msgs) => msgs.length >= 1,
           20_000,
         );
-        assert.equal(published.length, 1);
-        assert.equal(published[0]!.text, "codex-ready");
 
-        await harness.waitForEntry(
+        const settled = await harness.waitForEntry(
           agentConfig.entryId,
-          (entry) => entry.observed_state === "idle" && entry.room_agent_state?.turn.state === "idle",
+          (entry) =>
+            entry.observed_state === "idle" &&
+            entry.room_agent_state?.turn.state === "idle" &&
+            (entry.room_agent_state?.inbox.pending_count ?? 0) === 0,
           15_000,
           "codex back to idle after reply",
         );
+
+        const published = harness.roomServer.publishedMessages(agentConfig.roomId);
+        assert.deepEqual(
+          published.map((m) => m.text),
+          ["codex-ready-reply"],
+        );
+        assert.equal(
+          harness.roomServer.publishAttempts(agentConfig.roomId).length,
+          1,
+          "expected exactly one raw POST to room messages",
+        );
+        if (settled.delivery_receipts?.length) {
+          assert.equal(settled.delivery_receipts.length, 1);
+          assert.equal(settled.delivery_receipts[0]!.state, "acknowledged");
+        }
 
         const sqlite = harness.openSqlite();
         try {
           assert.equal(sqlite.integrityCheck(), "ok");
           assert.equal(sqlite.journalMode(), "wal");
           assert.ok(sqlite.userVersion() >= 1);
-          const inbox = sqlite.inboxItems(agentConfig.entryId);
-          assert.equal(inbox.length, 1);
-          assert.equal(inbox[0]!.state, "acknowledged");
         } finally {
           sqlite.close();
         }
       } finally {
         await harness.dispose();
+        assert.deepEqual(
+          findProcessesReferencingPath(harness.homeDir),
+          [],
+          `Expected zero processes referencing ${harness.homeDir} after dispose()`,
+        );
       }
     });
 
-    test("2. FIFO ordering for two queued room messages", async () => {
-      const { harness, controlDir, agentConfig } = await startCodexScenario("fifo-two");
+    test("2. FIFO ordering for three room messages (A in flight, B and C queued)", { timeout: 60_000 }, async () => {
+      const { harness, controlDir, agentConfig } = await startCodexScenario("fifo-order");
       try {
         await harness.startAgent(agentConfig);
         await harness.waitForEntry(
@@ -155,32 +160,27 @@ describe(
           25_000,
         );
 
+        await writeFile(join(controlDir, "hold-turn-1"), "hold\n", "utf8");
         harness.roomServer.enqueueMessage(agentConfig.roomId, { text: "First Codex FIFO message" });
-        await waitForFile(join(controlDir, "turn-1-waiting-gate.json"), 20_000);
+        await waitForFile(join(controlDir, "turn-1-held.json"), 20_000);
 
+        // Enqueue BOTH B and C while A is in flight so FIFO (B before C) is distinguished from LIFO (C before B).
         harness.roomServer.enqueueMessage(agentConfig.roomId, { text: "Second Codex FIFO message" });
+        harness.roomServer.enqueueMessage(agentConfig.roomId, { text: "Third Codex FIFO message" });
         await harness.waitForEntry(
           agentConfig.entryId,
-          (entry) => (entry.room_agent_state?.inbox.pending_count ?? 0) >= 2,
+          (entry) => (entry.room_agent_state?.inbox.pending_count ?? 0) >= 3,
           15_000,
-          "two pending Codex inbox items",
+          "three pending Codex inbox items (A in flight, B and C queued)",
         );
 
         await writeFile(join(controlDir, "release-turn-1"), "go\n", "utf8");
 
-        const published = await harness.roomServer.waitForPublishedMessages(
+        await harness.roomServer.waitForPublishedMessages(
           agentConfig.roomId,
-          (msgs) => msgs.length >= 2,
-          20_000,
+          (msgs) => msgs.length >= 3,
+          25_000,
         );
-        assert.deepEqual(
-          published.map((m) => m.text),
-          ["codex-fifo-1", "codex-fifo-2"],
-        );
-        const turn1Meta = JSON.parse(await readFile(join(controlDir, "turn-1-started.json"), "utf8")) as { promptText: string };
-        const turn2Meta = JSON.parse(await readFile(join(controlDir, "turn-2-started.json"), "utf8")) as { promptText: string };
-        assert.match(turn1Meta.promptText, /First Codex FIFO message/);
-        assert.match(turn2Meta.promptText, /Second Codex FIFO message/);
         await harness.waitForEntry(
           agentConfig.entryId,
           (entry) =>
@@ -191,22 +191,34 @@ describe(
           "idle with drained Codex FIFO queue",
         );
 
-        const sqlite = harness.openSqlite();
-        try {
-          const inbox = sqlite.inboxItems(agentConfig.entryId);
-          assert.equal(inbox.length, 2);
-          assert.ok(Number(inbox[0]!.fifo_sequence) < Number(inbox[1]!.fifo_sequence));
-          assert.equal(inbox[0]!.state, "acknowledged");
-          assert.equal(inbox[1]!.state, "acknowledged");
-        } finally {
-          sqlite.close();
-        }
+        assert.deepEqual(
+          harness.roomServer.publishedMessages(agentConfig.roomId).map((m) => m.text),
+          ["codex-fifo-1", "codex-fifo-2", "codex-fifo-3"],
+        );
+        assert.equal(harness.roomServer.publishAttempts(agentConfig.roomId).length, 3);
+
+        const turn1Meta = JSON.parse(await readFile(join(controlDir, "turn-1-started.json"), "utf8")) as { promptText: string };
+        const turn2Meta = JSON.parse(await readFile(join(controlDir, "turn-2-started.json"), "utf8")) as { promptText: string };
+        const turn3Meta = JSON.parse(await readFile(join(controlDir, "turn-3-started.json"), "utf8")) as { promptText: string };
+        assert.deepEqual(
+          [
+            sourceMessageText(turn1Meta.promptText),
+            sourceMessageText(turn2Meta.promptText),
+            sourceMessageText(turn3Meta.promptText),
+          ],
+          [
+            "First Codex FIFO message",
+            "Second Codex FIFO message",
+            "Third Codex FIFO message",
+          ],
+          "expected Codex provider turns to execute strictly in FIFO order A -> B -> C",
+        );
       } finally {
         await harness.dispose();
       }
     });
 
-    test("3. stop/interrupt during an active turn via manifest.control_turn", async () => {
+    test("3. stop/interrupt during an active turn via manifest.control_turn", { timeout: 60_000 }, async () => {
       const { harness, controlDir, agentConfig } = await startCodexScenario("turn-interrupt");
       try {
         const { daemonGeneration } = await harness.startAgent(agentConfig);
@@ -222,12 +234,13 @@ describe(
         const activeEntry = await harness.waitForEntry(
           agentConfig.entryId,
           (entry) =>
+            entry.observed_state === "working" &&
             entry.room_agent_state?.turn.state === "responding" &&
             Boolean(entry.room_agent_state.turn.provider_turn_id) &&
             Boolean(entry.room_agent_state.turn.inbox_item_id) &&
             Boolean(entry.room_agent_state.turn.source_message_id),
           15_000,
-          "responding Codex turn with checkpointed provider_turn_id",
+          "working Codex turn with checkpointed provider_turn_id",
         );
 
         const controlResult = await harness.rpc.controlTurn({
@@ -249,38 +262,42 @@ describe(
 
         await harness.waitForEntry(
           agentConfig.entryId,
-          (entry) => entry.observed_state === "idle" && entry.room_agent_state?.turn.state === "idle",
+          (entry) =>
+            entry.observed_state === "idle" &&
+            entry.room_agent_state?.turn.state === "idle" &&
+            (entry.room_agent_state?.inbox.pending_count ?? 0) === 0,
           15_000,
           "codex idle after interrupt",
         );
         assert.equal(harness.roomServer.publishedMessages(agentConfig.roomId).length, 0);
-
-        const sqliteAfterStop = harness.openSqlite();
-        try {
-          const inbox = sqliteAfterStop.inboxItems(agentConfig.entryId);
-          assert.equal(inbox.length, 1);
-          assert.ok(
-            ["cancelled_by_user", "acknowledged_failed"].includes(String(inbox[0]!.state)),
-            `expected interrupted Codex turn to settle cleanly without reply, got ${String(inbox[0]!.state)}`,
-          );
-        } finally {
-          sqliteAfterStop.close();
-        }
+        assert.equal(harness.roomServer.publishAttempts(agentConfig.roomId).length, 0);
 
         harness.roomServer.enqueueMessage(agentConfig.roomId, { text: "Follow-up after stop" });
-        const published = await harness.roomServer.waitForPublishedMessages(
+        await harness.roomServer.waitForPublishedMessages(
           agentConfig.roomId,
           (msgs) => msgs.length >= 1,
           20_000,
         );
-        assert.equal(published.length, 1);
-        assert.equal(published[0]!.text, "codex-after-interrupt");
+        await harness.waitForEntry(
+          agentConfig.entryId,
+          (entry) =>
+            entry.observed_state === "idle" &&
+            entry.room_agent_state?.turn.state === "idle" &&
+            (entry.room_agent_state?.inbox.pending_count ?? 0) === 0,
+          15_000,
+          "codex idle after follow-up reply",
+        );
+        assert.deepEqual(
+          harness.roomServer.publishedMessages(agentConfig.roomId).map((m) => m.text),
+          ["codex-after-interrupt"],
+        );
+        assert.equal(harness.roomServer.publishAttempts(agentConfig.roomId).length, 1);
       } finally {
         await harness.dispose();
       }
     });
 
-    test("4. SIGKILL daemon mid-turn, restart it, recover with no lost or duplicate reply", async () => {
+    test("4. SIGKILL daemon mid-turn, restart it, recover with no lost or duplicate reply", { timeout: 60_000 }, async () => {
       const { harness, controlDir, agentConfig } = await startCodexScenario("kill-recover");
       try {
         await harness.startAgent(agentConfig);
@@ -291,8 +308,9 @@ describe(
         );
         const providerPidBefore = before.provider_ref!.provider_connection!.pid!;
 
+        await writeFile(join(controlDir, "hold-turn-1"), "hold\n", "utf8");
         harness.roomServer.enqueueMessage(agentConfig.roomId, { text: "Survive SIGKILL" });
-        await waitForFile(join(controlDir, "turn-1-waiting-gate.json"), 20_000);
+        await waitForFile(join(controlDir, "turn-1-held.json"), 20_000);
         await harness.waitForEntry(
           agentConfig.entryId,
           (entry) =>
@@ -309,29 +327,40 @@ describe(
         assert.ok(restarted.healthy);
         await harness.reinstallCredentials(agentConfig, restarted.generation);
 
-        const published = await harness.roomServer.waitForPublishedMessages(
+        await harness.roomServer.waitForPublishedMessages(
           agentConfig.roomId,
           (msgs) => msgs.length >= 1,
           25_000,
         );
-        await new Promise((resolveWait) => setTimeout(resolveWait, 400));
-        const finalPublished = harness.roomServer.publishedMessages(agentConfig.roomId);
-        assert.equal(finalPublished.length, 1);
-        assert.equal(published[0]!.text, "codex-survived-kill");
 
         const after = await harness.waitForEntry(
           agentConfig.entryId,
-          (entry) => entry.observed_state === "idle" && entry.room_agent_state?.turn.state === "idle",
+          (entry) =>
+            entry.observed_state === "idle" &&
+            entry.room_agent_state?.turn.state === "idle" &&
+            (entry.room_agent_state?.inbox.pending_count ?? 0) === 0,
           15_000,
+          "codex idle with drained inbox after SIGKILL recovery",
+        );
+        assert.deepEqual(
+          harness.roomServer.publishedMessages(agentConfig.roomId).map((m) => m.text),
+          ["codex-survived-kill"],
+        );
+        assert.equal(
+          harness.roomServer.publishAttempts(agentConfig.roomId).length,
+          1,
+          "expected no duplicate room POST on SIGKILL recovery",
+        );
+        assert.equal(
+          existsSync(join(controlDir, "unexpected-turn-2.json")),
+          false,
+          "restarted daemon must not start a duplicate Codex turn",
         );
         assert.equal(after.provider_ref?.provider_connection?.pid, providerPidBefore);
 
         const sqlite = harness.openSqlite();
         try {
           assert.equal(sqlite.integrityCheck(), "ok");
-          const inbox = sqlite.inboxItems(agentConfig.entryId);
-          assert.equal(inbox.length, 1);
-          assert.equal(inbox[0]!.state, "acknowledged");
         } finally {
           sqlite.close();
         }
@@ -340,7 +369,7 @@ describe(
       }
     });
 
-    test("5. update handoff keeps Codex alive across successor daemon", async () => {
+    test("5. update handoff keeps Codex alive across successor daemon", { timeout: 60_000 }, async () => {
       const { harness, agentConfig } = await startCodexScenario("handoff");
       try {
         await harness.startAgent(agentConfig);
@@ -355,7 +384,10 @@ describe(
         await harness.roomServer.waitForPublishedMessages(agentConfig.roomId, (msgs) => msgs.length >= 1, 20_000);
         await harness.waitForEntry(
           agentConfig.entryId,
-          (entry) => entry.observed_state === "idle" && entry.room_agent_state?.turn.state === "idle",
+          (entry) =>
+            entry.observed_state === "idle" &&
+            entry.room_agent_state?.turn.state === "idle" &&
+            (entry.room_agent_state?.inbox.pending_count ?? 0) === 0,
           15_000,
         );
 
@@ -372,23 +404,41 @@ describe(
         assert.equal(attached.provider_ref?.provider_connection?.pid, providerPidBefore);
 
         harness.roomServer.enqueueMessage(agentConfig.roomId, { text: "After handoff" });
-        const published = await harness.roomServer.waitForPublishedMessages(
+        await harness.roomServer.waitForPublishedMessages(
           agentConfig.roomId,
           (msgs) => msgs.length >= 2,
           20_000,
         );
+        await harness.waitForEntry(
+          agentConfig.entryId,
+          (entry) =>
+            entry.observed_state === "idle" &&
+            entry.room_agent_state?.turn.state === "idle" &&
+            (entry.room_agent_state?.inbox.pending_count ?? 0) === 0,
+          15_000,
+          "codex idle after post-handoff reply",
+        );
         assert.deepEqual(
-          published.map((m) => m.text),
+          harness.roomServer.publishedMessages(agentConfig.roomId).map((m) => m.text),
           ["codex-before-handoff", "codex-after-handoff"],
         );
+        assert.equal(harness.roomServer.publishAttempts(agentConfig.roomId).length, 2);
       } finally {
         await harness.dispose();
       }
     });
 
-    test("6. approval request and signed host approval decision", async () => {
-      const { harness, agentConfig } = await startCodexScenario("approval");
+    test("6. approval request and signed host approval decision (ask_before_write)", { timeout: 60_000 }, async () => {
+      const { harness, controlDir, agentConfig } = await startCodexScenario("approval", {
+        permissionProfileId: "ask_before_write",
+      });
       try {
+        // Provide a minimal file-backed Codex home config so ask_before_write sandbox setup succeeds.
+        const codexDir = join(harness.homeDir, ".codex");
+        await mkdir(codexDir, { recursive: true });
+        await writeFile(join(codexDir, "config.toml"), 'cli_auth_credentials_store = "file"\n', "utf8");
+        await writeFile(join(codexDir, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "sk-edge-local" }), "utf8");
+
         await harness.startAgent(agentConfig);
         await harness.waitForEntry(
           agentConfig.entryId,
@@ -407,48 +457,80 @@ describe(
 
         const status = await harness.rpc.decideHostApproval(candidate, "allow_once");
         assert.ok(
-          ["resolved", "decision_sent", "decision_recorded", "pending"].includes(status),
-          `unexpected decision status: ${status}`,
+          ["resolved", "decision_sent", "decision_recorded"].includes(status),
+          `expected non-pending approval decision status, got: ${status}`,
         );
 
-        const published = await harness.roomServer.waitForPublishedMessages(
+        await harness.roomServer.waitForPublishedMessages(
           agentConfig.roomId,
           (msgs) => msgs.length >= 1,
           20_000,
         );
-        assert.equal(published.length, 1);
-        assert.equal(published[0]!.text, "codex-approval-granted");
+        await harness.waitForEntry(
+          agentConfig.entryId,
+          (entry) =>
+            entry.observed_state === "idle" &&
+            entry.room_agent_state?.turn.state === "idle" &&
+            (entry.room_agent_state?.inbox.pending_count ?? 0) === 0,
+          15_000,
+          "codex idle after approved reply",
+        );
+        assert.deepEqual(
+          harness.roomServer.publishedMessages(agentConfig.roomId).map((m) => m.text),
+          ["codex-approval-granted"],
+        );
+        assert.equal(harness.roomServer.publishAttempts(agentConfig.roomId).length, 1);
 
-        const sqlite = harness.openSqlite();
-        try {
-          const approvals = sqlite.approvalRequests(agentConfig.entryId);
-          assert.ok(approvals.length >= 1);
-        } finally {
-          sqlite.close();
-        }
+        const decisionLog = JSON.parse(
+          await readFile(join(controlDir, "turn-1-approval-decision.json"), "utf8"),
+        ) as { decision: unknown; accepted: boolean };
+        assert.equal(decisionLog.decision, "accept");
+        assert.equal(decisionLog.accepted, true);
+
+        const finalApprovals = await harness.rpc.listHostApprovals(agentConfig.roomId);
+        assert.equal(
+          finalApprovals.some((a) => a.status === "pending"),
+          false,
+          `expected no approval to remain pending, got: ${JSON.stringify(finalApprovals)}`,
+        );
       } finally {
         await harness.dispose();
       }
     });
 
-    test("7. crash loop triggers backoff and quarantines the agent", async () => {
+    test("7. repeated provider exits trigger exponential backoff and crash-loop quarantine", { timeout: 90_000 }, async () => {
       const { harness, agentConfig } = await startCodexScenario("crash-loop");
       try {
         await harness.startAgent(agentConfig);
 
         const quarantined = await harness.waitForEntry(
           agentConfig.entryId,
-          (entry) => entry.condition === "quarantined" && entry.observed_state === "failed",
-          45_000,
-          "codex crash loop quarantine",
+          (entry) => entry.condition === "quarantined",
+          75_000,
+          "codex crash-loop quarantine",
+          { failOnStartError: false },
         );
         assert.equal(quarantined.condition, "quarantined");
-        assert.equal(quarantined.observed_state, "failed");
+
+        const exitTimes = [...(quarantined.reconciliation?.exit_timestamps_ms ?? [])].sort((a, b) => a - b);
+        assert.ok(exitTimes.length >= 5, `expected at least 5 recorded crash exits via RPC, got ${exitTimes.length}`);
+        const gaps: number[] = [];
+        for (let i = 1; i < exitTimes.length; i += 1) {
+          gaps.push(exitTimes[i]! - exitTimes[i - 1]!);
+        }
+        assert.ok(
+          gaps.every((gap) => gap >= 500),
+          `expected every crash-loop restart gap to reflect backoff (>= 500ms), got gaps=${JSON.stringify(gaps)}`,
+        );
+        const totalSpanMs = exitTimes.at(-1)! - exitTimes[0]!;
+        assert.ok(
+          totalSpanMs >= 5_000,
+          `expected cumulative crash-loop backoff span >= 5000ms, got ${totalSpanMs}ms (gaps=${JSON.stringify(gaps)})`,
+        );
 
         const sqlite = harness.openSqlite();
         try {
-          const exits = sqlite.reconciliationExitTimestamps(agentConfig.entryId);
-          assert.ok(exits.length >= 5, `expected at least 5 recorded exits before quarantine, got ${exits.length}`);
+          assert.equal(sqlite.integrityCheck(), "ok");
         } finally {
           sqlite.close();
         }

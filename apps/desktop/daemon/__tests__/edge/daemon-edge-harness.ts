@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -44,6 +44,8 @@ export interface EdgeDaemonOptions {
     scriptPath: string;
     env?: Record<string, string>;
     nodeArgs?: readonly string[];
+    /** Copy `scriptPath` into `binDir` for sandboxed providers that can read only inside the shim directory. */
+    copyScript?: boolean;
     /** If set, also expose the materialized shim path under this env var name on the daemon process. */
     envVar?: string;
   }>;
@@ -303,6 +305,197 @@ process.stdin.on("data", (chunk) => {
 `;
   await writeFile(serverPath, serverSource.trimStart(), "utf8");
   return serverPath;
+}
+
+const ALLOWED_HOST_ENV_KEYS = new Set([
+  // POSIX baseline
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TERM",
+  "TZ",
+  // Windows baseline
+  "SYSTEMROOT",
+  "COMSPEC",
+  "WINDIR",
+  "TEMP",
+  "TMP",
+  "PATHEXT",
+  "OS",
+  "PROCESSOR_ARCHITECTURE",
+  "PROCESSOR_IDENTIFIER",
+  "NUMBER_OF_PROCESSORS",
+  "SYSTEMDRIVE",
+  "PROGRAMDATA",
+  "PROGRAMFILES",
+  "PROGRAMFILES(X86)",
+  "COMMONPROGRAMFILES",
+  "COMMONPROGRAMFILES(X86)",
+  // Explicit CI/local process-tree helper paths on Windows
+  "LETAGENTS_PROCESS_TREE_HELPER",
+  "LETAGENTS_TEST_PROCESS_TREE_HELPER",
+]);
+
+function allowedHostEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    if (ALLOWED_HOST_ENV_KEYS.has(key.toUpperCase())) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function readProcessCommandLine(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  try {
+    if (process.platform === "win32") {
+      const output = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CommandLine`,
+        ],
+        { encoding: "utf8", timeout: 3_000, stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+      ).trim();
+      return output || null;
+    }
+    const output = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      timeout: 3_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return output || null;
+  } catch {
+    return null;
+  }
+}
+
+export interface ProcessSnapshotEntry {
+  pid: number;
+  ppid: number;
+  pgid: number;
+  command: string;
+}
+
+function listOsProcesses(): ProcessSnapshotEntry[] {
+  try {
+    if (process.platform === "win32") {
+      const output = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)\t$($_.ParentProcessId)\t$($_.CommandLine)\" }",
+        ],
+        { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+      );
+      const entries: ProcessSnapshotEntry[] = [];
+      for (const line of output.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        const firstTab = line.indexOf("\t");
+        const secondTab = firstTab >= 0 ? line.indexOf("\t", firstTab + 1) : -1;
+        if (firstTab < 0 || secondTab < 0) continue;
+        const pid = Number.parseInt(line.slice(0, firstTab), 10);
+        const ppid = Number.parseInt(line.slice(firstTab + 1, secondTab), 10);
+        const command = line.slice(secondTab + 1);
+        if (Number.isInteger(pid) && pid > 1) entries.push({ pid, ppid: Number.isInteger(ppid) ? ppid : 0, pgid: pid, command });
+      }
+      return entries;
+    }
+    const output = execFileSync("ps", ["-axo", "pid=,ppid=,pgid=,command="], {
+      encoding: "utf8",
+      timeout: 3_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const entries: ProcessSnapshotEntry[] = [];
+    for (const line of output.split(/\r?\n/)) {
+      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+      if (!match) continue;
+      const pid = Number.parseInt(match[1]!, 10);
+      const ppid = Number.parseInt(match[2]!, 10);
+      const pgid = Number.parseInt(match[3]!, 10);
+      if (Number.isInteger(pid) && pid > 1) {
+        entries.push({ pid, ppid, pgid, command: match[4]! });
+      }
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Return every live OS process (excluding the current test runner process)
+ * whose command line references `needle` (normalized path match).
+ */
+export function findProcessesReferencingPath(needle: string): ProcessSnapshotEntry[] {
+  const normalized = needle.replaceAll("\\", "/").toLowerCase();
+  if (!normalized) return [];
+  return listOsProcesses().filter(
+    (entry) =>
+      entry.pid !== process.pid &&
+      entry.command.replaceAll("\\", "/").toLowerCase().includes(normalized),
+  );
+}
+
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+async function terminateProcessTrees(targets: ReadonlyArray<{ pid: number; pgid?: number }>): Promise<void> {
+  if (targets.length === 0) return;
+  if (process.platform === "win32") {
+    for (const { pid } of targets) {
+      if (!isPidAlive(pid)) continue;
+      try {
+        execFileSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+          timeout: 4_000,
+          stdio: "ignore",
+          windowsHide: true,
+        });
+      } catch {
+        try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+    }
+    return;
+  }
+  const sendSignal = (signal: NodeJS.Signals) => {
+    for (const { pid, pgid } of targets) {
+      if (!isPidAlive(pid)) continue;
+      // Signal the detached process group only when the target leads its own group (never the test runner's group).
+      if (pgid && pgid === pid && pgid !== process.pid) {
+        try { process.kill(-pgid, signal); } catch { /* fall back to direct pid */ }
+      }
+      try { process.kill(pid, signal); } catch { /* already gone */ }
+    }
+  };
+  sendSignal("SIGTERM");
+  const softDeadline = Date.now() + 800;
+  while (Date.now() < softDeadline && targets.some(({ pid }) => isPidAlive(pid))) {
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  if (targets.some(({ pid }) => isPidAlive(pid))) {
+    sendSignal("SIGKILL");
+    const hardDeadline = Date.now() + 800;
+    while (Date.now() < hardDeadline && targets.some(({ pid }) => isPidAlive(pid))) {
+      await new Promise((r) => setTimeout(r, 40));
+    }
+  }
 }
 
 export function resolveDefaultDaemonCommand(): EdgeDaemonCommand {
@@ -585,7 +778,7 @@ export class EdgeDaemonHarness {
     const command = this.baseCommand;
     const useNodeIpc = command.useNodeIpc !== false;
     const mergedEnv: NodeJS.ProcessEnv = {
-      ...process.env,
+      ...allowedHostEnvironment(process.env),
       ...this.baseEnv,
       ...(command.env ?? {}),
       ...extraEnv,
@@ -818,7 +1011,9 @@ export class EdgeDaemonHarness {
     predicate: (entry: EdgeManifestEntryView) => boolean,
     timeoutMs = 20_000,
     description = `entry ${entryId} state`,
+    options: { failOnStartError?: boolean } = {},
   ): Promise<EdgeManifestEntryView> {
+    const failOnStartError = options.failOnStartError !== false;
     const deadline = Date.now() + timeoutMs;
     let afterGen = 0;
     let afterSeq = 0;
@@ -842,8 +1037,21 @@ export class EdgeDaemonHarness {
           }
           lastSeen = entry;
           if (predicate(entry)) return entry;
+          if (
+            failOnStartError &&
+            entry.observed_state === "starting" &&
+            typeof entry.last_error === "string" &&
+            entry.last_error.trim().length > 0
+          ) {
+            throw new Error(
+              `Agent ${entryId} reported a start error while waiting for ${description}: ${entry.last_error}\nLast entry: ${JSON.stringify(entry)}`,
+            );
+          }
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith(`Agent ${entryId} reported a start error`)) {
+          throw error;
+        }
         await new Promise((resolveWait) => setTimeout(resolveWait, 50));
       }
     }
@@ -946,25 +1154,6 @@ export class EdgeDaemonHarness {
         // Fall through to force kill below.
       }
     }
-    try {
-      if (existsSync(this.databasePath)) {
-        const sqlite = this.openSqlite();
-        try {
-          const rows = sqlite.all<{ provider_ref_json?: string | null }>(
-            "SELECT provider_ref_json FROM entries WHERE provider_ref_json IS NOT NULL",
-          );
-          for (const row of rows) {
-            if (!row.provider_ref_json) continue;
-            try {
-              const ref = JSON.parse(row.provider_ref_json) as { provider_connection?: { pid?: number | null } };
-              this.trackProviderPid(ref.provider_connection?.pid);
-            } catch { /* ignore */ }
-          }
-        } finally {
-          sqlite.close();
-        }
-      }
-    } catch { /* best effort */ }
     for (const proc of this.allProcesses) {
       if (!proc.exitInfo) {
         try { proc.child.kill("SIGKILL"); } catch { /* already exited */ }
@@ -974,8 +1163,62 @@ export class EdgeDaemonHarness {
         ]);
       }
     }
+    const normalizedHome = this.homeDir.replaceAll("\\", "/").toLowerCase();
+    const snapshot = listOsProcesses();
+    const byPid = new Map(snapshot.map((entry) => [entry.pid, entry]));
+    const childrenByParent = new Map<number, ProcessSnapshotEntry[]>();
+    for (const entry of snapshot) {
+      const list = childrenByParent.get(entry.ppid) ?? [];
+      list.push(entry);
+      childrenByParent.set(entry.ppid, list);
+    }
+
+    const targetsByPid = new Map<number, { pid: number; pgid?: number }>();
+    const addTargetWithDescendants = (rootPid: number) => {
+      if (rootPid <= 1 || rootPid === process.pid || targetsByPid.has(rootPid)) return;
+      const info = byPid.get(rootPid);
+      targetsByPid.set(rootPid, { pid: rootPid, pgid: info?.pgid });
+      for (const child of childrenByParent.get(rootPid) ?? []) {
+        addTargetWithDescendants(child.pid);
+      }
+    };
+
+    // 1. Tracked provider PIDs whose command line references this isolated home (or that have a child referencing it).
     for (const pid of this.trackedProviderPids) {
-      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+      if (!isPidAlive(pid)) continue;
+      const commandLine = byPid.get(pid)?.command ?? readProcessCommandLine(pid) ?? "";
+      const directMatch = commandLine.replaceAll("\\", "/").toLowerCase().includes(normalizedHome);
+      const childMatch = (childrenByParent.get(pid) ?? []).some((child) =>
+        child.command.replaceAll("\\", "/").toLowerCase().includes(normalizedHome),
+      );
+      if (directMatch || childMatch) addTargetWithDescendants(pid);
+    }
+
+    // 2. Any remaining OS process whose command line references this isolated temp home
+    // (including detached provider servers and MCP stub children spawned under this home).
+    for (const entry of snapshot) {
+      if (entry.pid === process.pid) continue;
+      if (!entry.command.replaceAll("\\", "/").toLowerCase().includes(normalizedHome)) continue;
+      addTargetWithDescendants(entry.pid);
+      // If an edge dev-mcp stub child points to this temp home, also stop its detached provider parent.
+      const parent = byPid.get(entry.ppid);
+      if (
+        parent &&
+        parent.pid > 1 &&
+        parent.pid !== process.pid &&
+        entry.command.replaceAll("\\", "/").toLowerCase().includes("/dev-mcp/server.mjs") &&
+        /\b(?:opencode|codex)\b/i.test(parent.command)
+      ) {
+        addTargetWithDescendants(parent.pid);
+      }
+    }
+
+    await terminateProcessTrees([...targetsByPid.values()]);
+
+    // Re-scan once in case a parent spawned or left a child right before exiting.
+    const stragglers = findProcessesReferencingPath(this.homeDir);
+    if (stragglers.length > 0) {
+      await terminateProcessTrees(stragglers.map((entry) => ({ pid: entry.pid, pgid: entry.pgid })));
     }
     this.trackedProviderPids.clear();
     for (const fn of this.extraCleanup.splice(0)) {
@@ -997,78 +1240,105 @@ export async function startEdgeDaemon(options: EdgeDaemonOptions = {}): Promise<
   if (EDGE_DAEMON_UNSUPPORTED_REASON && !options.daemonCommand && !process.env.LETAGENTS_EDGE_DAEMON_CMD?.trim()) {
     throw new Error(EDGE_DAEMON_UNSUPPORTED_REASON);
   }
-  const homeDir = await realpath(await mkdtemp(join(tmpdir(), "letagents-edge-")));
-  const binDir = join(homeDir, "bin");
-  const workspaceDir = join(homeDir, "workspace");
-  const devMcpDir = join(homeDir, "dev-mcp");
-  const appDataDir = join(homeDir, "AppData", "Roaming");
-  const localAppDataDir = join(homeDir, "AppData", "Local");
-  const xdgConfigDir = join(homeDir, ".config");
-  await Promise.all([
-    mkdir(binDir, { recursive: true }),
-    mkdir(workspaceDir, { recursive: true }),
-    mkdir(appDataDir, { recursive: true }),
-    mkdir(localAppDataDir, { recursive: true }),
-    mkdir(xdgConfigDir, { recursive: true }),
-  ]);
-
-  const roomServer = new FakeRoomServer();
-  const apiUrl = await roomServer.start();
-  const devMcpEntryPath = await materializeDevMcpPackage(devMcpDir);
-
-  const shimPaths: Record<string, string> = {};
-  const shimEnv: Record<string, string> = {};
-  for (const shim of options.shims ?? []) {
-    const path = await materializeNodeShim(binDir, shim.name, shim.scriptPath, {
-      env: shim.env,
-      nodeArgs: shim.nodeArgs,
-    });
-    shimPaths[shim.name] = path;
-    if (shim.envVar) shimEnv[shim.envVar] = path;
-  }
-
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const spkiDer = publicKey.export({ format: "der", type: "spki" }) as Buffer;
-  const publicKeyBase64 = spkiDer.toString("base64");
-  const keyFingerprint = createHash("sha256").update(spkiDer).digest("hex");
-
-  const existingPath = process.env.PATH ?? process.env.Path ?? "";
-  const prependedPath = existingPath ? `${binDir}${delimiter}${existingPath}` : binDir;
-  const baseEnv: Record<string, string> = {
-    HOME: homeDir,
-    USERPROFILE: homeDir,
-    APPDATA: appDataDir,
-    LOCALAPPDATA: localAppDataDir,
-    XDG_CONFIG_HOME: xdgConfigDir,
-    PATH: prependedPath,
-    ...(process.platform === "win32" ? { Path: prependedPath } : {}),
-    LETAGENTS_API_URL: apiUrl,
-    LETAGENTS_POLL_MAX_MS: "5000",
-    LETAGENTS_DESKTOP_DEV_SERVER_URL: "http://127.0.0.1:5174",
-    LETAGENTS_DEV_MCP_SERVER_ENTRY: devMcpEntryPath,
-    ...shimEnv,
-    ...(options.env ?? {}),
-  };
-
+  // Resolve the daemon command before allocating temp directories or sockets
+  // so missing builds fail fast without leaking resources.
   const command = options.daemonCommand ?? resolveDefaultDaemonCommand();
-  const readyTimeoutMs = options.readyTimeoutMs ?? (process.platform === "win32" ? 30_000 : 15_000);
-  const harness = new EdgeDaemonHarness(
-    homeDir,
-    roomServer,
-    devMcpEntryPath,
-    command,
-    baseEnv,
-    readyTimeoutMs,
-    options.keepHome === true,
-    { publicKeyBase64, privateKey, keyFingerprint },
-    shimPaths,
-  );
-
+  const homeDir = await realpath(await mkdtemp(join(tmpdir(), "letagents-edge-")));
+  const roomServer = new FakeRoomServer();
+  let harness: EdgeDaemonHarness | null = null;
   try {
+    const binDir = join(homeDir, "bin");
+    const workspaceDir = join(homeDir, "workspace");
+    const devMcpDir = join(homeDir, "dev-mcp");
+    const appDataDir = join(homeDir, "AppData", "Roaming");
+    const localAppDataDir = join(homeDir, "AppData", "Local");
+    const xdgConfigDir = join(homeDir, ".config");
+    const xdgDataDir = join(homeDir, ".local", "share");
+    const xdgStateDir = join(homeDir, ".local", "state");
+    const xdgCacheDir = join(homeDir, ".cache");
+    await Promise.all([
+      mkdir(binDir, { recursive: true }),
+      mkdir(workspaceDir, { recursive: true }),
+      mkdir(appDataDir, { recursive: true }),
+      mkdir(localAppDataDir, { recursive: true }),
+      mkdir(xdgConfigDir, { recursive: true }),
+      mkdir(xdgDataDir, { recursive: true }),
+      mkdir(xdgStateDir, { recursive: true }),
+      mkdir(xdgCacheDir, { recursive: true }),
+    ]);
+
+    const apiUrl = await roomServer.start();
+    const devMcpEntryPath = await materializeDevMcpPackage(devMcpDir);
+
+    const shimPaths: Record<string, string> = {};
+    const shimEnv: Record<string, string> = {};
+    for (const shim of options.shims ?? []) {
+      const path = await materializeNodeShim(binDir, shim.name, shim.scriptPath, {
+        env: {
+          LETAGENTS_EDGE_TEST_RUNNER_PID: String(process.pid),
+          ...(shim.env ?? {}),
+        },
+        nodeArgs: shim.nodeArgs,
+        copyScript: shim.copyScript,
+      });
+      shimPaths[shim.name] = path;
+      if (shim.envVar) shimEnv[shim.envVar] = path;
+    }
+
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const spkiDer = publicKey.export({ format: "der", type: "spki" }) as Buffer;
+    const publicKeyBase64 = spkiDer.toString("base64");
+    const keyFingerprint = createHash("sha256").update(spkiDer).digest("hex");
+
+    const existingPath = process.env.PATH ?? process.env.Path ?? "";
+    const prependedPath = existingPath ? `${binDir}${delimiter}${existingPath}` : binDir;
+    const windowsHelper = process.platform === "win32"
+      ? (process.env.LETAGENTS_PROCESS_TREE_HELPER?.trim() || process.env.LETAGENTS_TEST_PROCESS_TREE_HELPER?.trim() || "")
+      : "";
+    const baseEnv: Record<string, string> = {
+      HOME: homeDir,
+      USERPROFILE: homeDir,
+      APPDATA: appDataDir,
+      LOCALAPPDATA: localAppDataDir,
+      XDG_CONFIG_HOME: xdgConfigDir,
+      XDG_DATA_HOME: xdgDataDir,
+      XDG_STATE_HOME: xdgStateDir,
+      XDG_CACHE_HOME: xdgCacheDir,
+      PATH: prependedPath,
+      ...(process.platform === "win32" ? { Path: prependedPath } : {}),
+      ...(windowsHelper ? { LETAGENTS_PROCESS_TREE_HELPER: windowsHelper } : {}),
+      LETAGENTS_API_URL: apiUrl,
+      LETAGENTS_POLL_MAX_MS: "5000",
+      LETAGENTS_DESKTOP_DEV_SERVER_URL: "http://127.0.0.1:5174",
+      LETAGENTS_DEV_MCP_SERVER_ENTRY: devMcpEntryPath,
+      ...shimEnv,
+      ...(options.env ?? {}),
+    };
+
+    const readyTimeoutMs = options.readyTimeoutMs ?? (process.platform === "win32" ? 30_000 : 15_000);
+    harness = new EdgeDaemonHarness(
+      homeDir,
+      roomServer,
+      devMcpEntryPath,
+      command,
+      baseEnv,
+      readyTimeoutMs,
+      options.keepHome === true,
+      { publicKeyBase64, privateKey, keyFingerprint },
+      shimPaths,
+    );
+
     await harness.startDaemonProcess();
     return harness;
   } catch (error) {
-    await harness.dispose();
+    if (harness) {
+      await harness.dispose();
+    } else {
+      await roomServer.close().catch(() => undefined);
+      if (options.keepHome !== true) {
+        await rm(homeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 150 }).catch(() => undefined);
+      }
+    }
     throw error;
   }
 }

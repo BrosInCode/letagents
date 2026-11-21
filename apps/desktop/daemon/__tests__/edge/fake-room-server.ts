@@ -102,6 +102,7 @@ export class FakeRoomServer {
   private readonly roomMessages = new Map<string, FakeRoomMessage[]>();
   private readonly publishedByClientId = new Map<string, FakePublishedMessage>();
   private readonly publishedList: FakePublishedMessage[] = [];
+  private readonly publishAttemptsList: Array<{ roomId: string; clientMessageId: string; text: string; deduplicated: boolean; at: number }> = [];
   private readonly sessions = new Map<string, FakeMintedSession>();
   private readonly nativeActivityEvents: FakeNativeActivityEvent[] = [];
   private readonly noReplyReceipts: Array<{ roomId: string; sourceMessageId: string; receiptId: string }> = [];
@@ -191,6 +192,10 @@ export class FakeRoomServer {
 
   publishedMessages(roomId?: string): readonly FakePublishedMessage[] {
     return roomId ? this.publishedList.filter((item) => item.roomId === roomId) : [...this.publishedList];
+  }
+
+  publishAttempts(roomId?: string): readonly { roomId: string; clientMessageId: string; text: string; deduplicated: boolean; at: number }[] {
+    return roomId ? this.publishAttemptsList.filter((item) => item.roomId === roomId) : [...this.publishAttemptsList];
   }
 
   mintedSessions(): readonly FakeMintedSession[] {
@@ -477,6 +482,13 @@ export class FakeRoomServer {
         const dedupKey = `${roomId}\0${clientMessageId}`;
         const existing = this.publishedByClientId.get(dedupKey);
         if (existing) {
+          this.publishAttemptsList.push({
+            roomId,
+            clientMessageId,
+            text: String(body.text ?? ""),
+            deduplicated: true,
+            at: Date.now(),
+          });
           sendJson(res, 200, { id: existing.id, room_id: existing.roomId });
           return;
         }
@@ -495,6 +507,13 @@ export class FakeRoomServer {
           threadRootId,
           receivedAt: new Date().toISOString(),
         };
+        this.publishAttemptsList.push({
+          roomId,
+          clientMessageId,
+          text,
+          deduplicated: false,
+          at: Date.now(),
+        });
         this.publishedByClientId.set(dedupKey, published);
         this.publishedList.push(published);
         const list = this.roomMessages.get(roomId) ?? [];
