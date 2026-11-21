@@ -362,6 +362,8 @@ export interface ProcessSnapshotEntry {
   ppid: number;
   pgid: number;
   command: string;
+  /** Set when OS/helper reported the process alive without a readable command line. */
+  commandLineUnreadable?: boolean;
 }
 
 export interface ProcessListDiagnostics {
@@ -500,10 +502,72 @@ function execProcessList(command: string, args: readonly string[], timeoutMs: nu
   );
 }
 
+export interface WindowsHelperSpawnResult {
+  status: number | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  error?: Error;
+}
+
+/**
+ * Interpret one `letagents-process-tree.exe info <pid>` reply without ever
+ * substituting `image` for a missing `commandLine` or silently omitting an
+ * inaccessible tracked/required process.
+ */
+export function parseWindowsHelperInfoResult(
+  pid: number,
+  result: WindowsHelperSpawnResult,
+  options: { required?: boolean; owned?: boolean } = {},
+): ProcessSnapshotEntry | null {
+  if (result.error) throw result.error;
+  // Exit 2 = confirmed absent (exited between tasklist and info).
+  if (result.status === 2) {
+    if (options.required) throw new Error(`letagents-process-tree.exe reported required pid ${pid} absent.`);
+    return null;
+  }
+  // Exit 3 = access denied. For the runner or any tracked/owned pid this cannot
+  // prove the process is unrelated to the test; fail closed.
+  if (result.status === 3) {
+    if (options.required || options.owned) {
+      throw new Error(`letagents-process-tree.exe could not open tracked/required pid ${pid} (access denied).`);
+    }
+    return null;
+  }
+  if (result.status !== 0) {
+    const stderr = String(result.stderr || "").trim();
+    throw new Error(`letagents-process-tree.exe info ${pid} exited with code ${result.status}${stderr ? `: ${stderr}` : ""}`);
+  }
+  const parsed = JSON.parse(String(result.stdout || "").trim()) as {
+    pid?: unknown;
+    parentPid?: unknown;
+    exited?: unknown;
+    image?: unknown;
+    commandLine?: unknown;
+  };
+  if (parsed.pid !== pid) {
+    throw new Error(`letagents-process-tree.exe info ${pid} returned unexpected pid ${String(parsed.pid)}.`);
+  }
+  // Confirmed exited (only a handle remains open): harmless unless required.
+  if (parsed.exited === true) {
+    if (options.required) throw new Error(`letagents-process-tree.exe reported required pid ${pid} exited.`);
+    return null;
+  }
+  const ppid = typeof parsed.parentPid === "number" && Number.isInteger(parsed.parentPid) ? parsed.parentPid : 0;
+  if (typeof parsed.commandLine !== "string" || parsed.commandLine.length === 0) {
+    if (options.required || options.owned) {
+      throw new Error(
+        `letagents-process-tree.exe info ${pid} returned unreadable commandLine for live tracked/required process.`,
+      );
+    }
+    return { pid, ppid, pgid: pid, command: "", commandLineUnreadable: true };
+  }
+  return { pid, ppid, pgid: pid, command: parsed.commandLine };
+}
+
 function queryWindowsHelperProcessInfo(
   helperPath: string,
   pid: number,
-  options: { required?: boolean } = {},
+  options: { required?: boolean; owned?: boolean } = {},
 ): ProcessSnapshotEntry | null {
   return execWithTimeoutRetry(() => {
     const result = spawnSync(helperPath, ["info", String(pid)], {
@@ -513,69 +577,8 @@ function queryWindowsHelperProcessInfo(
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
-    if (result.error) throw result.error;
-    // Exit 2 = process exited between tasklist and info.
-    if (result.status === 2) {
-      if (options.required) throw new Error(`letagents-process-tree.exe reported required pid ${pid} absent.`);
-      return null;
-    }
-    // Exit 3 = access denied (higher-privilege process not spawned by this unprivileged test runner).
-    if (result.status === 3) {
-      if (options.required) throw new Error(`letagents-process-tree.exe could not open required pid ${pid} (access denied).`);
-      return null;
-    }
-    if (result.status !== 0) {
-      const stderr = String(result.stderr || "").trim();
-      throw new Error(`letagents-process-tree.exe info ${pid} exited with code ${result.status}${stderr ? `: ${stderr}` : ""}`);
-    }
-    const parsed = JSON.parse(String(result.stdout || "").trim()) as {
-      pid?: unknown;
-      parentPid?: unknown;
-      exited?: unknown;
-      image?: unknown;
-      commandLine?: unknown;
-    };
-    if (parsed.pid !== pid) {
-      throw new Error(`letagents-process-tree.exe info ${pid} returned unexpected pid ${String(parsed.pid)}.`);
-    }
-    if (parsed.exited === true) return null;
-    const ppid = typeof parsed.parentPid === "number" && Number.isInteger(parsed.parentPid) ? parsed.parentPid : 0;
-    const command =
-      typeof parsed.commandLine === "string" && parsed.commandLine.length > 0
-        ? parsed.commandLine
-        : typeof parsed.image === "string"
-          ? parsed.image
-          : "";
-    return { pid, ppid, pgid: pid, command };
+    return parseWindowsHelperInfoResult(pid, result, options);
   }, 2);
-}
-
-function readProcessCommandLine(pid: number): string | null {
-  if (!Number.isInteger(pid) || pid <= 1) return null;
-  try {
-    if (process.platform === "win32") {
-      const helperPath = resolveWindowsProcessTreeHelper();
-      if (helperPath) {
-        const info = queryWindowsHelperProcessInfo(helperPath, pid);
-        return info?.command || null;
-      }
-      const output = execProcessList(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -Property CommandLine).CommandLine`,
-        ],
-        25_000,
-      ).trim();
-      return output || null;
-    }
-    const output = execProcessList("ps", ["-p", String(pid), "-o", "command="], 5_000).trim();
-    return output || null;
-  } catch {
-    return null;
-  }
 }
 
 export function listOsProcesses(extraPids?: Iterable<number>): ProcessSnapshotEntry[] {
@@ -589,14 +592,29 @@ export function listOsProcesses(extraPids?: Iterable<number>): ProcessSnapshotEn
         if (!tasks.some((task) => task.pid === process.pid)) {
           throw new Error(`tasklist.exe output did not contain current runner pid ${process.pid} (parsed ${tasks.length} rows).`);
         }
-        const candidates = selectWindowsEdgeProcessCandidates(tasks, { extraPids });
+        const ownedPids = new Set<number>();
+        for (const pid of extraPids ?? []) {
+          if (Number.isInteger(pid) && pid > 1) ownedPids.add(pid);
+        }
+        const candidates = selectWindowsEdgeProcessCandidates(tasks, { extraPids: ownedPids });
         const entries: ProcessSnapshotEntry[] = [];
+        const inspectedPids = new Set<number>();
         let helperCalls = 0;
         for (const candidate of candidates) {
+          inspectedPids.add(candidate.pid);
           helperCalls += 1;
           const info = queryWindowsHelperProcessInfo(helperPath, candidate.pid, {
             required: candidate.pid === process.pid,
+            owned: ownedPids.has(candidate.pid),
           });
+          if (info) entries.push(info);
+        }
+        // Directly inspect any live owned/tracked PID that was absent from tasklist.
+        for (const pid of ownedPids) {
+          if (inspectedPids.has(pid) || !isPidAlive(pid)) continue;
+          inspectedPids.add(pid);
+          helperCalls += 1;
+          const info = queryWindowsHelperProcessInfo(helperPath, pid, { owned: true });
           if (info) entries.push(info);
         }
         if (!entries.some((entry) => entry.pid === process.pid)) {
@@ -696,6 +714,12 @@ export function findProcessesReferencingPath(
 ): ProcessSnapshotEntry[] {
   const normalized = needle.replaceAll("\\", "/").toLowerCase();
   const processes = listProcesses(extraPids);
+  const unreadable = processes.filter((entry) => entry.pid !== process.pid && entry.commandLineUnreadable);
+  if (unreadable.length > 0) {
+    throw new Error(
+      `OS process enumeration returned unreadable command line(s) for live pid(s) ${unreadable.map((e) => e.pid).join(", ")}; cannot verify zero processes reference ${needle}.`,
+    );
+  }
   if (!normalized) return [];
   return processes.filter(
     (entry) =>
@@ -1467,20 +1491,28 @@ export class EdgeDaemonHarness {
         }
 
         // 2. Tracked provider PIDs whose command line references this isolated home (or that have a child referencing it).
+        //    If a tracked live PID is omitted from the snapshot or its command line is unreadable,
+        //    fail cleanup verification closed instead of assuming it is unrelated.
+        const unverifiableTrackedPids: number[] = [];
         for (const pid of this.trackedProviderPids) {
           if (!isPidAlive(pid)) continue;
-          const commandLine = byPid.get(pid)?.command ?? readProcessCommandLine(pid) ?? "";
-          const directMatch = commandLine.replaceAll("\\", "/").toLowerCase().includes(normalizedHome);
-          const childMatch = (childrenByParent.get(pid) ?? []).some((child) =>
-            child.command.replaceAll("\\", "/").toLowerCase().includes(normalizedHome),
+          const info = byPid.get(pid);
+          if (!info || info.commandLineUnreadable || !info.command) {
+            unverifiableTrackedPids.push(pid);
+            continue;
+          }
+          const directMatch = info.command.replaceAll("\\", "/").toLowerCase().includes(normalizedHome);
+          const childMatch = (childrenByParent.get(pid) ?? []).some(
+            (child) => !child.commandLineUnreadable && child.command.replaceAll("\\", "/").toLowerCase().includes(normalizedHome),
           );
           if (directMatch || childMatch) addTargetWithDescendants(pid);
         }
+        const unreadableEntries = snapshot.filter((entry) => entry.pid !== process.pid && entry.commandLineUnreadable);
 
         // 3. Any remaining OS process whose command line references this isolated temp home
         // (including detached provider servers and MCP stub children spawned under this home).
         for (const entry of snapshot) {
-          if (entry.pid === process.pid) continue;
+          if (entry.pid === process.pid || entry.commandLineUnreadable) continue;
           if (!entry.command.replaceAll("\\", "/").toLowerCase().includes(normalizedHome)) continue;
           addTargetWithDescendants(entry.pid);
           // If an edge dev-mcp stub child points to this temp home, also stop its detached provider parent.
@@ -1496,14 +1528,28 @@ export class EdgeDaemonHarness {
           }
         }
 
-        if (targetsByPid.size === 0) {
-          // The initial snapshot already confirmed zero live daemon PIDs and zero processes
-          // referencing this isolated home; avoid redundant PowerShell/ps spawns on clean exits.
+        if (targetsByPid.size > 0) {
+          await terminateProcessTrees([...targetsByPid.values()]);
+        }
+
+        if (unverifiableTrackedPids.length > 0 || unreadableEntries.length > 0) {
+          const detail = [
+            ...(unverifiableTrackedPids.length > 0
+              ? [`unverifiable live tracked pid(s): ${unverifiableTrackedPids.join(", ")}`]
+              : []),
+            ...(unreadableEntries.length > 0
+              ? [`unreadable commandLine pid(s): ${unreadableEntries.map((e) => e.pid).join(", ")}`]
+              : []),
+          ].join("; ");
+          cleanupError = new Error(
+            `Edge harness dispose could not verify process cleanup for ${this.homeDir}: ${detail}`,
+          );
+        } else if (targetsByPid.size === 0) {
+          // The initial snapshot already confirmed zero live daemon PIDs, readable info for all
+          // live tracked PIDs, and zero processes referencing this isolated home.
           verifiedClean = true;
           this.trackedProviderPids.clear();
         } else {
-          await terminateProcessTrees([...targetsByPid.values()]);
-
           // 4. Re-scan after termination; only run a third verification pass if stragglers were found.
           try {
             let remaining = findProcessesReferencingPath(this.homeDir, this.listProcesses, extraTrackedPids);

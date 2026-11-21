@@ -18,6 +18,7 @@ import {
   findProcessesReferencingPath,
   lastProcessListDiagnostics,
   listOsProcesses,
+  parseWindowsHelperInfoResult,
   parseWindowsTasklistCsv,
   selectWindowsEdgeProcessCandidates,
   startEdgeDaemon,
@@ -306,6 +307,158 @@ test("Windows tasklist CSV parser, candidate filter, timeout retry, and live OS 
   t.diagnostic(
     `edge process list diagnostics: method=${diag.method} totalTasks=${diag.totalTasks} helperCalls=${diag.helperCalls} elapsedMs=${diag.elapsedMs}`,
   );
+});
+
+test("unreadable native helper info (commandLine: null or access denied) fails closed in parser, finder, and dispose()", async () => {
+  // 1. Confirmed absent (exit 2) or exited (exited: true) stays harmless for non-required PIDs.
+  assert.equal(parseWindowsHelperInfoResult(9999, { status: 2 }), null);
+  assert.equal(
+    parseWindowsHelperInfoResult(9999, {
+      status: 0,
+      stdout: JSON.stringify({
+        pid: 9999,
+        parentPid: 1,
+        exited: true,
+        image: "C:\\Program Files\\nodejs\\node.exe",
+        commandLine: null,
+      }),
+    }),
+    null,
+  );
+  assert.throws(
+    () => parseWindowsHelperInfoResult(process.pid, { status: 2 }, { required: true }),
+    /reported required pid .* absent/,
+  );
+
+  // 2. Live process with commandLine: null never substitutes image path.
+  const unreadableUntracked = parseWindowsHelperInfoResult(4242, {
+    status: 0,
+    stdout: JSON.stringify({
+      pid: 4242,
+      parentPid: 1,
+      exited: false,
+      image: "C:\\Program Files\\nodejs\\node.exe",
+      commandLine: null,
+    }),
+  });
+  assert.deepEqual(unreadableUntracked, {
+    pid: 4242,
+    ppid: 1,
+    pgid: 4242,
+    command: "",
+    commandLineUnreadable: true,
+  });
+  assert.throws(
+    () =>
+      parseWindowsHelperInfoResult(
+        4242,
+        {
+          status: 0,
+          stdout: JSON.stringify({
+            pid: 4242,
+            parentPid: 1,
+            exited: false,
+            image: "C:\\Program Files\\nodejs\\node.exe",
+            commandLine: null,
+          }),
+        },
+        { owned: true },
+      ),
+    /unreadable commandLine/,
+  );
+
+  // 3. Access denied (exit 3) fails closed for owned/tracked or required PIDs.
+  assert.throws(
+    () => parseWindowsHelperInfoResult(4242, { status: 3 }, { owned: true }),
+    /access denied/,
+  );
+  assert.throws(
+    () => parseWindowsHelperInfoResult(process.pid, { status: 3 }, { required: true }),
+    /access denied/,
+  );
+  assert.equal(parseWindowsHelperInfoResult(4242, { status: 3 }), null);
+
+  // 4. findProcessesReferencingPath() refuses unreadable commandLine entries.
+  assert.throws(
+    () => findProcessesReferencingPath(tmpdir(), () => [unreadableUntracked!]),
+    /unreadable command line/,
+  );
+
+  // 5. Real EdgeDaemonHarness.dispose() must reject and preserve homeDir when a live tracked
+  //    child either reports commandLine: null or is omitted (e.g. access-denied status 3),
+  //    then clean up cleanly once inspection recovers.
+  if (EDGE_DAEMON_UNSUPPORTED_REASON) return;
+  let mode: "null-commandline" | "omit-tracked" | "real" = "real";
+  let trackedPid = 0;
+  const harness = await startEdgeDaemon({
+    listProcesses: (extraPids) => {
+      const live = listOsProcesses(extraPids);
+      if (mode === "null-commandline") {
+        const converted = parseWindowsHelperInfoResult(trackedPid, {
+          status: 0,
+          stdout: JSON.stringify({
+            pid: trackedPid,
+            parentPid: process.pid,
+            exited: false,
+            image: process.execPath,
+            commandLine: null,
+          }),
+        });
+        return live.map((entry) => (entry.pid === trackedPid ? converted! : entry));
+      }
+      if (mode === "omit-tracked") {
+        return live.filter((entry) => entry.pid !== trackedPid);
+      }
+      return live;
+    },
+  });
+
+  const probeChild = spawn(
+    process.execPath,
+    ["-e", "setInterval(() => {}, 1000);", "--", harness.homeDir],
+    { stdio: "ignore", windowsHide: true },
+  );
+  try {
+    assert.ok(probeChild.pid, "expected probe child pid");
+    trackedPid = probeChild.pid;
+    harness.trackProviderPid(probeChild.pid);
+
+    // 5a. Status 0 with commandLine: null must fail dispose() and preserve homeDir.
+    mode = "null-commandline";
+    await assert.rejects(
+      () => harness.dispose(),
+      /could not verify process cleanup/,
+      "Expected dispose() to reject when a live tracked child has commandLine: null",
+    );
+    assert.equal(existsSync(harness.homeDir), true, "Expected homeDir preserved after null commandLine");
+    assert.doesNotThrow(() => process.kill(probeChild.pid!, 0));
+    await assert.rejects(
+      () => fetch(`${harness.roomServer.apiUrl}/api/health`),
+      "Expected FakeRoomServer closed in finally even when commandLine is unreadable",
+    );
+
+    // 5b. Omitted live tracked child (e.g. status 3 access denied) must also fail dispose() and preserve homeDir.
+    mode = "omit-tracked";
+    await assert.rejects(
+      () => harness.dispose(),
+      /unverifiable live tracked pid/,
+      "Expected dispose() to reject when a live tracked child is omitted from process snapshot",
+    );
+    assert.equal(existsSync(harness.homeDir), true, "Expected homeDir preserved when live tracked child is omitted");
+    assert.doesNotThrow(() => process.kill(probeChild.pid!, 0));
+
+    // 5c. Once inspection recovers, follow-up dispose() kills the probe child and removes homeDir.
+    mode = "real";
+    await harness.dispose();
+    assert.equal(existsSync(harness.homeDir), false, "Expected recovery dispose() to remove homeDir");
+    assert.deepEqual(findProcessesReferencingPath(harness.homeDir), []);
+  } finally {
+    mode = "real";
+    if (probeChild.pid) {
+      try { process.kill(probeChild.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    await harness.dispose().catch(() => undefined);
+  }
 });
 
 test("all committed Codex and Open Model edge fixtures parse strictly and have zero redaction leaks", () => {
