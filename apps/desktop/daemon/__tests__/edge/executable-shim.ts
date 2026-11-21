@@ -36,17 +36,34 @@ function isScriptArgument(value: string): boolean {
   return /\.(?:c|m)?js$/i.test(value);
 }
 
-function locateProgram(command: string, env: NodeJS.ProcessEnv): string | null {
-  if (isAbsolute(command) || command.includes("/") || command.includes(sep)) {
-    const candidate = resolve(command);
-    return existsSync(candidate) ? candidate : null;
-  }
-  for (const folder of (env.PATH ?? env.Path ?? "").split(delimiter)) {
-    if (!folder) continue;
-    const candidate = join(folder, command);
-    if (existsSync(candidate)) return candidate;
+function locateProgram(command: string, env: NodeJS.ProcessEnv, cwd: string, platform: NodeJS.Platform): string | null {
+  // Windows also finds a program by its name with no extension.
+  const names = platform === "win32" && !extname(command)
+    ? [command, ...(env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean).map((extension) => `${command}${extension}`)]
+    : [command];
+  const folders = isAbsolute(command) || command.includes("/") || command.includes(sep)
+    ? [cwd]
+    : (env.PATH ?? env.Path ?? "").split(delimiter).filter(Boolean);
+  for (const folder of folders) {
+    for (const name of names) {
+      // `resolve` keeps an absolute name, and reads a relative name from the folder.
+      const candidate = resolve(cwd, folder, name);
+      if (existsSync(candidate)) return candidate;
+    }
   }
   return null;
+}
+
+export interface StandInRuntimeOptions {
+  /** The program of the test process. Defaults to `process.execPath`. */
+  execPath?: string;
+  /** The environment that the daemon starts with. Its `PATH` finds a command that is a bare name. Defaults to `process.env`. */
+  env?: NodeJS.ProcessEnv;
+  /** The folder that the daemon starts in. A relative command is read from it. Defaults to the current folder. */
+  cwd?: string;
+  /** The environment of the test process, for the explicit variable. Defaults to `process.env`. */
+  hostEnv?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -57,20 +74,21 @@ function locateProgram(command: string, env: NodeJS.ProcessEnv): string | null {
  * that same program. With the default daemon command that is the program of
  * the test process. With an overridden command that starts a script (a copy
  * of Node, or a packaged app in Node mode) it is the program of that command,
- * as the daemon sees it: an absolute path with links resolved. A command that
- * starts no script (a daemon in another language) cannot run a stand-in, so
- * the program of the test process stays.
+ * as the daemon sees it: an absolute path with links resolved. The command is
+ * found as the operating system finds it at the start of the daemon: with the
+ * `PATH` and the folder that the daemon starts with, not those of the test
+ * process. A command that starts no script (a daemon in another language)
+ * cannot run a stand-in, so the program of the test process stays.
  */
 export function resolveStandInRuntime(
   daemonCommand: { command: string; args: readonly string[] },
-  options: { execPath?: string; env?: NodeJS.ProcessEnv } = {},
+  options: StandInRuntimeOptions = {},
 ): string {
   const execPath = options.execPath ?? process.execPath;
-  const env = options.env ?? process.env;
-  const explicit = env[EDGE_STAND_IN_RUNTIME_ENV]?.trim();
+  const explicit = (options.hostEnv ?? process.env)[EDGE_STAND_IN_RUNTIME_ENV]?.trim();
   if (explicit) return explicit;
   if (!daemonCommand.args.some(isScriptArgument)) return execPath;
-  const located = locateProgram(daemonCommand.command, env);
+  const located = locateProgram(daemonCommand.command, options.env ?? process.env, options.cwd ?? process.cwd(), options.platform ?? process.platform);
   if (!located) return execPath;
   try {
     return realpathSync(located);

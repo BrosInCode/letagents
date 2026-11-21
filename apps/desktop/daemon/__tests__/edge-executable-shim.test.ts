@@ -56,11 +56,11 @@ test("edge executable shim generates a parseNodeShim-compatible Windows .cmd wra
 test("the stand-in runtime is the test process program for the default daemon command and for a daemon that is no script", () => {
   const env = {};
   // The default command: the daemon is a script under the program of the test process.
-  assert.equal(resolveStandInRuntime({ command: process.execPath, args: ["/x/dist-daemon/main.js"] }, { env }), process.execPath);
+  assert.equal(resolveStandInRuntime({ command: process.execPath, args: ["/x/dist-daemon/main.js"] }, { env, hostEnv: {} }), process.execPath);
   // A daemon in another language starts no script, so it cannot run a stand-in.
-  assert.equal(resolveStandInRuntime({ command: "/opt/daemon/letagents-daemon", args: ["--foreground"] }, { env, execPath: "/usr/bin/node" }), "/usr/bin/node");
+  assert.equal(resolveStandInRuntime({ command: "/opt/daemon/letagents-daemon", args: ["--foreground"] }, { env, hostEnv: {}, execPath: "/usr/bin/node" }), "/usr/bin/node");
   // A command that does not exist changes nothing.
-  assert.equal(resolveStandInRuntime({ command: "/no/such/runtime", args: ["main.js"] }, { env, execPath: "/usr/bin/node" }), "/usr/bin/node");
+  assert.equal(resolveStandInRuntime({ command: "/no/such/runtime", args: ["main.js"] }, { env, hostEnv: {}, execPath: "/usr/bin/node" }), "/usr/bin/node");
 });
 
 test("the stand-in runtime is the daemon's program when an overridden command starts a script", async () => {
@@ -69,15 +69,26 @@ test("the stand-in runtime is the daemon's program when an overridden command st
     const runtime = join(dir, "runtime");
     await writeFile(runtime, "", { mode: 0o755 });
     // An absolute path.
-    assert.equal(resolveStandInRuntime({ command: runtime, args: ["/x/dist-daemon/main.js"] }, { env: {}, execPath: "/usr/bin/node" }), runtime);
+    assert.equal(resolveStandInRuntime({ command: runtime, args: ["/x/dist-daemon/main.js"] }, { env: {}, hostEnv: {}, execPath: "/usr/bin/node" }), runtime);
     // A name on PATH.
     assert.equal(
-      resolveStandInRuntime({ command: "runtime", args: ["--flag", "main.mjs"] }, { env: { PATH: ["/no/such/folder", dir].join(delimiter) }, execPath: "/usr/bin/node" }),
+      resolveStandInRuntime({ command: "runtime", args: ["--flag", "main.mjs"] }, { env: { PATH: ["/no/such/folder", dir].join(delimiter) }, hostEnv: {}, execPath: "/usr/bin/node" }),
       runtime,
     );
-    // The explicit variable decides before each other rule.
+    // A relative command is read from the folder that the daemon starts in, not from the folder of the test process.
+    assert.equal(resolveStandInRuntime({ command: "./runtime", args: ["main.js"] }, { env: {}, hostEnv: {}, cwd: dir, execPath: "/usr/bin/node" }), runtime);
     assert.equal(
-      resolveStandInRuntime({ command: runtime, args: ["main.js"] }, { env: { [EDGE_STAND_IN_RUNTIME_ENV]: "/chosen/runtime" }, execPath: "/usr/bin/node" }),
+      resolveStandInRuntime({ command: "./runtime", args: ["main.js"] }, { env: {}, hostEnv: {}, cwd: join(dir, "elsewhere"), execPath: "/usr/bin/node" }),
+      "/usr/bin/node",
+    );
+    // The PATH of the daemon decides, not the PATH of the test process.
+    assert.equal(
+      resolveStandInRuntime({ command: "runtime", args: ["main.js"] }, { env: { PATH: "/no/such/folder" }, hostEnv: { PATH: dir }, execPath: "/usr/bin/node" }),
+      "/usr/bin/node",
+    );
+    // The explicit variable of the test process decides before each other rule.
+    assert.equal(
+      resolveStandInRuntime({ command: runtime, args: ["main.js"] }, { env: {}, hostEnv: { [EDGE_STAND_IN_RUNTIME_ENV]: "/chosen/runtime" }, execPath: "/usr/bin/node" }),
       "/chosen/runtime",
     );
   } finally {
@@ -95,7 +106,7 @@ test(
       const link = join(dir, "link");
       await writeFile(runtime, "", { mode: 0o755 });
       await symlink(runtime, link);
-      assert.equal(resolveStandInRuntime({ command: link, args: ["main.js"] }, { env: {}, execPath: "/usr/bin/node" }), runtime);
+      assert.equal(resolveStandInRuntime({ command: link, args: ["main.js"] }, { env: {}, hostEnv: {}, execPath: "/usr/bin/node" }), runtime);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

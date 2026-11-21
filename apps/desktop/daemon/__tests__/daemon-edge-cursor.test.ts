@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmod, copyFile, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -104,6 +104,26 @@ describe(
           const standard = resolveDefaultDaemonCommand();
           assert.notEqual(copy.program, process.execPath);
           await assertSignedOutCursorStartsNoTurn({ ...standard, command: copy.program });
+        } finally {
+          await copy.remove();
+        }
+      },
+    );
+
+    // The same, with the other program chosen by the PATH of the daemon command: the command is a bare
+    // name, and only the daemon's environment says which program that name is.
+    test(
+      "the same refusal with a daemon whose program is chosen by the PATH of the daemon command",
+      { skip: !resolveDefaultDaemonCommand().useNodeIpc ? "the daemon command is overridden from outside" : false },
+      async () => {
+        const copy = await copyOfNodeAtAnotherPath();
+        try {
+          const standard = resolveDefaultDaemonCommand();
+          await assertSignedOutCursorStartsNoTurn({
+            ...standard,
+            command: basename(copy.program),
+            env: { ...(standard.env ?? {}), PATH: [dirname(copy.program), process.env.PATH ?? ""].join(delimiter) },
+          });
         } finally {
           await copy.remove();
         }
