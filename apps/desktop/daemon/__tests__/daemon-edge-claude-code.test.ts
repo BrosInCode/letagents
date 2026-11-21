@@ -243,9 +243,12 @@ describe(
 
         // The recording has no answer for this turn: after its start the program waits for the interrupt.
         harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[never-sent]" });
+        // An interrupt needs a turn that the program has started and that the daemon shows as working.
+        // Without both, the daemon answers "There is no active supervised turn to stop."
+        await scenario.emitted(1, "t2-init");
         const active = await harness.waitForEntry(
           agent.entryId,
-          (entry) => entry.room_agent_state?.turn.state === "responding"
+          (entry) => entry.observed_state === "working" && entry.room_agent_state?.turn.state === "responding"
             && Boolean(entry.room_agent_state.turn.provider_turn_id)
             && Boolean(entry.room_agent_state.turn.inbox_item_id)
             && Boolean(entry.room_agent_state.turn.source_message_id),

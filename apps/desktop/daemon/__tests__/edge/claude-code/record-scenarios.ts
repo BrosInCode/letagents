@@ -192,7 +192,7 @@ const SCENARIOS: Record<string, (context: ScenarioContext) => Promise<void>> = {
     harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[never-sent]" });
     const active = await harness.waitForEntry(
       agent.entryId,
-      (entry) => entry.room_agent_state?.turn.state === "responding"
+      (entry) => entry.observed_state === "working" && entry.room_agent_state?.turn.state === "responding"
         && Boolean(entry.room_agent_state.turn.provider_turn_id)
         && Boolean(entry.room_agent_state.turn.inbox_item_id),
       60_000,
