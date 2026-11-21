@@ -7,7 +7,7 @@ import {
   plainTerminalText,
   type LiveBackgroundCommandPayload,
   type LiveBackgroundCommandStatus,
-} from "../../../../../shared/live-command-output.mjs";
+} from "../../../../shared/live-command-output.mjs";
 
 /** New output is read at most this often; one read takes everything that arrived since the last. */
 const READ_PACE_MS = 250;

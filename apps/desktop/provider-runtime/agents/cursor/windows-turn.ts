@@ -16,16 +16,16 @@ import {
   DAEMON_STATE_DIR_ENV,
   resolveDaemonProofPath,
   windowsPipeName,
-} from "../../../../../../shared/daemon-endpoint.mjs";
-import { findDaemonPipeAddon } from "../../../../../../shared/daemon-pipe-native.mjs";
-import { createPrivateDirSync, privateEntryCreatedSync } from "../../../../../../shared/owner-private-fs.mjs";
+} from "../../../../../shared/daemon-endpoint.mjs";
+import { findDaemonPipeAddon } from "../../../../../shared/daemon-pipe-native.mjs";
+import { createPrivateDirSync, privateEntryCreatedSync } from "../../../../../shared/owner-private-fs.mjs";
 import {
   processTreeHelperPath,
   quoteWindowsArgument,
   resolveWindowsCommand,
   terminateTree,
-} from "../../../../../../shared/process-tree.mjs";
-import { ProviderBatchFileError, providerLaunchCommand, type ProviderLaunchOptions } from "../../../../../../shared/provider-executable.mjs";
+} from "../../../../../shared/process-tree.mjs";
+import { ProviderBatchFileError, providerLaunchCommand, type ProviderLaunchOptions } from "../../../../../shared/provider-executable.mjs";
 import { DEFAULT_STOP_GRACE_MS } from "../provider-evidence.js";
 import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "./profile-types.js";
 
@@ -170,7 +170,7 @@ export const CURSOR_MCP_CONNECTOR_SERVER_FILE = "connector.server";
  * (the same relative path as this module's import of it, so the same file in
  * the source tree, the build and the packaged app).
  */
-const DAEMON_PIPE_NATIVE_MODULE = fileURLToPath(new URL("../../../../../../shared/daemon-pipe-native.mjs", import.meta.url));
+const DAEMON_PIPE_NATIVE_MODULE = fileURLToPath(new URL("../../../../../shared/daemon-pipe-native.mjs", import.meta.url));
 
 /** Cursor's command arguments for the Windows pipe connector of a connector socket path. */
 export function cursorMcpPipeConnectorArgs(socketPath: string, pipeNativeModule = DAEMON_PIPE_NATIVE_MODULE): string[] {

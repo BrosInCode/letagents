@@ -18,8 +18,8 @@ import { type OpenCodeRuntimeControl, type OpenCodeWritableRuntimeControl, readR
 import { OpenCodeRuntimeGoneError, OpenCodeStartTimeoutError } from "./errors.js";
 import { OpenModelAdapterTurnWait } from "./adapter-turn-wait.js";
 import { OpenModelHandle } from "./handle.js";
-import { protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
-import { ProviderInstallError } from "../../../../../../shared/provider-executable.mjs";
+import { protectOwnerPrivate } from "../../../../../shared/owner-private-fs.mjs";
+import { ProviderInstallError } from "../../../../../shared/provider-executable.mjs";
 import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
 import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
 

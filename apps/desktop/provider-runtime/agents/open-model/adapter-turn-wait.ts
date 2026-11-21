@@ -1,8 +1,8 @@
 /** Session ordering checks and waiting for one exact OpenCode turn to end, abort or go idle. */
-import { NO_REPLY_FAILURE } from "../../../../../../shared/room-turn-no-reply.mjs";
+import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
 import { ProviderContinuationMissingError, type ProviderRoomTurnResult } from "../provider-adapter.js";
 import { delay } from "../provider-evidence.js";
-import type { TurnOutcome } from "../../../../shared/execution-protocol.js";
+import type { TurnOutcome } from "../../../shared/execution-protocol.js";
 import { assistantsFor, eventReferencesSession, finalAssistantFor, messageCompleted, messageError, messageFinishReason, messageText, nativelyOrderedMessageId, OpenCodeServerClient, record, turnUserMessageIds, type JsonRecord, type OpenCodeEvent, type OpenCodeMessage } from "../opencode-server-client.js";
 import { MAX_CONSECUTIVE_DENIED_STEPS, TOOL_CALLS_UNFINISHED, type TurnStep, classifyTurn, deniedToolState, unansweredCompletionReason, unfinishedToolCalls } from "./turn-results.js";
 import { OpenCodeBoundedTurnError, OpenCodeTerminalTurnError, openCodeRetryStatus, safeProviderErrorMessage } from "./errors.js";

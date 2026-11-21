@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import type { ClaudeNativePermissionRequest } from "../../../../shared/provider-permissions.js";
+import type { ClaudeNativePermissionRequest } from "../../../shared/provider-permissions.js";
 import { ProviderUsageTracker } from "../provider-usage.js";
 import { claudeApiErrorCategory, claudeUsageLimitRejected, exactClaudeStreamTerminal } from "../claude-room-turn-evidence.js";
 import { ClaudeAdapterBackgroundWork } from "./adapter-background-work.js";

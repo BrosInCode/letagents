@@ -1,5 +1,5 @@
-import { claudeToolOperation } from "../../../../../../shared/claude-tool-operation.mjs";
-import type { NativeExecutionFact } from "../../../../shared/execution-protocol.js";
+import { claudeToolOperation } from "../../../../../shared/claude-tool-operation.mjs";
+import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint, type NativeLifecycleCheckpoint } from "../provider-execution-observer.js";
 import { ClaudeAdapterCore } from "./adapter-core.js";
 import { ClaudeProviderHandle } from "./provider-handle.js";

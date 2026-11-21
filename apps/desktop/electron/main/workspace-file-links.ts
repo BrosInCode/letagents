@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { parseRoomAgentWorkSummary } from '../../../../shared/room-agent-work.mjs';
 import { letagentsHome } from '../../../../shared/letagents-home.mjs';
-import { apiUrl } from './paths.js';
+import { apiUrl } from '#provider-runtime/paths.js';
 import { pollDesktopRoomAgentWork } from './rooms/agent-work.js';
 
 export type WorkspaceFileRequest = { roomId: string; agentKey: string; sourceMessageId: string; paths: string[] };

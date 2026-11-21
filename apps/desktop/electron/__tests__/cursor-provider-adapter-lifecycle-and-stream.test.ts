@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { CursorProviderAdapter, defaultLaunchTurn, type CursorProviderAdapterDependencies, type CursorProviderAdapterOptions } from "../main/agents/cursor-provider-adapter.js";
+import { CursorProviderAdapter, defaultLaunchTurn, type CursorProviderAdapterDependencies, type CursorProviderAdapterOptions } from "#provider-runtime/agents/cursor-provider-adapter.js";
 import { expectedCursorSandbox } from "./platform.js";
 import type {
   ProviderHandle,
@@ -13,7 +13,7 @@ import type {
   ProviderStreamEvent,
   ProviderTerminalPayload,
   NativeExecutionObservation,
-} from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/provider-adapter.js";
 import {
   birthIdentity,
   argValue,

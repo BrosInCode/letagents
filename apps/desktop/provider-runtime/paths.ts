@@ -1,10 +1,12 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { letagentsHomePath } from "../../../../shared/letagents-home.mjs";
+import { letagentsHomePath } from "../../../shared/letagents-home.mjs";
 
-export const electronMainDir = join(dirname(fileURLToPath(import.meta.url)), "..");
-export const desktopRoot = join(electronMainDir, "..");
+// This file is provider-runtime/paths.ts in the source and
+// dist-provider-runtime/paths.js in the build and in the packaged app. Both
+// folders are one level below the desktop root.
+export const desktopRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const workspaceRoot = join(desktopRoot, "..", "..");
 export const rendererDistPath = join(
   desktopRoot,

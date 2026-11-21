@@ -1,4 +1,4 @@
-import { processBirth, PROCESS_TREE_UNKILLABLE_EXIT_CODE, signalTree } from "../../../../../shared/process-tree.mjs";
+import { processBirth, PROCESS_TREE_UNKILLABLE_EXIT_CODE, signalTree } from "../../../../shared/process-tree.mjs";
 
 // Shared process-evidence primitives for provider adapters (plan v10 §4.8).
 // Extracted verbatim from the Codex adapter (#765) so the liveness invariants

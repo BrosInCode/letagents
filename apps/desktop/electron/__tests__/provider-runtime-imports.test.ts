@@ -51,3 +51,15 @@ test("the provider runtime imports nothing from the daemon or Electron folders",
     .map((file) => relative(desktopRoot, file).split(sep).join("/"));
   assert.deepEqual(offenders, []);
 });
+
+test("the daemon names no adapter file in the Electron build", () => {
+  // The adapters moved from electron/main/agents to provider-runtime/agents.
+  // A path into dist-electron/main/agents would load nothing in a packaged
+  // app. The supervision runtime (main/rooms) is the one path that remains,
+  // until it moves too.
+  const offenders = sourceFiles(join(desktopRoot, "daemon"))
+    .filter((file) => !file.split(sep).includes("__tests__"))
+    .filter((file) => /dist-electron\/main\/agents|electron\/main\/agents/.test(readFileSync(file, "utf8")))
+    .map((file) => relative(desktopRoot, file).split(sep).join("/"));
+  assert.deepEqual(offenders, []);
+});

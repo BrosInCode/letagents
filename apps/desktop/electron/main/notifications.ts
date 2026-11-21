@@ -5,7 +5,7 @@ import type {
   DesktopNotificationStatus,
   DesktopNotificationTarget,
 } from "../ipc-types.js";
-import { isIsolatedDesktopPreview } from "./preview-mode.js";
+import { isIsolatedDesktopPreview } from "#provider-runtime/preview-mode.js";
 import { apiFetch } from "./auth.js";
 import {
   parseDesktopNotificationLaunchInfo,

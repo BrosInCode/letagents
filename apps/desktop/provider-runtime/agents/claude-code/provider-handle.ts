@@ -1,7 +1,7 @@
 import { RoomTurnContextCache } from "../desktop-event-prompt-format.js";
-import type { ClaudePermissionObservation, ClaudeNativePermissionRequest } from "../../../../shared/provider-permissions.js";
+import type { ClaudePermissionObservation, ClaudeNativePermissionRequest } from "../../../shared/provider-permissions.js";
 import type { ProviderActivityEvent, ProviderConnectionRef, ProviderHandle, ProviderObservedState, ProviderStreamEvent, ProviderTerminalPayload } from "../provider-adapter.js";
-import type { NativeExecutionFact } from "../../../../shared/execution-protocol.js";
+import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
 import { ProviderExecutionObserver, type NativeLifecycleCheckpoint } from "../provider-execution-observer.js";
 import type { ProviderProcessExit } from "../provider-evidence.js";
 import type { ClaudeCliChild, ClaudeHeldRoomTurn, ClaudeRoomTurnTerminal, ClaudeStreamMessage } from "./types.js";

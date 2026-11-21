@@ -4,9 +4,9 @@ import { constants as fsConstants, mkdtempSync, readdirSync } from "node:fs";
 import { copyFile, lstat, realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, win32 } from "node:path";
-import { assertOwnerPrivateSync, createPrivateDirSync, nullDevice, openNoFollow, ownerPrivatePlatform, protectOwnerPrivateSync, windowsSystemTool } from "../../../../../../shared/owner-private-fs.mjs";
-import { letagentsHomePath } from "../../../../../../shared/letagents-home.mjs";
-import { GIT_NOT_FOUND_MESSAGE, resolveGitExecutable } from "../../../../../../shared/git-executable.mjs";
+import { assertOwnerPrivateSync, createPrivateDirSync, nullDevice, openNoFollow, ownerPrivatePlatform, protectOwnerPrivateSync, windowsSystemTool } from "../../../../../shared/owner-private-fs.mjs";
+import { letagentsHomePath } from "../../../../../shared/letagents-home.mjs";
+import { GIT_NOT_FOUND_MESSAGE, resolveGitExecutable } from "../../../../../shared/git-executable.mjs";
 import type { SourceGitAuthority } from "./types.js";
 import { fileVersionKey, generationError, limitError } from "./helpers.js";
 

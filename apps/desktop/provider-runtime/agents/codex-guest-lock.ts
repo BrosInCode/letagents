@@ -5,8 +5,8 @@ import type { AddressInfo } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { CODEX_OWNER_FEATURE_OVERRIDES, codexOwnerIsolationOverrides } from "../../../../../shared/codex-owner-isolation.mjs";
-import { signalTree, spawnTree } from "../../../../../shared/process-tree.mjs";
+import { CODEX_OWNER_FEATURE_OVERRIDES, codexOwnerIsolationOverrides } from "../../../../shared/codex-owner-isolation.mjs";
+import { signalTree, spawnTree } from "../../../../shared/process-tree.mjs";
 
 /**
  * A guest Codex (an agent given to someone else's room) runs with no tool

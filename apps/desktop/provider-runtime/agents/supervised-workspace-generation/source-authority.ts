@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, sep } from "node:path";
-import { isOwnerPrivate, protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
+import { isOwnerPrivate, protectOwnerPrivate } from "../../../../../shared/owner-private-fs.mjs";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, type GenerationManifest, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, SupervisedWorkspaceGenerationError, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationSupport, type SupervisedWorkspaceReadOnlyRoot } from "./types.js";
 import { ProcessExitError, cloneRegularFile, gitHooksPath, runGit, sourceAuthorityBuffer, sourceAuthorityExitCode, sourceGitEnvironment } from "./git.js";
 import { assertSafeAncestors, atomicWrite } from "./manifest.js";

@@ -4,8 +4,8 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION, CodexProviderAdapter } from "../main/agents/codex-provider-adapter.js";
-import type { ProviderHandle, ProviderSpawnRequest } from "../main/agents/provider-adapter.js";
+import { CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION, CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
+import type { ProviderHandle, ProviderSpawnRequest } from "#provider-runtime/agents/provider-adapter.js";
 import {
   assertProviderHandle,
   createHarness,

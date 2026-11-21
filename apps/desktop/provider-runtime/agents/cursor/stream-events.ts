@@ -1,7 +1,7 @@
 // Cursor stream-json parsing, native execution observation, and stream/activity publication.
 
 import type { ProviderActivityEvent, ProviderStreamEvent, ProviderStreamEventKind } from "../provider-adapter.js";
-import type { NativeExecutionFact } from "../../../../shared/execution-protocol.js";
+import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint, type NativeLifecycleCheckpoint } from "../provider-execution-observer.js";
 import { MAX_CURSOR_SESSION_ID_LENGTH, CURSOR_SESSION_ID_PATTERN } from "../cursor-provider-constants.js";
 import { cursorLiveDisplayProjections } from "../cursor-live-display.js";

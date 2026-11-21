@@ -1,10 +1,10 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodexProviderAdapter, CODEX_READ_ONLY_CONFIG_OVERRIDES, CODEX_READ_ONLY_ROOM_TOOLS } from "../main/agents/codex-provider-adapter.js";
+import { CodexProviderAdapter, CODEX_READ_ONLY_CONFIG_OVERRIDES, CODEX_READ_ONLY_ROOM_TOOLS } from "#provider-runtime/agents/codex-provider-adapter.js";
 import { API_AGENT_READ_TOOLS } from "../../../../shared/api-agent-tools.mjs";
-import { codexSandboxedProfileId } from "../main/agents/codex-agent-home.js";
-import type { ProviderHandle, ProviderSpawnRequest } from "../main/agents/provider-adapter.js";
+import { codexSandboxedProfileId } from "#provider-runtime/agents/codex-agent-home.js";
+import type { ProviderHandle, ProviderSpawnRequest } from "#provider-runtime/agents/provider-adapter.js";
 import {
   assertProviderHandle,
   FakeRpc,
@@ -27,7 +27,7 @@ import {
   assertStoppedNotAtLevel,
   READ_ONLY_ROOM_TOOL_DECISIONS,
 } from "./codex-provider-adapter.fixture.js";
-import { CODEX_APPROVAL_LEVEL_CONFIG_OVERRIDES } from "../main/agents/codex/thread-access.js";
+import { CODEX_APPROVAL_LEVEL_CONFIG_OVERRIDES } from "#provider-runtime/agents/codex/thread-access.js";
 
 test("Codex ask-before-write keeps its permission profile and its approval policy at turn dispatch after reattachment, and never names a sandbox", async () => {
   const harness = createHarness();

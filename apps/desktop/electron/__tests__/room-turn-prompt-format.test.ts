@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatRoomTurnContext, includedRoomTurnImages, roomTurnImageLabel, RoomTurnContextCache } from "../main/agents/desktop-event-prompt-format.js";
-import { withoutInlineFileBytes } from "../main/attachments/inline-bytes.js";
-import { cursorRoomTurnImageFolders, cursorRoomTurnImageLines } from "../main/agents/cursor-room-turn-images.js";
-import { parseConfiguredOpenModelExternalReads } from "../main/agents/opencode-launch-contract.js";
+import { formatRoomTurnContext, includedRoomTurnImages, roomTurnImageLabel, RoomTurnContextCache } from "#provider-runtime/agents/desktop-event-prompt-format.js";
+import { withoutInlineFileBytes } from "#provider-runtime/attachments/inline-bytes.js";
+import { cursorRoomTurnImageFolders, cursorRoomTurnImageLines } from "#provider-runtime/agents/cursor-room-turn-images.js";
+import { parseConfiguredOpenModelExternalReads } from "#provider-runtime/agents/opencode-launch-contract.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ProviderRoomTurnAttachment } from "../main/agents/provider-adapter.js";
+import type { ProviderRoomTurnAttachment } from "#provider-runtime/agents/provider-adapter.js";
 
 test("current guidance appears once; historical guidance cannot become a new instruction", () => {
   const activation = { decision: "activate", guidance: "You are an equal participant." };

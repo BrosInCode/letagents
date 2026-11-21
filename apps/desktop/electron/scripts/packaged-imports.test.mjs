@@ -53,14 +53,14 @@ test("declaration files are not part of the packaged build output", () => {
 function temporaryApp({ imports = packagedPackageJson(desktopPackage).imports, adapterImport = "#provider-runtime/shared.js" } = {}) {
   const app = mkdtempSync(join(tmpdir(), "letagents-packaged-imports-"));
   writeFileSync(join(app, "package.json"), JSON.stringify({ type: "module", imports }));
-  mkdirSync(join(app, "dist-provider-runtime"));
-  mkdirSync(join(app, "dist-electron", "main", "agents"), { recursive: true });
+  mkdirSync(join(app, "dist-provider-runtime", "agents"), { recursive: true });
+  mkdirSync(join(app, "dist-electron"));
   mkdirSync(join(app, "dist-daemon"));
   writeFileSync(join(app, "dist-provider-runtime", "shared.js"), "export const shared = 1;\n");
   writeFileSync(join(app, "dist-daemon", "main.js"), 'import "#provider-runtime/shared.js";\n');
   for (const [index, entry] of PROVIDER_ADAPTER_ENTRIES.entries()) {
     const name = index === 0 ? adapterImport : "#provider-runtime/shared.js";
-    writeFileSync(join(app, "dist-electron", "main", "agents", entry), `import ${JSON.stringify(name)};\n`);
+    writeFileSync(join(app, "dist-provider-runtime", "agents", entry), `import ${JSON.stringify(name)};\n`);
   }
   return app;
 }
@@ -100,7 +100,7 @@ test("the check fails when two users of one import name get two different files"
   try {
     // A second package.json below the build output gives the adapters their own
     // meaning of the name: a second copy of the shared file.
-    const agents = join(app, "dist-electron", "main", "agents");
+    const agents = join(app, "dist-provider-runtime", "agents");
     mkdirSync(join(agents, "copy"));
     writeFileSync(join(agents, "copy", "shared.js"), "export const shared = 2;\n");
     writeFileSync(join(agents, "package.json"), JSON.stringify({ type: "module", imports: { "#provider-runtime/*.js": "./copy/*.js" } }));
@@ -119,7 +119,7 @@ test("the check fails when a second import map gives import and require two diff
     // ESM resolution gives a copy. The adapters are ESM, so they load the copy.
     // A target must stay inside its own package, so the require target is a
     // link to the app's shared file (a second copy where links need a right).
-    const agents = join(app, "dist-electron", "main", "agents");
+    const agents = join(app, "dist-provider-runtime", "agents");
     mkdirSync(join(agents, "same"));
     mkdirSync(join(agents, "copy"));
     try {
@@ -146,8 +146,8 @@ test("the check fails when a second import map gives import and require two diff
 test("a package.json below the build output that declares no import names is accepted", () => {
   const app = temporaryApp();
   try {
-    writeFileSync(join(app, "dist-provider-runtime", "package.json"), JSON.stringify({ type: "module" }));
-    // The file that uses the name is in another folder, so its scope is the app's package.json.
+    writeFileSync(join(app, "dist-electron", "package.json"), JSON.stringify({ type: "module" }));
+    // The files that use the name are in other folders, so their scope is the app's package.json.
     assert.equal(runCheck(app).status, 0);
   } finally {
     rmSync(app, { recursive: true, force: true });
@@ -198,7 +198,7 @@ test("the check fails when a file names a path from its own place that the app d
 test("the check fails when an adapter entry file is missing", () => {
   const app = temporaryApp();
   try {
-    rmSync(join(app, "dist-electron", "main", "agents", PROVIDER_ADAPTER_ENTRIES[3]));
+    rmSync(join(app, "dist-provider-runtime", "agents", PROVIDER_ADAPTER_ENTRIES[3]));
     const result = runCheck(app);
     assert.equal(result.status, 1);
     assert.match(result.stderr, new RegExp(`no provider adapter entry file ${PROVIDER_ADAPTER_ENTRIES[3]}`));

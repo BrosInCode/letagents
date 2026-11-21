@@ -19,8 +19,8 @@ import test from "node:test";
 
 
 import { createElectronTestEnv } from "./harness.js";
-import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
-import type { CursorSupervisedProfileOptions } from "../main/agents/cursor-managed-profile.js";
+import { LETAGENTS_MCP_RUNTIME_VERSION } from "#provider-runtime/agents/letagents-mcp-runtime.js";
+import type { CursorSupervisedProfileOptions } from "#provider-runtime/agents/cursor-managed-profile.js";
 
 const { tempDir } = createElectronTestEnv({
   prefix: "letagents-cursor-managed-profile-",
@@ -57,7 +57,7 @@ const {
   prepareCursorSupervisedProfile: prepareCursorSupervisedProfileImpl,
   removeCursorSupervisedProfile,
   relocateCursorConversationNamespace,
-} = await import("../main/agents/cursor-managed-profile.js");
+} = await import("#provider-runtime/agents/cursor-managed-profile.js");
 
 /** A profile path ends with `tail`, written with forward slashes whatever the platform's separator. */
 const endsWithPath = (path: string, tail: string) => path.replaceAll("\\", "/").endsWith(tail);
@@ -87,7 +87,7 @@ test("Cursor conversations travel with sidecars and dependent sessions between u
   // A new supervisor uses only deterministic paths and existing custody, not
   // an in-memory previous-workspace pointer or a scan for the newest store.
   const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
-    `import {relocateCursorConversationNamespace as move} from ${JSON.stringify(new URL("../main/agents/cursor-managed-profile.ts", import.meta.url).href)};
+    `import {relocateCursorConversationNamespace as move} from ${JSON.stringify(new URL("../../provider-runtime/agents/cursor-managed-profile.ts", import.meta.url).href)};
      move(${JSON.stringify(profile)}, ${JSON.stringify(resting)}, ${JSON.stringify(second)}, "session-one");`], { encoding: "utf8" });
   assert.equal(child.status, 0, child.stderr);
   assert.equal(existsSync(namespace(resting)), false);

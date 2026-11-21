@@ -4,14 +4,14 @@ import { randomUUID } from "node:crypto";
 import { lstat, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
-import { spawnTree } from "../../../../../../shared/process-tree.mjs";
-import { probeScratchWorkspaceGit } from "../../../../../../shared/scratch-workspace-repository.mjs";
+import { spawnTree } from "../../../../../shared/process-tree.mjs";
+import { probeScratchWorkspaceGit } from "../../../../../shared/scratch-workspace-repository.mjs";
 import { synthesizeTerminalPayload, type ProviderTerminalPayload } from "../provider-adapter.js";
 import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, providerTreeExit, type ProviderProcessExit } from "../provider-evidence.js";
 import type { OpenCodeEvent, OpenCodeRuntimeAuth } from "../opencode-server-client.js";
 import { OpenCodeBoundedTurnError } from "./errors.js";
 import type { OpenModelProviderAdapterDependencies } from "./types.js";
-import { ownerPrivatePlatform, protectOwnerPrivate, readOwnerPrivateFile, writePrivateFileAtomically } from "../../../../../../shared/owner-private-fs.mjs";
+import { ownerPrivatePlatform, protectOwnerPrivate, readOwnerPrivateFile, writePrivateFileAtomically } from "../../../../../shared/owner-private-fs.mjs";
 
 export function safeRuntimeId(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 160);

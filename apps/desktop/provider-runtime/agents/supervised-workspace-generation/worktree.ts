@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
 import { lstat, mkdir, rmdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { openNoFollow } from "../../../../../../shared/owner-private-fs.mjs";
+import { openNoFollow } from "../../../../../shared/owner-private-fs.mjs";
 import { GIT_ENV, cloneRegularFile, gitAuthorityBuffer, gitAuthorityText, runGit, runGitWithAuthority, runProcess, sourceAuthorityBuffer, sourceGitEnvironment } from "./git.js";
 import { type GenerationManifest, type RegularFileInfo, type SourceGitAuthority, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationLimits, type TreeEntry } from "./types.js";
 import { assertSafeAncestors } from "./manifest.js";

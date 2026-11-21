@@ -5,7 +5,7 @@ import test from "node:test";
 import {
   buildCursorChildEnv,
   buildCursorAgentArgs,
-} from "../main/agents/cursor-runner.js";
+} from "#provider-runtime/agents/cursor-runner.js";
 
 test("Cursor runner args use read-only stream-json mode and avoid unsafe flags", () => {
   const args = buildCursorAgentArgs({

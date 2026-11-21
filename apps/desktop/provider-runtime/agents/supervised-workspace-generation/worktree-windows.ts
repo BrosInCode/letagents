@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, statfs, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
-import { isOwnerPrivate, openNoFollow, privateEntryCreated, windowsSystemTool } from "../../../../../../shared/owner-private-fs.mjs";
+import { isOwnerPrivate, openNoFollow, privateEntryCreated, windowsSystemTool } from "../../../../../shared/owner-private-fs.mjs";
 import { BASELINE_FILES_NAME, type GenerationManifest, PROVIDER_GIT_NAME, type RegularFileInfo, STAGING_NAME, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationSupport } from "./types.js";
 import { GIT_ENV, ProcessExitError, canonicalGitControlTarget, cloneRegularFile, gitArgs, gitAuthorityText, gitControlPath, gitExecutable, gitHooksPath, readStableGitControlFile, runGit, runGitWithAuthority, runProcess, sourceAuthorityBuffer, sourceAuthorityText, sourceGitEnvironment } from "./git.js";
 import { assertSafeAncestors } from "./manifest.js";

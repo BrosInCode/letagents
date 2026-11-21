@@ -23,8 +23,8 @@ import {
   isLocalDevLetAgentsApiUrl,
   type LetAgentsMcpServerConfig,
   type McpServerJsonConfig,
-} from "./mcp-config.js";
-import { apiUrl } from "./paths.js";
+} from "#provider-runtime/mcp-config.js";
+import { apiUrl } from "#provider-runtime/paths.js";
 
 const require = createRequire(import.meta.url);
 

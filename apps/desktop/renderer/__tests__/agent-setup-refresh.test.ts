@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createRenderer, createSSRApp, h, markRaw, nextTick, reactive, ref, ssrContextKey } from 'vue';
 import { renderToString } from '@vue/server-renderer';
 import { createServer, type ViteDevServer } from 'vite';
-import { listManagedAgentPermissionProfiles, defaultManagedAgentPermissionProfileId } from '../../electron/main/agents/managed-agent-permission-profiles';
+import { listManagedAgentPermissionProfiles, defaultManagedAgentPermissionProfileId } from '#provider-runtime/agents/managed-agent-permission-profiles.js';
 import { managedAgentEffortOptionsForProvider } from '../src/components/desktop/content/add-agent/useAddAgentPresentation';
 import { useAgentSetupPresentation } from '../src/components/desktop/content/add-agent/useAgentSetupPresentation';
 import { composerIdentityPosition } from '../src/components/desktop/content/room-chat/composer-identity-position';

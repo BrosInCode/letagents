@@ -1,7 +1,7 @@
 import { appendFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { appendFile, chmod, mkdir, stat } from "node:fs/promises";
-import { redactCredentialText } from "../agents/provider-evidence.js";
+import { redactCredentialText } from "#provider-runtime/agents/provider-evidence.js";
 
 const DAEMON_LIFECYCLE_LOG_MAX_BYTES = 256 * 1024;
 const daemonLifecycleLogWrites = new Map<string, Promise<void>>();

@@ -3,7 +3,7 @@ import { access, mkdir } from "node:fs/promises";
 import { withDaemonMaintenanceOperation, readDaemonMaintenance, DAEMON_MAINTENANCE_MESSAGE } from "../../../../../shared/daemon-maintenance.mjs";
 import { forceStopDaemon, waitForConfirmedDaemonExit } from "../force-daemon-restart.js";
 import type { DesktopSupervisorDaemonStatus } from "../../ipc-types.js";
-import { desktopShellEnvironmentReady } from "../desktop-shell-environment.js";
+import { desktopShellEnvironmentReady } from "#provider-runtime/desktop-shell-environment.js";
 import { SupervisedAgentsUnsupportedError, supervisorDaemonAllowed } from "../platform-capabilities.js";
 import { prepareSupervisorState } from "../supervisor-state-recovery.js";
 import {

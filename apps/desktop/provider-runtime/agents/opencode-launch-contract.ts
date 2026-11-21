@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { link, lstat, mkdir, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { renameWithRetryAsync } from "../../../../../shared/rename-retry.mjs";
+import { renameWithRetryAsync } from "../../../../shared/rename-retry.mjs";
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
 import { daemonStateDirEnvironment, environmentValue, windowsSystemEnvironment } from "./windows-child-environment.js";
 

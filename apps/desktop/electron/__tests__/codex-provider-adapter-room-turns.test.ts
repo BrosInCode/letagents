@@ -1,10 +1,10 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodexProviderAdapter } from "../main/agents/codex-provider-adapter.js";
-import { CodexRpcClient } from "../main/agents/codex-rpc-client.js";
-import type { ProviderStreamEvent } from "../main/agents/provider-adapter.js";
-import { ProviderTurnControlError } from "../main/agents/provider-adapter.js";
+import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { CodexRpcClient } from "#provider-runtime/agents/codex-rpc-client.js";
+import type { ProviderStreamEvent } from "#provider-runtime/agents/provider-adapter.js";
+import { ProviderTurnControlError } from "#provider-runtime/agents/provider-adapter.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import {
   type RecordedRequest,

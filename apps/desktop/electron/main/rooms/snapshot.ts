@@ -4,7 +4,7 @@ import { basename } from "node:path";
 import { resolveWorkspaceRoom } from "../../repo-status.js";
 import { forgetJoinedRoomInfo } from "./room-info.js";
 import { DesktopApiError } from "../auth.js";
-import { workspaceRoot } from "../paths.js";
+import { workspaceRoot } from "#provider-runtime/paths.js";
 import {
   createLocalRoom,
   cloudRoomIdentifierForStorage,

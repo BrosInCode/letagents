@@ -35,7 +35,7 @@ import {
   replaceDesktopSupervisorGrantForAgent,
   revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
 } from "../main/supervisor-grant.js";
-import { apiUrl as configuredApiUrl } from "../main/paths.js";
+import { apiUrl as configuredApiUrl } from "#provider-runtime/paths.js";
 import { createStateRecoveryKey, prepareSupervisorState } from "../main/supervisor-state-recovery.js";
 import { loadHostApprovalSigner } from "../main/host-approval-auth.js";
 import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/host-approvals.js";

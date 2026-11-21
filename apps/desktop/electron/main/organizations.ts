@@ -13,7 +13,7 @@ import type {
 import { apiFetch, DesktopApiError, readStoredAuth } from "./auth.js";
 import { acknowledgeCompanyLink, getPendingCompanyLink } from "./company-links.js";
 import { openAllowedExternalUrl, openExternalWebUrl } from "./external-url.js";
-import { apiUrl } from "./paths.js";
+import { apiUrl } from "#provider-runtime/paths.js";
 
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const COMPANY_TIMEOUT = { timeoutMs: 40_000 };

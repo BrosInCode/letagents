@@ -14,8 +14,8 @@ import {
   runCodexMcpList,
   type CodexMcpListRunner,
   type CodexMcpServerEntry,
-} from "../../../../../shared/codex-owner-isolation.mjs";
-import { parseWindowsCommandLine, PROCESS_TREE_HELPER_NAME, signalTree, spawnTree, windowsProcessInfo } from "../../../../../shared/process-tree.mjs";
+} from "../../../../shared/codex-owner-isolation.mjs";
+import { parseWindowsCommandLine, PROCESS_TREE_HELPER_NAME, signalTree, spawnTree, windowsProcessInfo } from "../../../../shared/process-tree.mjs";
 
 // A launch that keeps the owner's own Codex setup leaves the owner's
 // extensions on: plugins, app connectors, computer and browser use, hooks,

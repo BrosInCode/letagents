@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { isBirthEvidence } from "../../../../../../shared/process-tree.mjs";
-import { NO_REPLY_FAILURE } from "../../../../../../shared/room-turn-no-reply.mjs";
-import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../../shared/provider-permissions.js";
+import { isBirthEvidence } from "../../../../../shared/process-tree.mjs";
+import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
+import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import { sameProviderConnectionIdentity, PROCESS_ENDED_DURING_TURN, type ProviderActivityEvent, type ProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderContinuationRef, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderTurnControlResult, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderStreamEvent, type ProviderTerminalPayload, type NativeExecutionObservation, type NativeExecutionSubscription, type ControlProbeResult } from "../provider-adapter.js";
 import { nativeExecutionId } from "../provider-execution-observer.js";
 import { delay, sameProcessBirthIdentity } from "../provider-evidence.js";
@@ -32,7 +32,7 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
     return this.stopFollowedBackgroundCommand(this.requireHandle(providerHandle), taskId);
   }
 
-  async readUsage(providerHandle: ProviderHandle): Promise<import("../../../../shared/provider-usage.js").ProviderUsage | null> {
+  async readUsage(providerHandle: ProviderHandle): Promise<import("../../../shared/provider-usage.js").ProviderUsage | null> {
     const handle = this.handles.get(providerHandle.workAttemptId);
     if (!handle || handle !== providerHandle) return null;
     const tracker = this.usage.get(handle);

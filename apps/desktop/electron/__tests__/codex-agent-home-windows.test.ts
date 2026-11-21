@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-import { CodexAgentHomeError, CodexAgentHomeSignInError, linkCodexAgentHome } from "../main/agents/codex-agent-home.js";
+import { CodexAgentHomeError, CodexAgentHomeSignInError, linkCodexAgentHome } from "#provider-runtime/agents/codex-agent-home.js";
 
 const windowsOnly = process.platform === "win32" ? false : "a Windows host is needed";
 

@@ -25,10 +25,10 @@ import {
   defaultLaunchTurn,
   type CursorCliChild,
   type CursorProviderAdapterDependencies,
-} from "../main/agents/cursor-provider-adapter.js";
-import type { ProviderRoomTurnOptions, ProviderRoomTurnResult, ProviderTerminalPayload } from "../main/agents/provider-adapter.js";
-import { prepareCursorSupervisedProfile } from "../main/agents/cursor-managed-profile.js";
-import { removeSupervisedWorkspaceGenerationReceipt } from "../main/agents/supervised-workspace-generation.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
+import type { ProviderRoomTurnOptions, ProviderRoomTurnResult, ProviderTerminalPayload } from "#provider-runtime/agents/provider-adapter.js";
+import { prepareCursorSupervisedProfile } from "#provider-runtime/agents/cursor-managed-profile.js";
+import { removeSupervisedWorkspaceGenerationReceipt } from "#provider-runtime/agents/supervised-workspace-generation.js";
 import {
   argValue,
   initializeGitWorkspace,

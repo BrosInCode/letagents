@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
+import { electronResourcesPath } from "../electron-resources-path.js";
+
 type DesktopPackageMetadata = {
   letagentsRuntime?: {
     openCodeVersion?: unknown;
@@ -9,7 +11,7 @@ type DesktopPackageMetadata = {
 };
 
 const desktopPackage = createRequire(import.meta.url)(
-  "../../../package.json",
+  "../../package.json",
 ) as DesktopPackageMetadata;
 const configuredVersion = desktopPackage.letagentsRuntime?.openCodeVersion;
 if (typeof configuredVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(configuredVersion)) {
@@ -26,9 +28,7 @@ export function bundledOpenCodeBinaryName(platform: NodeJS.Platform = process.pl
 
 export function resolveOpenCodeBinary(
   env: NodeJS.ProcessEnv = process.env,
-  resourcesPath: string = typeof process.resourcesPath === "string"
-    ? process.resourcesPath
-    : "",
+  resourcesPath: string = electronResourcesPath(),
   platform: NodeJS.Platform = process.platform,
   exists: (path: string) => boolean = existsSync,
 ): string {

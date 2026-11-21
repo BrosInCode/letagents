@@ -11,9 +11,9 @@ import type {
   DesktopSupervisorRetirementInput,
   DesktopSupervisorRetirementStatus,
 } from "../../ipc-types.js";
-import { assertManagedAgentPermissionProfileAvailable } from "../agents/managed-agent-permission-profiles.js";
-import { removeCursorSupervisedProfile } from "../agents/cursor-managed-profile.js";
-import { redactCredentialText } from "../agents/provider-evidence.js";
+import { assertManagedAgentPermissionProfileAvailable } from "#provider-runtime/agents/managed-agent-permission-profiles.js";
+import { removeCursorSupervisedProfile } from "#provider-runtime/agents/cursor-managed-profile.js";
+import { redactCredentialText } from "#provider-runtime/agents/provider-evidence.js";
 import {
   classifyLaunchFailure,
   emitLaunchEvent,

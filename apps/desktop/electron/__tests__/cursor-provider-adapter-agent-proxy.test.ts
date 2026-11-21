@@ -7,7 +7,7 @@ import { createServer as createHttp2Server } from "node:http2";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CursorProviderAdapter, defaultLaunchTurn } from "../main/agents/cursor-provider-adapter.js";
+import { CursorProviderAdapter, defaultLaunchTurn } from "#provider-runtime/agents/cursor-provider-adapter.js";
 import {
   productionPersonalIdentityDependencies,
   wrapperHostedMcpFixture,

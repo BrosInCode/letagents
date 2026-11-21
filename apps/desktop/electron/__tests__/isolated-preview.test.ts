@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { mock } from "node:test";
 import {
   desktopLinkScheme, desktopProductName, isIsolatedDesktopPreview, normalizeDesktopPreviewLink,
-} from "../main/preview-mode.js";
+} from "#provider-runtime/preview-mode.js";
 
 test("normal startup keeps its identity and never opts into preview through environment variables", () => {
   const previous = process.env.LETAGENTS_DESKTOP_ISOLATED_PREVIEW;
@@ -73,7 +73,7 @@ test("packaged preview disables updater and APNs, avoids login shells, and owns 
     assert.equal(apnsCalls, 0);
     assert.equal(apiCalls, 0);
 
-    const shell = await import("../main/desktop-shell-environment.js");
+    const shell = await import("#provider-runtime/desktop-shell-environment.js");
     shell.resetDesktopShellEnvironmentForTests();
     const env = { HOME: "/isolated/home", PATH: "/installed/bin:/usr/bin" };
     const hydrated = await shell.hydrateDesktopShellEnvironment({ env, runCommand: async () => { shellCalls += 1; throw new Error("must not source shell"); } });

@@ -19,7 +19,7 @@ let token: string | null = "session-token";
 const published: Array<{ channel: string; payload: any }> = [];
 const roomEvents: unknown[] = [];
 mock.module("../main/auth.js", { namedExports: { readStoredAuth: async () => ({ token }) } });
-mock.module("../main/paths.js", { namedExports: { apiUrl } });
+mock.module("#provider-runtime/paths.js", { namedExports: { apiUrl } });
 mock.module("../main/room-stream.js", { namedExports: { emitRoomStreamEvent: (event: unknown) => roomEvents.push(event) } });
 mock.module("../main/window.js", {
   namedExports: { emitToMainWindow: (channel: string, payload: unknown) => published.push({ channel, payload }) },

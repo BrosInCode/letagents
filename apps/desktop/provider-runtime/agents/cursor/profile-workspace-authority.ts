@@ -4,7 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { gitSpawnFile } from "../../../../../../shared/git-executable.mjs";
+import { gitSpawnFile } from "../../../../../shared/git-executable.mjs";
 import { pathEntryExists, readRegularFileNoFollow } from "./profile-filesystem.js";
 import { SUPERVISED_CURSOR_PROJECT_AUTHORITY_FILES } from "./profile-types.js";
 

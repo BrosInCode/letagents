@@ -2,8 +2,8 @@ import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
-import { codexOwnerIsolationOverrides } from "../../../../../shared/codex-owner-isolation.mjs";
-import { signalTree, spawnTree } from "../../../../../shared/process-tree.mjs";
+import { codexOwnerIsolationOverrides } from "../../../../shared/codex-owner-isolation.mjs";
+import { signalTree, spawnTree } from "../../../../shared/process-tree.mjs";
 import { CODEX_TOKEN_SERVICE_OVERRIDES, type CodexSignInProfile, codexHomeForSandboxedLaunch } from "./codex-agent-home.js";
 import { codexHomeHarnessOverrides, runCodexMcpListForLaunch } from "./codex-home-harness.js";
 import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";

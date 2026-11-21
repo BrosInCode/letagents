@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
+import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
 
 const MAX_RETAINED_OBSERVATIONS = 256;
 const MAX_RETAINED_BYTES = 256 * 1024;

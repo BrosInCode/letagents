@@ -10,7 +10,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { AuditLog } from "../audit-log.js";
-import { ProviderExecutionObserver } from "../../electron/main/agents/provider-execution-observer.js";
+import { ProviderExecutionObserver } from "#provider-runtime/agents/provider-execution-observer.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "../lifecycle-log.js";

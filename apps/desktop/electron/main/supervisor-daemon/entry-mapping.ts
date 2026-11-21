@@ -1,6 +1,6 @@
 import { normalizeAgentAvatar } from "../../../../../shared/agent-avatar.mjs";
 import type { DesktopSupervisorActivityEvent, DesktopSupervisorManifestEntry } from "../../ipc-types.js";
-import { redactCredentialText, safeStreamPayload } from "../agents/provider-evidence.js";
+import { redactCredentialText, safeStreamPayload } from "#provider-runtime/agents/provider-evidence.js";
 import type { WireActivityEvent, WireEntry } from "./types.js";
 import { enumValue, nonEmptyString, nullableNonEmptyString, nullableString, record } from "./wire-values.js";
 

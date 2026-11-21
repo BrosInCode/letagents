@@ -15,7 +15,7 @@ import { RenterTriggerRuntime } from "../../rental/renter-trigger.js";
 import { runDesktopAgentProviderPreflight } from "../agents/providers.js";
 import { getOrCreateDesktopHostId } from "../agents/state.js";
 import { readStoredAuth } from "../auth.js";
-import { apiUrl } from "../paths.js";
+import { apiUrl } from "#provider-runtime/paths.js";
 import { emitRoomStreamEvent, getActiveRoomIdentifier } from "../room-stream.js";
 import { supervisorDaemonClient } from "../supervisor-daemon.js";
 import { emitToMainWindow } from "../window.js";

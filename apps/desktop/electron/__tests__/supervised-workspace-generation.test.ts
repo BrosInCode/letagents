@@ -36,9 +36,9 @@ import {
   supervisedWorkspaceGenerationManifestPath,
   type SupervisedWorkspaceGenerationFailpoint,
   type SupervisedWorkspaceGenerationHandle,
-} from "../main/agents/supervised-workspace-generation.js";
-import { GIT_ENV, gitHooksPath } from "../main/agents/supervised-workspace-generation/git.js";
-import { WINDOWS_FRESH_WORKTREE_NOTE } from "../main/agents/supervised-workspace-generation/worktree-windows.js";
+} from "#provider-runtime/agents/supervised-workspace-generation.js";
+import { GIT_ENV, gitHooksPath } from "#provider-runtime/agents/supervised-workspace-generation/git.js";
+import { WINDOWS_FRESH_WORKTREE_NOTE } from "#provider-runtime/agents/supervised-workspace-generation/worktree-windows.js";
 
 const windows = process.platform === "win32";
 // Writable generations exist on macOS (clonefile) and Windows (a Git worktree); Linux has neither.

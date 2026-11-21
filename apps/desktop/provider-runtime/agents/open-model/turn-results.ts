@@ -1,6 +1,6 @@
 /** Room-turn prompt input and how a finished OpenCode turn is classified, including denied and unfinished tool calls. */
 import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS, roomTurnImageLabel } from "../desktop-event-prompt-format.js";
-import { NO_REPLY_FAILURE } from "../../../../../../shared/room-turn-no-reply.mjs";
+import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
 import type { ProviderRoomTurnRequest, ProviderRoomTurnResult } from "../provider-adapter.js";
 import { messageFinishReason, messageText, record, type JsonRecord, type OpenCodeMessage } from "../opencode-server-client.js";
 import { NO_REPLY_SENTINEL } from "./types.js";

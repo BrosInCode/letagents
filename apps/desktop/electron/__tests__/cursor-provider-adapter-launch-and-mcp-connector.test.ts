@@ -23,12 +23,12 @@ import {
   cursorCliEnv,
   cursorLaunchPolicyArgs,
   defaultLaunchTurn,
-} from "../main/agents/cursor-provider-adapter.js";
-import { boundedClaudeRoomTurnPrompt } from "../main/agents/claude-code-provider-adapter.js";
-import { cursorMcpConnectorListenPath } from "../main/agents/cursor/windows-turn.js";
-import { cursorSupervisedMcpServerName } from "../main/agents/cursor-managed-profile.js";
-import { prepareCursorResumeOwnershipLock } from "../main/agents/cursor-sandbox-policy.js";
-import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
+import { boundedClaudeRoomTurnPrompt } from "#provider-runtime/agents/claude-code-provider-adapter.js";
+import { cursorMcpConnectorListenPath } from "#provider-runtime/agents/cursor/windows-turn.js";
+import { cursorSupervisedMcpServerName } from "#provider-runtime/agents/cursor-managed-profile.js";
+import { prepareCursorResumeOwnershipLock } from "#provider-runtime/agents/cursor-sandbox-policy.js";
+import { LETAGENTS_MCP_RUNTIME_VERSION } from "#provider-runtime/agents/letagents-mcp-runtime.js";
 import {
   birthIdentity,
   argValue,
@@ -53,7 +53,7 @@ import {
   endsWithPath,
 } from "./cursor-provider-adapter.fixture.js";
 import { macOsSandboxOnly, needsPosixProcessGroups, needsWindowsFakeCursorAgent, writeFakeProvider, expectedCursorSandbox } from "./platform.js";
-import { CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS } from "../main/agents/cursor-provider-constants.js";
+import { CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS } from "#provider-runtime/agents/cursor-provider-constants.js";
 
 /** A turn's private local-worker root: under /tmp on POSIX (/private/tmp on macOS), under the temporary folder on Windows. */
 const RUNTIME_DATA_DIR = process.platform === "win32"

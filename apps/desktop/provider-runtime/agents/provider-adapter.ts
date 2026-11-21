@@ -21,8 +21,8 @@
 // independent of the daemon's three-axis `ObservedState` (separate compilation
 // unit / process): the daemon/reconciler maps this to its own vocabulary at the
 // control-socket boundary. Deliberately no cross-rootDir import into the daemon.
-import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
-export type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../shared/execution-protocol.js";
+export type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
 
 export type ProviderObservedState =
   | "starting"
@@ -131,7 +131,7 @@ export type ProviderTerminalCause =
 // `execution_generation` terminal record so the reconciler/attestation can
 // consume it directly.
 export interface ProviderTerminalPayload {
-  nativeRuntimeDeath?: import("../../../shared/execution-protocol.js").NativeRuntimeDeath;
+  nativeRuntimeDeath?: import("../../shared/execution-protocol.js").NativeRuntimeDeath;
   endedAt: string;
   exitCode: number | null;
   signal: string | null;
@@ -475,7 +475,7 @@ export interface ProviderRoomTurnRequest {
   actionId: string;
   observedContext?: unknown[];
   /** The room's history summary, on the first turn of a continuation that has not had it. */
-  historySummary?: import("../../../../../shared/room-history-summary.mjs").RoomHistoryTurnSummary;
+  historySummary?: import("../../../../shared/room-history-summary.mjs").RoomHistoryTurnSummary;
   /** The activating message's files, then images from recent messages, prepared by the daemon for this one turn. Never persisted. */
   attachments?: ProviderRoomTurnAttachment[];
 }
@@ -598,7 +598,7 @@ export interface ProviderRoomTurnOptions {
 }
 
 export interface ProviderAdapter {
-  readUsage?(handle: ProviderHandle): Promise<import("../../../shared/provider-usage.js").ProviderUsage | null>;
+  readUsage?(handle: ProviderHandle): Promise<import("../../shared/provider-usage.js").ProviderUsage | null>;
   /**
    * Stop a command that the agent runs in the background, at its owner's
    * request. "stopping": the provider accepted it, and the command's own end

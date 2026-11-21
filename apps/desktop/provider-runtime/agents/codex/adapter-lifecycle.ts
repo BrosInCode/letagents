@@ -1,10 +1,10 @@
 /** Continuation repair, stopping, listener registration and control probes. */
-import { CODEX_THREAD_HISTORY_MODE } from "../../../../../../shared/codex-thread-history.mjs";
+import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import { nativeExecutionId } from "../provider-execution-observer.js";
-import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription } from "../../../../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
 import { synthesizeTerminalPayload, sameProviderConnectionIdentity, type ProviderActivityEvent, type ProviderContinuationRef, type ProviderHandle, type ProviderStopOptions, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderStreamEvent, type ProviderTerminalPayload } from "../provider-adapter.js";
 import { DEFAULT_STOP_GRACE_MS, delay, sameProcessBirthIdentity } from "../provider-evidence.js";
-import { isBirthEvidence } from "../../../../../../shared/process-tree.mjs";
+import { isBirthEvidence } from "../../../../../shared/process-tree.mjs";
 import { CODEX_ACCESS_LEVEL_OPTIONS, normalizeLaunchPolicy } from "./launch-contract.js";
 import { CodexAdapterTurns } from "./adapter-turns.js";
 import { CodexRoomTurnObservationDetachedError, isMethodNotFound } from "./room-tools.js";

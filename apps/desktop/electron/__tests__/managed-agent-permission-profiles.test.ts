@@ -9,7 +9,7 @@ const {
   assertManagedAgentPermissionProfileAvailable,
   listManagedAgentPermissionProfiles,
   managedAgentPermissionProfileForProvider,
-} = await import("../main/agents/managed-agent-permission-profiles.js");
+} = await import("#provider-runtime/agents/managed-agent-permission-profiles.js");
 
 test("managed agent permission profiles map provider-specific available and gated modes", () => {
   const claudeProfiles = listManagedAgentPermissionProfiles("claude-code");

@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, join, parse, resolve, sep } from "node:path";
 
-import { CODEX_OWNER_FEATURE_OVERRIDES, codexHomeDirectory } from "../../../../../shared/codex-owner-isolation.mjs";
+import { CODEX_OWNER_FEATURE_OVERRIDES, codexHomeDirectory } from "../../../../shared/codex-owner-isolation.mjs";
 import {
   askCodexAppServer,
   assertLayersAddNoCommandRules,
@@ -17,8 +17,8 @@ import {
   projectKeysRefusal,
   type CodexSettingsInspection,
 } from "./codex-home-harness.js";
-import { createWindowsSecurity, icaclsSetOwnerArguments, INHERITED_GROUP_SIDS, parseSddl, protectOwnerPrivateSync, sddlExtraGrantSids, sddlIsOwnerPrivate, SYSTEM_SID, type UserIdentity, windowsSystemTool } from "../../../../../shared/owner-private-fs.mjs";
-import { renameSyncWithRetry } from "../../../../../shared/rename-retry.mjs";
+import { createWindowsSecurity, icaclsSetOwnerArguments, INHERITED_GROUP_SIDS, parseSddl, protectOwnerPrivateSync, sddlExtraGrantSids, sddlIsOwnerPrivate, SYSTEM_SID, type UserIdentity, windowsSystemTool } from "../../../../shared/owner-private-fs.mjs";
+import { renameSyncWithRetry } from "../../../../shared/rename-retry.mjs";
 import { shadowProfileEnvironment, windowsSystemEnvironment } from "./windows-child-environment.js";
 
 // An owner can save "always allow" command rules in the `rules` folder of

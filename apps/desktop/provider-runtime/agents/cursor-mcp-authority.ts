@@ -2,7 +2,7 @@ import {
   PROCESS_TREE_UNKILLABLE_EXIT_CODE,
   spawnTree,
   terminateTreeOutcome,
-} from "../../../../../shared/process-tree.mjs";
+} from "../../../../shared/process-tree.mjs";
 import {
   accessSync,
   constants as fsConstants,

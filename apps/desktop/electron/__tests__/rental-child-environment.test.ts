@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { claudeCliEnv } from "../main/agents/claude-code-provider-adapter.js";
+import { claudeCliEnv } from "#provider-runtime/agents/claude-code-provider-adapter.js";
 import {
   rentalCredentialIsolationMarker,
   rentalIsolatedChildEnvironment,
-} from "../main/agents/rental-child-environment.js";
+} from "#provider-runtime/agents/rental-child-environment.js";
 
 test("rental child environment keeps process plumbing but strips raw owner/cloud credentials", () => {
   const source = {

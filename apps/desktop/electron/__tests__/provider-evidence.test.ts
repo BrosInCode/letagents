@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createCursorRuntimeCustodyReader } from "../main/agents/cursor-provider-evidence.js";
-import { ProviderProcessCustody, safeStreamPayload, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
+import { createCursorRuntimeCustodyReader } from "#provider-runtime/agents/cursor-provider-evidence.js";
+import { ProviderProcessCustody, safeStreamPayload, type ProviderProcessExit } from "#provider-runtime/agents/provider-evidence.js";
 
 test("provider evidence recursively redacts credential-shaped keys and embedded tool output", () => {
   const canary = "canary-not-a-real-credential-123456789";

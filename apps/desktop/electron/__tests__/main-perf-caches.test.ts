@@ -242,7 +242,7 @@ function countingSecretStorage() {
 }
 
 test("item 8: Open Model settings decrypt once while the file is unchanged, and again after a save or an outside edit", async () => {
-  const settings = await import("../main/agents/open-model-settings.js");
+  const settings = await import("#provider-runtime/agents/open-model-settings.js");
   const { state, storage } = countingSecretStorage();
   const storePath = join(env.tempDir, "open-model.json");
   await settings.saveOpenModelSettings({ apiKey: "secret-key", baseUrl: "https://example.test/v1", model: "m1" }, { storePath, secretStorage: storage });

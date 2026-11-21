@@ -1,6 +1,6 @@
 /** Launch policy normalization, the bounded MCP launch contract and the default adapter dependencies. */
-import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../../shared/room-api-origin.mjs";
-import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../../../../shared/codex-read-only-room-tools.mjs";
+import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
+import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../../../shared/codex-read-only-room-tools.mjs";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { resolve } from "node:path";

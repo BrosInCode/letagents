@@ -1,5 +1,5 @@
 /** Starting a Codex app-server process and its first thread. */
-import { CODEX_THREAD_HISTORY_MODE } from "../../../../../../shared/codex-thread-history.mjs";
+import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import type { CodexAppServerLaunch } from "../codex-app-server.js";
 import { CODEX_GUEST_TOOL_OVERRIDES, codexGuestToolsLocked } from "../codex-guest-lock.js";
 import { apiUrl as desktopApiUrl } from "../../paths.js";

@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { STARTS_AGAIN_BY_ITSELF } from "../codex-home-harness.js";
 import type { RpcNotification, ThreadReadResult, ThreadReadTurn } from "../codex-rpc-client.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint, type NativeLifecycleCheckpoint } from "../provider-execution-observer.js";
-import type { NativeExecutionFact } from "../../../../shared/execution-protocol.js";
+import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
 import { summarizeCodexRuntimeNotification, summarizeCodexRuntimeSnapshot } from "../codex-runtime-reasoning.js";
 import { extractTurnStatus } from "../codex-session-status.js";
 import type { ProviderRoomTurnResult, ProviderRoomTurnOptions } from "../provider-adapter.js";
@@ -14,7 +14,7 @@ import { CodexProviderHandle } from "./handle.js";
 import { CodexRoomTurnObservationDetachedError } from "./room-tools.js";
 import { type CodexThreadResult, codexFoundNotAtLevel } from "./thread-access.js";
 import { permissionFileChanges } from "./permission-requests.js";
-import { hidePartialPrivateKeys, liveOutputTail } from "../../../../../../shared/live-command-output.mjs";
+import { hidePartialPrivateKeys, liveOutputTail } from "../../../../../shared/live-command-output.mjs";
 
 /** The newest part of a command's whole output that its end event keeps. */
 const MAX_COMMAND_END_OUTPUT_CHARS = 6_000;

@@ -6,7 +6,7 @@ import {
   CURSOR_WINDOWS_UNSANDBOXED_NOTICE,
   cursorWindowsSandboxNotice,
 } from "../src/domain/supervised-agents-support";
-import { CURSOR_WINDOWS_UNSANDBOXED_NOTICE as MAIN_NOTICE } from "../../electron/main/agents/cursor-permission-profile";
+import { CURSOR_WINDOWS_UNSANDBOXED_NOTICE as MAIN_NOTICE } from "#provider-runtime/agents/cursor-permission-profile.js";
 
 const source = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
 

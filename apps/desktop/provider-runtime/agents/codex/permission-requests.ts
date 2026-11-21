@@ -1,8 +1,8 @@
 /** Parsing of Codex permission requests and the owner elicitations the adapter declines. */
-import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../../shared/codex-owner-isolation.mjs";
+import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
-import type { CodexPermissionFileChange } from "../../../../shared/provider-permissions.js";
+import type { CodexPermissionFileChange } from "../../../shared/provider-permissions.js";
 import type { RpcServerRequest } from "../codex-rpc-client.js";
 import { nativeExecutionId } from "../provider-execution-observer.js";
 import { recordValue } from "./notifications.js";

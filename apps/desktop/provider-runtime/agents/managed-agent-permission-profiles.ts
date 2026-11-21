@@ -2,7 +2,7 @@ import type {
   DesktopAgentProviderId,
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
-} from "../../ipc-types.js";
+} from "../desktop-types.js";
 
 const CLAUDE_CODE_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {

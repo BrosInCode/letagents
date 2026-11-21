@@ -12,7 +12,7 @@ import type {
   DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
 } from "../../ipc-types.js";
-import { apiUrl } from "../paths.js";
+import { apiUrl } from "#provider-runtime/paths.js";
 import { supervisedDeliveryModeForProvider } from "../agents/provider-registry.js";
 import {
   BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS,

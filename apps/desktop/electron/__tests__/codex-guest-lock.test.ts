@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { codexGuestToolsLocked, isGuestCodexToolSet, probeCodexGuestTools } from "../main/agents/codex-guest-lock.js";
+import { codexGuestToolsLocked, isGuestCodexToolSet, probeCodexGuestTools } from "#provider-runtime/agents/codex-guest-lock.js";
 
 test("a guest Codex may be offered only the room's tools and four that read nothing local", () => {
   assert.equal(isGuestCodexToolSet(["mcp__letagents__read_messages", "list_mcp_resources", "request_user_input"]), true);

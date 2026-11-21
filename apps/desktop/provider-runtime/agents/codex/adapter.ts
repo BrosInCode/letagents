@@ -1,6 +1,6 @@
 /** The Codex provider adapter: usage reads, launch contract, spawn, attach, resume and poke. */
 import { readCodexUsageTail } from "../provider-usage.js";
-import type { ProviderUsage } from "../../../../shared/provider-usage.js";
+import type { ProviderUsage } from "../../../shared/provider-usage.js";
 import { sameProviderConnectionIdentity, type ProviderAdapter, type ProviderAttachTerminal, type ProviderContinuationRef, type ProviderHandle, type ProviderSpawnRequest } from "../provider-adapter.js";
 import { CodexAdapterLifecycle } from "./adapter-lifecycle.js";
 import { stopCodexBackgroundTerminal } from "./background-terminals.js";

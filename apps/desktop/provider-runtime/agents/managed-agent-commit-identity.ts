@@ -4,8 +4,8 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, parse } from "node:path";
 
-import type { DesktopAgentCommitIdentitySettings } from "../../ipc-types.js";
-import { gitSpawnFile } from "../../../../../shared/git-executable.mjs";
+import type { DesktopAgentCommitIdentitySettings } from "../desktop-types.js";
+import { gitSpawnFile } from "../../../../shared/git-executable.mjs";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 /**

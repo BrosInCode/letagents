@@ -8,7 +8,7 @@ import { parseRoomAgentWorkSummary } from "../../../../../shared/room-agent-work
 import { addLocalChatMessage, getLocalChatMessages, getLatestLocalChatMessages,
   getLocalChatMessagesBefore, getLocalMessageAttachment, getLocalMessageThread } from "./messages/local-store.js";
 import { readLocalAttachmentBytesWithin } from "../attachments/local-store.js";
-import { withoutInlineFileBytes } from "../attachments/inline-bytes.js";
+import { withoutInlineFileBytes } from "#provider-runtime/attachments/inline-bytes.js";
 import type { RoomMessagePayload } from "./messages/mappers.js";
 import { getLocalRoom, listLocalTasks, addLocalTask, updateLocalTask, claimLocalTaskReviewLease,
   claimLocalTaskWorkLease, changeLocalTaskWorkLease } from "./local-store.js";

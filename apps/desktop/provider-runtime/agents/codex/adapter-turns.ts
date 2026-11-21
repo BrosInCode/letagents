@@ -1,7 +1,7 @@
 /** Turn control, inspection and bounded room turns. */
 import type { ThreadReadResult, ThreadReadTurn, TurnStartResult } from "../codex-rpc-client.js";
 import { nativeExecutionId } from "../provider-execution-observer.js";
-import type { NativeTurnBoundary } from "../../../../shared/execution-protocol.js";
+import type { NativeTurnBoundary } from "../../../shared/execution-protocol.js";
 import { extractThreadStatus, extractTurnStatus, isActiveCodexTurnStatus } from "../codex-session-status.js";
 import { sameProviderConnectionIdentity, type ProviderHandle, type ProviderTurnControlResult, type ProviderTurnControlOptions, ProviderTurnControlError, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnResult, type ProviderRoomTurnOptions, ProviderContinuationMissingError, PROCESS_ENDED_DURING_TURN } from "../provider-adapter.js";
 import { sameProcessBirthIdentity } from "../provider-evidence.js";

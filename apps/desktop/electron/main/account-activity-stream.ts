@@ -7,7 +7,7 @@ import {
 } from "../../../../shared/room-join-requests.mjs";
 import { ROOM_MENTION_EVENT, parseRoomMentionEvent } from "../../../../shared/room-mention-events.mjs";
 import { readStoredAuth } from "./auth.js";
-import { apiUrl } from "./paths.js";
+import { apiUrl } from "#provider-runtime/paths.js";
 import { emitRoomStreamEvent } from "./room-stream.js";
 import { emitToMainWindow } from "./window.js";
 import type { DesktopAccountActivityState, DesktopAccountRoomActivity } from "../ipc-types/account-activity.js";

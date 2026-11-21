@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { DesktopCursorMcpPolicy } from "../../../ipc-types.js";
+import type { DesktopCursorMcpPolicy } from "../../desktop-types.js";
 import { readRegularFileNoFollow } from "./profile-filesystem.js";
 import {
   DEFAULT_CURSOR_MCP_POLICY,

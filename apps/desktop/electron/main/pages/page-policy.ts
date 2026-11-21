@@ -2,7 +2,7 @@ import type { WebPreferences } from "electron";
 
 import type { DesktopPageThemeMode } from "../../ipc-types.js";
 import { inlineHtmlDemoWebPreferences, lockGuestWebPreferences } from "../attachments/html-demo-policy.js";
-import { pageProtocolScheme } from "../paths.js";
+import { pageProtocolScheme } from "#provider-runtime/paths.js";
 
 /**
  * A room page is one HTML file a team pinned in its room. It runs in the

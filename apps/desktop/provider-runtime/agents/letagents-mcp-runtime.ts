@@ -17,6 +17,8 @@ import { createRequire } from "node:module";
 import { setTimeout as sleep } from "node:timers/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
+import { electronResourcesPath } from "../electron-resources-path.js";
+
 type DesktopPackageMetadata = {
   letagentsRuntime?: {
     mcpVersion?: unknown;
@@ -24,7 +26,7 @@ type DesktopPackageMetadata = {
 };
 
 const desktopPackage = createRequire(import.meta.url)(
-  "../../../package.json",
+  "../../package.json",
 ) as DesktopPackageMetadata;
 const configuredVersion = desktopPackage.letagentsRuntime?.mcpVersion;
 if (typeof configuredVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(configuredVersion)) {
@@ -86,8 +88,7 @@ export function resolveLetAgentsMcpRuntime(input: {
 }
 
 function bundledRuntimePaths(resourcesPath: string | undefined): { root: string; nodeModules: string; entry: string } | null {
-  const resources = resourcesPath
-    ?? (typeof process.resourcesPath === "string" ? process.resourcesPath : "");
+  const resources = resourcesPath ?? electronResourcesPath();
   if (!resources) return null;
   const root = join(resources, "app", "runtime", "letagents");
   const nodeModules = join(root, "node_modules");

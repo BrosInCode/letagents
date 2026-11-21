@@ -1,11 +1,11 @@
 /** The per-process Codex provider handle and its turn-policy state. */
 import { RoomTurnContextCache } from "../desktop-event-prompt-format.js";
 import { ProviderUsageTracker } from "../provider-usage.js";
-import type { CodexPermissionFileChange } from "../../../../shared/provider-permissions.js";
+import type { CodexPermissionFileChange } from "../../../shared/provider-permissions.js";
 import type { CodexAppServerLaunch } from "../codex-app-server.js";
 import { sandboxedCodexHomeRefusal, sandboxedCodexProjectRefusal } from "../codex-agent-home.js";
 import { ProviderExecutionObserver } from "../provider-execution-observer.js";
-import type { HardControlEvidence, NativeExecutionFact } from "../../../../shared/execution-protocol.js";
+import type { HardControlEvidence, NativeExecutionFact } from "../../../shared/execution-protocol.js";
 import { CodexTurnResultAccumulator } from "../codex-turn-result.js";
 import type { ProviderActivityEvent, ProviderAttachTerminal, ProviderConnectionRef, ProviderHandle, ProviderObservedState, ProviderStreamEvent, ProviderTerminalPayload } from "../provider-adapter.js";
 import { errorMessage } from "../provider-evidence.js";

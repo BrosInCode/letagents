@@ -5,13 +5,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CodexAppServerExit, CodexAppServerLaunch } from "../main/agents/codex-app-server.js";
-import { CodexProviderAdapter, type CodexAdapterRpc, type CodexProviderAdapterDependencies } from "../main/agents/codex-provider-adapter.js";
-import { type CodexBuiltInProfile, type CodexSignInProfile, codexSandboxedProfileId } from "../main/agents/codex-agent-home.js";
-import { type RpcNotification, type RpcServerRequest } from "../main/agents/codex-rpc-client.js";
+import type { CodexAppServerExit, CodexAppServerLaunch } from "#provider-runtime/agents/codex-app-server.js";
+import { CodexProviderAdapter, type CodexAdapterRpc, type CodexProviderAdapterDependencies } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { type CodexBuiltInProfile, type CodexSignInProfile, codexSandboxedProfileId } from "#provider-runtime/agents/codex-agent-home.js";
+import { type RpcNotification, type RpcServerRequest } from "#provider-runtime/agents/codex-rpc-client.js";
 import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../../shared/codex-owner-isolation.mjs";
 import { API_AGENT_TOOLS } from "../../../../shared/api-agent-tools.mjs";
-import type { ProviderHandle, ProviderRoomTurnRequest, ProviderSpawnRequest } from "../main/agents/provider-adapter.js";
+import type { ProviderHandle, ProviderRoomTurnRequest, ProviderSpawnRequest } from "#provider-runtime/agents/provider-adapter.js";
 import { OS_BIRTH } from "./platform.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its

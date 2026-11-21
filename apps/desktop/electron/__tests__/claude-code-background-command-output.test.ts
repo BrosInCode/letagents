@@ -8,7 +8,7 @@ import {
   BackgroundCommandOutput,
   claudeBackgroundEndStatus,
   claudeBackgroundOutputPath,
-} from "../main/agents/claude-code/background-command-output.js";
+} from "#provider-runtime/agents/claude-code/background-command-output.js";
 import { LIVE_BACKGROUND_COMMAND_METHOD, type LiveBackgroundCommandPayload } from "../../../../shared/live-command-output.mjs";
 import { CLAUDE_REAL_CAPTURES, claudeCapturedTask, realClaudeCapture } from "./claude-result-shapes.js";
 import { claudeBackgroundHarness, splitAtOwnResult } from "./claude-code-provider-adapter.fixture.js";

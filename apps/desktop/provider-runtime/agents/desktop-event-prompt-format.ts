@@ -1,6 +1,6 @@
 import type { ProviderRoomTurnAttachment, ProviderRoomTurnRequest, RoomTurnImageMimeType } from "./provider-adapter.js";
-import { ROOM_EXPRESSION_GUIDANCE } from "../../../../../shared/room-expressions.mjs";
-import { formatRoomHistoryTurnSummary } from "../../../../../shared/room-history-summary.mjs";
+import { ROOM_EXPRESSION_GUIDANCE } from "../../../../shared/room-expressions.mjs";
+import { formatRoomHistoryTurnSummary } from "../../../../shared/room-history-summary.mjs";
 import { withoutInlineFileBytes } from "../attachments/inline-bytes.js";
 import { isDeepStrictEqual } from "node:util";
 

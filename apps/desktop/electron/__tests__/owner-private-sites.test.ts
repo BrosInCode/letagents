@@ -9,22 +9,22 @@ import { basename, dirname, join } from "node:path";
 import test from "node:test";
 
 import { loadHostApprovalSigner } from "../main/host-approval-auth.js";
-import { cursorMcpConnectorParent } from "../main/agents/cursor-provider-constants.js";
-import { cursorRoomTurnImageFolders } from "../main/agents/cursor-room-turn-images.js";
+import { cursorMcpConnectorParent } from "#provider-runtime/agents/cursor-provider-constants.js";
+import { cursorRoomTurnImageFolders } from "#provider-runtime/agents/cursor-room-turn-images.js";
 import {
   prepareCursorResumeOwnershipLock,
   prepareCursorTurnRuntimeDataDir,
   removeCursorTurnRuntimeDataDir,
-} from "../main/agents/cursor-sandbox-policy.js";
-import { readRegularFileNoFollow, writePrivateFileAtomic } from "../main/agents/cursor/profile-filesystem.js";
-import { relocateCursorConversationNamespace } from "../main/agents/cursor/managed-profile.js";
-import { gitEmptyHome, gitTemporaryRoot } from "../main/agents/supervised-workspace-generation/git.js";
+} from "#provider-runtime/agents/cursor-sandbox-policy.js";
+import { readRegularFileNoFollow, writePrivateFileAtomic } from "#provider-runtime/agents/cursor/profile-filesystem.js";
+import { relocateCursorConversationNamespace } from "#provider-runtime/agents/cursor/managed-profile.js";
+import { gitEmptyHome, gitTemporaryRoot } from "#provider-runtime/agents/supervised-workspace-generation/git.js";
 import { readAgentLocalState, readAgentLocalStateSnapshot, saveAgentSession, type StoredAgentSessionState } from "../main/agents/state.js";
 import { loadLocalSupervisorKey } from "../main/rooms/local-supervision-authority.js";
-import { readRuntimeControl, writeRuntimeControl } from "../main/agents/open-model/runtime-launch.js";
+import { readRuntimeControl, writeRuntimeControl } from "#provider-runtime/agents/open-model/runtime-launch.js";
 import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 import { asWindows, fakeWindowsSecurity } from "./helpers/fake-windows-security.js";
-import type { ProviderRoomTurnRequest } from "../main/agents/provider-adapter.js";
+import type { ProviderRoomTurnRequest } from "#provider-runtime/agents/provider-adapter.js";
 
 const posixOnly = process.platform === "win32" ? "POSIX modes" : false;
 

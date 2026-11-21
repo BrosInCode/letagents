@@ -1,7 +1,7 @@
 /** Observing, inspecting and answering Codex permission requests. */
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type { CodexPermissionFileChange, ProviderPermissionDispatchOptions } from "../../../../shared/provider-permissions.js";
+import type { CodexPermissionFileChange, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import type { RpcServerRequest } from "../codex-rpc-client.js";
 import { sameProviderConnectionIdentity, type ProviderConnectionRef, type ProviderHandle } from "../provider-adapter.js";
 import { sameProcessBirthIdentity } from "../provider-evidence.js";

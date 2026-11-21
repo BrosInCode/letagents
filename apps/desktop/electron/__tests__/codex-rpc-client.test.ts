@@ -5,7 +5,7 @@ import { createElectronTestEnv } from "./harness.js";
 
 createElectronTestEnv({ prefix: "letagents-codex-rpc-client-", paths: [] });
 
-const { CodexRpcClient } = await import("../main/agents/codex-rpc-client.js");
+const { CodexRpcClient } = await import("#provider-runtime/agents/codex-rpc-client.js");
 
 test("CodexRpcClient initializes app-server using the documented wire shape", async () => {
   const originalWebSocket = globalThis.WebSocket;

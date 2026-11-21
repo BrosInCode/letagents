@@ -24,7 +24,7 @@ import {
 } from "node:fs";
 import { rm } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import { openNoFollowSync, ownerPrivatePlatform, protectOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../../../shared/owner-private-fs.mjs";
+import { openNoFollowSync, ownerPrivatePlatform, protectOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../../shared/owner-private-fs.mjs";
 import { getLetAgentsLocalStatePath } from "../../paths.js";
 import {
   CURSOR_STATSIG_TEMP_PATTERN,

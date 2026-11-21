@@ -2,7 +2,7 @@
 import type { ChildProcess } from "node:child_process";
 import type { ProviderAdapterCapabilities } from "../provider-adapter.js";
 import type { ProviderProcessExit } from "../provider-evidence.js";
-import type { HardControlEvidence } from "../../../../shared/execution-protocol.js";
+import type { HardControlEvidence } from "../../../shared/execution-protocol.js";
 import type { OpenCodePermissionRequest } from "../opencode-server-client.js";
 import type { LetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
 

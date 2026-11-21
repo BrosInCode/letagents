@@ -4,7 +4,7 @@ import { sandboxedCodexProjectRefusal } from "../codex-agent-home.js";
 import { STARTS_AGAIN_BY_ITSELF, codexProcessKeepsOwnerSetup } from "../codex-home-harness.js";
 import { resolveCodexExecutable } from "../codex-executable.js";
 import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
-import type { NativeExecutionFact } from "../../../../shared/execution-protocol.js";
+import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
 import { synthesizeTerminalPayload, type ProviderActivityEvent, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderContinuationRef, type ProviderHandle, type ProviderStopOptions, type ProviderStreamEvent, type ProviderStreamEventKind, type ProviderTerminalPayload } from "../provider-adapter.js";
 import { errorMessage, safeStreamPayload } from "../provider-evidence.js";
 import { BASE_CODEX_CAPABILITIES, DEFAULT_DEPENDENCIES } from "./launch-contract.js";

@@ -2,7 +2,7 @@ import electron from "electron";
 import electronUpdaterModule, { type ProgressInfo, type UpdateInfo } from "electron-updater";
 import { join } from "node:path";
 
-import { isIsolatedDesktopPreview } from "./preview-mode.js";
+import { isIsolatedDesktopPreview } from "#provider-runtime/preview-mode.js";
 import type { DesktopUpdateStatus } from "../ipc-types.js";
 import {
   DesktopUpdaterController,

@@ -86,18 +86,18 @@ type BundledRuntimeVerifier = () => Promise<void>;
 
 /**
  * The adapters' own sealed-runtime check, run once in the background from the
- * Electron build tree; see warmLetAgentsMcpRuntime. A build without that
- * module (an older or partial dist-electron) has nothing to warm; its
+ * provider runtime; see warmLetAgentsMcpRuntime. A build without that
+ * module (a partial dist-provider-runtime) has nothing to warm; its
  * launches still verify the runtime themselves, as every launch does.
  */
 const bundledRuntimeVerifierFromBuild: BundledRuntimeVerifier = async () => {
   let module: { warmLetAgentsMcpRuntime?: (input: { devEntryPath?: string }) => Promise<void> };
   try {
-    module = await import(new URL("../dist-electron/main/agents/letagents-mcp-runtime.js", import.meta.url).href);
+    module = await import("#provider-runtime/agents/letagents-mcp-runtime.js");
   } catch (error) {
     if ((error as { code?: unknown } | null)?.code !== "ERR_MODULE_NOT_FOUND") throw error;
     // Only a packaged app has a bundled runtime; there a missing module means every launch pays the first hash.
-    if (typeof (process as { resourcesPath?: unknown }).resourcesPath === "string") console.warn("[runtime_verify]", "the Electron build's runtime module is missing; launches verify the runtime themselves");
+    if (typeof (process as { resourcesPath?: unknown }).resourcesPath === "string") console.warn("[runtime_verify]", "the provider runtime's MCP runtime module is missing; launches verify the runtime themselves");
     return;
   }
   if (typeof module.warmLetAgentsMcpRuntime !== "function") return;
@@ -119,8 +119,9 @@ function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: numbe
 }
 
 /**
- * Daemon-safe provider router. Adapters remain in the Electron build tree, but
- * this immutable sibling only imports their Node-native lifecycle boundary.
+ * Daemon-safe provider router. The adapters are in the provider runtime
+ * package; this router imports only their Node-native lifecycle boundary, by
+ * the package import name, at the first use of each provider.
  */
 export class ProviderActionPortRouter implements ProviderActionPort {
   private readonly adapters = new Map<string, Promise<NativeProviderAdapter>>();
@@ -603,19 +604,19 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       const loader = this.adapterLoaders[provider];
       if (loader) return loader();
       if (provider === "codex") {
-        const module = await import(new URL("../dist-electron/main/agents/codex-provider-adapter.js", import.meta.url).href) as { CodexProviderAdapter?: new () => NativeProviderAdapter };
+        const module = await import("#provider-runtime/agents/codex-provider-adapter.js") as { CodexProviderAdapter?: new () => NativeProviderAdapter };
         if (module.CodexProviderAdapter) return new module.CodexProviderAdapter();
       }
       if (provider === "claude-code") {
-        const module = await import(new URL("../dist-electron/main/agents/claude-code-provider-adapter.js", import.meta.url).href) as { ClaudeCodeProviderAdapter?: new () => NativeProviderAdapter };
+        const module = await import("#provider-runtime/agents/claude-code-provider-adapter.js") as { ClaudeCodeProviderAdapter?: new () => NativeProviderAdapter };
         if (module.ClaudeCodeProviderAdapter) return new module.ClaudeCodeProviderAdapter();
       }
       if (provider === "cursor") {
-        const module = await import(new URL("../dist-electron/main/agents/cursor-provider-adapter.js", import.meta.url).href) as { CursorProviderAdapter?: new () => NativeProviderAdapter };
+        const module = await import("#provider-runtime/agents/cursor-provider-adapter.js") as { CursorProviderAdapter?: new () => NativeProviderAdapter };
         if (module.CursorProviderAdapter) return new module.CursorProviderAdapter();
       }
       if (provider === "open-model") {
-        const module = await import(new URL("../dist-electron/main/agents/open-model-provider-adapter.js", import.meta.url).href) as { OpenModelProviderAdapter?: new () => NativeProviderAdapter };
+        const module = await import("#provider-runtime/agents/open-model-provider-adapter.js") as { OpenModelProviderAdapter?: new () => NativeProviderAdapter };
         if (module.OpenModelProviderAdapter) return new module.OpenModelProviderAdapter();
       }
       throw new Error(`No supervised native adapter is available for ${provider}.`);

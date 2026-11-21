@@ -9,7 +9,7 @@ import type {
   DesktopTaskSummary,
 } from "../ipc-types.js";
 import { mapApiActivityEvent } from "../rental/api-mapper.js";
-import { apiUrl, roomMessageHistoryPageSize } from "./paths.js";
+import { apiUrl, roomMessageHistoryPageSize } from "#provider-runtime/paths.js";
 import { readStoredAuth } from "./auth.js";
 import { isDesktopSmokeCheck } from "./smoke.js";
 import { publishRoomStreamPointer } from "./room-stream-pointers.js";

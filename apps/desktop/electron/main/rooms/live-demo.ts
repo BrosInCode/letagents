@@ -2,7 +2,7 @@ import type { WebContents } from "electron";
 
 import { watchInlineHtmlDemoPointer } from "../attachments/html-demo-inline.js";
 import { readStoredAuth } from "../auth.js";
-import { apiUrl } from "../paths.js";
+import { apiUrl } from "#provider-runtime/paths.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { emitToMainWindow } from "../window.js";
 import { connectLiveDemoSocket, LiveDemoClient } from "./live-demo-client.js";

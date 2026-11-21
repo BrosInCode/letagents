@@ -5,12 +5,12 @@ import type { ProviderActivityEvent, ProviderAdapterCapabilities, ProviderHandle
 import { DEFAULT_STOP_GRACE_MS, delay, redactCredentialText, safeStreamPayload, sameProcessBirthIdentity, type ProviderProcessExit } from "../provider-evidence.js";
 import { resolveOpenCodeBinary } from "../opencode-runtime.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint } from "../provider-execution-observer.js";
-import type { ControlProbeResult, NativeExecutionFact, TurnOutcome } from "../../../../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionFact, TurnOutcome } from "../../../shared/execution-protocol.js";
 import { messageCompleted, OpenCodeServerClient, record, type JsonRecord, type OpenCodeMessage, type OpenCodePart } from "../opencode-server-client.js";
 import { CAPABILITIES, MAX_ASSISTANT_STEPS, type OpenModelProviderAdapterDependencies, type OpenModelProviderAdapterOptions, START_TIMEOUT_MS, TURN_CONTROL_TIMEOUT_MS, TURN_TIMEOUT_MS } from "./types.js";
 import { OPEN_MODEL_PROVIDER_RETRY_METHOD, type OpenCodeRetryStatus, openModelProviderRetrySummary } from "./errors.js";
 import { OpenModelHandle } from "./handle.js";
-import { liveOutputTail, plainTerminalText } from "../../../../../../shared/live-command-output.mjs";
+import { liveOutputTail, plainTerminalText } from "../../../../../shared/live-command-output.mjs";
 import { defaultDependencies, terminalFromExit } from "./runtime-launch.js";
 
 export abstract class OpenModelAdapterBase {

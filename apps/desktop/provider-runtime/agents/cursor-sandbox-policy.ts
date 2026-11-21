@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { isOwnerPrivateSync, ownerPrivatePlatform, protectOwnerPrivateSync } from "../../../../../shared/owner-private-fs.mjs";
+import { isOwnerPrivateSync, ownerPrivatePlatform, protectOwnerPrivateSync } from "../../../../shared/owner-private-fs.mjs";
 
 export function isExactCursorLoopbackTestOrigin(value: string): boolean {
   const match = /^http:\/\/127[.]0[.]0[.]1:([1-9][0-9]{0,4})$/.exec(value);

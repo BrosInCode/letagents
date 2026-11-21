@@ -22,7 +22,7 @@ import {
   BackgroundCommandOutput,
   type BackgroundOutputFormat,
 } from "../background-command-output.js";
-import type { LiveBackgroundCommandPayload } from "../../../../../../shared/live-command-output.mjs";
+import type { LiveBackgroundCommandPayload } from "../../../../../shared/live-command-output.mjs";
 
 /** The header Cursor writes first: field lines between two `---` lines. */
 const HEADER = /^---\n(?:[a-z_]+: [^\n]*\n)*?---\n/;

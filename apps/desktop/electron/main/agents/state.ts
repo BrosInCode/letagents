@@ -12,7 +12,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 
-import { getLetAgentsLocalStatePath } from "../paths.js";
+import { getLetAgentsLocalStatePath } from "#provider-runtime/paths.js";
 import { letagentsHome } from "../../../../../shared/letagents-home.mjs";
 import {
   ensurePrivateStateFolderSync,

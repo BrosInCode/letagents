@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { SettingsFileCache } from "../settings-file-cache.js";
+import { SettingsFileCache } from "#provider-runtime/settings-file-cache.js";
 import type {
   DesktopAppAgentSaveSettingsInput,
   DesktopAppAgentSettingsStatus,

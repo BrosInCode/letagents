@@ -1,6 +1,6 @@
 import { lstatSync } from "node:fs";
 import { dirname } from "node:path";
-import { isOwnedByCurrentUserSync } from "../../../../../shared/owner-private-fs.mjs";
+import { isOwnedByCurrentUserSync } from "../../../../shared/owner-private-fs.mjs";
 
 import { cursorSandboxPathVariants } from "./cursor-sandbox-policy.js";
 import { includedRoomTurnImages, stagedRoomTurnFilePaths } from "./desktop-event-prompt-format.js";

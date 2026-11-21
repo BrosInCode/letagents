@@ -1,8 +1,8 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodexProviderAdapter, COMMAND_OUTPUT_WINDOW_MS } from "../main/agents/codex-provider-adapter.js";
-import type { ProviderStreamEvent } from "../main/agents/provider-adapter.js";
+import { CodexProviderAdapter, COMMAND_OUTPUT_WINDOW_MS } from "#provider-runtime/agents/codex-provider-adapter.js";
+import type { ProviderStreamEvent } from "#provider-runtime/agents/provider-adapter.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import {
   createHarness,

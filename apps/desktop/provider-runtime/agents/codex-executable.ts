@@ -3,4 +3,4 @@ export {
   installedCodexExecutablePath,
   resolveCodexExecutable,
   type CodexExecutableResolutionOptions,
-} from "../../../../../shared/codex-executable.mjs";
+} from "../../../../shared/codex-executable.mjs";

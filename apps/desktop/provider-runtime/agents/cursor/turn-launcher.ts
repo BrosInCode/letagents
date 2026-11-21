@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { spawnTree, windowsCommandLine } from "../../../../../../shared/process-tree.mjs";
+import { spawnTree, windowsCommandLine } from "../../../../../shared/process-tree.mjs";
 
 import { providerTreeExit, type ProviderProcessExit } from "../provider-evidence.js";
 import {

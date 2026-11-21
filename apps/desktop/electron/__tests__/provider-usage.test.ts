@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { codexAccountUsage, inspectorUsageSchema, ProviderUsageTracker, readCodexUsageTail } from "../main/agents/provider-usage.js";
+import { codexAccountUsage, inspectorUsageSchema, ProviderUsageTracker, readCodexUsageTail } from "#provider-runtime/agents/provider-usage.js";
 const at = "2026-10-10T20:00:00.000Z";
 const sample = { last: { totalTokens: 62000 }, total: { totalTokens: 4200000 }, modelContextWindow: 200000 };
 
@@ -112,7 +112,7 @@ test("Claude synthetic notices and API errors do not replace measured context wi
 });
 
 test("Cursor uses reported plan percentages, native dollar caps and millisecond resets without inventing windows", async () => {
-  const { cursorAccountUsage } = await import("../main/agents/cursor-usage.js");
+  const { cursorAccountUsage } = await import("#provider-runtime/agents/cursor-usage.js");
   const period = { billingCycleEnd: "1793364839000", planUsage: { includedSpend: 2000, totalSpend: 9533, limit: 2000, totalPercentUsed: 20.175661375661374 }, spendLimitUsage: { individualUsed: 2500, limitType: "user" } };
   const account = cursorAccountUsage(period, { hardLimit: 100 }, at);
   assert.deepEqual(account.windows.map(w => w.usedPercent), [20.175661375661374, 25]);
@@ -129,7 +129,7 @@ test("Cursor uses reported plan percentages, native dollar caps and millisecond 
 });
 
 test("Cursor account transport is bounded and sends authorization only to its fixed native read endpoints", async () => {
-  const { readCursorAccountUsage } = await import("../main/agents/cursor-usage.js");
+  const { readCursorAccountUsage } = await import("#provider-runtime/agents/cursor-usage.js");
   const urls: string[] = [];
   const request = (async (url, options) => {
     urls.push(String(url));
@@ -144,7 +144,7 @@ test("Cursor account transport is bounded and sends authorization only to its fi
 });
 
 test("Cursor reads only exact session context from its native SQLite/protobuf state, including zero after compaction", async () => {
-  const { readCursorContext, readCursorUsageOwner } = await import("../main/agents/cursor-usage.js");
+  const { readCursorContext, readCursorUsageOwner } = await import("#provider-runtime/agents/cursor-usage.js");
   const { DatabaseSync } = await import("node:sqlite");
   const { createHash } = await import("node:crypto");
   const { mkdir, symlink } = await import("node:fs/promises");

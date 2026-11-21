@@ -3,7 +3,7 @@ import { lstatSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ProviderUsage } from "../../../shared/provider-usage.js";
+import type { ProviderUsage } from "../../shared/provider-usage.js";
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
 import type { CursorManagedProfile } from "./cursor-managed-profile.js";
 import type { assertCursorPersonalIdentity } from "./cursor-identity.js";

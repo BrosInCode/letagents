@@ -436,9 +436,9 @@ test("an imported manifest never brings the owner's own setup with it", { timeou
 // ---- What an earlier writer left in a stored policy does not decide a launch with the owner's own setup.
 
 const { deriveProviderConfigurationSnapshot, entryLaunchPolicy } = await import("../provider-configuration.js");
-const { attestProviderSpawnPolicy } = await import("../../electron/main/agents/provider-spawn-configuration.js");
-const { claudeCliLaunchArgs, claudeLaunchPolicyArgs, claudeChildEnvironment, claudeOwnerSetupStartEnvironment } = await import("../../electron/main/agents/claude-code-provider-adapter.js");
-const { inspectClaudeCodeVersion, resolveClaudeCodeExecutable } = await import("../../electron/main/agents/claude-code-version.js");
+const { attestProviderSpawnPolicy } = await import("#provider-runtime/agents/provider-spawn-configuration.js");
+const { claudeCliLaunchArgs, claudeLaunchPolicyArgs, claudeChildEnvironment, claudeOwnerSetupStartEnvironment } = await import("#provider-runtime/agents/claude-code-provider-adapter.js");
+const { inspectClaudeCodeVersion, resolveClaudeCodeExecutable } = await import("#provider-runtime/agents/claude-code-version.js");
 
 /** The installed Claude Code, when it is one the adapter supports. Asked its version in a scratch home. */
 function installedClaude(scratch: string): string | null {

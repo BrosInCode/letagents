@@ -1,9 +1,9 @@
 import { posix } from "node:path";
 
-import { SIGN_IN_NOT_HIDDEN, codexSandboxedProfileOverrides } from "../../main/agents/codex-agent-home.js";
-import { READ_ONLY_POLICY_WITHOUT_LEVEL, type CodexAppServerExit } from "../../main/agents/codex-app-server.js";
-import type { CodexProviderAdapterDependencies } from "../../main/agents/codex-provider-adapter.js";
-import { CodexRpcClient, type CodexRpcWebSocketCtor } from "../../main/agents/codex-rpc-client.js";
+import { SIGN_IN_NOT_HIDDEN, codexSandboxedProfileOverrides } from "#provider-runtime/agents/codex-agent-home.js";
+import { READ_ONLY_POLICY_WITHOUT_LEVEL, type CodexAppServerExit } from "#provider-runtime/agents/codex-app-server.js";
+import type { CodexProviderAdapterDependencies } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { CodexRpcClient, type CodexRpcWebSocketCtor } from "#provider-runtime/agents/codex-rpc-client.js";
 import { REPLAY_HOME_DIRECTORY, REPLAY_WORKSPACE } from "./redaction.js";
 import { ProviderReplaySession, type ProviderReplaySessionOptions } from "./replay-session.js";
 import type { JsonObject, JsonValue, ProviderReplayTranscript } from "./transcript.js";

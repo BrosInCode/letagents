@@ -33,7 +33,7 @@ import {
 import { prepareCursorSupervisedProfile } from "./managed-profile.js";
 import { resolveLetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
 import { createCursorUsageReader } from "../cursor-usage.js";
-import type { ProviderUsage } from "../../../../shared/provider-usage.js";
+import type { ProviderUsage } from "../../../shared/provider-usage.js";
 import type { SupervisedWorkspaceGenerationHandle } from "../supervised-workspace-generation.js";
 import {
   DEFAULT_DEPENDENCIES,
@@ -49,7 +49,7 @@ import {
 } from "./lane-state.js";
 import { BASE_CURSOR_CAPABILITIES } from "./launch-arguments.js";
 import { CursorBackgroundShells } from "./background-shells.js";
-import { LIVE_BACKGROUND_COMMAND_METHOD } from "../../../../../../shared/live-command-output.mjs";
+import { LIVE_BACKGROUND_COMMAND_METHOD } from "../../../../../shared/live-command-output.mjs";
 import {
   awaitDeferredRoomTurnSettlement,
   awaitRoomTurnTerminal,

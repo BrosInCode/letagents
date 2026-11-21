@@ -3,10 +3,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 
-import { SIGN_IN_NOT_HIDDEN, codexSandboxedProfileId } from "../main/agents/codex-agent-home.js";
-import { READ_ONLY_POLICY_WITHOUT_LEVEL } from "../main/agents/codex-app-server.js";
-import { CodexProviderAdapter } from "../main/agents/codex-provider-adapter.js";
-import type { ProviderObservedState, ProviderStreamEvent } from "../main/agents/provider-adapter.js";
+import { SIGN_IN_NOT_HIDDEN, codexSandboxedProfileId } from "#provider-runtime/agents/codex-agent-home.js";
+import { READ_ONLY_POLICY_WITHOUT_LEVEL } from "#provider-runtime/agents/codex-app-server.js";
+import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
+import type { ProviderObservedState, ProviderStreamEvent } from "#provider-runtime/agents/provider-adapter.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import { CODEX_REPLAY_PROMPT, CodexReplay, normalizeCodexOutbound, type CodexReplayOptions } from "./provider-replay/codex-replay.js";
 import {

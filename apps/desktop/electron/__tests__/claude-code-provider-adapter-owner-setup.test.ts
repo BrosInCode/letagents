@@ -16,8 +16,8 @@ import {
   createManagedClaudeMcpConfig,
   ownerMcpServerNotices,
   ownerMcpStartupTimeoutMs,
-} from "../main/agents/claude-code-provider-adapter.js";
-import type { ProviderSpawnRequest } from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/claude-code-provider-adapter.js";
+import type { ProviderSpawnRequest } from "#provider-runtime/agents/provider-adapter.js";
 import { assertOwnerPrivateFile } from "./harness.js";
 import { CLAUDE_REAL_CAPTURES, realClaudeCapture, realClaudeResult } from "./claude-result-shapes.js";
 import {

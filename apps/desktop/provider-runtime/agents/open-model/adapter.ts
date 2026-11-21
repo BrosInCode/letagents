@@ -1,11 +1,11 @@
 /** The Open Model provider adapter: room turns, turn control, repair, stop, listeners, permissions and the shared instance. */
-import { NO_REPLY_FAILURE } from "../../../../../../shared/room-turn-no-reply.mjs";
-import { isBirthEvidence } from "../../../../../../shared/process-tree.mjs";
+import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
+import { isBirthEvidence } from "../../../../../shared/process-tree.mjs";
 import { PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, synthesizeTerminalPayload, type ProviderActivityEvent, type ProviderAdapter, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "../provider-adapter.js";
 import { delay, sameProcessBirthIdentity } from "../provider-evidence.js";
 import { OPEN_MODEL_OPENCODE_PROVIDER_ID } from "../opencode-launch-contract.js";
 import { nativeExecutionId } from "../provider-execution-observer.js";
-import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription } from "../../../../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
 import { assistantsFor, finalAssistantFor, messageCompleted, messageFinishReason, messageText, mintNativeUserMessageId, OpenCodePermissionReplyError, parseOpenCodePermissionEvent, turnUserMessageIds, type OpenCodePermissionRequest, type OpenCodePermissionTurnCorrelation } from "../opencode-server-client.js";
 import { OpenCodeBoundedTurnError, OpenCodeTerminalTurnError, safeProviderErrorMessage } from "./errors.js";
 import type { OpenCodePermissionObservation } from "./types.js";

@@ -6,7 +6,7 @@ import { daemonMaintenancePath, DAEMON_MAINTENANCE_MESSAGE } from "../../../../.
 import { connectDaemon, daemonEndpoint, prepareDaemonConnection } from "../../../../../shared/daemon-endpoint.mjs";
 import { letagentsHome } from "../../../../../shared/letagents-home.mjs";
 import type { DesktopSupervisorDaemonStatus } from "../../ipc-types.js";
-import { desktopRoot } from "../paths.js";
+import { desktopRoot } from "#provider-runtime/paths.js";
 import { loadHostApprovalSigner, type HostApprovalSigner } from "../host-approval-auth.js";
 import type { HostApprovalChallenge } from "../../../shared/host-approval-auth.js";
 import type { DesktopHostApproval, HostApprovalCandidate, HostApprovalSelection } from "../../../shared/host-approvals.js";

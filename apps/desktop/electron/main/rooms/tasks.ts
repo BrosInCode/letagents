@@ -14,7 +14,7 @@ import {
   readLetAgentsLocalState,
 } from "../../board-task-actions.js";
 import { agentApiFetch, apiFetch } from "../auth.js";
-import { getLetAgentsLocalStatePath } from "../paths.js";
+import { getLetAgentsLocalStatePath } from "#provider-runtime/paths.js";
 import {
   addLocalTask,
   claimLocalTaskReviewLease,

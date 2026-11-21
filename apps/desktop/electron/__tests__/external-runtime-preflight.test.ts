@@ -70,7 +70,7 @@ test("Codex supplies its own connection and setup refresh explicitly reconciles 
   assert.equal(stale.canStart, false);
   assert.equal(stale.message, "Agent setup needs refreshing.");
   assert.equal(refresh.mock.callCount(), 0, "environment drift must not silently replace live runtimes");
-  const { refreshDesktopShellEnvironment } = await import("../main/desktop-shell-environment.js");
+  const { refreshDesktopShellEnvironment } = await import("#provider-runtime/desktop-shell-environment.js");
   assert.equal((await refreshDesktopShellEnvironment()).changed, false);
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";

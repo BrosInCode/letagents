@@ -3,7 +3,7 @@ import type {
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
 } from "../../ipc-types.js";
-import { listManagedAgentPermissionProfiles } from "./managed-agent-permission-profiles.js";
+import { listManagedAgentPermissionProfiles } from "#provider-runtime/agents/managed-agent-permission-profiles.js";
 
 /**
  * Renting crosses from an internet user's instructions into the provider's

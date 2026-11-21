@@ -1,6 +1,6 @@
 import { ClaudeCompaction } from "../claude-compaction.js";
 import { randomUUID } from "node:crypto";
-import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "../../../../../../shared/provider-acquisition-evidence.mjs";
+import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "../../../../../shared/provider-acquisition-evidence.mjs";
 import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
 import type { ProviderAttachTerminal, ProviderConnectionRef, ProviderContinuationRef, ProviderSpawnRequest, ProviderTerminalPayload } from "../provider-adapter.js";
 import { attestProviderSpawnPolicy, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "../provider-spawn-configuration.js";

@@ -23,11 +23,11 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { type SupervisedDeliveryHttp } from "../supervised-agent-delivery.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
-import { defaultGetProcessIdentity, type ProviderProcessExit } from "../../electron/main/agents/provider-evidence.js";
+import { defaultGetProcessIdentity, type ProviderProcessExit } from "#provider-runtime/agents/provider-evidence.js";
 import {
   OpenModelProviderAdapter,
   type OpenModelProviderAdapterDependencies,
-} from "../../electron/main/agents/open-model-provider-adapter.js";
+} from "#provider-runtime/agents/open-model-provider-adapter.js";
 import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import {

@@ -1,6 +1,6 @@
 import { open } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import type { ProviderUsage } from "../../../shared/provider-usage.js";
+import type { ProviderUsage } from "../../shared/provider-usage.js";
 import { z } from "zod";
 
 const timestamp = z.string().datetime();

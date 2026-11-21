@@ -1,6 +1,6 @@
 import { win32 } from "node:path";
 
-import { DAEMON_STATE_DIR_ENV, isWindowsPipePath, resolveDaemonProofPath } from "../../../../../shared/daemon-endpoint.mjs";
+import { DAEMON_STATE_DIR_ENV, isWindowsPipePath, resolveDaemonProofPath } from "../../../../shared/daemon-endpoint.mjs";
 
 /**
  * What a Windows program needs in its environment to start and to work: the

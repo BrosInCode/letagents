@@ -8,7 +8,7 @@ import {
   CodexProviderAdapter,
   codexMcpWorkplaceConfigOverrides,
   type CodexPermissionObservation,
-} from "../main/agents/codex-provider-adapter.js";
+} from "#provider-runtime/agents/codex-provider-adapter.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import {
   ProviderActionPortRouter,

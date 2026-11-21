@@ -5,13 +5,13 @@ import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CodexProviderAdapter, codexMcpWorkplaceConfigOverrides } from "../main/agents/codex-provider-adapter.js";
-import { CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE, writeCodexSupervisorBridgeContext } from "../main/agents/codex-supervisor-bridge-context.js";
-import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
-import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+import { CodexProviderAdapter, codexMcpWorkplaceConfigOverrides } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE, writeCodexSupervisorBridgeContext } from "#provider-runtime/agents/codex-supervisor-bridge-context.js";
+import { ProviderContinuationMissingError } from "#provider-runtime/agents/provider-adapter.js";
+import { LETAGENTS_MCP_RUNTIME_VERSION } from "#provider-runtime/agents/letagents-mcp-runtime.js";
 import { assertOwnerPrivateFile } from "./harness.js";
 import { assertProviderHandle, custodialRuntimeContract, createHarness, spawnRequest, flush } from "./codex-provider-adapter.fixture.js";
-import { MCP_RUNTIME_CONTRACT_DEADLINE_MS, readMcpRuntimeContract } from "../main/agents/codex/launch-contract.js";
+import { MCP_RUNTIME_CONTRACT_DEADLINE_MS, readMcpRuntimeContract } from "#provider-runtime/agents/codex/launch-contract.js";
 
 // The probes below are small scripts, not the real runtime, so they start well
 // inside this deadline. The platform deadline (30 s on Windows) made one test

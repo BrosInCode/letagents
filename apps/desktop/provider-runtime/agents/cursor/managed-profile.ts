@@ -11,8 +11,8 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { getLetAgentsLocalStatePath } from "../../paths.js";
-import { renameSyncWithRetry } from "../../../../../../shared/rename-retry.mjs";
-import { everyOwnedByCurrentUserSync, isOwnedByCurrentUserSync, ownerPrivatePlatform } from "../../../../../../shared/owner-private-fs.mjs";
+import { renameSyncWithRetry } from "../../../../../shared/rename-retry.mjs";
+import { everyOwnedByCurrentUserSync, isOwnedByCurrentUserSync, ownerPrivatePlatform } from "../../../../../shared/owner-private-fs.mjs";
 import { CURSOR_MCP_CONNECTOR_PARENT, CURSOR_SESSION_ID_PATTERN, MAX_CURSOR_SESSION_ID_LENGTH } from "../cursor-provider-constants.js";
 import { cursorOsSandbox } from "../cursor-sandbox-policy.js";
 import { cursorMcpConnectorRootPattern } from "./turn-wrapper-setup.js";

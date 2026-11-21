@@ -2,7 +2,7 @@
 import { constants as fsConstants } from "node:fs";
 import { access, lstat, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { createPrivateDir, isOwnedByCurrentUser, protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
+import { createPrivateDir, isOwnedByCurrentUser, protectOwnerPrivate } from "../../../../../shared/owner-private-fs.mjs";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, BASELINE_INDEX_NAME, type CreateSupervisedWorkspaceGenerationOptions, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, PROVIDER_GIT_NAME, type RecoverSupervisedWorkspaceGenerationOptions, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationHandle, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationResult, type SupervisedWorkspaceGenerationSupport, type SupervisedWorkspaceReadOnlyRoot } from "./types.js";
 import { FileInspectionSession, validateAppliedOperationArtifacts } from "./file-inspection.js";
 import { ProcessExitError, canonicalGitControlTarget, discoverSourceGitText, gitControlPath, gitOutputPath, gitText, readStableGitControlFile, runGit, sourceAuthorityText } from "./git.js";

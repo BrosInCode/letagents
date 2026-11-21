@@ -9,7 +9,7 @@ import type {
   ProviderObservedState,
   ProviderSpawnRequest,
   ProviderTerminalPayload,
-} from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/provider-adapter.js";
 // In-memory fake child implementing the ProviderAdapter launcher boundary
 // (v10 §4.8). It has no real process — it exists to prove the durability
 // lifecycle contract (spawn → kill → restart/resume → terminal ordering)

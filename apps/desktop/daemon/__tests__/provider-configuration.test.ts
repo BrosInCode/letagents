@@ -25,7 +25,7 @@ import {
   storedLaunchPolicy,
   withoutHomeHarness,
 } from "../provider-configuration.js";
-import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-spawn-configuration.js";
+import { attestProviderSpawnPolicy } from "#provider-runtime/agents/provider-spawn-configuration.js";
 import {
   assertSupervisedPermissionProfileAvailable,
   assertSupervisedRentalPermissionProfileAvailable,

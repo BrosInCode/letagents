@@ -1,7 +1,7 @@
 /** The per-runtime Open Model provider handle. */
 import type { ProviderActivityEvent, ProviderConnectionRef, ProviderHandle, ProviderObservedState, ProviderStreamEvent, ProviderTerminalPayload } from "../provider-adapter.js";
 import { ProviderExecutionObserver } from "../provider-execution-observer.js";
-import type { HardControlEvidence, TurnOutcome } from "../../../../shared/execution-protocol.js";
+import type { HardControlEvidence, TurnOutcome } from "../../../shared/execution-protocol.js";
 import { OpenCodeServerClient } from "../opencode-server-client.js";
 
 export class OpenModelHandle implements ProviderHandle {

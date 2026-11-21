@@ -13,8 +13,8 @@ import {
   claudeLaunchPolicyArgs,
   createEphemeralClaudeMcpConfig,
   createManagedClaudeMcpConfig,
-} from "../main/agents/claude-code-provider-adapter.js";
-import type { ProviderStreamEvent, NativeExecutionObservation } from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/claude-code-provider-adapter.js";
+import type { ProviderStreamEvent, NativeExecutionObservation } from "#provider-runtime/agents/provider-adapter.js";
 import {
   ProviderActionPortRouter,
   ProviderSchedulerFailureCoordinator,

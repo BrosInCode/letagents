@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { inspectorUsageSchema } from "../agents/provider-usage.js";
+import { inspectorUsageSchema } from "#provider-runtime/agents/provider-usage.js";
 import type { RetainedExecutionDetail } from "../../../shared/execution-protocol.js";
 import { enumValue, nonEmptyString, nullableNonEmptyString, nullableString, record } from "./wire-values.js";
 

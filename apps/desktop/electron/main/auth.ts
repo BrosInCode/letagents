@@ -14,8 +14,8 @@ import type {
   DesktopAuthStatus,
   DesktopPendingDeviceAuth,
 } from "../ipc-types.js";
-import { recordManagedAgentCommitAccount } from "./agents/managed-agent-commit-identity.js";
-import { apiUrl } from "./paths.js";
+import { recordManagedAgentCommitAccount } from "#provider-runtime/agents/managed-agent-commit-identity.js";
+import { apiUrl } from "#provider-runtime/paths.js";
 import { desktopSmokeAuthStatus, isDesktopSmokeCheck } from "./smoke.js";
 
 const require = createRequire(import.meta.url);

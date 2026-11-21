@@ -6,7 +6,7 @@ import { ClaudeProviderHandle } from "./provider-handle.js";
 import { claudeStreamKind, sessionIdOf, shownTaskDescription, streamMethod } from "./stream-messages.js";
 import type { ClaudeHeldRoomTurn, ClaudeRoomTurnTerminal, ClaudeStreamMessage } from "./types.js";
 import { BackgroundCommandOutput, claudeBackgroundOutputPath } from "./background-command-output.js";
-import { LIVE_BACKGROUND_COMMAND_METHOD } from "../../../../../../shared/live-command-output.mjs";
+import { LIVE_BACKGROUND_COMMAND_METHOD } from "../../../../../shared/live-command-output.mjs";
 import { randomUUID } from "node:crypto";
 
 /** How long the owner's Stop waits for the CLI to accept it. */
