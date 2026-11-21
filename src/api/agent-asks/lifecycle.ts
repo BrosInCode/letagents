@@ -46,7 +46,7 @@ export function canTransition(from: AgentAskState, to: AgentAskState): boolean {
  * "that provider's current default". Every other id is one the provider's own
  * CLI takes as its model, so the giver's agent starts with exactly that model:
  * - Claude Code: full model ids (Fable 5.2 needs Claude Code 2.1.321).
- * - Codex: the `slug` of each listed model in `codex debug models` (0.162.1).
+ * - Codex: model slugs from `codex debug models`.
  * - Cursor: an id from `cursor-agent models` (2026.09.18). Cursor lists each
  *   model once per reasoning effort; the id is the one Cursor names without an
  *   effort (its own default), or the medium one when it has no such id.
@@ -61,6 +61,8 @@ export const ASKABLE_MODELS: readonly AskableModel[] = Object.freeze([
   { providerId: "claude-code", model: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
   { providerId: "claude-code", model: "claude-haiku-5-5", label: "Claude Haiku 5.5" },
   { providerId: "codex", model: null, label: "Codex (latest model)" },
+  { providerId: "codex", model: "gpt-6.2-sol", label: "GPT-6.2-Sol" },
+  { providerId: "codex", model: "gpt-6.2-astra", label: "GPT-6.2-Astra" },
   { providerId: "codex", model: "gpt-6.1-sol", label: "GPT-6.1-Sol" },
   { providerId: "codex", model: "gpt-6-astra", label: "GPT-6-Astra" },
   { providerId: "codex", model: "gpt-6.1-terra", label: "GPT-6.1 Terra" },
