@@ -10,7 +10,7 @@
 //   (turn id -> the first event the live display shows) and `turn_end`.
 //   The first turn after a launch is the cold one.
 //
-//   LETAGENTS_MEASURE_LIVE_PROVIDERS=1 node --import tsx \
+//   LETAGENTS_MEASURE_LIVE_PROVIDERS=1 node --conditions=letagents-source --import tsx \
 //     electron/scripts/measure-provider-start-latency.mjs --provider codex --turns 3
 //
 // The Codex adapter keeps its agents' home below HOME/.letagents. Run Codex

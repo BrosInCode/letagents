@@ -5,7 +5,7 @@ import test from "node:test";
 import type { DesktopAgentProvider } from "../ipc-types.js";
 import { missingExternalRuntimePreflight } from "../main/agents/external-runtime-preflight.js";
 import { writeFakeProvider } from "./platform.js";
-import { cachedProbe, clearProbeCache, probeKey } from "../main/agents/provider-probe-cache.js";
+import { cachedProbe, clearProbeCache, probeKey } from "#provider-runtime/provider-probe-cache.js";
 
 // Each case below writes its own fake CLI; no case may inherit a probe answer
 // that an earlier case memoised.

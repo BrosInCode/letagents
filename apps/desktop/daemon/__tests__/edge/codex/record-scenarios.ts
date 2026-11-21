@@ -28,7 +28,7 @@ import { startEdgeDaemon, type EdgeAgentRegistration } from "../daemon-edge-harn
 // Format 1 NDJSON transcripts under `./fixtures/`.
 //
 // Usage:
-//   LETAGENTS_RECORD_LIVE_CODEX=1 node --import tsx \
+//   LETAGENTS_RECORD_LIVE_CODEX=1 node --conditions=letagents-source --import tsx \
 //     daemon/__tests__/edge/codex/record-scenarios.ts
 
 const HERE = dirname(fileURLToPath(import.meta.url));

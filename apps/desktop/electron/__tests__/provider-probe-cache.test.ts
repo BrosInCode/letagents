@@ -7,7 +7,7 @@ import {
   clearProbeCache,
   PROVIDER_PROBE_TTL_MS,
   probeKey,
-} from "../main/agents/provider-probe-cache.js";
+} from "#provider-runtime/provider-probe-cache.js";
 
 test.beforeEach(() => clearProbeCache());
 test.after(() => clearProbeCache());

@@ -55,7 +55,7 @@ import {
 // Codex's own history of the conversation, which a resume reply holds, shows
 // the earlier turn.
 //
-//   LETAGENTS_RECORD_LIVE_CODEX=1 node --import tsx \
+//   LETAGENTS_RECORD_LIVE_CODEX=1 node --conditions=letagents-source --import tsx \
 //     electron/scripts/record-codex-replay.ts --scenario simple
 //
 // See docs/provider-replay-tests.md.

@@ -5,7 +5,7 @@
 // seal being moved would otherwise fail the release build and nothing before
 // it, as it did for desktop 0.1.99.
 //
-// Runs under `node --import tsx` so that it reads the digest routine and the
+// Runs under `node --conditions=letagents-source --import tsx` so that it reads the digest routine and the
 // sealed constant from the TypeScript source the packager compiles.
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
