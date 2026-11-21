@@ -10,7 +10,7 @@
 // a folder with no package.json and no node_modules above it.
 
 import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
-import { cp, mkdtemp } from "node:fs/promises";
+import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, sep } from "node:path";
 
@@ -53,15 +53,21 @@ export function linksLeaving(bundle, folder = bundle, found = []) {
 export async function isolatePackagedBundle(bundle, { parent = tmpdir() } = {}) {
   const root = await mkdtemp(join(realpathSync(parent), "letagents-packaged-artifact-"));
   const copy = join(root, basename(bundle));
-  // verbatimSymlinks: the macOS bundle has relative links inside its frameworks.
-  await cp(bundle, copy, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true });
-  const roots = resolutionRootsAbove(copy);
-  if (roots.length > 0) {
-    throw new Error(`the copy of the packaged app at ${copy} is below ${roots.join(", ")}; Node could load code from there`);
-  }
-  const links = linksLeaving(copy);
-  if (links.length > 0) {
-    throw new Error(`the packaged app has links that lead out of it: ${links.slice(0, 5).join(", ")}`);
+  try {
+    // verbatimSymlinks: the macOS bundle has relative links inside its frameworks.
+    await cp(bundle, copy, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true });
+    const roots = resolutionRootsAbove(copy);
+    if (roots.length > 0) {
+      throw new Error(`the copy of the packaged app at ${copy} is below ${roots.join(", ")}; Node could load code from there`);
+    }
+    const links = linksLeaving(copy);
+    if (links.length > 0) {
+      throw new Error(`the packaged app has links that lead out of it: ${links.slice(0, 5).join(", ")}`);
+    }
+  } catch (error) {
+    // The copy is several hundred megabytes; a refused copy must not stay on disk.
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    throw error;
   }
   return { root, bundle: copy };
 }

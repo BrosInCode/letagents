@@ -154,6 +154,32 @@ test("a package.json below the build output that declares no import names is acc
   }
 });
 
+test("the check fails when a file names a path from its own place that the app does not have", () => {
+  const app = temporaryApp();
+  try {
+    mkdirSync(join(app, "shared"));
+    writeFileSync(join(app, "shared", "worker.mjs"), "");
+    const user = join(app, "dist-daemon", "worker-user.js");
+    writeFileSync(user, 'export const worker = new URL("../shared/worker.mjs", import.meta.url);\n');
+    const passing = runCheck(app);
+    assert.equal(passing.status, 0, passing.stderr);
+    assert.match(passing.stdout, /1 path\(s\) from a file's own place exist/);
+    // The same file one folder deeper, as after a move: the path now points beside the app's folder.
+    mkdirSync(join(app, "dist-daemon", "moved"));
+    writeFileSync(join(app, "dist-daemon", "moved", "worker-user.js"), 'export const worker = new URL("../shared/worker.mjs", import.meta.url);\n');
+    const failing = runCheck(app);
+    assert.equal(failing.status, 1);
+    assert.match(failing.stderr, /moved.worker-user\.js names \.\.\/shared\/worker\.mjs from its own place/);
+    // A compiled test may name a fixture that the app does not have.
+    rmSync(join(app, "dist-daemon", "moved"), { recursive: true });
+    mkdirSync(join(app, "dist-daemon", "__tests__"));
+    writeFileSync(join(app, "dist-daemon", "__tests__", "x.test.js"), 'export const fixture = new URL("./no-such-fixture.json", import.meta.url);\n');
+    assert.equal(runCheck(app).status, 0);
+  } finally {
+    rmSync(app, { recursive: true, force: true });
+  }
+});
+
 test("the check fails when an adapter entry file is missing", () => {
   const app = temporaryApp();
   try {

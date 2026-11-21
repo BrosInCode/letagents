@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -63,6 +63,8 @@ test("the copy keeps the files and refuses a parent with a package.json", async 
     mkdirSync(join(root, "checkout"));
     writeFileSync(join(root, "checkout", "package.json"), "{}");
     await assert.rejects(isolatePackagedBundle(bundle, { parent: join(root, "checkout") }), /Node could load code from there/);
+    // A refused copy does not stay on disk.
+    assert.deepEqual(readdirSync(join(root, "checkout")), ["package.json"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

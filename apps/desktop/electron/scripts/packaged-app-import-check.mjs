@@ -15,13 +15,17 @@
 //      and to the same file as from the app's own package.json. Node keeps
 //      one module for one file, so two users of one name that resolve to
 //      two files would each get their own copy of its state;
-//   3. each provider adapter entry file loads.
+//   3. every file that the build output names by a path from its own place,
+//      `new URL("<relative path>", import.meta.url)`, exists. A moved file
+//      changes its depth in the build output, and the compiler does not see
+//      a path that breaks that way;
+//   4. each provider adapter entry file loads.
 //
 // This file imports nothing outside Node, because it runs inside the app.
 
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join, relative, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const PROVIDER_ADAPTER_ENTRIES = [
@@ -113,6 +117,28 @@ export async function checkPackagedAppImports(appRoot, { log = console.log } = {
     }
   }
   log(`packaged-imports: ${resolved} use(s) of ${canonical.size} import name(s) resolve inside the app, each name to one file`);
+
+  // Compiled tests are in the build output too; their paths point at fixtures
+  // of the repository, which a packaged app does not have.
+  const ownPlacePath = /new URL\(\s*(["'])(\.\.?\/[^"']+)\1\s*,\s*import\.meta\.url\s*\)/g;
+  let paths = 0;
+  for (const folder of BUILD_FOLDERS) {
+    const root = join(app, folder);
+    if (!existsSync(root)) continue;
+    for (const file of buildFiles(root)) {
+      if (relative(root, file).split(sep).includes("__tests__")) continue;
+      const source = readFileSync(file, "utf8");
+      if (!source.includes("import.meta.url")) continue;
+      for (const match of source.matchAll(ownPlacePath)) {
+        const target = resolve(dirname(file), match[2]);
+        if (!existsSync(target)) {
+          throw new Error(`${relative(app, file)} names ${match[2]} from its own place, and the packaged app has no file there: ${target}`);
+        }
+        paths += 1;
+      }
+    }
+  }
+  log(`packaged-imports: ${paths} path(s) from a file's own place exist`);
 
   for (const entry of PROVIDER_ADAPTER_ENTRIES) {
     const path = ADAPTER_FOLDERS.map((folder) => join(app, folder, entry)).find((candidate) => existsSync(candidate));
