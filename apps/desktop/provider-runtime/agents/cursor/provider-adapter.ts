@@ -1,7 +1,7 @@
 import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
 import type {
   ProviderActivityEvent,
-  ProviderAdapter,
+  SupervisedProviderAdapter,
   ProviderAdapterCapabilities,
   ProviderConnectionRef,
   ProviderContinuationRef,
@@ -116,7 +116,7 @@ import {
 // reseals an attempt-private MCP profile, and builds a narrow child environment.
 // Generic interactive Cursor lanes retain their established local behavior.
 
-export class CursorProviderAdapter implements ProviderAdapter {
+export class CursorProviderAdapter implements SupervisedProviderAdapter {
   readonly id = "cursor" as const;
   readonly cursorBin: string;
   readonly deps: CursorProviderAdapterDependencies;

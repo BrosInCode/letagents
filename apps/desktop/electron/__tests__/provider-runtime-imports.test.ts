@@ -82,3 +82,24 @@ test("a test that starts a TypeScript child process gives it the source conditio
   }
   assert.deepEqual(offenders, [], "start the child with \"--conditions=letagents-source\" before \"--import\", \"tsx\"");
 });
+
+test("the daemon and the adapters share one adapter contract", () => {
+  // The contract is SupervisedProviderAdapter in the provider runtime. Each
+  // adapter class declares it, so the compiler checks the class. The daemon
+  // takes the type from the package and does not cast a loaded adapter, so
+  // the compiler also checks each call that the daemon makes.
+  const read = (path: string) => readFileSync(join(desktopRoot, path), "utf8");
+  for (const [path, name] of [
+    ["provider-runtime/agents/codex/adapter.ts", "CodexProviderAdapter"],
+    ["provider-runtime/agents/claude-code/adapter.ts", "ClaudeCodeProviderAdapter"],
+    ["provider-runtime/agents/cursor/provider-adapter.ts", "CursorProviderAdapter"],
+    ["provider-runtime/agents/open-model/adapter.ts", "OpenModelProviderAdapter"],
+  ] as const) {
+    assert.match(read(path), new RegExp(`export class ${name}\\b[^{]*\\bimplements SupervisedProviderAdapter\\b`), `${name} must implement the contract`);
+  }
+  const router = read("daemon/provider-action-port-router.ts");
+  assert.match(router, /export type NativeProviderAdapter = SupervisedProviderAdapter;/);
+  const adapterImports = [...router.matchAll(/await import\("#provider-runtime\/agents\/[a-z-]+-provider-adapter\.js"\)([^;\n]*)/g)];
+  assert.equal(adapterImports.length, 4, "the router loads the four adapters by the package name");
+  for (const [text, rest] of adapterImports) assert.equal(rest.trim(), "", `no cast at an adapter import: ${text}`);
+});

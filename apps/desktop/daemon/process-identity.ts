@@ -1,8 +1,7 @@
 import { execFileSync } from "node:child_process";
 
 import { isBirthEvidence, processBirth } from "../../../shared/process-tree.mjs";
-
-const PS_LONG_START_PREFIX = /^\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}/;
+import { sameProcessBirthIdentity } from "#provider-runtime/agents/provider-evidence.js";
 
 export type ProcessIdentity = {
   readBirthIdentity(pid: number): string;
@@ -66,14 +65,7 @@ export function processBirthState(pid: number | null, birth: string | null, iden
   }
 }
 
-/**
- * Compare the stable birth portion of a process identity. The daemon and
- * Electron both use the `ps -o lstart=` prefix as the immutable PID identity
- * (on Windows the whole `win32-ft:` creation time, compared exactly).
- */
-export function sameProcessBirthIdentity(current: string, recorded: string): boolean {
-  // Unexpected or malformed values fall back to exact comparison. The outer
-  // kill(0) EPERM/ESRCH check remains the liveness safety net.
-  const stable = (value: string) => value.trim().match(PS_LONG_START_PREFIX)?.[0].replace(/\s+/g, " ") ?? value.trim();
-  return stable(current) === stable(recorded);
-}
+// The comparison of two process births has one definition, in the provider
+// runtime package. The adapters use the same function, so the daemon and an
+// adapter cannot disagree on whether two births are equal.
+export { sameProcessBirthIdentity };
