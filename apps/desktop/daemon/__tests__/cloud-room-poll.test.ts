@@ -108,7 +108,7 @@ test("a failure that a 25 s poll would have met too is thrown as before, and the
   assert.deepEqual(await idle(2), [50_000, 25_000, 50_000]);
 });
 
-test("a proven hold that is cut early is asked again at the floor, and the hold is proven again", async (t) => {
+test("a proven hold that is cut early is asked again at the floor, and a probe that is cut too leaves the floor in place", async (t) => {
   const { requests, script, ask, idle } = harness(t);
   await idle(1);
   // The path changed: a proxy now ends a request after 40 s.

@@ -401,8 +401,9 @@ async function requestRoomPoll(request: typeof roomRequest, input: RoomPollInput
 
 /**
  * The room poll of the delivery loop. The server answers as soon as a message
- * arrives, and the loop opens the next poll at once, so the hold adds no
- * latency: it only decides how often an idle agent asks.
+ * arrives, and the loop opens the next poll at once. So on a healthy path the
+ * hold adds no latency: it only decides how often an idle agent asks. What a
+ * longer hold costs on a path that is not healthy is listed at RoomPollHold.
  *
  * A lane that is not observing yet (its first poll, or the first after a
  * failure) asks for the floor hold, which works behind every proxy seen so
