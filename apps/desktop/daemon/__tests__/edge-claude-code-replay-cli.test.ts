@@ -181,7 +181,10 @@ describe("the stand-in claude of the daemon edge tests", () => {
     // The recording ends here, and stdin stays open. One more prompt is one too many.
     standIn.send(userLine("turn-c", "a turn the recording does not have"));
     await waitForFile(join(planDir, "claim-1", "error.txt"));
-    standIn.child.kill("SIGTERM");
+    // A stop signal that follows must not hide the failure. Windows has no signal to catch:
+    // `kill` ends the process at once there, before it can exit with its own code. So the
+    // signal is sent on POSIX only, and Windows proves the exit with stdin still open.
+    if (process.platform !== "win32") standIn.child.kill("SIGTERM");
     assert.deepEqual(await standIn.exit, { code: 70, signal: null });
     assert.match(readFileSync(join(planDir, "claim-1", "error.txt"), "utf8"), /a line after the end of the recording/);
     assert.equal(readJson(join(planDir, "claim-1", "exit.json")).outcome, "mismatch");

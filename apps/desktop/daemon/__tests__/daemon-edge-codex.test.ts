@@ -428,7 +428,17 @@ describe(
       }
     });
 
-    test("6. approval request and signed host approval decision (ask_before_write)", { timeout: 60_000 }, async () => {
+    test(
+      "6. approval request and signed host approval decision (ask_before_write)",
+      {
+        timeout: 60_000,
+        // A daemon started through LETAGENTS_EDGE_DAEMON_CMD has no Node IPC channel, and the host
+        // approval key reaches the daemon over that channel only.
+        skip: process.env.LETAGENTS_EDGE_DAEMON_CMD?.trim()
+          ? "needs the Node IPC channel for the host approval key; an external daemon command has none"
+          : false,
+      },
+      async () => {
       const { harness, controlDir, agentConfig } = await startCodexScenario("approval", {
         permissionProfileId: "ask_before_write",
       });
