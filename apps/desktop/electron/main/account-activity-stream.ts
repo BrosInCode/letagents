@@ -7,6 +7,7 @@ import {
 } from "../../../../shared/room-join-requests.mjs";
 import { ROOM_MENTION_EVENT, parseRoomMentionEvent } from "../../../../shared/room-mention-events.mjs";
 import { readStoredAuth } from "./auth.js";
+import { DESKTOP_USER_AGENT } from "./client-identity.js";
 import { apiUrl } from "./paths.js";
 import { emitRoomStreamEvent } from "./room-stream.js";
 import { emitToMainWindow } from "./window.js";
@@ -73,7 +74,7 @@ async function connect(current: Stream): Promise<void> {
       return;
     }
     const response = await fetch(`${apiUrl}/account/activity/stream`, {
-      headers: { Accept: "text/event-stream", Authorization: `Bearer ${auth.token}` },
+      headers: { Accept: "text/event-stream", "User-Agent": DESKTOP_USER_AGENT, Authorization: `Bearer ${auth.token}` },
       signal: current.abort.signal,
     });
     if (response.status === 401) {

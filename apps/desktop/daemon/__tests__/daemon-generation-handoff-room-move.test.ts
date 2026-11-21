@@ -212,7 +212,6 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.ok(recoveredFromStaleHandoff.ready_reached_at);
     await eventually(async () => deliveryPolls > 0, "credential recovery resumes daemon inbox polling");
     await deliveryRecoveryInternals.supervisedDelivery.stop("supervised_handoff");
-
     const manifestAfterFirstBind = await new ManifestStore(paths.manifestPath).load();
     const workplaceObservedAtAfterFirstBind = manifestAfterFirstBind.entries
       .find((candidate) => candidate.id === "supervised_handoff")?.workplace_liveness?.observed_at;
@@ -237,7 +236,6 @@ test("generation handoff reattaches the same provider and publishes its supervis
       workplaceObservedAtAfterFirstBind,
       "an unchanged exact binding does not refresh manifest liveness or request another manifest write",
     );
-
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
       entry_id: "supervised_handoff", work_attempt_id: workAttemptId,
       execution_generation_id: executionGenerationId, agent_session_id: "agent_session_exact",
@@ -261,7 +259,6 @@ test("generation handoff reattaches the same provider and publishes its supervis
     })).ok, true);
     const checkpointsAfterNoop = ((await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { checkpoints: unknown[] }).checkpoints.length;
     assert.equal(checkpointsAfterNoop, checkpointsBeforeNoop, "an unchanged poll cursor appends no durability checkpoint");
-
     await assertOwnerPrivate(paths.manifestPath, "file");
     await assert.rejects(() => readFile(paths.workerBindingsPath, "utf8"), { code: "ENOENT" });
     assert.doesNotMatch(JSON.stringify((await daemonRequest(paths.socketPath, "manifest.list")).result), /session-secret/);

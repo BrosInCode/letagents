@@ -224,6 +224,7 @@
         :room-agent-work-status="roomAgentWorkStatus"
         :room-agent-work-truncated="roomAgentWorkTruncated"
         :activity-history-request="activityHistoryRequest"
+        @history-visible="emit('activity-history-visible', $event)"
         :artifact-task-filter-id="artifactTimelineTaskFilterId"
         :tasks="tasks"
         :messages="visibleMessages"

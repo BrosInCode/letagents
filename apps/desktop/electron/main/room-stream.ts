@@ -10,7 +10,8 @@ import type {
 } from "../ipc-types.js";
 import { mapApiActivityEvent } from "../rental/api-mapper.js";
 import { apiUrl, roomMessageHistoryPageSize } from "./paths.js";
-import { readStoredAuth } from "./auth.js";
+import { DesktopApiError, readStoredAuth } from "./auth.js";
+import { DESKTOP_USER_AGENT } from "./client-identity.js";
 import { isDesktopSmokeCheck } from "./smoke.js";
 import { publishRoomStreamPointer } from "./room-stream-pointers.js";
 import {
@@ -29,7 +30,13 @@ import {
   mapRoomMessagePayload,
 } from "./rooms.js";
 import { mapRoomArtifactPayload } from "./rooms/snapshot/mappers.js";
-import { forgetJoinedRoomInfo } from "./rooms/room-info.js";
+import {
+  forgetJoinedRoomInfo,
+  getJoinedRoomInfo,
+  joinedRoomInfoRemainingMs,
+  onJoinedRoomInfoChange,
+  roomInfoCacheKey,
+} from "./rooms/room-info.js";
 import { invalidateInFlightRoomReads } from "./rooms/in-flight-reads.js";
 import { emitToMainWindow } from "./window.js";
 import {
@@ -90,6 +97,17 @@ let activeRoomStream: {
   }>;
   bufferedSseFrameBytes: number;
   bufferedSseFrameOverflow: boolean;
+  /** The next check of the open room's join (see `checkOpenRoomJoin`). */
+  roomJoinTimer: NodeJS.Timeout | null;
+  /** Whether a connection of this stream delivered its handshake before. */
+  syncedOnce: boolean;
+  /**
+   * A connection opened that could not continue from this stream's own event
+   * cursor, and no handshake has come since. See `repairUnprovenConnectionStart`.
+   */
+  connectGapPending: boolean;
+  /** The durable message catch-up of the current connection ended without an error. */
+  connectCatchUpDone: boolean;
 } | null = null;
 
 const roomEventCursors = new Map<string, string>();
@@ -388,20 +406,45 @@ function repairMalformedRoomStreamFrame(
   roomIdentifier: string,
   eventCursor: string | null,
 ): void {
+  // The frame identified by eventCursor was not applied. Repair from the
+  // last known-good cursor; never bless the malformed frame as a boundary.
+  void eventCursor;
+  startRoomStreamGapRepair(roomIdentifier);
+}
+
+/**
+ * Ask the renderer for one authoritative room read and repair the durable
+ * messages, without a new cursor boundary of its own. A repair that is
+ * already pending is kept: its token still waits for that read.
+ *
+ * `messagesRepaired`: the caller knows that the durable messages are current
+ * (the catch-up of this connection just ended well, or the read is about the
+ * room itself and no event was missed), so only the room read is owed and no
+ * message request is sent.
+ *
+ * `supersede`: the cause is newer than a read that may already be on its way
+ * for the pending repair (a new connection, a changed room answer). That
+ * read cannot close it. The pending repair is replaced by one with a new
+ * token, which the renderer can close only with a read that begins now. The
+ * new repair keeps the cursor boundary the old one had reached.
+ */
+function startRoomStreamGapRepair(
+  roomIdentifier: string,
+  { messagesRepaired = false, supersede = false }: { messagesRepaired?: boolean; supersede?: boolean } = {},
+): void {
   const stream = activeRoomStream;
   if (!stream || !isCurrentRoomStream(stream) || stream.roomIdentifier !== roomIdentifier) return;
-  if (stream.pendingGapRepair) {
-    repairDurableMessagesAfterBrokerGap(stream, stream.pendingGapRepair.token);
+  const owed = stream.pendingGapRepair;
+  if (owed && !supersede) {
+    if (!messagesRepaired) repairDurableMessagesAfterBrokerGap(stream, owed.token);
     return;
   }
   const gapRepairToken = ++stream.gapRepairGeneration;
   stream.pendingGapRepair = {
     token: gapRepairToken,
-    // The frame identified by eventCursor was not applied. Repair from the
-    // last known-good cursor; never bless the malformed frame as a boundary.
-    cursorPresent: false,
-    cursor: null,
-    messagesRepaired: false,
+    cursorPresent: owed?.cursorPresent ?? false,
+    cursor: owed?.cursor ?? null,
+    messagesRepaired,
     snapshotRepaired: false,
   };
   emitRoomStreamEvent({
@@ -412,7 +455,44 @@ function repairMalformedRoomStreamFrame(
     verified: true,
     deliveryRepairToken: gapRepairToken,
   });
-  repairDurableMessagesAfterBrokerGap(stream, gapRepairToken);
+  if (!messagesRepaired) repairDurableMessagesAfterBrokerGap(stream, gapRepairToken);
+}
+
+/**
+ * The first handshake of a connection that could not continue from this
+ * stream's own event cursor.
+ *
+ * Such a connection delivers events from now on. What the room shows was read
+ * earlier (a copy kept while another room was open, a read that raced the
+ * connect, or nothing after a failed read), and the server holds no proof of
+ * what this client saw: it answers `gap: false` to a request without a cursor.
+ * So the start of the connection is a gap of its own: one room read after it,
+ * with a repair token, so a failed read is tried again until it lands.
+ *
+ * A reconnect of the same stream that sent its cursor is different: the
+ * server replays what came after the cursor, or reports the gap itself.
+ *
+ * Until 2026-11 the server's ": connected" comment had this effect by
+ * accident (it was read as a damaged frame), and the room's first read, its
+ * retry and the return to a room all came to depend on it. The 15-second
+ * ": heartbeat" had the same effect and must not: see `parseRoomStreamChunk`.
+ *
+ * The connection's own catch-up has just brought the durable messages up to
+ * date (frames wait for it), so only the room read is owed. A catch-up that
+ * failed leaves the messages to the usual repair.
+ */
+function repairUnprovenConnectionStart(
+  stream: NonNullable<typeof activeRoomStream>,
+  serverReportsGap: boolean,
+): void {
+  stream.syncedOnce = true;
+  if (!stream.connectGapPending) return;
+  stream.connectGapPending = false;
+  // A gap in this same handshake starts the same repair, with its cursor.
+  if (serverReportsGap) return;
+  // A room read that is on its way for an earlier repair began before this
+  // connection: it cannot say what happened while no connection was up.
+  startRoomStreamGapRepair(stream.roomIdentifier, { messagesRepaired: stream.connectCatchUpDone, supersede: true });
 }
 
 function handleRoomStreamFrame(
@@ -474,6 +554,14 @@ function handleRoomStreamFrame(
   }
 
   if (eventName === "room_sync") {
+    if (activeRoomStream?.roomIdentifier === roomIdentifier) {
+      // The room's canonical id first, so the repair below names both ids.
+      if (isValidStreamRoomIdentifier(payload.room_id)) {
+        activeRoomStream.canonicalRoomIdentifier = payload.room_id;
+      }
+      // Before the cursor of this handshake: it then waits for the room read.
+      repairUnprovenConnectionStart(activeRoomStream, payload.gap === true);
+    }
     const cursorPresent = Object.prototype.hasOwnProperty.call(payload, "event_cursor")
       || eventCursor !== null;
     const syncCursor = typeof payload.event_cursor === "string"
@@ -488,9 +576,6 @@ function handleRoomStreamFrame(
       stageOrApplyRoomEventCursor(roomIdentifier, true, syncCursor);
     }
     if (activeRoomStream?.roomIdentifier === roomIdentifier) {
-      if (isValidStreamRoomIdentifier(payload.room_id)) {
-        activeRoomStream.canonicalRoomIdentifier = payload.room_id;
-      }
       activeRoomStream.handshakeReceived = true;
       if (activeRoomStream.handshakeTimer) clearTimeout(activeRoomStream.handshakeTimer);
       activeRoomStream.handshakeTimer = null;
@@ -861,7 +946,7 @@ async function fetchRoomMessagePollPage(
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers({
     Accept: "application/json",
-
+    "User-Agent": DESKTOP_USER_AGENT,
   });
   if (storedAuth.token) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
@@ -987,7 +1072,7 @@ async function fetchLatestRoomMessagePage(
   signal: AbortSignal,
 ): Promise<void> {
   const storedAuth = await readStoredAuth();
-  const headers = new Headers({ Accept: "application/json" });
+  const headers = new Headers({ Accept: "application/json", "User-Agent": DESKTOP_USER_AGENT });
   if (storedAuth.token) headers.set("Authorization", `Bearer ${storedAuth.token}`);
   const response = await fetch(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
@@ -1084,7 +1169,7 @@ async function emitLatestRoomMessageWindow(
   stream: NonNullable<typeof activeRoomStream>,
 ): Promise<void> {
   const storedAuth = await readStoredAuth();
-  const headers = new Headers({ Accept: "application/json" });
+  const headers = new Headers({ Accept: "application/json", "User-Agent": DESKTOP_USER_AGENT });
   if (storedAuth.token) headers.set("Authorization", `Bearer ${storedAuth.token}`);
   const response = await fetch(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
@@ -1278,20 +1363,31 @@ function parseRoomStreamChunk(
     let eventName = "message";
     let eventCursor: string | null = null;
     const dataLines: string[] = [];
+    let hasField = false;
     for (const line of lines) {
       if (!line || line.startsWith(":")) continue;
       if (line.startsWith("event:")) {
+        hasField = true;
         eventName = line.slice("event:".length).trim() || "message";
         continue;
       }
       if (line.startsWith("id:")) {
+        hasField = true;
         eventCursor = line.slice("id:".length).trim() || null;
         continue;
       }
       if (line.startsWith("data:")) {
+        hasField = true;
         dataLines.push(line.slice("data:".length).trimStart());
       }
     }
+    // The server keeps the stream open with a comment (": connected" at the
+    // start, ": heartbeat" every 15 s). A frame of comments names no event, no
+    // cursor and no data: it is not an event and never a damaged one. Read as
+    // an empty event, each one started a gap repair and a full room reload.
+    // The repair a new connection needs is started on purpose, at its first
+    // handshake (`repairUnprovenConnectionStart`).
+    if (!hasField) continue;
     queueOrHandleRoomStreamFrame(stream, eventName, dataLines.join("\n"), eventCursor);
   }
 
@@ -1351,7 +1447,7 @@ async function openDesktopRoomStream(
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers({
     Accept: "text/event-stream",
-
+    "User-Agent": DESKTOP_USER_AGENT,
   });
   if (storedAuth.token) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
@@ -1359,6 +1455,10 @@ async function openDesktopRoomStream(
   if (stream.lastEventCursor) {
     requestHeaders.set("Last-Event-ID", stream.lastEventCursor);
   }
+  // Only a reconnect of this stream continues from a cursor the room on
+  // screen has followed. The first connection may carry a cursor remembered
+  // from an earlier visit; the room shown now can be older than that cursor.
+  const continuesFromOwnCursor = stream.syncedOnce && Boolean(stream.lastEventCursor);
 
   try {
     const streamParams = new URLSearchParams();
@@ -1379,6 +1479,10 @@ async function openDesktopRoomStream(
     }
 
     stream.retryMs = 1000;
+    // Kept until a handshake comes: a connection that ended before its
+    // handshake leaves the start of the next one unproven too.
+    if (!continuesFromOwnCursor) stream.connectGapPending = true;
+    stream.connectCatchUpDone = false;
     emitRoomStreamEvent({
       type: "open",
       roomIdentifier: stream.roomIdentifier,
@@ -1440,6 +1544,7 @@ async function openDesktopRoomStream(
     try {
       await requestDurableMessageRepair(stream);
       if (!isCurrentRoomStream(stream)) return;
+      stream.connectCatchUpDone = true;
       if (stream.pendingGapRepair) {
         stream.pendingGapRepair.messagesRepaired = true;
         commitCompletedGapRepair(stream);
@@ -1509,6 +1614,76 @@ async function openDesktopRoomStream(
   }
 }
 
+// The room open joins the room itself; the first check waits for that join.
+const OPEN_ROOM_JOIN_FIRST_CHECK_MS =
+  Number(process.env.LETAGENTS_OPEN_ROOM_JOIN_FIRST_CHECK_MS) > 0
+    ? Number(process.env.LETAGENTS_OPEN_ROOM_JOIN_FIRST_CHECK_MS)
+    : 30_000;
+const OPEN_ROOM_JOIN_CHECK_SLACK_MS = 1_000;
+const OPEN_ROOM_JOIN_RETRY_MS =
+  Number(process.env.LETAGENTS_OPEN_ROOM_JOIN_RETRY_MS) > 0
+    ? Number(process.env.LETAGENTS_OPEN_ROOM_JOIN_RETRY_MS)
+    : 60_000;
+
+function scheduleOpenRoomJoinCheck(
+  stream: NonNullable<typeof activeRoomStream>,
+  delayMs: number,
+): void {
+  if (!isCurrentRoomStream(stream) || stream.roomJoinTimer) return;
+  stream.roomJoinTimer = setTimeout(() => {
+    stream.roomJoinTimer = null;
+    void checkOpenRoomJoin(stream);
+  }, delayMs);
+}
+
+/**
+ * Repeat the join of the room that is open when the remembered answer ends
+ * (five minutes, see `getJoinedRoomInfo`).
+ *
+ * The join is the only thing that tells the server the person still has the
+ * room open (the room's member list shows when each person was last there),
+ * and the only place a new room name, role or focus state comes from: no
+ * stream event carries them. A changed answer asks for one room read through
+ * `onJoinedRoomInfoChange`; a refusal asks for one here, and that read shows
+ * why the room is closed.
+ *
+ * Until 2026-11 a full room reload every 15 seconds did both by accident
+ * (see `repairUnprovenConnectionStart`), also while the window was hidden.
+ * This check runs in the main process for the same reason.
+ */
+async function checkOpenRoomJoin(stream: NonNullable<typeof activeRoomStream>): Promise<void> {
+  if (!isCurrentRoomStream(stream)) return;
+  let nextCheckMs = OPEN_ROOM_JOIN_RETRY_MS;
+  try {
+    await getJoinedRoomInfo(stream.roomIdentifier, { create: false });
+    nextCheckMs = joinedRoomInfoRemainingMs(stream.roomIdentifier) + OPEN_ROOM_JOIN_CHECK_SLACK_MS;
+  } catch (error) {
+    // No answer or a server fault: the room stays as it is, and the check comes again.
+    if (
+      isCurrentRoomStream(stream)
+      && error instanceof DesktopApiError
+      && [401, 403, 404, 410].includes(error.status)
+    ) startRoomStreamGapRepair(stream.roomIdentifier, { messagesRepaired: true });
+  }
+  scheduleOpenRoomJoinCheck(stream, nextCheckMs);
+}
+
+// The server now describes the open room in another way: read the room once.
+onJoinedRoomInfoChange((roomIdentifiers) => {
+  const stream = activeRoomStream;
+  if (!stream || !isCurrentRoomStream(stream) || stream.localRoomIdentifier) return;
+  const open = new Set([stream.roomIdentifier, stream.canonicalRoomIdentifier].map(roomInfoCacheKey).filter(Boolean));
+  if (roomIdentifiers.some((identifier) => open.has(roomInfoCacheKey(identifier)))) {
+    // No event was missed: only the room read is owed, and what a pending
+    // repair still owes for its messages stays owed. A read on its way may
+    // have used the earlier answer, so it cannot close this.
+    startRoomStreamGapRepair(stream.roomIdentifier, {
+      messagesRepaired: stream.pendingGapRepair ? stream.pendingGapRepair.messagesRepaired : true,
+      supersede: true,
+    });
+  }
+});
+
 export async function startDesktopRoomStream(
   roomIdentifier: string,
   afterMessageId?: string | null,
@@ -1563,6 +1738,10 @@ export async function startDesktopRoomStream(
     bufferedSseFrames: [],
     bufferedSseFrameBytes: 0,
     bufferedSseFrameOverflow: false,
+    roomJoinTimer: null,
+    syncedOnce: false,
+    connectGapPending: false,
+    connectCatchUpDone: false,
   };
   const startingStream = activeRoomStream;
   startingStream.readyTimer = setTimeout(() => {
@@ -1634,6 +1813,7 @@ export async function startDesktopRoomStream(
   // `openDesktopRoomStream` brings up if/when SSE drops, and retires again on
   // reconnect — instead of running a second permanent transport per room.
   void openDesktopRoomStream(startingStream);
+  scheduleOpenRoomJoinCheck(startingStream, OPEN_ROOM_JOIN_FIRST_CHECK_MS);
   await startingStream.readyPromise;
 }
 
@@ -1669,5 +1849,9 @@ function stopActiveRoomStream(roomIdentifier?: string | null): void {
     clearTimeout(activeRoomStream.reconnectTimer);
   }
   clearCatchUpRetry(activeRoomStream);
+  if (activeRoomStream.roomJoinTimer) {
+    clearTimeout(activeRoomStream.roomJoinTimer);
+    activeRoomStream.roomJoinTimer = null;
+  }
   activeRoomStream = null;
 }

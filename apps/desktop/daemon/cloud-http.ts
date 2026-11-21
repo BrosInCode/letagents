@@ -21,6 +21,7 @@ import {
 import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
 import { ROOM_HISTORY_TURN_VIEW_LINES, roomHistoryTurnSummary } from "../../../shared/room-history-summary.mjs";
 import type { PeerReceiptResult } from "./queued-peer-deliveries.js";
+import { ROOM_POLL_FLOOR_HOLD_MS, RoomPollHold } from "./room-poll-hold.js";
 
 /** Exact self-receipt reporting for messages explicitly delivered in another turn. */
 export async function reportGroupedNoReply(input: {
@@ -43,10 +44,6 @@ export async function reportGroupedNoReply(input: {
 }
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
-// Public deployments commonly terminate idle upstream requests at 60 seconds.
-// Keep the daemon's individual observation requests below that boundary; the
-// delivery loop immediately opens the next poll, so this does not add latency.
-const SUPERVISED_ROOM_POLL_TIMEOUT_MS = 25_000;
 const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
 const LIVENESS_GRACE_MS = 30_000;
 export const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
@@ -386,6 +383,67 @@ export async function readRoomThread(input: {
   }
 }
 
+type RoomPollInput = Parameters<SupervisedDeliveryHttp["poll"]>[0];
+
+async function requestRoomPoll(request: typeof roomRequest, input: RoomPollInput, holdMs: number): Promise<SupervisedPollResponse> {
+  const query = new URLSearchParams({ timeout: String(holdMs) });
+  if (input.afterMessageId) query.set("after", input.afterMessageId);
+  const response = await request(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/poll?${query}`, {
+    headers: { authorization: `Bearer ${input.bearer}` },
+    signal: boundedCloudSignal(input.signal, holdMs + CLOUD_REQUEST_TIMEOUT_MS),
+  });
+  if (response.status === 401 || response.status === 403) {
+    throw new SupervisedRoomAuthorizationError(`Supervised room poll failed with HTTP ${response.status}.`, response.status);
+  }
+  if (!response.ok) throw new Error(`Supervised room poll failed with HTTP ${response.status}.`);
+  return await response.json() as SupervisedPollResponse;
+}
+
+/**
+ * The room poll of the delivery loop. The server answers as soon as a message
+ * arrives, and the loop opens the next poll at once. So on a healthy path the
+ * hold adds no latency: it only decides how often an idle agent asks. What a
+ * longer hold costs on a path that is not healthy is listed at RoomPollHold.
+ *
+ * A lane that is not observing yet (its first poll, or the first after a
+ * failure) asks for the floor hold, which works behind every proxy seen so
+ * far: what its owner reads about it waits for that one answer. After that
+ * the hold grows as far as the path to this room server is proven to allow
+ * (see RoomPollHold), and all agents of one server share that proof. A long
+ * hold that is cut is asked again once, with the same cursor and bearer and a
+ * hold that is proven, so the loop gets one normal answer. A failure that a
+ * floor hold would have met too is thrown as before.
+ *
+ * A local room answers from this process within half a second and ignores
+ * the hold, so its request stays as it was.
+ */
+export function supervisedRoomPoll(options: { nowMs?: () => number; request?: typeof roomRequest } = {}): SupervisedDeliveryHttp["poll"] {
+  const nowMs = options.nowMs ?? (() => performance.now());
+  const request = options.request ?? roomRequest;
+  const holds = new Map<string, RoomPollHold>();
+  return async (input) => {
+    if (isLocalRoomApi(input.apiUrl)) return requestRoomPoll(request, input, ROOM_POLL_FLOOR_HOLD_MS);
+    let hold = holds.get(input.apiUrl);
+    if (!hold) holds.set(input.apiUrl, hold = new RoomPollHold(nowMs));
+    let attempt = hold.start(!input.observing);
+    for (let retried = false; ; retried = true) {
+      const startedAtMs = nowMs();
+      try {
+        const page = await requestRoomPoll(request, input, attempt.holdMs);
+        hold.answered(attempt, nowMs() - startedAtMs);
+        return page;
+      } catch (error) {
+        // A refused bearer and the caller's own abort say nothing about the hold.
+        if (input.signal.aborted || error instanceof SupervisedRoomAuthorizationError) throw error;
+        const again = hold.failed(attempt, nowMs() - startedAtMs);
+        // One retry only: a second failure is shown, as any failed poll is.
+        if (!again || retried) throw error;
+        attempt = again;
+      }
+    }
+  };
+}
+
 /** The daemon talks to the room API only through the live worker bearer. */
 export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
@@ -522,19 +580,7 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
     }
     throw new Error("Task ownership inventory exceeded its bounded read budget.");
   },
-  async poll(input) {
-    const query = new URLSearchParams({ timeout: String(SUPERVISED_ROOM_POLL_TIMEOUT_MS) });
-    if (input.afterMessageId) query.set("after", input.afterMessageId);
-    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/poll?${query}`, {
-      headers: { authorization: `Bearer ${input.bearer}` },
-      signal: boundedCloudSignal(input.signal, SUPERVISED_ROOM_POLL_TIMEOUT_MS + 20_000),
-    });
-    if (response.status === 401 || response.status === 403) {
-      throw new SupervisedRoomAuthorizationError(`Supervised room poll failed with HTTP ${response.status}.`, response.status);
-    }
-    if (!response.ok) throw new Error(`Supervised room poll failed with HTTP ${response.status}.`);
-    return await response.json() as SupervisedPollResponse;
-  },
+  poll: supervisedRoomPoll(),
   async latest(input) {
     const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages?limit=1&before=latest`, {
       headers: { authorization: `Bearer ${input.bearer}` }, signal: boundedCloudSignal(input.signal),

@@ -10,6 +10,7 @@ import { roomAccessRefusal } from "../../../../shared/room-membership.mjs";
 import { endStoredAgentSession, getStoredAgentSession } from "../../local-state.js";
 import type { StoredAgentSessionState } from "../../local-state/types.js";
 import { encodeRoomIdPath } from "../../room-id.js";
+import { MCP_USER_AGENT } from "../../client-identity.js";
 import { getApiUrl, getLetagentsToken } from "./api.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import { currentSessionScope } from "./session-scope.js";
@@ -99,7 +100,7 @@ async function holdOnce(
   try {
     expectWithin(ANSWER_TIMEOUT_MS);
     const response = await fetch(processUrl(session), {
-      headers: { Accept: "text/event-stream", ...await authorization(session) },
+      headers: { Accept: "text/event-stream", "User-Agent": MCP_USER_AGENT, ...await authorization(session) },
       signal: attempt.signal,
     });
     if (response.status === 410) {
@@ -267,7 +268,7 @@ export async function announceProcessExit(): Promise<void> {
     controller.abort();
     await fetch(processUrl(session, "/exit"), {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...await authorization(session) },
+      headers: { "Content-Type": "application/json", "User-Agent": MCP_USER_AGENT, ...await authorization(session) },
       body: JSON.stringify({
         agent_session_id: session.session_id,
         agent_session_token: session.session_token,
