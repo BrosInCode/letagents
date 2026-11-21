@@ -96,7 +96,8 @@ function launch() {
     let ready = false;
     const timeout = setTimeout(() => {
       // Report where the app waits before the kill; a timeout with no evidence cannot tell a hang from a slow start.
-      void launchTimeoutEvidence(child.pid).then((evidence) => {
+      // A fault of the evidence step must not replace the launch failure or skip the kill.
+      void launchTimeoutEvidence(child.pid).catch((error) => `no evidence (${error instanceof Error ? error.message : String(error)})`).then((evidence) => {
         child.kill("SIGKILL");
         reject(new Error(`packaged Electron launch timed out after ${launchTimeoutMs} ms: ${output}\n${evidence}`));
       });
@@ -135,7 +136,7 @@ async function launchTimeoutEvidence(pid) {
   parts.push(`daemon.status: ${await request("daemon.status").then((status) => JSON.stringify(status), (error) => `no answer (${error instanceof Error ? error.message : String(error)})`)}`);
   const entries = await readdir(home, { recursive: true }).catch(() => []);
   parts.push(`files in the scratch home: ${entries.length}`);
-  for (const entry of entries.filter((name) => name.endsWith(".log")).slice(0, 8)) {
+  for (const entry of entries.filter((name) => name.endsWith(".log") || name.endsWith("daemon-lifecycle.jsonl")).slice(0, 8)) {
     const text = await readFile(join(home, entry), "utf8").catch(() => "");
     parts.push(`${entry} (last lines):\n${text.split("\n").slice(-40).join("\n")}`);
   }
