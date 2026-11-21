@@ -354,5 +354,53 @@ describe(
         }
       });
     });
+
+    test(
+      "4b. the daemon is already dead when the program produces its answer",
+      { skip: process.platform === "win32" && "needs a program that outlives its daemon; not shown for Windows" },
+      async () => {
+        // The same recording as scenario 4, in the order it was recorded in: the daemon dies while
+        // the program still works, and the program ends the turn with nobody to report it to.
+        const scenario = await startClaudeScenario("kill-recover");
+        const { harness, agent } = scenario;
+        await inScenario(scenario, async () => {
+          await startAgentAndWaitIdle(scenario);
+
+          scenario.hold("t2-assistant");
+          harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[survived-kill]" });
+          await scenario.reached(1, "t2-assistant");
+          await harness.waitForEntry(
+            agent.entryId,
+            (entry) => entry.room_agent_state?.turn.state === "responding" && Boolean(entry.room_agent_state.turn.provider_turn_id),
+            WAIT_MS,
+            "a responding turn that the daemon has recorded",
+          );
+          await harness.kill("SIGKILL");
+
+          // Now the program ends its turn. Its session file has the answer; no daemon saw it.
+          scenario.release("t2-assistant");
+          await scenario.emitted(1, "t2-assistant");
+          assert.equal(existsSync(join(scenario.planDir, "claim-1", "session-error.txt")), false);
+          assert.equal(harness.roomServer.publishedMessages(agent.roomId).length, 0);
+
+          const restarted = await harness.restart();
+          assert.ok(restarted.healthy);
+          await harness.reinstallCredentials(agent, restarted.generation);
+
+          await harness.roomServer.waitForPublishedMessages(agent.roomId, (messages) => messages.length >= 1, WAIT_MS);
+          await harness.waitForEntry(
+            agent.entryId,
+            (entry) => entry.observed_state === "idle" && entry.room_agent_state?.turn.state === "idle"
+              && entry.room_agent_state.inbox.pending_count === 0,
+            WAIT_MS,
+            "claude idle on a new start, with an empty queue",
+          );
+          assert.deepEqual(harness.roomServer.publishedMessages(agent.roomId).map((message) => message.text), ["survived-kill"]);
+          assert.deepEqual(scenario.sources(1), [null, "EDGE_SAY[survived-kill]"]);
+          assert.deepEqual(scenario.sources(2), [null]);
+          assert.equal(existsSync(join(scenario.planDir, "claim-3")), false);
+        });
+      },
+    );
   },
 );
