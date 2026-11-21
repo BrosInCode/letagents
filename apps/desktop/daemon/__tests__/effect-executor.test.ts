@@ -983,6 +983,56 @@ test("pump does not starve pending authority I/O, fences on lost authority, and 
     assert.ok(timerFiredAt < 250, `25ms timer must not be starved by pre-claim pump errors (took ${timerFiredAt}ms)`);
     assert.ok(claimChecks >= 1 && claimChecks <= 3, `pre-claim errors must back off instead of spinning (got ${claimChecks} checks)`);
     await backoffExecutor.fenceAndDrain();
+
+    // 4. Regression for ReviewAstra P2: enqueued effect whose concurrent direct runEffect()
+    //    hits one transient pre-claim authority error while the automatic pump skips the
+    //    active row must still recover via bounded timer retry and complete exactly once
+    //    without a manual pump or second enqueue, while timers stay responsive.
+    let transientAuthChecks = 0;
+    let transientHandlerCalls = 0;
+    let transientCompletedResolve!: () => void;
+    const transientCompleted = new Promise<void>((resolve) => { transientCompletedResolve = resolve; });
+    const transientExecutor = new EffectExecutor({
+      getDatabase: () => env.db,
+      currentDaemonGeneration: () => 1,
+      assertCurrent: async () => {
+        transientAuthChecks += 1;
+        // Call 1 is enqueue()'s prepare(); call 2 is the concurrent direct runEffect().
+        if (transientAuthChecks === 2) {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          throw new Error("one transient authority read error");
+        }
+      },
+      assertWriteFence: () => {},
+      isClosing: () => false,
+      defaultBackoff: { baseDelayMs: 30, maxDelayMs: 120, factor: 2 },
+    });
+    transientExecutor.registerHandler("queued_transient", {
+      retryable: false,
+      execute: async () => {
+        transientHandlerCalls += 1;
+        transientCompletedResolve();
+        return { status: "completed", outcome: { recovered: true } };
+      },
+    });
+    const queued = (await transientExecutor.enqueue({
+      agent_id: "agent_1", kind: "queued_transient", idempotency_key: "k-queued-transient", payload: { ok: true },
+    })).effect;
+    // Immediately start direct runEffect() while enqueue()'s scheduled pump is about to run.
+    let heartbeatOk = false;
+    const heartbeat = new Promise<void>((resolve) => setTimeout(() => { heartbeatOk = true; resolve(); }, 20));
+    await assert.rejects(() => transientExecutor.runEffect(queued.id), /one transient authority read error/);
+    // Without calling pumpNow() or enqueue() again, the bounded retry timer must complete the effect once.
+    await Promise.race([
+      Promise.all([transientCompleted, heartbeat]),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Enqueued effect stalled after transient direct runEffect error")), 2_000)),
+    ]);
+    await transientExecutor.fenceAndDrain();
+    assert.equal(heartbeatOk, true);
+    assert.equal(transientHandlerCalls, 1);
+    const finished = getEffect(env.db, queued.id)!;
+    assert.equal(finished.state, "completed");
+    assert.deepEqual(finished.outcome, { recovered: true });
   } finally {
     await env.cleanup();
   }

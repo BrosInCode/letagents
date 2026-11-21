@@ -384,9 +384,16 @@ export class EffectExecutor {
         this.activeById.delete(effectId);
         this.inFlight.delete(tracker);
         release();
-        if (settledWithoutError && !this.isFenced && !this.activePump) {
-          this.scheduleNextPump();
+        if (this.isFenced || this.activePump) return;
+        if (settledWithoutError) {
+          this.consecutivePumpErrors = 0;
+        } else {
+          // A direct execution failed before settling (for example a transient
+          // pre-claim authority error while a concurrent pump skipped this active
+          // row). Back off with a timer so queued work never stalls or spins.
+          this.consecutivePumpErrors += 1;
         }
+        this.scheduleNextPump();
       });
     this.activeById.set(effectId, execution);
     return execution;
