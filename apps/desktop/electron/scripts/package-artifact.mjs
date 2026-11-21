@@ -14,6 +14,7 @@ import {
   assertLockedMcpRuntimeContract,
   installLockedMcpRuntime,
 } from "./mcp-runtime-install.mjs";
+import { isPackagedBuildFile, packagedPackageJson } from "./packaged-imports.mjs";
 import {
   assertDesktopArchitecture,
   assertWindowsArchitecture,
@@ -192,15 +193,21 @@ if (profile.updater) await writeFile(
   `${JSON.stringify(createDesktopUpdaterConfig({ arch: desktopArch, platform: process.platform }), null, 2)}\n`,
 );
 await mkdir(app, { recursive: true });
-for (const directory of ["dist-electron", "dist-daemon", "dist-provider-runtime", "dist-renderer"]) {
+for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
   await cp(join(root, directory), join(app, directory), { recursive: true });
 }
+// The provider runtime build has type declarations for the compiler; the app runs only the code.
+await cp(join(root, "dist-provider-runtime"), join(app, "dist-provider-runtime"), {
+  recursive: true,
+  filter: async (source) => (await stat(source)).isDirectory() || isPackagedBuildFile(source),
+});
 // Protocol/domain contracts are repository-neutral, but compiled desktop
 // imports resolve them from Contents/shared in the packaged application.
 await cp(join(root, "..", "..", "shared"), join(contents, "shared"), { recursive: true });
-const artifactPackage = preview
+// The app gets the build output target of each import name only: see packaged-imports.mjs.
+const artifactPackage = packagedPackageJson(preview
   ? { ...packageJson, main: profile.main, letagentsPreview: previewIsolation.PREVIEW_PROFILE }
-  : packageJson;
+  : packageJson);
 await writeFile(join(app, "package.json"), `${JSON.stringify(artifactPackage, null, 2)}\n`);
 if (preview) {
   for (const file of ["preview-bootstrap.mjs", "preview-isolation.cjs"]) {

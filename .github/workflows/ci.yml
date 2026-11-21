@@ -766,11 +766,109 @@ jobs:
           npm --prefix apps/desktop run build:daemon
           npm --prefix apps/desktop run test:daemon:edge
 
+  # The packaged app, as a release ships it but unsigned: build the artifact,
+  # load each provider adapter with the packaged program, and start the app
+  # until its daemon answers. The other desktop jobs run source and
+  # development builds, which do not prove what the packaged app contains or
+  # how the daemon loads its code there. This job exists on the daemon rebuild
+  # branch; decide at the merge into staging if it stays.
+  #
+  # Hosted runners only: the smoke run starts the packaged app, which
+  # registers itself as the handler of letagents:// links before it exits.
+  desktop-packaged-smoke:
+    name: desktop-packaged-smoke (${{ matrix.system }})
+    needs: dependency-audit
+    if: inputs.purpose != 'room-ack-evaluation'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: macos
+            runner: macos-15
+          - system: windows
+            runner: windows-latest
+    env:
+      LETAGENTS_API_URL: http://127.0.0.1:9
+    steps:
+      - name: Use a scratch home and keep committed line endings
+        shell: bash
+        run: |
+          home="${RUNNER_TEMP//\\//}/home"
+          mkdir -p "${home}"
+          export HOME="${home}" USERPROFILE="${home}"
+          git config --global core.autocrlf false
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "${home}" "${home}" >> "${GITHUB_ENV}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+
+      - name: Verify dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures
+
+      - name: Install desktop dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify desktop dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
+
+      - name: Run verified dependency lifecycle scripts
+        id: setup
+        shell: bash
+        run: |
+          npm rebuild
+          npm rebuild --prefix apps/desktop
+          npm exec --prefix apps/desktop -- install-electron
+
+      # As the release workflow installs it. npm's Windows global layout keeps
+      # the package under node_modules; the packager bundles the real binary.
+      - name: Install the locked OpenCode runtime
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          set -euo pipefail
+          opencode_version=$(node -p "require('./apps/desktop/package.json').letagentsRuntime.openCodeVersion")
+          prefix="${RUNNER_TEMP//\\//}/opencode"
+          npm install --global --prefix "${prefix}" "opencode-ai@${opencode_version}"
+          if [ "${SYSTEM}" = "windows" ]; then
+            echo "LETAGENTS_OPENCODE_BIN=${prefix}/node_modules/opencode-ai/bin/opencode.exe" >> "${GITHUB_ENV}"
+          else
+            echo "LETAGENTS_OPENCODE_BIN=${prefix}/bin/opencode" >> "${GITHUB_ENV}"
+          fi
+
+      # One command builds the unsigned artifact and runs the smoke script.
+      # On Windows the packager builds the two native pieces itself and
+      # refuses bytes that do not match their seals.
+      - name: Build the packaged app and run its smoke check
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${LETAGENTS_OPENCODE_BIN:-}" ]; then
+            echo "The locked OpenCode runtime is not installed." >&2
+            exit 1
+          fi
+          npm --prefix apps/desktop run smoke:packaged-supervisor
+
   # The required "build" check. GitHub counts a skipped check as passing, so
   # this gate runs even after a failure or cancellation, and passes only when
   # every job it waits for succeeded.
   build:
-    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows, process-tree-windows, desktop-tests-windows, desktop-edge-tests-macos]
+    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows, process-tree-windows, desktop-tests-windows, desktop-edge-tests-macos, desktop-packaged-smoke]
     if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
