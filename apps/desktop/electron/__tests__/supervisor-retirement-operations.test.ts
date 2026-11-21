@@ -99,8 +99,6 @@ test("durable retirement fallback requires stopped lifecycle and attested daemon
   assert.equal(desktopRetirementDurablyCompleted(entry({ agentSessionId: "session_1", agentSessionBindingState: "active" }), true), false);
   assert.equal(desktopRetirementDurablyCompleted(entry({ observedState: "stopping" }), true), false);
   assert.equal(desktopRetirementDurablyCompleted(entry({ desiredState: "running" }), true), false);
-  assert.equal(desktopRetirementDurablyCompleted(entry({ deliveryMode: "mcp_polling" }), false), true,
-    "entries that never held a desktop host grant use daemon lifecycle proof alone");
 });
 
 test("retirement submission rejects malformed or cross-generation aliases", async () => {

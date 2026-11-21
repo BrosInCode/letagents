@@ -161,7 +161,7 @@ export abstract class CodexAdapterAttach extends CodexAdapterLaunch {
         connection.pid,
         ref.providerContinuationId,
         connection,
-        ref.lifecycleAuthorityMode ?? "typed_shadow",
+        ref.lifecycleAuthorityMode ?? "typed",
         client,
         launch,
         this.deps.now,

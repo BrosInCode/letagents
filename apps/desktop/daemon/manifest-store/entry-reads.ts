@@ -8,7 +8,6 @@
 import { sameProviderActionConnectionSnapshot } from "../provider-action-port.js";
 import { composeDaemonManifestEntry } from "../manifest-entry-projection.js";
 import { executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
-import { lifecycleAuthorityModeSchema, type LifecycleAuthorityMode } from "../lifecycle-authority-mode.js";
 import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
 import { type Row, type ActivityShape, type PendingTypedLifecycleEffect, type TypedLifecycleEffectInstallation, ManifestConflictError, storeMethods } from "./shared.js";
 import { deepFreeze } from "../deep-freeze.js";
@@ -109,7 +108,7 @@ export const entryReads = storeMethods({
     executionGenerationId: string;
     providerConnection: DaemonProviderConnection;
     configurationRevision: number;
-  }): Promise<LifecycleAuthorityMode | null> {
+  }): Promise<"typed" | null> {
     const snapshot = structuredClone(input);
     if (!snapshot.agentId || !snapshot.executionGenerationId
       || snapshot.providerConnection.pid === null || !snapshot.providerConnection.processIdentity
@@ -127,8 +126,38 @@ export const entryReads = storeMethods({
       WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=? AND provider=? AND config_revision=?`)
       .get(snapshot.agentId, snapshot.executionGenerationId, runtimeGenerationId,
         provider[snapshot.providerConnection.kind], snapshot.configurationRevision) as Row | undefined;
-    const authority = lifecycleAuthorityModeSchema.safeParse(row?.authority_mode);
-    return authority.success ? authority.data : null;
+    return row?.authority_mode === "typed" ? "typed" : null;
+  },
+
+  /**
+   * True when the exact persisted process birth is frozen under a retired
+   * pre-typed authority mode ("legacy" or "typed_shadow"), so live callers fail
+   * closed without launching a competitor and Stop uses exact-ref retirement.
+   */
+  async hasRetiredRuntimeLifecycleAuthority(input: {
+    agentId: string;
+    executionGenerationId: string;
+    providerConnection: DaemonProviderConnection;
+    configurationRevision: number;
+  }): Promise<boolean> {
+    const snapshot = structuredClone(input);
+    if (!snapshot.agentId || !snapshot.executionGenerationId
+      || snapshot.providerConnection.pid === null || !snapshot.providerConnection.processIdentity
+      || !Number.isSafeInteger(snapshot.configurationRevision) || snapshot.configurationRevision < 1) return false;
+    const provider = {
+      codex_app_server: "codex",
+      claude_cli: "claude-code",
+      cursor_cli: "cursor",
+      opencode_server: "open-model",
+    } as const;
+    const runtimeGenerationId = executionRuntimeStorageIdentity(snapshot.agentId,
+      snapshot.executionGenerationId, snapshot.providerConnection.kind,
+      snapshot.providerConnection.pid, snapshot.providerConnection.processIdentity);
+    const row = (await this.getDatabase()).prepare(`SELECT authority_mode FROM execution_runtime_generations
+      WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=? AND provider=? AND config_revision=?`)
+      .get(snapshot.agentId, snapshot.executionGenerationId, runtimeGenerationId,
+        provider[snapshot.providerConnection.kind], snapshot.configurationRevision) as Row | undefined;
+    return row?.authority_mode === "legacy" || row?.authority_mode === "typed_shadow";
   },
 
   /** Bounded pending tail; the durable state, not this read, owns retries. */
@@ -222,8 +251,7 @@ export const entryReads = storeMethods({
           || row.observer_runtime_state === "exited" || terminal?.terminal_json !== null))
         || (runtimeReady && !["starting", "recovering"].includes(entry?.observed_state ?? ""))
         || (runtimeFailure && completedStopTurn)
-        || entry?.desired_state !== "running" || entry.condition === "quarantined"
-        || (entry.delivery_mode ?? "mcp_polling") !== "daemon_inbox";
+        || entry?.desired_state !== "running" || entry.condition === "quarantined";
       const disposedAtMs = Math.max(Number(row.created_at_ms), exact?.disposedAtMs ?? pending.observedAtMs);
       if (definitivelyStale) {
         database.prepare(`UPDATE execution_lifecycle_effects SET state='superseded',disposed_at_ms=?

@@ -7,8 +7,6 @@ import { normalizeAgentAvatar } from "../../../../shared/agent-avatar.mjs";
  * A method name may be defined in only one module; store.ts throws on a duplicate.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { assertNoPollingActivation } from "../custodial-polling-activation.js";
-import { assertNoDeliveryDrain } from "../delivery-drain.js";
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "../reconciler-state.js";
 import { STATE_WATCH_ACTIVITY_SUMMARY_LIMIT } from "../state-watch-projection.js";
 import { projectDaemonManifestEntry, type DaemonManifestDomainProjection } from "../manifest-entry-projection.js";
@@ -30,7 +28,6 @@ export const projections = storeMethods({
       }
       this.insertProjection(database, projection, index);
       if (initializeNewMintStates && !existingIdentities.has(normalized.id)
-        && (normalized.delivery_mode ?? "mcp_polling") === "daemon_inbox"
         && Object.hasOwn(normalized, "last_worker_binding")) {
         const binding = normalized.last_worker_binding ?? null;
         run(database.prepare(`
@@ -57,9 +54,8 @@ export const projections = storeMethods({
   },
 
   preserveInspectorConfiguration(projection: DaemonManifestDomainProjection, row: Row): void {
-    // Custody, like Inspector revisions, is database-owned and cannot be
-    // replaced by the compatibility manifest's stale or caller-supplied fields.
-    projection.configuration.polling_contract = nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"];
+    // Inspector revisions are database-owned and cannot be replaced by the
+    // compatibility manifest's stale or caller-supplied fields.
     projection.configuration.provider = String(row.provider);
     projection.configuration.model = nullableString(row.model);
     projection.configuration.reasoning_effort = nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"];
@@ -78,12 +74,6 @@ export const projections = storeMethods({
 
   insertProjection(database: DatabaseSync, projection: DaemonManifestDomainProjection, sortOrder: number): void {
     const { identity, profile, membership, configuration, launch_intent: launch, runtime_deployment: runtime, lifecycle, readiness, turn_control_journal: turnJournal, retained_worker_binding: bindingRecord, reconciliation: reconciliationRecord } = projection;
-    // Legacy cutover preparation commits through all projection replacement
-    // paths; a preflight check alone would race native drain acceptance.
-    if (configuration.delivery_cutover) {
-      assertNoDeliveryDrain(database, identity.agent_id);
-      assertNoPollingActivation(database, identity.agent_id);
-    }
     run(database.prepare("INSERT INTO agent_identities VALUES (?, ?, ?, ?)"), identity.agent_id, identity.created_by, identity.created_at, sortOrder);
     run(database.prepare("INSERT INTO agent_profiles(agent_id, display_name, avatar_json) VALUES (?, ?, ?)"), identity.agent_id, profile.display_name, profile.avatar ? json(profile.avatar) : null);
     run(database.prepare("INSERT INTO agent_room_memberships(agent_id, room_id, local_room_id) VALUES (?, ?, ?)"), identity.agent_id, membership.room_id, membership.local_room_id ?? null);
@@ -94,7 +84,7 @@ export const projections = storeMethods({
         agent_id, provider, model, reasoning_effort, charter, permission_profile_id, config_revision, runtime_configuration_revision, delivery_mode, delivery_cutover_json,
         provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json, polling_contract, image_input, live_sharing
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null, configuration.polling_contract ?? null, configuration.image_input === true ? 1 : 0, liveSharingState(configuration.live_sharing));
+    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, "daemon_inbox", null, Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null, null, configuration.image_input === true ? 1 : 0, liveSharingState(configuration.live_sharing));
     const sourcePresent = Object.hasOwn(launch, "source_repo_path");
     run(database.prepare("INSERT INTO agent_launch_intents VALUES (?, ?, ?, ?)"), identity.agent_id, launch.desired_state, Number(sourcePresent), sourcePresent ? launch.source_repo_path ?? null : null);
 
@@ -131,7 +121,7 @@ export const projections = storeMethods({
       connection?.kind === "opencode_server" ? connection.serverAuthPath : null,
       connection?.pid ?? null, Number(processIdentityPresent), connection?.processIdentity ?? null,
       providerRef?.execution_generation_id ?? null,
-      providerRef?.custodial_launch_agent_session_id ?? null,
+      null,
       Number(workplacePresent), runtime.workplace_liveness?.state ?? null,
       runtime.workplace_liveness?.observed_at ?? null, runtime.workplace_liveness?.detail ?? null,
       Number(nativePresent), runtime.native_liveness?.state ?? null,
@@ -254,8 +244,6 @@ export const projections = storeMethods({
           provider_continuation_id: String(row.provider_continuation_id),
           provider_connection: providerConnection,
           execution_generation_id: String(row.provider_execution_generation_id),
-          ...(row.custodial_launch_agent_session_id != null
-            ? { custodial_launch_agent_session_id: String(row.custodial_launch_agent_session_id) } : {}),
         };
       }
     }
@@ -318,7 +306,7 @@ export const projections = storeMethods({
       identity: { agent_id: agentId, created_by: String(row.created_by), created_at: String(row.created_at) },
       profile: { agent_id: agentId, display_name: String(row.display_name), ...(row.avatar_json ? { avatar: normalizeAgentAvatar(parseJson(row.avatar_json)) } : {}) },
       membership: { agent_id: agentId, room_id: String(row.room_id), ...(row.local_room_id == null ? {} : { local_room_id: String(row.local_room_id) }) },
-      configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), ...(row.delivery_mode !== "mcp_polling" ? { delivery_mode: String(row.delivery_mode) as DaemonManifestEntry["delivery_mode"] } : {}), ...(row.delivery_cutover_json === null ? {} : { delivery_cutover: parseJson(row.delivery_cutover_json) }), ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
+      configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), delivery_mode: "daemon_inbox", ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
       launch_intent: { agent_id: agentId, desired_state: String(row.desired_state) as DaemonManifestEntry["desired_state"], ...(bool(row.source_repo_path_present) ? { source_repo_path: nullableString(row.source_repo_path) } : {}) },
       runtime_deployment: runtime,
       lifecycle: { agent_id: agentId, condition: String(row.condition) as DaemonManifestEntry["condition"], ...(bool(row.last_error_present) ? { last_error: nullableString(row.last_error) } : {}) },

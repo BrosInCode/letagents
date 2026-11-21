@@ -317,13 +317,12 @@ test("concurrent Claude attach authenticates one exact continuation, authority m
   const ref = {
     workAttemptId: handle.workAttemptId,
     providerContinuationId: handle.providerContinuationId!,
-    lifecycleAuthorityMode: "typed_shadow" as const,
+    lifecycleAuthorityMode: "typed" as const,
     providerConnection: handle.providerConnection,
   };
 
   const exact = fresh.attach(ref);
   assert.equal(await fresh.attach({ ...ref, providerContinuationId: "foreign-session" }), null);
-  assert.equal(await fresh.attach({ ...ref, lifecycleAuthorityMode: "typed" }), null);
   assert.equal(await fresh.attach({
     ...ref,
     providerConnection: { kind: "claude_cli", pid: handle.pid, processIdentity: birthIdentity(9999) },
@@ -416,12 +415,17 @@ test("result messages settle the observed state to idle and publish activity evi
   const handle = await adapter.spawn(spawnRequest());
   const child = harness.children[0]!;
 
-  child.emit({ type: "assistant", message: { content: [{ type: "text", text: "working on it" }] } });
+  const running = adapter.runRoomTurn(handle, { inboxItemId: "inbox-state", actionId: "action-state", sourceMessage: {}, activation: {} });
+  await flush();
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  const session_id = handle.providerContinuationId;
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
   await flush();
   assert.equal(handle.observedState(), "working");
 
-  child.emit({ type: "result", subtype: "success", result: "done", num_turns: 3 });
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: turnId, result: "done", num_turns: 3 });
   await flush();
+  assert.equal((await running).text, "done");
   assert.equal(handle.observedState(), "idle");
 });
 

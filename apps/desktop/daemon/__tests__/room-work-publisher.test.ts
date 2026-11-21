@@ -60,7 +60,7 @@ async function fixture(t: TestContext, provider: "codex" | "claude-code" | "curs
   const capture = new ExecutionShadowStore(db);
   const receipts = new RoomWorkPublicationStore(db);
   capture.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "runtime",
-    provider, authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
+    provider, authorityMode: "typed", configRevision: 1, createdAtMs: 100 });
   const observer = capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "runtime", observerRuntimeGenerationId: "runtime",
     sourceId: "source", daemonGenerationId: "1", expectedEpoch: 0, boundAtMs: 100 });
   const sent: RoomWorkPublishInput[] = [];
@@ -229,7 +229,7 @@ for (const gap of ["with", "without"] as const) {
       UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',ended_at_ms=200;
       UPDATE execution_turns SET state='lost',ended_at_ms=200`);
     f.capture.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 201 });
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 201 });
     f.capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "next-runtime", observerRuntimeGenerationId: "next-runtime",
       sourceId: "next-source", daemonGenerationId: "1", expectedEpoch: 2, boundAtMs: 201 });
     f.publisher.changed("agent");
@@ -278,7 +278,7 @@ for (const gap of ["with", "without"] as const) {
       UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',ended_at_ms=200;
       UPDATE execution_turns SET state='lost',ended_at_ms=200`);
     f.capture.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 201 });
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 201 });
     f.capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "next-runtime", observerRuntimeGenerationId: "next-runtime",
       sourceId: "next-source", daemonGenerationId: "1", expectedEpoch: 2, boundAtMs: 201 });
     f.publisher.changed("agent");
@@ -307,7 +307,7 @@ test("a message recorded after an agent's first ten thousand facts is published:
     UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',ended_at_ms=200;
     UPDATE execution_turns SET state='lost',ended_at_ms=200 WHERE state IN ('none','active')`);
   f.capture.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
-    provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 201 });
+    provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 201 });
   const next = f.capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "next-runtime", observerRuntimeGenerationId: "next-runtime",
     sourceId: "next-source", daemonGenerationId: "1", expectedEpoch: 2, boundAtMs: 201 });
 
@@ -717,7 +717,7 @@ test("live hints preserve recovery progress and a hint arriving during upload", 
   f.receipts.pin(oldOrigin, ["msg_1"]);
   const oldRecord = f.receipts.get(oldId, "room", "msg_1")!;
   f.capture.registerRuntime({ agentId: oldId, executionGenerationId: "old-generation", runtimeGenerationId: "old-runtime",
-    provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
+    provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 });
   const oldAttempt = f.capture.trackMessage({ agentId: oldId, roomId: "room", sourceMessageId: "msg_1",
     executionGenerationId: "old-generation", workspaceId: "old-workspace", createdAtMs: 100 });
   f.receipts.stage(oldRecord, { ...f.summary(), attemptId: oldAttempt });

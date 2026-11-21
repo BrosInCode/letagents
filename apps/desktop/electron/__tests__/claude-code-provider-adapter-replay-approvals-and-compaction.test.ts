@@ -360,30 +360,6 @@ for (const subtype of ["error_max_turns", "error_max_budget_usd", "error_max_str
   });
 }
 
-for (const subtype of ["error_during_execution", "error_max_unknown_limit", "error_max_turns_extra"]) {
-  test(`Claude ${subtype} retains legacy runtime failure handling`, async () => {
-    const harness = createHarness();
-    const stream: ProviderStreamEvent[] = [];
-    const adapter = new ClaudeCodeProviderAdapter({
-      dependencies: harness.dependencies,
-      streamSink: (event) => stream.push(event),
-    });
-    const handle = await adapter.spawn(spawnRequest());
-    harness.children[0]!.emit({
-      type: "result",
-      subtype,
-      is_error: true,
-      result: "native provider failure",
-    });
-    await flush();
-
-    assert.equal(handle.observedState(), "failed");
-    assert.equal(stream.at(-1)?.kind, "error");
-    assert.equal(stream.at(-1)?.method, `result/${subtype}`);
-    assert.equal(providerStreamLifecycle(stream.at(-1)!), "failed");
-  });
-}
-
 test("Claude typed observations correlate native turns and completed tools without inventing execution starts", async () => {
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
@@ -493,34 +469,6 @@ test("Claude typed observations correlate native turns and completed tools witho
   await flush();
   assert.deepEqual(await adapter.probeControl(handle), { state: "lost", controlEvidence: "process_exit" });
   assert.equal(events.at(-1)?.fact.domain, "runtime");
-});
-
-test("Claude shadow native terminal remains observable behind a legacy failed-state latch", async () => {
-  const harness = createHarness();
-  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
-  const events: NativeExecutionObservation[] = [];
-  adapter.onExecution(handle, (event) => events.push(event));
-  const running = adapter.runRoomTurn(handle, { inboxItemId: "latch", actionId: "latch", sourceMessage: {}, activation: {} });
-  const rejected = assert.rejects(running, /exited/);
-  await flush();
-  const child = harness.children[0]!;
-  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
-  child.emit({ type: "result", subtype: "error_during_execution", is_error: true, session_id: handle.providerContinuationId, user_message_uuid: "foreign" });
-  assert.equal(handle.observedState(), "failed");
-  child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId });
-  assert.equal(events.length, 2);
-  assert.deepEqual(events[0]!.fact, {
-    domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none",
-  });
-  const { nativeEventId, ...terminalFact } = events[1]!.fact;
-  assert.match(nativeEventId ?? "", /^nlc1:[A-Za-z0-9_-]{43}$/);
-  assert.deepEqual(terminalFact, { domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none",
-    providerContinuationId: handle.providerContinuationId, providerTurnId: turnId, turnOutcome: "completed" });
-  assert.equal(handle.observedState(), "failed", "shadow must not repair or rewrite legacy behavior");
-  assert.deepEqual(harness.signals, []);
-  child.resolveExit({ type: "exit", code: 1, signal: null });
-  await rejected;
 });
 
 test("Claude Ask before writes owns prompting policy and requires native exact-turn capability", async () => {

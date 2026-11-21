@@ -10,7 +10,6 @@ import type {
 } from "./supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry, DaemonRoomMoveRecord } from "./types.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
-import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import { restartsAfterNextFailure } from "./reconciler-policy.js";
 
 type DeliveryMode = "refresh" | "ensure" | "wake";
@@ -33,16 +32,11 @@ export type SupervisedDeliveryLifecyclePorts = {
     "activeTurn" | "ensureStarted" | "refresh" | "wake"
   > | null;
   manifest: {
-    unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
     getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
-    getAgentConfiguration(entryId: string): Promise<{ polling_contract?: "custodial_polling_v1" | null } | undefined>;
     pendingRoomMoves(entryId: string): Promise<DaemonRoomMoveRecord[]>;
   };
   roomMoves: {
     reconcile(move: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord>;
-  };
-  cutovers: {
-    start(entryId: string): Promise<void>;
   };
   inbox: Pick<
     SupervisedAgentInboxStore,
@@ -97,7 +91,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
       agentId: entry.id,
       roomId: entry.room_id,
       provider: entry.provider,
-      deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      deliveryMode: "daemon_inbox" as const,
       apiUrl: binding.api_url,
       agentSessionId: binding.agent_session_id,
       bearer: credential,
@@ -135,16 +129,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
     const delivery = this.ports.delivery;
     if (this.ports.isHandoffScheduled() || !delivery || !this.ports.supportsRoomTurns()) return;
     if (this.ports.isLifecycleActive(entryId)) return;
-    if (deliveryDrainBlocksRuntime(await this.ports.manifest.unresolvedDeliveryDrain(entryId))) return;
     const entry = await this.ports.manifest.getEntry(entryId);
-    // Legacy worker polling and daemon ingress are mutually exclusive across
-    // every crash boundary; complete the durable cutover first.
-    if (entry?.provider === "codex" && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling") {
-      const configuration = await this.ports.manifest.getAgentConfiguration(entry.id);
-      if (!configuration || configuration.polling_contract) return;
-      await this.ports.cutovers.start(entryId);
-      return;
-    }
     if (!entry || entry.delivery_mode !== "daemon_inbox") return;
     if (!this.ports.isOperationallyAdmitted(entryId)) return;
     if (entry.turn_control?.inbox_item_id
@@ -218,7 +203,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
       providerConnection: entry.provider_ref.provider_connection ?? null,
       executionGenerationId: binding.execution_generation_id,
       daemonGeneration: this.ports.currentDaemonGeneration(),
-      deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      deliveryMode: "daemon_inbox" as const,
       laneOutlook: () => this.laneOutlook(entryId),
     };
     if (!await this.ports.providerAuthority.isExactAuthority(agent)) return;

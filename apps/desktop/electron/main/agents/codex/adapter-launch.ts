@@ -3,40 +3,30 @@ import { CODEX_THREAD_HISTORY_MODE } from "../../../../../../shared/codex-thread
 import type { CodexAppServerLaunch } from "../codex-app-server.js";
 import { CODEX_GUEST_TOOL_OVERRIDES, codexGuestToolsLocked } from "../codex-guest-lock.js";
 import { apiUrl as desktopApiUrl } from "../../paths.js";
-import type { RpcNotification, TurnStartResult } from "../codex-rpc-client.js";
+import type { RpcNotification } from "../codex-rpc-client.js";
 import { buildCodexDevMcpEntryOverrides } from "../codex-dev-mcp-entry.js";
 import type { LetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
 import { attestProviderSpawnPolicy, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "../provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "../rental-child-environment.js";
 import { daemonStateDirEnvironment } from "../windows-child-environment.js";
-import { buildCodexStartPrompt, DEFAULT_CODEX_STOP_PHRASE, looksLikeInviteCode, makeCodexStopToken } from "../codex-start-prompt.js";
 import type { ProviderContinuationRef, ProviderSpawnRequest } from "../provider-adapter.js";
 import { errorMessage, observeFencedExit, terminateFreshLaunch } from "../provider-evidence.js";
 import { CODEX_APPROVAL_LEVEL_CONFIG_OVERRIDES, CODEX_READ_ONLY_CONFIG_OVERRIDES, type CodexThreadResult, assertCodexSandboxedApplied, assertCodexReviewerApplied, assertCodexThreadDirectory, codexAgentHomeNoticeSaidOnce, codexEffortMismatchNotice, codexEffortNoticeSaidOnce, codexPolicyIsSandboxed, codexProfileBase, codexSignInProfileFor, codexThreadAccess, codexThreadConfig, codexThreadEffort, codexThreadIsReadOnly, sameDirectory } from "./thread-access.js";
 import { CodexAdapterEvents } from "./adapter-events.js";
 import { CodexProviderHandle } from "./handle.js";
-import { boundedCodexTools, boundedLaunchContract, boundedMcpEnvironment, codexMcpWorkplaceConfigOverrides, codexTurnPolicy, custodialMcpOverride, custodialPollingTools, normalizeLaunchPolicy } from "./launch-contract.js";
+import { boundedCodexTools, boundedLaunchContract, boundedMcpEnvironment, boundedMcpOverride, codexMcpWorkplaceConfigOverrides, codexTurnPolicy, normalizeLaunchPolicy } from "./launch-contract.js";
 import { isMethodNotFound, requireLetAgentsWorkplace } from "./room-tools.js";
 
 export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
-  protected async resolveCustodialPollingRuntime(devEntryPath?: string): Promise<{ runtime: LetAgentsMcpRuntime; tools: string[] }> {
-    const runtime = this.deps.resolveMcpRuntime(devEntryPath);
-    const tools = custodialPollingTools(await this.deps.readMcpRuntimeContract(runtime.entryPath));
-    return { runtime, tools };
-  }
-
   protected async start(
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<CodexProviderHandle> {
-    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
-    if (lifecycleAuthorityMode === "typed" && req.deliveryMode !== "daemon_inbox") {
-      throw new Error("Typed Codex lifecycle authority requires daemon-inbox delivery.");
+    const deliveryMode = req.deliveryMode ?? "daemon_inbox";
+    if (deliveryMode !== "daemon_inbox") {
+      throw new Error("Codex room agents require daemon_inbox delivery.");
     }
-    if (req.pollingContract !== undefined && req.pollingContract !== "custodial_polling_v1") {
-      throw new Error("Unsupported Codex polling contract.");
-    }
-    const custodialPolling = req.pollingContract === "custodial_polling_v1";
+    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed";
     req = { ...req, supervisorWorkerSession: req.supervisorWorkerSession && { ...req.supervisorWorkerSession } };
     resumeRef = resumeRef && { ...resumeRef };
     const current = this.handles.get(req.workAttemptId);
@@ -51,17 +41,6 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
     const attestedPolicy = attestProviderSpawnPolicy("codex", req);
     const policy = normalizeLaunchPolicy(attestedPolicy);
     const turnPolicy = codexTurnPolicy(attestedPolicy);
-    // Read-only limits the room tools to a named list, and the background service holds that list
-    // only for an agent it delivers room messages to. An agent that collects its own messages calls
-    // the room server itself, so only Codex would hold the list there. No agent ran that way before:
-    // Read-only for Codex came with the list. So every launch of another kind is refused, and a
-    // launch that does not say its kind is taken as one, as the rest of this start takes it.
-    if (req.permissionProfileId?.trim() === "read_only" && req.deliveryMode !== "daemon_inbox") {
-      throw new Error(
-        "Read-only access is for a Codex agent that LetAgents delivers room messages to. This agent collects its own room messages, "
-        + "so LetAgents cannot hold it to the room tools that Read-only allows, and did not start it. Choose another access level for this agent.",
-      );
-    }
     const supervisorCoordinates = [
       req.supervisorEntryId,
       req.supervisorSocketPath,
@@ -72,27 +51,12 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
     if (hasSupervisorCoordinate && !hasCompleteSupervisorCoordinates) {
       throw new Error("Codex supervisor bridge coordinates are incomplete.");
     }
-    const boundedMcp = req.deliveryMode === "daemon_inbox" && hasCompleteSupervisorCoordinates;
-    let custodialRuntime: LetAgentsMcpRuntime | null = null;
-    let custodialTools: string[] = [];
-    let custodialApiUrl: string | null = null;
-    if (custodialPolling) {
-      if (req.deliveryMode !== "mcp_polling" || !hasCompleteSupervisorCoordinates
-        || !req.roomId.trim() || !req.workAttemptId.trim() || !req.supervisorWorkerSession?.agentSessionId.trim()
-        || !req.supervisorWorkerSession.apiUrl?.trim()) {
-        throw new Error("Custodial polling requires exact supervisor, worker, room and API coordinates.");
-      }
-      try {
-        const apiUrl = new URL(req.supervisorWorkerSession.apiUrl);
-        if (apiUrl.username || apiUrl.password || apiUrl.search || apiUrl.hash || apiUrl.pathname !== "/"
-          || (apiUrl.protocol !== "https:" && !(apiUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(apiUrl.hostname)))) throw new Error();
-        custodialApiUrl = apiUrl.origin;
-      } catch { throw new Error("Custodial polling requires an exact safe worker API origin."); }
-      ({ runtime: custodialRuntime, tools: custodialTools } = await this.resolveCustodialPollingRuntime(req.devMcpServerEntryPath));
-    }
+    const boundedMcp = hasCompleteSupervisorCoordinates;
+    let boundedRuntime: LetAgentsMcpRuntime | null = null;
+    let boundedTools: string[] = [];
     if (boundedMcp) {
-      custodialRuntime = this.deps.resolveMcpRuntime(req.devMcpServerEntryPath);
-      custodialTools = boundedCodexTools(await this.deps.readMcpRuntimeContract(custodialRuntime.entryPath, req.supervisorWorkerSession?.apiUrl));
+      boundedRuntime = this.deps.resolveMcpRuntime(req.devMcpServerEntryPath);
+      boundedTools = boundedCodexTools(await this.deps.readMcpRuntimeContract(boundedRuntime.entryPath, req.supervisorWorkerSession?.apiUrl));
     }
     if (hasCompleteSupervisorCoordinates) {
       await this.deps.writeSupervisorBridgeContext(req.cwd, {
@@ -106,7 +70,7 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
         } : {}),
       });
     }
-    const devOverrides = !custodialRuntime && req.devMcpServerEntryPath
+    const devOverrides = !boundedRuntime && req.devMcpServerEntryPath
       ? await buildCodexDevMcpEntryOverrides(req.devMcpServerEntryPath)
       : [];
     const supervisorEnvironment: Record<string, string> | undefined = req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId
@@ -124,28 +88,19 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
               LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: req.agentDisplayName.trim(),
             } : {}),
           } : {}),
-          ...(req.deliveryMode === "daemon_inbox" ? {
-            ...boundedMcpEnvironment,
-            ...(req.supervisorEntryId.startsWith("supervised_rental_") ? {
-              [rentalCredentialIsolationMarker]: "1",
-            } : {}),
-          } : { LETAGENTS_EXECUTION_PROFILE: custodialPolling ? "supervised_mcp_polling" : "interactive_desktop" }),
-          ...(custodialPolling ? {
-            LETAGENTS_API_URL: custodialApiUrl!,
-            LETAGENTS_SUPERVISED_BOUNDED_TURNS: "",
-            LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "",
-            LETAGENTS_TOKEN: "",
-            LETAGENTS_AGENT_SESSION_BEARER: "",
+          ...boundedMcpEnvironment,
+          ...(req.supervisorEntryId.startsWith("supervised_rental_") ? {
+            [rentalCredentialIsolationMarker]: "1",
           } : {}),
         } : undefined;
     const managedLaunchContract = boundedMcp && !req.devMcpServerEntryPath
-      ? boundedLaunchContract(req.supervisorWorkerSession?.apiUrl || desktopApiUrl, custodialTools)
+      ? boundedLaunchContract(req.supervisorWorkerSession?.apiUrl || desktopApiUrl, boundedTools)
       : undefined;
     // With the owner's own setup on, the app-server's environment carries none
     // of the room agent's coordinates, so the room's server must be the sealed
     // one that is given them in its own configuration.
     const homeHarness = spawnUsesHomeHarness("codex", req);
-    if (homeHarness && !custodialRuntime) {
+    if (homeHarness && !boundedRuntime) {
       throw new Error("Codex can use its owner's own setup only as a daemon-supervised room agent.");
     }
     // The access level itself decides what follows, not the shape of a policy:
@@ -156,10 +111,6 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
     // launch defines it, with the owner's sign-in file denied to every command. The level's own policy says which
     // profile (the attestation tied them together); on Windows only Read-only names one.
     const signInProfile = readOnlyLevel || approvalLevel ? codexSignInProfileFor(policy, req.workAttemptId) : null;
-    // Room tools are approved in advance only for an agent the daemon delivers
-    // room messages to. Such an agent's room tools run in the daemon, on its
-    // own room and workspace. An agent that collects its own messages runs them
-    // in the room server with the caller's `cwd`, so none of its tools is.
     const readOnlyRoomTools = boundedMcp && readOnlyLevel;
     // A guest (an agent given to someone else's room) runs Read-only with no tool that reaches this Mac.
     // Fail closed unless this exact Codex shows, with the guest switches and this model, that it offers none.
@@ -171,12 +122,14 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
     const serverUrl = await this.deps.resolveServerUrl();
     // The launch's own overrides, the room's server among them. Kept with the handle: a later check lists Codex's servers as this launch does.
     const launchOverrides = [
-      ...(custodialRuntime
-        ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, {
+      ...(boundedRuntime
+        ? [boundedMcpOverride(boundedRuntime.entryPath, req.cwd, {
             ...supervisorEnvironment!,
-            ...(boundedMcp ? { LETAGENTS_API_URL: req.supervisorWorkerSession?.apiUrl || desktopApiUrl,
-              LETAGENTS_TOKEN: "", LETAGENTS_AGENT_SESSION_BEARER: "", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "" } : {}),
-          }, custodialTools, readOnlyRoomTools)]
+            LETAGENTS_API_URL: req.supervisorWorkerSession?.apiUrl || desktopApiUrl,
+            LETAGENTS_TOKEN: "",
+            LETAGENTS_AGENT_SESSION_BEARER: "",
+            LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "",
+          }, boundedTools, readOnlyRoomTools)]
         : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides]),
       // Read-only only: no other access level's launch turns web search off.
       ...(readOnlyLevel ? CODEX_READ_ONLY_CONFIG_OVERRIDES : []),
@@ -338,12 +291,6 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
         sideEffects: "none",
       });
       this.handles.set(req.workAttemptId, handle);
-      if (custodialPolling) {
-        handle.custodyLaunchAgentSessionId = req.supervisorWorkerSession!.agentSessionId;
-        this.pollingLaunches.set(handle, { roomId: req.roomId, cwd: req.cwd, configurationRevision: req.configurationRevision,
-          agentSessionId: req.supervisorWorkerSession!.agentSessionId });
-      }
-      else this.nonPollingLaunches.add(handle);
       const exitPromise = observedLaunch.exited.then((exit) => this.observeExit(handle!, exit));
       this.exitPromises.set(handle, exitPromise);
       for (const notification of pendingNotifications.splice(0)) {
@@ -357,37 +304,7 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
         await this.emitTranscriptTail(handle);
       }
 
-      // Both custodial profiles return idle. Daemon-inbox starts work only
-      // after its inbox claim; custodial polling activation is a later action.
-      if (req.deliveryMode === "daemon_inbox" || custodialPolling) {
-        handle.setLiveState("idle");
-        return handle;
-      }
-
-      const prompt = buildCodexStartPrompt({
-        roomIdentifier: req.roomId,
-        joinedVia: looksLikeInviteCode(req.roomId) ? "join_code" : "join_room",
-        cwd: req.cwd,
-        stopPhrase: DEFAULT_CODEX_STOP_PHRASE,
-        token: makeCodexStopToken(),
-        suggestedDisplayName: req.agentDisplayName.trim(),
-        deadlineUtc: null,
-        maxMinutes: 0,
-        ...(resumeRef && req.supervisorWorkerSession
-          ? { resumeWorker: req.supervisorWorkerSession }
-          : {}),
-      });
-      const turn = await client.request<TurnStartResult>("turn/start", {
-        ...handle.requireTurnPolicy(),
-        threadId,
-        cwd: req.cwd,
-        input: [{ type: "text", text: prompt, text_elements: [] }],
-      });
-      if (!turn.turn?.id) {
-        throw new Error("Codex app-server did not return a turn id.");
-      }
-      handle.setLiveState("working");
-      void this.emitTranscriptTail(handle);
+      handle.setLiveState("idle");
       return handle;
     } catch (error) {
       if (handle) {

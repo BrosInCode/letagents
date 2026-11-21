@@ -81,7 +81,7 @@ export class ClaudeProviderHandle implements ProviderHandle {
     readonly workAttemptId: string,
     readonly pid: number | null,
     readonly providerContinuationId: string,
-    readonly lifecycleAuthorityMode: "legacy" | "typed_shadow" | "typed",
+    readonly lifecycleAuthorityMode: "typed",
     readonly providerConnection: ProviderConnectionRef,
     readonly child: ClaudeCliChild,
     readonly exitEvidence: Promise<ProviderProcessExit>,

@@ -464,21 +464,6 @@ test("retire fences invalid coordinates before lifecycle admission and always re
   ]);
 });
 
-test("retire of a non-inbox agent preserves identity without credential cleanup", async () => {
-  const h = harness();
-  h.setEntry(entry({ delivery_mode: "mcp_polling", desired_state: "running" }));
-
-  const result = await h.subject.retireAgent("agent-1", DAEMON_GENERATION);
-
-  assert.equal(result.outcome, "retired");
-  assert.deepEqual(h.events, [
-    "lifecycle:begin:agent-1",
-    "desired:stopped:agent-1",
-    "liveness:project:agent-1",
-    "lifecycle:release:agent-1",
-  ]);
-});
-
 test("retire requires the exact worker-session acknowledgement and cleans authority in order", async () => {
   const h = harness();
   h.setBinding(binding());

@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { CursorProviderAdapter, defaultLaunchTurn, type CursorProviderAdapterDependencies } from "../main/agents/cursor-provider-adapter.js";
+import { CursorProviderAdapter, defaultLaunchTurn, type CursorProviderAdapterDependencies, type CursorProviderAdapterOptions } from "../main/agents/cursor-provider-adapter.js";
 import { expectedCursorSandbox } from "./platform.js";
 import type {
+  ProviderHandle,
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
@@ -18,7 +19,6 @@ import {
   argValue,
   wrapperHostedMcpFixture,
   createHarness,
-  spawnRequest,
   daemonSpawnRequest,
   supervisedAdapter,
   spawnDaemonLane,
@@ -27,6 +27,35 @@ import {
   waitFor,
   withLoopAlive,
 } from "./cursor-provider-adapter.fixture.js";
+
+function daemonAdapter(
+  harness: ReturnType<typeof createHarness>,
+  options: Omit<CursorProviderAdapterOptions, "dependencies" | "supervisedProfileFactory"> & {
+    dependencies?: Partial<CursorProviderAdapterDependencies>;
+  } = {},
+): CursorProviderAdapter {
+  const base = supervisedAdapter(harness, options.stopGraceMs);
+  return new CursorProviderAdapter({
+    ...options,
+    dependencies: { ...harness.dependencies, ...options.dependencies },
+    supervisedProfileFactory: base.supervisedProfileFactory,
+  });
+}
+
+async function startDaemonTurn(
+  adapter: CursorProviderAdapter,
+  harness: ReturnType<typeof createHarness>,
+  request = daemonSpawnRequest(),
+): Promise<{
+  handle: ProviderHandle;
+  turn: ReturnType<CursorProviderAdapter["runRoomTurn"]>;
+  child: NonNullable<ReturnType<typeof createHarness>["children"][number]>;
+}> {
+  const handle = await spawnDaemonLane(adapter, harness, request);
+  const turn = adapter.runRoomTurn(handle, roomTurnRequest());
+  await waitFor(() => handle.observedState() === "working");
+  return { handle, turn, child: harness.children[0]! };
+}
 
 test("daemon Cursor correction refuses an unjournaled side turn and native resume itself launches no bootstrap", async () => {
   const harness = createHarness();
@@ -190,15 +219,14 @@ test("daemon Cursor rejects missing supervisor coordinates and preserves selecte
 
 test("a successful result is TURN-terminal: the lane goes idle with NO claimed process and is not attempt-terminal", async () => {
   const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
+  const adapter = supervisedAdapter(harness);
+  const { handle, turn, child } = await startDaemonTurn(adapter, harness);
   const terminals: ProviderTerminalPayload[] = [];
   adapter.onExit(handle, (terminal) => terminals.push(terminal));
 
-  const child = harness.children[0]!;
   child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "sess-cursor-1" });
   child.resolveExit({ type: "exit", code: 0, signal: null });
-  await flush();
+  await turn;
 
   assert.equal(handle.observedState(), "idle");
   assert.deepEqual(terminals, [], "a finished turn never becomes attempt-terminal evidence");
@@ -210,62 +238,33 @@ test("a successful result is TURN-terminal: the lane goes idle with NO claimed p
 
 test("Cursor missing wrapper cwd proves no native child was acquired", async () => {
   const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: { ...harness.dependencies, launchTurn: input => {
-    const child = defaultLaunchTurn({ ...input, deferStart: true });
-    // Join the alternate readiness rejection too: this case deliberately
-    // fails before a wrapper exists or can receive its start IPC message.
-    void child.prepared?.catch(() => {});
-    return child;
-  } } });
-  await assert.rejects(adapter.spawn(spawnRequest({ cwd: "/nonexistent-letagents-test/cursor-cwd" })), /did not expose a process id|was not found on this computer/);
+  const adapter = daemonAdapter(harness, {
+    dependencies: {
+      launchTurn: input => {
+        const child = defaultLaunchTurn({ ...input, deferStart: true });
+        // Join the alternate readiness rejection too: this case deliberately
+        // fails before a wrapper exists or can receive its start IPC message.
+        void child.prepared?.catch(() => {});
+        return child;
+      },
+    },
+  });
+  const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({ cwd: "/nonexistent-letagents-test/cursor-cwd" }));
+  await assert.rejects(adapter.runRoomTurn(handle, roomTurnRequest()), /did not expose a process id|was not found on this computer/);
   assert.equal(adapter.runtimeCustody("wa-cursor-1"), "absent");
   assert.deepEqual(harness.signals, []);
 });
 
-test("Cursor legacy poke retains custody while preparing a child before liveTurn installation", async () => {
-  const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
-  harness.children[0]!.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "sess-cursor-1" });
-  harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
-  await flush();
-  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent");
-  const launch = harness.dependencies.launchTurn;
-  let release!: () => void;
-  const prepared = new Promise<void>(resolve => { release = resolve; });
-  // Early birth lookup may be unavailable before wrapper readiness. Custody
-  // recording must not move the existing launch validation before prepared.
-  const liveDeps = (adapter as unknown as { deps: CursorProviderAdapterDependencies }).deps;
-  liveDeps.launchTurn = input => {
-    const child = launch(input);
-    harness.identities.set(child.pid!, undefined);
-    Object.defineProperty(child, "prepared", { value: prepared.then(() => {
-      harness.identities.set(child.pid!, birthIdentity(child.pid!));
-    }) });
-    return child;
-  };
-  const pending = adapter.poke(handle, "next message");
-  await flush();
-  assert.equal(handle.pid, null, "no public liveTurn is installed during preparation");
-  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown");
-  release();
-  await pending;
-  harness.children[1]!.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "sess-cursor-1" });
-  harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
-  await flush();
-  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent");
-});
-
 test("a turn child that dies WITHOUT its result event is attempt-terminal (crashed) and attach reports absent", async () => {
   const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
+  const adapter = supervisedAdapter(harness);
+  const { handle, turn, child } = await startDaemonTurn(adapter, harness);
   const terminals: ProviderTerminalPayload[] = [];
   adapter.onExit(handle, (terminal) => terminals.push(terminal));
 
   harness.identities.set(5200, null);
-  harness.children[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
-  await flush();
+  child.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+  await turn;
 
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]!.terminalCause, "crashed");
@@ -279,27 +278,34 @@ test("a turn child that dies WITHOUT its result event is attempt-terminal (crash
 
 test("stop during a live turn orders SIGTERM before the observed terminal and escalates to SIGKILL after grace", async () => {
   const graceful = createHarness();
-  const gracefulAdapter = new CursorProviderAdapter({ dependencies: graceful.dependencies, stopGraceMs: 200 });
-  const gracefulHandle = await gracefulAdapter.spawn(spawnRequest());
+  const gracefulAdapter = supervisedAdapter(graceful, 200);
+  const { handle: gracefulHandle, turn: gracefulTurn } = await startDaemonTurn(gracefulAdapter, graceful);
+  gracefulTurn.catch(() => {});
   const stopped = await gracefulAdapter.stop(gracefulHandle);
+  await assert.rejects(gracefulTurn, /ended before/);
   assert.deepEqual(graceful.signals.map((entry) => entry.signal), ["SIGTERM"]);
   assert.equal(stopped.terminalCause, "stopped");
 
   const stubborn = createHarness({ dieOnSigterm: false });
-  const stubbornAdapter = new CursorProviderAdapter({ dependencies: stubborn.dependencies, stopGraceMs: 30 });
-  const stubbornHandle = await stubbornAdapter.spawn(spawnRequest());
+  const stubbornAdapter = supervisedAdapter(stubborn, 30);
+  const { handle: stubbornHandle, turn: stubbornTurn } = await startDaemonTurn(stubbornAdapter, stubborn);
+  stubbornTurn.catch(() => {});
   const killed = await withLoopAlive(stubbornAdapter.stop(stubbornHandle));
+  await assert.rejects(stubbornTurn, /ended before/);
   assert.deepEqual(stubborn.signals.map((entry) => entry.signal), ["SIGTERM", "SIGKILL"]);
   assert.equal(killed.terminalCause, "killed");
 });
 
 test("live Cursor stop never signals a recycled wrapper PID or process group", async () => {
   const harness = createHarness({ dieOnSigterm: false });
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 10 });
-  const handle = await adapter.spawn(spawnRequest());
+  const adapter = supervisedAdapter(harness, 10);
+  const { handle, turn, child } = await startDaemonTurn(adapter, harness);
+  void turn.catch(() => {});
   harness.identities.set(handle.pid!, "unrelated-recycled-birth");
 
   const stopped = await adapter.stop(handle);
+  child.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+  await assert.rejects(turn, /ended before/);
 
   assert.deepEqual(harness.signals, []);
   assert.equal(stopped.terminalCause, "stopped");
@@ -497,12 +503,11 @@ test("Cursor Stop and turn control retain the exact child when bounded settlemen
 
 test("stop while idle needs no signal: nothing is running, the attempt ends immediately as stopped", async () => {
   const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
-  const child = harness.children[0]!;
+  const adapter = supervisedAdapter(harness);
+  const { handle, turn, child } = await startDaemonTurn(adapter, harness);
   child.emit({ type: "result", subtype: "success", is_error: false, session_id: "sess-cursor-1" });
   child.resolveExit({ type: "exit", code: 0, signal: null });
-  await flush();
+  await turn;
   assert.equal(handle.observedState(), "idle");
 
   const stopped = await adapter.stop(handle);
@@ -511,132 +516,89 @@ test("stop while idle needs no signal: nothing is running, the attempt ends imme
   assert.equal(handle.observedState(), "stopped");
 });
 
-test("poke delivers at the boundary: refused mid-turn, runs a --resume turn when idle", async () => {
-  const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
-
-  await assert.rejects(adapter.poke(handle, "mid-turn message"), /no channel into a running turn/);
-
-  const first = harness.children[0]!;
-  first.emit({ type: "result", subtype: "success", is_error: false, session_id: "sess-cursor-1" });
-  first.resolveExit({ type: "exit", code: 0, signal: null });
-  await flush();
-  assert.equal(handle.observedState(), "idle");
-
-  await adapter.poke(handle, "next room event");
-  assert.equal(harness.launches.length, 2, "boundary delivery runs a fresh per-turn child");
-  const args = harness.launches[1]!.args;
-  assert.ok(args.includes("--resume=sess-cursor-1"), "the next turn continues the recorded session without an option-alias ambiguity");
-  assert.equal(args[args.length - 1], "next room event");
-  assert.equal(handle.observedState(), "working");
-  assert.equal(handle.pid, 5201, "the new turn's live pid is claimed while it runs");
-});
-
-test("Cursor turn control fences only the live turn child and resumes the same session without attempt terminal", async () => {
-  const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
-  const terminals: ProviderTerminalPayload[] = [];
-  adapter.onExit(handle, (terminal) => terminals.push(terminal));
-  let exactTurnA = "";
-
-  const result = await withLoopAlive(adapter.controlTurn!(handle, "Apply the corrected direction.", {
-    checkpointTurnStarted: async (turnId) => { exactTurnA = turnId; },
-    markDispatched: async () => {},
-  }));
-
-  assert.deepEqual(result, {
-    capability: "restart_resume",
-    interrupted: true,
-    resumed: true,
-    state: "working",
-  });
-  assert.deepEqual(harness.signals, [{ pid: 5200, signal: "SIGTERM" }]);
-  assert.deepEqual(terminals, [], "turn-child interruption never becomes attempt-terminal evidence");
-  assert.equal(harness.launches.length, 2);
-  assert.ok(harness.launches[1]!.args.includes("--resume=sess-cursor-1"));
-  assert.equal(harness.launches[1]!.args.at(-1), "Apply the corrected direction.");
-  assert.equal(handle.providerContinuationId, "sess-cursor-1");
-  assert.equal(handle.observedState(), "working");
-  assert.ok(exactTurnA, "legacy A receives a durable control identity before its signal");
-
-  const staleRetry = await adapter.controlTurn!(handle, null, {
-    targetTurnId: exactTurnA,
-    checkpointTurnStarted: async () => { throw new Error("retry must not adopt B"); },
-    markDispatched: async () => { throw new Error("retry must not signal B"); },
-  });
-  assert.deepEqual(staleRetry, {
-    capability: "restart_resume", interrupted: false, resumed: false, state: "working",
-  });
-  assert.deepEqual(harness.signals, [{ pid: 5200, signal: "SIGTERM" }], "stale retry leaves successor B untouched");
-});
-
 test("resume presents the recorded session and a stranger session id mid-stream is a protocol violation", async () => {
   const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
+  const adapter = supervisedAdapter(harness);
   const handle = await adapter.resume(
     { workAttemptId: "wa-cursor-1", providerContinuationId: "sess-old" },
-    spawnRequest(),
+    daemonSpawnRequest(),
   );
-  assert.ok(harness.launches[0]!.args.includes("--resume=sess-old"));
+  const turn = adapter.runRoomTurn(handle, roomTurnRequest());
+  await waitFor(() => handle.observedState() === "working");
+  assert.equal(argValue(harness.launches[0]!.args, "--resume"), "sess-old");
   assert.equal(handle.providerContinuationId, "sess-old", "the SAME session continues");
+  harness.children[0]!.emit({ type: "result", subtype: "success", is_error: false, result: "ok", session_id: "sess-old" });
+  harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await turn;
 
   // A stranger session id in the init itself must not silently become the
   // continuation: the launch is REJECTED and the fenced turn child terminated.
   const wrong = createHarness({ sessionId: "sess-stranger" });
-  const wrongAdapter = new CursorProviderAdapter({ dependencies: wrong.dependencies });
-  await assert.rejects(wrongAdapter.resume(
+  const wrongAdapter = supervisedAdapter(wrong);
+  const wrongHandle = await wrongAdapter.resume(
     { workAttemptId: "wa-cursor-2", providerContinuationId: "sess-old" },
-    spawnRequest({ workAttemptId: "wa-cursor-2" }),
-  ), /violated the session contract/);
+    daemonSpawnRequest({ workAttemptId: "wa-cursor-2" }),
+  );
+  await assert.rejects(
+    wrongAdapter.runRoomTurn(wrongHandle, roomTurnRequest({ inboxItemId: "inbox-stranger", actionId: "action-stranger" })),
+    /violated the session contract/,
+  );
   assert.deepEqual(wrong.signals.map((entry) => entry.signal), ["SIGTERM"], "the mismatched turn child was fenced");
   assert.equal(wrong.children[0]!.alive, false);
 
   const aliasHarness = createHarness();
-  const aliasAdapter = new CursorProviderAdapter({ dependencies: aliasHarness.dependencies });
-  await assert.rejects(aliasAdapter.resume(
+  const aliasAdapter = supervisedAdapter(aliasHarness);
+  const aliasHandle = await aliasAdapter.resume(
     { workAttemptId: "wa-cursor-alias", providerContinuationId: "--yolo" },
-    spawnRequest({ workAttemptId: "wa-cursor-alias" }),
-  ), /not a valid Cursor session identity/);
+    daemonSpawnRequest({ workAttemptId: "wa-cursor-alias" }),
+  );
+  await assert.rejects(
+    aliasAdapter.runRoomTurn(aliasHandle, roomTurnRequest({ inboxItemId: "inbox-alias", actionId: "action-alias" })),
+    /not a valid Cursor session identity/,
+  );
   assert.equal(aliasHarness.launches.length, 0, "an option-shaped session id never reaches argv");
 });
 
 test("startup gates on a valid init, not arbitrary stdout bytes (msg_1758)", async () => {
   // Raw diagnostics BEFORE init are published as evidence but do not start the
-  // turn; the handle only returns once init supplies the session identity.
+  // turn; the handle only records the session once init supplies it.
   const harness = createHarness({ silent: true });
   const streamEvents: ProviderStreamEvent[] = [];
-  const adapter = new CursorProviderAdapter({
-    dependencies: harness.dependencies,
+  const adapter = daemonAdapter(harness, {
     streamSink: (event) => streamEvents.push(event),
     turnStartTimeoutMs: 500,
   });
-  const spawning = adapter.spawn(spawnRequest());
+  const handle = await spawnDaemonLane(adapter, harness);
+  const turn = adapter.runRoomTurn(handle, roomTurnRequest());
   await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
   child.emitRaw("cursor-agent: warming up model cache");
   await flush();
   child.emit({ type: "system", subtype: "init", session_id: "sess-late-init" });
-  const handle = await spawning;
+  await waitFor(() => handle.providerContinuationId === "sess-late-init");
   assert.equal(handle.providerContinuationId, "sess-late-init", "init, not raw bytes, supplies the continuation");
   assert.ok(streamEvents.some((event) => event.method === "stdout/raw"), "pre-init diagnostics still published");
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "ok", session_id: "sess-late-init" });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await turn;
 
   // Raw-only output that never becomes an init times out and fences the child.
   const rawOnly = createHarness({ silent: true });
-  const rawOnlyAdapter = new CursorProviderAdapter({ dependencies: rawOnly.dependencies, turnStartTimeoutMs: 60, stopGraceMs: 30 });
-  const rawSpawning = rawOnlyAdapter.spawn(spawnRequest({ workAttemptId: "wa-cursor-7" }));
-  rawSpawning.catch(() => {});
+  const rawOnlyAdapter = daemonAdapter(rawOnly, { turnStartTimeoutMs: 60, stopGraceMs: 30 });
+  const rawHandle = await spawnDaemonLane(rawOnlyAdapter, rawOnly, daemonSpawnRequest({ workAttemptId: "wa-cursor-7" }));
+  const rawTurn = rawOnlyAdapter.runRoomTurn(rawHandle, roomTurnRequest({ inboxItemId: "inbox-raw-only", actionId: "action-raw-only" }));
+  rawTurn.catch(() => {});
   await waitFor(() => rawOnly.children[0]?.isReleased === true);
   rawOnly.children[0]!.emitRaw("just noise, never an init");
-  await assert.rejects(rawSpawning, /no stream-json init within the startup bound/);
+  await assert.rejects(rawTurn, /no stream-json init within the startup bound/);
   assert.equal(rawOnly.children[0]!.alive, false, "the unobservable child was terminated and awaited");
 });
 
 test("only a genuine system/init with a session id satisfies readiness — other system events do not (msg_1807)", async () => {
   const harness = createHarness({ silent: true });
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
-  const spawning = adapter.spawn(spawnRequest());
+  const adapter = daemonAdapter(harness, { turnStartTimeoutMs: 500 });
+  const handle = await spawnDaemonLane(adapter, harness);
+  const turn = adapter.runRoomTurn(handle, roomTurnRequest());
   await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
 
@@ -644,30 +606,37 @@ test("only a genuine system/init with a session id satisfies readiness — other
   // the turn or become the continuation identity for readiness.
   child.emit({ type: "system", subtype: "status", session_id: "sess-early" });
   await flush();
+  assert.notEqual(handle.providerContinuationId, "sess-early");
+  assert.match(handle.providerContinuationId ?? "", /^cursor-pending:/);
 
   child.emit({ type: "system", subtype: "init", session_id: "sess-real-init" });
-  const handle = await spawning;
+  await waitFor(() => handle.providerContinuationId === "sess-real-init");
   assert.equal(handle.observedState(), "working", "readiness resolved only after the real init");
   assert.equal(handle.providerContinuationId, "sess-real-init");
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "ok", session_id: "sess-real-init" });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await turn;
 });
 
 test("an init that carries no session id is fenced immediately as a session-contract violation (msg_1807)", async () => {
   const harness = createHarness({ silent: true });
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
-  const spawning = adapter.spawn(spawnRequest());
-  spawning.catch(() => {});
+  const adapter = daemonAdapter(harness, { turnStartTimeoutMs: 500 });
+  const handle = await spawnDaemonLane(adapter, harness);
+  const turn = adapter.runRoomTurn(handle, roomTurnRequest());
+  turn.catch(() => {});
   await waitFor(() => harness.children[0]?.isReleased === true);
   harness.children[0]!.emit({ type: "system", subtype: "init" });
-  await assert.rejects(spawning, /violated the session contract/);
+  await assert.rejects(turn, /violated the session contract/);
   assert.deepEqual(harness.signals.map((entry) => entry.signal), ["SIGTERM"], "the sessionless child was fenced, not awaited to timeout");
   assert.equal(harness.children[0]!.alive, false);
 });
 
 test("a late Cursor protocol callback never signals a recycled wrapper PID", async () => {
   const harness = createHarness({ silent: true, dieOnSigterm: false });
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
-  const spawning = adapter.spawn(spawnRequest());
-  spawning.catch(() => {});
+  const adapter = daemonAdapter(harness, { turnStartTimeoutMs: 500 });
+  const handle = await spawnDaemonLane(adapter, harness);
+  const turn = adapter.runRoomTurn(handle, roomTurnRequest());
+  turn.catch(() => {});
   await waitFor(() => harness.children[0]?.isReleased === true);
   harness.identities.set(5200, "unrelated-recycled-birth");
 
@@ -675,48 +644,56 @@ test("a late Cursor protocol callback never signals a recycled wrapper PID", asy
 
   assert.deepEqual(harness.signals, [], "the late stream callback is fenced by exact process birth");
   harness.children[0]!.resolveExit({ type: "exit", code: 1, signal: null });
-  await assert.rejects(spawning, /violated the session contract/);
+  await assert.rejects(turn, /violated the session contract/);
 });
 
 test("a child that exits before init rejects the launch and records terminal evidence", async () => {
   const harness = createHarness({ silent: true });
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
-  const spawning = adapter.spawn(spawnRequest());
-  spawning.catch(() => {});
+  const adapter = daemonAdapter(harness, { turnStartTimeoutMs: 500 });
+  const handle = await spawnDaemonLane(adapter, harness);
+  const turn = adapter.runRoomTurn(handle, roomTurnRequest());
+  turn.catch(() => {});
   await waitFor(() => harness.children[0]?.isReleased === true);
   harness.identities.set(5200, null);
   harness.children[0]!.resolveExit({ type: "exit", code: 1, signal: null });
-  await assert.rejects(spawning, /exited before reporting its stream-json init/);
+  await assert.rejects(turn, /exited before reporting its stream-json init/);
 });
 
 test("a streaming-but-quiet turn stays working; a completely silent turn is fenced with no orphan", async () => {
   const streaming = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: streaming.dependencies, turnStartTimeoutMs: 40 });
-  const handle = await adapter.spawn(spawnRequest());
+  const adapter = daemonAdapter(streaming, { turnStartTimeoutMs: 40 });
+  const { handle, turn, child } = await startDaemonTurn(adapter, streaming);
   await flush();
   await flush();
   assert.equal(handle.observedState(), "working", "long quiet turns are not dead");
   assert.equal(streaming.signals.length, 0);
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "ok", session_id: "sess-cursor-1" });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await turn;
 
   const silent = createHarness({ silent: true });
-  const silentAdapter = new CursorProviderAdapter({ dependencies: silent.dependencies, turnStartTimeoutMs: 40, stopGraceMs: 30 });
-  await assert.rejects(silentAdapter.spawn(spawnRequest({ workAttemptId: "wa-cursor-3" })), /no stream-json init within the startup bound/);
+  const silentAdapter = daemonAdapter(silent, { turnStartTimeoutMs: 40, stopGraceMs: 30 });
+  const silentHandle = await spawnDaemonLane(silentAdapter, silent, daemonSpawnRequest({ workAttemptId: "wa-cursor-3" }));
+  await assert.rejects(
+    silentAdapter.runRoomTurn(silentHandle, roomTurnRequest({ inboxItemId: "inbox-silent", actionId: "action-silent" })),
+    /no stream-json init within the startup bound/,
+  );
   assert.equal(silent.children[0]!.alive, false, "the unobservable child was terminated and awaited");
 });
 
 test("post-release Cursor startup cleanup never signals a recycled wrapper PID", async () => {
   const harness = createHarness({ silent: true, dieOnSigterm: false });
-  const adapter = new CursorProviderAdapter({
-    dependencies: harness.dependencies,
+  const adapter = daemonAdapter(harness, {
     turnStartTimeoutMs: 30,
     stopGraceMs: 10,
   });
-  const spawning = adapter.spawn(spawnRequest());
-  spawning.catch(() => {});
+  const handle = await spawnDaemonLane(adapter, harness);
+  const turn = adapter.runRoomTurn(handle, roomTurnRequest());
+  turn.catch(() => {});
   await waitFor(() => harness.children[0]?.isReleased === true);
   harness.identities.set(5200, "unrelated-recycled-birth");
 
-  await assert.rejects(spawning, /no stream-json init within the startup bound/);
+  await assert.rejects(turn, /no stream-json init within the startup bound/);
   assert.deepEqual(harness.signals, [], "timeout cleanup revalidates the exact process birth before TERM");
 });
 
@@ -748,22 +725,23 @@ test("a recycled pid can neither authenticate an attach nor be signalled; unveri
 
 test("attach to a live checkpointed Cursor wrapper returns promptly without signalling or launching beside it", async () => {
   const harness = createHarness({ dieOnSigterm: false });
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 30 });
-  const handle = await adapter.spawn(spawnRequest());
+  const adapter = supervisedAdapter(harness, 30);
+  const { handle, turn, child } = await startDaemonTurn(adapter, harness);
 
-  const fresh = new CursorProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 30 });
+  const fresh = supervisedAdapter(harness, 30);
   await assert.rejects(fresh.attach({
     workAttemptId: "wa-cursor-1",
     providerContinuationId: handle.providerContinuationId!,
     providerConnection: { kind: "cursor_cli", pid: 5200, processIdentity: birthIdentity(5200) },
   }), /still running/);
   assert.deepEqual(harness.signals, [], "a successor never interrupts the exact checkpointed writer");
-  harness.children[0]!.emit({
+  child.emit({
     type: "result", subtype: "success", is_error: false,
     result: "durably completed", session_id: handle.providerContinuationId,
   });
   harness.identities.set(5200, null);
-  harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await turn;
   const attached = await fresh.attach({
     workAttemptId: "wa-cursor-1",
     providerContinuationId: handle.providerContinuationId!,
@@ -801,18 +779,17 @@ test("exact-reference stop signals only the verified Cursor wrapper birth", asyn
 
 test("a result line delivered after exit resolution still counts: the lane goes idle, never falsely terminal (msg_1780)", async () => {
   const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
+  const adapter = supervisedAdapter(harness);
+  const { handle, turn, child } = await startDaemonTurn(adapter, harness);
   const terminals: ProviderTerminalPayload[] = [];
   adapter.onExit(handle, (terminal) => terminals.push(terminal));
 
   // Simulate the drain race: exit evidence resolves first, the buffered final
   // result line lands one microtask later (as a still-flushing pipe would).
-  const child = harness.children[0]!;
   child.resolveExit({ type: "exit", code: 0, signal: null });
   await Promise.resolve();
   child.emit({ type: "result", subtype: "success", is_error: false, session_id: "sess-cursor-1" });
-  await flush();
+  await turn;
 
   assert.deepEqual(terminals, [], "a cleanly completed turn is never misread as a crash");
   assert.equal(handle.observedState(), "idle");
@@ -820,18 +797,17 @@ test("a result line delivered after exit resolution still counts: the lane goes 
 
 test("the proven usage-limit signature classifies as provider_quota, not crashed (msg_1708)", async () => {
   const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
+  const adapter = supervisedAdapter(harness);
+  const { handle, turn, child } = await startDaemonTurn(adapter, harness);
   const terminals: ProviderTerminalPayload[] = [];
   adapter.onExit(handle, (terminal) => terminals.push(terminal));
 
   // init + user emitted normally, then the stream stops with NO result, the
   // ActionRequiredError lands on stderr, and the process exits 1.
-  const child = harness.children[0]!;
   child.emit({ type: "user", session_id: "sess-cursor-1" });
   child.stderr = "ActionRequiredError: You've hit your usage limit. Switch to a different model or set a Spend Limit.";
   child.resolveExit({ type: "exit", code: 1, signal: null });
-  await flush();
+  await assert.rejects(turn, /usage limit/);
 
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]!.terminalCause, "provider_quota", "an account condition is never recorded as a crash");
@@ -840,30 +816,34 @@ test("the proven usage-limit signature classifies as provider_quota, not crashed
 
   // The same no-result death WITHOUT the quota signature stays a crash.
   const crash = createHarness();
-  const crashAdapter = new CursorProviderAdapter({ dependencies: crash.dependencies });
-  const crashHandle = await crashAdapter.spawn(spawnRequest({ workAttemptId: "wa-cursor-9" }));
+  const crashAdapter = supervisedAdapter(crash);
+  const { handle: crashHandle, turn: crashTurn, child: crashChild } = await startDaemonTurn(
+    crashAdapter,
+    crash,
+    daemonSpawnRequest({ workAttemptId: "wa-cursor-9" }),
+  );
   const crashTerminals: ProviderTerminalPayload[] = [];
   crashAdapter.onExit(crashHandle, (terminal) => crashTerminals.push(terminal));
-  crash.children[0]!.stderr = "segfault or something else entirely";
-  crash.children[0]!.resolveExit({ type: "exit", code: 1, signal: null });
-  await flush();
+  crashChild.stderr = "segfault or something else entirely";
+  crashChild.resolveExit({ type: "exit", code: 1, signal: null });
+  await crashTurn;
   assert.equal(crashTerminals[0]!.terminalCause, "crashed");
 });
 
 test("stream evidence is bounded, redacted, and ordered; non-JSON output keeps method identity", async () => {
   const harness = createHarness();
   const streamEvents: ProviderStreamEvent[] = [];
-  const adapter = new CursorProviderAdapter({
-    dependencies: harness.dependencies,
+  const adapter = daemonAdapter(harness, {
     streamSink: (event) => streamEvents.push(event),
   });
-  await adapter.spawn(spawnRequest());
-  const child = harness.children[0]!;
+  const { turn, child } = await startDaemonTurn(adapter, harness);
 
   child.emit({ type: "assistant", session_id: "sess-cursor-1", message: { role: "assistant", content: [{ type: "text", text: "hi room" }] }, api_key: "sk-nope" });
   child.emit({ type: "system", subtype: "init", session_id: "sess-cursor-1" });
   child.emitRaw("cursor-agent plain diagnostics line");
-  await flush();
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "sess-cursor-1" });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await turn;
 
   const assistant = streamEvents.find((event) => event.method === "assistant");
   assert.ok(assistant);
@@ -871,7 +851,7 @@ test("stream evidence is bounded, redacted, and ordered; non-JSON output keeps m
   assert.equal((assistant!.payload as { api_key?: unknown }).api_key, "[REDACTED]");
   const display = streamEvents.find((event) => event.method === "item/agentMessage/delta");
   assert.equal((display?.payload as { delta?: unknown } | undefined)?.delta, "hi room");
-  assert.match(String((display?.payload as { partId?: unknown } | undefined)?.partId), /^cursor:[0-9a-f-]+:assistant:\d+$/);
+  assert.match(String((display?.payload as { partId?: unknown } | undefined)?.partId), /^cursor:(?:cursor:)?[0-9a-f-]+:assistant:\d+$/);
   assert.ok(streamEvents.some((event) => event.method === "stdout/raw"), "non-JSON output preserved as bounded evidence");
   assert.equal(streamEvents.filter((event) => event.method === "system/init_duplicate").length, 1,
     "a duplicate same-session init remains diagnostics and cannot reset the display generation");
@@ -882,12 +862,10 @@ test("stream evidence is bounded, redacted, and ordered; non-JSON output keeps m
 test("a Cursor result terminalizes any tool card that never emitted its own completion", async () => {
   const harness = createHarness();
   const streamEvents: ProviderStreamEvent[] = [];
-  const adapter = new CursorProviderAdapter({
-    dependencies: harness.dependencies,
+  const adapter = daemonAdapter(harness, {
     streamSink: (event) => streamEvents.push(event),
   });
-  await adapter.spawn(spawnRequest());
-  const child = harness.children[0]!;
+  const { turn, child } = await startDaemonTurn(adapter, harness);
   child.emit({
     type: "tool_call", subtype: "started", call_id: "tool-open",
     tool_call: { readToolCall: { args: { path: "README.md" } } },
@@ -897,7 +875,8 @@ test("a Cursor result terminalizes any tool card that never emitted its own comp
     type: "result", subtype: "success", is_error: false, result: "done",
     session_id: "sess-cursor-1",
   });
-  await flush();
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await turn;
   const toolStatuses = streamEvents
     .filter((event) => event.method === "item/toolCall/updated")
     .map((event) => (event.payload as { status?: unknown }).status);
@@ -907,14 +886,12 @@ test("a Cursor result terminalizes any tool card that never emitted its own comp
 test("Cursor live display refuses a mismatched native tool terminal", async () => {
   const harness = createHarness();
   const streamEvents: ProviderStreamEvent[] = [];
-  const adapter = new CursorProviderAdapter({
-    dependencies: harness.dependencies,
+  const adapter = daemonAdapter(harness, {
     streamSink: (event) => streamEvents.push(event),
   });
-  const handle = await adapter.spawn(spawnRequest());
+  const { handle, turn, child } = await startDaemonTurn(adapter, harness);
   const executionEvents: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, (event) => executionEvents.push(event));
-  const child = harness.children[0]!;
 
   child.emit({
     type: "tool_call", subtype: "started", call_id: "tool-mismatch",
@@ -935,7 +912,8 @@ test("Cursor live display refuses a mismatched native tool terminal", async () =
     type: "result", subtype: "success", is_error: false, result: "done",
     session_id: "sess-cursor-1",
   });
-  await flush();
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await turn;
 
   const toolUpdates = streamEvents
     .filter((event) => event.method === "item/toolCall/updated")
@@ -955,14 +933,12 @@ test("Cursor live display refuses a mismatched native tool terminal", async () =
 test("Cursor live display leaves invalid native terminals open until the turn result interrupts them", async () => {
   const harness = createHarness();
   const streamEvents: ProviderStreamEvent[] = [];
-  const adapter = new CursorProviderAdapter({
-    dependencies: harness.dependencies,
+  const adapter = daemonAdapter(harness, {
     streamSink: (event) => streamEvents.push(event),
   });
-  const handle = await adapter.spawn(spawnRequest());
+  const { handle, turn, child } = await startDaemonTurn(adapter, harness);
   const executionEvents: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, (event) => executionEvents.push(event));
-  const child = harness.children[0]!;
   const session_id = "sess-cursor-1";
 
   child.emit({
@@ -982,7 +958,8 @@ test("Cursor live display leaves invalid native terminals open until the turn re
     tool_call: { shellToolCall: { result: { success: { exitCode: 0, shellId: 7 }, isBackground: true } } },
   });
   child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id });
-  await flush();
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await turn;
 
   assert.deepEqual(streamEvents
     .filter((event) => event.method === "item/toolCall/updated")
@@ -1004,19 +981,17 @@ test("Cursor live display leaves invalid native terminals open until the turn re
 test("a Cursor turn that exits without result still terminalizes every running tool card", async () => {
   const harness = createHarness();
   const streamEvents: ProviderStreamEvent[] = [];
-  const adapter = new CursorProviderAdapter({
-    dependencies: harness.dependencies,
+  const adapter = daemonAdapter(harness, {
     streamSink: (event) => streamEvents.push(event),
   });
-  await adapter.spawn(spawnRequest());
-  const child = harness.children[0]!;
+  const { turn, child } = await startDaemonTurn(adapter, harness);
   child.emit({
     type: "tool_call", subtype: "started", call_id: "tool-no-result",
     tool_call: { shellToolCall: { args: { command: "false" } } },
     session_id: "sess-cursor-1",
   });
   child.resolveExit({ type: "exit", code: 1, signal: null });
-  await flush();
+  await turn;
   const toolStatuses = streamEvents
     .filter((event) => event.method === "item/toolCall/updated")
     .map((event) => (event.payload as { status?: unknown }).status);

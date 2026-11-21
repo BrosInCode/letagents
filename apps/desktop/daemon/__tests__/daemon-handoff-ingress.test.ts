@@ -8,7 +8,6 @@ import { type DaemonActivityEvent, type DaemonManifestEntry } from "../types.js"
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import { unavailableLifecycleProjectionDiagnostics } from "../lifecycle-projection-ledger.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import {
   SupervisorDaemon,
@@ -392,23 +391,8 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
     const status = await daemonRequest(paths.socketPath, "daemon.status");
     assert.equal(status.ok, true);
     assert.equal((status.result as { generation: number }).generation, 1);
-    assert.deepEqual((status.result as { recovery_diagnostics: unknown }).recovery_diagnostics, {
-      daemon_inbox_wait_evidence_dependency: 0,
-      lifecycle_projection: unavailableLifecycleProjectionDiagnostics(),
-      lifecycle_capture_admission: { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable", "open-model": "unavailable" },
-      lifecycle_local_conformance_eligible: { codex: false, "claude-code": false, cursor: false, "open-model": false },
-    });
-    const providerStreams = (daemon as unknown as {
-      providerStreams: { acceptsLegacyWaitAuthority(entry: DaemonManifestEntry): boolean };
-    }).providerStreams;
-    assert.equal(providerStreams.acceptsLegacyWaitAuthority({ ...entry, delivery_mode: "daemon_inbox" }), false);
     const negotiated = await daemonRequest(paths.socketPath, "daemon.negotiate");
-    assert.deepEqual((negotiated.result as { recovery_diagnostics: unknown }).recovery_diagnostics, {
-      daemon_inbox_wait_evidence_dependency: 1,
-      lifecycle_projection: unavailableLifecycleProjectionDiagnostics(),
-      lifecycle_capture_admission: { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable", "open-model": "unavailable" },
-      lifecycle_local_conformance_eligible: { codex: false, "claude-code": false, cursor: false, "open-model": false },
-    });
+    assert.equal(negotiated.ok, true);
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, workspace_path: "/tmp/work" } });
     assert.equal(put.ok, true);
     const listed = await daemonRequest(paths.socketPath, "manifest.list");

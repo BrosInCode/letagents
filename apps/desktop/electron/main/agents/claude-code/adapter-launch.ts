@@ -41,7 +41,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
     if (req.deliveryMode !== "daemon_inbox") {
       throw new Error("Claude room agents require daemon_inbox delivery.");
     }
-    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
+    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed";
     const versionOutput = await this.deps.readVersion(this.claudeBin);
     const approvalProfileLabel = claudeApprovalProfileLabel(req.permissionProfileId);
     requireSupportedClaudeCodeVersion(versionOutput, approvalProfileLabel);

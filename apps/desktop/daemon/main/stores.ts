@@ -11,7 +11,6 @@ import { ReplyAttachmentSpool } from "../reply-attachment-spool.js";
 import { createLiveActivitySession, updateLiveActivitySession, withdrawLiveActivity } from "../cloud-http.js";
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { DaemonAuthority } from "../daemon-authority.js";
-import { DeliveryCutoverCoordinator } from "../delivery-cutover-coordinator.js";
 import { schedulerErrorDetail } from "../daemon-error-policy.js";
 import { DaemonStateWatch, STATE_WATCH_NOTIFICATION_COALESCE_MS } from "../daemon-state-watch.js";
 import { WorkDurabilityStore } from "../durability-store.js";
@@ -64,7 +63,6 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
   protected readonly roomTurnAttachments: RoomTurnAttachmentStager;
   protected readonly stateWatch: DaemonStateWatch;
   protected readonly entryConcurrency: EntryConcurrencyGate;
-  protected readonly deliveryCutovers: DeliveryCutoverCoordinator;
   protected readonly agentStreamRegistry: AgentStreamRegistry;
   protected readonly liveRoomShare: LiveRoomSharePublisher;
 
@@ -85,10 +83,6 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
     });
     this.entryConcurrency = new EntryConcurrencyGate({
       isHandoffScheduled: () => this.handoffScheduled || this.handoffDraining,
-    });
-    this.deliveryCutovers = new DeliveryCutoverCoordinator({
-      isHandoffScheduled: () => this.handoffScheduled,
-      drive: (entryId, signal) => this.deliveryCutoverExecution.drive(entryId, signal),
     });
     this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath, undefined, undefined, /* schemaPrepared */ true);
     this.activityWrites = new DaemonActivityWrites({ authority: this.authority, store: this.store,

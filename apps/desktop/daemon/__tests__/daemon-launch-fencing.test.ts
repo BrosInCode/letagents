@@ -26,6 +26,37 @@ import {
   provisionedWorkspace,
   entry, testDaemonEndpoint, REQUEST_ARRIVAL_MS } from "./helpers/daemon-fixture.js";
 
+const ownedLaunchDeliveryHttp = {
+  latest: async () => ({ messages: [] }),
+  poll: ({ signal }: { signal: AbortSignal }) => new Promise<{ messages: never[] }>((resolve) => {
+    if (signal.aborted) resolve({ messages: [] });
+    else signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+  }),
+  publish: async () => {},
+};
+
+const ownedLaunchGrantHttp = {
+  ...noWorkLeaseHttp,
+  createWorkerSession: async ({ agentInstanceId }: { agentInstanceId: string }) => ({
+    sessionId: `session_${agentInstanceId.replace(/:/g, "_")}`,
+    bearer: `bearer_${agentInstanceId}`,
+    bearerId: `bearer_id_${agentInstanceId}`,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  }),
+};
+
+async function admitOwnedLaunchEntry(daemon: SupervisorDaemon, socketPath: string, entryId: string, roomId: string): Promise<void> {
+  await admitDaemonInboxForProviderTest(daemon, entryId, roomId);
+  const generation = ((await daemonRequest(socketPath, "daemon.status")).result as { generation: number }).generation;
+  const installed = await daemonRequest(socketPath, "supervisor.install_host_grant", {
+    entry_id: entryId, room_id: roomId, agent_key: `owner/${entryId}`,
+    grant_id: `grant_${entryId}_${generation}`, supervisor_grant: `grant-secret-${entryId}`,
+    grant_generation: generation, api_url: "http://127.0.0.1:9", daemon_generation: generation,
+    host_id: "host-test", installation_id: "installation-test", grant_expires_at: "2099-01-01T00:00:00.000Z",
+  });
+  assert.equal(installed.ok, true, installed.error);
+}
+
 test("daemon restart without Electron credential delivery retains inbox work and projects a safe waiting state", async () => {
   const env = await fixture();
   const paths = {
@@ -133,8 +164,9 @@ test("direct manifest convergence shares the per-entry reconciliation lane", asy
     stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }),
     onExit: async () => () => {},
     onStream: async () => () => {},
+    onExecution: (providerHandle, listener) => runtimeReadySubscription(providerHandle, listener),
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedLaunchDeliveryHttp, ownedLaunchGrantHttp);
   let releaseTick!: () => void;
   let tickEntered!: () => void;
   const tickStarted = new Promise<void>((resolve) => { tickEntered = resolve; });
@@ -142,17 +174,21 @@ test("direct manifest convergence shares the per-entry reconciliation lane", asy
   try {
     await daemon.start();
     const internals = daemon as unknown as { serializeEntryTick: <T>(entryId: string, operation: () => Promise<T>) => Promise<T> };
-    const heldTick = internals.serializeEntryTick("serialized_direct_convergence", async () => { tickEntered(); await tickHold; });
-    await tickStarted;
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
-      ...entry, id: "serialized_direct_convergence", provider: "claude-code", observed_state: "absent",
+      ...entry, id: "serialized_direct_convergence", provider: "claude-code", desired_state: "paused", observed_state: "paused",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } })).ok, true);
+    await admitOwnedLaunchEntry(daemon, paths.socketPath, "serialized_direct_convergence", entry.room_id);
+    const heldTick = internals.serializeEntryTick("serialized_direct_convergence", async () => { tickEntered(); await tickHold; });
+    await tickStarted;
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: "serialized_direct_convergence", desired_state: "running",
+    })).ok, true);
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(spawnCount, 0, "manifest convergence cannot pass an in-flight reconciliation tick");
     releaseTick();
     await heldTick;
-    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "serialized provider launch");
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "idle", "serialized provider launch");
     assert.equal(spawnCount, 1);
   } finally {
     releaseTick?.();
@@ -482,13 +518,14 @@ test("stop fences a launch waiting on provider capabilities before generation cr
     stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
     onExit: async () => () => {}, onStream: async () => () => {},
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedLaunchDeliveryHttp, ownedLaunchGrantHttp);
   try {
     await daemon.start();
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: "stop_during_capabilities", provider: "claude-code", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
+    await admitOwnedLaunchEntry(daemon, paths.socketPath, "stop_during_capabilities", entry.room_id);
     await capabilitiesStarted;
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
       id: "stop_during_capabilities", desired_state: "stopped",
@@ -503,103 +540,6 @@ test("stop fences a launch waiting on provider capabilities before generation cr
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
-});
-
-test("provider delivery capabilities block mismatches while legacy omissions remain compatible", async () => {
-  const runCase = async (
-    id: "delivery_mode_mismatch" | "legacy_delivery_capabilities",
-    deliveryModes: ReadonlyArray<"mcp_polling" | "daemon_inbox"> | undefined,
-  ) => {
-    const env = await fixture();
-    const paths = {
-      lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
-      manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
-      attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
-    };
-    const workspace = await provisionedWorkspace(env.root, id);
-    const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
-    const attempt = await durability.createAttempt({
-      taskId: id,
-      leaseId: id,
-      leaseEpoch: 0,
-      workspacePath: workspace.path,
-      workAttemptId: workspace.id,
-    });
-    await durability.close();
-    const handle = {
-      workAttemptId: attempt.work_attempt_id,
-      pid: 4401,
-      providerContinuationId: `${id}-continuation`,
-      observedState: "working" as const,
-    };
-    let spawns = 0;
-    const capabilities = {
-      resume: false,
-      midTurnInjection: false,
-      transcriptAccess: true,
-      permissionPromptBridging: false,
-      survivesRestart: true,
-      ...(deliveryModes ? { deliveryModes } : {}),
-    };
-    if (!deliveryModes) {
-      assert.equal(Object.hasOwn(capabilities, "deliveryModes"), false, "the legacy capability really omits the new field");
-    }
-    const port: ProviderActionPort = {
-      capabilities: async () => capabilities,
-      spawn: async () => { spawns += 1; return handle; },
-      attach: async () => null,
-      attachAction: async () => ({ state: "absent" }),
-      resume: async () => { throw new Error("fresh compatibility launch must not resume"); },
-      poke: async () => {},
-      stop: async () => ({
-        endedAt: new Date().toISOString(),
-        exitCode: 0,
-        signal: null,
-        terminalCause: "stopped",
-        providerContinuationId: handle.providerContinuationId,
-      }),
-      onExit: async () => () => {},
-      onStream: async () => () => {},
-    };
-    const daemon = new SupervisorDaemon(paths, "darwin", port, true);
-    try {
-      await daemon.start();
-      await daemonRequest(paths.socketPath, "manifest.put", { entry: {
-        ...entry,
-        id,
-        provider: "claude-code",
-        delivery_mode: "mcp_polling",
-        observed_state: "absent",
-        workspace_path: attempt.workspace_path,
-        work_attempt_id: attempt.work_attempt_id,
-      } });
-      if (deliveryModes) {
-        await eventually(async () => {
-          const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
-          return current?.observed_state === "failed" && current.condition === "coordination_blocked";
-        }, "incompatible provider delivery mode rejection");
-        const blocked = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
-        assert.match(blocked.last_error ?? "", /Claude Code does not support mcp_polling room delivery/);
-        const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
-        assert.equal(result.execution_generations.length, 0, "an incompatible adapter cannot create a durable generation");
-        assert.equal(spawns, 0, "an incompatible adapter cannot reach provider dispatch");
-      } else {
-        await eventually(async () => {
-          const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
-          return current?.observed_state === "working";
-        }, "legacy provider capability launch");
-        const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
-        assert.equal(result.execution_generations.length, 1, "an older adapter still creates the provider generation");
-        assert.equal(spawns, 1, "an older adapter still reaches provider dispatch");
-      }
-    } finally {
-      await daemon.stop().catch(() => undefined);
-      await env.cleanup();
-    }
-  };
-
-  await runCase("delivery_mode_mismatch", ["daemon_inbox"]);
-  await runCase("legacy_delivery_capabilities", undefined);
 });
 
 test("stop during grant mint and pause during capabilities both fence before provider dispatch", async () => {
@@ -644,18 +584,16 @@ test("stop during grant mint and pause during capabilities both fence before pro
       await daemon.start();
       await daemonRequest(paths.socketPath, "manifest.put", { entry: {
         ...entry, id, provider: boundary === "mint" ? "codex" : "claude-code",
-        delivery_mode: boundary === "mint" ? "daemon_inbox" : "mcp_polling", observed_state: "absent",
+        delivery_mode: "daemon_inbox", observed_state: "absent",
         workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
       } });
-      if (boundary === "mint") {
-        await admitDaemonInboxForProviderTest(daemon, id, entry.room_id);
-        const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
-        assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
-          entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: `grant-${id}`,
-          supervisor_grant: `${id}-grant`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
-          host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
-        })).ok, true);
-      }
+      await admitDaemonInboxForProviderTest(daemon, id, entry.room_id);
+      const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+        entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: `grant-${id}`,
+        supervisor_grant: `${id}-grant`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+        host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
+      })).ok, true);
       await boundaryStarted;
       assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: desiredState })).ok, true);
       releaseBoundary();
@@ -702,13 +640,14 @@ test("pause arriving during provider dispatch persists and fences the exact retu
     },
     onExit: async () => () => {}, onStream: async () => () => {},
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedLaunchDeliveryHttp, ownedLaunchGrantHttp);
   try {
     await daemon.start();
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: "pause_during_dispatch", provider: "claude-code", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
+    await admitOwnedLaunchEntry(daemon, paths.socketPath, "pause_during_dispatch", entry.room_id);
     await spawnStarted;
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
       id: "pause_during_dispatch", desired_state: "paused",
@@ -766,7 +705,7 @@ for (const survivesRestart of [true, false]) test(`handoff during provider dispa
       return () => {};
     }, onStream: async () => () => {},
   };
-  const first = new SupervisorDaemon(paths, "darwin", port, true);
+  const first = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedLaunchDeliveryHttp, ownedLaunchGrantHttp);
   let second: SupervisorDaemon | null = null;
   try {
     await first.start();
@@ -774,6 +713,7 @@ for (const survivesRestart of [true, false]) test(`handoff during provider dispa
       ...entry, id: "handoff_during_dispatch", provider: "claude-code", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
+    await admitOwnedLaunchEntry(first, paths.socketPath, "handoff_during_dispatch", entry.room_id);
     await spawnStarted;
     const handoff = first.waitForHandoff();
     const prepare = daemonRequest(paths.socketPath, "daemon.prepare_handoff");
@@ -797,8 +737,9 @@ for (const survivesRestart of [true, false]) test(`handoff during provider dispa
     assert.equal(stops, 0, "handoff preserves the provider process");
     assert.equal(exitRegistrations, survivesRestart ? 0 : 1, "surviving launches retain immediate handoff; non-surviving launches retain live custody through deferral");
 
-    second = new SupervisorDaemon(paths, "darwin", port, true);
+    second = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedLaunchDeliveryHttp, ownedLaunchGrantHttp);
     await second.start();
+    await admitOwnedLaunchEntry(second, paths.socketPath, "handoff_during_dispatch", entry.room_id);
     await eventually(async () => attaches === 1
       && (second as unknown as { liveHandles: Map<string, typeof returnedHandle> }).liveHandles.get("handoff_during_dispatch") === returnedHandle,
     "successor exact provider attach");
@@ -814,12 +755,8 @@ for (const survivesRestart of [true, false]) test(`handoff during provider dispa
     assert.equal(result.execution_generations[0]?.execution_generation_id, current.provider_ref?.execution_generation_id);
     assert.equal(result.execution_generations[0]?.terminal, null);
     assert.equal(spawns, 1);
-    // This legacy, non-grant fixture is terminal once idle. Its successor
-    // fences that exact installation only after attaching its observers.
-    assert.equal(stops, survivesRestart ? 0 : 1);
-    assert.deepEqual(stopActions, survivesRestart ? [] : [
-      `manifest:handoff_during_dispatch:reattached-terminal:${current.provider_ref?.execution_generation_id}`,
-    ]);
+    assert.equal(stops, 0);
+    assert.deepEqual(stopActions, []);
   } finally {
     releaseSpawn?.();
     await second?.stop().catch(() => undefined);
@@ -862,7 +799,7 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
     stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: returnedHandle.providerContinuationId }; },
     onExit: async () => { exitRegistrations += 1; return () => {}; }, onStream: async () => () => {},
   };
-  const first = new SupervisorDaemon(paths, "darwin", port, true);
+  const first = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedLaunchDeliveryHttp, ownedLaunchGrantHttp);
   let second: SupervisorDaemon | null = null;
   try {
     await first.start();
@@ -892,6 +829,7 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
       ...entry, id, provider: "claude-code", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
+    await admitOwnedLaunchEntry(first, paths.socketPath, id, entry.room_id);
     await commitStarted;
     const handoff = first.waitForHandoff();
     handoffRequested = true;
@@ -903,8 +841,9 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
     assert.equal(stops, 0);
     assert.equal(exitRegistrations, 0, "retiring daemon installs no callbacks after fallback persistence");
 
-    second = new SupervisorDaemon(paths, "darwin", port, true);
+    second = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedLaunchDeliveryHttp, ownedLaunchGrantHttp);
     await second.start();
+    await admitOwnedLaunchEntry(second, paths.socketPath, id, entry.room_id);
     await eventually(async () => attaches === 1, "successor attach after normal commit lost to handoff");
     const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: Array<{ execution_generation_id: string; terminal: unknown }> };
@@ -949,7 +888,7 @@ test("pause and stop at the normal post-dispatch commit fence the exact returned
       stop: async (handle) => { stopped.push(handle as typeof returnedHandle); return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
       onExit: async () => () => {}, onStream: async () => () => {},
     };
-    const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+    const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedLaunchDeliveryHttp, ownedLaunchGrantHttp);
     try {
       await daemon.start();
       const store = (daemon as unknown as { store: ManifestStore }).store;
@@ -966,6 +905,7 @@ test("pause and stop at the normal post-dispatch commit fence the exact returned
         ...entry, id, provider: "claude-code", observed_state: "absent",
         workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
       } });
+      await admitOwnedLaunchEntry(daemon, paths.socketPath, id, entry.room_id);
       await commitStarted;
       const control = daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: desiredState });
       await new Promise((resolve) => setTimeout(resolve, REQUEST_ARRIVAL_MS));
@@ -1013,7 +953,7 @@ test("fatal returned-handle journal and stop failure rejects handoff before ackn
     stop: async () => { stopEntered(); throw new Error("injected exact-stop failure"); },
     onExit: async () => () => {}, onStream: async () => () => {},
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedLaunchDeliveryHttp, ownedLaunchGrantHttp);
   try {
     await daemon.start();
     const store = (daemon as unknown as { store: ManifestStore }).store;
@@ -1022,6 +962,7 @@ test("fatal returned-handle journal and stop failure rejects handoff before ackn
       ...entry, id, provider: "claude-code", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
+    await admitOwnedLaunchEntry(daemon, paths.socketPath, id, entry.room_id);
     await stopStarted;
     await new Promise<void>((resolve) => setImmediate(resolve));
     await new Promise<void>((resolve) => setImmediate(resolve));

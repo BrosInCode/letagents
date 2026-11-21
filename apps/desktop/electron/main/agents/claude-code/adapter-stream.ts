@@ -122,9 +122,8 @@ export class ClaudeAdapterStream extends ClaudeAdapterBackgroundWork {
     // The line is published first: what it means for a turn that is held open comes after it.
     this.heldRoomTurnPublished(handle, backgroundWork);
     if (nativeLifecycle?.phase === "turn_terminal") this.handleCompactions.get(handle)?.clear();
-    const typedAuthority = handle.lifecycleAuthorityMode === "typed";
-    if (typedAuthority && nativeLifecycle?.phase === "turn_active") handle.state = "working";
-    if (typedAuthority && nativeLifecycle?.phase === "turn_terminal") handle.state = "idle";
+    if (nativeLifecycle?.phase === "turn_active") handle.state = "working";
+    if (nativeLifecycle?.phase === "turn_terminal") handle.state = "idle";
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
     // Claude names an API error on the assistant row that carries its text. The row comes before the
@@ -169,7 +168,6 @@ export class ClaudeAdapterStream extends ClaudeAdapterBackgroundWork {
         for (const resolve of waiters) resolve(message);
       }
       if (exactInterrupted) {
-        if (!typedAuthority) handle.state = "idle";
         this.publishActivity(handle, {
           source: "native_harness",
           method: streamMethod(message),
@@ -180,9 +178,8 @@ export class ClaudeAdapterStream extends ClaudeAdapterBackgroundWork {
         });
         return;
       }
-      if (isClaudeFailedResult(message) || (typedAuthority && exactTurnFailed)) {
+      if (isClaudeFailedResult(message) || exactTurnFailed) {
         const turnLimited = isClaudeTurnLimitResult(message);
-        if (!typedAuthority) handle.state = turnLimited || exactTurnFailed ? "idle" : "failed";
         this.publishActivity(handle, {
           source: "native_harness",
           method: streamMethod(message),
@@ -193,7 +190,6 @@ export class ClaudeAdapterStream extends ClaudeAdapterBackgroundWork {
         });
         return;
       }
-      if (!typedAuthority) handle.state = "idle";
       this.publishActivity(handle, {
         source: "native_harness",
         method: streamMethod(message),
@@ -205,7 +201,6 @@ export class ClaudeAdapterStream extends ClaudeAdapterBackgroundWork {
       return;
     }
     if (type === "assistant" || type === "user" || type === "tool_use_summary") {
-      if (!typedAuthority) handle.state = "working";
       const text = type === "assistant" ? assistantTextOf(message) : null;
       this.publishActivity(handle, {
         source: "native_harness",

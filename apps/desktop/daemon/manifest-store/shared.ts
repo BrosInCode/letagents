@@ -30,7 +30,7 @@ export type CommittedActivityWrite = { agentId: string; event: DaemonActivityEve
  * index without payloads: enough to tell whether a copy of it is current.
  */
 export type ActivityShape = { count: number; sequenceTotal: number; firstSequence: number | null };
-export type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"]; delivery_mode: string; image_input: boolean; live_sharing: LiveSharingState };
+export type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; delivery_mode: "daemon_inbox"; image_input: boolean; live_sharing: LiveSharingState };
 export type LiveSharingState = "off" | "on" | "withdrawing";
 /** Anything but a known state reads as off. */
 export function liveSharingState(value: unknown): LiveSharingState {

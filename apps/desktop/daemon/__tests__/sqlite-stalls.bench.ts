@@ -74,7 +74,7 @@ function agentEntry(index: number): DaemonManifestEntry {
     id, room_id: "room_1", display_name: `Agent${index}`, provider: "codex", model: "gpt-5.6-codex",
     charter: "Work on the room's tasks.", desired_state: "running", observed_state: "working",
     condition: "none", last_error: null, permission_profile_id: "workspace-write",
-    provider_launch_policy: { deliveryMode: "mcp_polling" }, created_by: "user_1",
+    provider_launch_policy: {}, created_by: "user_1",
     created_at: "2026-10-19T00:00:00.000Z", source_repo_path: "/repo", workspace_path: `/worktrees/${id}`,
     work_attempt_id: `attempt_${index}`,
     provider_ref: {

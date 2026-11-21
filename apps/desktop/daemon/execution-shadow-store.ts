@@ -6,16 +6,13 @@ import { parseRoomAgentWorkSummary, ROOM_WORK_OPERATION_OUTCOMES, type RoomAgent
 
 import { combineSideEffects, executionIdentity as id, ExecutionProtocolError, nativeTurnIdentity, parseExecutionFact, type ExecutionFact, type SideEffectState } from "./execution-protocol.js";
 import { emptyExecutionProjection, reduceParsedExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
-import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema, type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
 import { executionRecordWindowStart, hasRuntimeRecoveryBoundary, recoveredRuntime, runtimeRecoveryStorageAvailable } from "./runtime-recovery-journal.js";
-import { LifecycleProjectionLedger, type LifecycleProjectionDiagnostics, type LifecycleProjectionObservation,
-  type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
 
 type Row = Record<string, string | number | null>;
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const runtimeInput = z.strictObject({
   agentId: id, executionGenerationId: id, runtimeGenerationId: id,
-  provider: z.enum(["codex", "claude-code", "cursor", "open-model"]), authorityMode: lifecycleAuthorityModeSchema,
+  provider: z.enum(["codex", "claude-code", "cursor", "open-model"]), authorityMode: z.literal("typed"),
   configRevision: time.min(1), createdAtMs: time,
 });
 const attemptInput = z.strictObject({ agentId: id, roomId: id, sourceMessageId: id, executionGenerationId: id, workspaceId: id, createdAtMs: time });
@@ -141,7 +138,7 @@ export function executionRuntimeStorageIdentity(
 export function materializeExecutionIdentity(database: DatabaseSync, value: {
   runtime: z.input<typeof runtimeInput>; message: z.input<typeof attemptInput>;
   turn: Omit<z.input<typeof turnInput>, "attemptId">;
-}): LifecycleAuthorityMode {
+}): "typed" {
   const runtime = validated(runtimeInput, value.runtime);
   const message = validated(attemptInput, value.message);
   const turn = validated(turnInput.omit({ attemptId: true }), value.turn);
@@ -160,7 +157,7 @@ export function materializeExecutionIdentity(database: DatabaseSync, value: {
 export function materializeRuntimeIdentity(
   database: DatabaseSync,
   value: z.input<typeof runtimeInput>,
-): LifecycleAuthorityMode {
+): "typed" {
   const input = validated(runtimeInput, value);
   if (!database.isTransaction) throw new ExecutionProtocolError("identity_mismatch");
   return materializeRuntime(database, input);
@@ -178,7 +175,7 @@ function insertIdentity(database: DatabaseSync, table: string, fields: Record<st
     .run(...Object.values(fields));
 }
 /** First exact materialization freezes authority; later policy requests can only observe it. */
-function materializeRuntime(database: DatabaseSync, input: z.output<typeof runtimeInput>): LifecycleAuthorityMode {
+function materializeRuntime(database: DatabaseSync, input: z.output<typeof runtimeInput>): "typed" {
   if (!exactRow(database, "execution_generations", "execution_generation_id", input.executionGenerationId, { agent_id: input.agentId })) {
     insertIdentity(database, "execution_generations", { execution_generation_id: input.executionGenerationId, agent_id: input.agentId, created_at_ms: input.createdAtMs });
   }
@@ -187,13 +184,12 @@ function materializeRuntime(database: DatabaseSync, input: z.output<typeof runti
   const existing = database.prepare("SELECT * FROM execution_runtime_generations WHERE runtime_generation_id=?").get(input.runtimeGenerationId);
   if (existing) {
     if (Object.entries(fields).some(([column, expected]) => existing[column] !== expected)) throw new ExecutionProtocolError("identity_mismatch");
-    const authorityMode = lifecycleAuthorityModeSchema.safeParse(existing.authority_mode);
-    if (!authorityMode.success) throw new ExecutionProtocolError("identity_mismatch");
-    return authorityMode.data;
+    if (existing.authority_mode !== "typed") throw new ExecutionProtocolError("identity_mismatch");
+    return "typed";
   }
-  insertIdentity(database, "execution_runtime_generations", { ...fields, authority_mode: input.authorityMode, runtime_state: "starting",
+  insertIdentity(database, "execution_runtime_generations", { ...fields, authority_mode: "typed", runtime_state: "starting",
     control_state: "connecting", continuation_state: "available", created_at_ms: input.createdAtMs });
-  return input.authorityMode;
+  return "typed";
 }
 function materializeMessage(database: DatabaseSync, input: z.output<typeof attemptInput>): string {
   const attempt = database.prepare("SELECT attempt_id FROM execution_message_attempts WHERE agent_id=? AND room_id=? AND source_message_id=?")
@@ -237,10 +233,7 @@ export class ExecutionShadowStore {
   private cacheEpoch = 0;
   private cacheStamp: string | null = null;
   private schemaVersion: number | null = null;
-  private readonly lifecycleProjection: LifecycleProjectionLedger;
-  constructor(private readonly database: DatabaseSync) {
-    this.lifecycleProjection = new LifecycleProjectionLedger(database);
-  }
+  constructor(private readonly database: DatabaseSync) {}
 
   private transaction<T>(body: () => T): T {
     this.database.exec("BEGIN IMMEDIATE");
@@ -433,7 +426,7 @@ export class ExecutionShadowStore {
       ...Object.values(row));
   }
 
-  registerRuntime(value: z.input<typeof runtimeInput>): LifecycleAuthorityMode {
+  registerRuntime(value: z.input<typeof runtimeInput>): "typed" {
     const input = validated(runtimeInput, value);
     return this.transaction(() => materializeRuntimeIdentity(this.database, input));
   }
@@ -467,7 +460,7 @@ export class ExecutionShadowStore {
         return;
       }
       if (attempt.state !== "active") throw new ExecutionProtocolError("attempt_settled");
-      if (runtime.runtime_state === "exited" || !isTypedCaptureAuthority(runtime.authority_mode)
+      if (runtime.runtime_state === "exited" || runtime.authority_mode !== "typed"
         || this.row(runtimeRecoveryStorageAvailable(this.database) ? `SELECT 1 FROM execution_turns t WHERE t.agent_id=? AND t.state IN ('none','active','lost')
           AND NOT EXISTS (SELECT 1 FROM agent_runtime_recoveries r WHERE r.agent_id=t.agent_id
             AND r.runtime_generation_id=t.runtime_generation_id AND r.phase IN ('stopped','complete'))`
@@ -488,9 +481,7 @@ export class ExecutionShadowStore {
     const token = this.transaction((): ShadowObserver => {
       const subject = this.required("SELECT * FROM execution_runtime_generations WHERE agent_id=? AND runtime_generation_id=?", input.agentId, input.subjectRuntimeGenerationId);
       const observer = this.required("SELECT * FROM execution_runtime_generations WHERE agent_id=? AND runtime_generation_id=?", input.agentId, input.observerRuntimeGenerationId);
-      // Cursor recovery may observe a shadow-born turn from a typed-born child
-      // (or the reverse); each exact runtime keeps its own frozen authority.
-      if (observer.runtime_state === "exited" || !isTypedCaptureAuthority(observer.authority_mode) || !isTypedCaptureAuthority(subject.authority_mode)
+      if (observer.runtime_state === "exited" || observer.authority_mode !== "typed" || subject.authority_mode !== "typed"
         || observer.provider !== subject.provider) throw new ExecutionProtocolError("identity_mismatch");
       if (input.recovery) {
         this.required(`SELECT 1 FROM execution_turns WHERE turn_id=? AND agent_id=? AND execution_generation_id=?
@@ -694,9 +685,7 @@ export class ExecutionShadowStore {
         const operational = subjectRuntime.authority_mode === "typed"
           && observerRuntime.authority_mode === "typed"
           && effectKind !== "none";
-        const state = operational ? "pending"
-          : subjectRuntime.authority_mode === "typed_shadow" || observerRuntime.authority_mode === "typed_shadow"
-            ? "shadowed" : "applied";
+        const state = operational ? "pending" : "applied";
         this.insert("execution_lifecycle_effects", {
           fact_id: fact.factId,
           fact_sequence: journalSequence,
@@ -712,7 +701,6 @@ export class ExecutionShadowStore {
           disposed_at_ms: operational ? null : fact.observedAtMs,
         });
       }
-      this.recordLifecycleProjection(fact, retainedTurn, retainedRuntime);
       this.run("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?",
         fact.sourceSequence, fact.sourceSequence, fact.agentId);
       if (!replay && fact.domain === "runtime") {
@@ -755,37 +743,6 @@ export class ExecutionShadowStore {
       this.rememberBudget(fact.agentId, committed.budget);
     }
     return result;
-  }
-
-  recordLegacyLifecycle(value: LifecycleProjectionObservation): void {
-    this.lifecycleProjection.recordLegacy(value);
-  }
-
-  recordLifecycleProjectionUnavailable(provider: LifecycleProjectionProvider, count: number): void {
-    this.lifecycleProjection.recordUnavailable(provider, count);
-  }
-
-  lifecycleProjectionDiagnostics(): LifecycleProjectionDiagnostics {
-    return this.lifecycleProjection.diagnostics();
-  }
-
-  private recordLifecycleProjection(fact: ExecutionFact, retainedTurn: Row | undefined, retainedRuntime: Row | undefined): void {
-    if (fact.domain !== "turn" || fact.nativeEventId === undefined
-      || (fact.state !== "active" && fact.state !== "terminal") || !retainedTurn || !retainedRuntime) return;
-    const provider = String(retainedRuntime.provider);
-    if (!(["codex", "claude-code", "cursor", "open-model"] as const).includes(provider as LifecycleProjectionProvider)) return;
-    const generation = this.required(`SELECT workspace_id FROM execution_attempt_generations
-      WHERE attempt_id=? AND execution_generation_id=? AND agent_id=?`, retainedTurn.attempt_id,
-    fact.executionGenerationId, fact.agentId);
-    this.lifecycleProjection.recordTypedInCurrentTransaction({
-      agentId: fact.agentId,
-      provider: provider as LifecycleProjectionProvider,
-      workAttemptId: String(generation.workspace_id),
-      executionGenerationId: fact.executionGenerationId,
-      nativeEventId: fact.nativeEventId,
-      phase: fact.state === "active" ? "turn_active" : "turn_terminal",
-      state: fact.state === "active" ? "working" : "terminal",
-    });
   }
 
   /**

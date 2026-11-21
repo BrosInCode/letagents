@@ -63,17 +63,13 @@ export class CodexProviderAdapter extends CodexAdapterLifecycle implements Provi
     return boundedLaunchContract(input.apiUrl, tools);
   }
 
-  async preflightCustodialPolling(input: { devMcpServerEntryPath?: string }): Promise<void> {
-    await this.resolveCustodialPollingRuntime(input.devMcpServerEntryPath);
-  }
-
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
     return this.start(req, null);
   }
 
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
     ref = { ...ref, ...(ref.launchPolicy === undefined ? {} : { launchPolicy: codexTurnPolicy(ref.launchPolicy) }) };
-    const authorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
+    const authorityMode = ref.lifecycleAuthorityMode ?? "typed";
     const handle = this.handles.get(ref.workAttemptId);
     if (
       !handle ||
@@ -94,7 +90,7 @@ export class CodexProviderAdapter extends CodexAdapterLifecycle implements Provi
     if (pending) {
       if (
         pending.ref.providerContinuationId !== ref.providerContinuationId
-        || (pending.ref.lifecycleAuthorityMode ?? "typed_shadow") !== authorityMode
+        || (pending.ref.lifecycleAuthorityMode ?? "typed") !== authorityMode
         || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)
       ) return null;
       const attached = await pending.promise;

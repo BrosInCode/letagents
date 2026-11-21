@@ -356,38 +356,6 @@ test("an active retry presents its current phase while preserving the previous f
   }
 });
 
-test("uncertain legacy cutover overrides inbox and turn projection", () => {
-  const projected = projectRoomAgentManifestEntry(facts({
-    entry: {
-      ...entry,
-      delivery_mode: "mcp_polling",
-      delivery_cutover: {
-        work_attempt_id: "attempt_1",
-        execution_generation_id: "generation_1",
-        provider_continuation_id: "continuation_1",
-        provider_turn_id: "turn_uncertain",
-        phase: "uncertain",
-        error: "Active turn discovery timed out.",
-        updated_at: "2026-08-26T00:01:45.000Z",
-      },
-    },
-  }));
-
-  assert.deepEqual(projected.room_agent_state?.inbox, {
-    state: "blocked",
-    pending_count: 1,
-    blocked_by_message_id: null,
-    detail: "Daemon inbox cutover needs attention; legacy polling remains fenced. Active turn discovery timed out.",
-  });
-  assert.deepEqual(projected.room_agent_state?.turn, {
-    state: "failed",
-    inbox_item_id: null,
-    source_message_id: null,
-    provider_turn_id: "turn_uncertain",
-    detail: "Active turn discovery timed out.",
-  });
-});
-
 test("active continuation repair marks its receipt and prevents a model turn", () => {
   const blocked = receipt({
     state: "blocked",
@@ -416,35 +384,12 @@ test("active continuation repair marks its receipt and prevents a model turn", (
   assert.equal(projected.delivery_receipts?.[0]?.state, "restoring_conversation");
 });
 
-test("inbox projection preserves cutover, repair, credential, blocked, and queued precedence", () => {
+test("inbox projection preserves repair, credential, blocked, and queued precedence", () => {
   const blocked = receipt({
     state: "blocked",
     receipt_state: "blocked",
     last_error: "Delivery is blocked.",
   });
-  const cutoverEntry: DaemonManifestEntry = {
-    ...entry,
-    delivery_mode: "mcp_polling",
-    delivery_cutover: {
-      work_attempt_id: "attempt_1",
-      execution_generation_id: "generation_1",
-      provider_continuation_id: "continuation_1",
-      provider_turn_id: "turn_uncertain",
-      phase: "uncertain",
-      error: "Cutover is uncertain.",
-      updated_at: "2026-08-26T00:01:45.000Z",
-    },
-  };
-
-  const cutover = projectRoomAgentManifestEntry(facts({
-    entry: cutoverEntry,
-    credentialAvailable: false,
-    receipts: [blocked],
-    continuationRepair: { inbox_item_id: "inbox_1", phase: "probing" },
-    activeTurn: null,
-  }));
-  assert.equal(cutover.room_agent_state?.inbox.state, "blocked", "cutover wins over restoration and credentials");
-  assert.equal(cutover.room_agent_state?.turn.state, "failed");
 
   const restoring = projectRoomAgentManifestEntry(facts({
     credentialAvailable: false,

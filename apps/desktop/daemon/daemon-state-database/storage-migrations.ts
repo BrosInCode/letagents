@@ -16,7 +16,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { migrateExecutionStorageV21ToV22, migrateExecutionStorageV22ToV23, migrateExecutionStorageV23ToV24, migrateExecutionStorageV24ToV25, validateRuntimeFailureEffectMigrationSource } from "../execution-storage-schema.js";
 import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { applyExecutionApprovalPublicationSchema, validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
-import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
+import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./v52-compat-tables.js";
 import { SCHEMA_VERSION, applyAgentAvatarColumn, applyWorkerExecutionBindings, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyDaemonEfficiencyMigration, run, schemaMethods } from "./shared.js";
 
 export const storageMigrations = schemaMethods({

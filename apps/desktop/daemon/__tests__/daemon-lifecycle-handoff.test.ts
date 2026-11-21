@@ -883,8 +883,8 @@ for (const stage of ["before_native_attach", "native_attach", "attach_error"] as
   try {
     const current = (await env.internals.store.getEntry(env.id))!;
     if (stage === "before_native_attach") {
-      const original = env.internals.store.unresolvedDeliveryDrain.bind(env.internals.store);
-      env.internals.store.unresolvedDeliveryDrain = async id => { entered(); await gate; return original(id); };
+      const original = env.internals.durability.getAttempt.bind(env.internals.durability);
+      env.internals.durability.getAttempt = async id => { entered(); await gate; return original(id); };
     }
     attaching = internal.providerExecution.attachLiveProvider(current);
     void attaching.catch(() => undefined);
@@ -974,7 +974,7 @@ test("provider-aware handoff retains router custody after stream installation fa
   const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
   const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "claude-code", {
     capabilities: router.capabilities.bind(router), runtimeCustody: router.runtimeCustody.bind(router), attach: router.attach.bind(router),
-    onStream: async () => { throw new Error("stream installation failed"); },
+    onExit: async () => { throw new Error("stream installation failed"); },
   });
   const internal = env.daemon as unknown as { providerExecution: { attachLiveProvider(entry: DaemonManifestEntry): Promise<ProviderActionHandle | null> }; handoffDraining: boolean };
   try {
@@ -987,7 +987,7 @@ test("provider-aware handoff retains router custody after stream installation fa
     assert.equal(result.ok, false, "failed stream setup cannot hide native custody");
     assert.match(result.error ?? "", /native connection could not be confirmed/);
     assert.equal(internal.handoffDraining, false);
-    env.port.onStream = async () => () => {};
+    env.port.onExit = async () => () => {};
     assert.ok(await internal.providerExecution.attachLiveProvider(current));
     assert.equal((await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff")).ok, true);
     await within(env.daemon.waitForHandoff(), "repaired custody retires without a poisoned dispatch reservation");

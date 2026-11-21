@@ -5,7 +5,7 @@ import type {
 } from "./supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry, DaemonManifestEntryView } from "./types.js";
 import type { WorkerSessionBinding } from "./worker-binding-store.js";
-import type { LifecycleCaptureAdmissionStatus } from "./lifecycle-projection-ledger.js";
+import type { LifecycleCaptureAdmissionStatus } from "./execution-capture-coordinator.js";
 
 export type RoomAgentLiveHandle = {
   workAttemptId: string;
@@ -129,11 +129,8 @@ export function projectRoomAgentManifestEntry(
   const head = nonfinal[0] ?? null;
   const blocked = receipts.find((receipt) => receipt.receipt_state === "blocked") ?? null;
   const hasCurrentBinding = bindingMatchesCurrentGeneration;
-  const waitingForDesktopGrant = entry.delivery_mode === "daemon_inbox" && !currentHostGrantAvailable;
-  const cutoverNeedsAttention = entry.provider === "codex"
-    && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
-    && entry.delivery_cutover?.phase === "uncertain";
-  const admissionHeld = entry.delivery_mode === "daemon_inbox" && entry.desired_state === "running"
+  const waitingForDesktopGrant = !currentHostGrantAvailable;
+  const admissionHeld = entry.desired_state === "running"
     && ["starting", "recovering", "working", "idle"].includes(entry.observed_state)
     && (input.lifecycleAdmission === "pending" || input.lifecycleAdmission === "unavailable");
   // A record the daemon is about to get past by itself holds delivery like a
@@ -143,14 +140,7 @@ export function projectRoomAgentManifestEntry(
     ? "Waiting for verified agent readiness evidence before delivery can start."
     : input.recordRecovery === null ? RECORD_RESTART_PENDING_DETAIL
       : input.recordRecovery ?? "The agent's readiness evidence is unavailable. Delivery is blocked until recovery is verified.";
-  const inbox = cutoverNeedsAttention
-    ? {
-        state: "blocked" as const,
-        pending_count: nonfinal.length,
-        blocked_by_message_id: null,
-        detail: `Daemon inbox cutover needs attention; legacy polling remains fenced. ${entry.delivery_cutover?.error ?? "Exact turn state is uncertain."}`,
-      }
-    : activeContinuationRepair
+  const inbox = activeContinuationRepair
       ? {
           state: "restoring_conversation" as const,
           pending_count: nonfinal.length,
@@ -249,7 +239,7 @@ export function projectRoomAgentManifestEntry(
           ? "The room observation loop has not started."
           : "Room observation is stopped because its exact binding or credential is unavailable.",
       };
-  const projectedTurn = activeContinuationRepair
+  const turn = activeContinuationRepair
     ? {
         state: "idle" as const,
         inbox_item_id: head?.inbox_item_id ?? null,
@@ -258,21 +248,12 @@ export function projectRoomAgentManifestEntry(
         detail: "Conversation restoration is happening before any model turn starts.",
       }
     : projectDeliveryTurn(head, hasLiveDeliveryOwner ? activeTurn : null);
-  const turn = cutoverNeedsAttention
-    ? {
-        state: "failed" as const,
-        inbox_item_id: null,
-        source_message_id: null,
-        provider_turn_id: entry.delivery_cutover?.provider_turn_id ?? null,
-        detail: entry.delivery_cutover?.error ?? "Legacy polling turn cutover is uncertain; daemon ingress is fenced.",
-      }
-    : projectedTurn;
   const blockedHead = head?.state === "blocked" && !activeContinuationRepair ? head : null;
   const skip = blockedHead && input.blockedHeadSkip?.inbox_item_id === blockedHead.inbox_item_id
     ? input.blockedHeadSkip
     : null;
   const deliveryAttention: DaemonManifestEntryView["delivery_attention"] = blockedHead
-    && entry.delivery_mode === "daemon_inbox" && entry.desired_state !== "stopped"
+    && entry.desired_state !== "stopped"
     ? {
         reason: "message_blocked",
         source_message_id: blockedHead.source_message_id,

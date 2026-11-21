@@ -233,7 +233,6 @@ export class ClaudeAdapterBackgroundWork extends ClaudeAdapterNativeExecution {
     // A wait must not keep a process alive that has nothing else to do.
     held.notice.unref?.();
     handle.heldRoomTurn = held;
-    if (handle.lifecycleAuthorityMode !== "typed") handle.state = "working";
     this.heldRoomTurnChanged(handle, true);
     return true;
   }

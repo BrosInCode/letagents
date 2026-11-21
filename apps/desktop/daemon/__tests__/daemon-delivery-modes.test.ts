@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { WorkDurabilityStore } from "../durability-store.js";
 import { ManifestStore } from "../manifest-store.js";
+import { assertDaemonStateVersionSupported } from "../daemon-state-database/version-gate.js";
+import {
+  validateLifecycleProjectionLedgerSchema,
+  validatePollingActivationSchema,
+  validatePollingOfferSchema,
+} from "../daemon-state-database/v52-compat-tables.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonRoomMoveRecord } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
@@ -15,9 +22,13 @@ import { type DaemonToolAgentSession } from "../supervised-tool-runtime.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { type SupervisedDeliveryHttp } from "../supervised-agent-delivery.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
-import type { ProviderRecoveryDiagnostics } from "../provider-stream-coordinator.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
-import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
+import { defaultGetProcessIdentity, type ProviderProcessExit } from "../../electron/main/agents/provider-evidence.js";
+import {
+  OpenModelProviderAdapter,
+  type OpenModelProviderAdapterDependencies,
+} from "../../electron/main/agents/open-model-provider-adapter.js";
+import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import {
   runtimeReadySubscription,
@@ -35,11 +46,7 @@ import {
   entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 
-for (const modeCase of ["mcp_polling", "daemon_inbox", "custodial_polling_v1"] as const) {
-const custodial = modeCase === "custodial_polling_v1";
-const deliveryMode = modeCase === "daemon_inbox" ? "daemon_inbox" : "mcp_polling";
-const expectedReadyState = deliveryMode === "daemon_inbox" ? "idle" : "working";
-test(`two Codex room agents keep independent provider executions across stop, resume, and daemon handoff (${modeCase})`, async () => {
+test("two Codex room agents keep independent provider executions across stop, resume, and daemon handoff (daemon_inbox)", async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
@@ -177,17 +184,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
     onStream: () => () => {},
     onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
-  const router = () => {
-    const port = new ProviderActionPortRouter({ codex: async () => adapter });
-    // This legacy fixture has no exact-turn control and tests lifecycle
-    // isolation, not automatic migration to daemon inbox delivery.
-    return modeCase === "mcp_polling" ? new Proxy(port, {
-      get(target, property, receiver) {
-        if (property === "controlExactTurn") return undefined;
-        return Reflect.get(target, property, receiver);
-      },
-    }) : port;
-  };
+  const router = () => new ProviderActionPortRouter({ codex: async () => adapter });
   let activeRouter = router();
   let tailReads = 0;
   const polls: Array<{ bearer: string; afterMessageId: string | null }> = [];
@@ -231,12 +228,10 @@ test(`two Codex room agents keep independent provider executions across stop, re
     }
   };
   const assertOwnedBindings = async (manifest: DaemonManifestEntry[]) => {
-    assert.ok(manifest.every((current) => (current.delivery_mode ?? "mcp_polling") === deliveryMode));
-    if (deliveryMode !== "daemon_inbox" && !custodial) return;
+    assert.ok(manifest.every((current) => (current.delivery_mode ?? "daemon_inbox") === "daemon_inbox"));
     const internals = daemon as unknown as {
       workerBindings: WorkerBindingStore;
       supervisedInbox: SupervisedAgentInboxStore;
-      providerStreams: { recoveryDiagnostics(): ProviderRecoveryDiagnostics };
     };
     for (const current of manifest) {
       await eventually(async () => {
@@ -252,27 +247,12 @@ test(`two Codex room agents keep independent provider executions across stop, re
       assert.equal(binding?.agent_session_id, `session_daemon_${current.id}`);
       const credential = binding && await internals.workerBindings.credentialFor(binding);
       assert.ok(credential, "the current generation has a usable in-memory worker credential");
-      if (custodial) {
-        assert.equal(binding?.room_cursor, "msg_47", "restart/remint preserves the latest acknowledged polling cursor");
-        assert.equal(polls.length, 0, "custodial grant recovery must not start daemon inbox delivery");
-        const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
-        const admitted = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
-          entry_id: current.id, room_id: current.room_id, work_attempt_id: current.work_attempt_id,
-          execution_generation_id: current.provider_ref!.execution_generation_id, agent_session_id: binding!.agent_session_id,
-          daemon_generation: daemonGeneration, api_url: "http://127.0.0.1:9", contract: "custodial_polling_v1",
-          phase: "before", tool_name: "read_messages",
-        });
-        assert.equal(admitted.ok, false, "grant recovery cannot activate a dormant custodial runtime");
-        assert.match(admitted.error ?? "", /activation/);
-        continue;
-      }
       await eventually(async () => polls.some((poll) => poll.bearer === credential && poll.afterMessageId === "msg_41"),
         "owned ingress uses the exact restored credential and existing cursor");
       const cursor = await internals.supervisedInbox.cursor(current.id);
       assert.equal(cursor?.room_id, current.room_id);
       assert.equal(cursor?.last_observed_message_id, "msg_41", "recovery does not reset the admitted room cursor");
     }
-    assert.equal(internals.providerStreams.recoveryDiagnostics().daemon_inbox_wait_evidence_dependency, 0);
   };
   try {
     await daemon.start();
@@ -281,7 +261,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
       id: entryId,
       room_id: "codex_runtime_roundtable",
       provider: "codex",
-      delivery_mode: deliveryMode,
+      delivery_mode: "daemon_inbox",
       desired_state: "paused",
       observed_state: "paused",
       source_repo_path: sources[index],
@@ -291,17 +271,15 @@ test(`two Codex room agents keep independent provider executions across stop, re
     const created = await Promise.all(entries.map((candidate) =>
       daemonRequest(paths.socketPath, "manifest.put", { entry: candidate })));
     assert.ok(created.every((result) => result.ok));
-    if (deliveryMode === "daemon_inbox") {
-      await installGrants();
-      const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
-      for (const candidate of entries) {
-        const admitted = await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
-          entry_id: candidate.id, daemon_generation: generation,
-        });
-        assert.equal(admitted.ok, true, admitted.error);
-      }
-      assert.equal(tailReads, 2);
+    await installGrants();
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    for (const candidate of entries) {
+      const admitted = await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+        entry_id: candidate.id, daemon_generation: generation,
+      });
+      assert.equal(admitted.ok, true, admitted.error);
     }
+    assert.equal(tailReads, 2);
 
     const activated = await Promise.all(entries.map((candidate) =>
       daemonRequest(paths.socketPath, "manifest.compare_and_set_desired_state", {
@@ -311,7 +289,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
     try {
       await eventually(async () => {
         const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-        return manifest.length === 2 && manifest.every((candidate) => candidate.observed_state === expectedReadyState
+        return manifest.length === 2 && manifest.every((candidate) => candidate.observed_state === "idle"
           && candidate.condition === "none");
       }, "both Codex provider executions", 5_000);
     } catch (error) {
@@ -320,44 +298,6 @@ test(`two Codex room agents keep independent provider executions across stop, re
     }
 
     const beforeRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-    if (custodial) {
-      // Dormant prerequisite fixture only: install the persisted contract and
-      // an exact acknowledged boundary. This is not a production mode switch.
-      const db = new DatabaseSync(paths.manifestPath);
-      try { db.exec("UPDATE agent_configurations SET polling_contract='custodial_polling_v1'"); }
-      finally { db.close(); }
-      const durability = (daemon as unknown as { durability: WorkDurabilityStore }).durability;
-      for (const current of beforeRestart) await durability.checkpoint(current.work_attempt_id!, {
-        room_cursor: "msg_47", provider_continuation_id: current.provider_ref!.provider_continuation_id,
-      });
-      await installGrants();
-      const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
-      for (const current of beforeRestart) {
-        const params = {
-          entry_id: current.id, room_id: current.room_id, work_attempt_id: current.work_attempt_id,
-          execution_generation_id: current.provider_ref!.execution_generation_id, agent_session_id: `session_daemon_${current.id}`,
-          daemon_generation: generation, api_url: "http://127.0.0.1:9", contract: "custodial_polling_v1",
-          phase: "before", tool_name: "wait_for_messages",
-          process_incarnation_id: "01234567-89ab-4cde-8f01-23456789abcd", mcp_request_id: 1, room_cursor: "msg_47",
-        };
-        const admitted = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params);
-        assert.equal(admitted.ok, false, "changing the contract does not authorize native work");
-        assert.match(admitted.error ?? "", /activation/);
-        // Active expiry/revision/identity tests now live beside the explicit
-        // activation gate in worker-authority-coordinator.test.ts. This older
-        // fixture proves only dormant grant/worker recovery, not activation.
-        const released = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
-          ...params, phase: "release", expected_configuration_revision: 1,
-          expected_activation_id: "unactivated", expected_binding_epoch: 1,
-          input_cursor: "msg_47", offered_frontier: "msg_48",
-        });
-        assert.equal(released.ok, false);
-        assert.match(released.error ?? "", /activation/);
-        assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
-          ...params, room_cursor: "msg_48",
-        })).ok, false, "dormant processes cannot advance the acknowledged cursor");
-      }
-    }
     await assertOwnedBindings(beforeRestart);
     const alphaBefore = beforeRestart.find((candidate) => candidate.id === identities[0].entryId)!;
     const bravoBefore = beforeRestart.find((candidate) => candidate.id === identities[1].entryId)!;
@@ -398,11 +338,11 @@ test(`two Codex room agents keep independent provider executions across stop, re
     activeRouter = router();
     daemon = createDaemon();
     await daemon.start();
-    if (deliveryMode === "daemon_inbox" || custodial) await installGrants();
+    await installGrants();
     await eventually(async () => {
       const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
       return manifest.length === 2
-        && manifest.every((candidate) => candidate.observed_state === expectedReadyState && candidate.condition === "none")
+        && manifest.every((candidate) => candidate.observed_state === "idle" && candidate.condition === "none")
         && attachRequests.length === 2;
     }, "independent Codex provider reattachment", 5_000);
     assert.equal(attachRequests.length, 2);
@@ -440,13 +380,6 @@ test(`two Codex room agents keep independent provider executions across stop, re
       assert.equal(detail.execution_generations[0]?.terminal, null);
     }
 
-    // Select the cutover retry ordering around the exact terminal boundary;
-    // this lifecycle fixture must retain its requested delivery mode there too.
-    const cutovers = (daemon as unknown as {
-      deliveryCutovers: { start(entryId: string): Promise<void> };
-    }).deliveryCutovers;
-    if (modeCase === "mcp_polling") await cutovers.start(identities[0].entryId);
-
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
       id: identities[0].entryId, desired_state: "paused",
     })).ok, true);
@@ -456,12 +389,10 @@ test(`two Codex room agents keep independent provider executions across stop, re
     }, "independent Codex pause", 5_000);
     const bravoWhileAlphaPaused = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
       .find((candidate) => candidate.id === identities[1].entryId)!;
-    assert.equal(bravoWhileAlphaPaused.observed_state, expectedReadyState);
+    assert.equal(bravoWhileAlphaPaused.observed_state, "idle");
     assert.equal(bravoWhileAlphaPaused.provider_ref?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
     assert.equal(runtimes.get(bravoBefore.work_attempt_id!)?.state, "working");
     assert.deepEqual(stopRequests, [alphaBefore.work_attempt_id]);
-
-    if (modeCase === "mcp_polling") await cutovers.start(identities[0].entryId);
 
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
       id: identities[0].entryId, desired_state: "running",
@@ -469,11 +400,11 @@ test(`two Codex room agents keep independent provider executions across stop, re
     await eventually(async () => {
       const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
       const current = manifest.find((candidate) => candidate.id === identities[0].entryId);
-      return current?.observed_state === expectedReadyState && current.condition === "none";
+      return current?.observed_state === "idle" && current.condition === "none";
     }, "independent Codex resume", 5_000);
     const afterResume = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     await assertOwnedBindings(afterResume);
-    assert.equal(tailReads, deliveryMode === "daemon_inbox" ? 2 : 0,
+    assert.equal(tailReads, 2,
       "restart and native resume never bootstrap a new room tail");
     const alphaAfter = afterResume.find((candidate) => candidate.id === identities[0].entryId)!;
     const bravoAfter = afterResume.find((candidate) => candidate.id === identities[1].entryId)!;
@@ -500,34 +431,31 @@ test(`two Codex room agents keep independent provider executions across stop, re
     assert.equal(bravoAfterAlphaResumeAttempt.execution_generations.length, 1);
     assert.equal(bravoAfterAlphaResumeAttempt.execution_generations[0]?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
     assert.equal(bravoAfterAlphaResumeAttempt.execution_generations[0]?.terminal, null);
-    if (deliveryMode === "daemon_inbox") {
-      const internals = daemon as unknown as { workerBindings: WorkerBindingStore; supervisedInbox: SupervisedAgentInboxStore };
-      const binding = await internals.workerBindings.get(alphaAfter.id);
-      const credential = await internals.workerBindings.credentialFor(binding!);
-      let resolvePoll: ((response: Awaited<ReturnType<SupervisedDeliveryHttp["poll"]>>) => void) | undefined;
-      await eventually(async () => Boolean(resolvePoll = pendingPolls.get(credential!)),
-        "the recovered worker has an active exact-credential poll");
-      assert(resolvePoll);
-      resolvePoll({ messages: [{ id: "msg_42", text: "assess the project", source: "human",
-        activation: { for_current_agent: { decision: "activate", reason: "explicit_mention", addressed: true } },
-      }], last_observed_message_id: "msg_42" });
-      await eventually(async () => (await internals.supervisedInbox.getBySourceMessage(
-        alphaAfter.id, alphaAfter.room_id, "msg_42",
-      ))?.state === "acknowledged_no_reply", "a post-recovery message reaches and settles the exact native turn");
-      const receipt = await internals.supervisedInbox.getBySourceMessage(alphaAfter.id, alphaAfter.room_id, "msg_42");
-      const turnBinding = await internals.supervisedInbox.providerTurnBinding(receipt!.inbox_item_id);
-      assert.equal(turnBinding?.origin_execution_generation_id, alphaAfter.provider_ref?.execution_generation_id);
-      assert.equal(turnBinding?.provider_turn_id, "native_msg_42");
-      assert.deepEqual(deliveredTurns, [{ workAttemptId: alphaAfter.work_attempt_id, turnId: "native_msg_42" }]);
-      assert.equal((await internals.supervisedInbox.cursor(alphaAfter.id))?.last_observed_message_id, "msg_42");
-      assert.equal((await internals.supervisedInbox.cursor(bravoAfter.id))?.last_observed_message_id, "msg_41");
-    }
+    const internals = daemon as unknown as { workerBindings: WorkerBindingStore; supervisedInbox: SupervisedAgentInboxStore };
+    const binding = await internals.workerBindings.get(alphaAfter.id);
+    const credential = await internals.workerBindings.credentialFor(binding!);
+    let resolvePoll: ((response: Awaited<ReturnType<SupervisedDeliveryHttp["poll"]>>) => void) | undefined;
+    await eventually(async () => Boolean(resolvePoll = pendingPolls.get(credential!)),
+      "the recovered worker has an active exact-credential poll");
+    assert(resolvePoll);
+    resolvePoll({ messages: [{ id: "msg_42", text: "assess the project", source: "human",
+      activation: { for_current_agent: { decision: "activate", reason: "explicit_mention", addressed: true } },
+    }], last_observed_message_id: "msg_42" });
+    await eventually(async () => (await internals.supervisedInbox.getBySourceMessage(
+      alphaAfter.id, alphaAfter.room_id, "msg_42",
+    ))?.state === "acknowledged_no_reply", "a post-recovery message reaches and settles the exact native turn");
+    const receipt = await internals.supervisedInbox.getBySourceMessage(alphaAfter.id, alphaAfter.room_id, "msg_42");
+    const turnBinding = await internals.supervisedInbox.providerTurnBinding(receipt!.inbox_item_id);
+    assert.equal(turnBinding?.origin_execution_generation_id, alphaAfter.provider_ref?.execution_generation_id);
+    assert.equal(turnBinding?.provider_turn_id, "native_msg_42");
+    assert.deepEqual(deliveredTurns, [{ workAttemptId: alphaAfter.work_attempt_id, turnId: "native_msg_42" }]);
+    assert.equal((await internals.supervisedInbox.cursor(alphaAfter.id))?.last_observed_message_id, "msg_42");
+    assert.equal((await internals.supervisedInbox.cursor(bravoAfter.id))?.last_observed_message_id, "msg_41");
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
 });
-}
 
 test("daemon restart preserves multiple isolated Cursor owners from older manifests", async () => {
   const env = await fixture();
@@ -1418,7 +1346,24 @@ test("concurrent Claude Code creation mints one isolated provider generation per
     onExit: async () => () => {},
     onStream: async () => () => {},
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  const deliveryHttp: SupervisedDeliveryHttp = {
+    latest: async () => ({ messages: [] }),
+    poll: ({ signal }) => new Promise((resolve) => {
+      if (signal.aborted) resolve({ messages: [] });
+      else signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+    }),
+    publish: async () => {},
+  };
+  const grantHttp = {
+    ...noWorkLeaseHttp,
+    createWorkerSession: async ({ agentInstanceId }: { agentInstanceId: string }) => ({
+      sessionId: `session_${agentInstanceId.replace(/:/g, "_")}`,
+      bearer: randomUUID(),
+      bearerId: randomUUID(),
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    }),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, deliveryHttp, grantHttp);
   const candidate = (index: number): DaemonManifestEntry => ({
     ...entry,
     id: creationIds[index]!,
@@ -1438,7 +1383,17 @@ test("concurrent Claude Code creation mints one isolated provider generation per
     assert.equal(results.filter((result) => result.ok).length, 2);
     const owners = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     assert.equal(owners.length, 2);
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     for (const owner of owners) {
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+        entry_id: owner.id, room_id: owner.room_id, agent_key: `owner/${owner.id}`,
+        grant_id: `grant_${owner.id}_${generation}`, supervisor_grant: `grant-secret-${owner.id}`,
+        grant_generation: generation, api_url: "http://127.0.0.1:9", daemon_generation: generation,
+        host_id: "host-test", installation_id: "installation-test", grant_expires_at: "2099-01-01T00:00:00.000Z",
+      })).ok, true);
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+        entry_id: owner.id, daemon_generation: generation,
+      })).ok, true);
       assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
         id: owner.id,
         desired_state: "running",
@@ -1517,6 +1472,7 @@ test("restart fences a title-mutated orphan, durably closes its generation, and 
     poke: async () => {},
     stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped", providerContinuationId: continuation }),
     onExit: async () => () => {},
+    onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
   const secondPort: ProviderActionPort = {
     capabilities: firstPort.capabilities,
@@ -1549,9 +1505,39 @@ test("restart fences a title-mutated orphan, durably closes its generation, and 
     poke: async () => {},
     stop: firstPort.stop,
     onExit: async () => () => {},
+    onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
 
-  const first = new SupervisorDaemon(paths, "darwin", firstPort, true);
+  const deliveryHttp: SupervisedDeliveryHttp = {
+    latest: async () => ({ messages: [] }),
+    poll: ({ signal }) => new Promise((resolve) => {
+      if (signal.aborted) resolve({ messages: [] });
+      else signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+    }),
+    publish: async () => {},
+  };
+  const grantHttp = {
+    ...noWorkLeaseHttp,
+    createWorkerSession: async ({ agentInstanceId }: { agentInstanceId: string }) => ({
+      sessionId: `session_${agentInstanceId.replace(/:/g, "_")}`,
+      bearer: randomUUID(),
+      bearerId: randomUUID(),
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    }),
+  };
+  const installGrant = async () => {
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: "supervised_claude_fence", room_id: "focus_37", agent_key: "owner/supervised_claude_fence",
+      grant_id: `grant_fence_${generation}`, supervisor_grant: "grant-secret-fence",
+      grant_generation: generation, api_url: "http://127.0.0.1:9", daemon_generation: generation,
+      host_id: "host-test", installation_id: "installation-test", grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+      entry_id: "supervised_claude_fence", daemon_generation: generation,
+    })).ok, true);
+  };
+  const first = new SupervisorDaemon(paths, "darwin", firstPort, true, 15_000, undefined, {}, deliveryHttp, grantHttp);
   let second: SupervisorDaemon | null = null;
   try {
     await first.start();
@@ -1566,17 +1552,19 @@ test("restart fences a title-mutated orphan, durably closes its generation, and 
       work_attempt_id: null,
       provider_launch_policy: { permissionMode: "acceptEdits" },
     } });
-    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working"), "first Claude generation");
+    await installGrant();
+    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "idle"), "first Claude generation");
     const original = ((await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_claude_fence" })).result as { execution_generations: Array<{ execution_generation_id: string }> });
     assert.equal(original.execution_generations.length, 1);
     const originalGenerationId = original.execution_generations[0]!.execution_generation_id;
 
     await first.stop();
-    second = new SupervisorDaemon(paths, "darwin", secondPort, true);
+    second = new SupervisorDaemon(paths, "darwin", secondPort, true, 15_000, undefined, {}, deliveryHttp, grantHttp);
     await second.start();
+    await installGrant();
     await eventually(async () => {
       const manifest = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
-      return manifest.observed_state === "working" && manifest.provider_ref?.execution_generation_id !== originalGenerationId;
+      return manifest.observed_state === "idle" && manifest.provider_ref?.execution_generation_id !== originalGenerationId;
     }, "bounded successor resume", 8_000);
     const recovered = (await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_claude_fence" })).result as {
       execution_generations: Array<{ terminal: { terminal_cause: string } | null }>;
@@ -1593,5 +1581,795 @@ test("restart fences a title-mutated orphan, durably closes its generation, and 
       try { activeChild.kill("SIGKILL"); } catch {}
     }
     await env.cleanup();
+  }
+});
+
+test("fresh v52 state database keeps all 82 compatibility tables until step 1b", async () => {
+  const env = await fixture();
+  const dbPath = join(env.root, "daemon-v52-fresh.sqlite");
+  const store = new ManifestStore(dbPath);
+  try {
+    await store.load();
+  } finally {
+    store.close();
+  }
+  const database = new DatabaseSync(dbPath);
+  try {
+    database.exec("PRAGMA foreign_keys = ON");
+    assert.equal(assertDaemonStateVersionSupported(database), 52);
+    const tables = database.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
+      .map((row) => String(row.name));
+    assert.equal(tables.length, 82, "fresh v52 database keeps the complete 82-table v52 shape");
+    for (const compatTable of [
+      "custodial_polling_activations",
+      "custodial_polling_offers",
+      "lifecycle_projection_lanes",
+      "lifecycle_projection_pairs",
+      "lifecycle_projection_totals",
+      "legacy_lane_owners",
+    ]) {
+      assert.ok(tables.includes(compatTable), `v52 compatibility table ${compatTable} must exist`);
+    }
+    validatePollingActivationSchema(database);
+    validatePollingOfferSchema(database);
+    validateLifecycleProjectionLedgerSchema(database);
+    assert.equal(Number(database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_activations").get()?.n), 0);
+    assert.equal(Number(database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers").get()?.n), 0);
+    assert.equal(Number(database.prepare("SELECT COUNT(*) AS n FROM lifecycle_projection_lanes").get()?.n), 0);
+    assert.equal(Number(database.prepare("SELECT COUNT(*) AS n FROM lifecycle_projection_pairs").get()?.n), 0);
+    assert.equal(Number(database.prepare("SELECT COUNT(*) AS n FROM legacy_lane_owners").get()?.n), 0);
+  } finally {
+    database.close();
+    await env.cleanup();
+  }
+});
+
+test("persisted mcp_polling and custodial_polling_v1 rows upgrade transparently to daemon_inbox", async () => {
+  const env = await fixture();
+  const source = await committedSourceRepository(env.root, "upgrade-mcp-polling-source");
+  await primeDaemonBareRepository(env.root, source);
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    ...testDaemonEndpoint(env.root),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"),
+    attemptsRoot: join(env.root, "attempt-data"),
+    workspaceRoot: env.root,
+  };
+  const agentId = "codex_persisted_mcp_polling";
+  const seedStore = new ManifestStore(paths.manifestPath);
+  try {
+    await seedStore.write(0, [{
+      ...entry,
+      id: agentId,
+      room_id: "room_upgrade_polling",
+      provider: "codex",
+      desired_state: "running",
+      observed_state: "absent",
+      source_repo_path: source,
+      workspace_path: null,
+      work_attempt_id: null,
+    }]);
+  } finally {
+    seedStore.close();
+  }
+  const seededDb = new DatabaseSync(paths.manifestPath);
+  try {
+    seededDb.prepare(`
+      UPDATE agent_configurations
+      SET delivery_mode = 'mcp_polling',
+          polling_contract = 'custodial_polling_v1',
+          delivery_cutover_json = '{"phase":"prepared"}'
+      WHERE agent_id = ?
+    `).run(agentId);
+    const rawBefore = seededDb.prepare(
+      "SELECT delivery_mode, polling_contract, delivery_cutover_json FROM agent_configurations WHERE agent_id = ?",
+    ).get(agentId) as { delivery_mode: string; polling_contract: string | null; delivery_cutover_json: string | null };
+    assert.equal(rawBefore.delivery_mode, "mcp_polling");
+    assert.equal(rawBefore.polling_contract, "custodial_polling_v1");
+    assert.equal(rawBefore.delivery_cutover_json, '{"phase":"prepared"}');
+  } finally {
+    seededDb.close();
+  }
+
+  let spawnCount = 0;
+  const providerPort: ProviderActionPort = {
+    capabilities: async () => ({
+      resume: true,
+      midTurnInjection: false,
+      transcriptAccess: true,
+      permissionPromptBridging: false,
+      survivesRestart: true,
+      deliveryModes: ["daemon_inbox"],
+    }),
+    spawn: async (request) => {
+      spawnCount += 1;
+      assert.equal(request.deliveryMode, "daemon_inbox");
+      assert.equal(request.lifecycleAuthorityMode, "typed");
+      return {
+        workAttemptId: request.workAttemptId,
+        pid: process.pid,
+        providerContinuationId: `thread_upgraded_${spawnCount}`,
+        observedState: "working",
+        appliedConfigurationRevision: request.configurationRevision,
+        providerConnection: {
+          kind: "codex_app_server",
+          url: "http://127.0.0.1:41990",
+          pid: process.pid,
+          processIdentity: `birth-upgraded-${spawnCount}`,
+        },
+      };
+    },
+    attach: async () => null,
+    resume: async () => { throw new Error("unexpected resume"); },
+    poke: async () => {},
+    stop: async (ref) => ({
+      endedAt: new Date().toISOString(),
+      exitCode: 0,
+      signal: "SIGTERM",
+      terminalCause: "stopped",
+      providerContinuationId: ref.providerContinuationId,
+    }),
+    onExit: async () => () => {},
+    onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
+    runRoomTurn: async () => ({ turnId: "turn-1", outcome: "no_reply", text: null }),
+  };
+  const deliveryHttp: SupervisedDeliveryHttp = {
+    latest: async () => ({ messages: [] }),
+    poll: ({ signal }) => new Promise((resolve) => {
+      if (signal.aborted) resolve({ messages: [] });
+      else signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+    }),
+    publish: async () => {},
+  };
+  const grantHttp = {
+    ...noWorkLeaseHttp,
+    createWorkerSession: async () => ({
+      sessionId: `session_${randomUUID()}`,
+      bearer: randomUUID(),
+      bearerId: randomUUID(),
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    }),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", providerPort, true, 15_000, undefined, {}, deliveryHttp, grantHttp);
+  try {
+    await daemon.start();
+    const listedBeforeGrant = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    const projected = listedBeforeGrant.find((candidate) => candidate.id === agentId);
+    assert.ok(projected);
+    assert.equal(projected.delivery_mode, "daemon_inbox", "stored mcp_polling rows project as daemon_inbox on read");
+    assert.equal(projected.condition, "none");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(spawnCount, 0, "waits cleanly for host grant and inbox cursor without crashing");
+
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: agentId, room_id: "room_upgrade_polling", agent_key: `owner/${agentId}`,
+      grant_id: `grant_upgrade_${generation}`, supervisor_grant: "grant-secret-upgrade",
+      grant_generation: generation, api_url: "http://127.0.0.1:9", daemon_generation: generation,
+      host_id: "host-test", installation_id: "installation-test", grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+      entry_id: agentId, daemon_generation: generation,
+    })).ok, true);
+
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+        .find((candidate) => candidate.id === agentId);
+      return current?.observed_state === "idle" && current.condition === "none";
+    }, "upgraded agent converges in daemon_inbox typed mode", 5_000);
+    assert.equal(spawnCount, 1);
+
+    // Rewriting the manifest entry persists daemon_inbox with NULL cutover/polling columns under v52 CHECKs.
+    const currentEntry = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+      .find((candidate) => candidate.id === agentId)!;
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
+      entry: { ...currentEntry, display_name: "Upgraded Codex" },
+    })).ok, true);
+    await daemon.stop();
+
+    const persistedDb = new DatabaseSync(paths.manifestPath);
+    try {
+      const rawAfter = persistedDb.prepare(
+        "SELECT delivery_mode, polling_contract, delivery_cutover_json FROM agent_configurations WHERE agent_id = ?",
+      ).get(agentId) as { delivery_mode: string; polling_contract: string | null; delivery_cutover_json: string | null };
+      assert.equal(rawAfter.delivery_mode, "daemon_inbox");
+      assert.equal(rawAfter.polling_contract, null);
+      assert.equal(rawAfter.delivery_cutover_json, null);
+    } finally {
+      persistedDb.close();
+    }
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("persisted legacy and typed_shadow live runtimes fail closed once to coordination_blocked without retrying and recover on fresh start", async () => {
+  for (const priorMode of ["legacy", "typed_shadow"] as const) {
+    const env = await fixture();
+    const source = await committedSourceRepository(env.root, `upgrade-${priorMode}-source`);
+    await primeDaemonBareRepository(env.root, source);
+    const paths = {
+      lockPath: join(env.root, "daemon.lock"),
+      ...testDaemonEndpoint(env.root),
+      manifestPath: join(env.root, "daemon-state.sqlite"),
+      auditPath: join(env.root, "audit.jsonl"),
+      attemptsPath: join(env.root, "attempts.json"),
+      attemptsRoot: join(env.root, "attempt-data"),
+      workspaceRoot: env.root,
+    };
+    const agentId = `codex_prior_${priorMode}`;
+    let liveHandle: {
+      workAttemptId: string;
+      pid: number;
+      providerContinuationId: string;
+      observedState: "working";
+      appliedConfigurationRevision: number;
+      providerConnection: {
+        kind: "codex_app_server";
+        url: string;
+        pid: number;
+        processIdentity: string;
+      };
+    } | null = null;
+    let firstSpawnCount = 0;
+    let secondAttachCount = 0;
+    let secondSpawnCount = 0;
+    let secondResumeCount = 0;
+
+    const makeDeliveryHttp = (): SupervisedDeliveryHttp => ({
+      latest: async () => ({ messages: [] }),
+      poll: ({ signal }) => new Promise((resolve) => {
+        if (signal.aborted) resolve({ messages: [] });
+        else signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+      }),
+      publish: async () => {},
+    });
+    const grantHttp = {
+      ...noWorkLeaseHttp,
+      createWorkerSession: async () => ({
+        sessionId: `session_${randomUUID()}`,
+        bearer: randomUUID(),
+        bearerId: randomUUID(),
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      }),
+    };
+    const installGrant = async (bootstrap: boolean) => {
+      const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+        entry_id: agentId, room_id: `room_${priorMode}`, agent_key: `owner/${agentId}`,
+        grant_id: `grant_${priorMode}_${generation}`, supervisor_grant: `grant-secret-${priorMode}`,
+        grant_generation: generation, api_url: "http://127.0.0.1:9", daemon_generation: generation,
+        host_id: "host-test", installation_id: "installation-test", grant_expires_at: "2099-01-01T00:00:00.000Z",
+      })).ok, true);
+      if (bootstrap) {
+        assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+          entry_id: agentId, daemon_generation: generation,
+        })).ok, true);
+      }
+    };
+
+    const firstPort: ProviderActionPort = {
+      capabilities: async () => ({
+        resume: true,
+        midTurnInjection: false,
+        transcriptAccess: true,
+        permissionPromptBridging: false,
+        survivesRestart: true,
+        deliveryModes: ["daemon_inbox"],
+      }),
+      spawn: async (request) => {
+        firstSpawnCount += 1;
+        liveHandle = {
+          workAttemptId: request.workAttemptId,
+          pid: process.pid,
+          providerContinuationId: `thread_${priorMode}_orig`,
+          observedState: "working",
+          appliedConfigurationRevision: request.configurationRevision,
+          providerConnection: {
+            kind: "codex_app_server",
+            url: "http://127.0.0.1:41991",
+            pid: process.pid,
+            processIdentity: `birth-${priorMode}-orig`,
+          },
+        };
+        return liveHandle;
+      },
+      attach: async () => null,
+      resume: async () => { throw new Error("unexpected first resume"); },
+      poke: async () => {},
+      stop: async (ref) => ({
+        endedAt: new Date().toISOString(),
+        exitCode: 0,
+        signal: "SIGTERM",
+        terminalCause: "stopped",
+        providerContinuationId: ref.providerContinuationId,
+      }),
+      onExit: async () => () => {},
+      onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
+      runRoomTurn: async () => ({ turnId: "turn-1", outcome: "no_reply", text: null }),
+    };
+
+    const secondPort: ProviderActionPort = {
+      capabilities: async () => ({
+        resume: true,
+        midTurnInjection: false,
+        transcriptAccess: true,
+        permissionPromptBridging: false,
+        survivesRestart: true,
+        deliveryModes: ["daemon_inbox"],
+      }),
+      spawn: async (request) => {
+        secondSpawnCount += 1;
+        liveHandle = {
+          workAttemptId: request.workAttemptId,
+          pid: process.pid,
+          providerContinuationId: `thread_${priorMode}_fresh_${secondSpawnCount}`,
+          observedState: "working",
+          appliedConfigurationRevision: request.configurationRevision,
+          providerConnection: {
+            kind: "codex_app_server",
+            url: "http://127.0.0.1:41992",
+            pid: process.pid,
+            processIdentity: `birth-${priorMode}-fresh-${secondSpawnCount}`,
+          },
+        };
+        return liveHandle;
+      },
+      attach: async (ref) => {
+        secondAttachCount += 1;
+        return liveHandle && liveHandle.providerContinuationId === ref.providerContinuationId ? liveHandle : null;
+      },
+      resume: async (ref, request) => {
+        secondResumeCount += 1;
+        liveHandle = {
+          workAttemptId: request.workAttemptId,
+          pid: process.pid,
+          providerContinuationId: ref.providerContinuationId,
+          observedState: "working",
+          appliedConfigurationRevision: request.configurationRevision,
+          providerConnection: {
+            kind: "codex_app_server",
+            url: "http://127.0.0.1:41993",
+            pid: process.pid,
+            processIdentity: `birth-${priorMode}-resumed-${secondResumeCount}`,
+          },
+        };
+        return liveHandle;
+      },
+      poke: async () => {},
+      stop: async (ref) => {
+        liveHandle = null;
+        return {
+          endedAt: new Date().toISOString(),
+          exitCode: 0,
+          signal: "SIGTERM",
+          terminalCause: "stopped",
+          providerContinuationId: ref.providerContinuationId,
+        };
+      },
+      onExit: async () => () => {},
+      onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
+      runRoomTurn: async () => ({ turnId: "turn-2", outcome: "no_reply", text: null }),
+    };
+
+    const first = new SupervisorDaemon(paths, "darwin", firstPort, true, 15_000, undefined, {}, makeDeliveryHttp(), grantHttp);
+    let second: SupervisorDaemon | null = null;
+    try {
+      await first.start();
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
+        entry: {
+          ...entry,
+          id: agentId,
+          room_id: `room_${priorMode}`,
+          provider: "codex",
+          observed_state: "absent",
+          source_repo_path: source,
+          workspace_path: null,
+          work_attempt_id: null,
+        },
+      })).ok, true);
+      await installGrant(true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.observed_state === "idle" && current.condition === "none";
+      }, `${priorMode} seed runtime ready`, 5_000);
+      assert.equal(firstSpawnCount, 1);
+      const originalExecutionGenerationId = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+        .find((candidate) => candidate.id === agentId)!.provider_ref!.execution_generation_id;
+      await first.stop();
+
+      // Simulate an older daemon's persisted non-typed runtime row in SQLite.
+      const db = new DatabaseSync(paths.manifestPath);
+      try {
+        const updated = db.prepare(
+          "UPDATE execution_runtime_generations SET authority_mode = ? WHERE agent_id = ?",
+        ).run(priorMode, agentId);
+        assert.equal(updated.changes, 1);
+      } finally {
+        db.close();
+      }
+
+      second = new SupervisorDaemon(paths, "darwin", secondPort, true, 15_000, undefined, {}, makeDeliveryHttp(), grantHttp);
+      await second.start();
+      await installGrant(false);
+
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.condition === "coordination_blocked";
+      }, `${priorMode} live runtime blocks once instead of promoting`, 5_000);
+
+      const blocked = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+        .find((candidate) => candidate.id === agentId)!;
+      assert.equal(blocked.condition, "coordination_blocked");
+      assert.match(blocked.last_error ?? "", /convergence scheduler failure:/);
+      assert.ok(blocked.reconciliation_notices?.some((notice) => notice.kind === "coordination_escalation"));
+      assert.equal(secondSpawnCount, 0);
+      assert.equal(secondResumeCount, 0);
+      const attachCountAtBlock = secondAttachCount;
+      assert.equal(attachCountAtBlock, 1, `${priorMode} attach fails closed once`);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(secondAttachCount, attachCountAtBlock, `${priorMode} blocked agent must not enter a retry or crash loop`);
+
+      // Stopping and starting the agent creates a fresh typed runtime generation cleanly.
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: agentId, desired_state: "stopped",
+      })).ok, true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.observed_state === "stopped";
+      }, `${priorMode} agent stops cleanly`, 5_000);
+
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: agentId, desired_state: "running",
+      })).ok, true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.observed_state === "idle"
+          && current.condition === "none"
+          && current.provider_ref?.execution_generation_id !== originalExecutionGenerationId;
+      }, `${priorMode} agent restarts cleanly into a fresh typed generation`, 5_000);
+      const freshExecutionGenerationId = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+        .find((candidate) => candidate.id === agentId)!.provider_ref!.execution_generation_id;
+      await second.stop();
+      second = null;
+
+      const verifyDb = new DatabaseSync(paths.manifestPath);
+      try {
+        const freshRow = verifyDb.prepare(
+          "SELECT authority_mode FROM execution_runtime_generations WHERE agent_id = ? AND execution_generation_id = ?",
+        ).get(agentId, freshExecutionGenerationId) as { authority_mode: string } | undefined;
+        assert.equal(freshRow?.authority_mode, "typed");
+      } finally {
+        verifyDb.close();
+      }
+    } finally {
+      await first.stop().catch(() => undefined);
+      await second?.stop().catch(() => undefined);
+      await env.cleanup();
+    }
+  }
+});
+
+test("persisted pre-typed Open Model sidecars and rows retire through real adapter exact birth fencing before fresh typed start", async () => {
+  for (const priorMode of ["legacy", "typed_shadow"] as const) {
+    const env = await fixture();
+    const paths = {
+      lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
+      manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+      attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+    };
+    const runtimeRoot = join(env.root, "opencode-runtime");
+    const source = await committedSourceRepository(env.root, `open-model-retired-${priorMode}`);
+    await primeDaemonBareRepository(env.root, source);
+    const agentId = `open_model_retired_${priorMode}`;
+    const roomId = `room_open_model_${priorMode}`;
+
+    const makeDeliveryHttp = (): SupervisedDeliveryHttp => ({
+      latest: async () => ({ messages: [] }),
+      poll: async ({ signal }) => new Promise((resolve) => {
+        if (signal.aborted) resolve({ messages: [] });
+        else signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+      }),
+      publish: async () => {},
+    });
+    let sessionSeq = 0;
+    const grantHttp = {
+      ...noWorkLeaseHttp,
+      createWorkerSession: async () => ({
+        sessionId: `session_om_${priorMode}_${++sessionSeq}`,
+        bearer: `bearer_om_${priorMode}_${sessionSeq}`,
+        bearerId: `bearer_id_om_${priorMode}_${sessionSeq}`,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      }),
+    };
+    const installGrantAndCredential = async (bootstrap: boolean) => {
+      const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_open_model_credential", {
+        entry_id: agentId,
+        api_key: "test-open-model-key",
+        base_url: "https://models.example.test/v1/",
+        model: "qwen/qwen3-coder",
+        daemon_generation: generation,
+      })).ok, true);
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+        entry_id: agentId,
+        room_id: roomId,
+        agent_key: `owner/${agentId}`,
+        grant_id: `grant_${agentId}_${generation}`,
+        supervisor_grant: `grant-secret-${agentId}`,
+        grant_generation: generation,
+        api_url: "http://127.0.0.1:9",
+        daemon_generation: generation,
+        host_id: "host-test",
+        installation_id: "installation-test",
+        grant_expires_at: "2099-01-01T00:00:00.000Z",
+      })).ok, true);
+      if (bootstrap) {
+        assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+          entry_id: agentId,
+          daemon_generation: generation,
+        })).ok, true);
+      }
+    };
+
+    // Shared simulated OpenCode process table across daemon restarts.
+    let nextPid = 8100;
+    let nextPort = 44100;
+    let nextSession = 0;
+    let launchCount = 0;
+    const liveProcesses = new Map<number, { birth: string; resolveExit: (exit: ProviderProcessExit) => void; exited: Promise<ProviderProcessExit> }>();
+    const sessions = new Set<string>();
+    let identityReads = 0;
+    let forceUnknownPid: number | null = null;
+    let ignoreSignals = false;
+    const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+    const createOpenModelRouter = () => new ProviderActionPortRouter({
+      "open-model": async () => new OpenModelProviderAdapter({
+        binary: "/opt/letagents/opencode",
+        runtimeRoot,
+        stopGraceMs: 40,
+        startTimeoutMs: 10_000,
+        turnTimeoutMs: 500,
+        dependencies: {
+          resolveMcpRuntime: () => ({ entryPath: join(env.root, "letagents-mcp-entry.js"), readRoots: [] }),
+          launch: () => {
+            launchCount += 1;
+            const pid = ++nextPid;
+            const birth = `opencode-birth-${pid}`;
+            let resolveExit!: (exit: ProviderProcessExit) => void;
+            const exited = new Promise<ProviderProcessExit>((resolve) => { resolveExit = resolve; });
+            liveProcesses.set(pid, { birth, resolveExit, exited });
+            const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+            Object.assign(child, { pid, unref() {} });
+            return { child, exited };
+          },
+          getProcessIdentity: (pid) => {
+            identityReads += 1;
+            if (forceUnknownPid === pid) return undefined;
+            return liveProcesses.get(pid)?.birth ?? null;
+          },
+          observeProcessExit: (pid) => liveProcesses.get(pid)?.exited ?? Promise.resolve({ type: "exit", code: null, signal: null }),
+          signalProcess: (pid, signal, identity) => {
+            signals.push({ pid, signal, identity });
+            if (ignoreSignals) return;
+            const live = liveProcesses.get(pid);
+            if (live && live.birth === identity) {
+              liveProcesses.delete(pid);
+              live.resolveExit({ type: "exit", code: 0, signal });
+            }
+          },
+          allocatePort: async () => ++nextPort,
+          discoverRuntimeConnection: async () => null,
+          probeGit: async () => null,
+          fetch: async (input, init) => {
+            const url = new URL(input);
+            if (url.pathname.endsWith("/models")) {
+              return new Response(JSON.stringify({ data: [{ id: "qwen/qwen3-coder", context_length: 262144 }] }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            if (url.pathname === "/global/health") {
+              return new Response(JSON.stringify({ healthy: true, version: "1.18.20" }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            if (url.pathname === "/session" && init?.method === "POST") {
+              const id = `ses_${priorMode}_${++nextSession}`;
+              sessions.add(id);
+              return new Response(JSON.stringify({ id }), { status: 200, headers: { "content-type": "application/json" } });
+            }
+            if (url.pathname === "/session") {
+              return new Response(JSON.stringify([...sessions].map((id) => ({ id }))), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            if (url.pathname === "/config") {
+              return new Response(JSON.stringify({ model: "letagents-open-model/qwen/qwen3-coder", permission: { "*": "allow" } }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
+          },
+        },
+      }),
+    });
+
+    const first = new SupervisorDaemon(paths, "darwin", createOpenModelRouter(), true, 15_000, undefined, {}, makeDeliveryHttp(), grantHttp);
+    let second: SupervisorDaemon | null = null;
+    try {
+      await first.start();
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
+        entry: {
+          ...entry,
+          id: agentId,
+          room_id: roomId,
+          provider: "open-model",
+          model: "qwen/qwen3-coder",
+          permission_profile_id: "full_access",
+          observed_state: "absent",
+          source_repo_path: source,
+          workspace_path: null,
+          work_attempt_id: null,
+        },
+      })).ok, true);
+      await installGrantAndCredential(true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.observed_state === "idle" && current.condition === "none";
+      }, `${priorMode} open-model seed ready`, 5_000);
+      const seeded = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+        .find((candidate) => candidate.id === agentId)!;
+      const originalConnection = seeded.provider_ref!.provider_connection;
+      assert.ok(originalConnection?.kind === "opencode_server" && originalConnection.pid && originalConnection.processIdentity);
+      const originalExecutionGenerationId = seeded.provider_ref!.execution_generation_id;
+      const originalWorkAttemptId = seeded.work_attempt_id!;
+      await first.stop();
+
+      // Simulate an older daemon's persisted pre-typed database row AND private server-auth.json sidecar.
+      const db = new DatabaseSync(paths.manifestPath);
+      try {
+        const updated = db.prepare(
+          "UPDATE execution_runtime_generations SET authority_mode = ? WHERE agent_id = ?",
+        ).run(priorMode, agentId);
+        assert.equal(updated.changes, 1);
+      } finally {
+        db.close();
+      }
+      const savedAuth = JSON.parse(await readFile(originalConnection.serverAuthPath, "utf8")) as Record<string, unknown>;
+      await writePrivateFileAtomically(
+        originalConnection.serverAuthPath,
+        `${JSON.stringify({ ...savedAuth, lifecycleAuthorityMode: priorMode })}\n`,
+      );
+
+      // Reset observation counters before starting the upgraded daemon while the old process survives.
+      identityReads = 0;
+      signals.length = 0;
+      const launchesBeforeUpgrade = launchCount;
+
+      second = new SupervisorDaemon(paths, "darwin", createOpenModelRouter(), true, 15_000, undefined, {}, makeDeliveryHttp(), grantHttp);
+      await second.start();
+      await installGrantAndCredential(false);
+
+      // 1. Live pre-typed runtime fails closed once to coordination_blocked without admitting or launching a competitor.
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.condition === "coordination_blocked";
+      }, `${priorMode} open-model blocks once`, 5_000);
+      assert.equal(launchCount, launchesBeforeUpgrade, `${priorMode} must not spawn beside surviving old OpenCode process`);
+      assert.equal(signals.length, 0, `${priorMode} running convergence must not kill before explicit Stop`);
+      const attemptsBeforeStop = await new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, paths.manifestPath)
+        .getAttempt(originalWorkAttemptId);
+      assert.equal(attemptsBeforeStop.execution_generations.length, 1, `${priorMode} must not create a junk execution generation`);
+      assert.equal(attemptsBeforeStop.execution_generations[0]!.terminal, null);
+
+      // 2. When process birth cannot be verified, Stop fails closed and never falsely reports stopped.
+      forceUnknownPid = originalConnection.pid;
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: agentId, desired_state: "stopped",
+      })).ok, true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.desired_state === "stopped"
+          && current.condition === "coordination_blocked"
+          && /could not be stopped/i.test(current.last_error ?? "");
+      }, `${priorMode} stop fails closed when birth cannot be verified`, 5_000);
+      const unverifiedStop = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+        .find((candidate) => candidate.id === agentId)!;
+      assert.notEqual(unverifiedStop.observed_state, "stopped");
+      assert.equal(signals.length, 0);
+      const attemptAfterUnverifiedStop = await new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, paths.manifestPath)
+        .getAttempt(originalWorkAttemptId);
+      assert.equal(attemptAfterUnverifiedStop.execution_generations[0]!.terminal, null);
+
+      // 2b. When the surviving process ignores TERM and KILL, Stop still refuses to report stopped or settle terminal.
+      forceUnknownPid = null;
+      ignoreSignals = true;
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: agentId, desired_state: "stopped",
+      })).ok, true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.condition === "coordination_blocked"
+          && /has not yet proved the recorded process birth is gone/i.test(current.last_error ?? "");
+      }, `${priorMode} stop fails closed while process survives`, 5_000);
+      assert.deepEqual(signals, [
+        { pid: originalConnection.pid, signal: "SIGTERM", identity: originalConnection.processIdentity },
+        { pid: originalConnection.pid, signal: "SIGKILL", identity: originalConnection.processIdentity },
+      ]);
+      const attemptAfterStubbornStop = await new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, paths.manifestPath)
+        .getAttempt(originalWorkAttemptId);
+      assert.equal(attemptAfterStubbornStop.execution_generations[0]!.terminal, null);
+
+      // 3. With verifiable process birth and real exit, Stop signals exact (pid, birth), records terminal, and stops cleanly.
+      ignoreSignals = false;
+      signals.length = 0;
+      identityReads = 0;
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: agentId, desired_state: "stopped",
+      })).ok, true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.observed_state === "stopped" && current.condition === "none";
+      }, `${priorMode} open-model stops via exact birth fencing`, 5_000);
+      assert.ok(identityReads >= 1, `${priorMode} stop must inspect exact process identity`);
+      assert.deepEqual(signals, [
+        { pid: originalConnection.pid, signal: "SIGTERM", identity: originalConnection.processIdentity },
+      ]);
+      assert.equal(liveProcesses.has(originalConnection.pid), false);
+      const attemptAfterStop = await new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, paths.manifestPath)
+        .getAttempt(originalWorkAttemptId);
+      assert.equal(attemptAfterStop.execution_generations[0]!.terminal?.terminal_cause, "stopped");
+
+      // 4. Starting fresh passes assertPriorStartupProcessGone, rewrites server-auth.json to typed, and converges to idle.
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: agentId, desired_state: "running",
+      })).ok, true);
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+          .find((candidate) => candidate.id === agentId);
+        return current?.observed_state === "idle"
+          && current.condition === "none"
+          && current.provider_ref?.execution_generation_id !== originalExecutionGenerationId;
+      }, `${priorMode} open-model starts fresh into typed generation`, 5_000);
+      const restarted = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+        .find((candidate) => candidate.id === agentId)!;
+      const freshExecutionGenerationId = restarted.provider_ref!.execution_generation_id;
+      const freshAuth = JSON.parse(await readFile(originalConnection.serverAuthPath, "utf8")) as {
+        lifecycleAuthorityMode?: string;
+      };
+      assert.equal(freshAuth.lifecycleAuthorityMode, "typed");
+      await second.stop();
+      second = null;
+
+      const verifyDb = new DatabaseSync(paths.manifestPath);
+      try {
+        const freshRow = verifyDb.prepare(
+          "SELECT authority_mode FROM execution_runtime_generations WHERE agent_id = ? AND execution_generation_id = ?",
+        ).get(agentId, freshExecutionGenerationId) as { authority_mode: string } | undefined;
+        assert.equal(freshRow?.authority_mode, "typed");
+      } finally {
+        verifyDb.close();
+      }
+    } finally {
+      await first.stop().catch(() => undefined);
+      await second?.stop().catch(() => undefined);
+      await env.cleanup();
+    }
   }
 });

@@ -494,11 +494,8 @@ export class LifecycleAdministrationCoordinator {
     await this.ports.ephemeralProvisioner.garbageCollectOrphans(retained);
   }
 
-  private async requiresHostGrant(entry: DaemonManifestEntry): Promise<boolean> {
-    if (entry.delivery_mode === "daemon_inbox") return true;
-    const configuration = await this.ports.store.getAgentConfiguration(entry.id);
-    if (!configuration) throw new Error("Agent credential custody configuration is unavailable.");
-    return Boolean(configuration.polling_contract);
+  private async requiresHostGrant(_entry: DaemonManifestEntry): Promise<boolean> {
+    return true;
   }
 
   private providerRef(entry: DaemonManifestEntry): ProviderActionRef {

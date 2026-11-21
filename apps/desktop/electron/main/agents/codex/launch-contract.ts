@@ -24,7 +24,7 @@ export const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
     controlProbe: "rpc",
     approvals: { kinds: ["command", "file_change", "network"], recovery: "connection_only", denyScope: "request" },
   },
-  deliveryModes: ["mcp_polling", "daemon_inbox"],
+  deliveryModes: ["daemon_inbox"],
   // P0 task_28 did not prove native mid-turn injection or approval bridging.
   // Resume is populated per app-server after a protocol-level probe.
   resume: false,
@@ -162,19 +162,6 @@ export function readMcpRuntimeContract(entryPath: string, apiUrl?: string, deadl
   });
 }
 
-export function custodialPollingTools(value: unknown): string[] {
-  const report = recordValue(value);
-  const profile = recordValue(recordValue(report?.profiles)?.supervised_mcp_polling);
-  const tools = profile?.tools;
-  if (report?.format !== 1 || profile?.contract !== "custodial_polling_v1"
-    || !Array.isArray(tools) || !tools.every((name) => typeof name === "string")
-    || !["wait_for_messages", "read_messages", "send_message"].every((name) => tools.includes(name))
-    || tools.some((name) => /^(?:register_agent_session|disconnect_agent_session|start_device_auth|poll_device_auth|clear_saved_auth|resume_room_session|rental_.*)$/.test(name))) {
-    throw new Error("The verified LetAgents MCP runtime does not support custodial_polling_v1.");
-  }
-  return tools;
-}
-
 export const REQUIRED_ROOM_TOOLS = ["claim_task", "get_board", "read_messages", "send_message"] as const;
 
 export function boundedCodexTools(value: unknown): string[] {
@@ -221,7 +208,7 @@ export function boundedLaunchContract(apiUrl: string, tools: string[]): string {
   // The access level is not part of this identity: the daemon compares one
   // contract for every agent of a room server, and a change of access level
   // already replaces the runtime through its configuration revision.
-  const override = custodialMcpOverride("<sealed-entry>", "<workspace>", {
+  const override = boundedMcpOverride("<sealed-entry>", "<workspace>", {
     ...boundedMcpEnvironment, LETAGENTS_API_URL: apiUrl,
   }, [...tools].sort());
   return createHash("sha256").update(JSON.stringify({
@@ -229,7 +216,7 @@ export function boundedLaunchContract(apiUrl: string, tools: string[]): string {
   })).digest("hex");
 }
 
-export function custodialMcpOverride(
+export function boundedMcpOverride(
   entryPath: string, cwd: string, environment: Record<string, string>, tools: string[],
   /** The launch is a Read-only agent's: its room tools are the named ones and no others. */
   readOnlyRoomTools = false,

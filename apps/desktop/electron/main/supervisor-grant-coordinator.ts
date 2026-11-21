@@ -1284,8 +1284,7 @@ function supervisedEntryNeverLaunched(entry: DesktopSupervisorManifestEntry): bo
 }
 
 function requiresSupervisorGrant(entry: DesktopSupervisorManifestEntry): boolean {
-  return entry.deliveryMode === "daemon_inbox"
-    || (entry.deliveryMode === "mcp_polling" && entry.pollingContract === "custodial_polling_v1");
+  return entry.deliveryMode === "daemon_inbox";
 }
 
 function hasExactReconnectTarget(entry: DesktopSupervisorManifestEntry): boolean {

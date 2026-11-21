@@ -27,8 +27,7 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
     condition: entry.condition,
     lastError: entry.last_error ?? null,
     permissionProfileId: entry.permission_profile_id,
-    deliveryMode: entry.delivery_mode ?? "mcp_polling",
-    ...(entry.polling_contract === "custodial_polling_v1" ? { pollingContract: entry.polling_contract } : {}),
+    deliveryMode: entry.delivery_mode ?? "daemon_inbox",
     ...(entry.home_harness === "on" || entry.home_harness === "after_restart" || entry.home_harness === "until_restart"
       ? { homeHarness: entry.home_harness } : {}),
     ...(entry.permission_pending === true ? { permissionPending: true as const } : {}),

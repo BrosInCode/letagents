@@ -276,7 +276,7 @@ for (const natural of [
   });
 }
 
-for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
+for (const lifecycleAuthorityMode of ["typed"] as const) {
   test(`Claude success-subtype API errors settle and recover without replay (${lifecycleAuthorityMode})`, async () => {
     const harness = createHarness();
     const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
@@ -315,7 +315,7 @@ for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
   });
 }
 
-for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
+for (const lifecycleAuthorityMode of ["typed"] as const) {
   test(`every Claude result shape ends its room turn once: no throw, no rerun, no answer it did not prove (${lifecycleAuthorityMode})`, async () => {
     const sessionRows: Array<Record<string, unknown>> = [];
     const harness = createHarness({ sessionRows });

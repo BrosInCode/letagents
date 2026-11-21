@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { assertNoDeliveryDrain } from "../delivery-drain.js";
-import { assertNoPollingActivation } from "../custodial-polling-activation.js";
 import type { SupervisedEffectRecord, Row } from "./types.js";
 import { run } from "./sql.js";
 import { rowToItem } from "./row-mapping.js";
@@ -94,8 +92,6 @@ export abstract class InboxRoomMoveStore extends InboxEffectStore {
         const unresolvedControl = database.prepare(`SELECT action_id FROM turn_control_journals
           WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id);
         if (unresolvedControl) throw new Error("Room move is blocked by unresolved turn control.");
-        assertNoDeliveryDrain(database, input.agent_id);
-        assertNoPollingActivation(database, input.agent_id);
         const timestamp = this.now();
         const sourceCursor = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?")
           .get(input.agent_id, input.room_id) as Row | undefined;

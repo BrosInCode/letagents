@@ -2,12 +2,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import {
-  buildCodexStartPrompt,
-  DEFAULT_CODEX_STOP_PHRASE,
-  looksLikeInviteCode,
-  makeCodexStopToken,
-} from "../codex-start-prompt.js";
 import type { ProviderContinuationRef, ProviderRoomTurnOptions, ProviderSpawnRequest } from "../provider-adapter.js";
 import { safeCursorTerminalErrorDetail } from "../cursor-provider-evidence.js";
 import { CursorRoomTurnRecoveryError } from "../cursor-turn-settlement.js";
@@ -55,39 +49,34 @@ export async function start(
   if (!req.agentDisplayName?.trim()) {
     throw new Error("Cursor spawn requires the durable agent display name from the manifest.");
   }
-  const deliveryMode = req.deliveryMode ?? "mcp_polling";
-  if (deliveryMode !== "mcp_polling" && deliveryMode !== "daemon_inbox") {
+  const deliveryMode = req.deliveryMode ?? "daemon_inbox";
+  if (deliveryMode !== "daemon_inbox") {
     throw new Error(`Cursor does not support ${deliveryMode} room delivery.`);
   }
-  if (deliveryMode === "daemon_inbox" && !req.permissionProfileId?.trim()) {
+  if (!req.permissionProfileId?.trim()) {
     throw new Error("Cursor daemon-inbox launch requires an exact permission profile.");
   }
-  if (deliveryMode === "daemon_inbox"
-    && req.workspaceKind !== "git_worktree"
-    && req.workspaceKind !== "room_scratch") {
+  if (req.workspaceKind !== "git_worktree" && req.workspaceKind !== "room_scratch") {
     throw new Error("Cursor daemon-inbox launch requires an explicit workspace kind.");
   }
   const policyArgs = [
     ...cursorLaunchPolicyArgs(attestProviderSpawnPolicy("cursor", req)),
     ...(req.model ? ["--model", req.model] : []),
   ];
-  let supervisedProfile: CursorManagedProfile | null = null;
-  if (deliveryMode === "daemon_inbox") {
-    if (!req.supervisorEntryId?.trim()
-      || !req.supervisorSocketPath?.trim()
-      || !req.supervisorExecutionGenerationId?.trim()) {
-      throw new Error("Cursor daemon-inbox launch requires exact supervisor coordinates.");
-    }
-    supervisedProfile = adapter.supervisedProfileFactory({
-      workAttemptId: req.workAttemptId,
-      cwd: req.cwd,
-      apiBaseUrl: req.supervisorWorkerSession?.apiUrl ?? desktopApiUrl,
-      permissionProfileId: req.permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"],
-      exactWorkspaceOnly: usesExactScratchWorkspace(req),
-      includeAuth: false,
-      devMcpServerEntryPath: req.devMcpServerEntryPath,
-    });
+  if (!req.supervisorEntryId?.trim()
+    || !req.supervisorSocketPath?.trim()
+    || !req.supervisorExecutionGenerationId?.trim()) {
+    throw new Error("Cursor daemon-inbox launch requires exact supervisor coordinates.");
   }
+  const supervisedProfile = adapter.supervisedProfileFactory({
+    workAttemptId: req.workAttemptId,
+    cwd: req.cwd,
+    apiBaseUrl: req.supervisorWorkerSession?.apiUrl ?? desktopApiUrl,
+    permissionProfileId: req.permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"],
+    exactWorkspaceOnly: usesExactScratchWorkspace(req),
+    includeAuth: false,
+    devMcpServerEntryPath: req.devMcpServerEntryPath,
+  });
   const handle = new CursorProviderHandle(
     req.workAttemptId,
     req.cwd,
@@ -102,41 +91,15 @@ export async function start(
   // A daemon successor must not start a bootstrap turn while an uncheckpointed
   // predecessor child may still be finishing. The durable FIFO recovers (or
   // blocks) that exact turn first; a later real inbox item verifies --resume.
-  if (deliveryMode === "daemon_inbox") {
-    // Cursor cannot mint a session without executing an inference. Persist a
-    // non-native placeholder and let the FIRST DURABLY JOURNALED inbox turn
-    // establish the real session instead of running uncaused bootstrap work.
-    if (!handle.providerContinuationId) {
-      handle.providerContinuationId = `${CURSOR_PENDING_CONTINUATION_PREFIX}${randomUUID()}`;
-    }
-    handle.state = "idle";
-    adapter.handles.set(req.workAttemptId, handle);
-    return handle;
+  // Cursor cannot mint a session without executing an inference. Persist a
+  // non-native placeholder and let the FIRST DURABLY JOURNALED inbox turn
+  // establish the real session instead of running uncaused bootstrap work.
+  if (!handle.providerContinuationId) {
+    handle.providerContinuationId = `${CURSOR_PENDING_CONTINUATION_PREFIX}${randomUUID()}`;
   }
-
-  const prompt = buildCodexStartPrompt({
-    roomIdentifier: req.roomId,
-    joinedVia: looksLikeInviteCode(req.roomId) ? "join_code" : "join_room",
-    cwd: req.cwd,
-    stopPhrase: DEFAULT_CODEX_STOP_PHRASE,
-    token: makeCodexStopToken(),
-    suggestedDisplayName: req.agentDisplayName.trim(),
-    deadlineUtc: null,
-    maxMinutes: 0,
-    providerLabel: "Cursor",
-    runtimeKey: "cursor",
-  });
-
+  handle.state = "idle";
   adapter.handles.set(req.workAttemptId, handle);
-  try {
-    await adapter.beginTurn(handle, prompt, resumeRef?.providerContinuationId ?? null);
-    return handle;
-  } catch (error) {
-    if (adapter.handles.get(req.workAttemptId) === handle) {
-      adapter.handles.delete(req.workAttemptId);
-    }
-    throw error;
-  }
+  return handle;
 }
 
 /**

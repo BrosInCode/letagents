@@ -10,8 +10,6 @@ import type { DaemonControlSocket } from "../control-socket.js";
 import type { createHostApprovalBridge } from "../host-approval-broker.js";
 import type { DaemonAuthority } from "../daemon-authority.js";
 import type { DaemonReadModel } from "../daemon-read-model.js";
-import type { DeliveryCutoverCoordinator } from "../delivery-cutover-coordinator.js";
-import type { DeliveryCutoverExecutionCoordinator } from "../delivery-cutover-execution-coordinator.js";
 import type { DaemonStateWatch } from "../daemon-state-watch.js";
 import type { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import type { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
@@ -122,8 +120,6 @@ export abstract class SupervisorDaemonState {
   protected abstract readonly socket: DaemonControlSocket;
   protected abstract readonly stateWatch: DaemonStateWatch;
   protected abstract readonly entryConcurrency: EntryConcurrencyGate;
-  protected abstract readonly deliveryCutovers: DeliveryCutoverCoordinator;
-  protected abstract readonly deliveryCutoverExecution: DeliveryCutoverExecutionCoordinator;
   protected abstract readonly providerStreams: ProviderStreamCoordinator;
   protected abstract readonly hostApprovals: ReturnType<typeof createHostApprovalBridge>;
   protected abstract readonly providerCheckpoints: ProviderCheckpointCoordinator;

@@ -16,7 +16,7 @@ import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
-import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
+import { runtimeReadySubscription, testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
@@ -28,9 +28,30 @@ type DaemonInternals = {
   putManifestEntry(entry: Record<string, unknown>): Promise<unknown>;
   startSupervisedDelivery(entryId: string): Promise<void>;
   attachLiveProvider(entry: unknown): Promise<unknown>;
-  store: Pick<ManifestStore, "getEntry" | "commitTurnControlState">;
+  manifestGeneration: number;
+  providerStreams: { drainCallbacks(): Promise<void> };
+  store: Pick<ManifestStore, "getEntry" | "load" | "checkpointProviderBirth" | "commitTurnControlState">;
   publishNativeActivity: () => Promise<boolean>;
 };
+
+async function checkpointTypedBirth(
+  internals: DaemonInternals,
+  entryId: string,
+  executionGenerationId: string,
+): Promise<void> {
+  const snapshot = await internals.store.load();
+  const current = snapshot.entries.find((candidate) => candidate.id === entryId);
+  assert.ok(current?.provider_ref?.provider_connection);
+  const birth = await internals.store.checkpointProviderBirth(snapshot.generation, {
+    entry: current,
+    executionGenerationId,
+    providerConnection: current.provider_ref.provider_connection,
+    appliedRevision: 1,
+    requestedAuthorityMode: "typed",
+    observedAtMs: Date.now(),
+  });
+  internals.manifestGeneration = birth.generation;
+}
 
 function holdDeliveryCleanup(daemon: SupervisorDaemon, inboxItemId: string): () => void {
   const delivery = (daemon as unknown as { supervisedDelivery: {
@@ -152,6 +173,7 @@ test("a crash after native Stop quarantines exact A until operator resolution at
     },
     onExit: async () => () => {},
     onStream: async () => () => {},
+    onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
   const httpStub = {
     poll: async () => ({ messages: [] as Array<Record<string, unknown>> }),
@@ -197,9 +219,11 @@ test("a crash after native Stop quarantines exact A until operator resolution at
         execution_generation_id: executionGenerationId,
       },
     });
+    await checkpointTypedBirth(internals, entryId, executionGenerationId);
     await internals.supervisedInbox.bootstrapCursor({ agent_id: entryId, room_id: roomId, last_observed_message_id: null });
     await bindAgent(internals);
     await internals.attachLiveProvider(await internals.store.getEntry(entryId));
+    await internals.providerStreams.drainCallbacks();
     const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     const unownedDispatch = await daemonRequest(paths.socketPath, "manifest.control_turn", {
       id: entryId,
@@ -273,6 +297,7 @@ test("a crash after native Stop quarantines exact A until operator resolution at
     assert.equal(recovered.turn_control?.status, "uncertain", "restart preserves the exact native-effect quarantine");
     await bindAgent(internals2);
     await internals2.attachLiveProvider(await internals2.store.getEntry(entryId));
+    await internals2.providerStreams.drainCallbacks();
     await internals2.startSupervisedDelivery(entryId);
     const successorDaemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     const controlCallsBefore = calls.filter((call) => call.startsWith("control:")).length;
@@ -466,6 +491,23 @@ test("a linked prepared crash lets A finish, fences B, then folds the exact corr
     },
     onExit: async () => () => {},
     onStream: async () => () => {},
+    onExecution: (providerHandle, listener) => {
+      const sourceId = `runtime-ready:${providerHandle.workAttemptId}:${providerHandle.pid ?? "none"}`;
+      listener({
+        sourceId, sequence: 1, observedAtMs: Date.now(),
+        nativeProcessPid: providerHandle.pid!, nativeProcessIdentity: providerHandle.providerConnection!.processIdentity!,
+        fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" },
+      });
+      listener({
+        sourceId, sequence: 2, observedAtMs: Date.now(),
+        nativeProcessPid: providerHandle.pid!, nativeProcessIdentity: providerHandle.providerConnection!.processIdentity!,
+        fact: {
+          domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+          providerContinuationId: continuation, providerTurnId: `turn:${originalInboxItemId}`,
+        },
+      });
+      return { sourceId, position: () => ({ firstRetainedSequence: 1, latestSequence: 2 }), dispose() {} };
+    },
   };
   const httpStub = {
     poll: async () => ({ messages: [] as Array<Record<string, unknown>> }),
@@ -478,6 +520,7 @@ test("a linked prepared crash lets A finish, fences B, then folds the exact corr
     await daemon.start();
     const internals = daemon as unknown as DaemonInternals;
     internals.publishNativeActivity = async () => true;
+    await checkpointTypedBirth(internals, entryId, generation.execution_generation_id);
     await internals.workerBindings.bind({
       entry_id: entryId, room_id: roomId, work_attempt_id: workAttemptId,
       execution_generation_id: generation.execution_generation_id,
@@ -485,6 +528,7 @@ test("a linked prepared crash lets A finish, fences B, then folds the exact corr
       api_url: "https://letagents.test",
     });
     await internals.attachLiveProvider(await internals.store.getEntry(entryId));
+    await internals.providerStreams.drainCallbacks();
     await internals.startSupervisedDelivery(entryId);
     await eventually(async () => calls.includes(`recover-room-turn:${originalInboxItemId}`), "exact A recovery after prepared crash");
     activeTurns.get(originalInboxItemId)!.resolve({ turnId: `turn:${originalInboxItemId}`, outcome: "no_reply", text: null });
@@ -591,6 +635,7 @@ test("daemon-inbox native-correction capability still uses pure Stop and preserv
     },
     onExit: async () => () => {},
     onStream: async () => () => {},
+    onExecution: (providerHandle, listener) => runtimeReadySubscription(providerHandle, listener),
   };
   const httpStub = {
     poll: async () => ({ messages: [] as Array<Record<string, unknown>> }),
@@ -619,6 +664,7 @@ test("daemon-inbox native-correction capability still uses pure Stop and preserv
         provider_connection: handle.providerConnection,
       },
     });
+    await checkpointTypedBirth(internals, entryId, generation.execution_generation_id);
     await internals.supervisedInbox.bootstrapCursor({ agent_id: entryId, room_id: roomId, last_observed_message_id: null });
     await internals.workerBindings.bind({
       entry_id: entryId, room_id: roomId, work_attempt_id: workAttemptId,
@@ -627,6 +673,7 @@ test("daemon-inbox native-correction capability still uses pure Stop and preserv
       api_url: "https://letagents.test",
     });
     await internals.attachLiveProvider(await internals.store.getEntry(entryId));
+    await internals.providerStreams.drainCallbacks();
     const original = await internals.supervisedInbox.enqueueCorrection({ agent_id: entryId, room_id: roomId, source_message_id: "not-applied-A", source_message: { text: "A" }, activation: { decision: "activate" } });
     releaseCleanup = holdDeliveryCleanup(daemon, original.inbox_item_id);
     const successor = await internals.supervisedInbox.enqueueCorrection({ agent_id: entryId, room_id: roomId, source_message_id: "not-applied-B", source_message: { text: "B" }, activation: { decision: "activate" } });

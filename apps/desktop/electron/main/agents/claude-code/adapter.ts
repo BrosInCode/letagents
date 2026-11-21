@@ -73,7 +73,7 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
    */
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
     const handle = this.handles.get(ref.workAttemptId);
-    const authorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
+    const authorityMode = ref.lifecycleAuthorityMode ?? "typed";
     if (handle && !handle.terminal
       && handle.providerContinuationId === ref.providerContinuationId
       && handle.lifecycleAuthorityMode === authorityMode
@@ -87,7 +87,7 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
     const pending = this.pendingAttaches.get(ref.workAttemptId);
     if (pending) {
       if (pending.ref.providerContinuationId !== ref.providerContinuationId
-        || (pending.ref.lifecycleAuthorityMode ?? "typed_shadow") !== authorityMode
+        || (pending.ref.lifecycleAuthorityMode ?? "typed") !== authorityMode
         || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)) return null;
       return pending.promise;
     }
@@ -229,7 +229,6 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
       await options.checkpointTurnStarted?.(turnId);
       terminalPromise = this.waitForExactRoomTurn(handle, turnId, options.detachSignal);
       handle.activeRoomTurnId = turnId;
-      if (handle.lifecycleAuthorityMode !== "typed") handle.state = "working";
       handle.executionTurnId = turnId;
       handle.executionTurnStarted = false;
       handle.executionTerminalCheckpoint = null;

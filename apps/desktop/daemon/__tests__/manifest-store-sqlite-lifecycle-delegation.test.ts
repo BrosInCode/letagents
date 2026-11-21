@@ -22,62 +22,6 @@ import {
   seedTerminalExecution,
 } from "./helpers/manifest-store-sqlite-fixture.js";
 
-test("provider birth collisions cannot relabel frozen lifecycle authority", async () => {
-  const env = await fixture();
-  const store = new ManifestStore(env.databasePath);
-  const connection = {
-    kind: "codex_app_server" as const,
-    url: "http://127.0.0.1:4311",
-    pid: 4311,
-    processIdentity: "frozen-birth",
-  };
-  const agent: DaemonManifestEntry = {
-    ...entry,
-    condition: "none",
-    delivery_mode: "daemon_inbox",
-    turn_control: undefined,
-    work_attempt_id: "attempt_1",
-    provider_ref: {
-      work_attempt_id: "attempt_1",
-      execution_generation_id: "run_1",
-      provider_continuation_id: "thread_1",
-      provider_connection: connection,
-    },
-  };
-  try {
-    const written = await store.write(0, [agent]);
-    seedTerminalExecution(env.databasePath, "attempt_1", "run_1");
-    const first = await store.checkpointProviderBirth(written.generation, {
-      entry: agent,
-      executionGenerationId: "run_1",
-      providerConnection: connection,
-      appliedRevision: 1,
-      requestedAuthorityMode: "typed_shadow",
-      observedAtMs: 100,
-    });
-    const before = await store.load();
-    await assert.rejects(store.checkpointProviderBirth(first.generation, {
-      entry: first.entry,
-      executionGenerationId: "run_1",
-      providerConnection: connection,
-      appliedRevision: 1,
-      requestedAuthorityMode: "typed",
-      observedAtMs: 200,
-    }), /incompatible frozen lifecycle authority/);
-    const after = await store.load();
-    assert.equal(after.generation, before.generation, "rejected relabeling commits no manifest generation");
-    assert.deepEqual(after.entries, before.entries, "rejected relabeling rolls back projection rewrites");
-    assert.equal(await store.readRuntimeLifecycleAuthority({
-      agentId: agent.id,
-      executionGenerationId: "run_1",
-      providerConnection: connection,
-      configurationRevision: 1,
-    }), "typed_shadow");
-  } finally {
-    await env.cleanup();
-  }
-});
-
 test("typed runtime readiness makes a fresh exact birth idle and stamps readiness", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
@@ -377,7 +321,6 @@ test("typed hard-runtime failure cannot overwrite a replacement or intentionally
     } }) },
     { name: "stopped agent", mutate: agent => ({ ...agent, desired_state: "stopped", observed_state: "stopped" }) },
     { name: "quarantined agent", mutate: agent => ({ ...agent, condition: "quarantined" }) },
-    { name: "polling delivery", mutate: agent => ({ ...agent, delivery_mode: "mcp_polling" }) },
     { name: "completed stop turn", mutate: agent => ({ ...agent, turn_control: {
       action_id: "stop-action", action_sequence: 1, work_attempt_id: "fenced-workspace",
       execution_generation_id: "fenced-generation", has_correction: false, status: "completed",

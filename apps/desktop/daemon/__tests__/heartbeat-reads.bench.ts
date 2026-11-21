@@ -27,7 +27,7 @@ function event(sequence: number): DaemonActivityEvent {
 const entry = {
   id: "agent_0", room_id: "room_1", display_name: "Agent0", provider: "codex", model: "gpt-5.6-codex",
   charter: "Work.", desired_state: "running", observed_state: "working", condition: "none", last_error: null,
-  permission_profile_id: "workspace-write", provider_launch_policy: { deliveryMode: "mcp_polling" },
+  permission_profile_id: "workspace-write", provider_launch_policy: {},
   created_by: "user_1", created_at: "2026-10-19T00:00:00.000Z", source_repo_path: "/repo",
   workspace_path: "/worktrees/agent_0", work_attempt_id: "attempt_0",
   provider_ref: {

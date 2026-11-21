@@ -27,13 +27,17 @@ import type {
 import type { DaemonManifestEntry, ExecutionTerminalPayload, TaskWorkAttempt } from "../types.js";
 import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { BoundWorkerAuthorization, InstalledHostGrant } from "../worker-runtime-custody.js";
-import type { PollingActivationRecord } from "../custodial-polling-activation.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
 import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordinator.js";
 import { launchProgress } from "../launch-progress.js";
 import { setTurnStartLatencyReporter, type StartLatencyRecord } from "../turn-start-latency.js";
 import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-spawn-configuration.js";
+import { OpenModelProviderAdapter } from "../../electron/main/agents/open-model-provider-adapter.js";
+import { ProviderActionPortRouter } from "../provider-action-port-router.js";
+import { ExecutionProtocolError } from "../execution-protocol.js";
+import { ProviderStopError } from "../daemon-error-policy.js";
+import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -154,9 +158,7 @@ function harness(input: {
     settleRuntimeApprovals: async () => {},
     provider: port,
     store: {
-      unresolvedDeliveryDrain: async () => null,
       pendingRuntimeRecovery: async () => null,
-      unresolvedPollingActivation: async () => null,
       load: async () => ({ generation: manifestGeneration, entries: [manifestEntry] }),
       getEntry: async (entryId) => entryId === manifestEntry.id ? manifestEntry : undefined,
       getAgentConfiguration: async () => ({
@@ -928,17 +930,6 @@ test("a launch waits for the daemon's runtime verification before it takes a lau
   const bounded = launchProgress.view("agent-1")!;
   assert.equal(bounded.state, "launched");
   assert.equal(bounded.phases.find((phase) => phase.phase === "runtime_verify")?.ms, 50);
-});
-
-test("delivery handoff freezes convergence and draining never creates a successor", async () => {
-  for (const phase of ["draining", "dispatching", "uncertain"] as const) {
-    let launches = 0;
-    const runtime = harness({ provider: provider({ spawn: async () => { launches++; return returnedHandle; }, resume: async () => { launches++; return returnedHandle; } }) });
-    runtime.options.store.unresolvedDeliveryDrain = async () => ({ phase } as never);
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(launches, 0, phase);
-    assert.equal(runtime.executionGenerations.length, 0, phase);
-  }
 });
 
 const repositoryWorkspaceIdentity: TaskWorkAttempt["workspace_identity"] = {
@@ -1717,7 +1708,7 @@ test("handoff during native dispatch journals the exact returned provider withou
   const port = provider({
     spawn: async () => {
       runtime.setHandoff(true);
-      return { ...returnedHandle, custodyLaunchAgentSessionId: "launched-worker" };
+      return returnedHandle;
     },
   });
   runtime = harness({ provider: port });
@@ -1726,7 +1717,6 @@ test("handoff during native dispatch journals the exact returned provider withou
 
   assert.equal(runtime.entry().provider_ref?.provider_continuation_id, "continuation-1");
   assert.equal(runtime.entry().provider_ref?.execution_generation_id, "generation-1");
-  assert.equal(runtime.entry().provider_ref?.custodial_launch_agent_session_id, "launched-worker");
   assert.deepEqual(
     runtime.checkpoints,
     [],
@@ -1741,7 +1731,7 @@ test("the handoff birth checkpoint retires the entry's pending activity right af
   const port = provider({
     spawn: async () => {
       runtime.setHandoff(true);
-      return { ...returnedHandle, custodyLaunchAgentSessionId: "launched-worker" };
+      return returnedHandle;
     },
   });
   runtime = harness({ provider: port });
@@ -1768,14 +1758,6 @@ test("the handoff birth checkpoint retires the entry's pending activity right af
   assert.equal(batcher.pendingState("agent-1"), null, "its pending events are dropped");
   await runtime.coordinator.drainDispatches();
   await batcher.close();
-});
-
-test("ordinary persistence keeps only the worker identity receipted by the native launch", async () => {
-  const runtime = harness();
-  await runtime.coordinator.persistProviderHandle("agent-1", { ...returnedHandle, custodyLaunchAgentSessionId: "launched-worker" }, "generation-1");
-  assert.equal(runtime.entry().provider_ref?.custodial_launch_agent_session_id, "launched-worker");
-  await runtime.coordinator.persistProviderHandle("agent-1", returnedHandle, "generation-2");
-  assert.equal(runtime.entry().provider_ref?.custodial_launch_agent_session_id, undefined, "a successor cannot inherit an unreceipted worker identity");
 });
 
 test("ordinary provider birth holds manifest mutation authority through generation acceptance", async () => {
@@ -1813,7 +1795,7 @@ test("ordinary provider birth holds manifest mutation authority through generati
     returnedHandle,
     "generation-1",
     1,
-    "typed_shadow",
+    "typed",
   );
   await checkpointStarted;
   let peerEntered = false;
@@ -1832,46 +1814,6 @@ test("ordinary provider birth holds manifest mutation authority through generati
   releaseCheckpoint();
 
   await Promise.all([persistence, peerMutation]);
-});
-
-test("legacy resume stages wait authority from the persisted successor rather than the predecessor snapshot", async () => {
-  const runtime = harness({
-    entry: {
-      ...baseEntry(), delivery_mode: "mcp_polling",
-      provider_ref: {
-        work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
-        provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection,
-      },
-    },
-    provider: provider({ capabilities: async () => ({
-      resume: true, midTurnInjection: false, transcriptAccess: false,
-      permissionPromptBridging: false, survivesRestart: false,
-    }) }),
-  });
-  runtime.executionGenerations.push({
-    execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
-    started_at: "2026-08-26T00:00:00.000Z", actor: "test", generation: 1,
-    terminal: runtime.options.terminalPayload(terminal(returnedHandle), "test"),
-  });
-  runtime.options.bindings.get = async () => ({
-    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
-    execution_generation_id: "generation-1", agent_session_id: "session-1",
-    credential_ref: "legacy-ref", api_url: "https://letagents.test", room_cursor: "7",
-    last_sequence: 9, last_observed_at_ms: 1_000, updated_at: "2026-08-26T00:00:00.000Z",
-  });
-  let stagedGeneration: string | null = null;
-  runtime.options.streams.stageWorkerBindingAfterResume = async (entry, prior, successor, handle) => {
-    assert.equal(entry.provider_ref?.execution_generation_id, successor);
-    assert.equal(entry.provider_ref?.execution_generation_id, runtime.entry().provider_ref?.execution_generation_id);
-    assert.equal(prior.execution_generation_id, "generation-1");
-    assert.equal(handle, returnedHandle);
-    stagedGeneration = successor;
-  };
-
-  await runtime.coordinator.converge("agent-1");
-
-  assert.equal(stagedGeneration, "generation-2");
-  assert.equal(runtime.entry().last_error, "resumed provider awaits exact worker wait evidence");
 });
 
 function ownedRecoveryHarness() {
@@ -2438,67 +2380,6 @@ test("daemon-owned reattach binds the current generation despite a still-present
   assert.equal(runtime.deliveryStarts, 1);
   assert.equal(runtime.waitStages, 0);
   assert.deepEqual(runtime.failures, []);
-});
-
-test("unresolved polling activation permits exact recovery and explicit stop but never a successor", async () => {
-  for (const phase of ["prepared", "dispatching", "uncertain", "active"] as const) {
-    const runtime = ownedRecoveryHarness();
-    runtime.setEntry({ ...runtime.entry(), delivery_mode: "mcp_polling", provider_ref: {
-      ...runtime.entry().provider_ref!, custodial_launch_agent_session_id: "session-1",
-    } });
-    runtime.options.store.getAgentConfiguration = async () => ({ provider: "codex", model: null, reasoning_effort: null,
-      permission_profile_id: "full_access", provider_launch_policy: {}, config_revision: 1,
-      runtime_configuration_revision: 1, polling_contract: "custodial_polling_v1" });
-    const activation: PollingActivationRecord = {
-      operation_id: "activation-1", request_id: "activate-1", reverse_operation_id: "reverse-1",
-      agent_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "generation-2",
-      native_continuation_id: "continuation-1", native_connection_kind: "codex_app_server", native_pid: 4242,
-      native_process_identity: "birth-4242", native_connection_sha256: createHash("sha256").update(JSON.stringify([
-        "codex_app_server", "http://127.0.0.1:4242", 4242, "birth-4242",
-      ])).digest("hex"), config_revision: 1, agent_session_id: "session-1", room_cursor: "7", phase,
-      provider_turn_id: phase === "active" ? "native-turn" : null, terminal_outcome: null, created_at_ms: 1, updated_at_ms: 1,
-    };
-    runtime.options.store.unresolvedPollingActivation = async () => activation;
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(runtime.installed.length, 1, phase);
-    assert.equal(runtime.mintCalls, 1, "the exact runtime can recover its worker without polling evidence");
-    assert.equal(runtime.waitStages, 0);
-    assert.equal(runtime.deliveryStarts, 0);
-    assert.equal(runtime.executionGenerations.length, 1);
-
-    runtime.executionGenerations[0]!.terminal = runtime.options.terminalPayload(terminal(returnedHandle), "test");
-    runtime.liveHandles.clear();
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(runtime.executionGenerations.length, 1, "a terminal runtime cannot replay an unresolved activation in a successor");
-    let stops = 0;
-    runtime.options.provider.stopRef = async (ref) => {
-      stops++;
-      assert.equal(ref.providerConnection?.processIdentity, activation.native_process_identity);
-      return terminal(returnedHandle);
-    };
-    runtime.options.provider.stop = async () => { throw new Error("cached stop cannot prove activation writer death"); };
-    runtime.setEntry({ ...runtime.entry(), desired_state: phase === "active" ? "stopped" : "paused" });
-    if (phase !== "uncertain") runtime.liveHandles.set("agent-1", returnedHandle);
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(stops, 1, "Pause/Stop is available both attached and after transport loss");
-    runtime.setEntry({ ...runtime.entry(), provider_ref: { ...runtime.entry().provider_ref!, provider_continuation_id: "successor" } });
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(stops, 1, "the old activation never stops a replacement runtime");
-  }
-});
-
-test("draining preserves exact old-provider recovery while dispatching refuses attach", async () => {
-  const runtime = ownedRecoveryHarness();
-  runtime.options.store.unresolvedDeliveryDrain = async () => ({ phase: "draining" } as never);
-  await runtime.coordinator.converge("agent-1");
-  assert.equal(runtime.mintCalls, 1);
-  assert.equal(runtime.deliveryStarts, 1);
-  assert.equal(runtime.waitStages, 0);
-  runtime.options.store.unresolvedDeliveryDrain = async () => ({ phase: "dispatching" } as never);
-  assert.equal(await runtime.coordinator.attachLiveProvider(runtime.entry()), null);
-  await runtime.coordinator.converge("agent-1");
-  assert.equal(runtime.mintCalls, 1);
-  assert.equal(runtime.deliveryStarts, 1);
 });
 
 test("a resolved mint/bind call without exact read-back never makes an owned provider ready", async () => {
@@ -3166,4 +3047,207 @@ test("while an agent is still to be replaced the scheduler converges again after
   await failing.drainConvergence();
   assert.deepEqual(failures, [failed]);
   assert.deepEqual(timers, [], "and it is not tried again behind the owner's back");
+});
+
+test("Stop proves process death before releasing the fence even when an immutable protocol_error terminal already exists", async () => {
+  const existingProtocolError: ExecutionTerminalPayload = {
+    ended_at: "2026-08-26T00:01:00.000Z",
+    exit_code: null,
+    signal: null,
+    stdio_archive_ref: null,
+    stdio_tail: "",
+    terminal_cause: "protocol_error",
+    actor: "daemon-provider",
+    generation: 1,
+    provider_continuation_id: "ses-pre-typed",
+  };
+
+  // 1. Real OpenModelProviderAdapter + ProviderActionPortRouter + ProviderExecutionCoordinator
+  //    for both legacy and typed_shadow private server-auth.json sidecars.
+  for (const priorMode of ["legacy", "typed_shadow"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `letagents-stop-protocol-terminal-${priorMode}-`));
+    try {
+      const pid = 9101;
+      const birth = `opencode-birth-${priorMode}-${pid}`;
+      const attemptDir = join(root, `wa-${priorMode}`);
+      mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
+      const serverAuthPath = join(attemptDir, "server-auth.json");
+      await writePrivateFileAtomically(
+        serverAuthPath,
+        `${JSON.stringify({
+          username: "opencode",
+          password: "secret",
+          lifecycleAuthorityMode: priorMode,
+          connection: { url: "http://127.0.0.1:44991", pid, processIdentity: birth },
+        })}\n`,
+      );
+
+      let identityState: string | null | undefined = undefined;
+      let identityReads = 0;
+      let killOnSignal: NodeJS.Signals | null = null;
+      const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+      const adapter = new OpenModelProviderAdapter({
+        binary: "/opt/letagents/opencode",
+        runtimeRoot: root,
+        stopGraceMs: 25,
+        dependencies: {
+          getProcessIdentity: (candidatePid) => {
+            if (candidatePid !== pid) return null;
+            identityReads += 1;
+            return identityState;
+          },
+          signalProcess: (candidatePid, signal, identity) => {
+            signals.push({ pid: candidatePid, signal, identity });
+            if (killOnSignal === signal && identity === birth) identityState = null;
+          },
+          observeProcessExit: () => new Promise(() => {}),
+          discoverRuntimeConnection: async () => null,
+          probeGit: async () => null,
+        },
+      });
+      const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+
+      let fenceReleases = 0;
+      const stopEntry: DaemonManifestEntry = {
+        ...baseEntry(),
+        id: `agent-om-${priorMode}`,
+        provider: "open-model",
+        desired_state: "stopped",
+        observed_state: "recovering",
+        condition: "coordination_blocked",
+        work_attempt_id: `wa-${priorMode}`,
+        provider_ref: {
+          work_attempt_id: `wa-${priorMode}`,
+          execution_generation_id: `gen-${priorMode}`,
+          provider_continuation_id: "ses-pre-typed",
+          provider_connection: {
+            kind: "opencode_server",
+            url: "http://127.0.0.1:44991",
+            pid,
+            processIdentity: birth,
+            serverAuthPath,
+          },
+        },
+      };
+      const runtime = harness({ entry: stopEntry, provider: router });
+      runtime.executionGenerations.push({
+        execution_generation_id: `gen-${priorMode}`,
+        work_attempt_id: `wa-${priorMode}`,
+        started_at: "2026-08-26T00:00:00.000Z",
+        actor: "daemon-provider",
+        generation: 1,
+        terminal: { ...existingProtocolError },
+      });
+      runtime.options.durability.releaseTerminalExecutionFence = async () => { fenceReleases += 1; };
+
+      // 1a. Unverifiable birth: never signals, never releases fence, never reports stopped.
+      identityState = undefined;
+      await assert.rejects(
+        runtime.coordinator.converge(stopEntry.id),
+        (error: unknown) => error instanceof ProviderStopError
+          && /process birth cannot be verified/i.test(String(error.cause)),
+      );
+      assert.ok(identityReads >= 1, `${priorMode} must check process identity`);
+      assert.equal(signals.length, 0);
+      assert.equal(fenceReleases, 0);
+      assert.equal(runtime.terminalWrites.length, 0);
+      assert.notEqual(runtime.entry().observed_state, "stopped");
+
+      // 1b. Surviving stubborn process: escalates TERM -> KILL, never releases fence or reports stopped.
+      identityReads = 0;
+      identityState = birth;
+      killOnSignal = null;
+      await assert.rejects(
+        runtime.coordinator.converge(stopEntry.id),
+        (error: unknown) => error instanceof ProviderStopError
+          && /has not yet proved the recorded process birth is gone/i.test(String(error.cause)),
+      );
+      assert.ok(identityReads >= 1);
+      assert.deepEqual(signals, [
+        { pid, signal: "SIGTERM", identity: birth },
+        { pid, signal: "SIGKILL", identity: birth },
+      ]);
+      assert.equal(fenceReleases, 0);
+      assert.equal(runtime.terminalWrites.length, 0);
+      assert.notEqual(runtime.entry().observed_state, "stopped");
+
+      // 1c. Surviving process exits on SIGTERM: preserves immutable protocol_error, releases fence once, observes exit.
+      identityReads = 0;
+      signals.length = 0;
+      identityState = birth;
+      killOnSignal = "SIGTERM";
+      await runtime.coordinator.converge(stopEntry.id);
+      assert.ok(identityReads >= 1);
+      assert.deepEqual(signals, [{ pid, signal: "SIGTERM", identity: birth }]);
+      assert.equal(runtime.terminalWrites.length, 0, `${priorMode} must preserve existing immutable terminal record`);
+      assert.equal(runtime.executionGenerations[0]!.terminal?.terminal_cause, "protocol_error");
+      assert.equal(fenceReleases, 1, `${priorMode} releases fence only after confirmed process death`);
+      assert.equal(runtime.observedTerminals.length, 1);
+      assert.equal(runtime.observedTerminals[0]!.terminalCause, "stopped");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  // 2. Analogous stopRetiredPreTypedRuntime path (no stopRef, enters via identity_mismatch)
+  //    also refuses to release the fence on a protocol-only terminal without proven death.
+  let attachResponse: ProviderActionHandle | null = null;
+  let stopCalls = 0;
+  let retiredFenceReleases = 0;
+  const retiredEntry: DaemonManifestEntry = {
+    ...baseEntry(),
+    id: "agent-retired-protocol-terminal",
+    provider: "codex",
+    desired_state: "stopped",
+    observed_state: "recovering",
+    condition: "coordination_blocked",
+    work_attempt_id: "attempt-1",
+    provider_ref: {
+      work_attempt_id: "attempt-1",
+      execution_generation_id: "generation-1",
+      provider_continuation_id: "continuation-1",
+      provider_connection: returnedHandle.providerConnection,
+    },
+  };
+  const retired = harness({
+    entry: retiredEntry,
+    provider: provider({
+      attach: async () => attachResponse,
+      stop: async (handle) => {
+        stopCalls += 1;
+        return terminal(handle);
+      },
+    }),
+  });
+  retired.executionGenerations.push({
+    execution_generation_id: "generation-1",
+    work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z",
+    actor: "daemon-provider",
+    generation: 1,
+    terminal: { ...existingProtocolError, provider_continuation_id: "continuation-1" },
+  });
+  retired.options.store.readRuntimeLifecycleAuthority = async () => null;
+  retired.options.store.hasRetiredRuntimeLifecycleAuthority = async () => true;
+  retired.options.durability.releaseTerminalExecutionFence = async () => { retiredFenceReleases += 1; };
+  // Make attachLiveProvider throw identity_mismatch as happens for a frozen pre-typed row.
+  retired.coordinator.attachLiveProvider = async () => { throw new ExecutionProtocolError("identity_mismatch"); };
+
+  attachResponse = null;
+  await assert.rejects(
+    retired.coordinator.converge(retiredEntry.id),
+    (error: unknown) => error instanceof ProviderStopError
+      && /could not be attached or proven stopped/i.test(String(error.cause)),
+  );
+  assert.equal(stopCalls, 0);
+  assert.equal(retiredFenceReleases, 0);
+  assert.equal(retired.terminalWrites.length, 0);
+  assert.notEqual(retired.entry().observed_state, "stopped");
+
+  attachResponse = returnedHandle;
+  await retired.coordinator.converge(retiredEntry.id);
+  assert.equal(stopCalls, 1);
+  assert.equal(retired.terminalWrites.length, 0, "immutable protocol_error terminal is preserved");
+  assert.equal(retiredFenceReleases, 1, "fence released only after provider.stop confirmed termination");
+  assert.equal(retired.observedTerminals.length, 1);
 });

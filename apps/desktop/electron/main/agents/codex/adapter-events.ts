@@ -105,18 +105,8 @@ export abstract class CodexAdapterEvents extends CodexAdapterBase {
       nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null, streamed.truncated);
     // Execution status belongs to the item, never to the reusable app-server.
     // Exact turn settlement above remains independent of this runtime state.
-    const lifecycle = isCodexExecutionMethod(notification.method) ? null
-      : terminalMatch ? "idle"
-      : /(?:^|\/)(?:failed|systemError)$/i.test(notification.method)
-      ? "failed"
-      : codexLifecycleStatus(notification.params)
-        ?? (/^(?:turn|thread)\/(?:completed|interrupted|stopped)$/i.test(notification.method) ? "idle" : null)
-        ?? (/^(?:turn|thread)\/(?:started|resumed)$/i.test(notification.method) ? "working" : null);
-    if (handle.lifecycleAuthorityMode === "typed") {
-      if (nativeLifecycle?.phase === "turn_active") handle.setLiveState("working");
-      else if (nativeLifecycle?.phase === "turn_terminal") handle.setLiveState("idle");
-    } else if (lifecycle === "failed") handle.state = "failed";
-    else if (lifecycle) handle.setLiveState(lifecycle);
+    if (nativeLifecycle?.phase === "turn_active") handle.setLiveState("working");
+    else if (nativeLifecycle?.phase === "turn_terminal") handle.setLiveState("idle");
     this.publishActivity(handle, {
       source: "native_harness",
       method: notification.method,
@@ -170,17 +160,9 @@ export abstract class CodexAdapterEvents extends CodexAdapterBase {
     const params = recordValue(notification.params);
     // `systemError` is the status of a thread whose last turn failed: a
     // provider refusal, a rejected key, a rate limit. The app-server stays up
-    // and the same thread takes the next turn. Where the daemon starts every
-    // turn that is a failed turn, reported by `turn/completed`, and never the
-    // end of the runtime: latching here cost the agent a usable conversation
-    // for each refusal. A lane that polls for itself has no one to start its
-    // next turn, so it keeps the latch and is restarted.
-    const threadSystemError = notification.method === "thread/status/changed"
-      && params?.threadId === handle.providerContinuationId
-      && hasExplicitCodexSystemError(params);
-    const explicitRuntimeFailure = notification.method === "process/systemError"
-      || (threadSystemError && handle.lifecycleAuthorityMode !== "typed");
-    if (explicitRuntimeFailure) {
+    // and the same thread takes the next turn, so it is reported as a failed
+    // turn rather than terminating the runtime.
+    if (notification.method === "process/systemError") {
       this.emitNativeRuntimeUnavailable(handle, "native_session_terminated");
       return null;
     }

@@ -73,7 +73,7 @@ function snapshot(entries = [agent()], generation = 1, sequence = 1): DesktopSup
     observedAt, state: { entries, daemonGeneration: generation, sequence },
     status: {
       healthy: true, protocolVersion: 1, implementationVersion: `test-v${generation}`, generation, pid: 123, startedAt: observedAt,
-      recoveryDiagnostics: null, capabilities: { roomDeliveryRetry: true, providerContinuationRepair: true, roomDeliverySkip: true,
+      capabilities: { roomDeliveryRetry: true, providerContinuationRepair: true, roomDeliverySkip: true,
         agentInspectorDetail: true, agentInspectorSettings: true, agentRoomMove: true, agentLifecycle: true, agentStateSubscription: true },
     },
   };

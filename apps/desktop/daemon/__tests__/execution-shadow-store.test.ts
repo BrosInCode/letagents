@@ -9,8 +9,6 @@ import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../
 import { ExecutionProtocolError, parseExecutionFact, type ExecutionFact } from "../execution-protocol.js";
 import { emptyExecutionProjection, publicApprovalState, reduceDeliveryEvidence, reduceExecutionFact, waitingForApproval, type DeliveryEvidence } from "../execution-reducer.js";
 import { ExecutionShadowStore, type ShadowObserver } from "../execution-shadow-store.js";
-import { lifecycleAuthorityModeForProvider } from "../lifecycle-authority-mode.js";
-import { applyLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../../shared/room-agent-work.mjs";
 import { applyRuntimeRecoverySchema } from "../runtime-recovery-journal.js";
 
@@ -24,7 +22,7 @@ test("verified runtime replacement crosses an old source gap without erasing los
     store.ingest(old.sourceId, old, operationFact(2, { sideEffects: "possible" }));
     store.observeSourcePosition(old.sourceId, old, 776);
     store.registerRuntime({ agentId: "agent", executionGenerationId: "new-generation", runtimeGenerationId: "new-runtime",
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 200 });
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 200 });
     const newAttempt = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "new-message",
       executionGenerationId: "new-generation", workspaceId: "workspace", createdAtMs: 200 });
     const bindNew = () => store.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "new-runtime",
@@ -76,99 +74,34 @@ function fixture(path = ":memory:") {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys=ON");
   applyExecutionStorageSchema(db);
-  applyLifecycleProjectionLedgerSchema(db);
   const store = new ExecutionShadowStore(db);
   return { db, store };
 }
 
-test("typed lifecycle witnesses commit atomically with their exact execution fact", () => {
-  const { db, store } = fixture();
-  try {
-    seed(store); const token = observer(store);
-    const active = turnFact(1, { nativeEventId: "native-active" });
-    assert.equal(store.ingest(token.sourceId, token, active).status, "accepted");
-    assert.equal(store.ingest(token.sourceId, token, active).status, "duplicate");
-    assert.deepEqual({ ...db.prepare(`SELECT native_event_id,typed_phase,typed_state,legacy_state,classification
-      FROM lifecycle_projection_pairs`).get() }, {
-      native_event_id: "native-active",
-      typed_phase: "turn_active",
-      typed_state: "working",
-      legacy_state: null,
-      classification: "incomplete",
-    });
-
-    db.exec(`CREATE TEMP TRIGGER fail_lifecycle_projection BEFORE INSERT ON lifecycle_projection_pairs
-      BEGIN SELECT RAISE(ABORT,'injected lifecycle write failure'); END`);
-    assert.throws(() => store.ingest(token.sourceId, token,
-      turnFact(2, { factId: "fact-terminal", nativeEventId: "native-terminal", state: "terminal", turnOutcome: "completed" })),
-    /injected lifecycle write failure/);
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_facts WHERE fact_id='fact-terminal'").get()!.count, 0);
-    assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers WHERE agent_id='agent'").get()!.last_source_sequence, 1);
-    assert.equal(db.isTransaction, false);
-  } finally { db.close(); }
-});
-
-test("replaying a pre-ledger execution fact cannot manufacture typed comparison history", () => {
-  const { db, store } = fixture();
-  try {
-    seed(store); const token = observer(store);
-    const active = turnFact(1, { nativeEventId: "historical-active" });
-    db.prepare(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,
-      observer_epoch,source_sequence,native_event_id,turn_id,domain,kind,state,side_effects,observed_at_ms)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      active.factId, active.agentId, active.executionGenerationId, active.runtimeGenerationId,
-      active.observerEpoch, active.sourceSequence, active.nativeEventId!, active.turnId,
-      active.domain, active.kind, active.state, active.sideEffects, active.observedAtMs,
-    );
-    db.prepare("UPDATE execution_observers SET last_source_sequence=1,max_observed_sequence=1 WHERE agent_id='agent'").run();
-    assert.equal(store.ingest(token.sourceId, token, active).status, "duplicate");
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0,
-      "only facts committed by the current typed-shadow implementation may enter the comparison ledger");
-  } finally { db.close(); }
-});
-
-test("lifecycle facts receive atomic shadow or pending dispositions while tool facts do not", () => {
-  const shadow = fixture();
-  try {
-    seed(shadow.store); const token = observer(shadow.store);
-    shadow.store.ingest(token.sourceId, token, turnFact(1));
-    shadow.store.ingest(token.sourceId, token, operationFact(2));
-    shadow.store.ingest(token.sourceId, token, {
-      ...fact(3), domain: "runtime", kind: "state_changed", state: "exited",
-      controlEvidence: "process_exit", sideEffects: "none",
-    });
-    assert.deepEqual(shadow.db.prepare(`SELECT effect_kind,state,subject_authority_mode,observer_authority_mode
-      FROM execution_lifecycle_effects ORDER BY fact_sequence`).all().map(row => ({ ...row })), [{
-      effect_kind: "manifest_working", state: "shadowed",
-      subject_authority_mode: "typed_shadow", observer_authority_mode: "typed_shadow",
-    }, {
-      effect_kind: "manifest_failed", state: "shadowed",
-      subject_authority_mode: "typed_shadow", observer_authority_mode: "typed_shadow",
-    }]);
-  } finally { shadow.db.close(); }
-
+test("lifecycle facts receive atomic pending dispositions while tool facts do not", () => {
   const typed = fixture();
   try {
     seed(typed.store, "", "typed"); const token = observer(typed.store);
     assert.equal(typed.store.ingest(token.sourceId, token, turnFact(1)).status, "accepted");
-    assert.deepEqual({ ...typed.db.prepare(`SELECT effect_kind,state,disposed_at_ms
-      FROM execution_lifecycle_effects`).get() }, {
+    assert.equal(typed.store.ingest(token.sourceId, token, operationFact(2)).status, "accepted");
+    assert.deepEqual(typed.db.prepare(`SELECT effect_kind,state,disposed_at_ms
+      FROM execution_lifecycle_effects ORDER BY fact_sequence`).all().map(row => ({ ...row })), [{
       effect_kind: "manifest_working", state: "pending", disposed_at_ms: null,
-    });
+    }]);
     typed.db.exec(`CREATE TEMP TRIGGER reject_lifecycle_effect BEFORE INSERT ON execution_lifecycle_effects
       BEGIN SELECT RAISE(ABORT,'injected disposition failure'); END`);
     assert.throws(() => typed.store.ingest(token.sourceId, token,
-      turnFact(2, { state: "terminal", turnOutcome: "completed" })), /injected disposition failure/);
-    assert.equal(typed.db.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()?.count, 1,
+      turnFact(3, { state: "terminal", turnOutcome: "completed" })), /injected disposition failure/);
+    assert.equal(typed.db.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()?.count, 2,
       "a fact cannot commit without its disposition");
-    assert.equal(typed.db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 1);
+    assert.equal(typed.db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 2);
     typed.db.exec("DROP TRIGGER reject_lifecycle_effect");
     assert.equal(typed.store.ingest(token.sourceId, token, {
-      ...fact(2), domain: "runtime", kind: "state_changed", state: "exited",
+      ...fact(3), domain: "runtime", kind: "state_changed", state: "exited",
       controlEvidence: "native_session_terminated", sideEffects: "none",
     }).status, "accepted");
     assert.deepEqual({ ...typed.db.prepare(`SELECT effect_kind,state,disposed_at_ms
-      FROM execution_lifecycle_effects WHERE fact_sequence=2`).get() }, {
+      FROM execution_lifecycle_effects WHERE fact_sequence=3`).get() }, {
       effect_kind: "manifest_failed", state: "pending", disposed_at_ms: null,
     });
   } finally { typed.db.close(); }
@@ -236,7 +169,7 @@ const native = { turnId: "turn", providerContinuationId: "conversation", provide
 function seed(
   store: ExecutionShadowStore,
   suffix = "",
-  authorityMode: "typed_shadow" | "typed" = "typed_shadow",
+  authorityMode: "typed" = "typed",
   provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex",
 ) {
   const runtime = {
@@ -281,16 +214,15 @@ function roomSummary(store: ExecutionShadowStore): RoomAgentWorkSummary {
   return result.summary;
 }
 
-test("runtime authority freezes on first exact materialization and successor births may differ", () => {
+test("runtime authority registration is idempotent and rejects mismatched identity", () => {
   const { db, store } = fixture();
   try {
     const first = { agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "runtime",
-      provider: "codex" as const, authorityMode: "typed_shadow" as const, configRevision: 1, createdAtMs: 100 };
-    assert.equal(store.registerRuntime(first), "typed_shadow");
-    assert.equal(store.registerRuntime({ ...first, authorityMode: "typed", createdAtMs: 200 }), "typed_shadow",
-      "a changed release request cannot relabel the same exact birth");
+      provider: "codex" as const, authorityMode: "typed" as const, configRevision: 1, createdAtMs: 100 };
+    assert.equal(store.registerRuntime(first), "typed");
+    assert.equal(store.registerRuntime({ ...first, createdAtMs: 200 }), "typed");
     assert.deepEqual({ ...db.prepare("SELECT authority_mode,created_at_ms FROM execution_runtime_generations WHERE runtime_generation_id='runtime'").get() },
-      { authority_mode: "typed_shadow", created_at_ms: 100 });
+      { authority_mode: "typed", created_at_ms: 100 });
     assert.throws(() => store.registerRuntime({ ...first, provider: "cursor" }), /identity_mismatch/);
     assert.throws(() => store.registerRuntime({ ...first, configRevision: 2 }), /identity_mismatch/);
     assert.equal(store.registerRuntime({ ...first, executionGenerationId: "successor-generation",
@@ -299,26 +231,19 @@ test("runtime authority freezes on first exact materialization and successor bir
   } finally { db.close(); }
 });
 
-test("the closed release policy gives supported daemon-owned provider births typed authority", () => {
-  for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const) {
-    assert.equal(lifecycleAuthorityModeForProvider(provider, "daemon_inbox"), "typed");
-    assert.equal(lifecycleAuthorityModeForProvider(provider, "mcp_polling"), "typed_shadow");
-  }
-});
-
-test("typed capture accepts typed runtimes and Cursor recovery preserves each child's frozen mode", () => {
+test("typed capture accepts typed runtimes and Cursor recovery binds a successor observer", () => {
   const { db, store } = fixture();
   try {
-    const subject = { agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "cursor-shadow",
-      provider: "cursor" as const, authorityMode: "typed_shadow" as const, configRevision: 1, createdAtMs: 100 };
+    const subject = { agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "cursor-subject",
+      provider: "cursor" as const, authorityMode: "typed" as const, configRevision: 1, createdAtMs: 100 };
     store.registerRuntime(subject);
     const attemptId = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "message",
       executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: 100 });
     store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation",
-      runtimeGenerationId: "cursor-shadow", attemptId, ...native, createdAtMs: 100 });
+      runtimeGenerationId: "cursor-subject", attemptId, ...native, createdAtMs: 100 });
     store.registerRuntime({ ...subject, executionGenerationId: "successor-generation", runtimeGenerationId: "cursor-typed",
       authorityMode: "typed", createdAtMs: 200 });
-    assert.doesNotThrow(() => store.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "cursor-shadow",
+    assert.doesNotThrow(() => store.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "cursor-subject",
       observerRuntimeGenerationId: "cursor-typed", daemonGenerationId: "daemon", sourceId: "cursor-source",
       expectedEpoch: 0, boundAtMs: 200, recovery: native }));
 
@@ -331,24 +256,6 @@ test("typed capture accepts typed runtimes and Cursor recovery preserves each ch
       executionGenerationId: typed.executionGenerationId, runtimeGenerationId: typed.runtimeGenerationId,
       attemptId: typedAttempt, turnId: "typed-turn", providerContinuationId: "typed-continuation",
       providerTurnId: "typed-native-turn", createdAtMs: 100 }));
-
-    const legacy = { ...typed, agentId: "legacy-agent", executionGenerationId: "legacy-generation",
-      runtimeGenerationId: "legacy-runtime", authorityMode: "legacy" as const };
-    store.registerRuntime(legacy);
-    const legacyAttempt = store.trackMessage({ agentId: legacy.agentId, roomId: "room", sourceMessageId: "legacy-message",
-      executionGenerationId: legacy.executionGenerationId, workspaceId: "legacy-workspace", createdAtMs: 100 });
-    assert.throws(() => store.trackNativeTurn({ agentId: legacy.agentId, roomId: "room",
-      executionGenerationId: legacy.executionGenerationId, runtimeGenerationId: legacy.runtimeGenerationId,
-      attemptId: legacyAttempt, turnId: "legacy-turn", providerContinuationId: "legacy-continuation",
-      providerTurnId: "legacy-native-turn", createdAtMs: 100 }), /invalid_transition/);
-    store.registerRuntime({ ...subject, executionGenerationId: "legacy-observer-generation",
-      runtimeGenerationId: "cursor-legacy", authorityMode: "legacy", createdAtMs: 300 });
-    assert.throws(() => store.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "cursor-shadow",
-      observerRuntimeGenerationId: "cursor-legacy", daemonGenerationId: "daemon", sourceId: "legacy-observer",
-      expectedEpoch: 1, boundAtMs: 300, recovery: native }), /identity_mismatch/);
-    assert.throws(() => store.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "cursor-legacy",
-      observerRuntimeGenerationId: "cursor-typed", daemonGenerationId: "daemon", sourceId: "legacy-subject",
-      expectedEpoch: 1, boundAtMs: 300, recovery: native }), /identity_mismatch/);
   } finally { db.close(); }
 });
 
@@ -448,7 +355,7 @@ test("retained message execution follows historical generations and bounds turns
         const runtime = multipleRuntimes ? `runtime-${index}` : "runtime";
         const generation = multipleRuntimes ? `generation-${index}` : "generation";
         store.registerRuntime({ agentId: "agent", executionGenerationId: generation, runtimeGenerationId: runtime,
-          provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
+          provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 });
         const attemptId = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "message", executionGenerationId: generation, workspaceId: "workspace", createdAtMs: 100 });
         const turn = { turnId: `turn-${index}`, providerContinuationId: "conversation", providerTurnId: `native-${index}` };
         store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: generation, runtimeGenerationId: runtime, attemptId, ...turn, createdAtMs: 100 + index });
@@ -678,7 +585,7 @@ test("a message in an earlier record window reads as saved after later windows f
   try {
     applyRuntimeRecoverySchema(db);
     store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "runtime",
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 });
     const token = observer(store);
     /** A turn of `message` in the given runtime, its start and one command recorded through `source`. */
     const turnOf = (message: string, runtime: "runtime" | "runtime2", source: ShadowObserver, sequence: number) => {
@@ -705,7 +612,7 @@ test("a message in an earlier record window reads as saved after later windows f
     db.prepare("UPDATE execution_observers SET observer_epoch=observer_epoch+1").run();
     db.prepare("UPDATE execution_runtime_generations SET runtime_state='exited',ended_at_ms=200 WHERE runtime_generation_id='runtime'").run();
     store.registerRuntime({ agentId: "agent", executionGenerationId: "generation2", runtimeGenerationId: "runtime2",
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 200 });
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 200 });
     const next = observer(store, { expectedEpoch: 2, subjectRuntimeGenerationId: "runtime2", observerRuntimeGenerationId: "runtime2" });
     turnOf("spanning", "runtime2", next, 1);
     turnOf("newest", "runtime2", next, 4);
@@ -805,7 +712,7 @@ test("a recovery boundary starts a fresh record window: a full record no longer 
 
     // A new runtime without a boundary: the gap refuses its observer, and the budget would refuse its facts.
     store.registerRuntime({ agentId: "agent", executionGenerationId: "generation2", runtimeGenerationId: "runtime2",
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 200 });
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 200 });
     const next = { subjectRuntimeGenerationId: "runtime2", observerRuntimeGenerationId: "runtime2" };
     assert.throws(() => observer(store, { expectedEpoch: 1, ...next }), /source_gap/);
 
@@ -864,7 +771,7 @@ test("retention caps physical witnesses without deleting evidence, advancing acc
       .map(table => db.prepare(`SELECT * FROM ${table}`).all()), protectedRows);
     assert.throws(() => observer(store, { expectedEpoch: 1 }), /source_gap/, "a replacement source must not erase suspended capture");
     store.registerRuntime({ agentId: "agent", executionGenerationId: "generation2", runtimeGenerationId: "runtime2",
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 200 });
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 200 });
     const rebound = observer(store, { sourceId: token.sourceId, expectedEpoch: 1, subjectRuntimeGenerationId: "runtime2", observerRuntimeGenerationId: "runtime2" });
     assert.equal(rebound.lastSourceSequence, 10000); assert.equal(rebound.maxObservedSequence, 10005);
     assert.equal(store.ingest(rebound.sourceId, rebound, fact(10006, { observerEpoch: 2, runtimeGenerationId: "runtime2", executionGenerationId: "generation2" })).status,
@@ -964,7 +871,7 @@ test("public replay reads one WAL snapshot across agent capacity and every runti
     try {
       seed(store); observer(store); retainFacts(db, 1, 9999);
       store.registerRuntime({ agentId: "agent", executionGenerationId: "generation-b", runtimeGenerationId: "runtime-b",
-        provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 200 });
+        provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 200 });
       const prepare = db.prepare.bind(db);
       const exec = db.exec.bind(db);
       let growBeforeReplay = true;
@@ -1489,7 +1396,7 @@ test("one source follows distinct child lifetimes without misattributing a late 
     store.ingest(first.sourceId, first, fact(1)); store.ingest(first.sourceId, first, turnFact(2));
     store.ingest(first.sourceId, first, turnFact(3, { state: "terminal", turnOutcome: "completed" }));
     store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "child2",
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 });
     const attemptId = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "message2", executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: 100 });
     const turn2 = { turnId: "turn2", providerContinuationId: "conversation", providerTurnId: "native-turn2" };
     store.trackNativeTurn({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "child2", ...turn2, attemptId, roomId: "room", createdAtMs: 100 });
@@ -1602,7 +1509,7 @@ test("recovery fences stale observers and binds the exact retained native turn a
     first.store.ingest(old.sourceId, old, turnFact(3, { state: "lost" }));
     first.store.ingest(old.sourceId, old, fact(4, { domain: "control", state: "lost", controlEvidence: "process_exit" }));
     first.store.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 200 });
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 200 });
     const second = new ExecutionShadowStore(db);
     assert.throws(() => observer(second, { expectedEpoch: 1, subjectRuntimeGenerationId: "runtime", observerRuntimeGenerationId: "next-runtime" }), /identity_mismatch/);
     assert.throws(() => observer(second, { expectedEpoch: 1, observerRuntimeGenerationId: "next-runtime", recovery: { ...native, providerTurnId: "different" } }), /identity_mismatch/);
@@ -1693,7 +1600,7 @@ test("shadow projections cannot mutate the legacy inbox or invoke effects", () =
     store.ingest(token.sourceId, token, turnFact(2, { state: "terminal", turnOutcome: "failed" }));
     assert.equal(db.prepare("SELECT state FROM supervised_agent_inbox").get()?.state, "blocked");
     for (const name of ["settle", "publish", "stop", "restart", "approve", "dispatch"]) assert.equal(name in store, false);
-    assert.equal(db.prepare("SELECT authority_mode FROM execution_runtime_generations").get()?.authority_mode, "typed_shadow");
+    assert.equal(db.prepare("SELECT authority_mode FROM execution_runtime_generations").get()?.authority_mode, "typed");
   } finally { db.close(); }
 });
 

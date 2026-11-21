@@ -14,7 +14,7 @@ import { isOpenModelReasoningEffort, resolveOpenModelEffortCatalog, type OpenMod
 import { resolveOpenModelLimits } from "../open-model-limits.js";
 import { OPENCODE_RUNTIME_VERSION } from "../opencode-runtime.js";
 import { OpenCodeServerClient, type OpenCodeRuntimeAuth } from "../opencode-server-client.js";
-import { type OpenCodeRuntimeControl, readRuntimeControl, safeRuntimeId, withRuntimeLaunchOwnership, writeRuntimeControl } from "./runtime-launch.js";
+import { type OpenCodeRuntimeControl, type OpenCodeWritableRuntimeControl, readRuntimeControl, safeRuntimeId, withRuntimeLaunchOwnership, writeRuntimeControl } from "./runtime-launch.js";
 import { OpenCodeRuntimeGoneError, OpenCodeStartTimeoutError } from "./errors.js";
 import { OpenModelAdapterTurnWait } from "./adapter-turn-wait.js";
 import { OpenModelHandle } from "./handle.js";
@@ -73,10 +73,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
     if (this.survivingTrees.has(req.workAttemptId)) {
       throw new Error("OpenCode's processes from this agent's last run did not end, so LetAgents will not start another beside them. Restart this computer, then start the agent again.");
     }
-    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
-    if (lifecycleAuthorityMode === "typed" && req.deliveryMode !== "daemon_inbox") {
-      throw new Error("Typed Open Model lifecycle authority requires daemon-inbox delivery.");
-    }
+    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed";
     if (req.deliveryMode !== "daemon_inbox") {
       throw new Error("Open Model supports daemon-owned bounded room delivery only.");
     }
@@ -128,7 +125,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
       username: OPENCODE_SERVER_USERNAME,
       password: randomBytes(32).toString("base64url"),
     };
-    const initialControl: OpenCodeRuntimeControl = { ...auth, lifecycleAuthorityMode };
+    const initialControl: OpenCodeWritableRuntimeControl = { ...auth, lifecycleAuthorityMode };
     await writeRuntimeControl(authPath, initialControl);
     const pluginPath = join(runtimeRoot, "credential-boundary.mjs");
     await writeFile(pluginPath, credentialBoundaryPluginSource(), {
@@ -213,7 +210,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
     const launchNotice = req.workspaceKind === "room_scratch"
       ? await this.checkScratchWorkspaceBoundary(req.cwd, runtimeRoot, env)
       : null;
-    const intentControl: OpenCodeRuntimeControl = {
+    const intentControl: OpenCodeWritableRuntimeControl = {
       ...initialControl,
       startupIntent: { url },
     };
@@ -333,7 +330,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
   }
 
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
-    const lifecycleAuthorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
+    const lifecycleAuthorityMode = ref.lifecycleAuthorityMode ?? "typed";
     const resolved = await this.resolveAttachConnection(ref);
     if (!resolved) return null;
     const { connection, control, recoveredLegacyConnection } = resolved;
@@ -352,7 +349,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
       if (stale) this.finish(stale, terminal, true);
       return { state: "terminal", terminal } satisfies ProviderAttachTerminal;
     }
-    if ((control.lifecycleAuthorityMode ?? "typed_shadow") !== lifecycleAuthorityMode) return null;
+    if ((control.lifecycleAuthorityMode ?? "typed") !== lifecycleAuthorityMode) return null;
     const cached = this.handles.get(ref.workAttemptId);
     if (cached) {
       return cached.providerContinuationId === ref.providerContinuationId
@@ -485,7 +482,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
     // checked before the authority comparison so a dead runtime born under an
     // older mode is replaced instead of refused on every attempt.
     if (attached && "state" in attached) throw new OpenCodeRuntimeGoneError();
-    if ((ref.lifecycleAuthorityMode ?? "typed_shadow") !== (req.lifecycleAuthorityMode ?? "typed_shadow")) {
+    if ((ref.lifecycleAuthorityMode ?? "typed") !== (req.lifecycleAuthorityMode ?? "typed")) {
       throw new Error("Open Model resume lifecycle authority does not match the frozen provider birth.");
     }
     if (attached) return attached;

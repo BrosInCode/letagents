@@ -16,7 +16,7 @@ import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } fro
 import type { ExecutionDelegationHostAuthority, RemoteExecutionDelegationRevision, ValidateExecutionDelegation } from "../../execution-delegation-journal.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity } from "../../execution-shadow-store.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../../execution-storage-schema.js";
-import { validateLegacyLifecycleProjectionLedgerSchema } from "../../lifecycle-projection-ledger.js";
+import { validateLegacyLifecycleProjectionLedgerSchema } from "../../daemon-state-database/v52-compat-tables.js";
 import { removeTestDirectory } from "../../../electron/__tests__/harness.js";
 
 export const TEST_PROVIDER_TURN_AUTHORITY = {
@@ -286,55 +286,6 @@ export async function fixture(): Promise<{ root: string; databasePath: string; l
   };
 }
 
-export function deliveryDrainCoordinates() {
-  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "codex:4311" };
-  const agent: DaemonManifestEntry = {
-    ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined, last_turn_control_sequence: 0,
-    provider_ref: { ...entry.provider_ref!, provider_connection: connection },
-  };
-  const handle: ProviderActionHandle = { workAttemptId: "attempt_1", pid: 4311, providerContinuationId: "thread_1", providerConnection: { ...connection }, observedState: "idle" };
-  return { agent, input: {
-    requestId: "drain-request", operationId: "drain-operation", agentId: agent.id, roomId: agent.room_id,
-    executionGenerationId: "run_1", handle,
-    boundary: { state: "idle" as const, providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4311", latestProviderTurnId: null },
-  } };
-}
-
-export function seedActiveDrainExecution(databasePath: string): void {
-  seedTerminalExecution(databasePath, "attempt_1", "run_1");
-  const database = new DatabaseSync(databasePath);
-  try { database.exec("UPDATE work_attempt_executions SET terminal_json=NULL WHERE execution_generation_id='run_1'"); }
-  finally { database.close(); }
-}
-
-export async function seedPollingActivationRuntime(env: Awaited<ReturnType<typeof fixture>>, store: ManifestStore,
-  inbox: SupervisedAgentInboxStore, bindings: WorkerBindingStore): Promise<Parameters<ManifestStore["preparePollingActivation"]>[0]> {
-  const { agent, input } = deliveryDrainCoordinates();
-  await store.write(0, [agent]); seedActiveDrainExecution(env.databasePath);
-  await inbox.ingestPoll({ agent_id: agent.id, room_id: agent.room_id, last_observed_message_id: "msg_47", messages: [] });
-  await store.prepareDeliveryDrain(input); await store.markDeliveryDrainDispatch(input);
-  await store.commitDeliveryDrain((await store.load()).generation, input, async commit => commit());
-  const database = new DatabaseSync(env.databasePath);
-  try {
-    database.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='run_1'").run(JSON.stringify(terminal));
-    database.prepare("INSERT INTO work_attempt_executions VALUES('run_2','attempt_1',?,'provider',9,NULL)").run(terminal.ended_at);
-  } finally { database.close(); }
-  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4312", pid: 4312, processIdentity: "codex:4312" };
-  const next = withRuntimeIdentity({ ...(await store.getEntry(agent.id))!,
-    provider_ref: { work_attempt_id: "attempt_1", execution_generation_id: "run_2", provider_continuation_id: "thread_1", provider_connection: connection,
-      custodial_launch_agent_session_id: "session_2" } });
-  await store.replaceEntry((await store.load()).generation, next);
-  await store.markRuntimeConfigurationApplied((await store.load()).generation, { agentId: agent.id, executionGenerationId: "run_2", appliedRevision: 2 });
-  const binding = await bindings.bind({ entry_id: agent.id, room_id: agent.room_id, work_attempt_id: "attempt_1", execution_generation_id: "run_2",
-    agent_session_id: "session_2", agent_session_token: "test-token", api_url: "https://example.test" }, { roomCursor: "msg_47" });
-  await bindings.recordSupervisedWorkerSession({ agent_id: agent.id, room_id: agent.room_id, execution_generation_id: "run_2",
-    agent_session_id: binding.agent_session_id, credential_ref: binding.credential_ref, expires_at: "2099-01-01T00:00:00.000Z" });
-  return { operationId: "activation", requestId: "activation-request", agentId: agent.id, roomId: agent.room_id,
-    executionGenerationId: "run_2", reverseOperationId: input.operationId,
-    handle: { workAttemptId: "attempt_1", pid: 4312, providerConnection: connection, providerContinuationId: "thread_1", observedState: "idle", appliedConfigurationRevision: 2 },
-    boundary: { state: "idle", providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4312", latestProviderTurnId: null } };
-}
-
 export function seedTerminalExecution(databasePath: string, workAttemptId: string, executionGenerationId: string): void {
   const database = new DatabaseSync(databasePath);
   try {
@@ -364,7 +315,7 @@ export function withRuntimeIdentity(item: DaemonManifestEntry): DaemonManifestEn
 }
 
 export function withImportedRuntimeIdentity(item: DaemonManifestEntry): DaemonManifestEntry {
-  const imported = withRuntimeIdentity(item);
+  const imported = { ...withRuntimeIdentity(item), delivery_mode: "daemon_inbox" as const };
   return imported.provider === "codex" && imported.provider_ref
     ? { ...imported, desired_state: "stopped" }
     : imported;

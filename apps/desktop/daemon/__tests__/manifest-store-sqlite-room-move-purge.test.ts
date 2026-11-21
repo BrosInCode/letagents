@@ -16,52 +16,6 @@ import {
   seedTerminalAttempt,
 } from "./helpers/manifest-store-sqlite-fixture.js";
 
-test("polling custody is internal, survives every manifest replacement and does not depend on cutover history", async () => {
-  const env = await fixture();
-  const store = new ManifestStore(env.databasePath);
-  try {
-    const spoofed = { ...entry, polling_contract: "custodial_polling_v1" };
-    await store.write(0, [spoofed]);
-    assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, null,
-      "the flat projection cannot create polling custody");
-    const database = (store as unknown as { database: DatabaseSync }).database;
-    database.prepare("UPDATE agent_configurations SET polling_contract='custodial_polling_v1' WHERE agent_id=?").run(entry.id);
-    database.prepare(`INSERT INTO execution_cutover_v2
-      (operation_id,request_id,agent_id,execution_generation_id,from_mode,to_mode,strategy,phase,created_at_ms,updated_at_ms)
-      VALUES('completed-reverse','completed-reverse',?,'run_1','daemon_inbox','mcp_polling','drain','complete',1,2)`).run(entry.id);
-    const stale = { ...entry, polling_contract: null };
-    await store.replaceEntry(1, stale);
-    assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1");
-    await store.replaceEntriesBatch(2, [stale]);
-    assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1");
-    await store.write(3, [stale]);
-    assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1");
-    const updated = await store.updateAgentConfiguration(4, {
-      agentId: entry.id, expectedRevision: 1, model: "new-model", reasoningEffort: null,
-      charter: "Updated charter", permissionProfileId: "full_access", providerLaunchPolicy: { approvalPolicy: "never" }, imageInput: false,
-    });
-    assert.equal(updated.outcome, "updated");
-    assert.equal(updated.configuration?.polling_contract, "custodial_polling_v1");
-    const before = await store.load();
-    assert.equal(Object.hasOwn(before.entries[0]!, "polling_contract"), false);
-    assert.equal(Object.hasOwn((await store.getEntry(entry.id))!, "polling_contract"), false);
-    await assert.rejects(() => store.replaceEntry(5, { ...entry, delivery_mode: "daemon_inbox" }), /CHECK/,
-      "an unrelated replacement cannot silently downgrade custodial polling");
-    assert.deepEqual(await store.load(), before, "failed replacement rolls back identity deletion and generation");
-    assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1");
-    database.exec("DELETE FROM execution_cutover_v2 WHERE operation_id='completed-reverse'");
-    await store.close();
-    const reopened = new ManifestStore(env.databasePath);
-    try {
-      assert.equal((await reopened.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1",
-        "history pruning or daemon restart cannot erase current custody");
-      assert.deepEqual(await reopened.load(), before);
-      await reopened.removeEntry(before.generation, entry.id);
-      assert.equal(await reopened.getAgentConfiguration(entry.id), undefined);
-    } finally { await reopened.close(); }
-  } finally { await store.close(); await env.cleanup(); }
-});
-
 test("Inspector configuration revisions are optimistic, durable, and do not alter the flat manifest", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);

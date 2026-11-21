@@ -3,10 +3,9 @@ import { validateRoomWorkspaceSchema, validateRoomWorkspaceReviewSchema } from "
 import type { DatabaseSync } from "node:sqlite";
 import { validateExecutionStorageSchema, validateRuntimeFailureEffectMigrationSource } from "../execution-storage-schema.js";
 import { readDurableNativeFailure } from "../supervised-agent-history-retention.js";
-import { validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
+import { validatePollingActivationSchema, validatePollingOfferSchema, validateLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./v52-compat-tables.js";
 import { validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
-import { validateLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { validateApprovalRequestClosureSchema } from "../execution-approval-journal.js";
 import { SCHEMA_VERSION, type Row, validatePollingContract, validateCustodialLaunchSession, validateTerminalResults } from "./shared.js";
 

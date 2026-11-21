@@ -177,16 +177,16 @@ async function setSharingAt(socketPath: string, signed: (operation: HostApproval
   return daemonRequest(socketPath, "supervisor.host_approval_request", signed("set_live_sharing", { entryId: "supervised_owner", daemonGeneration, enabled: true }));
 }
 
-test("an agent that fetches its own messages, or a rented agent, cannot share its live activity", { timeout: 60_000 * WAIT_SCALE }, async () => {
+test("a rented agent cannot share its live activity", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, configuration, setSharing }) => {
-    assert.equal((await daemonRequest(socketPath, "manifest.put", { entry: agent("supervised_polling", { delivery_mode: "mcp_polling" }) })).ok, true);
-    assert.equal((await configuration("supervised_polling")).live_sharing_availability, "polling");
-    const refused = await setSharing("supervised_polling", true);
+    assert.equal((await daemonRequest(socketPath, "manifest.put", { entry: agent("supervised_rental_1234") })).ok, true);
+    assert.equal((await configuration("supervised_rental_1234")).live_sharing_availability, "rental");
+    const refused = await setSharing("supervised_rental_1234", true);
     assert.equal((refused.result as { outcome?: string }).outcome, "invalid");
-    assert.match((refused.result as { error?: string }).error ?? "", /fetches its own room messages/);
-    assert.equal((await configuration("supervised_polling")).share_live_activity, false);
+    assert.match((refused.result as { error?: string }).error ?? "", /rented agent works for someone else/);
+    assert.equal((await configuration("supervised_rental_1234")).share_live_activity, false);
     // Turning it off is always allowed.
-    assert.equal(((await setSharing("supervised_polling", false)).result as { outcome?: string }).outcome, "updated");
+    assert.equal(((await setSharing("supervised_rental_1234", false)).result as { outcome?: string }).outcome, "updated");
   });
 });
 

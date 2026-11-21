@@ -275,8 +275,6 @@ export abstract class SupervisedAgentDeliveryCore {
   }
 
   protected daemonIngressAllowed(agent: SupervisedIngressAgent): boolean {
-    // The durable delivery mode is the sole ingress-ownership fact. Provider
-    // identity must never create a second poller for an mcp_polling worker.
     return agent.deliveryMode === "daemon_inbox";
   }
 

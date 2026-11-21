@@ -1,6 +1,7 @@
 /** The Open Model provider adapter: room turns, turn control, repair, stop, listeners, permissions and the shared instance. */
 import { NO_REPLY_FAILURE } from "../../../../../../shared/room-turn-no-reply.mjs";
-import { PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, type ProviderActivityEvent, type ProviderAdapter, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "../provider-adapter.js";
+import { isBirthEvidence } from "../../../../../../shared/process-tree.mjs";
+import { PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, synthesizeTerminalPayload, type ProviderActivityEvent, type ProviderAdapter, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "../provider-adapter.js";
 import { delay, sameProcessBirthIdentity } from "../provider-evidence.js";
 import { OPEN_MODEL_OPENCODE_PROVIDER_ID } from "../opencode-launch-contract.js";
 import { nativeExecutionId } from "../provider-execution-observer.js";
@@ -278,6 +279,91 @@ export class OpenModelProviderAdapter extends OpenModelAdapterLaunch implements 
       previousProviderContinuationId: request.expectedProviderContinuationId,
       replacementProviderContinuationId: replacementId,
     };
+  }
+
+  async stopRef(
+    ref: ProviderContinuationRef,
+    options: ProviderStopOptions = {},
+  ): Promise<ProviderTerminalPayload> {
+    ref = { ...ref, providerConnection: ref.providerConnection && { ...ref.providerConnection } };
+    const graceMs = options.graceMs ?? this.stopGraceMs;
+    const force = options.force === true;
+    if (!ref.workAttemptId?.trim() || !ref.providerContinuationId?.trim()
+      || !Number.isFinite(graceMs) || graceMs < 0) {
+      throw new Error("Open Model exact-reference stop requires an exact continuation and process birth.");
+    }
+    let connection: Extract<ProviderConnectionRef, { kind: "opencode_server" }> & {
+      pid: number;
+      processIdentity: string;
+    };
+    if (ref.providerConnection) {
+      if (ref.providerConnection.kind !== "opencode_server"
+        || !Number.isSafeInteger(ref.providerConnection.pid) || ref.providerConnection.pid! <= 0
+        || typeof ref.providerConnection.processIdentity !== "string"
+        || !ref.providerConnection.processIdentity.trim()) {
+        throw new Error("Open Model exact-reference stop requires an exact continuation and process birth.");
+      }
+      connection = {
+        ...ref.providerConnection,
+        pid: ref.providerConnection.pid!,
+        processIdentity: ref.providerConnection.processIdentity,
+      };
+    } else {
+      const resolved = await this.resolveAttachConnection(ref);
+      if (!resolved) {
+        throw new Error("Open Model exact-reference stop requires an exact continuation and process birth.");
+      }
+      connection = resolved.connection;
+    }
+    const pid = connection.pid;
+    const birth = connection.processIdentity;
+    const requireStrictBirth = isBirthEvidence(birth);
+    const isGone = (): boolean => {
+      const current = this.deps.getProcessIdentity(pid);
+      if (current === null) return true;
+      if (typeof current !== "string" || !current.trim() || (requireStrictBirth && !isBirthEvidence(current))) {
+        throw new Error("Open Model exact-reference stop is ambiguous because process birth cannot be verified.");
+      }
+      return !sameProcessBirthIdentity(current, birth);
+    };
+    const known = [...this.handles.values()].find((handle) => handle.pid === pid
+      && handle.providerConnection.processIdentity
+      && sameProcessBirthIdentity(handle.providerConnection.processIdentity, birth));
+    if (known && (known.workAttemptId !== ref.workAttemptId
+      || known.providerContinuationId !== ref.providerContinuationId
+      || !sameProviderConnectionIdentity(known.providerConnection, connection))) {
+      throw new Error("Open Model exact-reference stop conflicts with the known native process owner.");
+    }
+    const finishAndReturn = (): ProviderTerminalPayload => {
+      const terminal = synthesizeTerminalPayload({
+        endedAt: this.deps.now(),
+        exitCode: null,
+        signal: null,
+        providerContinuationId: ref.providerContinuationId,
+        stopRequested: true,
+      });
+      if (known) this.finish(known, terminal, true);
+      return terminal;
+    };
+    if (isGone()) return finishAndReturn();
+    if (known) known.setState("stopping");
+    const awaitAbsence = async (): Promise<boolean> => {
+      const deadline = Date.now() + graceMs;
+      for (;;) {
+        if (isGone()) return true;
+        if (Date.now() >= deadline) return false;
+        await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+      }
+    };
+    this.deps.signalProcess(pid, force ? "SIGKILL" : "SIGTERM", birth);
+    if (await awaitAbsence()) return finishAndReturn();
+    if (!force) {
+      // Never escalate into a reused PID.
+      if (isGone()) return finishAndReturn();
+      this.deps.signalProcess(pid, "SIGKILL", birth);
+      if (await awaitAbsence()) return finishAndReturn();
+    }
+    throw new Error("Open Model exact-reference stop has not yet proved the recorded process birth is gone.");
   }
 
   async stop(rawHandle: ProviderHandle, options: ProviderStopOptions = {}): Promise<ProviderTerminalPayload> {

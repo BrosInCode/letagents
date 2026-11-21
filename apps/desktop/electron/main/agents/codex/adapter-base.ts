@@ -31,9 +31,6 @@ export abstract class CodexAdapterBase {
   protected readonly streamSink?: (event: ProviderStreamEvent) => void;
 
   protected readonly handles = new Map<string, CodexProviderHandle>();
-  protected readonly pollingLaunches = new WeakMap<CodexProviderHandle, { roomId: string; cwd: string; configurationRevision: number | undefined; agentSessionId: string }>();
-  protected readonly pollingDispatches = new WeakSet<CodexProviderHandle>();
-  protected readonly nonPollingLaunches = new WeakSet<CodexProviderHandle>();
   protected readonly pendingAttaches = new Map<string, {
     ref: ProviderContinuationRef;
     promise: Promise<CodexProviderHandle | ProviderAttachTerminal | null>;
