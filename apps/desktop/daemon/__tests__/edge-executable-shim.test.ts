@@ -20,6 +20,7 @@ import {
   listOsProcesses,
   parseWindowsHelperInfoResult,
   parseWindowsTasklistCsv,
+  queryWindowsHelperInfoWithSettle,
   selectWindowsEdgeProcessCandidates,
   startEdgeDaemon,
 } from "./edge/daemon-edge-harness.js";
@@ -346,8 +347,97 @@ test("unreadable native helper info (commandLine: null or access denied) fails c
     ppid: 1,
     pgid: 4242,
     command: "",
+    image: "C:\\Program Files\\nodejs\\node.exe",
     commandLineUnreadable: true,
   });
+
+  // 2b. Transient Windows PEB init/teardown (status 0 + commandLine: null) settles on brief retry,
+  //     while persistent unreadable commandLine still fails closed and access denied fails immediately.
+  const sleeps: number[] = [];
+  let dyingCalls = 0;
+  const settledDead = queryWindowsHelperInfoWithSettle(
+    4242,
+    () => {
+      dyingCalls += 1;
+      if (dyingCalls === 1) {
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            pid: 4242,
+            parentPid: 1,
+            exited: false,
+            image: "C:\\Program Files\\nodejs\\node.exe",
+            commandLine: null,
+          }),
+        };
+      }
+      return { status: 2 };
+    },
+    { maxUnreadableRetries: 3, retryDelayMs: 50, sleep: (ms) => sleeps.push(ms) },
+  );
+  assert.equal(settledDead, null);
+  assert.equal(dyingCalls, 2);
+  assert.deepEqual(sleeps, [50]);
+
+  let startingCalls = 0;
+  const settledLive = queryWindowsHelperInfoWithSettle(
+    4243,
+    () => {
+      startingCalls += 1;
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          pid: 4243,
+          parentPid: 1,
+          exited: false,
+          image: "C:\\Program Files\\nodejs\\node.exe",
+          commandLine: startingCalls === 1 ? null : "node.exe worker.js",
+        }),
+      };
+    },
+    { owned: true, maxUnreadableRetries: 3, retryDelayMs: 50, sleep: () => undefined },
+  );
+  assert.equal(settledLive?.command, "node.exe worker.js");
+  assert.equal(startingCalls, 2);
+
+  let persistentCalls = 0;
+  assert.throws(
+    () =>
+      queryWindowsHelperInfoWithSettle(
+        4244,
+        () => {
+          persistentCalls += 1;
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              pid: 4244,
+              parentPid: 1,
+              exited: false,
+              image: "C:\\Program Files\\nodejs\\node.exe",
+              commandLine: null,
+            }),
+          };
+        },
+        { owned: true, maxUnreadableRetries: 2, retryDelayMs: 10, sleep: () => undefined },
+      ),
+    /unreadable commandLine/,
+  );
+  assert.equal(persistentCalls, 3);
+
+  let deniedCalls = 0;
+  assert.throws(
+    () =>
+      queryWindowsHelperInfoWithSettle(
+        4245,
+        () => {
+          deniedCalls += 1;
+          return { status: 3 };
+        },
+        { owned: true, maxUnreadableRetries: 3, retryDelayMs: 10, sleep: () => undefined },
+      ),
+    /access denied/,
+  );
+  assert.equal(deniedCalls, 1, "Expected access-denied owned PID to fail immediately without retry");
   assert.throws(
     () =>
       parseWindowsHelperInfoResult(

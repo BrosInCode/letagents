@@ -362,6 +362,8 @@ export interface ProcessSnapshotEntry {
   ppid: number;
   pgid: number;
   command: string;
+  /** Optional executable image path for diagnostics only (never substituted into `command`). */
+  image?: string;
   /** Set when OS/helper reported the process alive without a readable command line. */
   commandLineUnreadable?: boolean;
 }
@@ -509,6 +511,12 @@ export interface WindowsHelperSpawnResult {
   error?: Error;
 }
 
+const SYNC_SLEEP_ARRAY = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSync(ms: number): void {
+  if (ms > 0) Atomics.wait(SYNC_SLEEP_ARRAY, 0, 0, ms);
+}
+
 /**
  * Interpret one `letagents-process-tree.exe info <pid>` reply without ever
  * substituting `image` for a missing `commandLine` or silently omitting an
@@ -517,7 +525,7 @@ export interface WindowsHelperSpawnResult {
 export function parseWindowsHelperInfoResult(
   pid: number,
   result: WindowsHelperSpawnResult,
-  options: { required?: boolean; owned?: boolean } = {},
+  options: { required?: boolean; owned?: boolean; deferUnreadableThrow?: boolean } = {},
 ): ProcessSnapshotEntry | null {
   if (result.error) throw result.error;
   // Exit 2 = confirmed absent (exited between tasklist and info).
@@ -526,7 +534,7 @@ export function parseWindowsHelperInfoResult(
     return null;
   }
   // Exit 3 = access denied. For the runner or any tracked/owned pid this cannot
-  // prove the process is unrelated to the test; fail closed.
+  // prove the process is unrelated to the test; fail closed immediately.
   if (result.status === 3) {
     if (options.required || options.owned) {
       throw new Error(`letagents-process-tree.exe could not open tracked/required pid ${pid} (access denied).`);
@@ -553,15 +561,52 @@ export function parseWindowsHelperInfoResult(
     return null;
   }
   const ppid = typeof parsed.parentPid === "number" && Number.isInteger(parsed.parentPid) ? parsed.parentPid : 0;
+  const image = typeof parsed.image === "string" && parsed.image.length > 0 ? parsed.image : undefined;
   if (typeof parsed.commandLine !== "string" || parsed.commandLine.length === 0) {
-    if (options.required || options.owned) {
+    if ((options.required || options.owned) && !options.deferUnreadableThrow) {
       throw new Error(
-        `letagents-process-tree.exe info ${pid} returned unreadable commandLine for live tracked/required process.`,
+        `letagents-process-tree.exe info ${pid} returned unreadable commandLine for live tracked/required process${image ? ` (${image})` : ""}.`,
       );
     }
-    return { pid, ppid, pgid: pid, command: "", commandLineUnreadable: true };
+    return { pid, ppid, pgid: pid, command: "", ...(image ? { image } : {}), commandLineUnreadable: true };
   }
-  return { pid, ppid, pgid: pid, command: parsed.commandLine };
+  return { pid, ppid, pgid: pid, command: parsed.commandLine, ...(image ? { image } : {}) };
+}
+
+/**
+ * Re-probe briefly when Windows returns status 0 + `exited: false` + `commandLine: null`,
+ * which happens transiently while a short-lived process is initializing or tearing down its PEB.
+ * Fails closed identically if the process remains live with an unreadable command line after settling.
+ */
+export function queryWindowsHelperInfoWithSettle(
+  pid: number,
+  queryOnce: () => WindowsHelperSpawnResult,
+  options: {
+    required?: boolean;
+    owned?: boolean;
+    maxUnreadableRetries?: number;
+    retryDelayMs?: number;
+    sleep?: (ms: number) => void;
+  } = {},
+): ProcessSnapshotEntry | null {
+  const maxRetries = options.maxUnreadableRetries ?? 3;
+  const retryDelayMs = options.retryDelayMs ?? 120;
+  const sleep = options.sleep ?? sleepSync;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const isFinalAttempt = attempt === maxRetries;
+    const raw = queryOnce();
+    const entry = parseWindowsHelperInfoResult(pid, raw, {
+      required: options.required,
+      owned: options.owned,
+      deferUnreadableThrow: !isFinalAttempt,
+    });
+    if (entry && entry.commandLineUnreadable && !isFinalAttempt) {
+      sleep(retryDelayMs);
+      continue;
+    }
+    return entry;
+  }
+  return null;
 }
 
 function queryWindowsHelperProcessInfo(
@@ -569,16 +614,25 @@ function queryWindowsHelperProcessInfo(
   pid: number,
   options: { required?: boolean; owned?: boolean } = {},
 ): ProcessSnapshotEntry | null {
-  return execWithTimeoutRetry(() => {
-    const result = spawnSync(helperPath, ["info", String(pid)], {
-      encoding: "utf8",
-      timeout: 10_000,
-      maxBuffer: 4 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    return parseWindowsHelperInfoResult(pid, result, options);
-  }, 2);
+  return queryWindowsHelperInfoWithSettle(
+    pid,
+    () =>
+      execWithTimeoutRetry(
+        () => {
+          const result = spawnSync(helperPath, ["info", String(pid)], {
+            encoding: "utf8",
+            timeout: 10_000,
+            maxBuffer: 4 * 1024 * 1024,
+            stdio: ["ignore", "pipe", "pipe"],
+            windowsHide: true,
+          });
+          if (result.error) throw result.error;
+          return result;
+        },
+        2,
+      ),
+    options,
+  );
 }
 
 export function listOsProcesses(extraPids?: Iterable<number>): ProcessSnapshotEntry[] {
@@ -716,8 +770,11 @@ export function findProcessesReferencingPath(
   const processes = listProcesses(extraPids);
   const unreadable = processes.filter((entry) => entry.pid !== process.pid && entry.commandLineUnreadable);
   if (unreadable.length > 0) {
+    const detail = unreadable
+      .map((entry) => `pid=${entry.pid} ppid=${entry.ppid}${entry.image ? ` image=${entry.image}` : ""}`)
+      .join(", ");
     throw new Error(
-      `OS process enumeration returned unreadable command line(s) for live pid(s) ${unreadable.map((e) => e.pid).join(", ")}; cannot verify zero processes reference ${needle}.`,
+      `OS process enumeration returned unreadable command line(s) for live process(es) (${detail}); cannot verify zero processes reference ${needle}.`,
     );
   }
   if (!normalized) return [];
@@ -1538,7 +1595,11 @@ export class EdgeDaemonHarness {
               ? [`unverifiable live tracked pid(s): ${unverifiableTrackedPids.join(", ")}`]
               : []),
             ...(unreadableEntries.length > 0
-              ? [`unreadable commandLine pid(s): ${unreadableEntries.map((e) => e.pid).join(", ")}`]
+              ? [
+                  `unreadable commandLine pid(s): ${unreadableEntries
+                    .map((e) => `${e.pid}(ppid=${e.ppid}${e.image ? `,image=${e.image}` : ""})`)
+                    .join(", ")}`,
+                ]
               : []),
           ].join("; ");
           cleanupError = new Error(
