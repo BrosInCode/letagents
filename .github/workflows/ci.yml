@@ -24,6 +24,7 @@ on:
       - dev
       - staging
       - main
+      - feat/modern-daemon
   push:
     branches:
       - dev
@@ -672,6 +673,10 @@ jobs:
               fi
               echo "Daemon shard ${shard} runs ${#files[@]} files:"
               printf '  %s\n' "${files[@]}"
+              if printf '%s\n' "${files[@]}" | grep -q 'daemon-edge-'; then
+                npm run build:electron || status=1
+                npm run build:daemon || status=1
+              fi
               npm run test:daemon:files -- "${files[@]}" || status=1
               ;;
             "electron "*)
@@ -708,11 +713,64 @@ jobs:
           esac
           exit "${status}"
 
+  # Runs the black-box daemon edge suite against the real daemon child process
+  # on macOS. Like desktop-tests-windows, macOS installs its own platform
+  # optional packages, so it verifies both lockfile trees' signatures right
+  # after installing and before running any lifecycle script.
+  desktop-edge-tests-macos:
+    name: desktop-edge-tests-macos
+    needs: dependency-audit
+    if: inputs.purpose != 'room-ack-evaluation'
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      LETAGENTS_API_URL: http://127.0.0.1:9
+    steps:
+      - name: Use a scratch home
+        run: |
+          home="${RUNNER_TEMP}/home"
+          mkdir -p "${home}"
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "${home}" "${home}" >> "${GITHUB_ENV}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies without lifecycle scripts
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+
+      - name: Verify dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures
+
+      - name: Install desktop dependencies without lifecycle scripts
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify desktop dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
+
+      - name: Run verified dependency lifecycle scripts
+        id: setup
+        run: |
+          npm rebuild
+          npm rebuild --prefix apps/desktop
+
+      - name: Build daemon and Electron adapters and run edge suite
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          npm --prefix apps/desktop run build:electron
+          npm --prefix apps/desktop run build:daemon
+          npm --prefix apps/desktop run test:daemon:edge
+
   # The required "build" check. GitHub counts a skipped check as passing, so
   # this gate runs even after a failure or cancellation, and passes only when
   # every job it waits for succeeded.
   build:
-    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows, process-tree-windows, desktop-tests-windows]
+    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows, process-tree-windows, desktop-tests-windows, desktop-edge-tests-macos]
     if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
