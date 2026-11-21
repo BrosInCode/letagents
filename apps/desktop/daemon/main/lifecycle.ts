@@ -94,7 +94,8 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     await this.roomMoves.reconcilePrepared();
     await this.lifecycleAdministration.recoverPreparedPurges();
     await this.lifecycleAdministration.recoverEphemeralWorkspaces();
-    await restoreLocalRoomAuthorities((await this.store.load()).entries, this.singleton.currentGeneration, this.workerRuntimeCustody);
+    // Uses id, room_id, local_room_id, desired_state, display_name and provider of each entry; no activity.
+    await restoreLocalRoomAuthorities((await this.store.load("summary")).entries, this.singleton.currentGeneration, this.workerRuntimeCustody);
     await this.socket.start();
     // The bundled MCP runtime's integrity check reads its whole tree once per
     // daemon (over a minute on a fresh install behind an on-access scanner). It
@@ -102,11 +103,12 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     void this.providerPort?.verifyBundledRuntime?.().catch((error) => console.warn("[runtime_verify]", String(error)));
     // Images an earlier process staged for turns that have long ended.
     void this.roomTurnAttachments.sweep();
-    for (const entry of (await this.store.load()).entries) {
-      void this.startSupervisedDelivery(entry.id).catch(() => undefined);
+    // These two passes use the id of each entry only, in manifest order.
+    for (const entryId of await this.store.listEntryIds()) {
+      void this.startSupervisedDelivery(entryId).catch(() => undefined);
     }
     if (this.providerPort && this.autoConverge) {
-      for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id, "rehydration");
+      for (const entryId of await this.store.listEntryIds()) this.requestConvergence(entryId, "rehydration");
     }
     void this.workerBindings.compactRetainedPublications().catch(() => undefined);
     // Earlier turns that a stopped process could not remove from a room are removed now.

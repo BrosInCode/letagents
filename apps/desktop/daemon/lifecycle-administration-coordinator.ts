@@ -465,7 +465,8 @@ export class LifecycleAdministrationCoordinator {
   }
 
   async recoverEphemeralWorkspaces(): Promise<void> {
-    const manifest = await this.ports.store.load();
+    // Uses work_attempt_id and provider_ref.work_attempt_id of each entry; no activity.
+    const manifest = await this.ports.store.load("summary");
     const attached = new Set<string>();
     for (const entry of manifest.entries) {
       if (entry.work_attempt_id) attached.add(entry.work_attempt_id);
