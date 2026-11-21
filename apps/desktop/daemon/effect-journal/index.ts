@@ -47,6 +47,7 @@ export {
   failEffect,
   rescheduleEffectForRetry,
   markEffectUncertain,
+  quarantinePreparedRetryAsUncertain,
   resolveUncertainEffect,
   recoverInterruptedEffectsOnStartup,
   deleteEffectsForAgentInTransaction,

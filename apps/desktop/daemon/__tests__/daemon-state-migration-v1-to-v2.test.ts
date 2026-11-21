@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -43,6 +43,8 @@ import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { SupervisorDaemon } from "../main.js";
 import { cloneStateDatabaseForCompaction, prepareStateRecoveryBackup } from "../state-recovery-backup.js";
 import { withProtectedStateUpgrade } from "../state-recovery-key.js";
+import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -71,7 +73,8 @@ function readAllTableRowCounts(database: DatabaseSync): Record<string, number> {
 
 async function tempDir(prefix: string): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), prefix));
-  return { root, cleanup: () => rm(root, { recursive: true, force: true }) };
+  if (process.platform === "win32") await protectOwnerPrivate(root, "directory", { force: true });
+  return { root, cleanup: () => removeTestDirectory(root) };
 }
 
 function normalizedSchemaEntries(database: DatabaseSync): Array<{ type: string; name: string; tblName: string; sql: string }> {

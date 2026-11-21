@@ -399,7 +399,7 @@ export const roomMovesAndPurges = storeMethods({
             throw new ManifestConflictError("Purge target attachment changed after preparation.");
           }
           for (const [table, column] of [
-            ["effects", "agent_id"], ["effect_tombstones", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
+            ["effects", "agent_id"], ["effect_journal", "agent_id"], ["effect_tombstones", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
             ["supervised_agent_ingress_cursors", "agent_id"], ["supervised_agent_history_boundaries", "agent_id"], ["supervised_agent_pruned_sources", "agent_id"],
             ["supervised_worker_mint_states", "agent_id"], ["supervised_worker_sessions", "agent_id"], ["inbox_items", "agent_id"], ["worker_binding_publications", "entry_id"],
             ["worker_generation_verifications", "entry_id"], ["worker_binding_watermarks", "entry_id"], ["worker_session_bindings", "entry_id"],

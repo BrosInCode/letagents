@@ -69,7 +69,8 @@ export const effectJournalSchemaSql: readonly string[] = [
       OR NEW.epoch < OLD.epoch
       OR NEW.attempt_count < OLD.attempt_count
       OR OLD.state IN ('completed', 'failed')
-      OR (OLD.state = 'prepared' AND NEW.state NOT IN ('executing', 'failed'))
+      OR (OLD.state = 'prepared' AND NEW.state NOT IN ('executing', 'uncertain', 'failed'))
+      OR (OLD.state = 'prepared' AND NEW.state = 'uncertain' AND OLD.attempt_count < 1)
       OR (OLD.state = 'prepared' AND NEW.state = 'executing' AND NEW.attempt_count != OLD.attempt_count + 1)
       OR (OLD.state != 'prepared' AND NEW.attempt_count != OLD.attempt_count)
       OR (OLD.state = 'executing' AND NEW.state NOT IN ('prepared', 'uncertain', 'completed', 'failed'))

@@ -59,6 +59,7 @@ export type PrepareEffectResult = {
 export type EffectStartupRecoveryReport = {
   requeuedIds: string[];
   uncertainIds: string[];
+  fencedFutureEpochIds: string[];
   preparedIds: string[];
   allUncertainIds: string[];
 };
@@ -81,9 +82,11 @@ export type EffectExecutionResult =
   /** Definite failure where the external mutation is known NOT to have taken effect. */
   | { status: "failed"; error: string; outcome?: unknown }
   /**
-   * Transient failure on a `retryable: true` kind. Ignored (marked `uncertain`) if the
-   * effect or handler is non-retryable, and settled as `failed` once `max_attempts` is exhausted.
-   * Use `{ status: "uncertain" }` when external application cannot be ruled out.
+   * Transient failure on a `retryable: true` kind where the external action is known
+   * not to have committed (or is safely idempotent under `idempotency_key`). Ignored
+   * (marked `uncertain`) if the effect or handler is non-retryable, and settled as
+   * `failed` once `max_attempts` is exhausted. Return `{ status: "uncertain" }` or throw
+   * when external application cannot be ruled out.
    */
   | { status: "retry"; error: string; retryAfterMs?: number }
   | { status: "uncertain"; error: string; outcome?: unknown };
@@ -103,7 +106,14 @@ export type EffectHandler = {
   retryable: boolean;
   /** Default attempt cap when `retryable: true` (defaults to 3; must be 1 when `retryable: false`). */
   defaultMaxAttempts?: number;
-  /** Execute the external side effect once the row is durably claimed as `executing`. */
+  /**
+   * Execute the external side effect once the row is durably claimed as `executing`.
+   *
+   * Handlers must only allow `DaemonFenceLostError` / `EffectFenceError` to escape
+   * on genuine daemon-generation authority loss (such as `context.assertCurrent()`):
+   * fence errors intentionally leave the row in `executing` for successor startup
+   * recovery rather than settling it to `uncertain` or `failed`.
+   */
   execute: (effect: EffectRecord, context: EffectExecutionContext) => Promise<EffectExecutionResult>;
   /**
    * Optional read-only verifier for `uncertain` rows (for example querying a remote

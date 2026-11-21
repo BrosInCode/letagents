@@ -19,6 +19,7 @@ import {
   markEffectUncertain,
   nextScheduledPreparedEffectAtMs,
   prepareEffect,
+  quarantinePreparedRetryAsUncertain,
   recoverInterruptedEffectsOnStartup,
   rescheduleEffectForRetry,
   resolveUncertainEffect,
@@ -38,6 +39,7 @@ import {
 const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 30_000;
 const DEFAULT_BACKOFF_FACTOR = 2;
+const MIN_PRE_CLAIM_ERROR_BACKOFF_MS = 25;
 
 export type EffectExecutorOptions = {
   getDatabase: () => DatabaseSync | null;
@@ -70,16 +72,26 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Single process-wide external-effect executor.
+ *
+ * Concurrency: each pump pass runs up to 64 due effects concurrently across
+ * registered kinds and agents. Features that require strict per-agent ordering
+ * must gate effect admission in domain state or add explicit per-agent/per-kind
+ * serialization when migrating onto the executor.
+ */
 export class EffectExecutor {
   private readonly handlers = new Map<string, EffectHandler>();
   private readonly activeById = new Map<string, Promise<EffectRecord>>();
   private readonly inFlight = new Set<Promise<void>>();
   private readonly abortController = new AbortController();
   private timer: NodeJS.Timeout | null = null;
+  private immediate: NodeJS.Immediate | null = null;
   private timerDueMs = Infinity;
   private fenced = false;
   private activePump: Promise<void> | null = null;
   private pumpAgain = false;
+  private consecutivePumpErrors = 0;
 
   constructor(private readonly options: EffectExecutorOptions) {}
 
@@ -115,10 +127,10 @@ export class EffectExecutor {
     input: Omit<PrepareEffectInput, "epoch"> & { epoch?: number },
   ): Promise<PrepareEffectResult> {
     this.assertNotFenced();
-    await this.options.assertCurrent();
+    await this.assertAuthority();
     this.assertNotFenced();
     const database = this.requireDatabase();
-    const generation = this.options.currentDaemonGeneration();
+    const generation = this.runFencedWrite(() => this.options.currentDaemonGeneration());
     if (input.epoch !== undefined && input.epoch !== generation) {
       throw new EffectFenceError(
         `Effect prepare generation mismatch: requested ${input.epoch}, current ${generation}.`,
@@ -133,7 +145,7 @@ export class EffectExecutor {
     const resolvedRetryable = input.retryable ?? handler?.retryable ?? false;
     const resolvedMaxAttempts = input.max_attempts
       ?? (resolvedRetryable ? (handler?.defaultMaxAttempts ?? 3) : 1);
-    const prepared = prepareEffect(
+    const prepared = this.runFencedWrite(() => prepareEffect(
       database,
       this.options.assertWriteFence,
       {
@@ -143,7 +155,7 @@ export class EffectExecutor {
         max_attempts: resolvedMaxAttempts,
       },
       this.nowIso(),
-    );
+    ));
     if (prepared.created) {
       this.options.notifyStateChanged?.();
     }
@@ -171,19 +183,19 @@ export class EffectExecutor {
    */
   async recoverOnStartup(): Promise<EffectStartupRecoveryReport> {
     this.assertNotFenced();
-    await this.options.assertCurrent();
+    await this.assertAuthority();
     this.assertNotFenced();
     const database = this.requireDatabase();
     const nonRetryableKinds = [...this.handlers.entries()]
       .filter(([, handler]) => !handler.retryable)
       .map(([kind]) => kind);
-    const report = recoverInterruptedEffectsOnStartup(database, this.options.assertWriteFence, {
+    const report = this.runFencedWrite(() => recoverInterruptedEffectsOnStartup(database, this.options.assertWriteFence, {
       daemonGeneration: this.options.currentDaemonGeneration(),
       nowMs: this.nowMs(),
       nowIso: this.nowIso(),
       nonRetryableKinds,
-    });
-    if (report.requeuedIds.length > 0 || report.uncertainIds.length > 0) {
+    }));
+    if (report.requeuedIds.length > 0 || report.uncertainIds.length > 0 || report.fencedFutureEpochIds.length > 0) {
       this.options.notifyStateChanged?.();
     }
     if (this.handlers.size > 0 && report.preparedIds.length > 0) {
@@ -215,15 +227,15 @@ export class EffectExecutor {
   /** Cancels a `prepared` effect before external execution begins. */
   async cancelPrepared(effectId: string, error: string): Promise<EffectRecord> {
     this.assertNotFenced();
-    await this.options.assertCurrent();
+    await this.assertAuthority();
     this.assertNotFenced();
     const database = this.requireDatabase();
-    const settled = failEffect(database, this.options.assertWriteFence, {
+    const settled = this.runFencedWrite(() => failEffect(database, this.options.assertWriteFence, {
       id: effectId,
       expectedEpoch: this.options.currentDaemonGeneration(),
       error,
       nowIso: this.nowIso(),
-    });
+    }));
     this.options.notifyStateChanged?.();
     return settled;
   }
@@ -244,11 +256,38 @@ export class EffectExecutor {
           if (this.isFenced) break;
           const database = this.options.getDatabase();
           if (!database || !database.isOpen) break;
+          const maxEpoch = this.safeCurrentGeneration();
+          if (maxEpoch === null) break;
           const kinds = [...this.handlers.keys()];
-          const due = listDuePreparedEffects(database, this.nowMs(), kinds);
-          const runnable = due.filter((effect) => !this.activeById.has(effect.id));
-          if (runnable.length > 0) {
-            await Promise.allSettled(runnable.map((effect) => this.runEffect(effect.id)));
+          const runnable = listDuePreparedEffects(database, this.nowMs(), kinds, 64, {
+            excludeIds: [...this.activeById.keys()],
+            maxEpoch,
+          });
+          if (runnable.length === 0) break;
+          const settled = await Promise.allSettled(runnable.map((effect) => this.runEffect(effect.id)));
+          let fulfilledCount = 0;
+          let rejectedCount = 0;
+          let lostAuthority = false;
+          for (const outcome of settled) {
+            if (outcome.status === "fulfilled") {
+              fulfilledCount += 1;
+            } else {
+              rejectedCount += 1;
+              if (outcome.reason instanceof DaemonFenceLostError) lostAuthority = true;
+            }
+          }
+          if (lostAuthority) {
+            this.fence();
+            break;
+          }
+          if (fulfilledCount > 0) {
+            this.consecutivePumpErrors = 0;
+          } else if (rejectedCount > 0) {
+            // Every due row failed before claiming (zero durable progress). Yield to
+            // the event loop with a bounded backoff timer instead of spinning.
+            this.consecutivePumpErrors += 1;
+            this.pumpAgain = false;
+            break;
           }
         } while (this.pumpAgain && !this.isFenced);
       })
@@ -271,6 +310,10 @@ export class EffectExecutor {
       clearTimeout(this.timer);
       this.timer = null;
       this.timerDueMs = Infinity;
+    }
+    if (this.immediate) {
+      clearImmediate(this.immediate);
+      this.immediate = null;
     }
     this.abortController.abort(new EffectFenceError("Effect executor fenced for shutdown or handoff."));
   }
@@ -297,6 +340,27 @@ export class EffectExecutor {
     }
   }
 
+  private safeCurrentGeneration(): number | null {
+    try {
+      return this.options.currentDaemonGeneration();
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) {
+        this.fence();
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private async assertAuthority(): Promise<void> {
+    try {
+      await this.options.assertCurrent();
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) this.fence();
+      throw error;
+    }
+  }
+
   private requireDatabase(): DatabaseSync {
     const database = this.options.getDatabase();
     if (!database || !database.isOpen) {
@@ -307,13 +371,23 @@ export class EffectExecutor {
 
   private trackInFlight(effectId: string, run: () => Promise<EffectRecord>): Promise<EffectRecord> {
     let release!: () => void;
+    let settledWithoutError = false;
     const tracker = new Promise<void>((resolve) => { release = resolve; });
     this.inFlight.add(tracker);
-    const execution = Promise.resolve().then(run).finally(() => {
-      this.activeById.delete(effectId);
-      this.inFlight.delete(tracker);
-      release();
-    });
+    const execution = Promise.resolve()
+      .then(async () => {
+        const result = await run();
+        settledWithoutError = true;
+        return result;
+      })
+      .finally(() => {
+        this.activeById.delete(effectId);
+        this.inFlight.delete(tracker);
+        release();
+        if (settledWithoutError && !this.isFenced && !this.activePump) {
+          this.scheduleNextPump();
+        }
+      });
     this.activeById.set(effectId, execution);
     return execution;
   }
@@ -322,9 +396,21 @@ export class EffectExecutor {
     if (this.isFenced || this.handlers.size === 0) return;
     const database = this.options.getDatabase();
     if (!database || !database.isOpen) return;
-    const dueMs = nextScheduledPreparedEffectAtMs(database, [...this.handlers.keys()]);
+    const maxEpoch = this.safeCurrentGeneration();
+    if (maxEpoch === null) return;
+    const dueMs = nextScheduledPreparedEffectAtMs(database, [...this.handlers.keys()], {
+      excludeIds: [...this.activeById.keys()],
+      maxEpoch,
+    });
     if (dueMs === null) return;
-    const delay = Math.max(0, dueMs - this.nowMs());
+    let delay = Math.max(0, dueMs - this.nowMs());
+    if (this.consecutivePumpErrors > 0) {
+      const errorBackoff = Math.max(
+        MIN_PRE_CLAIM_ERROR_BACKOFF_MS,
+        computeEffectBackoffMs(this.consecutivePumpErrors, undefined, this.options.defaultBackoff),
+      );
+      delay = Math.max(delay, errorBackoff);
+    }
     this.schedulePump(delay);
   }
 
@@ -336,7 +422,9 @@ export class EffectExecutor {
         this.timer = null;
         this.timerDueMs = Infinity;
       }
-      queueMicrotask(() => {
+      if (this.immediate) return;
+      this.immediate = setImmediate(() => {
+        this.immediate = null;
         if (!this.isFenced) void this.pumpNow();
       });
       return;
@@ -354,7 +442,7 @@ export class EffectExecutor {
   }
 
   private async executeEffect(effectId: string): Promise<EffectRecord> {
-    await this.options.assertCurrent();
+    await this.assertAuthority();
     this.assertNotFenced();
     const database = this.requireDatabase();
     const initial = getEffect(database, effectId);
@@ -365,12 +453,30 @@ export class EffectExecutor {
       throw new EffectValidationError(`No effect handler registered for kind ${initial.kind}.`);
     }
 
-    const claimed = claimEffectForExecution(database, this.options.assertWriteFence, {
+    // Enforce the current handler's at-most-once policy before dispatching any
+    // previously attempted retry row (e.g., if policy tightened across builds
+    // or handler registration occurred after startup recovery).
+    if (!handler.retryable && initial.attempt_count >= 1) {
+      const quarantined = this.runFencedWrite(() => quarantinePreparedRetryAsUncertain(
+        database,
+        this.options.assertWriteFence,
+        {
+          id: initial.id,
+          daemonGeneration: this.options.currentDaemonGeneration(),
+          error: `Effect kind ${initial.kind} is non-retryable (at-most-once); refusing replay after ${initial.attempt_count} prior attempt(s) and marking uncertain.`,
+          nowIso: this.nowIso(),
+        },
+      ));
+      this.options.notifyStateChanged?.();
+      return quarantined;
+    }
+
+    const claimed = this.runFencedWrite(() => claimEffectForExecution(database, this.options.assertWriteFence, {
       id: effectId,
       daemonGeneration: this.options.currentDaemonGeneration(),
       nowMs: this.nowMs(),
       nowIso: this.nowIso(),
-    });
+    }));
     this.options.notifyStateChanged?.();
 
     let result: EffectExecutionResult;
@@ -384,18 +490,31 @@ export class EffectExecutor {
     } catch (error) {
       // Never swallow lost singleton authority or pretend an external call failed
       // when this daemon lost its write fence.
-      if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+      if (error instanceof DaemonFenceLostError) {
+        this.fence();
+        throw error;
+      }
+      if (error instanceof EffectFenceError) throw error;
       return this.settleUnexpectedThrow(claimed, handler, error);
     }
 
     // Settlement checks singleton authority (not `!fenced`) so an execution already
     // admitted before `fenceAndDrain()` can durably record its receipt before the
     // daemon releases the lock and closes SQLite.
-    await this.options.assertCurrent();
-    const settled = this.settleExecutionResult(claimed, handler, result);
+    await this.assertAuthority();
+    const settled = this.runFencedWrite(() => this.settleExecutionResult(claimed, handler, result));
     this.options.notifyStateChanged?.();
     if (!this.isFenced) this.scheduleNextPump();
     return settled;
+  }
+
+  private runFencedWrite<T>(write: () => T): T {
+    try {
+      return write();
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) this.fence();
+      throw error;
+    }
   }
 
   private settleExecutionResult(
@@ -486,31 +605,31 @@ export class EffectExecutor {
     handler: EffectHandler,
     error: unknown,
   ): Promise<EffectRecord> {
-    await this.options.assertCurrent();
+    await this.assertAuthority();
     const database = this.requireDatabase();
     const detail = errorMessage(error);
     const nowIso = this.nowIso();
     let settled: EffectRecord;
     if (claimed.retryable && handler.retryable && claimed.attempt_count < claimed.max_attempts) {
       const delayMs = computeEffectBackoffMs(claimed.attempt_count, handler.backoff, this.options.defaultBackoff);
-      settled = rescheduleEffectForRetry(database, this.options.assertWriteFence, {
+      settled = this.runFencedWrite(() => rescheduleEffectForRetry(database, this.options.assertWriteFence, {
         id: claimed.id,
         expectedEpoch: claimed.epoch,
         expectedAttemptCount: claimed.attempt_count,
         nextAttemptAtMs: this.nowMs() + delayMs,
         error: detail,
         nowIso,
-      });
+      }));
     } else {
       // An unexpected throw after entering `executing` cannot prove the external
       // side effect did not occur. Mark `uncertain` instead of falsely claiming failure.
-      settled = markEffectUncertain(database, this.options.assertWriteFence, {
+      settled = this.runFencedWrite(() => markEffectUncertain(database, this.options.assertWriteFence, {
         id: claimed.id,
         expectedEpoch: claimed.epoch,
         expectedAttemptCount: claimed.attempt_count,
         error: detail,
         nowIso,
-      });
+      }));
     }
     this.options.notifyStateChanged?.();
     if (!this.isFenced) this.scheduleNextPump();
@@ -518,7 +637,7 @@ export class EffectExecutor {
   }
 
   private async reconcileUncertainInternal(effectId: string): Promise<EffectRecord> {
-    await this.options.assertCurrent();
+    await this.assertAuthority();
     this.assertNotFenced();
     const database = this.requireDatabase();
     const current = getEffect(database, effectId);
@@ -527,7 +646,7 @@ export class EffectExecutor {
     const handler = this.handlers.get(current.kind);
     if (!handler?.reconcileUncertain) return current;
 
-    const generation = this.options.currentDaemonGeneration();
+    const generation = this.runFencedWrite(() => this.options.currentDaemonGeneration());
     const verified = await handler.reconcileUncertain(current, {
       signal: this.abortController.signal,
       daemonGeneration: generation,
@@ -536,27 +655,27 @@ export class EffectExecutor {
     });
     if (verified.status === "still_uncertain") return current;
 
-    await this.options.assertCurrent();
+    await this.assertAuthority();
     const nowIso = this.nowIso();
     let settled: EffectRecord;
     try {
-      settled = resolveUncertainEffect(database, this.options.assertWriteFence, {
+      settled = this.runFencedWrite(() => resolveUncertainEffect(database, this.options.assertWriteFence, {
         id: current.id,
         daemonGeneration: generation,
         state: verified.status,
         outcome: verified.outcome,
         error: verified.status === "failed" ? verified.error : undefined,
         nowIso,
-      });
+      }));
     } catch (error) {
       if (!(error instanceof EffectValidationError) || verified.status !== "completed") throw error;
-      settled = resolveUncertainEffect(database, this.options.assertWriteFence, {
+      settled = this.runFencedWrite(() => resolveUncertainEffect(database, this.options.assertWriteFence, {
         id: current.id,
         daemonGeneration: generation,
         state: "completed",
         outcome: { effect_outcome_omitted: true, reason: error.message },
         nowIso,
-      });
+      }));
     }
     this.options.notifyStateChanged?.();
     return settled;

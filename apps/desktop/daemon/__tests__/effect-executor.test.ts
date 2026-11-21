@@ -9,13 +9,14 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import { DaemonStateDatabase } from "../daemon-state-database.js";
 import {
   EffectExecutor,
@@ -40,6 +41,7 @@ import {
 } from "../effect-journal/index.js";
 import { SupervisorDaemon } from "../main.js";
 import { DaemonFenceLostError } from "../singleton.js";
+import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -63,7 +65,7 @@ async function tempEnv(prefix = "letagents-effect-journal-"): Promise<{
     db: stateDb.connection,
     cleanup: async () => {
       stateDb.close();
-      await rm(root, { recursive: true, force: true });
+      await removeTestDirectory(root);
     },
   };
 }
@@ -204,6 +206,7 @@ test("effect journal enforces plain wire payloads, canonical idempotency, atomic
     assert.throws(() => env.db.prepare("UPDATE effect_journal SET payload='{}' WHERE id=?").run(first.effect.id), /invalid/i);
     assert.throws(() => env.db.prepare("UPDATE effect_journal SET idempotency_key='tampered' WHERE id=?").run(first.effect.id), /invalid/i);
     assert.throws(() => env.db.prepare("UPDATE effect_journal SET state='completed' WHERE id=?").run(first.effect.id), /invalid/i);
+    assert.throws(() => env.db.prepare("UPDATE effect_journal SET state='uncertain', last_error='never ran' WHERE id=?").run(first.effect.id), /invalid/i);
     assert.throws(() => env.db.prepare("UPDATE effect_journal SET next_attempt_at_ms=999 WHERE id=?").run(first.effect.id), /invalid/i);
     const claimed = claimEffectForExecution(env.db, () => {}, { id: first.effect.id, daemonGeneration: 2, nowMs: 1_000 });
     assert.throws(() => env.db.prepare("UPDATE effect_journal SET epoch=1 WHERE id=?").run(claimed.id), /invalid/i);
@@ -508,7 +511,7 @@ test("stale daemon generation is rejected on prepare, claim, settle, retry, reso
       agent_id: "agent_1", kind: "fence_test", idempotency_key: "k-fence", epoch: 2, payload: { v: 1 }, retryable: true, max_attempts: 3,
     }).effect;
 
-    // Stale gen 1 cannot prepare, claim, fail, or run startup recovery against epoch 2 rows.
+    // Stale gen 1 cannot prepare, claim, or fail against epoch 2 rows.
     assert.throws(() => prepareEffect(env.db, () => {}, {
       agent_id: "agent_1", kind: "fence_test", idempotency_key: "k-fence", epoch: 1, payload: { v: 1 }, retryable: true, max_attempts: 3,
     }), EffectFenceError);
@@ -517,9 +520,6 @@ test("stale daemon generation is rejected on prepare, claim, settle, retry, reso
     }), EffectFenceError);
     assert.throws(() => failEffect(env.db, () => {}, {
       id: prepared.id, expectedEpoch: 1, error: "stale cancel",
-    }), EffectFenceError);
-    assert.throws(() => recoverInterruptedEffectsOnStartup(env.db, () => {}, {
-      daemonGeneration: 1, nowMs: 1_000,
     }), EffectFenceError);
 
     // Gen 2 claims and completes? First test stale attempt_count / epoch on settlement.
@@ -834,6 +834,307 @@ test("SupervisorDaemon startup runs EffectExecutor recovery pass for interrupted
     try {
       assert.equal(getEffect(inspect, nonRetry.id)!.state, "uncertain");
       assert.equal(getEffect(inspect, retry.id)!.state, "prepared");
+    } finally {
+      inspect.close();
+    }
+  } finally {
+    await daemon?.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("pump does not starve pending authority I/O, fences on lost authority, and backs off persistent pre-claim errors", async () => {
+  // 1. Bounded child-process regression for ReviewAstra P1: direct runEffect() awaiting
+  //    async assertCurrent() while a concurrent pumpNow() runs must never starve the
+  //    event loop; heartbeat must fire and handler must execute exactly once.
+  const probeScript = `
+    import assert from "node:assert/strict";
+    import { DatabaseSync } from "node:sqlite";
+    const { applySchemaCurrent } = await import(process.env.SCHEMA_URL);
+    const { EffectExecutor } = await import(process.env.EFFECT_URL);
+
+    const db = new DatabaseSync(":memory:");
+    db.exec("PRAGMA foreign_keys = ON;");
+    applySchemaCurrent(db);
+
+    let calls = 0;
+    let heartbeatFired = false;
+    const heartbeat = new Promise((resolve) => {
+      setTimeout(() => { heartbeatFired = true; resolve(); }, 30);
+    });
+
+    const executor = new EffectExecutor({
+      getDatabase: () => db,
+      currentDaemonGeneration: () => 1,
+      assertCurrent: () => new Promise((resolve) => setTimeout(resolve, 20)),
+      assertWriteFence: () => {},
+      isClosing: () => false,
+    });
+    executor.registerHandler("at_most_once", {
+      retryable: false,
+      execute: async () => {
+        calls += 1;
+        return { status: "completed", outcome: { ok: true } };
+      },
+    });
+    const { effect } = await executor.prepare({
+      agent_id: "agent_1",
+      kind: "at_most_once",
+      idempotency_key: "starve-check",
+      payload: { x: 1 },
+    });
+    const direct = executor.runEffect(effect.id);
+    const competingPump = executor.pumpNow();
+    const [settled] = await Promise.all([direct, competingPump, heartbeat]);
+    assert.equal(settled.state, "completed");
+    assert.equal(calls, 1);
+    assert.equal(heartbeatFired, true);
+    await executor.fenceAndDrain();
+    db.close();
+    process.stdout.write("PROBE_OK\\n");
+  `;
+  const schemaModuleUrl = pathToFileURL(join(THIS_DIR, "../daemon-state-database/schema.ts")).href;
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", probeScript],
+      {
+        env: { ...process.env, SCHEMA_URL: schemaModuleUrl, EFFECT_URL: EFFECT_MODULE_URL },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+    const watchdog = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`Event loop starved in child probe (killed by watchdog): ${stderr}`));
+    }, 5_000);
+    child.once("exit", (code, signal) => {
+      clearTimeout(watchdog);
+      if (code === 0 && stdout.includes("PROBE_OK")) resolve();
+      else reject(new Error(`Child probe failed (code=${code}, signal=${signal}): stdout=${stdout} stderr=${stderr}`));
+    });
+  });
+
+  // 2. Pre-claim DaemonFenceLostError fences the executor immediately with zero retries.
+  const env = await tempEnv("letagents-pump-backoff-");
+  try {
+    let deposed = false;
+    let authCalls = 0;
+    const fencedExecutor = new EffectExecutor({
+      getDatabase: () => env.db,
+      currentDaemonGeneration: () => 1,
+      assertCurrent: async () => {
+        authCalls += 1;
+        if (deposed) throw new DaemonFenceLostError("deposed before claim");
+      },
+      assertWriteFence: () => {},
+      isClosing: () => false,
+    });
+    let handlerCalls = 0;
+    fencedExecutor.registerHandler("fence_pre_claim", {
+      retryable: false,
+      execute: async () => { handlerCalls += 1; return { status: "completed" }; },
+    });
+    const prep1 = (await fencedExecutor.prepare({
+      agent_id: "agent_1", kind: "fence_pre_claim", idempotency_key: "k-deposed", payload: {},
+    })).effect;
+    deposed = true;
+    authCalls = 0;
+    await fencedExecutor.pumpNow();
+    assert.equal(fencedExecutor.isFenced, true, "lost singleton authority must fence executor permanently");
+    assert.equal(authCalls, 1);
+    assert.equal(handlerCalls, 0);
+    assert.equal(getEffect(env.db, prep1.id)!.state, "prepared");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(authCalls, 1, "fenced executor must not reschedule any pump after DaemonFenceLostError");
+
+    // 3. Persistent non-fence pre-claim error backs off on a timer and never starves timers.
+    let claimChecks = 0;
+    let failClaim = false;
+    const backoffExecutor = new EffectExecutor({
+      getDatabase: () => env.db,
+      currentDaemonGeneration: () => 1,
+      assertCurrent: async () => {
+        if (failClaim) {
+          claimChecks += 1;
+          throw new Error("transient pre-claim I/O failure");
+        }
+      },
+      assertWriteFence: () => {},
+      isClosing: () => false,
+      defaultBackoff: { baseDelayMs: 40, maxDelayMs: 200, factor: 2 },
+    });
+    backoffExecutor.registerHandler("claim_err", {
+      retryable: false,
+      execute: async () => ({ status: "completed" }),
+    });
+    await backoffExecutor.prepare({
+      agent_id: "agent_1", kind: "claim_err", idempotency_key: "k-claim-err", payload: {},
+    });
+    failClaim = true;
+    const timerFiredAt = await new Promise<number>((resolve) => {
+      const start = Date.now();
+      void backoffExecutor.pumpNow();
+      setTimeout(() => resolve(Date.now() - start), 25);
+    });
+    assert.ok(timerFiredAt < 250, `25ms timer must not be starved by pre-claim pump errors (took ${timerFiredAt}ms)`);
+    assert.ok(claimChecks >= 1 && claimChecks <= 3, `pre-claim errors must back off instead of spinning (got ${claimChecks} checks)`);
+    await backoffExecutor.fenceAndDrain();
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("current handler retryable=false policy quarantines already-attempted retries in both registration orders with zero second calls", async () => {
+  const env = await tempEnv("letagents-policy-tighten-");
+  try {
+    // Sequence A: old gen left retryable=true row in `executing` after external commit;
+    // new gen runs recoverOnStartup() BEFORE registering the now non-retryable handler,
+    // then registers handler and invokes runEffect() / pumpNow().
+    let externalCallsA = 0;
+    const effA = prepareEffect(env.db, () => {}, {
+      agent_id: "agent_1", kind: "tightened_a", idempotency_key: "k-a", epoch: 1,
+      payload: { seq: "A" }, retryable: true, max_attempts: 3,
+    }).effect;
+    claimEffectForExecution(env.db, () => {}, { id: effA.id, daemonGeneration: 1, nowMs: 1_000 });
+    externalCallsA += 1; // External action committed before gen-1 crash.
+
+    const execA = new EffectExecutor({
+      getDatabase: () => env.db,
+      currentDaemonGeneration: () => 2,
+      assertCurrent: async () => {},
+      assertWriteFence: () => {},
+      isClosing: () => false,
+      nowMs: () => 5_000,
+    });
+    const recA = await execA.recoverOnStartup();
+    assert.ok(recA.requeuedIds.includes(effA.id), "unregistered retryable row was requeued before handler registration");
+    assert.equal(getEffect(env.db, effA.id)!.state, "prepared");
+    assert.equal(getEffect(env.db, effA.id)!.attempt_count, 1);
+
+    execA.registerHandler("tightened_a", {
+      retryable: false,
+      execute: async () => {
+        externalCallsA += 1;
+        return { status: "completed" };
+      },
+    });
+    const quarantinedA = await execA.runEffect(effA.id);
+    assert.equal(quarantinedA.state, "uncertain");
+    assert.equal(quarantinedA.attempt_count, 1);
+    await execA.pumpNow();
+    assert.equal(externalCallsA, 1, "handler registered after recovery must never replay an already-attempted row");
+    await execA.fenceAndDrain();
+
+    // Sequence B: old gen already rescheduled a retryable=true row back to `prepared`
+    // (`attempt_count=1`) after a lost response; new gen registers retryable=false
+    // BEFORE recoverOnStartup(). Startup recovery must quarantine it to `uncertain` immediately.
+    let externalCallsB = 0;
+    const effB = prepareEffect(env.db, () => {}, {
+      agent_id: "agent_1", kind: "tightened_b", idempotency_key: "k-b", epoch: 1,
+      payload: { seq: "B" }, retryable: true, max_attempts: 3,
+    }).effect;
+    claimEffectForExecution(env.db, () => {}, { id: effB.id, daemonGeneration: 1, nowMs: 1_000 });
+    externalCallsB += 1; // External action committed before lost response.
+    rescheduleEffectForRetry(env.db, () => {}, {
+      id: effB.id, expectedEpoch: 1, expectedAttemptCount: 1, nextAttemptAtMs: 2_000, error: "lost response",
+    });
+    assert.equal(getEffect(env.db, effB.id)!.state, "prepared");
+
+    const execB = new EffectExecutor({
+      getDatabase: () => env.db,
+      currentDaemonGeneration: () => 2,
+      assertCurrent: async () => {},
+      assertWriteFence: () => {},
+      isClosing: () => false,
+      nowMs: () => 5_000,
+    });
+    execB.registerHandler("tightened_b", {
+      retryable: false,
+      execute: async () => {
+        externalCallsB += 1;
+        return { status: "completed" };
+      },
+    });
+    const recB = await execB.recoverOnStartup();
+    assert.ok(recB.uncertainIds.includes(effB.id));
+    assert.equal(recB.preparedIds.includes(effB.id), false);
+    assert.equal(getEffect(env.db, effB.id)!.state, "uncertain");
+    assert.equal(getEffect(env.db, effB.id)!.attempt_count, 1);
+    await execB.pumpNow();
+    assert.equal(externalCallsB, 1, "handler registered before recovery must quarantine existing prepared retries with zero extra calls");
+    await execB.fenceAndDrain();
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("startup recovery fences higher-epoch rows fail-closed without bricking SupervisorDaemon startup, and agent removal purges effect_journal rows", async () => {
+  const env = await tempEnv("letagents-future-epoch-and-purge-");
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    ...testDaemonEndpoint(env.root),
+    manifestPath: env.dbPath,
+    auditPath: join(env.root, "audit.log"),
+    attemptsPath: join(env.root, "attempts.sqlite"),
+    attemptsRoot: join(env.root, "attempts"),
+    workspaceRoot: env.root,
+    workerBindingsPath: join(env.root, "bindings.sqlite"),
+  };
+  let daemon: SupervisorDaemon | null = null;
+  try {
+    // Seed rows at epoch 7 (simulating a deleted/reset generation file where next start is generation 1).
+    const futurePreparedFresh = prepareEffect(env.db, () => {}, {
+      agent_id: "agent_future", kind: "k", idempotency_key: "f-prep-0", epoch: 7, payload: { n: 1 }, retryable: true, max_attempts: 3,
+    }).effect;
+    const futurePreparedRetry = prepareEffect(env.db, () => {}, {
+      agent_id: "agent_future", kind: "k", idempotency_key: "f-prep-1", epoch: 7, payload: { n: 2 }, retryable: true, max_attempts: 3,
+    }).effect;
+    claimEffectForExecution(env.db, () => {}, { id: futurePreparedRetry.id, daemonGeneration: 7, nowMs: 1_000 });
+    rescheduleEffectForRetry(env.db, () => {}, {
+      id: futurePreparedRetry.id, expectedEpoch: 7, expectedAttemptCount: 1, nextAttemptAtMs: 2_000, error: "transient",
+    });
+    const futureExecuting = prepareEffect(env.db, () => {}, {
+      agent_id: "agent_future", kind: "k", idempotency_key: "f-exec", epoch: 7, payload: { n: 3 }, retryable: true, max_attempts: 3,
+    }).effect;
+    claimEffectForExecution(env.db, () => {}, { id: futureExecuting.id, daemonGeneration: 7, nowMs: 1_000 });
+    const futureUncertain = prepareEffect(env.db, () => {}, {
+      agent_id: "agent_keep", kind: "k", idempotency_key: "f-unc", epoch: 7, payload: { n: 4 }, retryable: false,
+    }).effect;
+    claimEffectForExecution(env.db, () => {}, { id: futureUncertain.id, daemonGeneration: 7, nowMs: 1_000 });
+    markEffectUncertain(env.db, () => {}, { id: futureUncertain.id, expectedEpoch: 7, expectedAttemptCount: 1, error: "prior" });
+    env.stateDb.close();
+
+    // Real SupervisorDaemon starts cleanly at generation 1 without throwing on epoch-7 rows.
+    daemon = new SupervisorDaemon(paths, "darwin");
+    await daemon.start();
+    await daemon.stop();
+    daemon = null;
+
+    const inspect = await DaemonStateDatabase.open(env.dbPath);
+    try {
+      const p0 = getEffect(inspect.connection, futurePreparedFresh.id)!;
+      const p1 = getEffect(inspect.connection, futurePreparedRetry.id)!;
+      const ex = getEffect(inspect.connection, futureExecuting.id)!;
+      const un = getEffect(inspect.connection, futureUncertain.id)!;
+      assert.equal(p0.state, "failed", "unattempted future-epoch row fails closed before dispatch");
+      assert.equal(p0.epoch, 7);
+      assert.equal(p1.state, "uncertain", "attempted future-epoch retry becomes uncertain without replay");
+      assert.equal(p1.epoch, 7);
+      assert.equal(ex.state, "uncertain", "executing future-epoch row becomes uncertain without replay");
+      assert.equal(ex.epoch, 7);
+      assert.equal(un.state, "uncertain");
+      assert.equal(un.epoch, 7);
+
+      // Removing agent_future via SupervisedAgentInboxStore.removeAgent purges its effect_journal rows
+      // while leaving agent_keep intact.
+      const inbox = new SupervisedAgentInboxStore(env.dbPath, { sharedDatabase: inspect });
+      await inbox.removeAgent("agent_future");
+      assert.equal(listEffectsForAgent(inspect.connection, "agent_future").length, 0);
+      assert.equal(listEffectsForAgent(inspect.connection, "agent_keep").length, 1);
     } finally {
       inspect.close();
     }

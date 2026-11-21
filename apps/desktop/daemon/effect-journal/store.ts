@@ -222,15 +222,31 @@ export function listDuePreparedEffects(
   nowMs: number,
   kinds?: readonly string[],
   limit = 64,
+  options: { excludeIds?: readonly string[]; maxEpoch?: number } = {},
 ): EffectRecord[] {
   if (kinds && kinds.length === 0) return [];
-  const kindClause = kinds ? ` AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
-  const args: unknown[] = [nowMs, ...(kinds ?? []), limit];
+  const clauses = [
+    "state = 'prepared'",
+    "(next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)",
+    "attempt_count < max_attempts",
+  ];
+  const args: unknown[] = [nowMs];
+  if (kinds) {
+    clauses.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+    args.push(...kinds);
+  }
+  if (options.excludeIds && options.excludeIds.length > 0) {
+    clauses.push(`id NOT IN (${options.excludeIds.map(() => "?").join(", ")})`);
+    args.push(...options.excludeIds);
+  }
+  if (options.maxEpoch !== undefined) {
+    clauses.push("epoch <= ?");
+    args.push(options.maxEpoch);
+  }
+  args.push(limit);
   const rows = database.prepare(`
     SELECT * FROM ${TABLE}
-    WHERE state = 'prepared'
-      AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
-      AND attempt_count < max_attempts${kindClause}
+    WHERE ${clauses.join(" AND ")}
     ORDER BY COALESCE(next_attempt_at_ms, 0), created_at, id
     LIMIT ?
   `).all(...args as never[]) as Row[];
@@ -240,15 +256,31 @@ export function listDuePreparedEffects(
 export function nextScheduledPreparedEffectAtMs(
   database: DatabaseSync,
   kinds?: readonly string[],
+  options: { excludeIds?: readonly string[]; maxEpoch?: number } = {},
 ): number | null {
   if (kinds && kinds.length === 0) return null;
-  const kindClause = kinds ? ` AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
+  const clauses = [
+    "state = 'prepared'",
+    "attempt_count < max_attempts",
+  ];
+  const args: unknown[] = [];
+  if (kinds) {
+    clauses.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+    args.push(...kinds);
+  }
+  if (options.excludeIds && options.excludeIds.length > 0) {
+    clauses.push(`id NOT IN (${options.excludeIds.map(() => "?").join(", ")})`);
+    args.push(...options.excludeIds);
+  }
+  if (options.maxEpoch !== undefined) {
+    clauses.push("epoch <= ?");
+    args.push(options.maxEpoch);
+  }
   const row = database.prepare(`
     SELECT MIN(COALESCE(next_attempt_at_ms, 0)) AS due_ms
     FROM ${TABLE}
-    WHERE state = 'prepared'
-      AND attempt_count < max_attempts${kindClause}
-  `).get(...(kinds ?? []) as never[]) as Row | undefined;
+    WHERE ${clauses.join(" AND ")}
+  `).get(...args as never[]) as Row | undefined;
   return row && row.due_ms !== null && row.due_ms !== undefined ? Number(row.due_ms) : null;
 }
 
@@ -510,6 +542,56 @@ export function markEffectUncertain(
   });
 }
 
+/**
+ * Quarantines an already-attempted (`attempt_count >= 1`) `prepared` retry row directly
+ * to `uncertain` without dispatching it again — used when a kind's current handler policy
+ * forbids retries (at-most-once) so a prior attempt that may have succeeded externally is
+ * neither replayed nor falsely marked `failed`.
+ */
+export function quarantinePreparedRetryAsUncertain(
+  database: DatabaseSync,
+  assertWriteFence: () => void,
+  input: {
+    id: string;
+    daemonGeneration: number;
+    error: string;
+    nowIso?: string;
+  },
+): EffectRecord {
+  const daemonGeneration = assertPositiveEpoch(input.daemonGeneration, "daemonGeneration");
+  const errorText = truncateEffectError(input.error);
+  const nowIso = input.nowIso ?? new Date().toISOString();
+  return withFencedEffectTransaction(database, assertWriteFence, () => {
+    const row = database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row | undefined;
+    if (!row) throw new EffectFenceError(`Unknown effect ${input.id}.`);
+    const current = rowToEffectRecord(row);
+    if (current.state !== "prepared") {
+      throw new EffectFenceError(`Effect ${input.id} cannot be quarantined from state ${current.state}.`);
+    }
+    if (current.attempt_count < 1) {
+      throw new EffectFenceError(`Effect ${input.id} has never executed externally; cancel it as failed instead of marking uncertain.`);
+    }
+    if (current.epoch > daemonGeneration) {
+      throw new EffectFenceError(
+        `Stale daemon generation ${daemonGeneration} cannot quarantine effect ${input.id} owned by epoch ${current.epoch}.`,
+      );
+    }
+    const result = database.prepare(`
+      UPDATE ${TABLE}
+      SET state = 'uncertain',
+          epoch = ?,
+          next_attempt_at_ms = NULL,
+          last_error = ?,
+          updated_at = ?
+      WHERE id = ? AND state = 'prepared' AND attempt_count >= 1 AND epoch = ?
+    `).run(daemonGeneration, errorText, nowIso, input.id, current.epoch);
+    if (Number(result.changes) !== 1) {
+      throw new EffectFenceError(`Effect ${input.id} lost its prepared-retry quarantine fence.`);
+    }
+    return rowToEffectRecord(database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row);
+  });
+}
+
 /** Settles an `uncertain` effect after external verification or explicit operator resolution. */
 export function resolveUncertainEffect(
   database: DatabaseSync,
@@ -561,11 +643,19 @@ export function resolveUncertainEffect(
 /**
  * Atomic startup recovery pass executed by a newly elected daemon generation
  * before serving requests:
- * - Refuses to proceed if any active/uncertain effect belongs to a newer epoch.
- * - Requeues interrupted `executing` rows ONLY when `retryable = 1` and
- *   `attempt_count < max_attempts`, preserving their exact idempotency key and payload.
+ * - Never blocks daemon startup if the external generation file was reset behind
+ *   historical DB epochs (`epoch > daemonGeneration`); instead fences those rows
+ *   fail-closed without lowering `epoch` or replaying external actions:
+ *   `executing` and previously attempted `prepared` rows (`attempt_count >= 1`)
+ *   become `uncertain`, unattempted `prepared` rows (`attempt_count = 0`) fail
+ *   closed before dispatch, and `uncertain` rows stay `uncertain`.
+ * - Requeues interrupted `executing` rows ONLY when `retryable = 1`, the kind is
+ *   not listed in `nonRetryableKinds`, and `attempt_count < max_attempts`,
+ *   preserving their exact idempotency key and payload.
  * - Marks every other interrupted `executing` row `uncertain` so non-idempotent
  *   external side effects are never replayed automatically.
+ * - Quarantines any already-attempted `prepared` retry (`attempt_count >= 1`)
+ *   whose kind is listed in `nonRetryableKinds` directly to `uncertain`.
  */
 export function recoverInterruptedEffectsOnStartup(
   database: DatabaseSync,
@@ -581,25 +671,60 @@ export function recoverInterruptedEffectsOnStartup(
   const nowIso = input.nowIso ?? new Date(input.nowMs).toISOString();
   const nonRetryableKinds = new Set(input.nonRetryableKinds ?? []);
   return withFencedEffectTransaction(database, assertWriteFence, () => {
-    const newer = database.prepare(`
-      SELECT id, epoch FROM ${TABLE}
-      WHERE state IN ('prepared', 'executing', 'uncertain') AND epoch > ?
-      LIMIT 1
-    `).get(daemonGeneration) as Row | undefined;
-    if (newer) {
-      throw new EffectFenceError(
-        `Refusing startup effect recovery at generation ${daemonGeneration}: effect ${String(newer.id)} belongs to newer epoch ${Number(newer.epoch)}.`,
-      );
-    }
-
-    const interrupted = database.prepare(`
-      SELECT * FROM ${TABLE}
-      WHERE state = 'executing'
-      ORDER BY created_at, id
-    `).all() as Row[];
-
     const requeuedIds: string[] = [];
     const uncertainIds: string[] = [];
+    const fencedFutureEpochIds: string[] = [];
+
+    // 1. Fence any non-terminal rows whose stored epoch exceeds the current
+    //    daemon generation (for example after the generation file beside the DB
+    //    was lost or reset) without bricking daemon startup or lowering `epoch`.
+    const futureRows = database.prepare(`
+      SELECT * FROM ${TABLE}
+      WHERE state IN ('prepared', 'executing', 'uncertain') AND epoch > ?
+      ORDER BY created_at, id
+    `).all(daemonGeneration) as Row[];
+    const futureUncertainStmt = database.prepare(`
+      UPDATE ${TABLE}
+      SET state = 'uncertain',
+          next_attempt_at_ms = NULL,
+          last_error = ?,
+          updated_at = ?
+      WHERE id = ? AND state IN ('prepared', 'executing')
+    `);
+    const futureFailPreparedStmt = database.prepare(`
+      UPDATE ${TABLE}
+      SET state = 'failed',
+          next_attempt_at_ms = NULL,
+          last_error = ?,
+          updated_at = ?
+      WHERE id = ? AND state = 'prepared' AND attempt_count = 0
+    `);
+    for (const row of futureRows) {
+      const effect = rowToEffectRecord(row);
+      fencedFutureEpochIds.push(effect.id);
+      if (effect.state === "executing" || (effect.state === "prepared" && effect.attempt_count >= 1)) {
+        futureUncertainStmt.run(
+          `Daemon started at generation ${daemonGeneration} below stored effect epoch ${effect.epoch}; marked uncertain without replay.`,
+          nowIso,
+          effect.id,
+        );
+        uncertainIds.push(effect.id);
+      } else if (effect.state === "prepared") {
+        futureFailPreparedStmt.run(
+          `Daemon started at generation ${daemonGeneration} below stored effect epoch ${effect.epoch}; refused execution before dispatch.`,
+          nowIso,
+          effect.id,
+        );
+      }
+    }
+
+    // 2. Recover interrupted `executing` rows from the current or earlier generations.
+    const interrupted = database.prepare(`
+      SELECT * FROM ${TABLE}
+      WHERE state = 'executing' AND epoch <= ?
+      ORDER BY created_at, id
+    `).all(daemonGeneration) as Row[];
+
     const requeueStmt = database.prepare(`
       UPDATE ${TABLE}
       SET state = 'prepared',
@@ -641,6 +766,40 @@ export function recoverInterruptedEffectsOnStartup(
       }
     }
 
+    // 3. Quarantine any already-attempted `prepared` retry rows whose current
+    //    handler policy is now non-retryable (for example after a policy tightening
+    //    across daemon upgrades) so they are never replayed automatically.
+    if (nonRetryableKinds.size > 0) {
+      const kindList = [...nonRetryableKinds];
+      const preparedRetries = database.prepare(`
+        SELECT * FROM ${TABLE}
+        WHERE state = 'prepared'
+          AND attempt_count >= 1
+          AND epoch <= ?
+          AND kind IN (${kindList.map(() => "?").join(", ")})
+        ORDER BY created_at, id
+      `).all(daemonGeneration, ...kindList) as Row[];
+      const quarantineStmt = database.prepare(`
+        UPDATE ${TABLE}
+        SET state = 'uncertain',
+            epoch = ?,
+            next_attempt_at_ms = NULL,
+            last_error = ?,
+            updated_at = ?
+        WHERE id = ? AND state = 'prepared' AND attempt_count >= 1
+      `);
+      for (const row of preparedRetries) {
+        const effect = rowToEffectRecord(row);
+        quarantineStmt.run(
+          daemonGeneration,
+          `Effect kind ${effect.kind} is now non-retryable (at-most-once); refusing replay after ${effect.attempt_count} prior attempt(s) and marking uncertain.`,
+          nowIso,
+          effect.id,
+        );
+        uncertainIds.push(effect.id);
+      }
+    }
+
     const preparedRows = database.prepare(`
       SELECT id FROM ${TABLE}
       WHERE state = 'prepared'
@@ -655,6 +814,7 @@ export function recoverInterruptedEffectsOnStartup(
     return {
       requeuedIds,
       uncertainIds,
+      fencedFutureEpochIds,
       preparedIds: preparedRows.map((row) => String(row.id)),
       allUncertainIds: allUncertainRows.map((row) => String(row.id)),
     };
