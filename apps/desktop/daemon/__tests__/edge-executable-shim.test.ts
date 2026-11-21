@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,7 +12,12 @@ import { parseNodeShim } from "../../../../shared/codex-executable.mjs";
 import { findReplayLeaks, type ReplayRedactionContext } from "../../electron/__tests__/provider-replay/redaction.js";
 import { parseProviderReplayTranscript } from "../../electron/__tests__/provider-replay/transcript.js";
 import { parseCodexEdgeTranscript } from "./edge/codex/parser.mjs";
-import { findProcessesReferencingPath, startEdgeDaemon } from "./edge/daemon-edge-harness.js";
+import {
+  EDGE_DAEMON_UNSUPPORTED_REASON,
+  findProcessesReferencingPath,
+  listOsProcesses,
+  startEdgeDaemon,
+} from "./edge/daemon-edge-harness.js";
 import { materializeNodeShim } from "./edge/executable-shim.js";
 import { parseOpenCodeEdgeTranscript } from "./edge/open-model/parser.mjs";
 
@@ -86,24 +93,129 @@ test("replay stand-in transcript parsers strictly reject missing or non-terminal
 });
 
 test("startEdgeDaemon cleans up temp home and server on startup failure", async () => {
-  const before = new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("letagents-edge-")));
-  await assert.rejects(
+  const isolatedTempRoot = await mkdtemp(join(tmpdir(), "letagents-edge-startup-fail-"));
+  try {
+    await assert.rejects(
+      () =>
+        startEdgeDaemon({
+          tempRoot: isolatedTempRoot,
+          daemonCommand: {
+            command: process.execPath,
+            args: [join(isolatedTempRoot, "nonexistent-daemon-entry-for-edge-cleanup-test.js")],
+          },
+          readyTimeoutMs: 1_500,
+        }),
+    );
+    const remaining = readdirSync(isolatedTempRoot);
+    assert.deepEqual(remaining, [], "Expected failed startEdgeDaemon() to clean up its temporary home directory");
+    assert.deepEqual(
+      findProcessesReferencingPath(isolatedTempRoot),
+      [],
+      "Expected zero leftover processes after failed startEdgeDaemon()",
+    );
+  } finally {
+    await rm(isolatedTempRoot, { recursive: true, force: true });
+  }
+});
+
+test("process enumeration failure cannot satisfy zero-process assertions or silent dispose()", async () => {
+  // 1. Direct inspection helper must throw rather than return [].
+  assert.throws(
     () =>
-      startEdgeDaemon({
-        daemonCommand: {
-          command: process.execPath,
-          args: [join(tmpdir(), "nonexistent-daemon-entry-for-edge-cleanup-test.js")],
-        },
-        readyTimeoutMs: 1_500,
+      findProcessesReferencingPath(tmpdir(), () => {
+        throw new Error("simulated process lookup failure");
       }),
+    /simulated process lookup failure/,
   );
-  const after = readdirSync(tmpdir()).filter((name) => name.startsWith("letagents-edge-") && !before.has(name));
-  assert.deepEqual(after, [], "Expected failed startEdgeDaemon() to clean up its temporary home directory");
-  assert.deepEqual(
-    findProcessesReferencingPath("nonexistent-daemon-entry-for-edge-cleanup-test.js"),
-    [],
-    "Expected zero leftover processes after failed startEdgeDaemon()",
+
+  if (process.platform !== "win32") {
+    const previousPath = process.env.PATH;
+    process.env.PATH = join(tmpdir(), `letagents-nonexistent-path-${randomUUID()}`);
+    try {
+      assert.throws(
+        () => findProcessesReferencingPath(tmpdir()),
+        /OS process enumeration failed/,
+      );
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  }
+
+  // 2. Real harness dispose() must surface inspection failure, keep homeDir evidence,
+  //    close independent roomServer handles in finally, and clean up once inspection recovers.
+  if (EDGE_DAEMON_UNSUPPORTED_REASON) return;
+  let failListProcesses = false;
+  const harness = await startEdgeDaemon({
+    ...(process.platform === "win32"
+      ? {
+          listProcesses: () => {
+            if (failListProcesses) throw new Error("simulated Windows process lookup failure");
+            return listOsProcesses();
+          },
+        }
+      : {}),
+  });
+
+  const probeChild = spawn(
+    process.execPath,
+    ["-e", "setInterval(() => {}, 1000);", "--", harness.homeDir],
+    { stdio: "ignore", windowsHide: true },
   );
+  const previousPath = process.env.PATH;
+  try {
+    assert.ok(probeChild.pid, "expected probe child pid");
+    harness.trackProviderPid(probeChild.pid);
+    const before = findProcessesReferencingPath(harness.homeDir);
+    assert.ok(
+      before.some((entry) => entry.pid === probeChild.pid),
+      `expected normal process enumeration to find probe child ${probeChild.pid}`,
+    );
+
+    // Fault-inject enumeration failure: broken PATH on POSIX, failing enumerator on Windows.
+    if (process.platform === "win32") {
+      failListProcesses = true;
+    } else {
+      process.env.PATH = join(tmpdir(), `letagents-nonexistent-path-${randomUUID()}`);
+    }
+
+    await assert.rejects(
+      () => harness.dispose(),
+      /could not verify process cleanup/,
+      "Expected dispose() to reject when OS process inspection fails",
+    );
+    assert.equal(
+      existsSync(harness.homeDir),
+      true,
+      "Expected dispose() to preserve homeDir evidence when cleanup verification fails",
+    );
+    await assert.rejects(
+      () => fetch(`${harness.roomServer.apiUrl}/api/health`),
+      "Expected dispose() finally block to close FakeRoomServer even when process inspection fails",
+    );
+    // Probe child should still be alive until inspection is restored.
+    assert.doesNotThrow(() => process.kill(probeChild.pid!, 0));
+
+    // Restore inspection and confirm a follow-up dispose() finishes cleanup cleanly.
+    failListProcesses = false;
+    if (process.platform !== "win32") {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+    await harness.dispose();
+    assert.equal(existsSync(harness.homeDir), false, "Expected recovery dispose() to remove homeDir after clean verification");
+    assert.deepEqual(findProcessesReferencingPath(harness.homeDir), []);
+  } finally {
+    failListProcesses = false;
+    if (process.platform !== "win32") {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+    if (probeChild.pid) {
+      try { process.kill(probeChild.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    await harness.dispose().catch(() => undefined);
+  }
 });
 
 test("all committed Codex and Open Model edge fixtures parse strictly and have zero redaction leaks", () => {
