@@ -109,8 +109,12 @@ type TerminalSettlement = {
   reportedCanonicalDifference?: boolean;
   /** Ends the wait: first for the ordinary attempts, then for the last one. */
   deadline: object | null;
-  /** Rejected when the wait ends, so that a step that never returns is left behind. */
-  cut: { promise: Promise<never>; reject(error: unknown): void };
+  /**
+   * Rejected when the wait ends, so that a step that never returns is left
+   * behind. `ended` holds the reason from then on, for work that only gets
+   * its turn afterwards.
+   */
+  cut: { promise: Promise<never>; reject(error: unknown): void; ended: { error: unknown } | null };
   /** The ordinary attempts ran out of time; `last` once the last attempt has begun. */
   overdue: false | "due" | "last";
   /** The exit was recorded without a step that kept failing. */
@@ -126,10 +130,27 @@ class TerminalOwnerLostError extends Error {}
 class TerminalSettlementOverdueError extends Error {}
 
 function settlementCut(): TerminalSettlement["cut"] {
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<never>((_resolve, decline) => { reject = decline; });
+  let decline!: (error: unknown) => void;
+  const promise = new Promise<never>((_resolve, reject) => { decline = reject; });
   void promise.catch(() => undefined);
-  return { promise, reject };
+  const cut: TerminalSettlement["cut"] = { promise, ended: null, reject(error) { cut.ended ??= { error }; decline(error); } };
+  return cut;
+}
+
+/** A step, for as long as the wait that this cut ends lasts. */
+function until<T>(cut: TerminalSettlement["cut"], step: Promise<T>): Promise<T> {
+  void step.catch(() => undefined);
+  return Promise.race([step, cut.promise]);
+}
+
+/**
+ * Whether the manifest already holds this terminal. The manifest keeps a
+ * terminal without its native death evidence, which only the execution
+ * record holds, so that part is left out of the comparison.
+ */
+function manifestHolds(last: ExecutionTerminalPayload | undefined, terminal: ExecutionTerminalPayload): boolean {
+  const kept = ({ native_runtime_death: _onlyInExecutionRecord, ...rest }: ExecutionTerminalPayload) => rest;
+  return last !== undefined && isDeepStrictEqual(kept(last), kept(terminal));
 }
 
 /** Owns terminal evidence, exact-handle retirement, and exit-state projection. */
@@ -146,7 +167,7 @@ export class ProviderTerminalCoordinator {
     PlannedConfigurationReplacement
   >();
 
-  /** Tests shorten these, or leave them and take over `timers`. */
+  /** The bounds in force. Tests leave them as they are and take over `timers`. */
   bounds = { ...EXIT_SETTLEMENT_BOUNDS };
   /** Times the bounds; see ExitSettlementTimers. A bound never keeps the process alive. */
   timers: ExitSettlementTimers = {
@@ -321,8 +342,15 @@ export class ProviderTerminalCoordinator {
     if (!this.owns(owner)) throw new TerminalOwnerLostError("Terminal settlement lost its exact installation authority.");
   }
 
-  private fence(owner: TerminalSettlement): TerminalCommitFence {
+  /**
+   * The check a store makes at the moment it writes. It writes only for a
+   * settlement that still owns its installation and, when the step belongs to
+   * an attempt, only while that attempt is still waited for: a step that an
+   * attempt left behind may get its turn in a store later, and writes nothing.
+   */
+  private fence(owner: TerminalSettlement, cut?: TerminalSettlement["cut"]): TerminalCommitFence {
     return commit => this.ports.authority.fenceCommit(async () => {
+      if (cut?.ended) throw cut.ended.error;
       this.assertOwner(owner);
       await commit();
     });
@@ -433,8 +461,7 @@ export class ProviderTerminalCoordinator {
 
   /** A step of a settlement, for as long as that settlement is waited for. */
   private within<T>(owner: TerminalSettlement, step: Promise<T>): Promise<T> {
-    void step.catch(() => undefined);
-    return Promise.race([step, owner.cut.promise]);
+    return until(owner.cut, step);
   }
 
   /**
@@ -487,10 +514,19 @@ export class ProviderTerminalCoordinator {
     const { installation, replacement } = owner;
     const { entryId, handle, executionGenerationId } = installation;
     let shouldStartDelivery = false;
-    // Every step is waited for only as long as the settlement is: a step that
+    // Every step is waited for only as long as this attempt is: a step that
     // never returns must not keep the entry's queue, or the entry, for ever.
-    const within = <T>(step: Promise<T>) => this.within(owner, step);
+    // The attempt keeps the cut it began under. When that cut ends it, the
+    // attempt after it begins under a new one, and this one is over: it
+    // begins nothing more, it does nothing when its turn in the entry's queue
+    // comes only then, and a step it left behind writes nothing when a store
+    // comes to it only then. What it wrote before that stays: the attempt
+    // after it reads the saved terminal, and finds the exit in the manifest.
+    const cut = owner.cut;
+    const within = <T>(step: Promise<T>) => until(cut, step);
+    const fence = this.fence(owner, cut);
     await this.ports.serializeEntry(entryId, async () => {
+      if (cut.ended) throw cut.ended.error;
       this.assertOwner(owner);
       await within(this.ports.authority.assertCurrent());
       this.assertOwner(owner);
@@ -531,11 +567,11 @@ export class ProviderTerminalCoordinator {
             catch { /* A diagnostic cannot change the settlement outcome. */ }
           }
         } else {
-          await within(this.ports.durability.recordTerminal(entry.work_attempt_id, executionGenerationId, expected, undefined, this.fence(owner)));
+          await within(this.ports.durability.recordTerminal(entry.work_attempt_id, executionGenerationId, expected, undefined, fence));
         }
         this.assertOwner(owner);
         try {
-          const approvals = this.ports.settleRuntimeApprovals(entryId, this.fence(owner));
+          const approvals = this.ports.settleRuntimeApprovals(entryId, fence);
           // The last attempt gives this step half its time, and goes on without it.
           await within(owner.overdue ? Promise.race([approvals, new Promise<never>((_resolve, reject) => {
             this.timers.set(() => reject(new Error("Closing the ended runtime's approvals did not finish in time.")), this.bounds.lastAttemptMs / 2);
@@ -550,12 +586,12 @@ export class ProviderTerminalCoordinator {
         }
         this.assertOwner(owner);
         if (entry.desired_state === "stopped") {
-          await within(this.ports.durability.releaseTerminalExecutionFence(entry.work_attempt_id, executionGenerationId, this.fence(owner)));
+          await within(this.ports.durability.releaseTerminalExecutionFence(entry.work_attempt_id, executionGenerationId, fence));
           this.assertOwner(owner);
         }
       }
       await within(this.observeExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle,
-        installation, Boolean(replacement), this.fence(owner)));
+        installation, Boolean(replacement), fence));
       this.assertOwner(owner);
       if (!replacement && !owner.admitted) {
         // This is the convergence a pass that was turned away is owed.
@@ -676,8 +712,11 @@ export class ProviderTerminalCoordinator {
       if (expectedHandle && currentHandle && currentHandle !== expectedHandle) return;
       if (expectedInstallation && !this.matchesInstallation(entry, expectedInstallation)) return;
       const payload = this.terminalPayload(terminal, actor, expectedInstallation?.providerConnection ?? expectedHandle?.providerConnection ?? entry.provider_ref?.provider_connection);
+      // An attempt that was given up after it had written the exit here leaves
+      // that write behind, and the attempt after it does not write it again.
+      const recorded = manifestHolds(entry.reconciliation?.last_terminal, payload);
       if (entry.condition === "quarantined") {
-        if (commitFence && isDeepStrictEqual(entry.reconciliation?.last_terminal, payload)) return;
+        if (commitFence && recorded) return;
         await this.ports.transitionOnce(
           entryId,
           entry.observed_state,
@@ -724,8 +763,7 @@ export class ProviderTerminalCoordinator {
         ...advanceReconciliationState(entry.reconciliation, observedState, this.ports.nowMs()),
         last_terminal: payload,
       };
-      if (commitFence && entry.observed_state === observedState && entry.condition === "none"
-        && isDeepStrictEqual(entry.reconciliation?.last_terminal, payload)) return;
+      if (commitFence && entry.observed_state === observedState && entry.condition === "none" && recorded) return;
       await this.ports.transitionOnce(
         entryId,
         observedState,
