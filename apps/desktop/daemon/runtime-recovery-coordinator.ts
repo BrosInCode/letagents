@@ -632,6 +632,29 @@ export class RuntimeRecoveryCoordinator {
           validatedNativeRuntimeDeath({ nativeRuntimeDeath: execution.terminal.native_runtime_death }, ref.provider_connection);
           await this.options.settleRuntimeApprovals(entryId);
           await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, ref.execution_generation_id);
+        } else if (execution.terminal && !recoverIdleCursor) {
+          // The record ends the generation; it does not witness that the process is gone.
+          // This recovery clears the reference below, and then nothing can find that process again.
+          const connection = ref.provider_connection;
+          const hasPid = connection && connection.pid !== null && connection.pid !== undefined;
+          // A process id with no recorded birth matches no process: it is never signalled and never treated as gone.
+          if (hasPid && !(Number.isSafeInteger(connection.pid) && connection.pid! > 0
+            && typeof connection.processIdentity === "string" && connection.processIdentity.trim())) {
+            throw new Error("LetAgents cannot prove that the previous provider process stopped. Recovery was not started.");
+          }
+          if (hasPid) {
+            if (!this.provider) throw new Error("Provider recovery is unavailable.");
+            const capabilities = await this.provider.capabilities(ref.work_attempt_id, entry.provider);
+            if (capabilities.exactProcessStop && this.provider.stopRef) {
+              try {
+                await this.provider.stopRef({ workAttemptId: ref.work_attempt_id, provider: entry.provider,
+                  providerContinuationId: ref.provider_continuation_id, providerConnection: connection },
+                { actionId: `recovery:${entryId}:retire-predecessor:${this.nowMs()}` });
+              } catch {
+                throw new Error("LetAgents cannot prove that the previous provider process stopped. Recovery was not started.");
+              }
+            }
+          }
         }
       }
       await this.options.settleRuntimeApprovals(entryId);

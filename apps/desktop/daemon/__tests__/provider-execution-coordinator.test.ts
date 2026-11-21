@@ -34,6 +34,7 @@ import { launchProgress } from "../launch-progress.js";
 import { setTurnStartLatencyReporter, type StartLatencyRecord } from "../turn-start-latency.js";
 import { attestProviderSpawnPolicy } from "#provider-runtime/agents/provider-spawn-configuration.js";
 import { OpenModelProviderAdapter } from "#provider-runtime/agents/open-model-provider-adapter.js";
+import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
 import { ProviderActionPortRouter } from "../provider-action-port-router.js";
 import { ExecutionProtocolError } from "../execution-protocol.js";
 import { ProviderStopError } from "../daemon-error-policy.js";
@@ -3249,4 +3250,215 @@ test("Stop proves process death before releasing the fence even when an immutabl
   assert.equal(retired.terminalWrites.length, 0, "immutable protocol_error terminal is preserved");
   assert.equal(retiredFenceReleases, 1, "fence released only after provider.stop confirmed termination");
   assert.equal(retired.observedTerminals.length, 1);
+});
+
+test("a terminal record without a witnessed process death never lets a replacement start beside the recorded Codex process", async () => {
+  // The record that a daemon leaves when it ends between the terminal write and the stop of the process.
+  const protocolError: ExecutionTerminalPayload = {
+    ended_at: "2026-08-26T00:01:00.000Z", exit_code: null, signal: null, stdio_archive_ref: null, stdio_tail: "",
+    terminal_cause: "protocol_error", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation-1",
+  };
+  const pid = 9201;
+  const [birth, otherBirth] = process.platform === "win32"
+    ? ["win32-ft:134378009191465763", "win32-ft:134378009200000000"]
+    : ["Sat Nov 21 10:00:00 2026", "Sat Nov 21 11:30:00 2026"];
+  const scenario = async (run: (context: {
+    runtime: ReturnType<typeof harness>;
+    coordinator: ProviderExecutionCoordinator;
+    setIdentity(next: string | null | undefined): void;
+    dieOn(signal: NodeJS.Signals | null): void;
+    signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }>;
+    launches: () => number;
+    timers: number[];
+  }) => Promise<void>, recordedBirth: { processIdentity?: string | null } = { processIdentity: birth }) => {
+    let identity: string | null | undefined = birth;
+    let dieOn: NodeJS.Signals | null = null;
+    const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+    // The real Codex adapter decides what is proof and what is signalled; only the OS calls are fakes.
+    const adapter = new CodexProviderAdapter({ dependencies: {
+      getProcessIdentity: (candidate: number) => candidate === pid ? identity : null,
+      signalProcess: (candidate: number, signal: NodeJS.Signals, expected?: string | null) => {
+        signals.push({ pid: candidate, signal, identity: expected });
+        if (dieOn === signal && expected === birth) identity = null;
+      },
+    } });
+    const router = new ProviderActionPortRouter({ codex: async () => adapter });
+    let launches = 0;
+    const entry: DaemonManifestEntry = { ...baseEntry(), observed_state: "idle", provider_ref: {
+      work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+      provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:9201", pid, ...recordedBirth },
+    } };
+    const runtime = harness({ entry, provider: provider({
+      capabilities: async (...args) => ({ ...await router.capabilities(...args), resume: false }),
+      spawn: async () => { launches++; return returnedHandle; },
+      resume: async () => { launches++; return returnedHandle; },
+      stopRef: (ref, options) => router.stopRef(ref, { ...options, graceMs: 25 }),
+    }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: { ...protocolError } });
+    const timers: number[] = [];
+    const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+      setTimeout: ((_callback: () => void, delay: number) => { timers.push(delay); return { unref() {} }; }) as unknown as typeof setTimeout,
+      clearTimeout: (() => {}) as typeof clearTimeout,
+    });
+    // The adapter waits for the process with timers that do not hold the event loop open.
+    const keepAlive = setInterval(() => {}, 1_000);
+    try {
+      await run({ runtime, coordinator, signals, timers, launches: () => launches,
+        setIdentity: (next) => { identity = next; }, dieOn: (signal) => { dieOn = signal; } });
+    } finally {
+      clearInterval(keepAlive);
+    }
+  };
+
+  // The recorded process is alive and does not end: no second runtime, and the entry says why.
+  await scenario(async ({ runtime, coordinator, signals, launches, timers }) => {
+    await coordinator.converge("agent-1");
+    assert.equal(launches(), 0, "no replacement starts while the recorded process lives");
+    assert.deepEqual(signals, [
+      { pid, signal: "SIGTERM", identity: birth },
+      { pid, signal: "SIGKILL", identity: birth },
+    ], "only the exact recorded birth is signalled");
+    assert.equal(runtime.entry().observed_state, "recovering");
+    assert.equal(runtime.entry().condition, "coordination_blocked");
+    assert.match(String(runtime.entry().last_error), /not proven gone after its recorded end/);
+    assert.deepEqual(timers, [60_000], "the entry is checked again");
+    assert.equal(runtime.terminalWrites.length, 0, "the stored terminal record is not rewritten");
+  });
+
+  // The recorded process is alive and ends when it is asked: it is ended first, then one runtime starts.
+  await scenario(async ({ coordinator, signals, launches, dieOn }) => {
+    dieOn("SIGTERM");
+    await coordinator.converge("agent-1");
+    assert.deepEqual(signals, [{ pid, signal: "SIGTERM", identity: birth }]);
+    assert.equal(launches(), 1, "the replacement starts once the recorded process is gone");
+  });
+
+  // The process id now belongs to another process: nothing is signalled, and the replacement starts.
+  await scenario(async ({ coordinator, signals, launches, setIdentity }) => {
+    setIdentity(otherBirth);
+    await coordinator.converge("agent-1");
+    assert.deepEqual(signals, [], "a reused process id is never signalled");
+    assert.equal(launches(), 1);
+  });
+
+  // No process has the id: the replacement starts.
+  await scenario(async ({ coordinator, signals, launches, setIdentity }) => {
+    setIdentity(null);
+    await coordinator.converge("agent-1");
+    assert.deepEqual(signals, []);
+    assert.equal(launches(), 1);
+  });
+
+  // The birth of the process cannot be read: that is not proof, so nothing is signalled and nothing starts.
+  await scenario(async ({ runtime, coordinator, signals, launches, setIdentity }) => {
+    setIdentity(undefined);
+    await coordinator.converge("agent-1");
+    assert.deepEqual(signals, []);
+    assert.equal(launches(), 0);
+    assert.equal(runtime.entry().condition, "coordination_blocked");
+  });
+
+  // The reference has a process id and no recorded birth. No process can be matched to it, so it is
+  // never signalled and never treated as gone, whether or not a process has the id now.
+  for (const recorded of [{ processIdentity: null }, {}, { processIdentity: "  " }]) {
+    for (const osIdentity of [birth, null]) {
+      await scenario(async ({ runtime, coordinator, signals, launches, setIdentity, timers }) => {
+        setIdentity(osIdentity);
+        await coordinator.converge("agent-1");
+        assert.deepEqual(signals, [], "an incomplete reference is never signalled");
+        assert.equal(launches(), 0, "no replacement starts beside an incomplete process reference");
+        assert.equal(runtime.entry().observed_state, "recovering");
+        assert.equal(runtime.entry().condition, "coordination_blocked");
+        assert.deepEqual(timers, [60_000]);
+      }, recorded);
+    }
+  }
+});
+
+test("Stop of an entry whose ended generation has a process id and no recorded birth never reports stopped", async () => {
+  const protocolError: ExecutionTerminalPayload = {
+    ended_at: "2026-08-26T00:01:00.000Z", exit_code: null, signal: null, stdio_archive_ref: null, stdio_tail: "",
+    terminal_cause: "protocol_error", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation-1",
+  };
+  for (const recorded of [{ processIdentity: null }, {}] as Array<{ processIdentity?: string | null }>) {
+    let stopRefs = 0;
+    let attaches = 0;
+    const entry: DaemonManifestEntry = { ...baseEntry(), desired_state: "stopped", observed_state: "idle", provider_ref: {
+      work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+      provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:9401", pid: 9401, ...recorded },
+    } };
+    const runtime = harness({ entry, provider: provider({
+      attach: async () => { attaches++; return null; },
+      stopRef: async () => { stopRefs++; throw new Error("must not be called"); },
+    }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: { ...protocolError } });
+    let fenceReleases = 0;
+    runtime.options.durability.releaseTerminalExecutionFence = async () => { fenceReleases += 1; };
+    await assert.rejects(runtime.coordinator.converge("agent-1"),
+      (error: unknown) => error instanceof ProviderStopError && /no process birth/i.test(String(error.cause)));
+    assert.notEqual(runtime.entry().observed_state, "stopped");
+    assert.equal(stopRefs, 0, "an incomplete reference is never handed to a stop");
+    assert.equal(attaches, 0);
+    assert.equal(fenceReleases, 0);
+  }
+});
+
+test("Stop of a Codex entry never reports stopped while the process of its ended generation is not proven gone", async () => {
+  const protocolError: ExecutionTerminalPayload = {
+    ended_at: "2026-08-26T00:01:00.000Z", exit_code: null, signal: null, stdio_archive_ref: null, stdio_tail: "",
+    terminal_cause: "protocol_error", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation-1",
+  };
+  const pid = 9301;
+  const birth = process.platform === "win32" ? "win32-ft:134378009191465763" : "Sat Nov 21 10:00:00 2026";
+  let identity: string | null = birth;
+  let dieOn: NodeJS.Signals | null = null;
+  const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+  const adapter = new CodexProviderAdapter({ dependencies: {
+    getProcessIdentity: (candidate: number) => candidate === pid ? identity : null,
+    signalProcess: (candidate: number, signal: NodeJS.Signals, expected?: string | null) => {
+      signals.push({ pid: candidate, signal, identity: expected });
+      if (dieOn === signal && expected === birth) identity = null;
+    },
+  } });
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  let attaches = 0;
+  const entry: DaemonManifestEntry = { ...baseEntry(), desired_state: "stopped", observed_state: "recovering",
+    condition: "coordination_blocked", provider_ref: {
+      work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+      provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:9301", pid, processIdentity: birth },
+    } };
+  const runtime = harness({ entry, provider: provider({
+    capabilities: (...args) => router.capabilities(...args),
+    attach: async () => { attaches++; return null; },
+    stopRef: (ref, options) => router.stopRef(ref, { ...options, graceMs: 25 }),
+  }) });
+  runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: { ...protocolError } });
+  let fenceReleases = 0;
+  runtime.options.durability.releaseTerminalExecutionFence = async () => { fenceReleases += 1; };
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    // The recorded process does not end: Stop fails, and the entry is not stopped.
+    await assert.rejects(runtime.coordinator.converge("agent-1"),
+      (error: unknown) => error instanceof ProviderStopError
+        && /has not yet proved the recorded process birth is gone/i.test(String(error.cause)));
+    assert.deepEqual(signals, [{ pid, signal: "SIGTERM", identity: birth }, { pid, signal: "SIGKILL", identity: birth }]);
+    assert.notEqual(runtime.entry().observed_state, "stopped");
+    assert.equal(fenceReleases, 0);
+
+    // The recorded process ends when it is asked: the stored record stays, and the stop is observed once.
+    signals.length = 0;
+    dieOn = "SIGTERM";
+    await runtime.coordinator.converge("agent-1");
+    assert.deepEqual(signals, [{ pid, signal: "SIGTERM", identity: birth }]);
+    assert.equal(runtime.terminalWrites.length, 0, "the stored terminal record is not rewritten");
+    assert.equal(fenceReleases, 1);
+    assert.equal(runtime.observedTerminals.length, 1);
+    assert.equal(runtime.observedTerminals[0]!.terminalCause, "stopped");
+    assert.equal(attaches, 0, "an ended generation is not attached again");
+  } finally {
+    clearInterval(keepAlive);
+  }
 });

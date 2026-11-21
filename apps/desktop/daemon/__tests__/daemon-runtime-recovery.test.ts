@@ -1524,3 +1524,108 @@ test("definitive worker mint rejection attempts once and never schedules automat
     await env.cleanup();
   }
 });
+
+async function recoverEndedCodexGeneration(recordedBirth: { processIdentity?: string | null }): Promise<void> {
+  const incomplete = typeof recordedBirth.processIdentity !== "string";
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const id = "recover_unproven_codex_runtime";
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"),
+    undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR);
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0,
+    workspacePath: workspace.path, workAttemptId: workspace.id });
+  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+  // The record of a daemon that ended between the terminal write and the stop of the process: no witnessed death.
+  await durability.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, {
+    ended_at: "2099-07-29T12:00:00.000Z", exit_code: null, signal: null, stdio_archive_ref: null, stdio_tail: "",
+    terminal_cause: "protocol_error", actor: "daemon-provider", generation: 1, provider_continuation_id: "thread-unproven",
+  });
+  await durability.close();
+  const connection = { kind: "codex_app_server" as const, pid: 45551, url: "ws://127.0.0.1:45551", ...recordedBirth };
+  let processAlive = true;
+  const stopped: Array<{ pid: number | null | undefined; birth: string | null | undefined }> = [];
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false,
+      transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true, exactProcessStop: true }),
+    spawn: async () => { throw new Error("recovery converges only after the RPC returns"); },
+    attach: async () => { throw new Error("an ended generation is not attached again"); },
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("recovery must not resume the ended provider"); },
+    poke: async () => {},
+    stop: async () => { throw new Error("no handle exists for the recorded process"); },
+    stopRef: async (ref) => {
+      stopped.push({ pid: ref.providerConnection?.pid, birth: ref.providerConnection?.processIdentity });
+      if (processAlive) throw new Error("Codex exact-reference stop has not yet proved the recorded process birth is gone.");
+      return { endedAt: "2099-07-29T12:00:05.000Z", exitCode: null, signal: null, terminalCause: "stopped",
+        providerContinuationId: "thread-unproven",
+        nativeRuntimeDeath: { kind: "codex_app_server", pid: connection.pid, processIdentity: String(connection.processIdentity) } };
+    },
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }),
+    publish: async () => {},
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as { requestConvergence: (entryId: string) => void };
+    internals.requestConvergence = () => {};
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "codex", delivery_mode: "daemon_inbox", desired_state: "running",
+      observed_state: "recovering", condition: "coordination_blocked", last_error: "the earlier provider process is not proven gone",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      run_id: execution.execution_generation_id,
+      deployment_id: serializeDaemonDeploymentId(id, execution.execution_generation_id),
+      provider_ref: { work_attempt_id: attempt.work_attempt_id, provider_continuation_id: "thread-unproven",
+        provider_connection: connection, execution_generation_id: execution.execution_generation_id },
+    } });
+    assert.equal(put.ok, true, put.error);
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const recover = () => daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", { entry_id: id, daemon_generation: generation });
+    const listed = async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+
+    stopped.length = 0;
+    const refused = await recover();
+    assert.equal(refused.ok, false);
+    assert.match(String(refused.error), /cannot prove that the previous provider process stopped/i);
+    assert.deepEqual((await listed()).provider_ref?.provider_connection?.pid, connection.pid,
+      "the reference to the process that may still run is kept, so a later pass can still find it");
+    if (incomplete) {
+      // A process id with no recorded birth matches no process: nothing is asked to stop, and a later try is refused too.
+      assert.deepEqual(stopped, [], "an incomplete reference is never handed to a stop");
+      processAlive = false;
+      assert.equal((await recover()).ok, false);
+      assert.deepEqual(stopped, []);
+      assert.equal((await listed()).provider_ref?.provider_connection?.pid, connection.pid);
+      return;
+    }
+    assert.deepEqual(stopped, [{ pid: connection.pid, birth: connection.processIdentity }], "the exact recorded process is the one asked to stop");
+    assert.deepEqual((await listed()).provider_ref?.provider_connection, connection);
+
+    processAlive = false;
+    const result = await recover();
+    assert.equal(result.ok, true, result.error);
+    const recovered = (result.result as { entry: DaemonManifestEntryView }).entry;
+    assert.equal(recovered.provider_ref ?? null, null);
+    assert.equal(recovered.observed_state, "starting");
+    assert.equal(stopped.length, 2);
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+}
+
+test("explicit runtime recovery never clears a Codex reference whose recorded process is not proven gone", async () => {
+  await recoverEndedCodexGeneration({ processIdentity: "Mon Sep 14 15:50:00 2026" });
+});
+
+test("explicit runtime recovery never clears a reference that has a process id and no recorded birth", async () => {
+  await recoverEndedCodexGeneration({ processIdentity: null });
+  await recoverEndedCodexGeneration({});
+});
