@@ -169,7 +169,7 @@ needs its own copy of each, and the copies must stay equal:
 
 | Possible gain | Size of the gain here |
 |---|---|
-| Less memory | Real. Measured: the spike uses 5 MB idle. The TypeScript daemon uses 127 MB on an empty state folder, 58 MB in long use on one Mac, and 476 MB after it starts on a 38 MB database. If the adapters stay in a Node process, most of the saving goes away. |
+| Less memory | Real. Measured: the spike uses 5 MB idle. The TypeScript daemon uses 127 MB on an empty state folder, 58 MB in long use on one Mac, and 365 to 476 MB after it starts on a 38 MB database. Most of that is start-up garbage: after one full GC it is 147 MB (see the trace). If the adapters stay in a Node process, most of the saving goes away. |
 | Less CPU | None measured. For the same store-level work, Rust and TypeScript used the same CPU within 10% (see the spike results). |
 | No GC pauses, less allocation | PR #1882 measured 100 MB/s of allocation, but the cause was full re-reads and 4 MB JSON pushes. That PR fixed it in TypeScript. |
 | No event-loop stalls from SQLite | SQLite is synchronous in Rust too. The fix is the same in both languages: batches (PR #1668) and work off the main thread. Rust makes threads easier and safer. |
@@ -293,7 +293,7 @@ one shared module (`shared/agent-avatar.mjs`, 114 lines of Rust).
 | Measurement | Rust spike | TypeScript daemon |
 |---|---|---|
 | Start-up to the first `daemon.negotiate` answer (3 runs) | 24 to 26 ms | 2.8 to 4.7 s (625 to 665 ms on an empty folder) |
-| Resident memory, 5 s after start | 4.7 MB | 476 MB (127 MB on an empty folder) |
+| Resident memory, 5 s after start | 4.7 MB | 476 MB (127 MB on an empty folder; 147 MB after one full GC, see the trace) |
 | Idle CPU over 10 s | 0 | 0 |
 | `manifest.list` summary: p50, size, CPU for 30 calls | 20 ms, 1.1 MB, 0.48 s | 157 ms, 9.8 MB, 4.14 s |
 | `manifest.list` full: p50, size, CPU for 10 calls | 103 ms, 24 MB, 0.59 s | 245 ms, 33 MB, 1.98 s |
@@ -342,12 +342,74 @@ would remove it.
 
 These are not about the language. Each can be a small task:
 
-- After start-up on the 38 MB database, the TypeScript daemon holds 476 MB,
-  against 127 MB on an empty folder. The cause is not traced yet. The start-up
-  backup and compaction are the first places to look
-  (`daemon/state-recovery-backup.ts`, `daemon/daemon-state-maintenance.ts`).
+- After start-up on the 38 MB database, the TypeScript daemon holds 365 to
+  476 MB, against 127 MB on an empty folder. Most of it is garbage from
+  repeated full reads at start-up, not live data. The next section has the
+  trace.
 - In summary mode, the derived view of `manifest.list` is 9.8 MB, while the
   stored data is 1.1 MB. The inbox receipts in the view are the likely cause.
+
+### Trace: TypeScript daemon memory after start-up
+
+Method: the same seed and the same Electron program in Node mode, with the
+inspector on. A script samples the resident memory every 100 ms, reads
+`process.memoryUsage()` in the daemon, forces one full GC, and reads it again.
+A sampling heap profile from the first line of the daemon, which also counts
+the objects that GC collected, shows where the start-up allocates. A temporary
+stack log in the local build output shows who calls the manifest reads. The
+script is not in the repository.
+
+| Measurement, 3 s after the first answer | Before a full GC | After one full GC |
+|---|---|---|
+| Resident memory | 365 MB | 147 MB |
+| JS heap in use | 119 MB | 13 MB |
+| JS heap reserved | 173 MB | 15 MB |
+
+1. **Nothing leaks.** After one full GC, the live JS heap is 13 MB and the
+   resident memory is 147 MB. On an empty folder it is 127 MB. The rest is
+   garbage that V8 did not collect yet, and memory that V8 and `malloc` did
+   not give back to the system.
+2. **An idle daemon keeps it.** With no forced GC, the daemon stayed at
+   385 MB for 60 s. Then V8's memory reducer took it to 281 MB, and it stayed
+   there for the rest of the 90 s run. The figure is 365 to 476 MB from run
+   to run, because it depends on when V8 collects.
+3. **The source is full manifest reads.** Start-up allocates about 725 MB.
+   580 MB of it is in `projectionFromRow`
+   (`daemon/manifest-store/projections.ts`). In full mode, it reads every
+   activity event of an agent with its payload and parses the payload JSON.
+4. **Start-up reads the full manifest about ten times.** It makes 6 full
+   `ManifestStore.load()` calls and 891 `getEntry(id)` calls in full mode
+   (about 4 for each of the 218 agents):
+
+| Caller | Calls | What it uses from the entries |
+|---|---|---|
+| `main/lifecycle.ts`, start: the manifest generation | 1 `load` | Only `generation`. `store.readGeneration()` already reads it alone |
+| `main/lifecycle.ts`, `restoreLocalRoomAuthorities` | 1 `load` | `id`, `room_id`, `local_room_id`, `desired_state`, `display_name`, `provider` |
+| `main/lifecycle.ts`, start of supervised delivery and of rehydration | 2 `load` | Only `id` |
+| `LifecycleAdministrationCoordinator.recoverEphemeralWorkspaces` | 1 `load` | Only the work attempt IDs |
+| `RuntimeRecoveryCoordinator.recoverTurnControls` | 1 `load` | Writes entries back, so it needs the full entry |
+| `SupervisedDeliveryLifecycleCoordinator.start` | 218 `getEntry` | Not checked |
+| `DeliveryCutoverExecutionCoordinator.drive` | 218 `getEntry` | Not checked |
+| `ProviderExecutionCoordinator.converge` | 218 `getEntry` | Not checked |
+| `ManifestTransitionCoordinator.transitionOnce` | 119 `getEntry` | Not checked |
+| `RuntimeConfigurationApplyCoordinator.refreshManaged` | 118 `getEntry` | Not checked |
+
+Two trials, made only in the local build output and then removed:
+
+| Trial | Allocated at start-up | Peak resident memory | JS heap in use, 3 s after the first answer |
+|---|---|---|---|
+| No change | 725 MB | 363 to 409 MB | 119 MB |
+| `readGeneration()` for the generation, `load("summary")` for the four other `load` calls that do not use activity | 493 MB | 296 to 303 MB | 14 MB |
+| Upper bound: also every `getEntry` in summary mode (not a valid change, some callers may need activity) | 149 MB | 251 MB | 14 MB |
+
+Start-up time did not change in the trials (2.7 to 2.9 s). The cost grows with
+the activity payloads in the database, because each full read parses all of
+them again.
+
+The fix is small and has no effect on the wire contracts: the first trial
+row, plus a check of each `getEntry` caller in the table, so that a caller
+that does not use activity reads in summary mode. It does not depend on
+the language, and it belongs in its own PR with a test.
 
 ### How to run it again
 
