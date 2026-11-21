@@ -6,7 +6,6 @@ import { WorkspaceCapture } from "./workspace-capture.js";
 import type { DatabaseSync } from "node:sqlite";
 import { publishRoomWork, reportGroupedNoReply, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
 import { PENDING_PEER_REPORT_SQL, resolvePeerReceipt } from "./queued-peer-deliveries.js";
-import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
 import { ExecutionShadowStore } from "./execution-shadow-store.js";
 import { RoomWorkPublicationStore, type RoomWorkOrigin, type RoomWorkPublication } from "./room-work-publication-store.js";
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
@@ -22,6 +21,8 @@ type Options = {
   daemonGeneration(): number;
   isClosing(): boolean;
   assertCurrent(): Promise<void>;
+  /** Synchronous generation fence check run inside every write transaction before COMMIT. */
+  assertWriteFence?(): void;
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
   reportGroupedNoReply?: typeof reportGroupedNoReply;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict" | `remote_unanswered: ${string}`): void;
@@ -107,18 +108,16 @@ export class RoomWorkPublisher {
   private closed = false;
   private scanAfter = "";
 
-  static open(path: string, options: Options): RoomWorkPublisher | null {
-    try {
-      const publisher = new RoomWorkPublisher(openDaemonStateObservationDatabase(path), options);
-      publisher.schedule(0);
-      return publisher;
-    } catch { console.warn("[room_work_publication] storage_unavailable"); return null; }
+  static attach(database: DatabaseSync, options: Options): RoomWorkPublisher {
+    const publisher = new RoomWorkPublisher(database, options);
+    publisher.schedule(0);
+    return publisher;
   }
 
   constructor(private readonly database: DatabaseSync, private readonly options: Options) {
-    this.store = new RoomWorkPublicationStore(database);
-    this.capture = new ExecutionShadowStore(database);
-    this.workspaces = new RoomWorkspaceStore(database);
+    this.store = new RoomWorkPublicationStore(database, options.assertWriteFence);
+    this.capture = new ExecutionShadowStore(database, { assertWriteFence: options.assertWriteFence });
+    this.workspaces = new RoomWorkspaceStore(database, options.assertWriteFence);
   }
 
   /** Called before the worker-authenticated poll, never after delayed native capture. */
@@ -254,8 +253,6 @@ export class RoomWorkPublisher {
     this.changedAgents.clear();
     this.settledAgents.clear();
     this.stamps.clear(); this.attemptedAt.clear(); this.stagingAttemptedAt.clear(); this.turnStarts.clear(); this.remoteAnswers.clear();
-    // Never drain capture or upload a shutdown tail. Late responses are fenced.
-    try { this.database.close(); } catch { this.report("storage_unavailable"); }
   }
 
   private unavailable(): boolean { return this.closed || this.options.isClosing(); }
@@ -309,7 +306,7 @@ export class RoomWorkPublisher {
     if (!records.length) { this.stamps.delete(agentId); return false; }
     const facts = this.database.prepare(`SELECT f.sequence,f.runtime_generation_id,f.domain,t.attempt_id
       FROM (SELECT * FROM execution_facts WHERE agent_id=? ORDER BY sequence DESC LIMIT 10000) f
-      LEFT JOIN execution_turns t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
+      LEFT JOIN runs t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
         AND t.execution_generation_id=f.execution_generation_id AND t.runtime_generation_id=f.runtime_generation_id`).all(agentId) as Row[];
     const attempts = new Map<string, { sequence: number; runtimes: Set<string> }>();
     const runtimeSequence = new Map<string, number>();
@@ -400,7 +397,7 @@ export class RoomWorkPublisher {
     if (!authority) return [];
     // Filter the current Room before limiting: unavailable old-room custody
     // never starves reports for the worker's actual current Room.
-    const rows = this.database.prepare(`SELECT i.inbox_item_id,i.source_message_id FROM supervised_agent_inbox i
+    const rows = this.database.prepare(`SELECT i.inbox_item_id,i.source_message_id FROM inbox_items i
       WHERE i.agent_id=? AND i.room_id=? AND i.state='acknowledged_no_reply' AND ${PENDING_PEER_REPORT_SQL}
       ORDER BY i.fifo_sequence`).all(agentId, authority.origin.roomId);
     return rows.flatMap(row => {

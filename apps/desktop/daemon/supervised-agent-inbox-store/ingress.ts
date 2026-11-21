@@ -102,23 +102,23 @@ export abstract class InboxIngressStore extends InboxStoreBase {
           input.agent_id, input.room_id, message.source_message_id, JSON.stringify(message.source_message), JSON.stringify(message.activation), message.activation_decision, observedAt);
         historyGrew ||= Number(observed.changes) > 0;
       }
-      let sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value);
+      let sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM inbox_items WHERE agent_id=?").get(input.agent_id) as Row).value);
       // The head may already be claimed or admitted by delivery; queue ordering never moves it.
-      const head = database.prepare(`SELECT fifo_sequence FROM supervised_agent_inbox WHERE agent_id=?
+      const head = database.prepare(`SELECT fifo_sequence FROM inbox_items WHERE agent_id=?
         AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence LIMIT 1`).get(input.agent_id) as Row | undefined;
       const created: SupervisedInboxItem[] = [];
       const newItemIds = new Set<string>();
       for (const message of input.messages) {
         this.require(message.source_message_id, "source_message_id");
-        const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, message.source_message_id) as Row | undefined;
+        const existing = database.prepare("SELECT * FROM inbox_items WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, message.source_message_id) as Row | undefined;
         if (existing) { created.push(rowToItem(existing)); continue; }
         historyGrew = true;
         sequence += 1;
         const timestamp = this.now(); const inboxItemId = randomUUID();
         const actionId = `supervised-room:${input.agent_id}:${input.room_id}:${message.source_message_id}:action:v1`;
         const replyId = `supervised-room:${input.agent_id}:${input.room_id}:${message.source_message_id}:reply:v1`;
-        run(database.prepare(`INSERT INTO supervised_agent_inbox
+        run(database.prepare(`INSERT INTO inbox_items
           (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
           VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
           inboxItemId, input.agent_id, input.room_id, message.source_message_id, JSON.stringify(message.source_message), JSON.stringify(message.activation), sequence, actionId, replyId, timestamp, timestamp);
@@ -130,12 +130,12 @@ export abstract class InboxIngressStore extends InboxStoreBase {
         try { if (isNewerCursor(message.source_message_id, currentCursor)) inserted.push(message.source_message_id); }
         catch { /* A nonnumeric source cannot establish new room provenance. */ }
         newItemIds.add(inboxItemId);
-        created.push(rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row));
+        created.push(rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row));
       }
       if (newItemIds.size) {
         this.orderQueuedDeliveries(database, input.agent_id, input.room_id, head ? Number(head.fifo_sequence) : 0, observedAt);
         for (const [index, item] of created.entries()) {
-          created[index] = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+          created[index] = rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
         }
       }
       const timestamp = this.now();
@@ -170,7 +170,7 @@ export abstract class InboxIngressStore extends InboxStoreBase {
   private orderQueuedDeliveries(database: DatabaseSync, agentId: string, roomId: string, headSequence: number, timestamp: string): void {
     const rows = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched,
         (SELECT COUNT(*) FROM supervised_agent_inbox_events e WHERE e.inbox_item_id=i.inbox_item_id AND e.idempotency_key GLOB 'passed:*') AS passes
-      FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.fifo_sequence>?
+      FROM inbox_items i WHERE i.agent_id=? AND i.fifo_sequence>?
         AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
       ORDER BY i.fifo_sequence`).all(agentId, headSequence) as Row[];
     let queue: Array<{ item: SupervisedInboxItem; kind: QueuedDeliveryKind; arrival: bigint; passes: number }> = [];
@@ -186,8 +186,8 @@ export abstract class InboxIngressStore extends InboxStoreBase {
     if (!moves.length) return;
     // Permute the run's own slots through unused ones above the maximum so
     // UNIQUE(agent_id,fifo_sequence) holds at every step; other rows keep theirs.
-    let parked = Number((database.prepare("SELECT MAX(fifo_sequence) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(agentId) as Row).value);
-    const move = database.prepare("UPDATE supervised_agent_inbox SET fifo_sequence=? WHERE inbox_item_id=?");
+    let parked = Number((database.prepare("SELECT MAX(fifo_sequence) AS value FROM inbox_items WHERE agent_id=?").get(agentId) as Row).value);
+    const move = database.prepare("UPDATE inbox_items SET fifo_sequence=? WHERE inbox_item_id=?");
     for (const { entry } of moves) run(move, ++parked, entry.item.inbox_item_id);
     for (const { entry, slot } of moves) run(move, slot, entry.item.inbox_item_id);
     for (const [person, overtaken] of passed) {
@@ -221,7 +221,7 @@ export abstract class InboxIngressStore extends InboxStoreBase {
       && head.activation.decision === "activate"
       && head.activation.reason === "thread_participant") {
       const rows = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched
-        FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.fifo_sequence>?
+        FROM inbox_items i WHERE i.agent_id=? AND i.fifo_sequence>?
           AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
         ORDER BY i.fifo_sequence LIMIT 17`).all(head.agent_id, head.fifo_sequence) as Row[];
       return freezeQueuedPeers(database, head, rows.map(row => ({ ...rowToItem(row), untouched: Number(row.untouched) === 1 })), untouched, timestamp);
@@ -229,7 +229,7 @@ export abstract class InboxIngressStore extends InboxStoreBase {
     const { queued_notices: _stale, queued_peer_messages: _untrusted, ...activation } = head.activation;
     if (queuedDeliveryKind(head.source_message_id, head.source_message) !== "notice") return activation;
     const rows = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched
-      FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.fifo_sequence>?
+      FROM inbox_items i WHERE i.agent_id=? AND i.fifo_sequence>?
         AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
       ORDER BY i.fifo_sequence`).all(head.agent_id, head.fifo_sequence) as Row[];
     const queued: SupervisedInboxItem[] = [];
@@ -247,13 +247,13 @@ export abstract class InboxIngressStore extends InboxStoreBase {
   protected settleQueuedNotices(database: DatabaseSync, head: SupervisedInboxItem, timestamp: string): void {
     let settled = false;
     for (const sourceMessageId of queuedNoticeIds(head.activation)) {
-      const row = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched FROM supervised_agent_inbox i
+      const row = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched FROM inbox_items i
         WHERE i.agent_id=? AND i.room_id=? AND i.source_message_id=?`).get(head.agent_id, head.room_id, sourceMessageId) as Row | undefined;
       if (!row || Number(row.untouched) !== 1) continue;
       const item = rowToItem(row);
       if (queuedDeliveryKind(item.source_message_id, item.source_message) !== "notice") continue;
       const reason = queuedNoticeReason(head.activation, head.source_message_id, sourceMessageId);
-      run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',last_error=?,updated_at=?,acknowledged_at=?
+      run(database.prepare(`UPDATE inbox_items SET state='acknowledged_no_reply',last_error=?,updated_at=?,acknowledged_at=?
         WHERE inbox_item_id=? AND state='pending'`), reason, timestamp, timestamp, item.inbox_item_id);
       this.recordEvent(database, item.inbox_item_id, `delivered_with:${head.inbox_item_id}`, "no_reply", timestamp, reason);
       this.settleTerminalItem(database, item, timestamp);
@@ -290,19 +290,19 @@ export abstract class InboxIngressStore extends InboxStoreBase {
   }
 
   protected insertSyntheticMessage(database: DatabaseSync, input: { agent_id: string; room_id: string; source_message_id: string; source_message: unknown; activation: unknown }): SupervisedInboxItem {
-    const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, input.source_message_id) as Row | undefined;
+    const existing = database.prepare("SELECT * FROM inbox_items WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, input.source_message_id) as Row | undefined;
     if (existing) return rowToItem(existing);
-    const sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value) + 1;
+    const sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM inbox_items WHERE agent_id=?").get(input.agent_id) as Row).value) + 1;
     const timestamp = this.now(); const inboxItemId = randomUUID();
     const actionId = `supervised-room:${input.agent_id}:${input.room_id}:${input.source_message_id}:action:v1`;
     const replyId = `supervised-room:${input.agent_id}:${input.room_id}:${input.source_message_id}:reply:v1`;
-    run(database.prepare(`INSERT INTO supervised_agent_inbox
+    run(database.prepare(`INSERT INTO inbox_items
       (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
       VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
       inboxItemId, input.agent_id, input.room_id, input.source_message_id, JSON.stringify(input.source_message), JSON.stringify(input.activation), sequence, actionId, replyId, timestamp, timestamp);
     this.recordEvent(database, inboxItemId, "received:0", "received", timestamp, null);
     this.recordEvent(database, inboxItemId, "queued:0", "queued", timestamp, null);
-    return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+    return rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row);
   }
 
   async observedContext(agentId: string, roomId: string, limit = 50): Promise<ObservedIngressMessage[]> {

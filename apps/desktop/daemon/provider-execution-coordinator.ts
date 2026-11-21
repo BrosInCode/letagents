@@ -112,8 +112,8 @@ export type ProviderExecutionStore = {
   pendingRuntimeRecovery(agentId: string): Promise<unknown>;
   /** Archive what the agent's exited runtimes left unfinished in its execution record. Resolves with the runtimes archived. */
   archiveExitedRuntimes?(agentId: string, commitFence: CommitFence): Promise<string[]>;
-  load(): Promise<{ generation: number; entries: DaemonManifestEntry[] }>;
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+  getEntryWithVersion(entryId: string): Promise<{ entry: DaemonManifestEntry; version: number } | undefined>;
   getAgentConfiguration(entryId: string): Promise<ProviderExecutionConfiguration | undefined>;
   readRuntimeLifecycleAuthority(input: {
     agentId: string;
@@ -121,28 +121,22 @@ export type ProviderExecutionStore = {
     providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
     configurationRevision: number;
   }): Promise<"typed" | null>;
-  hasRetiredRuntimeLifecycleAuthority?(input: {
-    agentId: string;
-    executionGenerationId: string;
-    providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
-    configurationRevision: number;
-  }): Promise<boolean>;
   replaceEntry(
-    expectedGeneration: number,
+    expectedVersion: number,
     entry: DaemonManifestEntry,
     commitFence: CommitFence,
-  ): Promise<{ generation: number }>;
+  ): Promise<{ version: number }>;
   markRuntimeConfigurationApplied(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       agentId: string;
       executionGenerationId: string;
       appliedRevision: number;
     },
     commitFence: CommitFence,
-  ): Promise<{ generation: number }>;
+  ): Promise<{ version: number }>;
   checkpointProviderBirth(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       entry: DaemonManifestEntry;
       executionGenerationId: string;
@@ -153,7 +147,7 @@ export type ProviderExecutionStore = {
       observedAtMs: number;
     },
     commitFence: CommitFence,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: "typed" | null }>;
+  ): Promise<{ version: number; entry: DaemonManifestEntry; authorityMode: "typed" | null }>;
 };
 
 export type ProviderExecutionDurability = Pick<
@@ -193,8 +187,6 @@ export type ProviderExecutionCoordinatorOptions = {
     isHandoffScheduled(): boolean;
     isDispatchPaused?(): boolean;
     currentDaemonGeneration(): number;
-    currentManifestGeneration(): number;
-    acceptManifestGeneration(generation: number): void;
     assertCurrent(): Promise<void>;
     ownsDaemonGeneration(expectedGeneration: number): Promise<boolean>;
     fenceCommit: CommitFence;
@@ -784,14 +776,14 @@ export class ProviderExecutionCoordinator {
     await this.options.authority.serializeManifestMutation(async () => {
       for (let attempt = 0; attempt < 8; attempt += 1) {
         await this.options.authority.assertCurrent();
-        const snapshot = await this.options.store.load();
-        const current = snapshot.entries.find((candidate) => candidate.id === entryId);
-        if (!current || current.work_attempt_id !== handle.workAttemptId) {
+        const loaded = await this.options.store.getEntryWithVersion(entryId);
+        const current = loaded?.entry;
+        if (!current || !loaded || current.work_attempt_id !== handle.workAttemptId) {
           throw new DaemonFenceLostError("Provider birth no longer matches the durable work attempt.");
         }
         try {
-          const next = await this.options.store.checkpointProviderBirth(
-            snapshot.generation,
+          await this.options.store.checkpointProviderBirth(
+            loaded.version,
             {
               entry: this.providerBirthEntry(current, handle, executionGenerationId),
               executionGenerationId,
@@ -803,13 +795,12 @@ export class ProviderExecutionCoordinator {
             },
             this.options.authority.fenceCommit,
           );
-          this.options.authority.acceptManifestGeneration(next.generation);
           return;
         } catch (error) {
           if (!(error instanceof ManifestConflictError)) throw error;
         }
       }
-      throw new DaemonFenceLostError("Provider birth could not converge on the latest manifest generation.");
+      throw new DaemonFenceLostError("Provider birth could not converge on the latest agent version.");
     });
   }
 
@@ -902,9 +893,9 @@ export class ProviderExecutionCoordinator {
         || activeBeforeRead.daemonGeneration !== this.options.authority.currentDaemonGeneration()) {
         throw new DaemonFenceLostError("Retiring provider dispatch persistence gate closed.");
       }
-      const snapshot = await this.options.store.load();
-      const current = snapshot.entries.find((candidate) => candidate.id === entryId);
-      if (!current || current.work_attempt_id !== handle.workAttemptId) {
+      const loaded = await this.options.store.getEntryWithVersion(entryId);
+      const current = loaded?.entry;
+      if (!current || !loaded || current.work_attempt_id !== handle.workAttemptId) {
         throw new DaemonFenceLostError(
           "Retiring provider dispatch no longer matches the durable work attempt.",
         );
@@ -915,8 +906,8 @@ export class ProviderExecutionCoordinator {
         // Deliberately bypass the ordinary manifest-mutation lane: handoff has
         // fenced new mutations, but the retiring daemon must still journal an
         // already-returned native birth before yielding singleton authority.
-        const next = await this.options.store.checkpointProviderBirth(
-          snapshot.generation,
+        await this.options.store.checkpointProviderBirth(
+          loaded.version,
           {
             entry: updated,
             executionGenerationId,
@@ -940,14 +931,13 @@ export class ProviderExecutionCoordinator {
             this.options.retirePendingActivity?.(entryId);
           }),
         );
-        this.options.authority.acceptManifestGeneration(next.generation);
         return;
       } catch (error) {
         if (!(error instanceof ManifestConflictError)) throw error;
       }
     }
     throw new DaemonFenceLostError(
-      "Retiring provider dispatch persistence could not converge on the latest manifest generation.",
+      "Retiring provider dispatch persistence could not converge on the latest agent version.",
     );
   }
 
@@ -1019,15 +1009,6 @@ export class ProviderExecutionCoordinator {
     if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return null;
     const attachment = await this.options.provider.attach(attachRef);
     if (!attachment) {
-      if (ref.provider_connection
-        && await this.options.store.hasRetiredRuntimeLifecycleAuthority?.({
-          agentId: entry.id,
-          executionGenerationId: ref.execution_generation_id,
-          providerConnection: ref.provider_connection,
-          configurationRevision: appliedRevision!,
-        })) {
-        throw new ExecutionProtocolError("identity_mismatch");
-      }
       return null;
     }
     if (this.isAttachTerminal(attachment)) {
@@ -1090,10 +1071,10 @@ export class ProviderExecutionCoordinator {
       authoritativeEntry = await this.options.authority.serializeManifestMutation(async () => {
         for (let attemptIndex = 0; attemptIndex < 8; attemptIndex += 1) {
           await this.options.authority.assertCurrent();
-          const snapshot = await this.options.store.load();
-          const current = snapshot.entries.find((candidate) => candidate.id === entry.id);
+          const loaded = await this.options.store.getEntryWithVersion(entry.id);
+          const current = loaded?.entry;
           const currentRef = current?.provider_ref;
-          if (!current || current.work_attempt_id !== ref.work_attempt_id
+          if (!current || !loaded || current.work_attempt_id !== ref.work_attempt_id
             || currentRef?.work_attempt_id !== ref.work_attempt_id
             || currentRef.execution_generation_id !== ref.execution_generation_id
             || currentRef.provider_continuation_id !== ref.provider_continuation_id) {
@@ -1112,7 +1093,7 @@ export class ProviderExecutionCoordinator {
           }
           try {
             const next = await this.options.store.checkpointProviderBirth(
-              snapshot.generation,
+              loaded.version,
               {
                 entry: {
                   ...current,
@@ -1129,14 +1110,13 @@ export class ProviderExecutionCoordinator {
               },
               this.options.authority.fenceCommit,
             );
-            this.options.authority.acceptManifestGeneration(next.generation);
             return next.entry;
           } catch (error) {
             if (!(error instanceof ManifestConflictError)) throw error;
           }
         }
         throw new DaemonFenceLostError(
-          "Recovered provider birth could not converge on the latest manifest generation.",
+          "Recovered provider birth could not converge on the latest agent version.",
         );
       });
     }

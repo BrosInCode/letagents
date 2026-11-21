@@ -22,7 +22,7 @@ function agent(id: string): DaemonManifestEntry {
     id, room_id: "room_1", display_name: `Agent ${id}`, provider: "codex", model: "gpt-5.6-codex",
     charter: "Work on the room's tasks.", desired_state: "running", observed_state: "idle",
     condition: "none", last_error: null, permission_profile_id: "workspace-write",
-    provider_launch_policy: { deliveryMode: "mcp_polling" }, created_by: "user_1",
+    provider_launch_policy: {}, created_by: "user_1",
     created_at: "2026-10-19T00:00:00.000Z", source_repo_path: "/repo", workspace_path: `/worktrees/${id}`,
     work_attempt_id: `attempt_${id}`,
     provider_ref: {
@@ -55,7 +55,7 @@ async function harness(options: {
   const root = await mkdtemp(join(tmpdir(), "letagents-activity-batch-"));
   const path = join(root, "daemon-state.sqlite");
   const store = new ManifestStore(path);
-  const written = await store.write(0, [agent("a"), agent("b")]);
+  await store.write([agent("a"), agent("b")]);
   const notifications: number[] = [];
   const commits: number[] = [];
   const timers: { callback: () => void; ms: number; cleared: boolean }[] = [];
@@ -66,16 +66,15 @@ async function harness(options: {
     assertCurrent: async () => { if (lost) throw new Error("singleton lost"); },
     isHandoffScheduled: () => fenced,
     notifyStateChanged: () => notifications.push(Date.now()),
-  }, written.generation);
+  });
   const batcher = new ActivityWriteBatcher({
     serialize: (operation) => authority.serializeManifestMutationWithoutFlush(operation),
     commit: async (items) => {
       await options.beforeCommit?.(items);
       commits.push(items.length);
       // The same commit main.ts makes, with the ordinary fence.
-      const next = await commitActivityBatch({ store, items, expectedGeneration: authority.generation,
+      await commitActivityBatch({ store, items,
         fence: (commit) => authority.fenceDaemonCommit(commit), mayWrite: (agentId) => batcher.mayWrite(agentId) });
-      authority.generation = next.generation;
     },
     diagnostic: (error, dropped) => diagnostics.push({ error, dropped }),
     setTimeout: (callback, ms) => {
@@ -95,8 +94,6 @@ async function harness(options: {
       serialize: (operation) => authority.serializeManifestMutation(operation),
       assertCurrent: async () => {},
       currentDaemonGeneration: () => 7,
-      currentManifestGeneration: () => authority.generation,
-      acceptManifestGeneration: (generation) => { authority.generation = generation; },
       fenceCommit: (commit) => authority.fenceDaemonCommit(commit),
     },
     policies: {
@@ -139,7 +136,6 @@ async function harness(options: {
 test("many events from several agents share one commit and one notification", async () => {
   const h = await harness();
   try {
-    const startGeneration = h.authority.generation;
     for (let sequence = 1; sequence <= 10; sequence += 1) {
       await h.coordinator.appendNativeActivity("a", event(sequence), false);
       await h.coordinator.appendNativeActivity("b", event(sequence), true);
@@ -150,7 +146,6 @@ test("many events from several agents share one commit and one notification", as
     await h.fireWindow();
     assert.deepEqual(h.commits, [20]);
     assert.equal(h.notifications.length, 1, "one notification, after the commit");
-    assert.equal(h.authority.generation, startGeneration + 1, "one generation per batch");
     assert.deepEqual(h.committedActivity("a"), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     assert.deepEqual(h.committedActivity("b"), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const a = await h.store.getEntry("a");
@@ -228,11 +223,11 @@ test("every other manifest mutation writes pending activity first", async () => 
     // events committed and orders after them: its state wins.
     await h.authority.serializeManifestMutation(async () => {
       assert.deepEqual(h.committedActivity("a"), [1, 2], "flushed before the mutation ran");
-      const manifest = await h.store.load();
-      const next = await h.store.write(h.authority.generation,
-        manifest.entries.map((candidate) => candidate.id === "a" ? { ...candidate, observed_state: "failed" } : candidate),
+      const loaded = await h.store.getEntryWithVersion("a");
+      assert.ok(loaded);
+      await h.store.replaceEntry(loaded.version,
+        { ...loaded.entry, observed_state: "failed" },
         (commit) => h.authority.fenceDaemonCommit(commit));
-      h.authority.generation = next.generation;
     });
     assert.deepEqual(h.commits, [2]);
     const a = await h.store.getEntry("a");
@@ -321,8 +316,7 @@ test("a batch skips an entry removed before the flush instead of failing the oth
       { agentId: "gone", event: event(1), runtimeUpdate: null, limit: 200 },
       { agentId: "b", event: event(1), runtimeUpdate: null, limit: 200 },
     ];
-    const result = await h.store.recordActivityBatch(h.authority.generation, items);
-    h.authority.generation = result.generation;
+    const result = await h.store.recordActivityBatch(items);
     assert.deepEqual({ written: result.written, skipped: result.skipped }, { written: 2, skipped: 1 });
     assert.deepEqual(h.committedActivity("a"), [1]);
     assert.deepEqual(h.committedActivity("b"), [1]);
@@ -454,9 +448,8 @@ test("activity of an entry whose provider birth was checkpointed is never writte
     await h.coordinator.appendNativeActivity("a", event(1, "working"), false);
     await h.coordinator.appendNativeActivity("b", event(1, "working"), false);
     // An in-flight batch skips the entry inside its transaction too.
-    const result = await h.store.recordActivityBatch(h.authority.generation,
+    const result = await h.store.recordActivityBatch(
       [{ agentId: "a", event: event(5), runtimeUpdate: null, limit: 200 }], undefined, () => false);
-    h.authority.generation = result.generation;
     assert.equal(result.skipped, 1);
     h.batcher.retireEntry("a");
     assert.equal(h.batcher.mayWrite("a"), false);

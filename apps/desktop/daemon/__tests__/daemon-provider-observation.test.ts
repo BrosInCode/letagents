@@ -5,6 +5,7 @@ import { assertSupervisorDaemonPlatform } from "../platform.js";
 import { type SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import type { NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
 import type { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
+import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import {
   within,
   eventually,
@@ -107,7 +108,7 @@ for (const shutdown of ["stop", "handoff"] as const) test(`daemon captures only 
     await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
     await eventually(async () => inspection.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()!.count === 1,
       "runtime fact without fabricated native-turn mapping");
-    assert.equal(inspection.prepare("SELECT COUNT(*) AS count FROM execution_turns").get()!.count, 0);
+    assert.equal(inspection.prepare("SELECT COUNT(*) AS count FROM runs").get()!.count, 0);
     const [item] = await env.internals.supervisedInbox.ingestPoll({ agent_id: env.id, room_id: entry.room_id,
       last_observed_message_id: "901", messages: [{ source_message_id: "901", source_message: { text: "private source text" }, activation: {} }] });
     assert.ok(item);
@@ -119,7 +120,7 @@ for (const shutdown of ["stop", "handoff"] as const) test(`daemon captures only 
     await eventually(async () => inspection.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()!.count === 2,
       "post-commit inbox notification resumes structural capture");
     const mapped = inspection.prepare(`SELECT t.agent_id,t.execution_generation_id,t.provider_continuation_id,t.provider_turn_id,
-      a.room_id,a.source_message_id FROM execution_turns t JOIN execution_message_attempts a USING(attempt_id)`).get();
+      a.room_id,a.source_message_id FROM runs t JOIN execution_message_attempts a USING(attempt_id)`).get();
     assert.deepEqual({ ...mapped }, { agent_id: env.id, execution_generation_id: env.generation,
       provider_continuation_id: env.handle.providerContinuationId, provider_turn_id: "native-turn",
       room_id: entry.room_id, source_message_id: "901" });
@@ -208,7 +209,12 @@ for (const failure of ["observer_rejection", "storage_closed"] as const) test(`o
     return { sourceId: "source-storage", position: () => ({ firstRetainedSequence: 1, latestSequence: 1 }), dispose: () => {} };
   });
   try {
-    if (failure === "storage_closed") (env.internals.executionCapture as unknown as { database: DatabaseSync }).database.close();
+    if (failure === "storage_closed") {
+      const closedDb = new DatabaseSync(":memory:");
+      closedDb.close();
+      (env.internals.executionCapture as unknown as { database: DatabaseSync; store: ExecutionShadowStore }).database = closedDb;
+      (env.internals.executionCapture as unknown as { store: ExecutionShadowStore }).store = new ExecutionShadowStore(closedDb);
+    }
     await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
     await eventually(async () => subscriptions === 1, "optional observer invoked");
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -281,9 +287,11 @@ for (const commit of ["normal", "recovered"] as const) test(`Cursor observation 
     env.handle.providerConnection = connection;
     const observations: Array<{ runtime: Parameters<ExecutionCaptureCoordinator["prepared"]>[0]; binding: unknown; connection: unknown }> = [];
     env.internals.executionCapture!.prepared = (runtime) => {
+      const connRow = inspection.prepare("SELECT provider_connection_json FROM agents WHERE agent_id=?").get(env.id) as { provider_connection_json: string | null } | undefined;
+      const parsedConn = connRow?.provider_connection_json ? JSON.parse(connRow.provider_connection_json) as { pid?: number | null; processIdentity?: string | null } : null;
       observations.push({ runtime,
         binding: inspection.prepare("SELECT provider_turn_id,origin_execution_generation_id FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(item.inbox_item_id),
-        connection: inspection.prepare("SELECT provider_connection_pid,provider_process_identity FROM runtime_deployments WHERE agent_id=?").get(env.id) });
+        connection: { provider_connection_pid: parsedConn?.pid ?? null, provider_process_identity: parsedConn?.processIdentity ?? null } });
       throw new Error("optional observation callback failed after commit");
     };
     const input = { agent, inboxItemId: item.inbox_item_id, providerTurnId: "cursor-prepared-turn",

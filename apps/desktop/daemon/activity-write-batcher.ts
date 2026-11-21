@@ -1,6 +1,6 @@
 import type { DaemonAuthority } from "./daemon-authority.js";
 import type { ManifestActivityBatch } from "./manifest-administration-coordinator.js";
-import { ManifestConflictError, type ActivityWrite, type ManifestStore } from "./manifest-store.js";
+import type { ActivityWrite, ManifestStore } from "./manifest-store.js";
 import { RecentActivityWindows } from "./recent-activity-windows.js";
 import { DaemonFenceLostError } from "./singleton.js";
 import type { DaemonActivityEvent, DaemonManifest, DaemonManifestEntry } from "./types.js";
@@ -55,33 +55,18 @@ export function isSingleEventActivityError(error: unknown): boolean {
 }
 
 /**
- * One batch commit, as the daemon makes it. A generation conflict means a
- * writer outside the manifest lane committed first; within the lane none can,
- * since every other mutation flushes pending activity before it runs. The only
- * such writer is the retiring daemon's provider birth checkpoint
- * (ProviderExecutionCoordinator.persistReturnedProviderForHandoff), which
- * retires its entry's pending activity inside the commit lane right after it
- * commits. So the whole batch is retried once against the current generation,
- * with mayWrite still checked inside the transaction: the retired entry stays
- * skipped and every other entry's events, often their final idle state before
- * a handoff, are kept. A second conflict throws, and the batch is dropped.
+ * One batch commit, as the daemon makes it. Per-agent versioning means
+ * activity writes never collide on a global manifest generation; `mayWrite`
+ * still skips any entry whose provider birth a retiring daemon checkpointed
+ * outside the manifest lane.
  */
 export async function commitActivityBatch(input: {
-  store: Pick<ManifestStore, "recordActivityBatch" | "readGeneration">;
+  store: Pick<ManifestStore, "recordActivityBatch">;
   items: readonly ActivityWrite[];
-  expectedGeneration: number;
   fence: (commit: () => Promise<void>) => Promise<void>;
   mayWrite: (agentId: string) => boolean;
-}): Promise<Awaited<ReturnType<ManifestStore["recordActivityBatch"]>> & { retriedAfterConflict: boolean }> {
-  try {
-    const result = await input.store.recordActivityBatch(input.expectedGeneration, input.items, input.fence, input.mayWrite);
-    return { ...result, retriedAfterConflict: false };
-  } catch (error) {
-    if (!(error instanceof ManifestConflictError)) throw error;
-    const current = await input.store.readGeneration();
-    const result = await input.store.recordActivityBatch(current, input.items, input.fence, input.mayWrite);
-    return { ...result, retriedAfterConflict: true };
-  }
+}): Promise<Awaited<ReturnType<ManifestStore["recordActivityBatch"]>>> {
+  return input.store.recordActivityBatch(input.items, input.fence, input.mayWrite);
 }
 
 export type ActivityWriteBatcherOptions = {
@@ -390,16 +375,12 @@ export class DaemonActivityWrites extends ActivityWriteBatcher {
       serialize: (operation) => ports.authority.serializeManifestMutationWithoutFlush(operation),
       commit: async (items) => {
         const next = await commitActivityBatch({
-          store: ports.store, items, expectedGeneration: ports.authority.generation,
+          store: ports.store, items,
           fence: (commit) => ports.admittedFence(commit), mayWrite: (agentId) => this.mayWrite(agentId),
         });
-        ports.authority.generation = next.generation;
-        // Another writer committed first; its change is found by the next
-        // read's check, but no window needs to survive it.
-        if (next.retriedAfterConflict) this.windows.forget();
-        else this.windows.committed(next.events);
-        if (next.skipped > 0 || next.retriedAfterConflict) {
-          warn({ skipped: next.skipped, written: next.written, retriedAfterConflict: next.retriedAfterConflict,
+        this.windows.committed(next.events);
+        if (next.skipped > 0) {
+          warn({ skipped: next.skipped, written: next.written,
             reason: "entry gone, entry retired by a handoff birth, or sequence no longer newer" });
         }
       },

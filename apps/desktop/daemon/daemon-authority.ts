@@ -10,36 +10,16 @@ export type DaemonAuthorityDependencies = {
 };
 
 /**
- * Owns the daemon's manifest generation and its two deliberately independent
- * serialization lanes. Durable stores remain outside this authority boundary;
- * callers supply only the exact commit closure reserved by a store.
+ * Owns the daemon's two deliberately independent serialization lanes. Durable
+ * stores remain outside this authority boundary; callers supply only the exact
+ * commit closure reserved by a store.
  */
 export class DaemonAuthority {
-  private manifestGeneration: number;
   private manifestMutation: Promise<void> = Promise.resolve();
   private manifestCommit: Promise<void> = Promise.resolve();
   private pendingWriteFlush: (() => Promise<void>) | null = null;
 
-  constructor(
-    private readonly dependencies: DaemonAuthorityDependencies,
-    initialGeneration = 0,
-  ) {
-    this.manifestGeneration = initialGeneration;
-  }
-
-  get generation(): number {
-    return this.manifestGeneration;
-  }
-
-  /**
-   * The stored generation only grows, so an accepted value lower than the
-   * current one is a stale acceptance: a writer outside the manifest lane (the
-   * handoff birth checkpoint) can accept its generation after an activity
-   * batch retried past it. Never move backwards.
-   */
-  set generation(generation: number) {
-    if (generation > this.manifestGeneration) this.manifestGeneration = generation;
-  }
+  constructor(private readonly dependencies: DaemonAuthorityDependencies) {}
 
   /**
    * Work that must commit before any other manifest mutation runs: the

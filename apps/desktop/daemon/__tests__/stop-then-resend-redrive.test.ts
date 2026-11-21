@@ -42,7 +42,7 @@ async function checkpointTypedBirth(
   const snapshot = await internals.store.load();
   const current = snapshot.entries.find((candidate) => candidate.id === entryId);
   assert.ok(current?.provider_ref?.provider_connection);
-  const birth = await internals.store.checkpointProviderBirth(snapshot.generation, {
+  await internals.store.checkpointProviderBirth(snapshot.versions[entryId]!, {
     entry: current,
     executionGenerationId,
     providerConnection: current.provider_ref.provider_connection,
@@ -50,7 +50,6 @@ async function checkpointTypedBirth(
     requestedAuthorityMode: "typed",
     observedAtMs: Date.now(),
   });
-  internals.manifestGeneration = birth.generation;
 }
 
 function holdDeliveryCleanup(daemon: SupervisorDaemon, inboxItemId: string): () => void {
@@ -426,7 +425,7 @@ test("a linked prepared crash lets A finish, fences B, then folds the exact corr
         recorded_at: recordedAt, updated_at: recordedAt,
       },
     };
-    await seedManifest.write(0, [{ ...seededEntry, turn_control: undefined }]);
+    await seedManifest.write([{ ...seededEntry, turn_control: undefined }]);
     const original = await seedInbox.enqueueCorrection({ agent_id: entryId, room_id: roomId, source_message_id: "prepared-A", source_message: { text: "A" }, activation: { decision: "activate" } });
     const successor = await seedInbox.enqueueCorrection({ agent_id: entryId, room_id: roomId, source_message_id: "prepared-B", source_message: { text: "B" }, activation: { decision: "activate" } });
     originalInboxItemId = original.inbox_item_id;

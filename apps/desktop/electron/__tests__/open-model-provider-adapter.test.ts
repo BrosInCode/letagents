@@ -4176,17 +4176,15 @@ for (const ending of ["idle", "reread", "open"] as const) {
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys=ON");
     new DaemonStateSchema().createSchema(db);
-    db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${at}',0);
-      INSERT INTO agent_configurations(agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,config_revision,runtime_configuration_revision)
-        VALUES('agent','open-model','charter','daemon_inbox',0,0,1,1);
+    db.exec(`INSERT INTO agents(agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,config_revision,runtime_configuration_revision,desired_state,observed_state,condition)
+        VALUES('agent',0,1,'owner','${at}','Agent','room','open-model','charter',1,1,'running','idle','none');
       INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
         VALUES('${attempt}','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','${at}');
       INSERT INTO work_attempt_executions VALUES('${generation}','${attempt}','${at}','test',1,NULL);`);
-    db.prepare(`INSERT INTO runtime_deployments(agent_id,observed_state,workspace_path_present,work_attempt_id_present,work_attempt_id,
-      provider_ref_present,provider_work_attempt_id,provider_continuation_id,provider_connection_kind,provider_connection_pid,
-      provider_process_identity_present,provider_process_identity,provider_execution_generation_id,workplace_liveness_present,native_liveness_present,activity_present)
-      VALUES('agent','idle',0,1,?,1,?,?,'opencode_server',?,1,?,?,0,0,0)`)
-      .run(attempt, attempt, handle.providerContinuationId, connection.pid, connection.processIdentity!, generation);
+    db.prepare(`UPDATE agents SET observed_state='idle',work_attempt_id=?,
+      provider_work_attempt_id=?,provider_continuation_id=?,provider_execution_generation_id=?,
+      provider_connection_json=? WHERE agent_id='agent'`)
+      .run(attempt, attempt, handle.providerContinuationId, generation, JSON.stringify(connection));
     new ExecutionShadowStore(db).registerRuntime({ agentId: "agent", executionGenerationId: generation,
       runtimeGenerationId: executionRuntimeStorageIdentity("agent", generation, "opencode_server", connection.pid!, connection.processIdentity!),
       provider: "open-model", authorityMode: "typed", configRevision: 1, createdAtMs: Date.parse(at) });
@@ -4202,14 +4200,14 @@ for (const ending of ["idle", "reread", "open"] as const) {
       providerConnection: { ...connection }, configurationRevision: 1, authorityMode: "typed" }));
     /** The daemon saves which message a native turn belongs to when the adapter reports the turn started. */
     const bindTurn = async (turnId: string) => {
-      const order = Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1;
-      db.prepare(`INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
+      const order = Number(db.prepare("SELECT COUNT(*) n FROM inbox_items").get()!.n) + 1;
+      db.prepare(`INSERT INTO inbox_items(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
         VALUES(?,'agent','room',?,'{}','{}',?,'awaiting_result',1,?,?,?,?,?)`).run(turnId, `message-${order}`, order, `action-${order}`, `reply-${order}`, turnId, at, at);
       db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room',?,?,?,?)").run(turnId, attempt, generation, handle.providerContinuationId, turnId);
       capture.refresh("agent");
     };
     const settle = async () => { for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve)); };
-    const turns = () => db.prepare("SELECT provider_turn_id,state FROM execution_turns ORDER BY rowid").all().map((turn) => ({ ...turn }));
+    const turns = () => db.prepare("SELECT provider_turn_id,state FROM runs ORDER BY rowid").all().map((turn) => ({ ...turn }));
     const run = (inboxItemId: string) => adapter.runRoomTurn(handle, { inboxItemId, sourceMessage: {}, activation: {}, actionId: inboxItemId },
       { beforeNativeDispatch: async () => {}, checkpointTurnStarted: bindTurn });
     try {
@@ -4230,7 +4228,7 @@ for (const ending of ["idle", "reread", "open"] as const) {
         assert.equal(reread.outcome, "unreadable");
         await settle();
       }
-      db.prepare("UPDATE supervised_agent_inbox SET state='blocked' WHERE inbox_item_id=?").run(one.turnId);
+      db.prepare("UPDATE inbox_items SET state='blocked' WHERE inbox_item_id=?").run(one.turnId);
       const closed = ending !== "open";
       assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: closed ? "terminal" : "active" }]);
 
@@ -4810,7 +4808,7 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
       },
       /** The turns in the agent's execution record, its recovery boundaries, and whether the record has a gap. */
       recorded: () => ({
-        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,rowid"),
         boundaries: read<{ n: number }>("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=? AND phase='complete'")[0]!.n,
         gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
           .filter((observer) => observer.max !== observer.last).length,

@@ -1679,7 +1679,7 @@ export async function cursorDaemonFixture() {
       },
       /** The agent's execution record: its turns, recovery boundaries, and whether its observer has a gap. */
       recorded: () => ({
-        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,rowid"),
         boundaries: read<{ phase: string }>("SELECT phase FROM agent_runtime_recoveries WHERE agent_id=?").map((row) => row.phase),
         gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
           .filter((observer) => observer.max !== observer.last).length,

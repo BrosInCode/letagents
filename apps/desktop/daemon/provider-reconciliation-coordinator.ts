@@ -28,13 +28,13 @@ export type DaemonReconcileInput = Omit<
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
 export type ProviderReconciliationStore = {
-  getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+  getEntryWithVersion(entryId: string): Promise<{ entry: DaemonManifestEntry; version: number } | undefined>;
   load(): Promise<{ entries: DaemonManifestEntry[] }>;
   replaceEntriesBatch(
-    expectedGeneration: number,
+    expectedVersions: Readonly<Record<string, number>>,
     entries: DaemonManifestEntry[],
     commitFence: CommitFence,
-  ): Promise<{ generation: number }>;
+  ): Promise<{ versions: Record<string, number> }>;
 };
 
 export type ProviderReconciliationTransition = (
@@ -53,8 +53,6 @@ export type ProviderReconciliationCoordinatorOptions = {
   store: ProviderReconciliationStore;
   authority: {
     assertCurrent(): Promise<void>;
-    currentManifestGeneration(): number;
-    acceptManifestGeneration(generation: number): void;
     fenceCommit: CommitFence;
     serializeManifest<T>(operation: () => Promise<T>): Promise<T>;
   };
@@ -114,8 +112,9 @@ export class ProviderReconciliationCoordinator {
   ) {
     const { authority, provider, store, transitionOnce } = this.options;
     await authority.assertCurrent();
-    const entry = await store.getEntry(entryId);
-    if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+    const loaded = await store.getEntryWithVersion(entryId);
+    if (!loaded) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+    const entry = loaded.entry;
 
     let reconciliation = advanceReconciliationState(
       entry.reconciliation,
@@ -123,12 +122,11 @@ export class ProviderReconciliationCoordinator {
       input.nowMs,
     );
     if (JSON.stringify(reconciliation) !== JSON.stringify(entry.reconciliation)) {
-      const next = await store.replaceEntriesBatch(
-        authority.currentManifestGeneration(),
+      await store.replaceEntriesBatch(
+        { [entryId]: loaded.version },
         [{ ...entry, reconciliation }],
         authority.fenceCommit,
       );
-      authority.acceptManifestGeneration(next.generation);
     }
 
     let redispatchPending = false;

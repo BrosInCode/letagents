@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFile, chmod, link, lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
@@ -9,11 +9,10 @@ import { nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import { isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
 import { assertCredentialFreeRemote, normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
 import { acquireWorkspaceFence, WorkspaceFenceError, type WorkspaceFenceHandle } from "./workspace-fence.js";
-import { ensureDaemonStateDatabase, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
+import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 
 const STORE_VERSION = 2;
 type StoredAttempts = { version: typeof STORE_VERSION; attempts: TaskWorkAttempt[]; checksum: string };
-type LegacyStoredAttempts = { version: 1; attempts: TaskWorkAttempt[] };
 
 export class AttemptNotFoundError extends Error {}
 export class ImmutableExecutionError extends Error {}
@@ -24,12 +23,6 @@ export type SupervisorFenceIdentity = { supervisor_id: string; supervisor_genera
 export type GcQuiescenceHooks = {
   before_release?: (attempt: TaskWorkAttempt, index: number) => Promise<void>;
   before_restore?: (attempt: TaskWorkAttempt, index: number) => Promise<void>;
-};
-/** Adversarial-test hooks around the durable legacy-migration failure fence. */
-export type LegacyAttemptMigrationHooks = {
-  after_source_read?: () => Promise<void> | void;
-  after_failure_recorded?: () => Promise<void> | void;
-  before_quarantine?: () => Promise<void> | void;
 };
 
 function checksum(attempts: TaskWorkAttempt[]): string {
@@ -124,13 +117,28 @@ export class WorkDurabilityStore {
   private readonly executionFences = new Map<string, WorkspaceFenceHandle>();
   private readonly executionFenceOperations = new Map<string, Promise<void>>();
   private database: DatabaseSync | null = null;
+  private ownsDatabase = false;
   private initializing: Promise<DatabaseSync> | null = null;
   private closed = false;
+  private writeFence: (() => void) | null = null;
   private readonly databasePath: string;
 
-  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks, databasePath?: string, private readonly migrationHooks?: LegacyAttemptMigrationHooks, private readonly schemaPrepared = false) {
+  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks, databasePath?: string) {
     this.workspaceRoot = resolve(workspaceRoot);
     this.databasePath = databasePath ?? join(dirname(path), "daemon-state.sqlite");
+  }
+
+  /** Attach the process's single shared SQLite handle without taking ownership of closing it. */
+  attachDatabase(database: DatabaseSync, writeFence?: () => void): void {
+    this.database = database;
+    this.ownsDatabase = false;
+    this.initializing = null;
+    this.closed = false;
+    if (writeFence) this.writeFence = writeFence;
+  }
+
+  bindWriteFence(writeFence: () => void): void {
+    this.writeFence = writeFence;
   }
 
   async close(): Promise<void> {
@@ -141,7 +149,8 @@ export class WorkDurabilityStore {
     const database = this.database;
     this.database = null;
     this.initializing = null;
-    database?.close();
+    if (this.ownsDatabase) database?.close();
+    this.ownsDatabase = false;
   }
 
   /** Bind the store to the P1a fence after the singleton generation is acquired. */
@@ -162,6 +171,7 @@ export class WorkDurabilityStore {
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
+      this.writeFence?.();
       if (database.prepare("SELECT 1 FROM work_attempts WHERE work_attempt_id = ?").get(workAttemptId)) throw new ImmutableExecutionError("Work attempt ID already exists.");
       if (database.prepare("SELECT 1 FROM work_attempts WHERE workspace_path = ?").get(resolve(input.workspacePath))) throw new ImmutableExecutionError("Workspace path is already bound to a work attempt.");
       const createdAt = this.now();
@@ -197,6 +207,7 @@ export class WorkDurabilityStore {
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
+      this.writeFence?.();
       const attempt = this.readAttempt(database, workAttemptId);
       if (!attempt) throw new AttemptNotFoundError(`Unknown work attempt: ${workAttemptId}`);
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("A non-live work attempt cannot be rebound.");
@@ -216,6 +227,7 @@ export class WorkDurabilityStore {
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
+      this.writeFence?.();
       const attempt = this.readAttempt(database, workAttemptId);
       if (!attempt) throw new AttemptNotFoundError(`Unknown work attempt: ${workAttemptId}`);
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("A non-live work attempt cannot be checkpointed.");
@@ -235,6 +247,7 @@ export class WorkDurabilityStore {
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
+      this.writeFence?.();
       const attempt = this.readAttempt(database, workAttemptId);
       if (!attempt) throw new AttemptNotFoundError(`Unknown work attempt: ${workAttemptId}`);
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("A non-live work attempt cannot start a generation.");
@@ -279,6 +292,7 @@ export class WorkDurabilityStore {
       const commit = async () => {
       database.exec("BEGIN IMMEDIATE");
       try {
+      this.writeFence?.();
       const attempt = this.readAttempt(database, workAttemptId);
       if (!attempt) throw new AttemptNotFoundError(`Unknown work attempt: ${workAttemptId}`);
       const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
@@ -513,124 +527,12 @@ export class WorkDurabilityStore {
     return stored;
   }
 
-  private async importLegacyAttempts(database: DatabaseSync): Promise<void> {
-    const migrationKey = `attempts-json:${resolve(this.path)}`;
-    type LegacySource = { kind: "missing" } | { kind: "invalid"; reason: string } | { kind: "valid"; attempts: TaskWorkAttempt[]; checksum: string };
-    let source: LegacySource;
-    try {
-      const raw = await readFile(this.path, "utf8");
-      const parsed: unknown = JSON.parse(raw);
-      if (this.validLegacy(parsed)) {
-        // A v1 file predates integrity protection. Preserve live/recoverable
-        // attempts, but never inherit a legacy clean conclusion as GC authority.
-        source = {
-          kind: "valid",
-          attempts: parsed.attempts.map((attempt) => (attempt.state === "cleanly_concluded" || attempt.state === "abandoned" ? { ...attempt, state: "unreviewed" } : attempt)),
-          checksum: checksum(parsed.attempts),
-        };
-      } else if (this.valid(parsed)) {
-        source = { kind: "valid", attempts: parsed.attempts, checksum: parsed.checksum };
-      } else {
-        source = { kind: "invalid", reason: "Attempt store has an invalid schema or integrity checksum." };
-      }
-    } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") source = { kind: "missing" };
-      else source = { kind: "invalid", reason: error instanceof Error ? error.message : String(error) };
-    }
-
-    await this.migrationHooks?.after_source_read?.();
-    type MigrationOutcome = { kind: "success" } | { kind: "previous_failure"; reason: string; quarantinedPath: string } | { kind: "new_failure"; reason: string; quarantinedPath: string };
-    let outcome: MigrationOutcome = { kind: "success" };
-    database.exec("BEGIN IMMEDIATE");
-    try {
-      // Both decisions are authoritative only while holding the writer lock.
-      // A concurrent winner may have committed between our source read and
-      // this point, in which case a matching checksum is an idempotent no-op.
-      const priorFailure = database.prepare("SELECT reason, quarantined_path FROM migration_failures WHERE migration_key = ?").get(migrationKey) as { reason: string; quarantined_path: string } | undefined;
-      if (priorFailure) {
-        outcome = { kind: "previous_failure", reason: priorFailure.reason, quarantinedPath: priorFailure.quarantined_path };
-      } else {
-        const existing = database.prepare("SELECT checksum FROM migration_records WHERE migration_key = ?").get(migrationKey) as { checksum?: unknown } | undefined;
-        let failureReason: string | undefined;
-        if (source.kind === "invalid") failureReason = source.reason;
-        else if (existing && source.kind === "valid" && String(existing.checksum) !== source.checksum) failureReason = "Legacy attempts source changed after it was migrated.";
-        else if (!existing && source.kind === "valid") {
-          database.exec("SAVEPOINT legacy_attempt_import");
-          try {
-            for (const attempt of source.attempts) this.persistAttempt(database, attempt, true);
-            database.prepare("INSERT INTO migration_records(migration_key, checksum, imported_at) VALUES (?, ?, ?)").run(migrationKey, source.checksum, this.now());
-            database.exec("RELEASE legacy_attempt_import");
-          } catch (error: unknown) {
-            database.exec("ROLLBACK TO legacy_attempt_import");
-            database.exec("RELEASE legacy_attempt_import");
-            failureReason = error instanceof Error ? error.message : String(error);
-          }
-        }
-        if (failureReason) {
-          const quarantinedPath = `${this.path}.corrupt.${Date.now()}.${randomUUID()}`;
-          database.prepare("INSERT INTO migration_failures(migration_key, reason, failed_at, quarantined_path) VALUES (?, ?, ?, ?)").run(migrationKey, failureReason, this.now(), quarantinedPath);
-          outcome = { kind: "new_failure", reason: failureReason, quarantinedPath };
-        }
-      }
-      database.exec("COMMIT");
-    } catch (error) {
-      try { database.exec("ROLLBACK"); } catch {}
-      throw error;
-    }
-
-    if (outcome.kind !== "success") {
-      if (outcome.kind === "new_failure") await this.migrationHooks?.after_failure_recorded?.();
-      await this.quarantineLegacySource(outcome.quarantinedPath);
-      if (outcome.kind === "previous_failure") {
-        throw new CorruptAttemptStoreError(`Legacy attempt migration previously failed: ${outcome.reason} (${outcome.quarantinedPath})`);
-      }
-      throw new CorruptAttemptStoreError(`Legacy attempt migration failed closed: ${outcome.reason}`);
-    }
-
-    if (source.kind === "valid") {
-      try { await rename(this.path, `${this.path}.migrated-backup`); }
-      catch (error: unknown) {
-        // The SQLite transaction is already authoritative. Backup retention is
-        // idempotent housekeeping and is retried on the next open.
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error(`Unable to retain migrated attempt JSON backup ${this.path}:`, error);
-      }
-    }
-  }
-
-  private async quarantineLegacySource(quarantinedPath: string): Promise<void> {
-    try {
-      await this.migrationHooks?.before_quarantine?.();
-      await rename(this.path, quarantinedPath);
-    } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        // A durable migration_failures row already blocks every reopen. Keep
-        // quarantine as retryable, non-authoritative housekeeping.
-        console.error(`Unable to quarantine failed attempt JSON ${this.path}:`, error);
-      }
-    }
-  }
-
-  private valid(value: unknown): value is StoredAttempts {
-    if (!value || typeof value !== "object") return false;
-    const stored = value as Partial<StoredAttempts>;
-    if (stored.version !== STORE_VERSION || !Array.isArray(stored.attempts) || typeof stored.checksum !== "string" || !stored.attempts.every(isAttempt)) return false;
-    if (new Set(stored.attempts.map((attempt) => attempt.work_attempt_id)).size !== stored.attempts.length
-      || new Set(stored.attempts.map((attempt) => resolve(attempt.workspace_path))).size !== stored.attempts.length) return false;
-    const expected = Buffer.from(checksum(stored.attempts));
-    const actual = Buffer.from(stored.checksum);
-    return expected.length === actual.length && timingSafeEqual(expected, actual);
-  }
-
-  private validLegacy(value: unknown): value is LegacyStoredAttempts {
-    return !!value && typeof value === "object" && (value as Partial<LegacyStoredAttempts>).version === 1
-      && Array.isArray((value as Partial<LegacyStoredAttempts>).attempts) && (value as LegacyStoredAttempts).attempts.every(isAttempt);
-  }
-
   private async mutate<T>(operation: (stored: StoredAttempts) => T): Promise<T> {
     return this.exclusive(async () => {
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
+        this.writeFence?.();
         const stored = this.loadFromDatabase(database);
         const before = new Map(stored.attempts.map((attempt) => [attempt.work_attempt_id, JSON.stringify(attempt)]));
         const result = operation(stored);
@@ -649,6 +551,7 @@ export class WorkDurabilityStore {
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
+        this.writeFence?.();
         const attempt = this.readAttempt(database, workAttemptId);
         if (!attempt) throw new AttemptNotFoundError(`Unknown work attempt: ${workAttemptId}`);
         const result = operation(attempt);
@@ -931,15 +834,11 @@ export class WorkDurabilityStore {
   }
 
   private async initializeDatabase(): Promise<DatabaseSync> {
-    // The neutral state-schema owner serializes all daemon-state upgrades.
-    if (!this.schemaPrepared) await ensureDaemonStateDatabase(this.databasePath);
     let database: DatabaseSync | null = null;
     try {
-      database = this.schemaPrepared
-        ? await openPreparedDaemonStateDatabase(this.databasePath)
-        : await openDaemonStateDatabase(this.databasePath, () => {});
-      await this.importLegacyAttempts(database);
+      database = await openDaemonStateDatabase(this.databasePath, (opened) => new DaemonStateSchema().createSchema(opened));
       this.database = database;
+      this.ownsDatabase = true;
       return database;
     } catch (error) { if (this.database === database) this.database = null; database?.close(); this.initializing = null; throw error; }
   }
@@ -995,7 +894,7 @@ export class WorkDurabilityStore {
   private async write(stored: StoredAttempts): Promise<void> {
     const database = await this.getDatabase();
     database.exec("BEGIN IMMEDIATE");
-    try { for (const attempt of stored.attempts) this.persistAttempt(database, attempt); database.exec("COMMIT"); }
+    try { this.writeFence?.(); for (const attempt of stored.attempts) this.persistAttempt(database, attempt); database.exec("COMMIT"); }
     catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
   }
 }

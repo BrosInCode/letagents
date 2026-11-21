@@ -301,7 +301,7 @@ test("post-launch worker binding retries the exact provider and preserves the re
     });
     assert.equal((await internals.workerBindings.supervisedWorkerSession("host_grant_bind_retry"))?.agent_session_id, "session-host");
     const beforeManifestBinding = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
-    assert.equal(beforeManifestBinding.last_worker_binding, null, "the exact public mint precedes the manifest binding");
+    assert.equal(beforeManifestBinding.last_worker_binding ?? null, null, "the exact public mint precedes the manifest binding");
     const exactEvidence = new ManifestStore(paths.manifestPath);
     try {
       assert.deepEqual(await exactEvidence.durablePurgeWorkerSessionAttestation("host_grant_bind_retry"), {
@@ -319,7 +319,7 @@ test("post-launch worker binding retries the exact provider and preserves the re
       "successful room binding clears its durable recovery condition",
     );
     const recovered = (await internals.store.getEntry("host_grant_bind_retry"))!;
-    assert.equal(recovered.last_error, null);
+    assert.equal(recovered.last_error ?? null, null);
     const recoveredProjection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     // This fixture deliberately has no native execution observer. Restoring
     // its exact worker binding cannot manufacture operational readiness.
@@ -1232,7 +1232,7 @@ for (const [rotationFailures, rotationStatus, providerName] of [[0, 500, "codex"
     const recovered = await internals.store.getEntry("host_grant_expiry_rotation");
     assert.equal(recovered?.desired_state, "running");
     assert.equal(recovered?.condition, "none");
-    assert.equal(recovered?.last_error, null);
+    assert.equal(recovered?.last_error ?? null, null);
     assert.deepEqual(recovered?.provider_ref, initial?.provider_ref);
     assert.equal(recovered?.work_attempt_id, initial?.work_attempt_id);
     assert.equal(rotated.agent_session_id, firstBinding.agent_session_id);

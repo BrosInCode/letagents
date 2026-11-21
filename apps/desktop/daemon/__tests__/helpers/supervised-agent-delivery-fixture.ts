@@ -127,7 +127,6 @@ export async function daemonRequest(socketPath: string, method: string, params?:
 export async function installExactTestProviderBirth(
   internals: {
     store: ManifestStore;
-    manifestGeneration: number;
     providerStreams: {
       install(
         entryId: string,
@@ -142,8 +141,9 @@ export async function installExactTestProviderBirth(
   handle: ProviderActionHandle,
   executionGenerationId: string,
 ): Promise<void> {
-  const entry = await internals.store.getEntry(entryId);
-  assert.ok(entry?.work_attempt_id && entry.workspace_path && handle.providerConnection);
+  const loaded = await internals.store.getEntryWithVersion(entryId);
+  const entry = loaded?.entry;
+  assert.ok(loaded && entry?.work_attempt_id && entry.workspace_path && handle.providerConnection);
   const database = (internals.store as unknown as { database: DatabaseSync }).database;
   database.prepare(`INSERT OR IGNORE INTO work_attempts(
     work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,
@@ -170,8 +170,7 @@ export async function installExactTestProviderBirth(
     "test",
     1,
   );
-  const snapshot = await internals.store.load();
-  const birth = await internals.store.checkpointProviderBirth(snapshot.generation, {
+  await internals.store.checkpointProviderBirth(loaded.version, {
     entry,
     executionGenerationId,
     providerConnection: handle.providerConnection,
@@ -179,7 +178,6 @@ export async function installExactTestProviderBirth(
     requestedAuthorityMode: "typed",
     observedAtMs: Date.now(),
   });
-  internals.manifestGeneration = birth.generation;
   await internals.providerStreams.install(entryId, handle, executionGenerationId, () => false);
   await internals.providerStreams.drainCallbacks?.();
 }
@@ -355,8 +353,7 @@ export async function scheduledRetryFixture(providerId = "claude-code") {
 export async function recordThreadIntent(path: string, store: SupervisedAgentInboxStore, turnId: string): Promise<void> {
   const manifest = new ManifestStore(path);
   try {
-    const loaded = await manifest.load();
-    await manifest.write(loaded.generation, [{
+    await manifest.write([{
       id: agent.agentId, room_id: agent.roomId, display_name: "Stone", provider: "codex", model: null,
       charter: "test", desired_state: "running", observed_state: "working", condition: "none",
       permission_profile_id: null, delivery_mode: "daemon_inbox", provider_launch_policy: {}, created_by: "test",
@@ -375,8 +372,7 @@ export async function recordThreadIntent(path: string, store: SupervisedAgentInb
 export async function recordReplyIntent(path: string, store: SupervisedAgentInboxStore, turnId: string, toolName: string, request: unknown): Promise<void> {
   const manifest = new ManifestStore(path);
   try {
-    const loaded = await manifest.load();
-    await manifest.write(loaded.generation, [{
+    await manifest.write([{
       id: agent.agentId, room_id: agent.roomId, display_name: "Stone", provider: "codex", model: null,
       charter: "test", desired_state: "running", observed_state: "working", condition: "none",
       permission_profile_id: null, delivery_mode: "daemon_inbox", provider_launch_policy: {}, created_by: "test",
@@ -395,8 +391,7 @@ export async function recordReplyIntent(path: string, store: SupervisedAgentInbo
 export async function writeAgentRuntime(path: string, providerContinuationId: string): Promise<void> {
   const manifest = new ManifestStore(path);
   try {
-    const loaded = await manifest.load();
-    await manifest.write(loaded.generation, [{
+    await manifest.write([{
       id: agent.agentId, room_id: agent.roomId, display_name: "Stone", provider: "codex", model: null,
       charter: "test", desired_state: "running", observed_state: "working", condition: "none",
       permission_profile_id: null, delivery_mode: "daemon_inbox", provider_launch_policy: {}, created_by: "test",

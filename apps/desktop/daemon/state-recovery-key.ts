@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
+import {
+  DAEMON_STATE_USER_VERSION,
+  DaemonStateDatabase,
+  DaemonStateSchema,
+  moveAsideLegacyDaemonStateDatabase,
+} from "./daemon-state-database.js";
 import { prepareStateRecoveryBackup, markStateRecoveryBackupValidated, cleanupStateRecoveryBackup, recordStateRecoveryBackupWarning, StateRecoveryError } from "./state-recovery-backup.js";
 import { compactDaemonStateDatabase } from "./daemon-state-maintenance.js";
 
@@ -42,39 +47,52 @@ export function requestHostApprovalVerifier(): Promise<string | null> {
   });
 }
 
-/** Caller holds the daemon singleton; initialize is the existing schema owner. */
+/**
+ * Caller holds the daemon singleton. Opens the process's single SQLite
+ * connection after retiring any legacy database and taking any required
+ * encrypted backup for future modern schema upgrades. When `keepOpen` is true,
+ * the caller takes ownership of the returned DaemonStateDatabase handle.
+ */
 export async function withProtectedStateUpgrade<T>(
-  path: string, initialize: () => Promise<T>, bootstrap: StateRecoveryBootstrap,
+  path: string,
+  initialize: (database: DaemonStateDatabase) => Promise<T>,
+  bootstrap: StateRecoveryBootstrap,
   assertCurrent?: () => Promise<void>,
+  options: { keepOpen?: boolean } = {},
 ): Promise<T> {
-  let database: DatabaseSync | null = null;
+  let stateDatabase: DaemonStateDatabase | null = null;
   try {
-    const freshBackup = await prepareStateRecoveryBackup(path, DAEMON_STATE_SCHEMA_VERSION, bootstrap.getBackupKey ?? requestStateRecoveryKey);
-    database = await openDaemonStateDatabase(path, (opened) => new DaemonStateSchema().createSchema(opened));
+    await moveAsideLegacyDaemonStateDatabase(path);
+    const freshBackup = await prepareStateRecoveryBackup(path, DAEMON_STATE_USER_VERSION, bootstrap.getBackupKey ?? requestStateRecoveryKey);
+    stateDatabase = await DaemonStateDatabase.open(path, (opened) => new DaemonStateSchema().createSchema(opened));
+    const database = stateDatabase.connection;
     if (assertCurrent) {
       const maintenance = await compactDaemonStateDatabase(path, database, assertCurrent);
       if (maintenance !== "not_needed" && maintenance !== "compacted") {
-        database.prepare(`INSERT INTO migration_failures(migration_key,reason,failed_at,quarantined_path)
-          VALUES ('state-space-maintenance',?,?, '') ON CONFLICT(migration_key)
-          DO UPDATE SET reason=excluded.reason,failed_at=excluded.failed_at`)
-          .run(maintenance, new Date().toISOString());
+        const now = new Date().toISOString();
+        database.prepare(`INSERT INTO daemon_maintenance_state(key,value_json,updated_at)
+          VALUES ('state-space-maintenance',?,?) ON CONFLICT(key)
+          DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+          .run(JSON.stringify({ reason: maintenance }), now);
       } else {
-        database.exec("DELETE FROM migration_failures WHERE migration_key='state-space-maintenance'");
+        database.exec("DELETE FROM daemon_maintenance_state WHERE key='state-space-maintenance'");
       }
     }
-    const result = await initialize();
+    const result = await initialize(stateDatabase);
     new DaemonStateSchema().validateCurrentShape(database);
     const validation = await markStateRecoveryBackupValidated(path, database, { freshBackup });
     if (validation.status !== "unverified") {
       try { await cleanupStateRecoveryBackup(path, database); }
       catch { recordStateRecoveryBackupWarning(database, "recovery_snapshot_cleanup_failed"); }
     }
-    database.close();
-    database = null;
+    if (!options.keepOpen) {
+      stateDatabase.close();
+      stateDatabase = null;
+    }
     await bootstrap.onPrepared?.();
     return result;
   } catch (error) {
-    try { database?.close(); } catch { /* preserve the triggering error */ }
+    try { stateDatabase?.close(); } catch { /* preserve the triggering error */ }
     await bootstrap.onPrepared?.(true);
     throw error;
   }

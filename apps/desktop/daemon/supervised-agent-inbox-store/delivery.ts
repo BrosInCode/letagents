@@ -14,7 +14,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
   async checkpointPublication(input: { inbox_item_id: string; room_id: string; canonical_message_id: string }): Promise<SupervisedInboxItem> {
     this.require(input.inbox_item_id, "inbox_item_id"); this.require(input.room_id, "room_id"); this.require(input.canonical_message_id, "canonical_message_id");
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
+      const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
       if (!row) throw new Error("Unknown supervised inbox publication.");
       const item = rowToItem(row);
       if (item.room_id !== input.room_id) throw new Error("Canonical publication room does not match the inbox item.");
@@ -25,17 +25,17 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       if (item.state === "publishing") {
         run(database.prepare(`INSERT INTO supervised_agent_publications(inbox_item_id,agent_id,room_id,client_message_id,canonical_message_id,published_at)
           VALUES (?,?,?,?,?,?) ON CONFLICT(inbox_item_id) DO NOTHING`), item.inbox_item_id, item.agent_id, item.room_id, item.reply_client_message_id, input.canonical_message_id, timestamp);
-        run(database.prepare("UPDATE supervised_agent_inbox SET state='acknowledged',updated_at=?,acknowledged_at=? WHERE inbox_item_id=?"), timestamp, timestamp, item.inbox_item_id);
+        run(database.prepare("UPDATE inbox_items SET state='acknowledged',updated_at=?,acknowledged_at=? WHERE inbox_item_id=?"), timestamp, timestamp, item.inbox_item_id);
         this.recordEvent(database, item.inbox_item_id, `published:${item.attempt_count}`, "published", timestamp, input.canonical_message_id);
         this.settleTerminalItem(database, item, timestamp);
       }
       this.pruneAgentHistory(database, item.agent_id);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+      return rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
     }));
   }
   async transition(inboxItemId: string, next: SupervisedInboxState, patch: Partial<Pick<SupervisedInboxItem, "provider_turn_id" | "outcome" | "last_error" | "failure_code" | "next_attempt_at_ms" | "blocked_by_inbox_item_id">> = {}): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      const current = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(current);
       if (!transitions[item.state].includes(next)) throw new Error(`Invalid supervised inbox transition: ${item.state} -> ${next}.`);
@@ -70,10 +70,10 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       }
       const attempts = item.attempt_count;
       const timestamp = this.now(); const acknowledged = finalStates.has(next) ? timestamp : null;
-      run(database.prepare(`UPDATE supervised_agent_inbox SET state=?,attempt_count=?,provider_turn_id=?,outcome=?,last_error=?,failure_code=?,blocked_by_inbox_item_id=?,next_attempt_at_ms=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
+      run(database.prepare(`UPDATE inbox_items SET state=?,attempt_count=?,provider_turn_id=?,outcome=?,last_error=?,failure_code=?,blocked_by_inbox_item_id=?,next_attempt_at_ms=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
         next, attempts, valueOrCurrent(patch, "provider_turn_id", item.provider_turn_id), valueOrCurrent(patch, "outcome", item.outcome), valueOrCurrent(patch, "last_error", item.last_error),
         valueOrCurrent(patch, "failure_code", item.failure_code), valueOrCurrent(patch, "blocked_by_inbox_item_id", item.blocked_by_inbox_item_id), valueOrCurrent(patch, "next_attempt_at_ms", item.next_attempt_at_ms), timestamp, acknowledged, inboxItemId);
-      const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const updated = rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row);
       const event = phaseForTransition(next);
       if (event) {
         const ordinal = event === "retry_scheduled" || event === "queued"
@@ -91,13 +91,12 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
   async claimHead(agentId: string, expected?: InboxHeadSnapshot | null): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       if (pendingRuntimeRecovery(database, agentId)) return null;
-      const row = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY i.fifo_sequence LIMIT 1`).get(agentId) as Row | undefined;
+      const row = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched FROM inbox_items i WHERE i.agent_id=? AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY i.fifo_sequence LIMIT 1`).get(agentId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
       if (expected !== undefined && !sameInboxHead(expected, item)) return null;
-      const turnControlBarrier = database.prepare(`SELECT inbox_item_id,status FROM turn_control_journals
-        WHERE agent_id=? AND turn_control_present=1
-          AND status IN ('prepared','dispatching','uncertain','retryable')`).get(agentId) as Row | undefined;
+      const turnControlBarrier = database.prepare(`SELECT turn_control_inbox_item_id AS inbox_item_id,turn_control_status AS status FROM agents
+        WHERE agent_id=? AND turn_control_status IN ('prepared','dispatching','uncertain','retryable')`).get(agentId) as Row | undefined;
       if (turnControlBarrier) {
         const linkedInboxItemId = typeof turnControlBarrier.inbox_item_id === "string"
           && turnControlBarrier.inbox_item_id.trim()
@@ -119,15 +118,15 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
         && item.next_attempt_at_ms > Date.parse(this.now())) return null;
       this.assertCurrentHead(database, item);
       const timestamp = this.now();
-      run(database.prepare("UPDATE supervised_agent_inbox SET state='dispatching',updated_at=? WHERE inbox_item_id=? AND state='pending'"), timestamp, item.inbox_item_id);
+      run(database.prepare("UPDATE inbox_items SET state='dispatching',updated_at=? WHERE inbox_item_id=? AND state='pending'"), timestamp, item.inbox_item_id);
       // A recovering row keeps the activation its existing provider turn was started with.
       if (!item.provider_turn_id && !item.outcome) {
         const activation = this.dispatchActivation(database, item, Number(row.untouched) === 1, timestamp);
         if (JSON.stringify(activation) !== JSON.stringify(item.activation)) {
-          run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"), JSON.stringify(activation), item.inbox_item_id);
+          run(database.prepare("UPDATE inbox_items SET activation_json=? WHERE inbox_item_id=?"), JSON.stringify(activation), item.inbox_item_id);
         }
       }
-      const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+      const updated = rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
       return updated;
     }));
   }
@@ -138,7 +137,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
    */
   async checkpointDispatchIntent(inboxItemId: string, taskOwnerSessionId?: string, context?: readonly unknown[]): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      const current = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(current);
       if (item.state !== "dispatching" || item.provider_turn_id) throw new Error("Provider dispatch intent requires an unstarted dispatching inbox item.");
@@ -148,9 +147,9 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
         run(database.prepare(`INSERT INTO supervised_agent_prepared_context(inbox_item_id,snapshot_json) VALUES (?,?)
           ON CONFLICT(inbox_item_id) DO UPDATE SET snapshot_json=excluded.snapshot_json`), inboxItemId, JSON.stringify(snapshot));
       }
-      run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
+      run(database.prepare("UPDATE inbox_items SET activation_json=? WHERE inbox_item_id=?"),
         JSON.stringify({ ...item.activation, task_continuity_dispatch_session_id: taskOwnerSessionId ?? null }), inboxItemId);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      return rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
   /** Persist the exact provider turn id before waiting for any terminal evidence. */
@@ -164,7 +163,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
     this.require(authority.origin_execution_generation_id, "provider turn origin_execution_generation_id");
     this.require(authority.provider_continuation_id, "provider turn provider_continuation_id");
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      const current = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(current);
       if (item.state !== "dispatching") throw new Error("Provider turn-start checkpoint requires a dispatching inbox item.");
@@ -187,7 +186,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       }
       const timestamp = this.now();
       const nextAttemptCount = item.provider_turn_id ? item.attempt_count : item.attempt_count + 1;
-      run(database.prepare("UPDATE supervised_agent_inbox SET provider_turn_id=?,attempt_count=?,updated_at=? WHERE inbox_item_id=?"), providerTurnId, nextAttemptCount, timestamp, inboxItemId);
+      run(database.prepare("UPDATE inbox_items SET provider_turn_id=?,attempt_count=?,updated_at=? WHERE inbox_item_id=?"), providerTurnId, nextAttemptCount, timestamp, inboxItemId);
       if (!existingBinding) {
         run(database.prepare(`INSERT INTO supervised_agent_provider_turn_bindings
           (inbox_item_id,agent_id,room_id,work_attempt_id,origin_execution_generation_id,provider_continuation_id,provider_turn_id)
@@ -195,7 +194,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
         authority.origin_execution_generation_id, authority.provider_continuation_id, providerTurnId);
       }
       this.recordEvent(database, inboxItemId, `turn_started:${nextAttemptCount}:${providerTurnId}`, "turn_started", timestamp, null);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      return rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
   /** Record failure debt and its retry/block disposition in one transaction. */
@@ -212,7 +211,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       throw new Error("Undispatched reset requires an exact provider turn id and pre-dispatch retry domain.");
     }
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!row) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(row);
       this.assertCurrentHead(database, item);
@@ -247,10 +246,10 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
           }
         } else if (resetTurnId !== undefined) {
           const executionGenerationId = String(binding!.origin_execution_generation_id);
-          const effect = database.prepare(`SELECT 1 FROM supervised_agent_effects
+          const effect = database.prepare(`SELECT 1 FROM effects
             WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
             UNION ALL
-            SELECT 1 FROM supervised_agent_effect_tombstones
+            SELECT 1 FROM effect_tombstones
             WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
             LIMIT 1`).get(
             item.agent_id, item.room_id, executionGenerationId, resetTurnId,
@@ -285,14 +284,14 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
         : input.domain === "publication" ? "Reply publication" : "Pre-dispatch preparation";
       const error = exhausted ? `${label} failed ${attempt} times: ${input.error}` : input.error;
       if (reset) run(database.prepare("DELETE FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?"), inboxItemId);
-      run(database.prepare(`UPDATE supervised_agent_inbox
+      run(database.prepare(`UPDATE inbox_items
         SET state=?,attempt_count=?,provider_turn_id=?,last_error=?,failure_code=NULL,
             blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?
         WHERE inbox_item_id=?`), next, reset ? Math.max(0, item.attempt_count - 1) : item.attempt_count,
       reset ? null : item.provider_turn_id, error, timestamp, inboxItemId);
       this.recordEvent(database, inboxItemId, `${prefix}${attempt}`, "retry_scheduled", timestamp, error);
       if (exhausted) this.recordEvent(database, inboxItemId, `${prefix}${attempt}:blocked`, "blocked", timestamp, error);
-      return { item: rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row), attempt };
+      return { item: rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row), attempt };
     }));
   }
   /**
@@ -302,7 +301,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
    */
   async resetPreNativeHandoff(inboxItemId: string): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!row) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(row);
       if (!["dispatching", "retryable"].includes(item.state) || item.provider_turn_id || item.outcome) {
@@ -312,13 +311,13 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       const terminal = database.prepare("SELECT 1 FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(inboxItemId);
       if (terminal) throw new Error("Pre-native handoff reset found terminal evidence and was refused.");
       const timestamp = this.now();
-      run(database.prepare(`UPDATE supervised_agent_inbox
+      run(database.prepare(`UPDATE inbox_items
         SET state='pending',last_error=NULL,failure_code=NULL,blocked_by_inbox_item_id=NULL,
             next_attempt_at_ms=NULL,updated_at=?
         WHERE inbox_item_id=?`), timestamp, inboxItemId);
       const queuedOrdinal = Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='queued'").get(inboxItemId) as Row).value) + 1;
       this.recordEvent(database, inboxItemId, `handoff_queued:${queuedOrdinal}`, "queued", timestamp, "Clean handoff completed before native provider dispatch; returning the FIFO item to pending.");
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      return rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
   async checkpointNormalizedTerminal(input: {
@@ -334,7 +333,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
     terminal_evidence: unknown;
   }): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
+      const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
       if (!row) throw new Error(`Unknown supervised inbox item: ${input.inbox_item_id}`);
       const item = rowToItem(row);
       if (item.agent_id !== input.agent_id || item.provider_turn_id !== input.provider_turn_id) throw new Error("Normalized terminal evidence does not match the exact inbox turn.");
@@ -388,7 +387,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
         input.inbox_item_id, input.agent_id, input.execution_generation_id, input.provider_turn_id, input.outcome, input.text, input.evidence, JSON.stringify(input.terminal_evidence), timestamp, timestamp);
       const outcome = JSON.stringify({ kind: input.outcome, text: input.text, evidence: input.evidence });
       const failureDetail = nativeFailure ? input.failure_detail?.trim() || null : item.last_error;
-      run(database.prepare(`UPDATE supervised_agent_inbox
+      run(database.prepare(`UPDATE inbox_items
         SET outcome=?,last_error=?,updated_at=? WHERE inbox_item_id=?`),
         outcome, failureDetail, timestamp, input.inbox_item_id);
       // Recovery may observe an old turn after a worker-session replacement.
@@ -396,7 +395,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       if (input.outcome === "failed") {
         const sameOwner = input.task_owner_session_id
           && item.activation.task_continuity_dispatch_session_id === input.task_owner_session_id;
-        run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
+        run(database.prepare("UPDATE inbox_items SET activation_json=? WHERE inbox_item_id=?"),
           JSON.stringify({ ...item.activation, task_continuity_owner_session_id: sameOwner ? input.task_owner_session_id : null,
             task_continuity_failed_at: sameOwner ? timestamp : null, task_continuity_considered: null }), input.inbox_item_id);
       }
@@ -407,7 +406,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       if (input.outcome === "unreadable") {
         this.recordEvent(database, input.inbox_item_id, `result_unreadable:${input.provider_turn_id}`, "result_unreadable", timestamp, "Checking the existing provider turn for its result.");
       }
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row);
+      return rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(input.inbox_item_id) as Row);
     }));
   }
 
@@ -417,7 +416,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
   /** Persist provider terminal evidence before advancing out of dispatching. */
   async checkpointTerminalOutcome(inboxItemId: string, outcome: string): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      const current = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(current);
       if (item.state !== "dispatching" && item.state !== "awaiting_result") throw new Error("Provider terminal evidence may only be checkpointed while delivery is in-flight.");
@@ -430,9 +429,9 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       try { kind = JSON.parse(outcome).kind; } catch { /* Legacy opaque outcomes remain supported. */ }
       if (kind === "failed" || kind === "interrupted") throw new Error("Native failure outcomes require the exact terminal checkpoint.");
       const timestamp = this.now();
-      run(database.prepare("UPDATE supervised_agent_inbox SET outcome=?,updated_at=? WHERE inbox_item_id=?"), outcome, timestamp, inboxItemId);
+      run(database.prepare("UPDATE inbox_items SET outcome=?,updated_at=? WHERE inbox_item_id=?"), outcome, timestamp, inboxItemId);
       this.recordEvent(database, inboxItemId, `turn_finished:${item.attempt_count}`, "turn_finished", timestamp, null);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      return rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
   async retryBlocked(inboxItemId: string): Promise<SupervisedInboxItem> {
@@ -450,7 +449,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
    */
   async skipBlocked(inboxItemId: string): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!row) throw new Error("The blocked room message no longer exists.");
       const item = rowToItem(row);
       if (item.state !== "blocked") throw new Error("This message is no longer blocked, so it cannot be skipped.");
@@ -466,20 +465,20 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       // its time, and what the task is now is not known here. A follow-up that started keeps the text of a started turn.
       const lastError = started ? detail : item.source_message_id.startsWith("task-continuation:") ? FOLLOW_UP_ENDED.skippedByOwner : null;
       const timestamp = this.now();
-      run(database.prepare(`UPDATE supervised_agent_inbox
+      run(database.prepare(`UPDATE inbox_items
         SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
         WHERE inbox_item_id=?`), lastError, timestamp, timestamp, inboxItemId);
       this.settleTerminalItem(database, item, timestamp);
       this.recordEvent(database, inboxItemId, "user_cancelled", "user_cancelled", timestamp, detail);
       this.pruneAgentHistory(database, item.agent_id);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      return rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
 
   /** Whether the agent's blocked FIFO head may be skipped now, by the same rule skipBlocked enforces. */
   async blockedHeadSkip(agentId: string): Promise<{ inbox_item_id: string; refusal: string | null } | null> {
     return this.read(async (database) => {
-      const row = database.prepare(`SELECT * FROM supervised_agent_inbox WHERE agent_id=?
+      const row = database.prepare(`SELECT * FROM inbox_items WHERE agent_id=?
         AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence LIMIT 1`).get(agentId) as Row | undefined;
       if (!row || String(row.state) !== "blocked") return null;
@@ -501,7 +500,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       || database.prepare("SELECT 1 FROM supervised_agent_publications WHERE inbox_item_id=?").get(item.inbox_item_id)) {
       return "This message has a saved reply that wasn't posted. Post the saved reply instead; the provider is not asked again.";
     }
-    if (database.prepare("SELECT 1 FROM turn_control_journals WHERE agent_id=? AND inbox_item_id=? AND turn_control_present=1")
+    if (database.prepare("SELECT 1 FROM agents WHERE agent_id=? AND turn_control_inbox_item_id=?")
       .get(item.agent_id, item.inbox_item_id)) {
       return "A stop or correction for this message is still being settled. Try again once it finishes.";
     }
@@ -512,9 +511,8 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
     if (terminal && item.provider_turn_id && String(terminal.provider_turn_id) === item.provider_turn_id) return null;
     const binding = database.prepare("SELECT work_attempt_id,provider_continuation_id FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
       .get(item.inbox_item_id) as Row | undefined;
-    const current = database.prepare(`SELECT CASE WHEN work_attempt_id_present=1 THEN work_attempt_id END AS work_attempt_id,
-      CASE WHEN provider_ref_present=1 THEN provider_continuation_id END AS provider_continuation_id
-      FROM runtime_deployments WHERE agent_id=?`).get(item.agent_id) as Row | undefined;
+    const current = database.prepare(`SELECT work_attempt_id,provider_continuation_id
+      FROM agents WHERE agent_id=?`).get(item.agent_id) as Row | undefined;
     if (binding && current?.work_attempt_id && current.provider_continuation_id
       && (String(binding.work_attempt_id) !== String(current.work_attempt_id)
         || String(binding.provider_continuation_id) !== String(current.provider_continuation_id))) return null;
@@ -561,7 +559,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
   async normalizeInterruptedEffects(agentId?: string): Promise<void> {
     await this.exclusive(async (database) => this.transaction(database, () => {
       const scope = agentId ? " AND agent_id=?" : "";
-      const affected = database.prepare(`SELECT DISTINCT agent_id FROM supervised_agent_effects
+      const affected = database.prepare(`SELECT DISTINCT agent_id FROM effects
         WHERE state='executing' AND tool_name<>'join_room'${scope}`).all(
         ...(agentId ? [agentId] : []) as never[],
       ) as Row[];
@@ -587,7 +585,7 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const interruptedAt = this.now();
       this.normalizeInterruptedEffectsInTransaction(database, agentId, interruptedAt);
-      const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence").all(agentId) as Row[];
+      const rows = database.prepare("SELECT * FROM inbox_items WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence").all(agentId) as Row[];
       const recovered: SupervisedInboxItem[] = [];
       for (const row of rows) {
         const item = rowToItem(row);
@@ -641,9 +639,9 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
         }
         if (!next) continue;
         const timestamp = this.now();
-        run(database.prepare("UPDATE supervised_agent_inbox SET state=?,last_error=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?"),
+        run(database.prepare("UPDATE inbox_items SET state=?,last_error=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?"),
           next, error, timestamp, finalStates.has(next) ? timestamp : null, item.inbox_item_id);
-        const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+        const updated = rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
         const phase = phaseForTransition(next);
         const key = `recovery:${phase}:${updated.attempt_count}`;
         // A row left in its state is the same fact again; a real transition is recorded every time.

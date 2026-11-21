@@ -101,8 +101,6 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
         isHandoffScheduled: () => this.handoffScheduled,
         assertCurrent: () => this.singleton.assertCurrent(),
         currentDaemonGeneration: () => this.singleton.currentGeneration,
-        currentManifestGeneration: () => this.manifestGeneration,
-        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
         fenceCommit: (commit) => this.fenceDaemonCommit(commit),
         fenceAdmittedTransitionCommit: (commit) => this.fenceAdmittedTransitionCommit(commit),
       },
@@ -126,7 +124,7 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
         (input) => this.providerCheckpoints.checkpointDynamicState(input),
         (input) => this.providerCheckpoints.checkpointPreparedTurn(input),
         (agent) => this.roomWorkPublisher?.observeNewSources(agent),
-        (agent) => this.providerStreams.settleCursorLifecycleBeforeIdle(agent, this.executionCapture, this.typedLifecycleEffects),
+        (agent) => this.providerStreams.settleCursorLifecycleBeforeIdle(agent, this.executionCapture),
         async (agent, sourceMessageId, inboxItemId, summary, baseline) => {
           const installation = this.providerStreams.currentInstallation(agent.agentId);
           if (installation?.handle === agent.handle && installation.executionGenerationId === agent.executionGenerationId) {
@@ -243,8 +241,6 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
       entryConcurrency: this.entryConcurrency,
       delivery: this.supervisedDelivery,
       authority: {
-        currentManifestGeneration: () => this.manifestGeneration,
-        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
         assertCurrent: () => this.singleton.assertCurrent(),
         serializeManifest: (operation) => this.serializeManifestMutation(operation),
         fenceCommit: (commit) => this.fenceDaemonCommit(commit),

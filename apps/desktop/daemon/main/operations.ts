@@ -351,19 +351,6 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
     return this.authority.serializeManifestMutation(operation);
   }
 
-  protected writeManifest(
-    expectedGeneration: number,
-    entries: DaemonManifestEntry[],
-    roomMoveCancellation?: { agentId: string; detail: string },
-  ) {
-    return this.store.write(
-      expectedGeneration,
-      entries,
-      (commit) => this.fenceDaemonCommit(commit),
-      roomMoveCancellation,
-    );
-  }
-
   protected fenceDaemonCommit(commit: () => Promise<void>, notification?: DaemonCommitNotification): Promise<void> {
     return this.authority.fenceDaemonCommit(commit, notification);
   }

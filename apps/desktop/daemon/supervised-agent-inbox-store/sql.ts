@@ -10,7 +10,7 @@ export const UNTOUCHED_PENDING_SQL = `(i.state='pending' AND i.attempt_count=0 A
     AND e.idempotency_key NOT IN ('received:0','queued:0','queued:person_first') AND e.idempotency_key NOT GLOB 'passed:*'
     AND e.idempotency_key NOT GLOB 'peer_batch_assigned:*')
   AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=i.inbox_item_id)
-  AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.inbox_item_id=i.inbox_item_id))`;
+  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.agent_id=i.agent_id AND a.turn_control_inbox_item_id=i.inbox_item_id))`;
 /**
  * A follow-up that was made blocked and has not been touched since: no claim, retry, dispatch, turn or turn control.
  * Nothing was ever sent to a provider for it, so no native work can be running for it. Alias `i`.
@@ -20,14 +20,14 @@ export const UNTOUCHED_BLOCKED_FOLLOW_UP_SQL = `(i.state='blocked' AND i.source_
   AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events e WHERE e.inbox_item_id=i.inbox_item_id
     AND e.idempotency_key NOT IN ('received:0','queued:0','task-continuation:0'))
   AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=i.inbox_item_id)
-  AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.inbox_item_id=i.inbox_item_id))`;
+  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.agent_id=i.agent_id AND a.turn_control_inbox_item_id=i.inbox_item_id))`;
 export const RECEIPT_METADATA_COLUMNS = "i.inbox_item_id,i.agent_id,i.room_id,i.source_message_id,i.fifo_sequence,i.state,i.attempt_count,i.action_id,i.reply_client_message_id,i.provider_turn_id,i.outcome,i.last_error,i.failure_code,i.blocked_by_inbox_item_id,i.next_attempt_at_ms,i.terminal_reason,i.created_at,i.updated_at,i.acknowledged_at";
-export const RECEIPT_SELECTION_SQL = `FROM supervised_agent_inbox i
+export const RECEIPT_SELECTION_SQL = `FROM inbox_items i
         LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
         WHERE i.agent_id=? AND (
           i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
           OR i.inbox_item_id IN (
-            SELECT inbox_item_id FROM supervised_agent_inbox
+            SELECT inbox_item_id FROM inbox_items
             WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
             ORDER BY fifo_sequence DESC LIMIT ?
           )
@@ -41,11 +41,11 @@ export const INBOX_READS = {
       THEN json_extract(i.activation_json,'$.task_continuity.kind') END AS follow_up_kind ${RECEIPT_SELECTION_SQL}`,
   receiptTimelines: `WITH selected_inbox AS (
           SELECT inbox_item_id,fifo_sequence
-          FROM supervised_agent_inbox
+          FROM inbox_items
           WHERE agent_id=? AND (
             state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
             OR inbox_item_id IN (
-              SELECT inbox_item_id FROM supervised_agent_inbox
+              SELECT inbox_item_id FROM inbox_items
               WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
               ORDER BY fifo_sequence DESC LIMIT ?
             )

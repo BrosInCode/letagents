@@ -24,21 +24,21 @@ export function cancelInterruptedSupervisedTurn(
   timestamp: string,
   expected?: { agent_id: string; room_id: string },
 ): Row | null {
-  const item = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+  const item = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
   if (!item) return null;
   if (expected && (item.agent_id !== expected.agent_id || item.room_id !== expected.room_id)) {
     throw new Error("Interrupted-turn settlement does not match the exact active delivery identity.");
   }
   if (!["pending", "dispatching", "awaiting_result", "result_recovery", "retryable", "blocked"].includes(String(item.state))) return item;
-  const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=?
+  const head = database.prepare(`SELECT inbox_item_id FROM inbox_items WHERE agent_id=?
     AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
     ORDER BY fifo_sequence LIMIT 1`).get(String(item.agent_id)) as Row | undefined;
   if (head?.inbox_item_id !== inboxItemId) throw new Error("Only the current FIFO head may change delivery state.");
   if (readDurableNativeFailure(database, inboxItemId)) {
-    run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_failed',
+    run(database.prepare(`UPDATE inbox_items SET state='acknowledged_failed',
       failure_code=NULL,blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
   } else {
-    run(database.prepare(`UPDATE supervised_agent_inbox
+    run(database.prepare(`UPDATE inbox_items
       SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
       WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
     const key = `user_cancelled:${item.fifo_sequence}`;
@@ -50,12 +50,12 @@ export function cancelInterruptedSupervisedTurn(
   settleSupervisedTerminalItem(database, { inboxItemId, agentId: String(item.agent_id),
     providerTurnId: item.provider_turn_id === null ? null : String(item.provider_turn_id) }, timestamp);
   pruneSupervisedAgentHistory(database, String(item.agent_id), () => timestamp);
-  return database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row;
+  return database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row;
 }
 
 /** Only the exact operational terminal journal may authorize failed settlement. */
 export function readDurableNativeFailure(database: DatabaseSync, inboxItemId: string): "failed" | "interrupted" | null {
-  const item = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+  const item = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
   if (!item) return null;
   let outcome: { kind?: unknown; text?: unknown; evidence?: unknown } | null = null;
   try { outcome = item.outcome ? JSON.parse(String(item.outcome)) : null; } catch { /* Invalid outcomes are not authority. */ }
@@ -107,7 +107,7 @@ export function settleCapturedExecutionAttempts(database: DatabaseSync, agentId:
     savepoint = true;
     const rows = database.prepare(`SELECT i.inbox_item_id,i.agent_id,i.room_id,i.source_message_id,i.fifo_sequence,
       i.state,i.provider_turn_id,i.outcome,i.terminal_reason,i.acknowledged_at,i.reply_client_message_id,a.attempt_id,a.created_at_ms
-      FROM supervised_agent_inbox i JOIN execution_message_attempts a
+      FROM inbox_items i JOIN execution_message_attempts a
         ON a.agent_id=i.agent_id AND a.room_id=i.room_id AND a.source_message_id=i.source_message_id
       WHERE i.agent_id=? AND a.state='active'
         AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_user')
@@ -154,7 +154,7 @@ function capturedReceiptConclusion(database: DatabaseSync, row: Row): "replied" 
   // Only typed lifecycle authority is admitted here.
   const binding = database.prepare(`SELECT b.origin_execution_generation_id,b.provider_continuation_id
     FROM supervised_agent_provider_turn_bindings b
-    JOIN execution_turns t ON t.attempt_id=? AND t.agent_id=b.agent_id AND t.room_id=b.room_id
+    JOIN runs t ON t.attempt_id=? AND t.agent_id=b.agent_id AND t.room_id=b.room_id
       AND t.execution_generation_id=b.origin_execution_generation_id
       AND t.provider_continuation_id=b.provider_continuation_id AND t.provider_turn_id=b.provider_turn_id
     JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
@@ -217,7 +217,7 @@ export function settleSupervisedTerminalItem(
     FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?`)
     .get(item.inboxItemId) as Row | undefined;
   if (!binding) return;
-  run(database.prepare(`UPDATE supervised_agent_effects
+  run(database.prepare(`UPDATE effects
     SET state='failed',error='The provider turn settled before this effect completed.',updated_at=?
     WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
       AND (state='prepared' OR (state='executing' AND mutation=0))
@@ -238,19 +238,19 @@ export function pruneSupervisedAgentHistory(
   now: () => string,
   protectedUncertainEffectId: string | null = null,
 ): void {
-  const compactableUncertain = database.prepare(`SELECT * FROM supervised_agent_effects
+  const compactableUncertain = database.prepare(`SELECT * FROM effects
     WHERE agent_id=? AND state='uncertain' AND effect_id NOT IN (
-      SELECT effect_id FROM supervised_agent_effects
+      SELECT effect_id FROM effects
       WHERE agent_id=? AND state='uncertain'
       ORDER BY CASE WHEN effect_id=? THEN 0 ELSE 1 END,updated_at DESC,effect_id DESC LIMIT ?
     ) ORDER BY updated_at,effect_id`).all(
     agentId, agentId, protectedUncertainEffectId, RETAINED_UNCERTAIN_EFFECTS_PER_AGENT,
   ) as Row[];
-  const insertTombstone = database.prepare(`INSERT INTO supervised_agent_effect_tombstones
+  const insertTombstone = database.prepare(`INSERT INTO effect_tombstones
     (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
      tool_name,request_sha256,request_bytes,mutation,state,result_json,error,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-  const deleteCompactedEffect = database.prepare("DELETE FROM supervised_agent_effects WHERE effect_id=? AND state='uncertain'");
+  const deleteCompactedEffect = database.prepare("DELETE FROM effects WHERE effect_id=? AND state='uncertain'");
   for (const effect of compactableUncertain) {
     const requestJson = String(effect.request_json);
     run(insertTombstone,
@@ -268,7 +268,7 @@ export function pruneSupervisedAgentHistory(
   // Do not independently evict compact identities while a binding survives;
   // doing so could make an already-crossed mutation executable again. If crash
   // repair or terminal receipt pruning removed the binding, deletion is safe.
-  run(database.prepare(`DELETE FROM supervised_agent_effect_tombstones AS t
+  run(database.prepare(`DELETE FROM effect_tombstones AS t
     WHERE t.agent_id=? AND NOT EXISTS (
       SELECT 1 FROM supervised_agent_provider_turn_bindings b
       WHERE b.agent_id=t.agent_id AND b.room_id=t.room_id
@@ -280,20 +280,14 @@ export function pruneSupervisedAgentHistory(
   // binding that validates those coordinates on reopen, so retention must keep
   // that row until a later control replaces the journal. Count the pin inside
   // the fixed receipt budget rather than growing history around it.
-  // A native drain also needs its exact admitted receipt after settlement to
-  // distinguish finished A from missing evidence; release that pin at its end.
   const pinnedTerminalCount = Number((database.prepare(`SELECT COUNT(*) AS count
-    FROM supervised_agent_inbox i
+    FROM inbox_items i
     WHERE i.agent_id=?
       AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
       AND ((${PENDING_PEER_REPORT_SQL}) OR EXISTS (
-        SELECT 1 FROM turn_control_journals j
-        WHERE j.agent_id=i.agent_id AND j.turn_control_present=1
-          AND j.inbox_item_id=i.inbox_item_id
-      ) OR EXISTS (
-        SELECT 1 FROM execution_cutover_v2 c
-        WHERE c.agent_id=i.agent_id AND c.admitted_inbox_item_id=i.inbox_item_id
-          AND c.phase NOT IN ('complete','cancelled','failed')
+        SELECT 1 FROM agents a
+        WHERE a.agent_id=i.agent_id
+          AND a.turn_control_inbox_item_id=i.inbox_item_id
       ))`).get(agentId) as Row).count);
   const retainedUnpinnedReceipts = Math.max(
     0,
@@ -301,23 +295,18 @@ export function pruneSupervisedAgentHistory(
   );
   const stale = database.prepare(`SELECT i.inbox_item_id,i.provider_turn_id,i.room_id,i.source_message_id,
       b.origin_execution_generation_id
-    FROM supervised_agent_inbox i
+    FROM inbox_items i
     LEFT JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
     WHERE i.agent_id=?
       AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
       AND NOT (${PENDING_PEER_REPORT_SQL})
       AND NOT EXISTS (
-        SELECT 1 FROM turn_control_journals j
-        WHERE j.agent_id=i.agent_id AND j.turn_control_present=1
-          AND j.inbox_item_id=i.inbox_item_id
+        SELECT 1 FROM agents a
+        WHERE a.agent_id=i.agent_id
+          AND a.turn_control_inbox_item_id=i.inbox_item_id
       )
       AND NOT EXISTS (
-        SELECT 1 FROM execution_cutover_v2 c
-        WHERE c.agent_id=i.agent_id AND c.admitted_inbox_item_id=i.inbox_item_id
-          AND c.phase NOT IN ('complete','cancelled','failed')
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM supervised_agent_effects e
+        SELECT 1 FROM effects e
         WHERE e.agent_id=i.agent_id AND e.provider_turn_id=i.provider_turn_id
           AND (b.origin_execution_generation_id IS NULL
             OR e.execution_generation_id=b.origin_execution_generation_id)
@@ -335,12 +324,12 @@ export function pruneSupervisedAgentHistory(
           AND m.phase NOT IN ('active','failed')
       )
     ORDER BY i.fifo_sequence DESC LIMIT -1 OFFSET ?`).all(agentId, retainedUnpinnedReceipts) as Row[];
-  const deleteEffects = database.prepare(`DELETE FROM supervised_agent_effects
+  const deleteEffects = database.prepare(`DELETE FROM effects
     WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
       AND state IN ('uncertain','completed','failed')`);
-  const deleteEffectTombstones = database.prepare(`DELETE FROM supervised_agent_effect_tombstones
+  const deleteEffectTombstones = database.prepare(`DELETE FROM effect_tombstones
     WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?`);
-  const deleteInbox = database.prepare("DELETE FROM supervised_agent_inbox WHERE inbox_item_id=?");
+  const deleteInbox = database.prepare("DELETE FROM inbox_items WHERE inbox_item_id=?");
   const prunedByRoom = new Map<string, string>();
   for (const row of stale) {
     if (!prunedByRoom.has(String(row.room_id))) {
@@ -365,7 +354,7 @@ export function pruneSupervisedAgentHistory(
     WHERE agent_id=? AND rowid NOT IN (
       SELECT rowid FROM supervised_agent_observed_messages
       WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
-    ) AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i
+    ) AND NOT EXISTS (SELECT 1 FROM inbox_items i
       WHERE i.agent_id=supervised_agent_observed_messages.agent_id
         AND i.room_id=supervised_agent_observed_messages.room_id
         AND i.source_message_id=supervised_agent_observed_messages.source_message_id
@@ -375,12 +364,12 @@ export function pruneSupervisedAgentHistory(
     WHERE agent_id=? AND rowid NOT IN (
       SELECT rowid FROM supervised_agent_observed_messages
       WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
-    ) AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i
+    ) AND NOT EXISTS (SELECT 1 FROM inbox_items i
       WHERE i.agent_id=supervised_agent_observed_messages.agent_id
         AND i.room_id=supervised_agent_observed_messages.room_id
         AND i.source_message_id=supervised_agent_observed_messages.source_message_id
         AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user'))`), agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT);
-  const rooms = database.prepare(`SELECT DISTINCT room_id FROM supervised_agent_inbox WHERE agent_id=?
+  const rooms = database.prepare(`SELECT DISTINCT room_id FROM inbox_items WHERE agent_id=?
     UNION SELECT DISTINCT room_id FROM supervised_agent_observed_messages WHERE agent_id=?`)
     .all(agentId, agentId) as Row[];
   for (const row of observedStale) {
@@ -414,7 +403,7 @@ export function compactSupervisedTerminalHistory(database: DatabaseSync, agentId
         AND ev.idempotency_key=('room_move_cancelled:' || m.operation_id || ':' || i.fifo_sequence)
         WHERE m.agent_id=i.agent_id AND m.source_room_id=i.room_id AND m.phase IN ('active','failed')
         ORDER BY ev.event_sequence DESC LIMIT 1) AS retained_move_key
-    FROM supervised_agent_inbox i
+    FROM inbox_items i
     LEFT JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
     WHERE i.agent_id=? AND (
       i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_user')
@@ -428,12 +417,10 @@ export function compactSupervisedTerminalHistory(database: DatabaseSync, agentId
         ON ev.inbox_item_id=i.inbox_item_id
         AND ev.idempotency_key=('room_move_cancelled:' || m.operation_id || ':' || i.fifo_sequence)
         WHERE m.agent_id=i.agent_id AND m.source_room_id=i.room_id AND m.phase NOT IN ('active','failed'))
-      AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.agent_id=i.agent_id
-        AND j.inbox_item_id=i.inbox_item_id AND j.turn_control_present=1
-        AND j.status NOT IN ('completed','failed'))
-      AND NOT EXISTS (SELECT 1 FROM execution_cutover_v2 c WHERE c.agent_id=i.agent_id
-        AND c.admitted_inbox_item_id=i.inbox_item_id AND c.phase NOT IN ('complete','cancelled','failed'))
-      AND NOT EXISTS (SELECT 1 FROM supervised_agent_effects e WHERE e.agent_id=i.agent_id
+      AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.agent_id=i.agent_id
+        AND a.turn_control_inbox_item_id=i.inbox_item_id
+        AND a.turn_control_status NOT IN ('completed','failed'))
+      AND NOT EXISTS (SELECT 1 FROM effects e WHERE e.agent_id=i.agent_id
         AND e.provider_turn_id=i.provider_turn_id
         AND (b.origin_execution_generation_id IS NULL OR e.execution_generation_id=b.origin_execution_generation_id)
         AND e.state IN ('prepared','executing'))
@@ -472,7 +459,7 @@ function updateHistoryBoundary(
     FROM supervised_agent_observed_messages WHERE agent_id=? AND room_id=? ORDER BY rowid LIMIT 1`)
     .get(agentId, roomId) as Row | undefined;
   const inbox = database.prepare(`SELECT source_message_id,fifo_sequence
-    FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? ORDER BY fifo_sequence LIMIT 1`)
+    FROM inbox_items WHERE agent_id=? AND room_id=? ORDER BY fifo_sequence LIMIT 1`)
     .get(agentId, roomId) as Row | undefined;
   const prior = database.prepare(`SELECT pruned_before_message_id,pruned_at
     FROM supervised_agent_history_boundaries WHERE agent_id=? AND room_id=?`)

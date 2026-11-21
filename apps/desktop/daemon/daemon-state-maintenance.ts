@@ -26,8 +26,12 @@ export async function compactDaemonStateDatabase(
   const pages = Number(database.prepare("PRAGMA page_count").get()!.page_count);
   const free = Number(database.prepare("PRAGMA freelist_count").get()!.freelist_count);
   if (free * pageSize < MIN_RECLAIM_BYTES || free < pages / 4) {
-    const pending = database.prepare("SELECT reason FROM migration_failures WHERE migration_key='state-space-maintenance'").get();
-    if (pending?.reason === "checkpoint_busy" || pending?.reason === "checkpoint_failed") {
+    const pendingRow = database.prepare("SELECT value_json FROM daemon_maintenance_state WHERE key='state-space-maintenance'").get() as { value_json?: unknown } | undefined;
+    let pendingReason: unknown;
+    if (pendingRow && typeof pendingRow.value_json === "string") {
+      try { pendingReason = (JSON.parse(pendingRow.value_json) as { reason?: unknown }).reason; } catch { /* ignore */ }
+    }
+    if (pendingReason === "checkpoint_busy" || pendingReason === "checkpoint_failed") {
       await assertCurrent();
       return reclaimWal(database);
     }

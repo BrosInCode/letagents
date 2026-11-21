@@ -1600,7 +1600,7 @@ export function executionRecord(agent: Awaited<ReturnType<typeof codexDaemonFixt
     boundaries: () => agent.read<{ operation_id: string; runtime_generation_id: string; phase: string; mode: string; observer_json: string | null; provider_ref_json: string }>(
       "SELECT operation_id,runtime_generation_id,phase,mode,observer_json,provider_ref_json FROM agent_runtime_recoveries WHERE agent_id=? ORDER BY created_at,operation_id"),
     turns: () => agent.read<{ provider_turn_id: string; state: string }>(
-      "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"),
+      "SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"),
     notices: async () => ((await agent.request("manifest.list")).result[0].activity as Array<{ kind: string; summary: string }>)
       .filter((event) => event.kind === "launch_notice").map((event) => event.summary),
   };

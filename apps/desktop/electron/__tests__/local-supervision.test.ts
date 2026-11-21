@@ -580,7 +580,7 @@ test("daemon restart restores local authority and the unread cursor without clou
     permission_profile_id: "read_only", delivery_mode: "daemon_inbox", created_by: "test", created_at: new Date().toISOString(),
   };
   const store = new ManifestStore(paths.manifestPath);
-  await store.write(0, [entry]); await store.close();
+  await store.write([entry]); await store.close();
   let daemon = new SupervisorDaemon(paths, "darwin");
   try {
     await daemon.start();

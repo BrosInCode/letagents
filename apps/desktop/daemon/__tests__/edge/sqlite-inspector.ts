@@ -47,7 +47,7 @@ export class EdgeSqliteInspector {
 
   inboxItems(agentId: string): SqliteRow[] {
     return this.all(
-      "SELECT * FROM supervised_agent_inbox WHERE agent_id = ? ORDER BY fifo_sequence ASC",
+      "SELECT * FROM inbox_items WHERE agent_id = ? ORDER BY fifo_sequence ASC",
       agentId,
     );
   }
@@ -66,39 +66,43 @@ export class EdgeSqliteInspector {
     );
   }
 
+  agent(agentId: string): SqliteRow | undefined {
+    return this.get("SELECT * FROM agents WHERE agent_id = ?", agentId);
+  }
+
   runtimeDeployment(agentId: string): SqliteRow | undefined {
-    return this.get(
-      "SELECT * FROM runtime_deployments WHERE agent_id = ?",
-      agentId,
-    );
+    return this.agent(agentId);
   }
 
   lifecycleState(agentId: string): SqliteRow | undefined {
     return this.get(
-      "SELECT * FROM agent_lifecycle_states WHERE agent_id = ?",
+      "SELECT agent_id, condition, last_error, observed_state, desired_state FROM agents WHERE agent_id = ?",
       agentId,
     );
   }
 
   reconciliationRecord(agentId: string): SqliteRow | undefined {
-    return this.get(
-      "SELECT * FROM reconciliation_records WHERE agent_id = ?",
+    const row = this.get<{ reconciliation_json: string | null }>(
+      "SELECT reconciliation_json FROM agents WHERE agent_id = ?",
       agentId,
     );
+    if (!row?.reconciliation_json) return undefined;
+    return JSON.parse(row.reconciliation_json) as SqliteRow;
   }
 
   reconciliationExitTimestamps(agentId: string): number[] {
-    return this.all<{ timestamp_ms: number }>(
-      "SELECT timestamp_ms FROM reconciliation_exit_timestamps WHERE agent_id = ? ORDER BY sort_order ASC",
-      agentId,
-    ).map((row) => Number(row.timestamp_ms));
+    const record = this.reconciliationRecord(agentId);
+    const exits = record?.exit_timestamps_ms;
+    return Array.isArray(exits) ? exits.map(Number) : [];
   }
 
   turnControlJournal(agentId: string): SqliteRow | undefined {
-    return this.get(
-      "SELECT * FROM turn_control_journals WHERE agent_id = ?",
+    const row = this.get<{ turn_control_json: string | null }>(
+      "SELECT turn_control_json FROM agents WHERE agent_id = ?",
       agentId,
     );
+    if (!row?.turn_control_json) return undefined;
+    return JSON.parse(row.turn_control_json) as SqliteRow;
   }
 
   approvalRequests(agentId: string): SqliteRow[] {
@@ -110,7 +114,7 @@ export class EdgeSqliteInspector {
 
   executionTurns(agentId: string): SqliteRow[] {
     return this.all(
-      "SELECT * FROM execution_turns WHERE agent_id = ? ORDER BY rowid ASC",
+      "SELECT * FROM runs WHERE agent_id = ? ORDER BY rowid ASC",
       agentId,
     );
   }

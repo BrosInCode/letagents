@@ -313,7 +313,7 @@ test("delegation lifecycle eagerly starts, wakes, and fences approval publicatio
     changed: (entryId: string) => { events.push(`publication:changed:${entryId}`); },
     close: () => { events.push("publication:closed"); },
   };
-  t.mock.method(ExecutionApprovalPublisher, "open", () => {
+  t.mock.method(ExecutionApprovalPublisher, "attach", () => {
     events.push("publication:opened");
     return publisher as unknown as ExecutionApprovalPublisher;
   });
@@ -335,7 +335,7 @@ test("delegation lifecycle eagerly starts, wakes, and fences approval publicatio
       getExecutionDelegationDecision: async () => null,
     },
     approvalPublication: {
-      path: "state.sqlite", custody: { hostGrant: () => null, workerAuthorization: () => null },
+      database: () => ({}) as never, custody: { hostGrant: () => null, workerAuthorization: () => null },
       inbox: { get: async () => null }, daemonGeneration: () => 7, isClosing: () => false, assertCurrent: async () => {},
     },
     requestConvergence: () => {}, diagnostic: () => {},

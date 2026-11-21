@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { applyExecutionStorageSchema, migrateExecutionStorageV20ToV21, migrateExecutionStorageV21ToV22,
-  migrateExecutionStorageV22ToV23, migrateExecutionStorageV24ToV25, validateExecutionStorageSchema } from "../execution-storage-schema.js";
+import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 
 type Values = Record<string, string | number | null>;
 const digest = "a".repeat(64);
@@ -41,7 +40,7 @@ function attemptGeneration(db: DatabaseSync, extra: Values = {}): void {
   });
 }
 function turn(db: DatabaseSync, extra: Values = {}): void {
-  insert(db, "execution_turns", {
+  insert(db, "runs", {
     turn_id: "turn", attempt_id: "attempt", agent_id: "agent", room_id: "room", execution_generation_id: "generation",
     runtime_generation_id: "runtime",
     provider_continuation_id: "continuation", provider_turn_id: "native-turn", state: "active",
@@ -52,7 +51,10 @@ function seed(db: DatabaseSync): void { runtime(db); attempt(db); attemptGenerat
 function fact(db: DatabaseSync, extra: Values = {}): void {
   insert(db, "execution_facts", {
     fact_id: "fact", agent_id: "agent", execution_generation_id: "generation", turn_id: "turn",
-    runtime_generation_id: "runtime", observer_epoch: 1,
+    runtime_generation_id: "runtime",
+    observer_execution_generation_id: extra.execution_generation_id ?? "generation",
+    observer_runtime_generation_id: extra.runtime_generation_id ?? "runtime",
+    observer_epoch: 1,
     source_sequence: Number(db.prepare("SELECT COALESCE(MAX(source_sequence),0)+1 AS next FROM execution_facts").get()?.next),
     execution_id: "execution", domain: "execution", kind: "completed", operation: "command",
     outcome: "succeeded", side_effects: "none", observed_at_ms: 101, ...extra,
@@ -82,30 +84,23 @@ function decision(db: DatabaseSync, extra: Values = {}): void {
     decision: "allow_once", source: "host", actor_id: "owner", dispatch_state: "not_dispatched", decided_at_ms: 110, ...extra,
   });
 }
-function cutover(db: DatabaseSync, extra: Values = {}): void {
-  insert(db, "execution_cutover_v2", {
-    operation_id: "cutover", request_id: "cutover-request", agent_id: "agent", execution_generation_id: "generation",
-    from_mode: "mcp_polling", to_mode: "daemon_inbox", strategy: "drain", phase: "prepared",
-    created_at_ms: 100, updated_at_ms: 100, ...extra,
-  });
-}
 
 test("schema is additive, empty, idempotent, and reserves only the bounded projection JSON slot", () => {
   const db = fixture();
   try {
-    db.exec("PRAGMA user_version=17; BEGIN IMMEDIATE");
+    db.exec("PRAGMA user_version=1; BEGIN IMMEDIATE");
     applyExecutionStorageSchema(db);
     validateExecutionStorageSchema(db);
-    assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 17);
-    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'execution_%'").all() as Array<{ name: string }>;
-    assert.equal(tables.length, 16);
+    assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 1);
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'execution_%' OR name='runs')").all() as Array<{ name: string }>;
+    assert.equal(tables.length, 14);
     for (const { name } of tables) {
       assert.equal((db.prepare(`SELECT COUNT(*) AS count FROM ${name}`).get() as { count: number }).count, 0);
       const columns = db.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string }>;
       assert.ok(columns.every(({ name }) => !/payload|output_text|command_text|reason|path|token|secret|_json$/.test(name)
         || name === "reason" || (name === "projection_json" && name.includes("projection"))), name);
       const foreign = db.prepare(`PRAGMA foreign_key_list(${name})`).all() as Array<{ table: string }>;
-      assert.ok(foreign.every(({ table }) => table.startsWith("execution_")), name);
+      assert.ok(foreign.every(({ table }) => table.startsWith("execution_") || table === "runs"), name);
     }
     runtime(db);
     db.exec("ROLLBACK");
@@ -113,16 +108,10 @@ test("schema is additive, empty, idempotent, and reserves only the bounded proje
   } finally { db.close(); }
 });
 
-test("approval projection storage is additive, exact-request-owned, immutable, and cascading", () => {
-  const db = new DatabaseSync(":memory:");
+test("approval projection storage is exact-request-owned, immutable, and cascading", () => {
+  const db = fixture();
   try {
-    db.exec("PRAGMA foreign_keys=ON");
-    applyExecutionStorageSchema(db, 24);
     seed(db); request(db);
-    assert.throws(() => migrateExecutionStorageV24ToV25(db), /requires a transaction/);
-    db.exec("BEGIN IMMEDIATE");
-    migrateExecutionStorageV24ToV25(db);
-    db.exec("COMMIT");
     const projection = JSON.stringify({ version: 1, category: "file_change", path_scope: "workspace_relative", changes: [],
       totals: { file_count: 0, added_lines: 0, removed_lines: 0, diff_bytes: 0 } });
     insert(db, "execution_approval_projections", {
@@ -140,97 +129,7 @@ test("approval projection storage is additive, exact-request-owned, immutable, a
     }), /CHECK/);
     db.exec("DELETE FROM execution_approval_requests WHERE request_id='request'");
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_approval_projections").get()?.count, 0);
-    validateExecutionStorageSchema(db, 25);
-  } finally { db.close(); }
-});
-
-test("lifecycle dispositions are final, fact-owned, and historical migration never replays effects", () => {
-  const db = new DatabaseSync(":memory:");
-  try {
-    db.exec("PRAGMA foreign_keys=ON");
-    applyExecutionStorageSchema(db, 21);
-    seed(db);
-    insert(db, "execution_facts", {
-      fact_id: "historical-active", agent_id: "agent", execution_generation_id: "generation",
-      runtime_generation_id: "runtime", observer_epoch: 1, source_sequence: 1, turn_id: "turn",
-      domain: "turn", kind: "state_changed", state: "active", side_effects: "none", observed_at_ms: 101,
-    });
-    assert.throws(() => migrateExecutionStorageV21ToV22(db), /requires a transaction/);
-    db.exec("BEGIN IMMEDIATE");
-    migrateExecutionStorageV21ToV22(db);
-    db.exec("COMMIT");
-    assert.deepEqual({ ...db.prepare(`SELECT effect_kind,state,observer_runtime_generation_id,disposed_at_ms
-      FROM execution_lifecycle_effects WHERE fact_id='historical-active'`).get() }, {
-      effect_kind: "manifest_working", state: "superseded", observer_runtime_generation_id: null, disposed_at_ms: 101,
-    });
-    assert.throws(() => db.exec("UPDATE execution_lifecycle_effects SET state='applied'"), /final/);
-    db.exec("DELETE FROM execution_facts WHERE fact_id='historical-active'");
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects").get()?.count, 0,
-      "fact compaction cascades its disposition");
-    validateExecutionStorageSchema(db, 22);
-  } finally { db.close(); }
-});
-
-test("runtime-failure effect storage migration preserves every prior disposition", () => {
-  const db = new DatabaseSync(":memory:");
-  try {
-    db.exec("PRAGMA foreign_keys=ON");
-    applyExecutionStorageSchema(db, 22);
-    seed(db);
-    for (const [index, state] of ["pending", "shadowed", "applied", "superseded"].entries()) {
-      const factId = `fact-${state}`;
-      insert(db, "execution_facts", {
-        fact_id: factId, agent_id: "agent", execution_generation_id: "generation",
-        runtime_generation_id: "runtime", observer_epoch: 1, source_sequence: index + 1, turn_id: "turn",
-        domain: "turn", kind: "state_changed", state: index % 2 ? "terminal" : "active",
-        side_effects: "none", observed_at_ms: 101 + index,
-      });
-      const factSequence = Number(db.prepare("SELECT sequence FROM execution_facts WHERE fact_id=?").get(factId)?.sequence);
-      insert(db, "execution_lifecycle_effects", {
-        fact_id: factId, fact_sequence: factSequence, agent_id: "agent",
-        observer_execution_generation_id: state === "pending" ? "generation" : null,
-        observer_runtime_generation_id: state === "pending" ? "runtime" : null,
-        observer_epoch: 1, subject_authority_mode: "typed",
-        observer_authority_mode: state === "pending" ? "typed" : null,
-        effect_kind: index % 2 ? "manifest_idle" : "manifest_working", state,
-        created_at_ms: 110 + index, disposed_at_ms: state === "pending" ? null : 120 + index,
-      });
-    }
-    const before = db.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all();
-    assert.throws(() => migrateExecutionStorageV22ToV23(db), /requires a transaction/);
-    db.exec("CREATE TRIGGER unexpected_lifecycle_extension AFTER INSERT ON execution_lifecycle_effects BEGIN SELECT 1; END; BEGIN IMMEDIATE");
-    assert.throws(() => migrateExecutionStorageV22ToV23(db), /Unexpected lifecycle effect storage dependency/);
-    db.exec("ROLLBACK; DROP TRIGGER unexpected_lifecycle_extension");
-    db.exec("BEGIN IMMEDIATE");
-    migrateExecutionStorageV22ToV23(db);
-    db.exec("COMMIT");
-    assert.deepEqual(db.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all(), before);
-    assert.match(String(db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_lifecycle_effects'").get()?.sql), /'manifest_failed'/);
-    assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
-    db.exec("DELETE FROM execution_facts WHERE fact_id='fact-applied'");
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects WHERE fact_id='fact-applied'").get()?.count, 0);
-    validateExecutionStorageSchema(db, 23);
-  } finally { db.close(); }
-});
-
-test("predecessor repair settles missing dispositions even when the physical journal is already current", () => {
-  const db = new DatabaseSync(":memory:");
-  try {
-    db.exec("PRAGMA foreign_keys=ON");
-    applyExecutionStorageSchema(db, 23);
-    seed(db);
-    insert(db, "execution_facts", {
-      fact_id: "unsettled-active", agent_id: "agent", execution_generation_id: "generation",
-      runtime_generation_id: "runtime", observer_epoch: 1, source_sequence: 1, turn_id: "turn",
-      domain: "turn", kind: "state_changed", state: "active", side_effects: "none", observed_at_ms: 101,
-    });
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects").get()?.count, 0);
-    db.exec("BEGIN IMMEDIATE");
-    migrateExecutionStorageV21ToV22(db);
-    db.exec("COMMIT");
-    const effect = db.prepare("SELECT effect_kind,state FROM execution_lifecycle_effects WHERE fact_id='unsettled-active'").get();
-    assert.deepEqual({ ...effect }, { effect_kind: "manifest_working", state: "superseded" });
-    validateExecutionStorageSchema(db, 23);
+    validateExecutionStorageSchema(db);
   } finally { db.close(); }
 });
 
@@ -256,14 +155,14 @@ test("separate state axes and exact turn ownership do not collapse tool failure 
     assert.throws(() => attemptGeneration(db, { execution_generation_id: "other-generation" }), /FOREIGN KEY/);
     assert.throws(() => turn(db, { turn_id: "wrong-room", room_id: "wrong", state: "none", provider_continuation_id: null, provider_turn_id: null }), /FOREIGN KEY/);
     assert.throws(() => turn(db, { turn_id: "overlap", provider_turn_id: "second-native-turn" }), /UNIQUE/);
-    assert.throws(() => db.exec("UPDATE execution_turns SET state='waiting_approval'"), /CHECK/);
+    assert.throws(() => db.exec("UPDATE runs SET state='waiting_approval'"), /CHECK/);
     db.exec("UPDATE execution_runtime_generations SET control_state='degraded'");
     fact(db, { outcome: "failed", exit_code: 1, side_effects: "possible" });
     assert.deepEqual({ ...db.prepare("SELECT runtime_state,control_state FROM execution_runtime_generations WHERE agent_id='agent'").get() },
       { runtime_state: "ready", control_state: "degraded" });
     assert.throws(() => db.exec("UPDATE execution_runtime_generations SET runtime_state='exited' WHERE agent_id='agent'"), /CHECK/);
     assert.throws(() => db.exec("UPDATE execution_runtime_generations SET authority_mode='invented'"), /CHECK/);
-    assert.equal(db.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE agent_id='agent'").get()?.authority_mode, "legacy");
+    assert.equal(db.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE agent_id='agent'").get()?.authority_mode, "typed");
   } finally { db.close(); }
 });
 
@@ -294,7 +193,7 @@ test("native lifetimes and observer ordering remain distinct from execution and 
     runtime(db, { runtime_generation_id: "second-runtime" });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_generations").get()?.count, 1);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_runtime_generations").get()?.count, 2);
-    db.exec("UPDATE execution_turns SET state='terminal',ended_at_ms=110 WHERE turn_id='turn'");
+    db.exec("UPDATE runs SET state='terminal',ended_at_ms=110 WHERE turn_id='turn'");
     turn(db, { turn_id: "second-turn", runtime_generation_id: "second-runtime" });
     fact(db, { source_sequence: 1, native_event_id: "native-event" });
     assert.throws(() => fact(db, { fact_id: "duplicate-source", source_sequence: 1 }), /UNIQUE/);
@@ -337,7 +236,7 @@ test("observer bindings fence subject and current observer lifetimes to the same
       assert.throws(() => insert(db, "execution_observers", { ...observer, ...invalid }), /CHECK/);
     }
     insert(db, "execution_observers", observer);
-    assert.equal(db.prepare("SELECT source_id FROM execution_observers").get()!.source_id, null, "unknown legacy source stays unknown");
+    assert.equal(db.prepare("SELECT source_id FROM execution_observers").get()!.source_id, null, "unset source starts null");
     const setSource = db.prepare("UPDATE execution_observers SET source_id=?");
     for (const source of ["", "a".repeat(513), " bad", "a b", "_bad", "a\n", "a\0hidden", "é", "a?b"]) {
       assert.throws(() => setSource.run(source), /CHECK/, JSON.stringify(source));
@@ -358,13 +257,13 @@ test("observer bindings fence subject and current observer lifetimes to the same
     assert.equal(sourceKeys[0].table, "execution_observers", "source memory must not pin old runtime generations");
     assert.equal(sourceKeys[0].on_delete, "NO ACTION");
     assert.throws(() => insert(db, "execution_observers", observer), /UNIQUE/);
-    assert.throws(() => db.exec("DELETE FROM execution_turns WHERE turn_id='turn'"), /FOREIGN KEY/);
+    assert.throws(() => db.exec("DELETE FROM runs WHERE turn_id='turn'"), /FOREIGN KEY/);
     db.exec("UPDATE execution_observers SET recovery_turn_id=NULL");
     validateExecutionStorageSchema(db);
   } finally { db.close(); }
 });
 
-test("v19 evidence fields are nullable for history and constrained to their fact domains", () => {
+test("evidence fields are nullable for history and constrained to their fact domains", () => {
   const db = fixture(); try {
     seed(db);
     const stateFact = { execution_id: null, kind: "state_changed", operation: null, outcome: null };
@@ -475,94 +374,13 @@ test("a same-room agent cannot borrow another agent's local delegation", () => {
   } finally { db.close(); }
 });
 
-test("cutover-v2 cannot overlap an unresolved operation; reverse is a distinct operation", () => {
-  const db = fixture(); try {
-    seed(db); cutover(db, { phase: "uncertain", strategy: "force", target_turn_id: "turn" });
-    assert.throws(() => cutover(db, { operation_id: "overlap", request_id: "overlap-request" }), /UNIQUE/);
-    db.exec("UPDATE execution_cutover_v2 SET phase='complete'");
-    cutover(db, { operation_id: "reverse", request_id: "reverse-request", predecessor_operation_id: "cutover", from_mode: "daemon_inbox", to_mode: "mcp_polling" });
-    db.exec("UPDATE execution_cutover_v2 SET phase='cancelled' WHERE operation_id='reverse'");
-    assert.throws(() => cutover(db, { operation_id: "no-target", request_id: "no-target-request", strategy: "force", phase: "dispatching" }), /CHECK/);
-    assert.throws(() => cutover(db, { operation_id: "wrong-predecessor", request_id: "wrong-predecessor-request", predecessor_operation_id: "missing-operation" }), /FOREIGN KEY/);
-    assert.throws(() => cutover(db, { operation_id: "no-change", request_id: "no-change-request", from_mode: "daemon_inbox" }), /CHECK/);
-    validateExecutionStorageSchema(db);
-  } finally { db.close(); }
-});
-
-test("native cutover identity is complete, immutable, and independent of optional activity rows", () => {
-  const db = fixture(); try {
-    const authority = {
-      authority_version: 1, room_id: "room", work_attempt_id: "work-attempt", provider: "codex",
-      native_continuation_id: "native-thread", native_connection_kind: "codex_app_server",
-      native_connection_sha256: digest, native_pid: 123, native_process_identity: "process-birth",
-    };
-    for (const key of Object.keys(authority)) {
-      assert.throws(() => cutover(db, { ...authority, [key]: null }), /CHECK/, `missing ${key}`);
-    }
-    for (const invalid of [
-      { authority_version: 2 }, { target_turn_id: "shadow-turn" },
-      { native_pid: 0 }, { native_connection_sha256: "short" }, { native_connection_sha256: "G".repeat(64) },
-      { provider: "claude-code" }, { native_connection_kind: "invented" },
-      { room_id: "" }, { work_attempt_id: " " }, { native_continuation_id: "" }, { native_process_identity: " " },
-      { native_target_turn_id: " " }, { admitted_inbox_item_id: "inbox" },
-    ]) assert.throws(() => cutover(db, { ...authority, ...invalid }), /CHECK/, JSON.stringify(invalid));
-    assert.throws(() => cutover(db, { native_target_turn_id: "native-turn" }), /CHECK/, "history cannot acquire native authority");
-    assert.throws(() => cutover(db, { ...authority, strategy: "force", phase: "dispatching" }), /CHECK/);
-    cutover(db, authority);
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_generations").get()!.count, 0);
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_turns").get()!.count, 0);
-    assert.deepEqual(db.prepare("PRAGMA foreign_key_list(execution_cutover_v2)").all().map((key) => key.table),
-      ["execution_cutover_v2", "execution_cutover_v2"], "only same-agent predecessor ownership remains");
-    for (const key of [...Object.keys(authority), "agent_id", "execution_generation_id", "request_id", "target_turn_id", "from_mode", "strategy", "admitted_action_id"]) {
-      assert.throws(() => db.exec(`UPDATE execution_cutover_v2 SET ${key}=${key}`), /new operation/, key);
-    }
-    db.exec("UPDATE execution_cutover_v2 SET phase='draining',native_target_turn_id='native-turn'");
-    db.exec("UPDATE execution_cutover_v2 SET native_target_turn_id='native-turn'");
-    assert.throws(() => db.exec("UPDATE execution_cutover_v2 SET native_target_turn_id='replacement'"), /cannot be replaced/);
-    assert.throws(() => db.exec("UPDATE execution_cutover_v2 SET native_target_turn_id=NULL"), /cannot be replaced/);
-    db.exec("UPDATE execution_cutover_v2 SET phase='complete'");
-    const admission = { admitted_inbox_item_id: "inbox-A", admitted_source_message_id: "message-A", admitted_action_id: "claim-A" };
-    for (const key of Object.keys(admission)) {
-      assert.throws(() => cutover(db, { ...authority, ...admission, [key]: null,
-        operation_id: "reverse", request_id: "reverse", from_mode: "daemon_inbox", to_mode: "mcp_polling" }), /CHECK/);
-    }
-    assert.throws(() => cutover(db, { ...authority, ...admission, operation_id: "wrong-lane", request_id: "wrong-lane" }), /CHECK/);
-    assert.throws(() => cutover(db, { ...authority, operation_id: "wrong-owner", request_id: "wrong-owner",
-      agent_id: "other-agent", predecessor_operation_id: "cutover" }), /FOREIGN KEY/);
-    cutover(db, { ...authority, ...admission, operation_id: "reverse", request_id: "reverse",
-      predecessor_operation_id: "cutover", from_mode: "daemon_inbox", to_mode: "mcp_polling",
-      strategy: "force", phase: "dispatching", native_target_turn_id: "native-turn" });
-    assert.throws(() => db.exec("UPDATE execution_cutover_v2 SET admitted_inbox_item_id='inbox-B' WHERE operation_id='reverse'"), /new operation/);
-    validateExecutionStorageSchema(db);
-  } finally { db.close(); }
-});
-
-test("cutover migration refuses unknown dependencies and requires an outer transaction", () => {
-  for (const extension of ["index", "trigger", "foreign-key"]) {
-    const db = new DatabaseSync(":memory:"); try {
-      db.exec("PRAGMA foreign_keys=ON");
-      applyExecutionStorageSchema(db, 20);
-      assert.throws(() => migrateExecutionStorageV20ToV21(db), /requires a transaction/);
-      if (extension === "index") db.exec("CREATE INDEX extra_cutover_index ON execution_cutover_v2(request_id)");
-      if (extension === "trigger") db.exec("CREATE TRIGGER extra_cutover_trigger AFTER INSERT ON execution_cutover_v2 BEGIN SELECT 1; END");
-      if (extension === "foreign-key") db.exec("CREATE TABLE extra_cutover_owner(operation_id TEXT REFERENCES execution_cutover_v2(operation_id))");
-      const before = db.prepare("SELECT name,sql FROM sqlite_master ORDER BY name").all();
-      db.exec("BEGIN IMMEDIATE");
-      assert.throws(() => migrateExecutionStorageV20ToV21(db), /Unexpected cutover storage dependency/, extension);
-      db.exec("ROLLBACK");
-      assert.deepEqual(db.prepare("SELECT name,sql FROM sqlite_master ORDER BY name").all(), before);
-      validateExecutionStorageSchema(db, 20);
-    } finally { db.close(); }
-  }
-});
-
 test("retention pins preserve owned evidence and compaction watermarks cannot regress", () => {
   const db = fixture(); try {
     seed(db); fact(db);
     assert.throws(() => insert(db, "execution_retention_pins", { pin_id: "wrong-agent", agent_id: "other", from_sequence: 1, reason: "active_turn", created_at_ms: 100 }), /FOREIGN KEY/);
     insert(db, "execution_retention_pins", { pin_id: "pin", agent_id: "agent", from_sequence: 1, reason: "uncertain_dispatch", created_at_ms: 100 });
     assert.throws(() => db.exec("DELETE FROM execution_facts"), /FOREIGN KEY/);
-    assert.throws(() => db.exec("DELETE FROM execution_turns"), /FOREIGN KEY/);
+    assert.throws(() => db.exec("DELETE FROM runs"), /FOREIGN KEY/);
     insert(db, "execution_retention_watermarks", { agent_id: "agent", compacted_through_sequence: 0, updated_at_ms: 100 });
     db.exec("DELETE FROM execution_retention_pins; DELETE FROM execution_facts; UPDATE execution_retention_watermarks SET compacted_through_sequence=1");
     assert.throws(() => db.exec("UPDATE execution_retention_watermarks SET compacted_through_sequence=0"), /cannot regress/);
@@ -574,9 +392,9 @@ test("reopen validation rejects weakened constraints, indexes, triggers and cros
   for (const corruption of ["index", "trigger", "check", "foreign-key"]) {
     const db = fixture(); try {
       seed(db);
-      if (corruption === "index") db.exec("DROP INDEX execution_cutover_one_unresolved");
+      if (corruption === "index") db.exec("DROP INDEX runs_one_active");
       if (corruption === "trigger") db.exec("DROP TRIGGER execution_approval_decision_immutable");
-      if (corruption === "check") db.exec("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql,'''legacy''','''LEGACY''') WHERE name='execution_runtime_generations'; PRAGMA writable_schema=OFF");
+      if (corruption === "check") db.exec("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql,'''typed''','''TYPED''') WHERE name='execution_runtime_generations'; PRAGMA writable_schema=OFF");
       if (corruption === "foreign-key") {
         db.exec("PRAGMA foreign_keys=OFF");
         fact(db, { agent_id: "other-agent" });

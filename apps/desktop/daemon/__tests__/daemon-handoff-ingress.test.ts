@@ -232,8 +232,8 @@ test("handoff destroys open control sockets and fences a mutation paused before 
   try {
     await first.start();
     const store = (first as unknown as { store: ManifestStore }).store;
-    const originalWrite = store.write.bind(store);
-    store.write = (expected, entries, commitFence) => originalWrite(expected, entries, async (commit) => {
+    const originalCreateEntry = store.createEntry.bind(store);
+    store.createEntry = (candidate, commitFence) => originalCreateEntry(candidate, async (commit) => {
       reachedCommit();
       await commitGate;
       if (commitFence) await commitFence(commit);
@@ -243,12 +243,14 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       entry: { ...entry, id: "must_not_commit_after_handoff" },
     }).catch(() => null);
     const bindingStore = (first as unknown as { workerBindings: WorkerBindingStore }).workerBindings;
-    const rawBindingStore = bindingStore as unknown as { write: (value: unknown) => Promise<void> };
-    const originalBindingWrite = rawBindingStore.write.bind(rawBindingStore);
-    rawBindingStore.write = async (value) => {
+    const rawBindingStore = bindingStore as unknown as {
+      transaction: <T>(database: unknown, operation: () => T, notification?: unknown) => Promise<T>;
+    };
+    const originalBindingTransaction = rawBindingStore.transaction.bind(rawBindingStore);
+    rawBindingStore.transaction = async (database, operation, notification) => {
       reachedBindingCommit();
       await bindingCommitGate;
-      await originalBindingWrite(value);
+      return originalBindingTransaction(database, operation, notification);
     };
     const lateBinding = bindingStore.bind({
       entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_old",

@@ -25,8 +25,6 @@ type ProviderCheckpointAuthority = {
   isHandoffScheduled: () => boolean;
   assertCurrent: () => Promise<void>;
   currentDaemonGeneration: () => number;
-  currentManifestGeneration: () => number;
-  acceptManifestGeneration: (generation: number) => void;
   fenceCommit: (commit: () => Promise<void>) => Promise<void>;
   fenceAdmittedTransitionCommit: (commit: () => Promise<void>) => Promise<void>;
 };
@@ -111,11 +109,12 @@ export class ProviderCheckpointCoordinator {
         throw new DaemonFenceLostError("Cursor prepared turn changed during daemon handoff.");
       }
       await this.authority.assertCurrent();
-      const current = await this.store.getEntry(agent.agentId);
+      const loaded = await this.store.getEntryWithVersion(agent.agentId);
+      const current = loaded?.entry;
       const live = this.liveHandles.get(agent.agentId);
       const binding = await this.bindings.get(agent.agentId);
       const currentCredential = binding ? await this.bindings.credentialFor(binding) : null;
-      if (!current
+      if (!current || !loaded
         || live !== agent.handle
         || current.room_id !== agent.roomId
         || current.desired_state !== "running"
@@ -148,7 +147,7 @@ export class ProviderCheckpointCoordinator {
       agent.handle.appliedConfigurationRevision = configurationRevision;
       try {
         const checkpoint = await this.store.checkpointCursorPreparedTurn(
-          this.authority.currentManifestGeneration(),
+          loaded.version,
           {
             agentId: agent.agentId,
             roomId: agent.roomId,
@@ -169,7 +168,6 @@ export class ProviderCheckpointCoordinator {
           },
           (commit) => this.authority.fenceCommit(commit),
         );
-        this.authority.acceptManifestGeneration(checkpoint.generation);
         agent.providerConnection = providerConnection;
         this.activateCommittedCursorRuntime?.({ entry: checkpoint.entry, handle: agent.handle,
           executionGenerationId: agent.executionGenerationId, authorityMode: checkpoint.authorityMode });
@@ -210,8 +208,6 @@ export class ProviderCheckpointCoordinator {
           && recoveredLive.workAttemptId === agent.workAttemptId
           && recoveredLive.providerContinuationId === providerContinuationId
           && sameProviderActionConnectionSnapshot(recoveredLive.providerConnection, providerConnection)) {
-          const manifest = await this.store.load();
-          this.authority.acceptManifestGeneration(manifest.generation);
           agent.providerConnection = providerConnection;
           const authorityMode = await this.store.readRuntimeLifecycleAuthority({
             agentId: agent.agentId,
@@ -268,7 +264,8 @@ export class ProviderCheckpointCoordinator {
         throw new DaemonFenceLostError("Cursor provider state changed during daemon handoff.");
       }
       await this.authority.assertCurrent();
-      const current = await this.store.getEntry(agent.agentId);
+      const loaded = await this.store.getEntryWithVersion(agent.agentId);
+      const current = loaded?.entry;
       const live = this.liveHandles.get(agent.agentId);
       const binding = await this.bindings.get(agent.agentId);
       const currentCredential = binding ? await this.bindings.credentialFor(binding) : null;
@@ -285,7 +282,7 @@ export class ProviderCheckpointCoordinator {
           providerConnection,
         ));
       const inbox = await this.inbox.get(inboxItemId);
-      if (!current || live !== agent.handle
+      if (!current || !loaded || live !== agent.handle
         || current.room_id !== agent.roomId
         || current.desired_state !== "running"
         || current.provider !== "cursor"
@@ -323,7 +320,7 @@ export class ProviderCheckpointCoordinator {
         if (current.provider_ref.provider_continuation_id !== providerContinuationId
           || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, providerConnection)) {
           const checkpoint = await this.store.checkpointCursorProviderState(
-            this.authority.currentManifestGeneration(),
+            loaded.version,
             {
               agentId: agent.agentId,
               roomId: agent.roomId,
@@ -344,7 +341,6 @@ export class ProviderCheckpointCoordinator {
               ? this.authority.fenceAdmittedTransitionCommit(commit)
               : this.authority.fenceCommit(commit),
           );
-          this.authority.acceptManifestGeneration(checkpoint.generation);
           committedEntry = checkpoint.entry;
         }
         this.activateCommittedCursorRuntime?.({ entry: committedEntry, handle: agent.handle,
@@ -413,8 +409,6 @@ export class ProviderCheckpointCoordinator {
             providerContinuationId,
             providerConnection,
           )) {
-          const manifest = await this.store.load();
-          this.authority.acceptManifestGeneration(manifest.generation);
           this.activateCommittedCursorRuntime?.({ entry: persisted, handle: agent.handle,
             executionGenerationId: agent.executionGenerationId,
             ...(isIdleCursorConnection(providerConnection) ? { authorityMode: null } : {}) });

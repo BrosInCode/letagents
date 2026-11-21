@@ -132,13 +132,13 @@ function harness(input: {
   workspaceIdentity?: TaskWorkAttempt["workspace_identity"];
 } = {}) {
   let manifestEntry = input.entry ?? baseEntry();
-  let manifestGeneration = 1;
+  let agentVersion = 1;
   let handoff = input.handoff ?? false;
   let controlEpoch = input.controlEpoch ?? 0;
   let frozenAuthorityMode: "legacy" | "typed_shadow" | "typed" | null =
     input.frozenAuthorityMode !== undefined
       ? input.frozenAuthorityMode
-      : manifestEntry.provider_ref?.provider_connection?.pid != null ? "legacy" : null;
+      : manifestEntry.provider_ref?.provider_connection?.pid != null ? "typed" : null;
   const liveHandles = new Map<string, ProviderActionHandle>();
   const installed: ProviderActionHandle[] = [];
   const stoppedDelivery: string[] = [];
@@ -159,8 +159,9 @@ function harness(input: {
     provider: port,
     store: {
       pendingRuntimeRecovery: async () => null,
-      load: async () => ({ generation: manifestGeneration, entries: [manifestEntry] }),
+      load: async () => ({ entries: [manifestEntry], versions: { [manifestEntry.id]: agentVersion } }),
       getEntry: async (entryId) => entryId === manifestEntry.id ? manifestEntry : undefined,
+      getEntryWithVersion: async (entryId) => entryId === manifestEntry.id ? { entry: manifestEntry, version: agentVersion } : undefined,
       getAgentConfiguration: async () => ({
         provider: manifestEntry.provider,
         model: manifestEntry.model,
@@ -171,35 +172,35 @@ function harness(input: {
         runtime_configuration_revision: 1,
       }),
       readRuntimeLifecycleAuthority: async () => frozenAuthorityMode,
-      checkpointProviderBirth: async (expectedGeneration, input, commitFence) => {
-        assert.equal(expectedGeneration, manifestGeneration);
+      checkpointProviderBirth: async (expectedVersion, input, commitFence) => {
+        assert.equal(expectedVersion, agentVersion);
         await commitFence(async () => {
           manifestEntry = input.entry;
-          manifestGeneration += 1;
+          agentVersion += 1;
         });
         if (input.providerConnection.pid !== null && frozenAuthorityMode === null) {
           frozenAuthorityMode = input.requestedAuthorityMode;
         }
         return {
-          generation: manifestGeneration,
+          version: agentVersion,
           entry: manifestEntry,
           authorityMode: input.providerConnection.pid === null
             ? null
             : frozenAuthorityMode,
         };
       },
-      replaceEntry: async (expectedGeneration, updated, commitFence) => {
-        assert.equal(expectedGeneration, manifestGeneration);
+      replaceEntry: async (expectedVersion, updated, commitFence) => {
+        assert.equal(expectedVersion, agentVersion);
         await commitFence(async () => {
           manifestEntry = updated;
-          manifestGeneration += 1;
+          agentVersion += 1;
         });
-        return { generation: manifestGeneration };
+        return { version: agentVersion };
       },
-      markRuntimeConfigurationApplied: async (expectedGeneration, _update, commitFence) => {
-        assert.equal(expectedGeneration, manifestGeneration);
-        await commitFence(async () => { manifestGeneration += 1; });
-        return { generation: manifestGeneration };
+      markRuntimeConfigurationApplied: async (expectedVersion, _update, commitFence) => {
+        assert.equal(expectedVersion, agentVersion);
+        await commitFence(async () => { agentVersion += 1; });
+        return { version: agentVersion };
       },
     },
     durability: {
@@ -273,8 +274,6 @@ function harness(input: {
     authority: {
       isHandoffScheduled: () => handoff,
       currentDaemonGeneration: () => 7,
-      currentManifestGeneration: () => manifestGeneration,
-      acceptManifestGeneration: (generation) => { manifestGeneration = generation; },
       assertCurrent: async () => {},
       ownsDaemonGeneration: async (generation) => !handoff && generation === 7,
       fenceCommit: async (commit) => {
@@ -291,7 +290,7 @@ function harness(input: {
     updateManifestEntry: async (_entryId, update) => {
       if (handoff) throw new (await import("../singleton.js")).DaemonFenceLostError("handoff");
       manifestEntry = update(manifestEntry);
-      manifestGeneration += 1;
+      agentVersion += 1;
       return manifestEntry;
     },
     transition: async (_entryId, observedState, condition, cause) => {
@@ -1801,12 +1800,12 @@ test("ordinary provider birth holds manifest mutation authority through generati
   let peerEntered = false;
   const peerMutation = runtime.options.authority.serializeManifestMutation(async () => {
     peerEntered = true;
-    const expectedGeneration = runtime.options.authority.currentManifestGeneration();
+    const before = (await runtime.options.store.getEntryWithVersion("agent-1"))?.version;
     await birthCommit;
     assert.equal(
-      runtime.options.authority.currentManifestGeneration(),
-      expectedGeneration,
-      "a peer manifest transition must not capture generation before provider birth commits",
+      (await runtime.options.store.getEntryWithVersion("agent-1"))?.version,
+      before,
+      "a peer manifest transition must not capture version before provider birth commits",
     );
   });
   await new Promise<void>((resolve) => setImmediate(resolve));
