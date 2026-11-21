@@ -12,7 +12,7 @@ import {
   requireSupportedClaudeCodeVersion,
   resolveClaudeCodeExecutable,
 } from "../main/agents/claude-code-version.js";
-import { clearProbeCache } from "../main/agents/provider-probe-cache.js";
+import { clearProbeCache } from "#provider-runtime/provider-probe-cache.js";
 import { writeFakeProvider } from "./platform.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
 

@@ -192,7 +192,7 @@ if (profile.updater) await writeFile(
   `${JSON.stringify(createDesktopUpdaterConfig({ arch: desktopArch, platform: process.platform }), null, 2)}\n`,
 );
 await mkdir(app, { recursive: true });
-for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
+for (const directory of ["dist-electron", "dist-daemon", "dist-provider-runtime", "dist-renderer"]) {
   await cp(join(root, directory), join(app, directory), { recursive: true });
 }
 // Protocol/domain contracts are repository-neutral, but compiled desktop
@@ -352,6 +352,7 @@ const requiredAppFiles = [
   "dist-electron/main/agents/open-model/runtime-launch.js",
   "dist-electron/main/agents/open-model/turn-results.js",
   "dist-electron/main/agents/open-model/types.js",
+  "dist-provider-runtime/provider-probe-cache.js",
   "dist-daemon/main.js",
   "dist-daemon/main/delivery.js",
   "dist-daemon/main/index.js",
