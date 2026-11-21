@@ -267,7 +267,9 @@ async function play() {
     }
     // runtime_exit, always the last entry.
     if (entry.requested) {
-      while (!stdinEnded && !ended) await nextEvent();
+      // The recording has no more traffic. A line that comes now is one Claude Code never got, and
+      // it fails at once: a stop signal that follows it must not hide it.
+      while (!outboundQueue.length && !stdinEnded && !ended) await nextEvent();
       if (ended) return;
       if (outboundQueue.length) {
         return fail(`${transcript.path}:${entry.line}: the daemon wrote a line after the end of the recording: ${outboundQueue[0].slice(0, 200)}`);

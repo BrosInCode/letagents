@@ -169,6 +169,24 @@ describe("the stand-in claude of the daemon edge tests", () => {
     assert.equal(readJson(join(planDir, "claim-1", "exit.json")).outcome, "mismatch");
   });
 
+  it("fails at once on a line that comes after the end of the recording, and a stop does not hide it", async () => {
+    const planDir = plan([ONE_TURN]);
+    const standIn = start(planDir, ["--session-id", SESSION]);
+    standIn.send(userLine("turn-a", "bootstrap"));
+    await standIn.next();
+    await standIn.next();
+    standIn.send(userLine("turn-b", "the recorded turn"));
+    await standIn.next();
+
+    // The recording ends here, and stdin stays open. One more prompt is one too many.
+    standIn.send(userLine("turn-c", "a turn the recording does not have"));
+    await waitForFile(join(planDir, "claim-1", "error.txt"));
+    standIn.child.kill("SIGTERM");
+    assert.deepEqual(await standIn.exit, { code: 70, signal: null });
+    assert.match(readFileSync(join(planDir, "claim-1", "error.txt"), "utf8"), /a line after the end of the recording/);
+    assert.equal(readJson(join(planDir, "claim-1", "exit.json")).outcome, "mismatch");
+  });
+
   it("gives a recorded control reply the request id of this run", async () => {
     const planDir = plan([[
       { type: "expect_outbound", frame: { type: "control_request", request_id: "<control-1>", request: { subtype: "interrupt" } } },
