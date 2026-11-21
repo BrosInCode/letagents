@@ -7,6 +7,7 @@
  * to match the new target shape, and bump DAEMON_STATE_SCHEMA_VERSION.
  */
 import { DatabaseSync } from "node:sqlite";
+import { applyEffectJournalSchema } from "../effect-journal/schema.js";
 import { applyApprovalRequestClosureSchema } from "../execution-approval-journal.js";
 import { applyExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
 import { applyExecutionStorageSchema } from "../execution-storage-schema.js";
@@ -27,11 +28,19 @@ import { assertDaemonStateVersionSupported } from "./version-gate.js";
 
 export type SchemaMigration = (database: DatabaseSync) => void;
 
+/** Schema v1 -> v2: introduces the unified external-effect journal and its version triggers. */
+export function migrateV1ToV2(database: DatabaseSync): void {
+  applyEffectJournalSchema(database);
+  applyAgentStateVersionSchema(database);
+}
+
 /**
  * Plain numbered migrations from schema v1 onward. Each entry upgrades from
  * version `N` to `N + 1` inside the caller's write transaction.
  */
-export const DAEMON_STATE_MIGRATIONS: Readonly<Record<number, SchemaMigration>> = {};
+export const DAEMON_STATE_MIGRATIONS: Readonly<Record<number, SchemaMigration>> = {
+  1: migrateV1ToV2,
+};
 
 type SchemaEntry = { type: string; name: string; tblName: string; sql: string };
 
@@ -570,7 +579,31 @@ export function applySchemaV1(database: DatabaseSync): void {
   applyAgentStateVersionSchema(database);
 }
 
+/**
+ * Applies the current daemon schema on an empty database by installing the
+ * immutable v1 baseline followed by every plain numbered migration through
+ * `SCHEMA_VERSION`. Fresh installs and migrated databases therefore share
+ * the exact same DDL by construction.
+ */
+export function applySchemaCurrent(database: DatabaseSync): void {
+  applySchemaV1(database);
+  runNumberedMigrations(database, 1, SCHEMA_VERSION);
+}
+
 /** Runs plain numbered migrations `fromVersion -> targetVersion` inside a transaction. */
+/**
+ * Runs plain numbered migrations (`v1 -> v2 -> ...`) inside the caller's
+ * active `BEGIN IMMEDIATE` transaction.
+ *
+ * Foreign-key hazard note: `DaemonStateSchema.createSchema` runs migrations
+ * inside `BEGIN IMMEDIATE` with `PRAGMA foreign_keys = ON`. SQLite ignores
+ * `PRAGMA foreign_keys = OFF` inside a transaction, so a migration that drops
+ * and recreates a parent table referenced by `ON DELETE CASCADE` (such as
+ * `agents`) would silently delete child rows. Keep migrations additive or
+ * drop-only for leaf tables; if a future migration must rebuild a parent table,
+ * toggle `PRAGMA foreign_keys = OFF` outside the transaction and verify
+ * `PRAGMA foreign_key_check` before restoring it.
+ */
 export function runNumberedMigrations(
   database: DatabaseSync,
   fromVersion: number,
@@ -590,7 +623,7 @@ function referenceSchema(): readonly SchemaEntry[] {
   const memory = new DatabaseSync(":memory:");
   try {
     memory.exec("PRAGMA foreign_keys = ON");
-    applySchemaV1(memory);
+    applySchemaCurrent(memory);
     memory.exec(`PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID}`);
     memory.exec(`PRAGMA user_version = ${toSqliteUserVersion(SCHEMA_VERSION)}`);
     cachedReferenceSchema = readSchemaEntries(memory);
@@ -648,7 +681,7 @@ export class DaemonStateSchema {
       // or migrating between the unlocked read above and acquiring BEGIN IMMEDIATE.
       const lockedVersion = assertDaemonStateVersionSupported(database);
       if (lockedVersion === 0) {
-        applySchemaV1(database);
+        applySchemaCurrent(database);
         this.schemaInitializationHook?.(database);
         database.exec(`PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID}`);
         database.exec(`PRAGMA user_version = ${toSqliteUserVersion(SCHEMA_VERSION)}`);
