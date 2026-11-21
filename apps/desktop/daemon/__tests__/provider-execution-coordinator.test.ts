@@ -3270,7 +3270,7 @@ test("a terminal record without a witnessed process death never lets a replaceme
     signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }>;
     launches: () => number;
     timers: number[];
-  }) => Promise<void>) => {
+  }) => Promise<void>, recordedBirth: { processIdentity?: string | null } = { processIdentity: birth }) => {
     let identity: string | null | undefined = birth;
     let dieOn: NodeJS.Signals | null = null;
     const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
@@ -3286,7 +3286,7 @@ test("a terminal record without a witnessed process death never lets a replaceme
     let launches = 0;
     const entry: DaemonManifestEntry = { ...baseEntry(), observed_state: "idle", provider_ref: {
       work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
-      provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:9201", pid, processIdentity: birth },
+      provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:9201", pid, ...recordedBirth },
     } };
     const runtime = harness({ entry, provider: provider({
       capabilities: async (...args) => ({ ...await router.capabilities(...args), resume: false }),
@@ -3358,6 +3358,51 @@ test("a terminal record without a witnessed process death never lets a replaceme
     assert.equal(launches(), 0);
     assert.equal(runtime.entry().condition, "coordination_blocked");
   });
+
+  // The reference has a process id and no recorded birth. No process can be matched to it, so it is
+  // never signalled and never treated as gone, whether or not a process has the id now.
+  for (const recorded of [{ processIdentity: null }, {}, { processIdentity: "  " }]) {
+    for (const osIdentity of [birth, null]) {
+      await scenario(async ({ runtime, coordinator, signals, launches, setIdentity, timers }) => {
+        setIdentity(osIdentity);
+        await coordinator.converge("agent-1");
+        assert.deepEqual(signals, [], "an incomplete reference is never signalled");
+        assert.equal(launches(), 0, "no replacement starts beside an incomplete process reference");
+        assert.equal(runtime.entry().observed_state, "recovering");
+        assert.equal(runtime.entry().condition, "coordination_blocked");
+        assert.deepEqual(timers, [60_000]);
+      }, recorded);
+    }
+  }
+});
+
+test("Stop of an entry whose ended generation has a process id and no recorded birth never reports stopped", async () => {
+  const protocolError: ExecutionTerminalPayload = {
+    ended_at: "2026-08-26T00:01:00.000Z", exit_code: null, signal: null, stdio_archive_ref: null, stdio_tail: "",
+    terminal_cause: "protocol_error", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation-1",
+  };
+  for (const recorded of [{ processIdentity: null }, {}] as Array<{ processIdentity?: string | null }>) {
+    let stopRefs = 0;
+    let attaches = 0;
+    const entry: DaemonManifestEntry = { ...baseEntry(), desired_state: "stopped", observed_state: "idle", provider_ref: {
+      work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+      provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:9401", pid: 9401, ...recorded },
+    } };
+    const runtime = harness({ entry, provider: provider({
+      attach: async () => { attaches++; return null; },
+      stopRef: async () => { stopRefs++; throw new Error("must not be called"); },
+    }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: { ...protocolError } });
+    let fenceReleases = 0;
+    runtime.options.durability.releaseTerminalExecutionFence = async () => { fenceReleases += 1; };
+    await assert.rejects(runtime.coordinator.converge("agent-1"),
+      (error: unknown) => error instanceof ProviderStopError && /no process birth/i.test(String(error.cause)));
+    assert.notEqual(runtime.entry().observed_state, "stopped");
+    assert.equal(stopRefs, 0, "an incomplete reference is never handed to a stop");
+    assert.equal(attaches, 0);
+    assert.equal(fenceReleases, 0);
+  }
 });
 
 test("Stop of a Codex entry never reports stopped while the process of its ended generation is not proven gone", async () => {

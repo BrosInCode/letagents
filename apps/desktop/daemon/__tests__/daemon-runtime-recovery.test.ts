@@ -1525,7 +1525,8 @@ test("definitive worker mint rejection attempts once and never schedules automat
   }
 });
 
-test("explicit runtime recovery never clears a Codex reference whose recorded process is not proven gone", async () => {
+async function recoverEndedCodexGeneration(recordedBirth: { processIdentity?: string | null }): Promise<void> {
+  const incomplete = typeof recordedBirth.processIdentity !== "string";
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
@@ -1545,7 +1546,7 @@ test("explicit runtime recovery never clears a Codex reference whose recorded pr
     terminal_cause: "protocol_error", actor: "daemon-provider", generation: 1, provider_continuation_id: "thread-unproven",
   });
   await durability.close();
-  const connection = { kind: "codex_app_server" as const, pid: 45551, processIdentity: "Mon Sep 14 15:50:00 2026", url: "ws://127.0.0.1:45551" };
+  const connection = { kind: "codex_app_server" as const, pid: 45551, url: "ws://127.0.0.1:45551", ...recordedBirth };
   let processAlive = true;
   const stopped: Array<{ pid: number | null | undefined; birth: string | null | undefined }> = [];
   const port: ProviderActionPort = {
@@ -1562,7 +1563,7 @@ test("explicit runtime recovery never clears a Codex reference whose recorded pr
       if (processAlive) throw new Error("Codex exact-reference stop has not yet proved the recorded process birth is gone.");
       return { endedAt: "2099-07-29T12:00:05.000Z", exitCode: null, signal: null, terminalCause: "stopped",
         providerContinuationId: "thread-unproven",
-        nativeRuntimeDeath: { kind: "codex_app_server", pid: connection.pid, processIdentity: connection.processIdentity } };
+        nativeRuntimeDeath: { kind: "codex_app_server", pid: connection.pid, processIdentity: String(connection.processIdentity) } };
     },
     onExit: async () => () => {},
     onStream: async () => () => {},
@@ -1593,9 +1594,19 @@ test("explicit runtime recovery never clears a Codex reference whose recorded pr
     const refused = await recover();
     assert.equal(refused.ok, false);
     assert.match(String(refused.error), /cannot prove that the previous provider process stopped/i);
-    assert.deepEqual(stopped, [{ pid: connection.pid, birth: connection.processIdentity }], "the exact recorded process is the one asked to stop");
-    assert.deepEqual((await listed()).provider_ref?.provider_connection, connection,
+    assert.deepEqual((await listed()).provider_ref?.provider_connection?.pid, connection.pid,
       "the reference to the process that may still run is kept, so a later pass can still find it");
+    if (incomplete) {
+      // A process id with no recorded birth matches no process: nothing is asked to stop, and a later try is refused too.
+      assert.deepEqual(stopped, [], "an incomplete reference is never handed to a stop");
+      processAlive = false;
+      assert.equal((await recover()).ok, false);
+      assert.deepEqual(stopped, []);
+      assert.equal((await listed()).provider_ref?.provider_connection?.pid, connection.pid);
+      return;
+    }
+    assert.deepEqual(stopped, [{ pid: connection.pid, birth: connection.processIdentity }], "the exact recorded process is the one asked to stop");
+    assert.deepEqual((await listed()).provider_ref?.provider_connection, connection);
 
     processAlive = false;
     const result = await recover();
@@ -1608,4 +1619,13 @@ test("explicit runtime recovery never clears a Codex reference whose recorded pr
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
+}
+
+test("explicit runtime recovery never clears a Codex reference whose recorded process is not proven gone", async () => {
+  await recoverEndedCodexGeneration({ processIdentity: "Mon Sep 14 15:50:00 2026" });
+});
+
+test("explicit runtime recovery never clears a reference that has a process id and no recorded birth", async () => {
+  await recoverEndedCodexGeneration({ processIdentity: null });
+  await recoverEndedCodexGeneration({});
 });

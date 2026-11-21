@@ -91,6 +91,21 @@ function turnInFlight(head: Pick<SupervisedInboxItem, "state" | "provider_turn_i
     || (head.state === "pending" && Boolean(head.provider_turn_id) && !head.outcome));
 }
 const UNATTACHABLE_GENERATION_CAUSE = "durable execution generation remains live without an attachable provider handle";
+const INCOMPLETE_PROCESS_REF_ERROR = "The recorded provider process has a process id and no process birth, so its absence cannot be proved.";
+/**
+ * A reference with no process id names no process (a Cursor lane between
+ * turns): there is nothing to prove. A process id with no recorded birth is an
+ * incomplete reference: no process can be matched to it, so it is never
+ * signalled and never treated as gone.
+ */
+function recordedProcessState(
+  connection: { pid?: number | null; processIdentity?: string | null } | null | undefined,
+): "none" | "exact" | "incomplete" {
+  if (!connection || connection.pid === null || connection.pid === undefined) return "none";
+  return Number.isSafeInteger(connection.pid) && connection.pid > 0
+    && typeof connection.processIdentity === "string" && connection.processIdentity.trim()
+    ? "exact" : "incomplete";
+}
 const UNPROVEN_PREDECESSOR_CAUSE = "the earlier provider process is not proven gone after its recorded end; no replacement starts until it is";
 
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
@@ -1546,15 +1561,17 @@ export class ProviderExecutionCoordinator {
   private async retireUnprovenPredecessor(entry: DaemonManifestEntry): Promise<boolean> {
     const ref = entry.provider_ref;
     const connection = ref?.provider_connection;
-    if (!ref || !connection || !Number.isSafeInteger(connection.pid) || !connection.processIdentity) return true;
+    const recorded = recordedProcessState(connection);
+    if (!ref || recorded === "none") return true;
     const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
     const execution = attempt.execution_generations.find(
       (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
     );
     if (!execution?.terminal || execution.terminal.native_runtime_death) return true;
-    const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
-    if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return true;
     try {
+      if (recorded === "incomplete") throw new Error(INCOMPLETE_PROCESS_REF_ERROR);
+      const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
+      if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return true;
       await this.options.provider.stopRef(await this.providerRef(entry), {
         actionId: `manifest:${entry.id}:retire-predecessor:${this.options.nowMs()}`,
       });
@@ -2307,13 +2324,14 @@ export class ProviderExecutionCoordinator {
     entry: DaemonManifestEntry,
     ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
   ): Promise<boolean> {
-    const connection = ref.provider_connection;
-    if (!connection || !Number.isSafeInteger(connection.pid) || !connection.processIdentity) return false;
+    const recorded = recordedProcessState(ref.provider_connection);
+    if (recorded === "none") return false;
     const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
     const execution = attempt.execution_generations.find(
       (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
     );
     if (!execution?.terminal || execution.terminal.native_runtime_death) return false;
+    if (recorded === "incomplete") throw new Error(INCOMPLETE_PROCESS_REF_ERROR);
     const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
     if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return false;
     await this.stopUnattachedExactRef(entry, ref, true);
