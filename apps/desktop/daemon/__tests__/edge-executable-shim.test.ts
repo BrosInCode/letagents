@@ -348,6 +348,7 @@ test("unreadable native helper info (commandLine: null or access denied) fails c
     pgid: 4242,
     command: "",
     image: "C:\\Program Files\\nodejs\\node.exe",
+    helperExited: false,
     commandLineUnreadable: true,
   });
 

@@ -364,6 +364,8 @@ export interface ProcessSnapshotEntry {
   command: string;
   /** Optional executable image path for diagnostics only (never substituted into `command`). */
   image?: string;
+  /** Helper-reported `exited` flag for diagnostics when `commandLineUnreadable` is true. */
+  helperExited?: boolean | null;
   /** Set when OS/helper reported the process alive without a readable command line. */
   commandLineUnreadable?: boolean;
 }
@@ -562,13 +564,14 @@ export function parseWindowsHelperInfoResult(
   }
   const ppid = typeof parsed.parentPid === "number" && Number.isInteger(parsed.parentPid) ? parsed.parentPid : 0;
   const image = typeof parsed.image === "string" && parsed.image.length > 0 ? parsed.image : undefined;
+  const helperExited = typeof parsed.exited === "boolean" ? parsed.exited : null;
   if (typeof parsed.commandLine !== "string" || parsed.commandLine.length === 0) {
     if ((options.required || options.owned) && !options.deferUnreadableThrow) {
       throw new Error(
-        `letagents-process-tree.exe info ${pid} returned unreadable commandLine for live tracked/required process${image ? ` (${image})` : ""}.`,
+        `letagents-process-tree.exe info ${pid} returned unreadable commandLine for live tracked/required process (ppid=${ppid}, tracked=${Boolean(options.owned || options.required)}, alive=${isPidAlive(pid)}, exited=${String(helperExited)}${image ? `, image=${image}` : ""}).`,
       );
     }
-    return { pid, ppid, pgid: pid, command: "", ...(image ? { image } : {}), commandLineUnreadable: true };
+    return { pid, ppid, pgid: pid, command: "", ...(image ? { image } : {}), helperExited, commandLineUnreadable: true };
   }
   return { pid, ppid, pgid: pid, command: parsed.commandLine, ...(image ? { image } : {}) };
 }
@@ -589,8 +592,8 @@ export function queryWindowsHelperInfoWithSettle(
     sleep?: (ms: number) => void;
   } = {},
 ): ProcessSnapshotEntry | null {
-  const maxRetries = options.maxUnreadableRetries ?? 3;
-  const retryDelayMs = options.retryDelayMs ?? 120;
+  const maxRetries = options.maxUnreadableRetries ?? 20;
+  const retryDelayMs = options.retryDelayMs ?? 100;
   const sleep = options.sleep ?? sleepSync;
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     const isFinalAttempt = attempt === maxRetries;
@@ -612,13 +615,14 @@ export function queryWindowsHelperInfoWithSettle(
 function queryWindowsHelperProcessInfo(
   helperPath: string,
   pid: number,
-  options: { required?: boolean; owned?: boolean } = {},
+  options: { required?: boolean; owned?: boolean; onLaunch?: () => void } = {},
 ): ProcessSnapshotEntry | null {
   return queryWindowsHelperInfoWithSettle(
     pid,
     () =>
       execWithTimeoutRetry(
         () => {
+          options.onLaunch?.();
           const result = spawnSync(helperPath, ["info", String(pid)], {
             encoding: "utf8",
             timeout: 10_000,
@@ -656,10 +660,10 @@ export function listOsProcesses(extraPids?: Iterable<number>): ProcessSnapshotEn
         let helperCalls = 0;
         for (const candidate of candidates) {
           inspectedPids.add(candidate.pid);
-          helperCalls += 1;
           const info = queryWindowsHelperProcessInfo(helperPath, candidate.pid, {
             required: candidate.pid === process.pid,
             owned: ownedPids.has(candidate.pid),
+            onLaunch: () => { helperCalls += 1; },
           });
           if (info) entries.push(info);
         }
@@ -667,8 +671,10 @@ export function listOsProcesses(extraPids?: Iterable<number>): ProcessSnapshotEn
         for (const pid of ownedPids) {
           if (inspectedPids.has(pid) || !isPidAlive(pid)) continue;
           inspectedPids.add(pid);
-          helperCalls += 1;
-          const info = queryWindowsHelperProcessInfo(helperPath, pid, { owned: true });
+          const info = queryWindowsHelperProcessInfo(helperPath, pid, {
+            owned: true,
+            onLaunch: () => { helperCalls += 1; },
+          });
           if (info) entries.push(info);
         }
         if (!entries.some((entry) => entry.pid === process.pid)) {
@@ -770,8 +776,12 @@ export function findProcessesReferencingPath(
   const processes = listProcesses(extraPids);
   const unreadable = processes.filter((entry) => entry.pid !== process.pid && entry.commandLineUnreadable);
   if (unreadable.length > 0) {
+    const trackedSet = new Set<number>(extraPids ?? []);
     const detail = unreadable
-      .map((entry) => `pid=${entry.pid} ppid=${entry.ppid}${entry.image ? ` image=${entry.image}` : ""}`)
+      .map(
+        (entry) =>
+          `pid=${entry.pid} ppid=${entry.ppid} tracked=${trackedSet.has(entry.pid)} alive=${isPidAlive(entry.pid)} exited=${String(entry.helperExited ?? null)}${entry.image ? ` image=${entry.image}` : ""}`,
+      )
       .join(", ");
     throw new Error(
       `OS process enumeration returned unreadable command line(s) for live process(es) (${detail}); cannot verify zero processes reference ${needle}.`,
@@ -1597,7 +1607,10 @@ export class EdgeDaemonHarness {
             ...(unreadableEntries.length > 0
               ? [
                   `unreadable commandLine pid(s): ${unreadableEntries
-                    .map((e) => `${e.pid}(ppid=${e.ppid}${e.image ? `,image=${e.image}` : ""})`)
+                    .map(
+                      (e) =>
+                        `${e.pid}(ppid=${e.ppid},tracked=${extraTrackedPids.has(e.pid)},alive=${isPidAlive(e.pid)},exited=${String(e.helperExited ?? null)}${e.image ? `,image=${e.image}` : ""})`,
+                    )
                     .join(", ")}`,
                 ]
               : []),
