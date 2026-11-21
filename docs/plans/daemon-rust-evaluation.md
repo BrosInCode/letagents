@@ -377,39 +377,65 @@ script is not in the repository.
    580 MB of it is in `projectionFromRow`
    (`daemon/manifest-store/projections.ts`). In full mode, it reads every
    activity event of an agent with its payload and parses the payload JSON.
-4. **Start-up reads the full manifest about ten times.** It makes 6 full
-   `ManifestStore.load()` calls and 891 `getEntry(id)` calls in full mode
-   (about 4 for each of the 218 agents):
+4. **Start-up reads the full manifest about ten times, and rewrites each
+   stopped agent once.** It makes 6 full `ManifestStore.load()` calls, about
+   1,090 `getEntry(id)` calls in full mode, and 218 `replaceEntry()` calls.
+   Each `replaceEntry()` comes from the convergence of a stopped agent
+   (`ManifestTransitionCoordinator.transitionOnce`). It deletes the agent's
+   rows, writes all of them again (all activity events too), and parses all
+   the payloads again. The first version of this trace logged only the reads,
+   so it did not see the rewrites. PR #2074 found them.
 
 | Caller | Calls | What it uses from the entries |
 |---|---|---|
-| `main/lifecycle.ts`, start: the manifest generation | 1 `load` | Only `generation`. `store.readGeneration()` already reads it alone |
+| `main/lifecycle.ts`, start: the manifest generation | 1 `load` | Only `generation`, but the full read checks that each stored payload parses before the upgrade marks a recovery backup valid. That check is needed only after an upgrade or a compaction |
 | `main/lifecycle.ts`, `restoreLocalRoomAuthorities` | 1 `load` | `id`, `room_id`, `local_room_id`, `desired_state`, `display_name`, `provider` |
 | `main/lifecycle.ts`, start of supervised delivery and of rehydration | 2 `load` | Only `id` |
 | `LifecycleAdministrationCoordinator.recoverEphemeralWorkspaces` | 1 `load` | Only the work attempt IDs |
-| `RuntimeRecoveryCoordinator.recoverTurnControls` | 1 `load` | Writes entries back, so it needs the full entry |
-| `SupervisedDeliveryLifecycleCoordinator.start` | 218 `getEntry` | Not checked |
-| `DeliveryCutoverExecutionCoordinator.drive` | 218 `getEntry` | Not checked |
-| `ProviderExecutionCoordinator.converge` | 218 `getEntry` | Not checked |
-| `ManifestTransitionCoordinator.transitionOnce` | 119 `getEntry` | Not checked |
-| `RuntimeConfigurationApplyCoordinator.refreshManaged` | 118 `getEntry` | Not checked |
+| `RuntimeRecoveryCoordinator.recoverTurnControls` | 1 `load`, 1 `write` | Only agents with an unresolved turn control. On a normal start there are none |
+| `ManifestTransitionCoordinator.transitionOnce` | 218 `getEntry`, 218 `replaceEntry` | Scalars and reconciliation. It changes only the state, lifecycle, readiness and reconciliation rows |
+| `SupervisedDeliveryLifecycleCoordinator`, `DeliveryCutoverExecutionCoordinator`, `ProviderExecutionCoordinator`, `RuntimeConfigurationApplyCoordinator`, `ProviderStreamCoordinator` | about 870 `getEntry` | Scalars only. Each write path reads the entry again in full mode before it writes |
 
-Two trials, made only in the local build output and then removed:
+### The fix, in two PRs
 
-| Trial | Allocated at start-up | Peak resident memory | JS heap in use, 3 s after the first answer |
+- **PR #2072** changes the four `load()` calls that use no activity to
+  summary mode. It is small, and it keeps the two other full reads.
+- **PR #2074**, stacked on PR #2072, removes the rest. A targeted SQL write
+  (`commitTransition`) replaces the 218 rewrites and changes only the rows
+  that a transition changes. The read-only `getEntry` callers read in summary
+  mode. Turn-control recovery reads only the agents that need it. The full
+  check in the upgrade step runs only when the start made a new backup or
+  compacted the database.
+
+Same seed and probe as above, three runs each:
+
+| Build | Allocated at start-up | Peak resident memory | After one forced full GC |
 |---|---|---|---|
-| No change | 725 MB | 363 to 409 MB | 119 MB |
-| `readGeneration()` for the generation, `load("summary")` for the four other `load` calls that do not use activity | 493 MB | 296 to 303 MB | 14 MB |
-| Upper bound: also every `getEntry` in summary mode (not a valid change, some callers may need activity) | 149 MB | 251 MB | 14 MB |
+| `staging` | 727 MB | 363 to 474 MB | 146 to 150 MB |
+| PR #2072 | 538 MB | 276 to 300 MB | 144 to 145 MB |
+| PR #2074 | 81 MB | 175 to 182 MB | 150 to 155 MB |
 
-Start-up time did not change in the trials (2.7 to 2.9 s). The cost grows with
-the activity payloads in the database, because each full read parses all of
-them again.
+The memory after a forced GC does not change, because the live data is the
+same. The gain is the garbage that start-up no longer makes. On this Mac,
+start-up time is about the same in the three builds (1.7 to 2.9 s; the first
+run is the slowest).
 
-The fix is small and has no effect on the wire contracts: the first trial
-row, plus a check of each `getEntry` caller in the table, so that a caller
-that does not use activity reads in summary mode. It does not depend on
-the language, and it belongs in its own PR with a test.
+Checks made on PR #2074 before this table was written:
+
+- The same 24 varied transitions, written through `replaceEntry()` on one
+  copy of the seed and through `commitTransition()` on another, give the same
+  rows in all 81 tables, and the same `load()` result in both modes. Only the
+  `agent_state_versions` counters differ: the old path moved them more,
+  because it deleted and wrote again rows that did not change. The new path
+  still moves `manifest_version` for each agent that changed.
+- The guarded reads in `projectionFromRow` give the same output. Each one was
+  already used only when the same flag was set.
+- No entry read in summary mode reaches a write. Each write path
+  (`updateManifestEntry`, `checkpointProviderBirth`) reads the entry again in
+  full mode.
+- One change in behavior: on a normal restart (no upgrade, no compaction), a
+  stored payload that does not parse no longer stops the start. The error
+  comes later, when code reads that agent's entry in full mode.
 
 ### How to run it again
 
