@@ -154,6 +154,18 @@ test("cross-process wire boundary rule rejects root and nested non-JSON-Schema t
     ["nested set in lazy", z.lazy(() => z.set(z.string()))],
     ["nested unknown in tuple", z.tuple([z.string(), z.unknown()])],
     ["nested custom in intersection", z.intersection(z.object({ a: z.string() }), z.object({ b: z.custom<object>(() => true) }))],
+    ["coerce string", z.coerce.string()],
+    ["coerce number", z.coerce.number()],
+    ["coerce boolean", z.coerce.boolean()],
+    ["nested coerce number", z.object({ count: z.coerce.number() })],
+    ["custom stringFormat predicate", z.stringFormat("opaque-check", (value) => value === "allowed")],
+    ["custom stringFormat hijacking standard name", z.stringFormat("email", (value) => value === "only@me")],
+    ["nested custom stringFormat regex", z.object({ tag: z.stringFormat("custom-rx", /^[a-z]+$/) })],
+    ["bigint literal", z.literal(1n)],
+    ["nested bigint literal", z.object({ n: z.literal(1n) })],
+    ["optional array element", z.array(z.string().optional())],
+    ["optional record value", z.record(z.string(), z.string().optional())],
+    ["optional tuple item", z.tuple([z.string().optional()])],
   ];
   for (const [label, schema] of unrepresentableSchemas) {
     assert.throws(
@@ -166,8 +178,12 @@ test("cross-process wire boundary rule rejects root and nested non-JSON-Schema t
     );
   }
 
+  // Known JSON-Schema-representable built-in formats and objects pass.
   const ok = toWireJsonSchema(z.strictObject({
-    id: z.string(),
+    id: z.string().regex(/^[a-z0-9_-]+$/),
+    email: z.email(),
+    uuid: z.uuid(),
+    at: z.iso.datetime(),
     count: z.number().int().min(0),
     meta: jsonRecordSchema,
     payload: jsonValueSchema,
@@ -175,6 +191,36 @@ test("cross-process wire boundary rule rejects root and nested non-JSON-Schema t
   }));
   assert.equal(ok.type, "object");
   assert.equal(ok.additionalProperties, false);
+});
+
+test("generated JSON Schema preserves runtime parity for plain objects, strict objects, and looseJsonObject", () => {
+  const doc = buildDaemonRpcContractDocument();
+
+  // Ordinary z.object request schemas accept forward-compatible extra JSON fields
+  // at runtime and must not emit additionalProperties: false in JSON Schema.
+  const withExtra = parseDaemonRpcParams("manifest.get_entry", {
+    entry_id: "agent_1",
+    future_field: true,
+  }) as Record<string, unknown>;
+  assert.equal(withExtra.entry_id, "agent_1");
+  assert.equal(withExtra.future_field, true);
+  assert.equal(doc.methods["manifest.get_entry"].params.additionalProperties, undefined);
+  // Extra fields on ordinary z.object requests still enforce plain JSON values.
+  assert.throws(
+    () => parseDaemonRpcParams("manifest.get_entry", { entry_id: "agent_1", future_field: new Date() }),
+    /Date/,
+  );
+
+  // Explicit z.strictObject schemas reject unknown fields at runtime and emit
+  // additionalProperties: false in the published document.
+  const strictSchema = z.strictObject({ id: z.string() });
+  assert.equal(strictSchema.safeParse({ id: "ok", extra: 1 }).success, false);
+  assert.equal(toWireJsonSchema(strictSchema).additionalProperties, false);
+  assert.equal(doc.$defs.NativeRuntimeDeath.additionalProperties, false);
+
+  // looseJsonObject emits additionalProperties constrained to JsonValue.
+  const manifestPutEntry = (doc.methods["manifest.put"].params.properties as Record<string, Record<string, unknown>>).entry;
+  assert.deepEqual(manifestPutEntry.additionalProperties, { $ref: "#/$defs/JsonValue" });
 });
 
 test("jsonValueSchema and jsonRecordSchema enforce plain JSON values recursively", () => {
@@ -228,8 +274,82 @@ test("jsonValueSchema and jsonRecordSchema enforce plain JSON values recursively
   assert.throws(() => assertPlainWireValue(cyclic), /circular reference/);
   assert.throws(() => assertPlainWireValue({ [Symbol("k")]: 1 }), /symbol keys/);
   const withGetter = {};
-  Object.defineProperty(withGetter, "computed", { enumerable: true, get: () => "x" });
+  let objectGetterCalled = false;
+  Object.defineProperty(withGetter, "computed", {
+    enumerable: true,
+    get: () => {
+      objectGetterCalled = true;
+      return "x";
+    },
+  });
   assert.throws(() => assertPlainWireValue(withGetter), /accessor/);
+  assert.throws(() => assertPlainWireValue({ nested: withGetter }), /accessor/);
+  assert.equal(objectGetterCalled, false, "object accessors must never be invoked");
+
+  // Array accessors, array subclasses, symbol keys on arrays, sparse arrays,
+  // extra properties, and enumerable/non-enumerable toJSON hooks are rejected
+  // at both root and nested positions without invoking accessors.
+  let arrayGetterCalled = false;
+  const arrayWithAccessor: unknown[] = [];
+  Object.defineProperty(arrayWithAccessor, 0, {
+    enumerable: true,
+    get: () => {
+      arrayGetterCalled = true;
+      return "x";
+    },
+  });
+  assert.throws(() => assertPlainWireValue(arrayWithAccessor), /accessor/);
+  assert.throws(() => assertPlainWireValue({ nested: arrayWithAccessor }), /accessor/);
+  assert.equal(arrayGetterCalled, false, "array index accessors must never be invoked");
+
+  class CustomArray extends Array<unknown> {}
+  const subArray = new CustomArray(1, 2);
+  assert.throws(() => assertPlainWireValue(subArray), /plain Array/);
+  assert.throws(() => assertPlainWireValue({ nested: subArray }), /plain Array/);
+
+  const arrayWithSymbol = [1];
+  Object.defineProperty(arrayWithSymbol, Symbol("cb"), { value: () => {}, enumerable: true });
+  assert.throws(() => assertPlainWireValue(arrayWithSymbol), /symbol keys/);
+  assert.throws(() => assertPlainWireValue({ nested: arrayWithSymbol }), /symbol keys/);
+
+  const arrayWithToJson = Object.assign([1], { toJSON: () => ({ changed: true }) });
+  assert.throws(() => assertPlainWireValue(arrayWithToJson), /extra property "toJSON"/);
+  assert.throws(() => assertPlainWireValue({ nested: arrayWithToJson }), /extra property "toJSON"/);
+
+  const arrayWithHiddenToJson = [1];
+  Object.defineProperty(arrayWithHiddenToJson, "toJSON", { value: () => ({ changed: true }), enumerable: false });
+  assert.throws(() => assertPlainWireValue(arrayWithHiddenToJson), /extra property "toJSON"/);
+  assert.throws(() => assertPlainWireValue({ nested: arrayWithHiddenToJson }), /extra property "toJSON"/);
+
+  const sparseArray: unknown[] = [];
+  sparseArray[2] = "x";
+  assert.throws(() => assertPlainWireValue(sparseArray), /sparse/);
+  assert.throws(() => assertPlainWireValue({ nested: sparseArray }), /sparse/);
+
+  const objectWithHiddenToJson: Record<string, unknown> = { ok: true };
+  Object.defineProperty(objectWithHiddenToJson, "toJSON", { value: () => ({ changed: true }), enumerable: false });
+  assert.throws(() => assertPlainWireValue(objectWithHiddenToJson), /non-enumerable/);
+  assert.throws(() => assertPlainWireValue({ nested: objectWithHiddenToJson }), /non-enumerable/);
+
+  const objectWithEnumerableToJson = { ok: true, toJSON: () => ({ changed: true }) };
+  assert.throws(() => assertPlainWireValue(objectWithEnumerableToJson), /unsupported type "function"/);
+  assert.throws(() => assertPlainWireValue({ nested: objectWithEnumerableToJson }), /unsupported type "function"/);
+
+  // Excessive nesting throws a clean wire error rather than overflowing the stack.
+  let deep: Record<string, unknown> = { leaf: true };
+  for (let i = 0; i < 20_000; i += 1) {
+    deep = { next: deep };
+  }
+  assert.throws(() => assertPlainWireValue(deep), /maximum nesting depth/);
+
+  // Optional allowUndefinedProperties permits optional TS object fields while still rejecting array undefineds.
+  assert.deepEqual(
+    assertPlainWireValue({ a: 1, opt: undefined }, { allowUndefinedProperties: true }),
+    { a: 1, opt: undefined },
+  );
+  assert.equal(isPlainWireValue({ a: 1, opt: undefined }, { allowUndefinedProperties: true }), true);
+  assert.equal(isPlainWireValue([1, undefined], { allowUndefinedProperties: true }), false);
+  assert.equal(isPlainWireValue({ a: 1, opt: undefined }), false);
   // Own "__proto__" properties are inspected by descriptor value, not prototype lookup.
   const ownProtoBad = JSON.parse('{"__proto__":{"nested":1}}') as Record<string, unknown>;
   Object.defineProperty(ownProtoBad, "__proto__", { enumerable: true, configurable: true, writable: true, value: { bad: new Date() } });

@@ -888,38 +888,10 @@ function formatParamIssueMessage(method: DaemonRpcMethod, issue: z.core.$ZodIssu
 }
 
 /**
- * Zod v4's `z.record` skips own `"__proto__"` keys when building parsed output.
- * Validate any own `"__proto__"` values explicitly against the plain wire-value
- * rule so non-JSON payloads cannot hide under `"__proto__"`, while preserving
- * the raw object for downstream security guards that reject smuggled keys.
- */
-function assertOwnProtoPropertiesArePlainJson(value: unknown, path: string): void {
-  const seen = new WeakSet<object>();
-  const walk = (candidate: unknown, currentPath: string): void => {
-    if (candidate === null || typeof candidate !== "object" || seen.has(candidate)) return;
-    seen.add(candidate);
-    if (Array.isArray(candidate)) {
-      for (let i = 0; i < candidate.length; i += 1) {
-        walk(candidate[i], `${currentPath}[${i}]`);
-      }
-      return;
-    }
-    for (const key of Object.keys(candidate)) {
-      const descriptor = Object.getOwnPropertyDescriptor(candidate, key);
-      if (!descriptor) continue;
-      if (key === "__proto__") {
-        assertPlainWireValue(descriptor.value, `${currentPath}.__proto__`);
-      }
-      walk(descriptor.value, `${currentPath}.${key}`);
-    }
-  };
-  walk(value, path);
-}
-
-/**
  * Validate and parse raw JSON request params against the single contract.
  * Throws a clean, caller-facing Error when params do not satisfy the method's
- * schema.
+ * schema or contain non-plain wire values (including on extra forward-compatible
+ * fields or own `"__proto__"` keys).
  */
 export function parseDaemonRpcParams<M extends DaemonRpcMethod>(
   method: M,
@@ -928,7 +900,9 @@ export function parseDaemonRpcParams<M extends DaemonRpcMethod>(
   const spec = DAEMON_RPC_METHODS[method];
   const parsed = spec.params.safeParse(rawParams);
   if (parsed.success) {
-    assertOwnProtoPropertiesArePlainJson(rawParams, method);
+    if (rawParams !== undefined) {
+      assertPlainWireValue(rawParams, { path: method, allowUndefinedProperties: true });
+    }
     return rawParams as DaemonRpcParsedParams<M>;
   }
 

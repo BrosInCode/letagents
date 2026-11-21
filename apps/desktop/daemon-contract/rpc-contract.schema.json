@@ -98,7 +98,6 @@
       ]
     },
     "DaemonActivityEvent": {
-      "additionalProperties": false,
       "properties": {
         "durable_payload_ref": {
           "type": [
@@ -161,7 +160,6 @@
       "type": "object"
     },
     "DaemonAgentConfigurationApplyResult": {
-      "additionalProperties": false,
       "properties": {
         "outcome": {
           "enum": [
@@ -182,7 +180,6 @@
     "DaemonAgentConfigurationUpdateResult": {
       "anyOf": [
         {
-          "additionalProperties": false,
           "properties": {
             "configuration": {
               "$ref": "#/$defs/DaemonAgentConfigurationView"
@@ -202,7 +199,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "error": {
               "type": "string"
@@ -221,7 +217,6 @@
       ]
     },
     "DaemonAgentConfigurationView": {
-      "additionalProperties": false,
       "properties": {
         "charter": {
           "type": "string"
@@ -346,7 +341,6 @@
       "type": "object"
     },
     "DaemonAgentStreamEvent": {
-      "additionalProperties": false,
       "properties": {
         "kind": {
           "type": "string"
@@ -386,7 +380,6 @@
       "type": "object"
     },
     "DaemonAttemptDetail": {
-      "additionalProperties": false,
       "properties": {
         "activity": {
           "items": {
@@ -450,7 +443,6 @@
       "type": "object"
     },
     "DaemonCapabilities": {
-      "additionalProperties": false,
       "properties": {
         "agent_activity_stream_v1": {
           "type": "boolean"
@@ -671,7 +663,6 @@
       "type": "object"
     },
     "DaemonManifestEntryView": {
-      "additionalProperties": false,
       "properties": {
         "activity": {
           "items": {
@@ -796,7 +787,6 @@
           ]
         },
         "native_liveness": {
-          "additionalProperties": false,
           "properties": {
             "detail": {
               "type": [
@@ -850,7 +840,6 @@
         "provider_progress": {
           "anyOf": [
             {
-              "additionalProperties": false,
               "properties": {
                 "startedAt": {
                   "type": "string"
@@ -946,7 +935,6 @@
         "runtime_recovery": {
           "anyOf": [
             {
-              "additionalProperties": false,
               "properties": {
                 "executionGenerationId": {
                   "type": "string"
@@ -1023,7 +1011,6 @@
           ]
         },
         "workplace_liveness": {
-          "additionalProperties": false,
           "properties": {
             "detail": {
               "type": [
@@ -1079,7 +1066,6 @@
     "DaemonProviderConnection": {
       "anyOf": [
         {
-          "additionalProperties": false,
           "properties": {
             "kind": {
               "const": "codex_app_server",
@@ -1115,7 +1101,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "kind": {
               "const": "claude_cli",
@@ -1147,7 +1132,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "kind": {
               "const": "cursor_cli",
@@ -1179,7 +1163,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "kind": {
               "const": "opencode_server",
@@ -1221,7 +1204,6 @@
       ]
     },
     "DaemonProviderRuntimeReference": {
-      "additionalProperties": false,
       "properties": {
         "execution_generation_id": {
           "type": "string"
@@ -1254,7 +1236,6 @@
     "DaemonPurgeAgentResult": {
       "anyOf": [
         {
-          "additionalProperties": false,
           "properties": {
             "outcome": {
               "const": "purged",
@@ -1270,7 +1251,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "agent_session_id": {
               "type": "string"
@@ -1296,7 +1276,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "operation_id": {
               "type": "string"
@@ -1318,7 +1297,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "error": {
               "type": "string"
@@ -1337,7 +1315,6 @@
       ]
     },
     "DaemonRequestEnvelope": {
-      "additionalProperties": false,
       "properties": {
         "id": {
           "type": "string"
@@ -1361,7 +1338,6 @@
       "type": "object"
     },
     "DaemonResponseEnvelope": {
-      "additionalProperties": false,
       "properties": {
         "error": {
           "type": "string"
@@ -1390,7 +1366,6 @@
     "DaemonRetireAgentResult": {
       "anyOf": [
         {
-          "additionalProperties": false,
           "properties": {
             "outcome": {
               "const": "retired",
@@ -1403,7 +1378,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "agent_session_id": {
               "type": "string"
@@ -1425,7 +1399,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "outcome": {
               "const": "revocation_required",
@@ -1443,7 +1416,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "error": {
               "type": "string"
@@ -1476,7 +1448,6 @@
       "type": "string"
     },
     "DaemonRoomMoveRecord": {
-      "additionalProperties": false,
       "properties": {
         "activating_inbox_item_id": {
           "type": [
@@ -1600,7 +1571,6 @@
       "type": "object"
     },
     "DaemonStateWatchChanges": {
-      "additionalProperties": false,
       "properties": {
         "complete": {
           "const": false,
@@ -1656,7 +1626,6 @@
       ]
     },
     "DaemonStateWatchSnapshot": {
-      "additionalProperties": false,
       "properties": {
         "daemon_generation": {
           "maximum": 9007199254740991,
@@ -1683,7 +1652,6 @@
       "type": "object"
     },
     "DaemonStatus": {
-      "additionalProperties": false,
       "properties": {
         "capabilities": {
           "$ref": "#/$defs/DaemonCapabilities"
@@ -1745,7 +1713,6 @@
       "type": "object"
     },
     "DaemonTurnControlEffect": {
-      "additionalProperties": false,
       "properties": {
         "action_id": {
           "type": "string"
@@ -1917,7 +1884,6 @@
       "type": "object"
     },
     "DaemonTurnControlResult": {
-      "additionalProperties": false,
       "properties": {
         "actionId": {
           "type": "string"
@@ -1984,7 +1950,6 @@
       "type": "object"
     },
     "DaemonWorkerBindingProjection": {
-      "additionalProperties": false,
       "properties": {
         "agent_session_id": {
           "type": "string"
@@ -2008,7 +1973,6 @@
       "type": "object"
     },
     "DeliveryAttention": {
-      "additionalProperties": false,
       "properties": {
         "blocked_since": {
           "type": "string"
@@ -2067,7 +2031,6 @@
       "type": "object"
     },
     "DeliveryReceipt": {
-      "additionalProperties": false,
       "properties": {
         "attempt_count": {
           "maximum": 9007199254740991,
@@ -2109,7 +2072,6 @@
           "type": "integer"
         },
         "follow_up": {
-          "additionalProperties": false,
           "properties": {
             "for_message_id": {
               "type": [
@@ -2137,7 +2099,6 @@
             "scheduled": {
               "anyOf": [
                 {
-                  "additionalProperties": false,
                   "properties": {
                     "at_ms": {
                       "maximum": 9007199254740991,
@@ -2238,7 +2199,6 @@
         },
         "timeline": {
           "items": {
-            "additionalProperties": false,
             "properties": {
               "detail": {
                 "type": [
@@ -2315,7 +2275,6 @@
       "type": "string"
     },
     "ExecutionGeneration": {
-      "additionalProperties": false,
       "properties": {
         "actor": {
           "type": "string"
@@ -2356,7 +2315,6 @@
       "type": "object"
     },
     "ExecutionTerminalPayload": {
-      "additionalProperties": false,
       "properties": {
         "actor": {
           "type": "string"
@@ -2772,7 +2730,6 @@
       ]
     },
     "LaunchProgressView": {
-      "additionalProperties": false,
       "properties": {
         "attempt": {
           "maximum": 9007199254740991,
@@ -2807,7 +2764,6 @@
         "failure": {
           "anyOf": [
             {
-              "additionalProperties": false,
               "properties": {
                 "action": {
                   "enum": [
@@ -2849,7 +2805,6 @@
         },
         "phases": {
           "items": {
-            "additionalProperties": false,
             "properties": {
               "ms": {
                 "anyOf": [
@@ -3064,7 +3019,6 @@
       "type": "object"
     },
     "ReconciliationNotice": {
-      "additionalProperties": false,
       "properties": {
         "at": {
           "type": "string"
@@ -3091,7 +3045,6 @@
       "type": "object"
     },
     "ReconciliationState": {
-      "additionalProperties": false,
       "properties": {
         "completed_action_ids": {
           "items": {
@@ -3130,7 +3083,6 @@
         "pending_action": {
           "anyOf": [
             {
-              "additionalProperties": false,
               "properties": {
                 "id": {
                   "type": "string"
@@ -3205,10 +3157,8 @@
       "type": "object"
     },
     "RoomAgentState": {
-      "additionalProperties": false,
       "properties": {
         "connection": {
-          "additionalProperties": false,
           "properties": {
             "detail": {
               "type": [
@@ -3239,7 +3189,6 @@
           "type": "object"
         },
         "inbox": {
-          "additionalProperties": false,
           "properties": {
             "blocked_by_message_id": {
               "type": [
@@ -3278,7 +3227,6 @@
           "type": "object"
         },
         "ingress": {
-          "additionalProperties": false,
           "properties": {
             "detail": {
               "type": [
@@ -3311,7 +3259,6 @@
           "type": "object"
         },
         "task": {
-          "additionalProperties": false,
           "properties": {
             "state": {
               "enum": [
@@ -3343,7 +3290,6 @@
           "type": "object"
         },
         "turn": {
-          "additionalProperties": false,
           "properties": {
             "detail": {
               "type": [
@@ -3482,7 +3428,6 @@
       "type": "object"
     },
     "RunningBackgroundCommand": {
-      "additionalProperties": false,
       "properties": {
         "command": {
           "type": "string"
@@ -3528,7 +3473,6 @@
       "type": "object"
     },
     "SupervisedPermissionProfile": {
-      "additionalProperties": false,
       "properties": {
         "description": {
           "type": "string"
@@ -3577,7 +3521,6 @@
       "type": "object"
     },
     "WorkAttemptCheckpoint": {
-      "additionalProperties": false,
       "properties": {
         "at": {
           "type": "string"
@@ -3786,7 +3729,6 @@
       "result": {
         "anyOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "apply": {
                 "type": "string"
@@ -3809,7 +3751,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "error": {
                 "type": "string"
@@ -3856,7 +3797,6 @@
       "result": {
         "anyOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "configuration": {
                 "$ref": "#/$defs/DaemonAgentConfigurationView"
@@ -3873,7 +3813,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "error": {
                 "type": "string"
@@ -3922,7 +3861,6 @@
       "result": {
         "anyOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "outcome": {
                 "enum": [
@@ -3939,7 +3877,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "error": {
                 "type": "string"
@@ -3965,7 +3902,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "id": {
             "type": "string"
@@ -3994,7 +3930,6 @@
       "params": {
         "anyOf": [
           {
-            "additionalProperties": false,
             "properties": {},
             "type": "object"
           },
@@ -4021,7 +3956,6 @@
       "params": {
         "anyOf": [
           {
-            "additionalProperties": false,
             "properties": {},
             "type": "object"
           },
@@ -4032,7 +3966,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "accepted": {
             "const": true,
@@ -4061,7 +3994,6 @@
       "params": {
         "anyOf": [
           {
-            "additionalProperties": false,
             "properties": {},
             "type": "object"
           },
@@ -4203,7 +4135,6 @@
       },
       "requiresLiveConnection": true,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "generation": {
             "maximum": 9007199254740991,
@@ -4239,7 +4170,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "desired_state": {
             "$ref": "#/$defs/DesiredState"
@@ -4262,7 +4192,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "applied": {
             "type": "boolean"
@@ -4289,7 +4218,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "action_id": {
             "type": "string"
@@ -4362,7 +4290,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "entry_id": {
             "minLength": 1,
@@ -4400,7 +4327,6 @@
       "params": {
         "anyOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "activity": {
                 "anyOf": [
@@ -4455,7 +4381,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "entry": {
             "additionalProperties": {
@@ -4545,7 +4470,6 @@
                 ]
               },
               "native_liveness": {
-                "additionalProperties": false,
                 "properties": {
                   "detail": {
                     "type": [
@@ -4695,7 +4619,6 @@
                 ]
               },
               "workplace_liveness": {
-                "additionalProperties": false,
                 "properties": {
                   "detail": {
                     "type": [
@@ -4756,7 +4679,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "action_id": {
             "type": "string"
@@ -4799,7 +4721,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "desired_state": {
             "$ref": "#/$defs/DesiredState"
@@ -4832,7 +4753,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "display_name": {
             "minLength": 1,
@@ -4867,7 +4787,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "detail": {
             "type": [
@@ -4911,7 +4830,6 @@
       "handoffLifecycle": true,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "after_daemon_generation": {
             "type": "number"
@@ -4946,7 +4864,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "maximum": 9007199254740991,
@@ -4993,7 +4910,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "maximum": 9007199254740991,
@@ -5032,7 +4948,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -5069,7 +4984,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -5101,7 +5015,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "type": "number"
@@ -5121,7 +5034,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "last_observed_message_id": {
             "type": [
@@ -5156,7 +5068,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -5196,7 +5107,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -5231,7 +5141,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -5260,7 +5169,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "checkpointed": {
             "const": true,
@@ -5292,7 +5200,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "maximum": 9007199254740991,
@@ -5333,7 +5240,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "type": "number"
@@ -5371,7 +5277,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "completed": {
             "const": true,
@@ -5395,7 +5300,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "maximum": 9007199254740991,
@@ -5458,7 +5362,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "maximum": 9007199254740991,
@@ -5493,7 +5396,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "entry_id": {
             "type": "string"
@@ -5531,7 +5433,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "maximum": 9007199254740991,
@@ -5573,7 +5474,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "maximum": 9007199254740991,
@@ -5616,7 +5516,6 @@
       "params": {
         "anyOf": [
           {
-            "additionalProperties": false,
             "properties": {},
             "type": "object"
           },
@@ -5666,7 +5565,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "agent_key": {
             "type": "string"
@@ -5737,7 +5635,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -5768,7 +5665,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "api_key": {
             "type": [
@@ -5805,7 +5701,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "status": {
             "enum": [
@@ -5832,7 +5727,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -5869,7 +5763,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "status": {
             "enum": [
@@ -5896,7 +5789,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "type": "number"
@@ -5952,7 +5844,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "maximum": 9007199254740991,
@@ -6001,7 +5892,6 @@
       "params": {
         "anyOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "daemon_generation": {
                 "maximum": 9007199254740991,
@@ -6031,7 +5921,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "daemon_generation": {
                 "maximum": 9007199254740991,
@@ -6207,7 +6096,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "entry": {
             "$ref": "#/$defs/DaemonManifestEntryView"
@@ -6235,7 +6123,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -6272,7 +6159,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "accepted": {
             "const": true,
@@ -6298,7 +6184,6 @@
       "params": {
         "anyOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "daemon_generation": {
                 "maximum": 9007199254740991,
@@ -6328,7 +6213,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "daemon_generation": {
                 "maximum": 9007199254740991,
@@ -6371,7 +6255,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -6408,7 +6291,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "accepted": {
             "const": true,
@@ -6432,7 +6314,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "maximum": 9007199254740991,
@@ -6479,7 +6360,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -6516,7 +6396,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "accepted": {
             "const": true,
@@ -6540,7 +6419,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "daemon_generation": {
             "maximum": 9007199254740991,
@@ -6561,7 +6439,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "status": {
             "enum": [
@@ -6588,7 +6465,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "configuration": {
             "$ref": "#/$defs/JsonRecord"
@@ -6633,7 +6509,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -6670,7 +6545,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "agent_session_id": {
             "type": "string"
@@ -6702,7 +6576,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "after_sequence": {
             "type": "number"
@@ -6721,7 +6594,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "dropped_events": {
             "maximum": 9007199254740991,
@@ -6771,7 +6643,6 @@
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
       "params": {
-        "additionalProperties": false,
         "properties": {
           "after_version": {
             "type": "number"
@@ -6790,7 +6661,6 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "additionalProperties": false,
         "properties": {
           "commands": {
             "items": {
