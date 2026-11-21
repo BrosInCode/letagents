@@ -1,6 +1,6 @@
 # Supervisor daemon: evaluation of a rewrite in Rust
 
-Status: **findings only, no product change**
+Status: **findings and a spike, no product change**
 
 This document records what a rewrite of the desktop supervisor daemon
 (`apps/desktop/daemon/`) in Rust would involve, and what it would give us.
@@ -26,9 +26,18 @@ same time the design changes quickly: 419 commits in 90 days, and the
 modern-daemon program is still removing modes and plans a new schema. A rewrite
 now aims at a target that moves.
 
+The spike in [Spike results](#spike-results-2026-11-21) supports this. For the
+same work on the same data, Rust used about the same CPU as TypeScript, because
+the cost is SQLite and JSON, and Node already runs both in native code. Rust's
+real gains were memory (5 MB idle, against 127 MB for the TypeScript daemon on
+an empty state folder) and start-up time. Those gains are real, but no user
+problem today depends on them.
+
+The spike also showed that a later move is possible. Rust read the v52
+database byte for byte as TypeScript does, and the two daemons' singleton locks
+exclude each other. So a staged hand-off between the implementations can work.
+
 Revisit when the conditions in [When to revisit](#when-to-revisit) are true.
-If we want numbers before that, do the small spike in
-[A spike that gives real numbers](#a-spike-that-gives-real-numbers).
 
 ## What the daemon is today
 
@@ -160,7 +169,8 @@ needs its own copy of each, and the copies must stay equal:
 
 | Possible gain | Size of the gain here |
 |---|---|
-| Less memory | Real but small. The daemon is 58 to 70 MB today. A Rust daemon could be 15 to 30 MB. If the adapters stay in a Node process, most of that saving goes away. |
+| Less memory | Real. Measured: the spike uses 5 MB idle. The TypeScript daemon uses 127 MB on an empty state folder, 58 MB in long use on one Mac, and 476 MB after it starts on a 38 MB database. If the adapters stay in a Node process, most of the saving goes away. |
+| Less CPU | None measured. For the same store-level work, Rust and TypeScript used the same CPU within 10% (see the spike results). |
 | No GC pauses, less allocation | PR #1882 measured 100 MB/s of allocation, but the cause was full re-reads and 4 MB JSON pushes. That PR fixed it in TypeScript. |
 | No event-loop stalls from SQLite | SQLite is synchronous in Rust too. The fix is the same in both languages: batches (PR #1668) and work off the main thread. Rust makes threads easier and safer. |
 | One program to ship | No gain. We ship the Electron program, and it already runs the daemon in Node mode. A Rust program is one more binary to sign and notarize on macOS. On Windows it is one more unsigned exe. |
@@ -209,21 +219,149 @@ Look at this again when most of these are true:
    GC pauses that delay stream events, or slow start-up.
 6. A second person on the team can review Rust.
 
-## A spike that gives real numbers
+## Spike results (2026-11-21)
 
-If we want numbers before we decide, a spike of one to two weeks can give them
-without risk to users. It ships nothing.
+The spike is in `spikes/rust-daemon/`, at the repository root. It is not built
+by CI and not shipped.
 
-1. A Rust program that opens the control socket (Unix socket only), takes the
-   singleton lock with the same file rules (`daemon/singleton.ts`), and answers
-   `daemon.negotiate`, `daemon.status`, `manifest.list` and `manifest.watch_state`.
-2. It opens a copy of a real v52 `daemon-state.sqlite` read-only and serves the
-   manifest from it.
-3. Run the edge harness `negotiate` and state-watch checks against it with
-   `LETAGENTS_EDGE_DAEMON_CMD`.
-4. Measure against the TypeScript daemon, with the same database of 218 entries:
-   resident memory, start-up time to `daemon_ready`, and CPU for 30 s of
-   `watch_state` with changes.
+### What the spike is
 
-If the spike shows a large gain on a problem that users have, write a plan for
-a staged move. Otherwise close the question.
+A Rust program (1,192 lines; `libc`, `rusqlite` with bundled SQLite and
+`serde_json`; 36 crates in `Cargo.lock`; a 2.4 MB binary). Each locked crate
+was published at least 14 days before the spike. Cargo does not do that by
+itself: it picked six indirect crates from the last 14 days (two of them from
+the same day), and the spike pins them back by hand. This is the gap in the
+supply-chain rules that "Costs and risks" names. The program:
+
+- takes the singleton lock as `daemon/singleton.ts` does on macOS
+  (`O_EXLOCK | O_NONBLOCK`, then the durable `daemon.lock.generation` counter);
+- opens `daemon-state.sqlite` with the same pragmas, requires WAL and refuses any
+  schema other than v52;
+- serves the control socket with the same framing, the 64 KiB cap, the protocol
+  version check and the same error texts;
+- answers five methods: `daemon.negotiate`, `daemon.status`, `manifest.list`,
+  `manifest.watch_state` (long poll, 150 ms coalescing, per-agent cache on
+  `agent_state_versions`, `changed_only`) and
+  `manifest.update_workplace_liveness` (one write, so that a watch has changes).
+
+`manifest.list` in the spike gives the stored entry
+(`ManifestStore.load`). The TypeScript daemon sends a derived view
+(`entriesWithDerivedLiveness`), which also needs live in-memory state: provider
+handles, credentials, delivery turns and inbox receipts. The spike has none of
+that state, so it does not make the view.
+
+The plan said "a copy of a real database" and "the edge harness". The spike used
+a synthetic database instead, so that no user data is in the measurements. It
+did not use the edge harness, because the harness is on `feat/modern-daemon`
+and its scenarios need providers.
+
+### Method
+
+- `bench/seed.ts` uses the real TypeScript stores to write 218 stopped agents in
+  12 rooms. Each agent has 40 activity events (every tenth has a 24 KB payload)
+  and 40 inbox receipts. Some agents have avatars, and 1 in 9 is failed, with a
+  reconciliation record, a terminal and a notice. The database is 38 MB. The
+  seed also saves what `ManifestStore.load` reads back, as the reference.
+- `bench/compare.mjs` starts each daemon on a fresh copy of that folder and uses
+  only the control socket, with one connection per request, as the desktop app
+  does. The TypeScript daemon is `dist-daemon/main.js` under the installed
+  Electron program in Node mode (Node 24.19.0, SQLite 3.53.3), as in production.
+- `bench/ts-store.ts` does the same store-level work as the spike, in-process,
+  on the real `ManifestStore`. This is the like-for-like test. It favors
+  TypeScript, because it has no socket and no request parsing.
+- `bench/lock-and-empty.mjs` measures the TypeScript daemon on an empty state
+  folder, and it tests the lock between the two implementations.
+- Host: Apple M5 Pro, 24 GB. One run of each. Expect some variation.
+
+### Parity
+
+| Check | Result |
+|---|---|
+| `manifest.list` summary, all 218 entries, against `ManifestStore.load("summary")` | Byte-identical JSON |
+| `manifest.list` full (24 MB), against `ManifestStore.load("full")` | Byte-identical JSON |
+| `daemon.status` keys | No TypeScript key is missing. The spike reports all delivery capabilities as `false` |
+| TypeScript daemon running, Rust daemon started on the same folder | Rust refuses: "A supervisor daemon already owns this host lock." |
+| Rust daemon running, TypeScript daemon started on the same folder | TypeScript refuses with the same message |
+
+The parity covers the branches that the seed uses. It does not cover provider
+references, turn-control records, `daemon_inbox` delivery, local rooms or
+image avatars. To match the TypeScript output, the spike needed its own copy of
+one shared module (`shared/agent-avatar.mjs`, 114 lines of Rust).
+
+### Black box: the two daemons over the socket
+
+| Measurement | Rust spike | TypeScript daemon |
+|---|---|---|
+| Start-up to the first `daemon.negotiate` answer (3 runs) | 24 to 26 ms | 2.8 to 4.7 s (625 to 665 ms on an empty folder) |
+| Resident memory, 5 s after start | 4.7 MB | 476 MB (127 MB on an empty folder) |
+| Idle CPU over 10 s | 0 | 0 |
+| `manifest.list` summary: p50, size, CPU for 30 calls | 20 ms, 1.1 MB, 0.48 s | 157 ms, 9.8 MB, 4.14 s |
+| `manifest.list` full: p50, size, CPU for 10 calls | 103 ms, 24 MB, 0.59 s | 245 ms, 33 MB, 1.98 s |
+| 30 s watch load: about 147 writes, a `changed_only` watcher, CPU | 0.54 s (1.8% of one core) | 3.36 s (11.2%) |
+| Watch: entries in each wake, bytes in each wake | 0.99, 7.8 KB | 1.00, 28 KB |
+| Peak resident memory during the run | 298 MB | 572 MB |
+
+These rows are not a language comparison. The TypeScript daemon does more work:
+its list and watch build the derived view for each entry, and the view is about
+nine times the stored data (9.8 MB against 1.1 MB). Its start-up also makes the
+encrypted backup, compacts and checks the database. The spike does none of
+these.
+
+### Like for like: the same store-level work
+
+| Work | TypeScript `ManifestStore`, in-process | Rust spike, over the socket |
+|---|---|---|
+| `manifest.list` summary, CPU for 30 calls | 0.49 s (p50 15.6 ms) | 0.48 s (p50 19.6 ms) |
+| `manifest.list` full, CPU for 10 calls | 0.66 s (p50 49 ms) | 0.59 s (p50 103 ms) |
+| 147 liveness writes, each with one state-watch read | 0.10 s | 0.54 s |
+| Resident memory after the reads | 571 MB | 295 MB |
+
+For the same work, the CPU is the same within about 10%. In both languages, the
+cost is SQLite and JSON, and Node already runs both in native code (`node:sqlite`
+is C, `JSON.stringify` is C++). The Rust write figure is higher because it also
+counts the socket, the request parsing, and the full entry (about 110 KB) that
+each write sends back. The Rust latencies include the time the test client takes
+to parse the reply, so compare CPU, not latency. In both languages the peak
+memory comes from holding the 24 MB full list as objects. A streaming encoder
+would remove it.
+
+### What the spike shows
+
+1. **CPU: no gain.** A Rust daemon would not make the daemon's work cheaper.
+2. **Memory and start-up: a real gain.** Idle memory drops from about 127 MB
+   (empty folder) to 5 MB, and start-up from about 0.6 s to 25 ms. Today no
+   user problem depends on either.
+3. **A staged move is possible.** The database is readable byte for byte,
+   and the singleton lock works across the two implementations. Both are
+   needed for a hand-off between them.
+4. **The port is mechanical but large.** Five methods at store level took
+   1,192 lines and one copied shared module. The view layer, the providers,
+   migrations, backup and the Windows pipe are not in the spike.
+
+### Two findings for the TypeScript daemon
+
+These are not about the language. Each can be a small task:
+
+- After start-up on the 38 MB database, the TypeScript daemon holds 476 MB,
+  against 127 MB on an empty folder. The cause is not traced yet. The start-up
+  backup and compaction are the first places to look
+  (`daemon/state-recovery-backup.ts`, `daemon/daemon-state-maintenance.ts`).
+- In summary mode, the derived view of `manifest.list` is 9.8 MB, while the
+  stored data is 1.1 MB. The inbox receipts in the view are the likely cause.
+
+### How to run it again
+
+From the repository root, with the dependencies installed and the daemon built
+(`npm run build`, then `npm --prefix apps/desktop run build:electron` and
+`npm --prefix apps/desktop run build:daemon`):
+
+```bash
+cargo build --release --manifest-path spikes/rust-daemon/Cargo.toml
+ELECTRON_RUN_AS_NODE=1 /Applications/LetAgents.app/Contents/MacOS/LetAgents --import tsx spikes/rust-daemon/bench/seed.ts spikes/rust-daemon/.run/seed/.letagents spikes/rust-daemon/.run/reference
+node spikes/rust-daemon/bench/compare.mjs 30
+ELECTRON_RUN_AS_NODE=1 /Applications/LetAgents.app/Contents/MacOS/LetAgents --import tsx spikes/rust-daemon/bench/ts-store.ts 147
+node spikes/rust-daemon/bench/lock-and-empty.mjs
+```
+
+The runs write to `spikes/rust-daemon/.run/`, which git ignores. Set
+`LETAGENTS_ELECTRON` to use another Electron program.

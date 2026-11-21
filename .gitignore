@@ -29,3 +29,7 @@ headless_cascade_test.mjs
 headless_opus_test.mjs
 headless_via_debugger.mjs
 node_modules
+
+# Rust daemon spike: build output and local benchmark runs
+spikes/rust-daemon/target/
+spikes/rust-daemon/.run/
