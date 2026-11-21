@@ -29,7 +29,7 @@ if (!existsSync(daemonEntry)) {
 // The harness gives the daemon an allowlisted environment only, so the settings
 // travel as `--import data:` code that sets them in the daemon process itself.
 const settings = {};
-for (const name of ["STALL_MS", "STALL_EVERY_MS", "STALL_JITTER_MS", "SLOW_SQLITE_MS"]) {
+for (const name of ["STALL_MS", "STALL_EVERY_MS", "STALL_JITTER_MS", "SLOW_SQLITE_MS", "SLOW_AFTER_MS", "SLOW_FOR_MS"]) {
   if (process.env[name] !== undefined) settings[name] = process.env[name];
 }
 const setSettings = `data:text/javascript,${encodeURIComponent(`Object.assign(process.env, ${JSON.stringify(settings)});`)}`;
