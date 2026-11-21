@@ -33,7 +33,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
       if (!this.maintenance) await this.hostApprovals.enroll(storage);
       this.manifestGeneration = await withProtectedStateUpgrade(this.stateDatabasePath, async () => {
         this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
-        return (await this.store.load()).generation;
+        return (await this.store.load()).generation; // Full: checks every payload parses before the backup is marked valid.
       }, storage, () => this.singleton.assertCurrent());
     } catch (error) {
       this.boardOwnershipActive = false;
@@ -77,7 +77,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     await this.roomMoves.reconcilePrepared();
     await this.lifecycleAdministration.recoverPreparedPurges();
     await this.lifecycleAdministration.recoverEphemeralWorkspaces();
-    await restoreLocalRoomAuthorities((await this.store.load()).entries, this.singleton.currentGeneration, this.workerRuntimeCustody);
+    await restoreLocalRoomAuthorities((await this.store.load("summary")).entries, this.singleton.currentGeneration, this.workerRuntimeCustody);
     await this.socket.start();
     // The bundled MCP runtime's integrity check reads its whole tree once per
     // daemon (over a minute on a fresh install behind an on-access scanner). It
@@ -85,14 +85,14 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     void this.providerPort?.verifyBundledRuntime?.().catch((error) => console.warn("[runtime_verify]", String(error)));
     // Images an earlier process staged for turns that have long ended.
     void this.roomTurnAttachments.sweep();
-    for (const entry of (await this.store.load()).entries) {
+    for (const entry of (await this.store.load("summary")).entries) { // Summary: these passes read no activity.
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);
       if (await this.store.unresolvedDeliveryDrain(entry.id) || await this.store.unresolvedPollingActivation(entry.id)) {
         void this.deliveryCutovers.start(entry.id).catch(() => undefined);
       }
     }
     if (this.providerPort && this.autoConverge) {
-      for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id, "rehydration");
+      for (const entry of (await this.store.load("summary")).entries) this.requestConvergence(entry.id, "rehydration");
     }
     void this.workerBindings.compactRetainedPublications().catch(() => undefined);
     // Earlier turns that a stopped process could not remove from a room are removed now.
