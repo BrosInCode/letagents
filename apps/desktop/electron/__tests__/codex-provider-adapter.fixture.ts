@@ -1199,7 +1199,9 @@ export async function codexDaemonFixture(options: {
        */
       exitSettlement: () => (daemon as unknown as { providerTerminals: {
         ports: { settleRuntimeApprovals(...args: unknown[]): Promise<void>; serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
-          durability: { recordTerminal(...args: unknown[]): Promise<unknown> }; exitUnsettled(entryId: string, exitId: string): void };
+          serializeManifest<T>(operation: () => Promise<T>): Promise<T>;
+          durability: { recordTerminal(...args: unknown[]): Promise<unknown>; releaseTerminalExecutionFence(...args: unknown[]): Promise<void> };
+          exitUnsettled(entryId: string, exitId: string): void };
         bounds: { settleMs: number; lastAttemptMs: number; recordMs: number }; settling(entryId: string): boolean;
         timers: { set(callback: () => void, ms: number): object; clear(timer: object): void };
       } }).providerTerminals,
@@ -1402,6 +1404,49 @@ export const EXIT_RECORDING_FAULTS = {
     return () => { terminals.ports.durability = original; end(); };
   },
 } as const;
+
+/**
+ * What an attempt to record an exit can wait for longer than it is given: the
+ * agent's queue, or a store it writes to, busy with other work. Each holds
+ * whatever the recording asks of it, in the order it was asked, until
+ * `letGo`. `waiting` is how much it holds. A test calls `letGo` before the
+ * daemon is stopped as well: a stop waits for an exit that is being recorded.
+ */
+export const EXIT_RECORDING_WAITS = {
+  "the agent's queue": (terminals: ExitSettlement) => {
+    const busy = busyUntilLetGo();
+    const original = terminals.ports.serializeEntry;
+    terminals.ports.serializeEntry = async (entryId, operation) => { await busy.arrive(); return original(entryId, operation); };
+    return { waiting: busy.waiting, letGo: () => { terminals.ports.serializeEntry = original; busy.letGo(); } };
+  },
+  "the store that saves its terminal": (terminals: ExitSettlement) => {
+    const busy = busyUntilLetGo();
+    const original = terminals.ports.durability;
+    terminals.ports.durability = Object.create(original, {
+      recordTerminal: { value: async (...args: unknown[]) => { await busy.arrive(); return original.recordTerminal(...args); } } });
+    return { waiting: busy.waiting, letGo: () => { terminals.ports.durability = original; busy.letGo(); } };
+  },
+  "the manifest, where the exit is recorded": (terminals: ExitSettlement) => {
+    const busy = busyUntilLetGo();
+    const original = terminals.ports.serializeManifest;
+    terminals.ports.serializeManifest = async (operation) => { await busy.arrive(); return original(operation); };
+    return { waiting: busy.waiting, letGo: () => { terminals.ports.serializeManifest = original; busy.letGo(); } };
+  },
+  "the store that frees its workspace lock": (terminals: ExitSettlement) => {
+    const busy = busyUntilLetGo();
+    const original = terminals.ports.durability;
+    terminals.ports.durability = Object.create(original, {
+      releaseTerminalExecutionFence: { value: async (...args: unknown[]) => { await busy.arrive(); return original.releaseTerminalExecutionFence(...args); } } });
+    return { waiting: busy.waiting, letGo: () => { terminals.ports.durability = original; busy.letGo(); } };
+  },
+} as const;
+
+function busyUntilLetGo() {
+  let letGo!: () => void;
+  const free = new Promise<void>((resolve) => { letGo = resolve; });
+  let waiting = 0;
+  return { arrive: async () => { waiting += 1; await free; }, waiting: () => waiting, letGo };
+}
 
 /**
  * The daemon's wait for an exit to be recorded, on a clock the test moves.

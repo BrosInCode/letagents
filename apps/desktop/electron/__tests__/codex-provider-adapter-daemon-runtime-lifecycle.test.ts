@@ -14,6 +14,7 @@ import {
   convergeAcrossExit,
   answerOnReplacement,
   EXIT_RECORDING_FAULTS,
+  EXIT_RECORDING_WAITS,
   exitWaitClock,
   executionRecord,
 } from "./codex-provider-adapter.fixture.js";
@@ -720,45 +721,77 @@ for (const fault of Object.keys(EXIT_RECORDING_FAULTS) as Array<keyof typeof EXI
   });
 }
 
-test("an attempt to record a crash that is given up while it waits for the agent's queue records nothing when its turn comes", async () => {
-  const { EXIT_UNSETTLED_NOTICE } = await import(new URL("../../daemon/provider-terminal-coordinator.ts", import.meta.url).href);
-  const agent = await codexDaemonFixture({ holdExits: true });
-  let endFault = () => {};
-  let letQueueGo = () => {};
+for (const busy of ["the agent's queue", "the store that saves its terminal", "the manifest, where the exit is recorded"] as const) {
+  test(`an attempt to record a crash that is given up while it waits for ${busy} does nothing when its turn comes there: the crash is recorded once`, async () => {
+    const { EXIT_UNSETTLED_NOTICE } = await import(new URL("../../daemon/provider-terminal-coordinator.ts", import.meta.url).href);
+    const agent = await codexDaemonFixture({ holdExits: true });
+    let letGo = () => {};
+    try {
+      await agent.deliver(1, { answer: "Answer 1." });
+      await agent.turnsRecorded(1);
+      const terminals = agent.exitSettlement();
+      const wait = exitWaitClock(agent);
+      // Other work keeps it busy for longer than the ordinary attempts have.
+      const held = EXIT_RECORDING_WAITS[busy](terminals);
+      letGo = held.letGo;
+
+      agent.exitProcess(0, "SIGKILL");
+      await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id) && held.waiting() >= 1, `the first attempt waits for ${busy}`);
+      // The ordinary attempts' time ends while the first of them still waits, and the last attempt comes to wait behind it.
+      wait.pass(terminals.bounds.settleMs);
+      await agent.eventually(() => held.waiting() >= 2, "the last attempt waits there as well");
+      assert.equal(agent.harness.launches.length, 1, "nothing replaces the process while its exit waits to be recorded");
+
+      held.letGo();
+      await agent.eventually(() => !terminals.settling(agent.id), "the last attempt records the exit once it is let through");
+      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again");
+      await answerOnReplacement(agent, 2);
+      assert.equal(agent.published.at(-1), "Answer 2.");
+      // The attempt that was given up has its turn first. It used to go on from there, with the last attempt behind it:
+      // the crash was recorded twice, or, where both saved the terminal, the second save was refused and the crash was not recorded at all.
+      assert.deepEqual((await agent.transitionCauses()).filter((cause) => /provider terminal/.test(cause)), ["provider terminal: crashed"], "the crash is recorded once");
+      const entry = (await agent.request("manifest.list")).result[0] as { activity?: Array<{ summary: string }>; reconciliation?: { exit_timestamps_ms?: number[] } };
+      assert.equal(entry.reconciliation?.exit_timestamps_ms?.length, 1, "it counts toward the agent's crash-loop limit");
+      assert.equal(entry.activity?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length, 0, "and the owner is told nothing: no step was left out");
+      const generations = agent.read<{ ended: number }>(
+        "SELECT terminal_json IS NOT NULL AS ended FROM work_attempt_executions WHERE work_attempt_id=(SELECT work_attempt_id FROM agent_configurations c JOIN runtime_deployments d ON d.agent_id=c.agent_id WHERE c.agent_id=?) ORDER BY rowid");
+      assert.deepEqual(generations.map((row) => row.ended), [1, 0], "the crashed process's terminal is saved: the first generation has ended, the second runs");
+      assert.equal(agent.harness.launches.length, 2, "one replacement");
+    } finally {
+      letGo();
+      await agent.cleanup();
+    }
+  });
+}
+
+test("an attempt to record a stop that is given up while it waits for the store that frees its workspace lock does nothing when its turn comes there: the stop is recorded", async () => {
+  const agent = await codexDaemonFixture();
+  let letGo = () => {};
   try {
     await agent.deliver(1, { answer: "Answer 1." });
     await agent.turnsRecorded(1);
     const terminals = agent.exitSettlement();
     const wait = exitWaitClock(agent);
-    endFault = wait.fault("closing its approvals fails every time");
-    // Other work keeps the agent's queue for longer than the ordinary attempts have.
-    const queue = terminals.ports.serializeEntry;
-    const free = new Promise<void>((resolve) => { letQueueGo = resolve; });
-    let waiting = 0;
-    terminals.ports.serializeEntry = async (entryId, operation) => { waiting += 1; await free; return queue(entryId, operation); };
+    const held = EXIT_RECORDING_WAITS["the store that frees its workspace lock"](terminals);
+    letGo = held.letGo;
 
-    agent.exitProcess(0, "SIGKILL");
-    await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id) && waiting >= 1, "the first attempt waits for the agent's queue");
-    // The ordinary attempts' time ends while the first of them still waits, and the last attempt takes its place behind it.
+    const stopping = agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "stopped" });
+    await agent.eventually(() => terminals.settling(agent.id) && held.waiting() >= 1, "the first attempt waits to free the workspace lock");
     wait.pass(terminals.bounds.settleMs);
-    await agent.eventually(() => waiting >= 2, "the last attempt waits for the queue as well");
-    assert.equal(agent.harness.launches.length, 1, "nothing replaces the process while its exit waits to be recorded");
+    await agent.eventually(() => held.waiting() >= 2, "the last attempt waits there as well");
 
-    terminals.ports.serializeEntry = queue;
-    letQueueGo();
-    await agent.eventually(() => !terminals.settling(agent.id), "the last attempt records the exit once the queue lets it through");
-    await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again");
-    await answerOnReplacement(agent, 2);
-    assert.equal(agent.published.at(-1), "Answer 2.");
-    // The attempt that was given up had its turn first. It used to record the crash as well, with the last attempt behind it.
-    assert.deepEqual((await agent.transitionCauses()).filter((cause) => /provider terminal/.test(cause)), ["provider terminal: crashed"], "the crash is recorded once");
-    const entry = (await agent.request("manifest.list")).result[0] as { activity?: Array<{ summary: string }>; reconciliation?: { exit_timestamps_ms?: number[] } };
-    assert.equal(entry.activity?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length, 1, "the owner reads once that the exit could not be recorded in full");
-    assert.equal(entry.reconciliation?.exit_timestamps_ms?.length, 1, "and it counts once toward the agent's crash-loop limit");
-    assert.equal(agent.harness.launches.length, 2, "one replacement");
+    held.letGo();
+    await agent.eventually(() => !terminals.settling(agent.id), "the last attempt records the exit once it is let through");
+    assert.equal((await stopping).ok, true);
+    await agent.eventually(async () => (await agent.view()).observed_state === "stopped", "the agent is stopped");
+    // The attempt that was given up has its turn first. It used to free the lock, and the last attempt's release was then
+    // refused, because the lock it had asked to free was no longer held. The recording ended there, without the stop.
+    assert.deepEqual((await agent.transitionCauses()).filter((cause) => /provider terminal/.test(cause)), ["provider terminal: stopped"], "the stop is recorded, once");
+    const current = await agent.view();
+    assert.deepEqual([current.observed_state, current.condition, current.last_error], ["stopped", "none", null]);
+    assert.equal(agent.harness.launches.length, 1, "and nothing is started in its place");
   } finally {
-    letQueueGo();
-    endFault();
+    letGo();
     await agent.cleanup();
   }
 });

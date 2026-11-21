@@ -845,41 +845,64 @@ for (const fault of ["approvals fail", "approvals never return", "the terminal c
   });
 }
 
-/** A coordinator over ports that count what an exit's recording does, with the entry's queue and the store as the daemon has them. */
-function countedTerminalRecording(options: { queueBusy?: boolean; firstSaveIsSlow?: boolean } = {}) {
+/** The steps of an exit's recording that write something, in the order they come. */
+const WRITING_STEPS = ["saving the terminal", "closing the approvals", "freeing the workspace lock", "recording the exit in the manifest"] as const;
+type WritingStep = typeof WRITING_STEPS[number];
+
+/**
+ * A coordinator over ports that count what an exit's recording writes. The entry's queue and the stores are as the
+ * daemon has them: each does one piece of work at a time, in the order it was asked, and a store writes through the
+ * commit guard its caller gives it. `queueBusy` and `busyStore` start one of them busy: it does nothing until it is let go.
+ */
+function countedTerminalRecording(options: { queueBusy?: boolean; busyStore?: WritingStep; desiredState?: "stopped" } = {}) {
   const liveHandles = new Map([["agent-1", handle]]);
-  const entry = manifestEntry();
-  const done = { reads: 0, saves: 0, approvals: 0, projections: 0, convergence: 0, deliveries: 0, told: 0 };
+  const entry: DaemonManifestEntry = { ...manifestEntry(), ...(options.desiredState ? { desired_state: options.desiredState } : {}) };
+  /** What was done: manifest reads, the four writes, and what follows a recorded exit. */
+  const done = { reads: 0, saves: 0, approvals: 0, releases: 0, projections: 0, convergence: 0, deliveries: 0, told: 0 };
+  /** How often each store was asked to write, and each write that did not happen, with the reason. */
+  const asked = new Map<WritingStep, number>();
+  const refused: string[] = [];
   let saved: ExecutionTerminalPayload | null = null;
-  // The entry's queue: one operation at a time, in order. Busy, it runs nothing until it is let go.
   let letQueueGo = () => {};
   let queue: Promise<unknown> = options.queueBusy ? new Promise<void>(resolve => { letQueueGo = resolve; }) : Promise.resolve();
-  // The store: one save at a time, in order, and it keeps the first terminal it is given.
-  let letFirstSaveLand = () => {};
-  const firstSaveLands = options.firstSaveIsSlow ? new Promise<void>(resolve => { letFirstSaveLand = resolve; }) : Promise.resolve();
-  let store: Promise<unknown> = Promise.resolve();
+  let letStoreGo = () => {};
+  const storeIsFree = new Promise<void>(resolve => { letStoreGo = resolve; });
+  const stores = new Map<WritingStep, Promise<unknown>>();
+  /** One write: after the writes that store was asked for before it, and through the guard its caller gave. */
+  const write = (step: WritingStep, guard: ((commit: () => Promise<void>) => Promise<void>) | undefined, commit: () => void): Promise<void> => {
+    const nth = (asked.get(step) ?? 0) + 1;
+    asked.set(step, nth);
+    const turn = (stores.get(step) ?? (step === options.busyStore ? storeIsFree : Promise.resolve()))
+      .then(() => (guard ?? (async go => { await go(); }))(async () => { commit(); }));
+    stores.set(step, turn.then(() => undefined, () => undefined));
+    return turn.catch((error: unknown) => { refused.push(`${step}, asked ${nth}: ${(error as Error).message}`); throw error; });
+  };
+  // The workspace lock, as the store has it: whoever asks to free it frees the lock that was held when they asked.
+  let lock: object | null = {};
   const ports: ProviderTerminalPorts = {
     authority: terminalAuthority, currentDaemonGeneration: () => 7, nowMs: () => Date.parse(terminal.endedAt), liveHandles,
     manifest: { getEntry: async () => entry, load: async () => { done.reads += 1; return { entries: [entry] }; } },
     durability: {
       getAttempt: async () => ({ execution_generations: [{ execution_generation_id: "generation-1",
         actor: "daemon-provider", generation: 7, terminal: saved }] }) as never,
-      recordTerminal: (_attempt, _execution, payload) => {
-        const first = (done.saves += 1) === 1;
-        const save = store.then(async () => {
-          if (first) await firstSaveLands;
-          if (saved) throw new ImmutableExecutionError("Execution terminal payloads are append-only and immutable.");
-          saved = structuredClone(payload);
-          return {} as never;
+      // The store keeps the first terminal it is given and refuses a second.
+      recordTerminal: (_attempt, _execution, payload, _limit, guard) => write("saving the terminal", guard, () => {
+        if (saved) throw new ImmutableExecutionError("Execution terminal payloads are append-only and immutable.");
+        saved = structuredClone(payload);
+        done.saves += 1;
+      }).then(() => ({}) as never),
+      releaseTerminalExecutionFence: (_attempt, _execution, guard) => {
+        const held = lock;
+        return write("freeing the workspace lock", guard, () => {
+          if (lock !== held) throw new ImmutableExecutionError("Terminal workspace fence ownership changed before release.");
+          lock = null;
+          done.releases += 1;
         });
-        store = save.then(() => undefined, () => undefined);
-        return save;
       },
-      releaseTerminalExecutionFence: async () => {},
     },
     runtimeCustody: { deletePendingResumeBinding: () => {} },
     streams: { remove: exact => exact === installation && liveHandles.delete("agent-1"), isLatestInstallation: exact => exact === installation },
-    settleRuntimeApprovals: async () => { done.approvals += 1; },
+    settleRuntimeApprovals: (_id, guard) => write("closing the approvals", guard, () => { done.approvals += 1; }),
     delivery: { start: async () => { done.deliveries += 1; } },
     serializeEntry: (_id, operation) => {
       const run = queue.then(operation);
@@ -887,13 +910,21 @@ function countedTerminalRecording(options: { queueBusy?: boolean; firstSaveIsSlo
       return run;
     },
     serializeManifest: async operation => operation(),
-    transitionOnce: async (_id, state, condition, _cause, _actor, reconciliation) => {
-      entry.observed_state = state; entry.condition = condition; entry.reconciliation = reconciliation; done.projections += 1;
-    },
+    transitionOnce: (_id, state, condition, _cause, _actor, reconciliation, _notice, _terminal, guard) =>
+      write("recording the exit in the manifest", guard, () => {
+        entry.observed_state = state; entry.condition = condition; entry.reconciliation = reconciliation; done.projections += 1;
+      }),
     requestConvergence: () => { done.convergence += 1; },
     exitUnsettled: () => { done.told += 1; },
   };
-  return { coordinator: new ProviderTerminalCoordinator(ports), entry, done, saved: () => saved, letQueueGo: () => letQueueGo(), letFirstSaveLand: () => letFirstSaveLand() };
+  const coordinator = new ProviderTerminalCoordinator(ports);
+  return {
+    coordinator, entry, done, refused, saved: () => saved,
+    asked: (step: WritingStep) => asked.get(step) ?? 0,
+    /** Whether the exit is still being recorded. Asking the coordinator itself would mark a convergence as owed, as a real pass does. */
+    waiting: () => (coordinator as unknown as { pending: Map<unknown, unknown> }).pending.size === 1,
+    letQueueGo: () => letQueueGo(), letStoreGo: () => letStoreGo(),
+  };
 }
 
 test("an attempt whose time ends while it waits for the entry's queue does nothing when its turn comes: the last attempt records the exit, once", async t => {
@@ -903,48 +934,66 @@ test("an attempt whose time ends while it waits for the entry's queue does nothi
   // Other work holds the entry's queue for longer than the ordinary attempts have.
   const recording = countedTerminalRecording({ queueBusy: true });
   const { coordinator, done } = recording;
+  const nothing = { reads: 0, saves: 0, approvals: 0, releases: 0, projections: 0, convergence: 0, deliveries: 0, told: 0 };
   void coordinator.handleTerminal(installation, terminal).catch(() => undefined);
   // The ordinary attempts' time ends, and a moment later the last attempt takes its place in the queue.
   await pass(EXIT_SETTLEMENT_BOUNDS.settleMs + 250);
-  assert.deepEqual(done, { reads: 0, saves: 0, approvals: 0, projections: 0, convergence: 0, deliveries: 0, told: 0 },
-    "the first attempt has not had its turn, and neither has the last one, which waits behind it");
+  assert.deepEqual(done, nothing, "the first attempt has not had its turn, and neither has the last one, which waits behind it");
 
   recording.letQueueGo();
   await flush();
-  assert.equal((coordinator as unknown as { pending: Map<unknown, unknown> }).pending.size, 0, "the last attempt records the exit as soon as the queue lets it");
-  // The attempt that was given up read the manifest, saved the terminal, closed the approvals and recorded the exit
-  // when its turn came, and the last attempt, behind it, then did the same work over again.
-  assert.deepEqual(done, { reads: 2, saves: 1, approvals: 1, projections: 1, convergence: 1, deliveries: 1, told: 0 },
-    "the exit is recorded by one attempt: the one that was given up does nothing when its turn comes");
+  assert.equal(recording.waiting(), false, "the last attempt records the exit as soon as the queue lets it");
+  // Had the attempt that was given up done its work when its turn came, the last attempt behind it would have done
+  // the same work over again: four manifest reads, the approvals closed twice, two convergences.
+  const once = { ...nothing, reads: 2, saves: 1, approvals: 1, projections: 1, convergence: 1, deliveries: 1 };
+  assert.deepEqual(done, once, "the exit is recorded by one attempt: the one that was given up does nothing when its turn comes");
+  assert.deepEqual(recording.refused, [], "and it asks no store for anything");
   assert.equal(recording.entry.reconciliation?.last_terminal?.terminal_cause, "stopped");
   await pass(60_000);
-  assert.deepEqual(done, { reads: 2, saves: 1, approvals: 1, projections: 1, convergence: 1, deliveries: 1, told: 0 }, "and nothing follows");
+  assert.deepEqual(done, once, "and nothing follows");
 });
 
-test("an attempt that reads no saved terminal while the attempt before it is still saving one finishes from the terminal the store kept", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const flush = async () => { for (let turn = 0; turn < 8; turn += 1) await new Promise<void>(resolve => setImmediate(resolve)); };
-  const pass = async (ms: number) => { for (let left = ms; left > 0; left -= 250) { t.mock.timers.tick(Math.min(250, left)); await flush(); } };
-  // The first attempt's save is still under way when the ordinary attempts' time ends.
-  const recording = countedTerminalRecording({ firstSaveIsSlow: true });
-  const { coordinator, done } = recording;
-  void coordinator.handleTerminal(installation, terminal).catch(() => undefined);
-  await flush();
-  assert.equal(done.saves, 1, "the first attempt is saving the terminal");
-  await pass(EXIT_SETTLEMENT_BOUNDS.settleMs + 250);
-  assert.equal(done.saves, 2, "the last attempt read that no terminal was saved yet, and saves it as well");
-  assert.equal(recording.saved(), null);
+for (const busyStore of WRITING_STEPS) {
+  test(`an attempt whose time ends while it is ${busyStore}, and the store is busy, writes nothing when the store comes to it: the last attempt records the exit, once`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const flush = async () => { for (let turn = 0; turn < 8; turn += 1) await new Promise<void>(resolve => setImmediate(resolve)); };
+    const pass = async (ms: number) => { for (let left = ms; left > 0; left -= 250) { t.mock.timers.tick(Math.min(250, left)); await flush(); } };
+    // The store is busy with other work for longer than the ordinary attempts have. Only a stopped agent's exit frees the workspace lock.
+    const stopped = busyStore === "freeing the workspace lock";
+    const recording = countedTerminalRecording({ busyStore, ...(stopped ? { desiredState: "stopped" } : {}) });
+    const { coordinator, done } = recording;
+    void coordinator.handleTerminal(installation, terminal).catch(() => undefined);
+    await flush();
+    assert.equal(recording.asked(busyStore), 1, "the first attempt has asked the store, and waits for it");
+    const before = { ...done };
+    // The ordinary attempts' time ends. The last attempt comes to the same step and asks the store as well, behind the first.
+    await pass(EXIT_SETTLEMENT_BOUNDS.settleMs + 250);
+    assert.equal(recording.asked(busyStore), 2, "the last attempt has asked the store too");
+    assert.equal(recording.waiting(), true);
+    assert.deepEqual([done.projections, done.convergence, done.told], [0, 0, 0], "while the store is busy the exit is not recorded");
 
-  // The first save lands. The store keeps it and refuses the second one.
-  recording.letFirstSaveLand();
-  await flush();
-  assert.equal(recording.saved()?.terminal_cause, "stopped");
-  assert.equal((coordinator as unknown as { pending: Map<unknown, unknown> }).pending.size, 0, "the exit's recording ends");
-  assert.deepEqual([done.approvals, done.projections, done.convergence, done.deliveries, done.told], [1, 1, 1, 1, 0],
-    "the last attempt goes on from the terminal the store kept: it closes the approvals and records the exit, with nothing left out to tell the owner of");
-  assert.equal(recording.entry.observed_state, "failed");
-  assert.equal(recording.entry.reconciliation?.last_terminal?.terminal_cause, "stopped");
-});
+    recording.letStoreGo();
+    await flush();
+    // The store comes to what the given-up attempt asked for first. It used to write it, and then the last attempt's
+    // save or release was refused as a second one, or the exit was recorded in the manifest twice.
+    assert.deepEqual(recording.refused, [`${busyStore}, asked 1: The exit was not recorded in time; one last attempt follows.`],
+      "the store writes nothing for the attempt that was given up, and what the last attempt asked for is written");
+    assert.equal(recording.waiting(), false, "the last attempt records the exit");
+    const written = { saves: done.saves, releases: done.releases, projections: done.projections };
+    assert.deepEqual(written, { saves: 1, releases: stopped ? 1 : 0, projections: 1 }, "each thing is written once");
+    // An attempt closes the approvals again when the attempt before it had closed them already: there are none left to close.
+    assert.equal(done.approvals, before.approvals + 1, "the approvals are closed by the last attempt");
+    assert.deepEqual([done.convergence, done.deliveries, done.told], [1, stopped ? 0 : 1, 0],
+      "the entry is converged once, and nothing was left out to tell the owner of");
+    assert.equal(recording.saved()?.terminal_cause, "stopped");
+    assert.equal(recording.entry.observed_state, stopped ? "stopped" : "failed");
+    assert.equal(recording.entry.reconciliation?.last_terminal?.terminal_cause, "stopped");
+    const end = { ...done };
+    await pass(60_000);
+    assert.deepEqual(done, end, "and nothing follows");
+    assert.equal(recording.refused.length, 1);
+  });
+}
 
 test("an operator's recovery supersedes an exit that is still being recorded, and an update or a retirement waits for an exit no longer than its bound", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });

@@ -332,8 +332,15 @@ export class ProviderTerminalCoordinator {
     if (!this.owns(owner)) throw new TerminalOwnerLostError("Terminal settlement lost its exact installation authority.");
   }
 
-  private fence(owner: TerminalSettlement): TerminalCommitFence {
+  /**
+   * The check a store makes at the moment it writes. It writes only for a
+   * settlement that still owns its installation and, when the step belongs to
+   * an attempt, only while that attempt is still waited for: a step that an
+   * attempt left behind may get its turn in a store later, and writes nothing.
+   */
+  private fence(owner: TerminalSettlement, cut?: TerminalSettlement["cut"]): TerminalCommitFence {
     return commit => this.ports.authority.fenceCommit(async () => {
+      if (cut?.ended) throw cut.ended.error;
       this.assertOwner(owner);
       await commit();
     });
@@ -500,11 +507,14 @@ export class ProviderTerminalCoordinator {
     // Every step is waited for only as long as this attempt is: a step that
     // never returns must not keep the entry's queue, or the entry, for ever.
     // The attempt keeps the cut it began under. When that cut ends it, the
-    // attempt after it begins under a new one, and this one does nothing
-    // more: not a step it had not reached, and nothing at all when its turn
-    // in the entry's queue comes only then.
+    // attempt after it begins under a new one, and this one is over: it
+    // begins nothing more, it does nothing when its turn in the entry's queue
+    // comes only then, and a step it left behind writes nothing when a store
+    // comes to it only then. What it wrote before stays, and the attempt
+    // after it finds that.
     const cut = owner.cut;
     const within = <T>(step: Promise<T>) => until(cut, step);
+    const fence = this.fence(owner, cut);
     await this.ports.serializeEntry(entryId, async () => {
       if (cut.ended) throw cut.ended.error;
       this.assertOwner(owner);
@@ -523,19 +533,20 @@ export class ProviderTerminalCoordinator {
         const execution = attempt.execution_generations.find(candidate => candidate.execution_generation_id === executionGenerationId);
         if (!execution) throw new TerminalOwnerLostError("Terminal execution is no longer present.");
         const expected = { ...this.terminalPayload(terminal, execution.actor, installation.providerConnection), generation: execution.generation };
-        // stopRef and onExit can observe the same installation differently.
-        // Finish from its immutable committed result without enriching it.
-        const committed = (saved: ExecutionTerminalPayload): ProviderActionTerminal => {
+        if (execution.terminal) {
+          // stopRef and onExit can observe the same installation differently.
+          // Finish from its immutable committed result without enriching it.
+          const saved = execution.terminal;
           if (saved.actor !== execution.actor || saved.generation !== execution.generation
             || saved.provider_continuation_id !== installation.providerContinuationId
             || saved.provider_continuation_id !== expected.provider_continuation_id) {
             throw new ImmutableExecutionError("Committed terminal does not match its exact execution identity.");
           }
-          const kept: ProviderActionTerminal = { endedAt: saved.ended_at, exitCode: saved.exit_code, signal: saved.signal,
+          terminal = { endedAt: saved.ended_at, exitCode: saved.exit_code, signal: saved.signal,
             terminalCause: saved.terminal_cause as ProviderActionTerminal["terminalCause"],
             providerContinuationId: saved.provider_continuation_id,
             ...(saved.native_runtime_death ? { nativeRuntimeDeath: saved.native_runtime_death } : {}) };
-          try { validatedNativeRuntimeDeath(kept, installation.providerConnection); }
+          try { validatedNativeRuntimeDeath(terminal, installation.providerConnection); }
           catch { throw new ImmutableExecutionError("Committed native death does not match its exact provider installation."); }
           if (!owner.reportedCanonicalDifference && (saved.ended_at !== expected.ended_at
             || saved.exit_code !== expected.exit_code || saved.signal !== expected.signal
@@ -545,29 +556,12 @@ export class ProviderTerminalCoordinator {
             try { this.ports.diagnostic?.(entryId, new Error("Exact installation has differing terminal observations; retaining its committed result.")); }
             catch { /* A diagnostic cannot change the settlement outcome. */ }
           }
-          return kept;
-        };
-        if (execution.terminal) terminal = committed(execution.terminal);
-        else {
-          try {
-            await within(this.ports.durability.recordTerminal(entry.work_attempt_id, executionGenerationId, expected, undefined, this.fence(owner)));
-          } catch (error) {
-            // The store keeps the first terminal it is given and refuses a
-            // second. One may have been saved since this attempt read that
-            // there was none: by an attempt whose time ended while its save
-            // was under way, or by another observer of the same exit. That
-            // one is the committed result, as if it had been read above.
-            if (!(error instanceof ImmutableExecutionError)) throw error;
-            const kept = (await within(this.ports.durability.getAttempt(entry.work_attempt_id))).execution_generations
-              .find(candidate => candidate.execution_generation_id === executionGenerationId)?.terminal;
-            this.assertOwner(owner);
-            if (!kept) throw error;
-            terminal = committed(kept);
-          }
+        } else {
+          await within(this.ports.durability.recordTerminal(entry.work_attempt_id, executionGenerationId, expected, undefined, fence));
         }
         this.assertOwner(owner);
         try {
-          const approvals = this.ports.settleRuntimeApprovals(entryId, this.fence(owner));
+          const approvals = this.ports.settleRuntimeApprovals(entryId, fence);
           // The last attempt gives this step half its time, and goes on without it.
           await within(owner.overdue ? Promise.race([approvals, new Promise<never>((_resolve, reject) => {
             this.timers.set(() => reject(new Error("Closing the ended runtime's approvals did not finish in time.")), this.bounds.lastAttemptMs / 2);
@@ -582,12 +576,12 @@ export class ProviderTerminalCoordinator {
         }
         this.assertOwner(owner);
         if (entry.desired_state === "stopped") {
-          await within(this.ports.durability.releaseTerminalExecutionFence(entry.work_attempt_id, executionGenerationId, this.fence(owner)));
+          await within(this.ports.durability.releaseTerminalExecutionFence(entry.work_attempt_id, executionGenerationId, fence));
           this.assertOwner(owner);
         }
       }
       await within(this.observeExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle,
-        installation, Boolean(replacement), this.fence(owner)));
+        installation, Boolean(replacement), fence));
       this.assertOwner(owner);
       if (!replacement && !owner.admitted) {
         // This is the convergence a pass that was turned away is owed.
