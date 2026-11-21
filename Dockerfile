@@ -22,6 +22,9 @@ RUN npm run build
 # the production image copies the built bundle, not these sources.
 COPY apps/desktop/renderer/src/ apps/desktop/renderer/src/
 COPY apps/desktop/electron/ipc-types/ apps/desktop/electron/ipc-types/
+# The IPC types take the types that the provider runtime shares from this
+# declaration file.
+COPY apps/desktop/shared/provider-desktop-types.d.ts apps/desktop/shared/provider-desktop-types.d.ts
 
 # Build Vue SPA (src/web/ → src/web/dist/)
 RUN cd src/web && npm ci && npx vite build
