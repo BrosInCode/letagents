@@ -70,6 +70,15 @@ export const entryReads = storeMethods({
     return { entries };
   },
 
+  /**
+   * The id of every entry, in the order that load() returns the entries. It
+   * reads one column of `agents`: no entry is projected and no activity is read.
+   */
+  async listEntryIds(): Promise<string[]> {
+    const database = await this.getDatabase();
+    return (this.reads.get(database, "entryIds").all() as Row[]).map((row) => String(row.agent_id));
+  },
+
   async getEntry(agentId: string, activityMode: "full" | "summary" = "full"): Promise<DaemonManifestEntry | undefined> {
     const database = await this.getDatabase();
     return this.readEntryFromDatabase(database, agentId, activityMode);
