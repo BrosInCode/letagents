@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { copyFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -26,14 +24,12 @@ describe(
   { skip: EDGE_DAEMON_UNSUPPORTED_REASON ?? false },
   () => {
     test("a Cursor that is not signed in starts no turn, and the daemon reports the sign-in state", async () => {
-      const harness = await startEdgeDaemon();
+      // The daemon runs its checks of Cursor in a sandbox that reads the folder of the program
+      // only. So the harness copies the stand-in there (`copyScript`).
+      const harness = await startEdgeDaemon({
+        shims: [{ name: "cursor-agent", scriptPath: SIGNED_OUT_CLI, envVar: "LETAGENTS_CURSOR_AGENT_BIN", copyScript: true }],
+      });
       try {
-        // The daemon runs its checks of Cursor in a sandbox that reads the folder of the program
-        // only. So the stand-in is copied there, and the daemon finds `cursor-agent` on its PATH.
-        const standIn = join(harness.binDir, "cursor-agent.stand-in.mjs");
-        copyFileSync(SIGNED_OUT_CLI, standIn);
-        await harness.addShim("cursor-agent", standIn);
-
         const agent: EdgeAgentRegistration = {
           entryId: "agent_cursor_signed_out",
           roomId: "edge_cursor_signed_out",
