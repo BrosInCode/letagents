@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { DAEMON_RPC_METHOD_NAMES } from "#daemon-contract/index.js";
 
 // The entry point and the daemon class modules it re-exports from ./main/.
 const mainFiles = ["../main.ts", ...readdirSync(new URL("../main/", import.meta.url)).filter((name) => name.endsWith(".ts")).sort().map((name) => `../main/${name}`)];
@@ -74,11 +75,15 @@ test("the daemon entrypoint delegates control-protocol parsing to one router", (
   assert.equal(matches(mainSource, /request\.method\s*===/g).length, 0);
   assert.equal(matches(mainSource, /createDaemonControlRequestHandler\s*\(/g).length, 1);
 
-  const actualMethods = matches(routerSource, /request\.method\s*===\s*"([^"]+)"/g)
+  assert.deepEqual([...DAEMON_RPC_METHOD_NAMES], expectedControlMethods);
+  assert.match(routerSource, /parseDaemonRpcParams\s*\(/);
+  assert.match(routerSource, /isDaemonRpcMethod\s*\(/);
+  const actualHandlers = matches(routerSource, /^\s*"([a-z0-9_.]+)"\s*:/mg)
     .map((match) => match[1])
+    .filter((method) => method.includes("."))
     .filter((method, index, methods) => methods.indexOf(method) === index)
     .sort();
-  assert.deepEqual(actualMethods, expectedControlMethods);
+  assert.deepEqual(actualHandlers, expectedControlMethods);
 });
 
 test("cloud requests are isolated from the daemon authority owner", () => {

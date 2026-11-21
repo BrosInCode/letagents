@@ -7,6 +7,7 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
+import { DAEMON_PROTOCOL_VERSION } from "#daemon-contract/index.js";
 import { connectDaemon, daemonEndpoint } from "../../../../../shared/daemon-endpoint.mjs";
 import { processTreeHelperPath } from "../../../../../shared/process-tree.mjs";
 import { materializeNodeShim, resolveStandInRuntime, type MaterializeNodeShimOptions } from "./executable-shim.js";
@@ -16,7 +17,7 @@ import { EdgeSqliteInspector } from "./sqlite-inspector.js";
 const EDGE_DIR = dirname(fileURLToPath(import.meta.url));
 export const DESKTOP_ROOT = resolve(EDGE_DIR, "../../..");
 export const REPO_ROOT = resolve(DESKTOP_ROOT, "../..");
-export const DAEMON_PROTOCOL_VERSION = 3;
+export { DAEMON_PROTOCOL_VERSION };
 
 export const EDGE_DAEMON_UNSUPPORTED_REASON: string | null =
   process.platform !== "darwin" && process.platform !== "win32"

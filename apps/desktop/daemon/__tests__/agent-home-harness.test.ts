@@ -331,7 +331,7 @@ test("turning the owner's own setup off restarts an idle agent that still has it
       { assertCurrent: async () => {}, currentGeneration: () => 7, isHandoffScheduled: () => false },
       {
         // The signature is checked by the verifier; here every request is the desktop app's own.
-        hostApprovals: { verify: (params: unknown) => params },
+        hostApprovals: { verify: (params: unknown) => JSON.parse((params as { payload: string }).payload) },
         updateAgentConfiguration: async (request: unknown) => {
           assert.deepEqual(request, { entryId: "agent", daemonGeneration: 7, expectedRevision: 5, configuration: {}, homeHarness: input.enabled });
           return input.saved;
@@ -339,8 +339,18 @@ test("turning the owner's own setup off restarts an idle agent that still has it
         applyAgentConfiguration: (request: unknown) => { applied.push(request); return (input.apply ?? (() => ({ outcome: "restarting" })))(); },
       } as unknown as DaemonControlOperations,
     );
-    const result = await handler({ version: DAEMON_PROTOCOL_VERSION, id: "test", method: "supervisor.host_approval_request",
-      params: { operation: "set_home_harness", input: { entryId: "agent", daemonGeneration: 7, expectedRevision: 5, enabled: input.enabled } } } as never);
+    const result = await handler({
+      version: DAEMON_PROTOCOL_VERSION,
+      id: "test",
+      method: "supervisor.host_approval_request",
+      params: {
+        payload: JSON.stringify({
+          operation: "set_home_harness",
+          input: { entryId: "agent", daemonGeneration: 7, expectedRevision: 5, enabled: input.enabled },
+        }),
+        signature: "test-signature",
+      },
+    } as never);
     return { result: result as Record<string, unknown>, applied };
   };
   const saved = (pending: unknown, outcome = "updated") => ({ outcome, configuration: { config_revision: 6, home_harness: false, home_harness_pending: pending } });

@@ -1,0 +1,6698 @@
+{
+  "$defs": {
+    "AgentAvatar": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "character": {
+              "enum": [
+                "orbit",
+                "prism",
+                "tide",
+                "spark",
+                "bloom",
+                "beacon",
+                "fern",
+                "pip",
+                "pebble",
+                "moss",
+                "wren",
+                "ember",
+                "cosmo",
+                "nimbus",
+                "comet",
+                "lune",
+                "ripple",
+                "vesper"
+              ],
+              "type": "string"
+            },
+            "color": {
+              "enum": [
+                "sage",
+                "blue",
+                "lilac",
+                "rose",
+                "amber",
+                "graphite",
+                "pearl"
+              ],
+              "type": "string"
+            },
+            "kind": {
+              "const": "character",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "character",
+            "color"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "color": {
+              "enum": [
+                "sage",
+                "blue",
+                "lilac",
+                "rose",
+                "amber",
+                "graphite",
+                "pearl"
+              ],
+              "type": "string"
+            },
+            "kind": {
+              "const": "initials",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "color"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dataUrl": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "image",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "dataUrl"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DaemonActivityEvent": {
+      "properties": {
+        "durable_payload_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "payload_redacted": {
+          "type": "boolean"
+        },
+        "payload_truncated": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "sequence": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "idle",
+            "working",
+            "reviewing",
+            "blocked"
+          ],
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "observed_at",
+        "sequence",
+        "provider",
+        "kind",
+        "method",
+        "summary",
+        "status",
+        "payload",
+        "payload_truncated",
+        "payload_redacted",
+        "durable_payload_ref"
+      ],
+      "type": "object"
+    },
+    "DaemonAgentConfigurationApplyResult": {
+      "properties": {
+        "outcome": {
+          "enum": [
+            "already_applied",
+            "restarting",
+            "busy_active_turn",
+            "conflict",
+            "unsupported"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "DaemonAgentConfigurationUpdateResult": {
+      "anyOf": [
+        {
+          "properties": {
+            "configuration": {
+              "$ref": "#/$defs/DaemonAgentConfigurationView"
+            },
+            "outcome": {
+              "enum": [
+                "updated",
+                "conflict"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "configuration"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "outcome": {
+              "const": "invalid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DaemonAgentConfigurationView": {
+      "properties": {
+        "charter": {
+          "type": "string"
+        },
+        "config_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "daemon_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "delivery_mode": {
+          "const": "daemon_inbox",
+          "type": "string"
+        },
+        "entry_id": {
+          "type": "string"
+        },
+        "home_harness": {
+          "type": "boolean"
+        },
+        "home_harness_availability": {
+          "enum": [
+            "available",
+            "rental",
+            "unsupported",
+            "polling"
+          ],
+          "type": "string"
+        },
+        "home_harness_pending": {
+          "type": "boolean"
+        },
+        "image_input": {
+          "type": "boolean"
+        },
+        "image_input_available": {
+          "type": "boolean"
+        },
+        "live_sharing": {
+          "enum": [
+            "off",
+            "on",
+            "withdrawing"
+          ],
+          "type": "string"
+        },
+        "live_sharing_availability": {
+          "enum": [
+            "available",
+            "rental",
+            "polling"
+          ],
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permission_profile_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "provider_launch_policy": {
+          "$ref": "#/$defs/JsonRecord"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_configuration_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "share_live_activity": {
+          "type": "boolean"
+        },
+        "supervised_permission_profiles": {
+          "items": {
+            "$ref": "#/$defs/SupervisedPermissionProfile"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entry_id",
+        "daemon_generation",
+        "provider",
+        "model",
+        "reasoning_effort",
+        "charter",
+        "permission_profile_id",
+        "supervised_permission_profiles",
+        "provider_launch_policy",
+        "config_revision",
+        "runtime_configuration_revision"
+      ],
+      "type": "object"
+    },
+    "DaemonAgentStreamEvent": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "latest_key": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "sequence": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sequence",
+        "observed_at",
+        "kind",
+        "method",
+        "summary",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DaemonAttemptDetail": {
+      "properties": {
+        "activity": {
+          "items": {
+            "$ref": "#/$defs/DaemonActivityEvent"
+          },
+          "type": "array"
+        },
+        "checkpoints": {
+          "items": {
+            "$ref": "#/$defs/WorkAttemptCheckpoint"
+          },
+          "type": "array"
+        },
+        "entry_id": {
+          "type": "string"
+        },
+        "execution_generations": {
+          "items": {
+            "$ref": "#/$defs/ExecutionGeneration"
+          },
+          "type": "array"
+        },
+        "last_terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionTerminalPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "restart_count": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "work_attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "entry_id",
+        "work_attempt_id",
+        "workspace_path",
+        "last_terminal",
+        "restart_count",
+        "execution_generations",
+        "checkpoints",
+        "activity"
+      ],
+      "type": "object"
+    },
+    "DaemonCapabilities": {
+      "properties": {
+        "agent_activity_stream_v1": {
+          "type": "boolean"
+        },
+        "agent_inspector_detail_v1": {
+          "type": "boolean"
+        },
+        "agent_inspector_settings_v1": {
+          "type": "boolean"
+        },
+        "agent_lifecycle_v1": {
+          "type": "boolean"
+        },
+        "agent_room_move_v1": {
+          "type": "boolean"
+        },
+        "agent_runtime_recovery_v1": {
+          "type": "boolean"
+        },
+        "agent_runtime_recovery_v2": {
+          "type": "boolean"
+        },
+        "agent_state_subscription_v1": {
+          "type": "boolean"
+        },
+        "provider_continuation_repair": {
+          "type": "boolean"
+        },
+        "room_delivery_retry": {
+          "type": "boolean"
+        },
+        "room_delivery_skip": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "room_delivery_retry",
+        "provider_continuation_repair",
+        "room_delivery_skip",
+        "agent_inspector_detail_v1",
+        "agent_inspector_settings_v1",
+        "agent_room_move_v1",
+        "agent_lifecycle_v1",
+        "agent_runtime_recovery_v1",
+        "agent_runtime_recovery_v2",
+        "agent_state_subscription_v1",
+        "agent_activity_stream_v1"
+      ],
+      "type": "object"
+    },
+    "DaemonInspectorDetail": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "properties": {
+        "availability": {
+          "enum": [
+            "available",
+            "pruned",
+            "not_loaded"
+          ],
+          "type": "string"
+        },
+        "continuation_repair": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entry_id": {
+          "type": "string"
+        },
+        "history_boundary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inbox_item_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/JsonRecord"
+          },
+          "type": "array"
+        },
+        "latest_intervention": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prepared_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publication": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recorded_execution": {
+          "$ref": "#/$defs/JsonRecord"
+        },
+        "requested_source_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "room_id": {
+          "type": "string"
+        },
+        "runtime_control": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeline": {
+          "items": {
+            "$ref": "#/$defs/JsonRecord"
+          },
+          "type": "array"
+        },
+        "uncertain_effects": {
+          "items": {
+            "$ref": "#/$defs/JsonRecord"
+          },
+          "type": "array"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "availability",
+        "entry_id",
+        "room_id",
+        "requested_source_message_id",
+        "inbox_item_id",
+        "source_message",
+        "receipt",
+        "terminal",
+        "publication",
+        "timeline",
+        "items",
+        "history_boundary"
+      ],
+      "type": "object"
+    },
+    "DaemonManifestEntryView": {
+      "properties": {
+        "activity": {
+          "items": {
+            "$ref": "#/$defs/DaemonActivityEvent"
+          },
+          "type": "array"
+        },
+        "avatar": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentAvatar"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "background_commands": {
+          "items": {
+            "$ref": "#/$defs/RunningBackgroundCommand"
+          },
+          "type": "array"
+        },
+        "charter": {
+          "type": "string"
+        },
+        "condition": {
+          "$ref": "#/$defs/PolicyCondition"
+        },
+        "config_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "created_by": {
+          "type": "string"
+        },
+        "delivery_attention": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryAttention"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivery_mode": {
+          "const": "daemon_inbox",
+          "type": "string"
+        },
+        "delivery_receipts": {
+          "items": {
+            "$ref": "#/$defs/DeliveryReceipt"
+          },
+          "type": "array"
+        },
+        "deployment_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desired_state": {
+          "$ref": "#/$defs/DesiredState"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "home_harness": {
+          "enum": [
+            "on",
+            "after_restart",
+            "until_restart"
+          ],
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_turn_control_sequence": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_worker_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DaemonWorkerBindingProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "launch_progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaunchProgressView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "local_room_id": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "native_liveness": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "observed_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "enum": [
+                "active",
+                "idle",
+                "stale",
+                "terminal",
+                "unknown"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observed_at",
+            "detail"
+          ],
+          "type": "object"
+        },
+        "observed_state": {
+          "$ref": "#/$defs/ObservedState"
+        },
+        "permission_pending": {
+          "const": true,
+          "type": "boolean"
+        },
+        "permission_profile_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "provider_launch_policy": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "provider_progress": {
+          "anyOf": [
+            {
+              "properties": {
+                "startedAt": {
+                  "type": "string"
+                },
+                "state": {
+                  "const": "compacting",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "startedAt"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DaemonProviderRuntimeReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ready_reached_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reconciliation": {
+          "$ref": "#/$defs/ReconciliationState"
+        },
+        "reconciliation_notices": {
+          "items": {
+            "$ref": "#/$defs/ReconciliationNotice"
+          },
+          "type": "array"
+        },
+        "room_agent_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoomAgentState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "room_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime_configuration_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "runtime_generation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime_recovery": {
+          "anyOf": [
+            {
+              "properties": {
+                "executionGenerationId": {
+                  "type": "string"
+                },
+                "mode": {
+                  "enum": [
+                    "resume",
+                    "fresh"
+                  ],
+                  "type": "string"
+                },
+                "operationId": {
+                  "type": "string"
+                },
+                "phase": {
+                  "enum": [
+                    "prepared",
+                    "stopped"
+                  ],
+                  "type": "string"
+                },
+                "roomId": {
+                  "type": "string"
+                },
+                "runtimeGenerationId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "operationId",
+                "roomId",
+                "executionGenerationId",
+                "runtimeGenerationId",
+                "mode",
+                "phase"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_repo_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn_control": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DaemonTurnControlEffect"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "work_attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worker_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DaemonWorkerBindingProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workplace_liveness": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "observed_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "enum": [
+                "reachable",
+                "stale",
+                "unknown"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observed_at",
+            "detail"
+          ],
+          "type": "object"
+        },
+        "workspace_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "room_id",
+        "display_name",
+        "provider",
+        "model",
+        "charter",
+        "desired_state",
+        "observed_state",
+        "condition",
+        "permission_profile_id",
+        "created_by",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "DaemonProviderConnection": {
+      "anyOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "codex_app_server",
+              "type": "string"
+            },
+            "pid": {
+              "anyOf": [
+                {
+                  "maximum": 9007199254740991,
+                  "minimum": -9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "processIdentity": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url",
+            "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "claude_cli",
+              "type": "string"
+            },
+            "pid": {
+              "anyOf": [
+                {
+                  "maximum": 9007199254740991,
+                  "minimum": -9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "processIdentity": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "cursor_cli",
+              "type": "string"
+            },
+            "pid": {
+              "anyOf": [
+                {
+                  "maximum": 9007199254740991,
+                  "minimum": -9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "processIdentity": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "opencode_server",
+              "type": "string"
+            },
+            "pid": {
+              "anyOf": [
+                {
+                  "maximum": 9007199254740991,
+                  "minimum": -9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "processIdentity": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "serverAuthPath": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url",
+            "pid",
+            "serverAuthPath"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DaemonProviderRuntimeReference": {
+      "properties": {
+        "execution_generation_id": {
+          "type": "string"
+        },
+        "provider_connection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DaemonProviderConnection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_continuation_id": {
+          "type": "string"
+        },
+        "work_attempt_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "work_attempt_id",
+        "provider_continuation_id",
+        "provider_connection",
+        "execution_generation_id"
+      ],
+      "type": "object"
+    },
+    "DaemonPurgeAgentResult": {
+      "anyOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "purged",
+              "type": "string"
+            },
+            "purged_work_attempt_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "agent_session_id": {
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "outcome": {
+              "const": "revocation_required",
+              "type": "string"
+            },
+            "revocation_kind": {
+              "const": "worker_session",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "operation_id",
+            "revocation_kind",
+            "agent_session_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "outcome": {
+              "const": "revocation_required",
+              "type": "string"
+            },
+            "revocation_kind": {
+              "const": "grant_only",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "operation_id",
+            "revocation_kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "outcome": {
+              "const": "invalid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DaemonRequestEnvelope": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "version": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "method"
+      ],
+      "type": "object"
+    },
+    "DaemonResponseEnvelope": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "result": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "version": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "ok"
+      ],
+      "type": "object"
+    },
+    "DaemonRetireAgentResult": {
+      "anyOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "retired",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "agent_session_id": {
+              "type": "string"
+            },
+            "outcome": {
+              "const": "revocation_required",
+              "type": "string"
+            },
+            "revocation_kind": {
+              "const": "worker_session",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "revocation_kind",
+            "agent_session_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "revocation_required",
+              "type": "string"
+            },
+            "revocation_kind": {
+              "const": "grant_only",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "revocation_kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "outcome": {
+              "const": "invalid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DaemonRoomMovePhase": {
+      "enum": [
+        "prepared",
+        "waiting_for_current_turn",
+        "joining_destination",
+        "membership_committed",
+        "rotating_credentials",
+        "bootstrapping_destination_tail",
+        "active",
+        "failed",
+        "rollback_required"
+      ],
+      "type": "string"
+    },
+    "DaemonRoomMoveRecord": {
+      "properties": {
+        "activating_inbox_item_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "agent_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "daemon_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "destination_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destination_room_id": {
+          "type": "string"
+        },
+        "effect_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "execution_generation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/$defs/DaemonRoomMovePhase"
+        },
+        "provider_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remote_room_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "source_credentials_revoked": {
+          "type": "boolean"
+        },
+        "source_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_cursor_present": {
+          "type": "boolean"
+        },
+        "source_room_id": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "work_attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "request_id",
+        "agent_id",
+        "source_room_id",
+        "destination_room_id",
+        "daemon_generation",
+        "work_attempt_id",
+        "execution_generation_id",
+        "agent_session_id",
+        "activating_inbox_item_id",
+        "provider_turn_id",
+        "effect_id",
+        "phase",
+        "remote_room_id",
+        "destination_cursor",
+        "source_credentials_revoked",
+        "source_cursor_present",
+        "source_cursor",
+        "error",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "DaemonStateWatchChanges": {
+      "properties": {
+        "complete": {
+          "const": false,
+          "type": "boolean"
+        },
+        "daemon_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/DaemonManifestEntryView"
+          },
+          "type": "array"
+        },
+        "entry_order": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "removed_entry_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sequence": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "daemon_generation",
+        "sequence",
+        "complete",
+        "entries",
+        "removed_entry_ids",
+        "entry_order"
+      ],
+      "type": "object"
+    },
+    "DaemonStateWatchResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DaemonStateWatchChanges"
+        },
+        {
+          "$ref": "#/$defs/DaemonStateWatchSnapshot"
+        }
+      ]
+    },
+    "DaemonStateWatchSnapshot": {
+      "properties": {
+        "daemon_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/DaemonManifestEntryView"
+          },
+          "type": "array"
+        },
+        "sequence": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "daemon_generation",
+        "sequence",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "DaemonStatus": {
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/DaemonCapabilities"
+        },
+        "compatibility_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "healthy": {
+          "type": "boolean"
+        },
+        "implementation_version": {
+          "type": "string"
+        },
+        "maintenance_hold_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pid": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "protocol_version": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "runtime_environment_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "healthy",
+        "protocol_version",
+        "implementation_version",
+        "runtime_environment_fingerprint",
+        "compatibility_fingerprint",
+        "capabilities",
+        "generation",
+        "pid",
+        "started_at"
+      ],
+      "type": "object"
+    },
+    "DaemonTurnControlEffect": {
+      "properties": {
+        "action_id": {
+          "type": "string"
+        },
+        "action_sequence": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "capability": {
+          "enum": [
+            "native_interrupt",
+            "restart_resume",
+            "unsupported"
+          ],
+          "type": "string"
+        },
+        "correction_strategy": {
+          "anyOf": [
+            {
+              "enum": [
+                "native",
+                "stop_then_resend"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correction_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "execution_generation_id": {
+          "type": "string"
+        },
+        "has_correction": {
+          "type": "boolean"
+        },
+        "inbox_item_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "interrupted": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "operator_resolution": {
+          "anyOf": [
+            {
+              "enum": [
+                "applied",
+                "not_applied"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recorded_at": {
+          "type": "string"
+        },
+        "resumed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "stages": {
+          "items": {
+            "enum": [
+              "delivered",
+              "interrupting",
+              "applied",
+              "resumed",
+              "already_applied"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "enum": [
+                "idle",
+                "working"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "prepared",
+            "dispatching",
+            "completed",
+            "retryable",
+            "uncertain"
+          ],
+          "type": "string"
+        },
+        "target_provider_continuation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_room_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_source_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "work_attempt_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_id",
+        "action_sequence",
+        "work_attempt_id",
+        "execution_generation_id",
+        "has_correction",
+        "status",
+        "capability",
+        "interrupted",
+        "resumed",
+        "state",
+        "stages",
+        "error",
+        "recorded_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "DaemonTurnControlResult": {
+      "properties": {
+        "actionId": {
+          "type": "string"
+        },
+        "capability": {
+          "enum": [
+            "native_interrupt",
+            "restart_resume",
+            "unsupported"
+          ],
+          "type": "string"
+        },
+        "duplicate": {
+          "type": "boolean"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "executionGenerationId": {
+          "type": "string"
+        },
+        "interrupted": {
+          "type": "boolean"
+        },
+        "resumed": {
+          "type": "boolean"
+        },
+        "stages": {
+          "items": {
+            "enum": [
+              "delivered",
+              "interrupting",
+              "applied",
+              "resumed",
+              "already_applied"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "enum": [
+            "idle",
+            "working"
+          ],
+          "type": "string"
+        },
+        "workAttemptId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entryId",
+        "workAttemptId",
+        "executionGenerationId",
+        "actionId",
+        "capability",
+        "interrupted",
+        "resumed",
+        "state",
+        "duplicate",
+        "stages"
+      ],
+      "type": "object"
+    },
+    "DaemonWorkerBindingProjection": {
+      "properties": {
+        "agent_session_id": {
+          "type": "string"
+        },
+        "execution_generation_id": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "work_attempt_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_session_id",
+        "work_attempt_id",
+        "execution_generation_id",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "DeliveryAttention": {
+      "properties": {
+        "blocked_since": {
+          "type": "string"
+        },
+        "can_skip": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_work_started": {
+          "type": "boolean"
+        },
+        "reason": {
+          "const": "message_blocked",
+          "type": "string"
+        },
+        "retry": {
+          "enum": [
+            "reread_saved_turn",
+            "publish_saved_reply",
+            "start_turn",
+            "restore_conversation"
+          ],
+          "type": "string"
+        },
+        "skip_unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_message_id": {
+          "type": "string"
+        },
+        "waiting_count": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reason",
+        "source_message_id",
+        "blocked_since",
+        "detail",
+        "waiting_count",
+        "provider_work_started",
+        "retry",
+        "can_skip",
+        "skip_unavailable_reason"
+      ],
+      "type": "object"
+    },
+    "DeliveryReceipt": {
+      "properties": {
+        "attempt_count": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "blocked_by_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "canonical_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "const": "provider_continuation_missing",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fifo_sequence": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "follow_up": {
+          "properties": {
+            "for_message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "later_person_turn": {
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "stopped_by_owner",
+                "skipped",
+                "agent_changed",
+                "task_not_held",
+                "uncertain_action",
+                "uncertain_resolved",
+                "attempts_failed",
+                "ownership_unverified",
+                "other"
+              ],
+              "type": "string"
+            },
+            "scheduled": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "at_ms": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "attempt": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "attempts": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "enum": [
+                        "provider_fault",
+                        "no_reply"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "at_ms",
+                    "attempt",
+                    "attempts",
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "state": {
+              "enum": [
+                "scheduled",
+                "waiting_for_owner",
+                "ended"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "for_message_id",
+            "state",
+            "scheduled"
+          ],
+          "type": "object"
+        },
+        "inbox_item_id": {
+          "type": "string"
+        },
+        "provider_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reply_client_message_id": {
+          "type": "string"
+        },
+        "source_message_id": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "dispatching",
+            "awaiting_result",
+            "result_recovery",
+            "publishing",
+            "acknowledged",
+            "acknowledged_no_reply",
+            "acknowledged_failed",
+            "retryable",
+            "blocked",
+            "restoring_conversation",
+            "cancelled_by_room_move",
+            "cancelled_by_user",
+            "queued_behind_blocked"
+          ],
+          "type": "string"
+        },
+        "terminal_reason": {
+          "anyOf": [
+            {
+              "const": "upgrade_authority_unavailable",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeline": {
+          "items": {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "event_sequence": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "observed_at": {
+                "type": "string"
+              },
+              "phase": {
+                "enum": [
+                  "received",
+                  "queued",
+                  "turn_started",
+                  "turn_finished",
+                  "result_unreadable",
+                  "publish_started",
+                  "published",
+                  "no_reply",
+                  "retry_scheduled",
+                  "blocked",
+                  "room_move_cancelled",
+                  "conversation_restoring",
+                  "conversation_restored",
+                  "user_cancelled"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "event_sequence",
+              "phase",
+              "observed_at",
+              "detail"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "inbox_item_id",
+        "source_message_id",
+        "fifo_sequence",
+        "reply_client_message_id",
+        "canonical_message_id",
+        "state",
+        "attempt_count",
+        "provider_turn_id",
+        "blocked_by_message_id",
+        "error",
+        "failure_code",
+        "terminal_reason",
+        "updated_at",
+        "timeline"
+      ],
+      "type": "object"
+    },
+    "DesiredState": {
+      "enum": [
+        "running",
+        "paused",
+        "stopped"
+      ],
+      "type": "string"
+    },
+    "ExecutionGeneration": {
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "execution_generation_id": {
+          "type": "string"
+        },
+        "generation": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionTerminalPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "work_attempt_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "execution_generation_id",
+        "work_attempt_id",
+        "started_at",
+        "actor",
+        "generation",
+        "terminal"
+      ],
+      "type": "object"
+    },
+    "ExecutionTerminalPayload": {
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "ended_at": {
+          "type": "string"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": -9007199254740991,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "native_runtime_death": {
+          "$ref": "#/$defs/NativeRuntimeDeath"
+        },
+        "provider_continuation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stdio_archive_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stdio_tail": {
+          "type": "string"
+        },
+        "terminal_cause": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ended_at",
+        "exit_code",
+        "signal",
+        "stdio_archive_ref",
+        "stdio_tail",
+        "terminal_cause",
+        "actor",
+        "generation",
+        "provider_continuation_id"
+      ],
+      "type": "object"
+    },
+    "HostApprovalCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "presentation": {
+          "additionalProperties": false,
+          "properties": {
+            "agentId": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "alwaysAllow": {
+              "$ref": "#/$defs/HostToolScope"
+            },
+            "denyScope": {
+              "enum": [
+                "request",
+                "session_pending"
+              ],
+              "type": "string"
+            },
+            "details": {
+              "maxLength": 24576,
+              "type": "string"
+            },
+            "displayName": {
+              "maxLength": 256,
+              "type": "string"
+            },
+            "provider": {
+              "enum": [
+                "codex",
+                "open-model",
+                "claude-code"
+              ],
+              "type": "string"
+            },
+            "title": {
+              "enum": [
+                "Run a command",
+                "Run a tool",
+                "Change files",
+                "Grant for this turn",
+                "Approval unavailable"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "agentId",
+            "displayName",
+            "provider",
+            "title",
+            "details",
+            "denyScope"
+          ],
+          "type": "object"
+        },
+        "recordedDecision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "actorId": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "decision": {
+                  "enum": [
+                    "allow_once",
+                    "deny"
+                  ],
+                  "type": "string"
+                },
+                "decisionId": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "projectionSha256": {
+                  "anyOf": [
+                    {
+                      "pattern": "^[a-f0-9]{64}$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "decisionId",
+                "actorId",
+                "decision",
+                "projectionSha256"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostApprovalReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/HostApprovalStatus"
+        }
+      },
+      "required": [
+        "reference",
+        "presentation",
+        "status",
+        "detail",
+        "recordedDecision"
+      ],
+      "type": "object"
+    },
+    "HostApprovalChallenge": {
+      "additionalProperties": false,
+      "properties": {
+        "bootNonce": {
+          "pattern": "^[A-Za-z0-9_-]{43}$",
+          "type": "string"
+        },
+        "daemonGeneration": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "keyFingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "daemonGeneration",
+        "bootNonce",
+        "keyFingerprint"
+      ],
+      "type": "object"
+    },
+    "HostApprovalReference": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "connectionId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "executionGenerationId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nativeRequestId": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ]
+        },
+        "providerContinuationId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "providerTurnId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "requestId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "requestSha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "requestVersion": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "roomId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "runtimeGenerationId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "turnId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId",
+        "requestVersion",
+        "requestSha256",
+        "agentId",
+        "roomId",
+        "executionGenerationId",
+        "runtimeGenerationId",
+        "turnId",
+        "providerContinuationId",
+        "providerTurnId",
+        "connectionId",
+        "nativeRequestId"
+      ],
+      "type": "object"
+    },
+    "HostApprovalStatus": {
+      "enum": [
+        "pending",
+        "decision_recorded",
+        "decision_sent",
+        "uncertain",
+        "request_closed",
+        "resolved",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "HostToolRule": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAtMs": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "ownerId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/HostToolScope"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "ownerId",
+        "scope",
+        "createdAtMs"
+      ],
+      "type": "object"
+    },
+    "HostToolScope": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProjectHostToolScope"
+        },
+        {
+          "$ref": "#/$defs/RoomWorkspaceHostToolScope"
+        }
+      ]
+    },
+    "JsonRecord": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "propertyNames": {
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "propertyNames": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "LaunchProgressView": {
+      "properties": {
+        "attempt": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "current": {
+          "anyOf": [
+            {
+              "enum": [
+                "prepare",
+                "runtime_verify",
+                "slot_wait",
+                "admission",
+                "process",
+                "bootstrap",
+                "install"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "sign_in",
+                    "install",
+                    "retry"
+                  ],
+                  "type": "string"
+                },
+                "phase": {
+                  "enum": [
+                    "prepare",
+                    "runtime_verify",
+                    "slot_wait",
+                    "admission",
+                    "process",
+                    "bootstrap",
+                    "install"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "phase",
+                "action"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "first_output_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phases": {
+          "items": {
+            "properties": {
+              "ms": {
+                "anyOf": [
+                  {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "phase": {
+                "enum": [
+                  "prepare",
+                  "runtime_verify",
+                  "slot_wait",
+                  "admission",
+                  "process",
+                  "bootstrap",
+                  "install"
+                ],
+                "type": "string"
+              },
+              "started_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase",
+              "started_at",
+              "ms"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "slot_ahead": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "running",
+            "launched",
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "started_at",
+        "state",
+        "current",
+        "phases",
+        "ended_at",
+        "first_output_at",
+        "failure",
+        "slot_ahead"
+      ],
+      "type": "object"
+    },
+    "NativeRuntimeDeath": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "claude_cli",
+            "codex_app_server"
+          ],
+          "type": "string"
+        },
+        "pid": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "processIdentity": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "pid",
+        "processIdentity"
+      ],
+      "type": "object"
+    },
+    "ObservedState": {
+      "enum": [
+        "absent",
+        "starting",
+        "idle",
+        "working",
+        "checkpointing",
+        "pausing",
+        "paused",
+        "recovering",
+        "stopping",
+        "stopped",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "PolicyCondition": {
+      "enum": [
+        "none",
+        "quarantined",
+        "coordination_blocked",
+        "auth_blocked",
+        "budget_blocked",
+        "security_blocked"
+      ],
+      "type": "string"
+    },
+    "ProjectHostToolScope": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "agentId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "canonicalSourcePath": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "policySha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "projectId": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "projectName": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]+$",
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "codex",
+            "claude-code",
+            "open-model"
+          ],
+          "type": "string"
+        },
+        "remoteUrl": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "repository": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sourceRepoPath": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "toolId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "toolLabel": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentId",
+        "accountId",
+        "projectId",
+        "projectName",
+        "sourceRepoPath",
+        "canonicalSourcePath",
+        "repository",
+        "remoteUrl",
+        "provider",
+        "toolId",
+        "toolLabel",
+        "policySha256"
+      ],
+      "type": "object"
+    },
+    "ReconciliationNotice": {
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "quarantine_death",
+            "coordination_escalation"
+          ],
+          "type": "string"
+        },
+        "terminal": {
+          "$ref": "#/$defs/ExecutionTerminalPayload"
+        }
+      },
+      "required": [
+        "at",
+        "kind",
+        "cause"
+      ],
+      "type": "object"
+    },
+    "ReconciliationState": {
+      "properties": {
+        "completed_action_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "consecutive_action_failures": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit_timestamps_ms": {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "last_action_sequence": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_observed_state": {
+          "$ref": "#/$defs/ObservedState"
+        },
+        "last_terminal": {
+          "$ref": "#/$defs/ExecutionTerminalPayload"
+        },
+        "next_restart_at_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pending_action": {
+          "anyOf": [
+            {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "poke",
+                    "restart_fresh",
+                    "restart_with_resume",
+                    "stop"
+                  ],
+                  "type": "string"
+                },
+                "recorded_at_ms": {
+                  "type": "number"
+                },
+                "sequence": {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "sequence",
+                "kind",
+                "recorded_at_ms"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "exit_timestamps_ms",
+        "consecutive_action_failures",
+        "last_observed_state",
+        "next_restart_at_ms",
+        "completed_action_ids",
+        "last_action_sequence",
+        "pending_action"
+      ],
+      "type": "object"
+    },
+    "RetiredRuntimeEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "death": {
+          "$ref": "#/$defs/NativeRuntimeDeath"
+        },
+        "executionGenerationId": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]*$",
+          "type": "string"
+        },
+        "runtimeGenerationId": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "executionGenerationId",
+        "runtimeGenerationId",
+        "death"
+      ],
+      "type": "object"
+    },
+    "RoomAgentState": {
+      "properties": {
+        "connection": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "observed_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "enum": [
+                "connected",
+                "reconnecting",
+                "disconnected"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observed_at",
+            "detail"
+          ],
+          "type": "object"
+        },
+        "inbox": {
+          "properties": {
+            "blocked_by_message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pending_count": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "enum": [
+                "empty",
+                "queued",
+                "blocked",
+                "restoring_conversation",
+                "waiting_for_desktop_credentials"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "pending_count",
+            "blocked_by_message_id",
+            "detail"
+          ],
+          "type": "object"
+        },
+        "ingress": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "observed_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "enum": [
+                "starting",
+                "observing",
+                "backoff",
+                "blocked",
+                "stopped"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observed_at",
+            "detail"
+          ],
+          "type": "object"
+        },
+        "task": {
+          "properties": {
+            "state": {
+              "enum": [
+                "none",
+                "assigned",
+                "working",
+                "blocked"
+              ],
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "task_id",
+            "title"
+          ],
+          "type": "object"
+        },
+        "turn": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inbox_item_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "provider_turn_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "enum": [
+                "idle",
+                "dispatching",
+                "responding",
+                "publishing",
+                "retrying",
+                "failed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "inbox_item_id",
+            "source_message_id",
+            "provider_turn_id",
+            "detail"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "connection",
+        "ingress",
+        "inbox",
+        "turn",
+        "task"
+      ],
+      "type": "object"
+    },
+    "RoomWorkspaceHostToolScope": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "agentId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "canonicalWorkspacePath": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "const": "room_workspace",
+          "type": "string"
+        },
+        "policySha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "codex",
+            "claude-code",
+            "open-model"
+          ],
+          "type": "string"
+        },
+        "roomId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "toolId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "toolLabel": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]+$",
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "type": "number"
+        },
+        "workAttemptId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "workspacePath": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version",
+        "agentId",
+        "accountId",
+        "roomId",
+        "workAttemptId",
+        "workspacePath",
+        "canonicalWorkspacePath",
+        "provider",
+        "toolId",
+        "toolLabel",
+        "policySha256"
+      ],
+      "type": "object"
+    },
+    "RunningBackgroundCommand": {
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "tool_use_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "task_id",
+        "tool_use_id",
+        "command",
+        "started_at"
+      ],
+      "type": "object"
+    },
+    "SignedHostApprovalRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "payload": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "SupervisedPermissionProfile": {
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string"
+        },
+        "risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "available",
+            "gated",
+            "unsupported"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "description",
+        "status",
+        "risk",
+        "detail",
+        "isDefault"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptCheckpoint": {
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "provider_continuation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "room_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "room_cursor",
+        "provider_continuation_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://letagents.chat/schemas/daemon-rpc-contract.v3.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract": {
+    "defaultMaxRequestBytes": 65536,
+    "implementationVersion": "2.0.284-modern.8",
+    "localBoardMaxFrameBytes": 16777216,
+    "protocolVersion": 3,
+    "stateActivitySummaryLimit": 16,
+    "timeouts": {
+      "bootstrapIngressMs": 45000,
+      "defaultMs": 3000,
+      "installHostGrantMs": 60000,
+      "localBoardMs": 30000,
+      "longPollDefaultWaitMs": 25000,
+      "longPollMaxWaitMs": 30000,
+      "noneMs": 0,
+      "recoveryMs": 30000,
+      "retireMs": 60000,
+      "richReadMs": 15000,
+      "roomMoveCommitMs": 15000,
+      "turnControlMs": 15000
+    }
+  },
+  "description": "Language-neutral JSON Schema Draft 2020-12 contract for the LetAgents supervisor daemon NDJSON control socket. Generated from apps/desktop/daemon-contract/methods.ts.",
+  "envelope": {
+    "request": {
+      "$ref": "#/$defs/DaemonRequestEnvelope"
+    },
+    "response": {
+      "$ref": "#/$defs/DaemonResponseEnvelope"
+    }
+  },
+  "hostApprovalOperations": {
+    "decide": {
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "actorId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "allow_once",
+              "deny",
+              "allow_always"
+            ],
+            "type": "string"
+          },
+          "decisionId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "expected": {
+            "$ref": "#/$defs/HostApprovalReference"
+          },
+          "projectionSha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected",
+          "decisionId",
+          "actorId",
+          "decision",
+          "projectionSha256"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$ref": "#/$defs/HostApprovalStatus"
+      }
+    },
+    "list": {
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "roomId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "roomId"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/HostApprovalCandidate"
+        },
+        "type": "array"
+      }
+    },
+    "list_tool_rules": {
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "agentId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentId"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/HostToolRule"
+        },
+        "type": "array"
+      }
+    },
+    "revoke_tool_rule": {
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "agentId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "ruleId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentId",
+          "ruleId",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$ref": "#/$defs/JsonValue"
+      }
+    },
+    "set_home_harness": {
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "daemonGeneration": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "entryId": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entryId",
+          "daemonGeneration",
+          "expectedRevision",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "properties": {
+              "apply": {
+                "type": "string"
+              },
+              "configuration": {
+                "$ref": "#/$defs/DaemonAgentConfigurationView"
+              },
+              "outcome": {
+                "enum": [
+                  "updated",
+                  "conflict"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "configuration"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "set_live_sharing": {
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "daemonGeneration": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "entryId": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entryId",
+          "daemonGeneration",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "properties": {
+              "configuration": {
+                "$ref": "#/$defs/DaemonAgentConfigurationView"
+              },
+              "outcome": {
+                "const": "updated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "configuration"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "stop_background_command": {
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "daemonGeneration": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "entryId": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "taskId": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entryId",
+          "daemonGeneration",
+          "taskId"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "stopping",
+                  "not_running",
+                  "failed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    }
+  },
+  "methods": {
+    "attempt.read": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonAttemptDetail"
+      },
+      "timeout": {
+        "class": "rich_read",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "daemon.negotiate": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": true,
+      "maxRequestBytes": 65536,
+      "params": {
+        "anyOf": [
+          {
+            "properties": {},
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonStatus"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": true
+    },
+    "daemon.prepare_handoff": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": true,
+      "maxRequestBytes": 65536,
+      "params": {
+        "anyOf": [
+          {
+            "properties": {},
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "accepted": {
+            "const": true,
+            "type": "boolean"
+          },
+          "generation": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "kind": "none"
+      },
+      "versionAgnostic": false
+    },
+    "daemon.status": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": true,
+      "maxRequestBytes": 65536,
+      "params": {
+        "anyOf": [
+          {
+            "properties": {},
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonStatus"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "local_board.mutate": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 16777216,
+      "params": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "properties": {
+              "args": {
+                "items": {
+                  "$ref": "#/$defs/JsonValue"
+                },
+                "type": "array"
+              },
+              "databasePath": {
+                "type": "string"
+              },
+              "domain": {
+                "const": "desktop",
+                "type": "string"
+              },
+              "operation": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "domain",
+              "databasePath",
+              "operation",
+              "args"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "properties": {
+              "args": {
+                "items": {
+                  "$ref": "#/$defs/JsonValue"
+                },
+                "type": "array"
+              },
+              "databasePath": {
+                "type": "string"
+              },
+              "domain": {
+                "const": "mcp",
+                "type": "string"
+              },
+              "operation": {
+                "type": "string"
+              },
+              "statePath": {
+                "type": "string"
+              },
+              "worker": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/JsonRecord"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "domain",
+              "databasePath",
+              "statePath",
+              "operation",
+              "args",
+              "worker"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "timeout": {
+        "class": "local_board",
+        "kind": "fixed",
+        "ms": 30000
+      },
+      "versionAgnostic": false
+    },
+    "local_board.watch": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "additionalProperties": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "properties": {
+          "generation": {
+            "type": "number"
+          },
+          "revision": {
+            "type": "number"
+          },
+          "roomId": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "roomId"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": true,
+      "result": {
+        "properties": {
+          "generation": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "generation",
+          "revision",
+          "tasks"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "kind": "none"
+      },
+      "versionAgnostic": false
+    },
+    "manifest.compare_and_set_desired_state": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "desired_state": {
+            "$ref": "#/$defs/DesiredState"
+          },
+          "expected_desired_state": {
+            "$ref": "#/$defs/DesiredState"
+          },
+          "id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "expected_desired_state",
+          "desired_state"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "applied": {
+            "type": "boolean"
+          },
+          "entry": {
+            "$ref": "#/$defs/DaemonManifestEntryView"
+          }
+        },
+        "required": [
+          "applied",
+          "entry"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "manifest.control_turn": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "action_id": {
+            "type": "string"
+          },
+          "action_sequence": {
+            "type": "number"
+          },
+          "correction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "daemon_generation": {
+            "type": "number"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "inbox_item_id": {
+            "type": "string"
+          },
+          "provider_continuation_id": {
+            "type": "string"
+          },
+          "provider_turn_id": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "source_message_id": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "room_id",
+          "daemon_generation",
+          "work_attempt_id",
+          "execution_generation_id",
+          "provider_continuation_id",
+          "provider_turn_id",
+          "inbox_item_id",
+          "source_message_id",
+          "action_id",
+          "action_sequence"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonTurnControlResult"
+      },
+      "timeout": {
+        "class": "turn_control",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "manifest.get_entry": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/DaemonManifestEntryView"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "timeout": {
+        "class": "rich_read",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "manifest.list": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "anyOf": [
+          {
+            "properties": {
+              "activity": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "full",
+                      "summary"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "room_id": {
+                "anyOf": [
+                  {
+                    "minLength": 1,
+                    "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "items": {
+          "$ref": "#/$defs/DaemonManifestEntryView"
+        },
+        "type": "array"
+      },
+      "timeout": {
+        "class": "rich_read",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "manifest.put": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "entry": {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "properties": {
+              "activity": {
+                "items": {
+                  "$ref": "#/$defs/DaemonActivityEvent"
+                },
+                "type": "array"
+              },
+              "avatar": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AgentAvatar"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "charter": {
+                "type": "string"
+              },
+              "condition": {
+                "$ref": "#/$defs/PolicyCondition"
+              },
+              "config_revision": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "created_at": {
+                "type": "string"
+              },
+              "created_by": {
+                "type": "string"
+              },
+              "delivery_mode": {
+                "const": "daemon_inbox",
+                "type": "string"
+              },
+              "deployment_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "desired_state": {
+                "$ref": "#/$defs/DesiredState"
+              },
+              "display_name": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "last_error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_turn_control_sequence": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "last_worker_binding": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/DaemonWorkerBindingProjection"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "local_room_id": {
+                "type": "string"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "native_liveness": {
+                "properties": {
+                  "detail": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "observed_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "state": {
+                    "enum": [
+                      "active",
+                      "idle",
+                      "stale",
+                      "terminal",
+                      "unknown"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "observed_at",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              "observed_state": {
+                "type": "string"
+              },
+              "permission_profile_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "provider": {
+                "type": "string"
+              },
+              "provider_launch_policy": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "provider_ref": {
+                "anyOf": [
+                  {
+                    "additionalProperties": {
+                      "$ref": "#/$defs/JsonValue"
+                    },
+                    "properties": {
+                      "execution_generation_id": {
+                        "type": "string"
+                      },
+                      "provider_connection": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/JsonRecord"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "provider_continuation_id": {
+                        "type": "string"
+                      },
+                      "work_attempt_id": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ready_reached_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reconciliation": {
+                "$ref": "#/$defs/ReconciliationState"
+              },
+              "reconciliation_notices": {
+                "items": {
+                  "$ref": "#/$defs/ReconciliationNotice"
+                },
+                "type": "array"
+              },
+              "room_id": {
+                "type": "string"
+              },
+              "run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "runtime_configuration_revision": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "source_repo_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "turn_control": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/DaemonTurnControlEffect"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "work_attempt_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "workplace_liveness": {
+                "properties": {
+                  "detail": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "observed_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "state": {
+                    "enum": [
+                      "reachable",
+                      "stale",
+                      "unknown"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "observed_at",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              "workspace_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "entry"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonManifestEntryView"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "manifest.resolve_turn_control": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "action_id": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "resolution": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "action_id",
+          "resolution"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonManifestEntryView"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "manifest.set_desired_state": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "desired_state": {
+            "$ref": "#/$defs/DesiredState"
+          },
+          "id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "desired_state"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonManifestEntryView"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "manifest.set_display_name": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "display_name": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "display_name"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonManifestEntryView"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "manifest.update_workplace_liveness": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "reachable",
+              "stale",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonManifestEntryView"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "manifest.watch_state": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": true,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "after_daemon_generation": {
+            "type": "number"
+          },
+          "after_sequence": {
+            "type": "number"
+          },
+          "changed_only": {
+            "type": "boolean"
+          },
+          "wait_ms": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonStateWatchResult"
+      },
+      "timeout": {
+        "defaultWaitMs": 25000,
+        "kind": "long_poll",
+        "maxWaitMs": 30000,
+        "overheadMs": 3000,
+        "waitParam": "wait_ms"
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.acknowledge_room_move_source_revocation": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "source_agent_session_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "entry_id",
+          "daemon_generation",
+          "source_agent_session_id"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonRoomMoveRecord"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.apply_agent_configuration": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "expected_configuration_revision": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entry_id",
+          "daemon_generation",
+          "expected_configuration_revision"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonAgentConfigurationApplyResult"
+      },
+      "timeout": {
+        "kind": "none"
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.bind_worker_session": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "agent_session_token": {
+            "type": "string"
+          },
+          "api_url": {
+            "type": "string"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "room_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "agent_session_id",
+          "agent_session_token",
+          "api_url"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "bound": {
+            "const": true,
+            "type": "boolean"
+          },
+          "entry_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bound",
+          "entry_id",
+          "agent_session_id"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.bootstrap_room_ingress": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "initial_message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "last_observed_message_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "bootstrapped",
+              "existing",
+              "stale"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "last_observed_message_id"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "bootstrap_ingress",
+        "kind": "fixed",
+        "ms": 45000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.borrow_worker_credential": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "api_url": {
+            "type": "string"
+          },
+          "daemon_generation": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "provider_turn_id": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "room_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "agent_session_id",
+          "daemon_generation",
+          "api_url"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "agent_session_token": {
+            "type": "string"
+          },
+          "api_url": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_session_token",
+          "api_url",
+          "room_id",
+          "agent_session_id"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.checkpoint_worker_cursor": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "room_cursor": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "agent_session_id",
+          "room_cursor"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "checkpointed": {
+            "const": true,
+            "type": "boolean"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "room_cursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "checkpointed",
+          "entry_id",
+          "room_cursor"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.commit_room_move": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "entry_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonRoomMoveRecord"
+      },
+      "timeout": {
+        "class": "room_move_commit",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.complete_bounded_effect": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "type": "number"
+          },
+          "effect_id": {
+            "type": "string"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "provider_turn_id": {
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "daemon_generation",
+          "effect_id"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "completed": {
+            "const": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "completed"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.execute_bounded_tool": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "input": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "mcp_request_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "provider_turn_id": {
+            "type": "string"
+          },
+          "tool_name": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "daemon_generation",
+          "mcp_request_id",
+          "tool_name"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/JsonRecord"
+      },
+      "timeout": {
+        "kind": "none"
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.get_agent_configuration": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonAgentConfigurationView"
+      },
+      "timeout": {
+        "class": "rich_read",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.get_agent_inspector_detail": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "entry_id": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "source_message_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "entry_id",
+          "room_id",
+          "source_message_id"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonInspectorDetail"
+      },
+      "timeout": {
+        "class": "rich_read",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.get_current_room_move": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/DaemonRoomMoveRecord"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.get_room_move": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "entry_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonRoomMoveRecord"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.host_approval_challenge": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "anyOf": [
+          {
+            "properties": {},
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HostApprovalChallenge"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.host_approval_request": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "$ref": "#/$defs/SignedHostApprovalRequest"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "timeout": {
+        "class": "rich_read",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.install_host_grant": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "agent_key": {
+            "type": "string"
+          },
+          "api_url": {
+            "type": "string"
+          },
+          "credential_only": {
+            "type": "boolean"
+          },
+          "daemon_generation": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "grant_expires_at": {
+            "type": "string"
+          },
+          "grant_generation": {
+            "type": "number"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "installation_id": {
+            "type": "string"
+          },
+          "owner_account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recovery_only": {
+            "type": "boolean"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "scope_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supervisor_grant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "room_id",
+          "agent_key",
+          "grant_id",
+          "supervisor_grant",
+          "grant_generation",
+          "api_url",
+          "host_id",
+          "installation_id",
+          "grant_expires_at",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "installed",
+              "stale",
+              "provider_unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "install_host_grant",
+        "kind": "fixed",
+        "ms": 60000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.install_open_model_credential": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "api_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "context_window": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "daemon_generation": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "api_key",
+          "base_url",
+          "model",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "status": {
+            "enum": [
+              "installed",
+              "stale"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.install_worker_credential": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "agent_session_token": {
+            "type": "string"
+          },
+          "daemon_generation": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "room_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "agent_session_id",
+          "agent_session_token",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "status": {
+            "enum": [
+              "installed",
+              "stale"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.prepare_bounded_effect": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "input": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "mcp_request_id": {
+            "type": "string"
+          },
+          "mutation": {
+            "type": "boolean"
+          },
+          "provider_turn_id": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "daemon_generation",
+          "mcp_request_id",
+          "tool_name"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/JsonRecord"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.prepare_room_move": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "destination_room_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "request_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "destination_room_id",
+          "request_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonRoomMoveRecord"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.purge_agent": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "anyOf": [
+          {
+            "properties": {
+              "daemon_generation": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "entry_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "grant_revoked_without_worker_session": {
+                "const": false,
+                "type": "boolean"
+              },
+              "revoked_agent_session_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry_id",
+              "daemon_generation",
+              "revoked_agent_session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "daemon_generation": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "entry_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "grant_revoked_without_worker_session": {
+                "type": "boolean"
+              },
+              "revoked_agent_session_id": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "entry_id",
+              "daemon_generation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonPurgeAgentResult"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.recover_agent_runtime": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "daemon_generation": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "entry_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry_id",
+              "daemon_generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "daemon_generation": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "entry_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "execution_generation_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "mode": {
+                "const": "reconnect",
+                "type": "string"
+              },
+              "operation_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "room_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "runtime_generation_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry_id",
+              "daemon_generation",
+              "mode",
+              "operation_id",
+              "room_id",
+              "execution_generation_id",
+              "runtime_generation_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "daemon_generation": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "entry_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "execution_generation_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "mode": {
+                "enum": [
+                  "resume",
+                  "fresh"
+                ],
+                "type": "string"
+              },
+              "operation_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "retired_runtime_evidence": {
+                "items": {
+                  "$ref": "#/$defs/RetiredRuntimeEvidence"
+                },
+                "maxItems": 32,
+                "type": "array"
+              },
+              "room_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "runtime_generation_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry_id",
+              "daemon_generation",
+              "mode",
+              "operation_id",
+              "room_id",
+              "execution_generation_id",
+              "runtime_generation_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "entry": {
+            "$ref": "#/$defs/DaemonManifestEntryView"
+          },
+          "outcome": {
+            "const": "recovering",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "entry"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "recovery",
+        "kind": "fixed",
+        "ms": 30000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.restore_agent_conversation": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "daemon_generation": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "source_message_id": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "room_id",
+          "source_message_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "agent_session_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "accepted": {
+            "const": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "turn_control",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.retire_agent": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "anyOf": [
+          {
+            "properties": {
+              "daemon_generation": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "entry_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "grant_revoked_without_worker_session": {
+                "const": false,
+                "type": "boolean"
+              },
+              "revoked_agent_session_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry_id",
+              "daemon_generation",
+              "revoked_agent_session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "daemon_generation": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "entry_id": {
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+                "type": "string"
+              },
+              "grant_revoked_without_worker_session": {
+                "type": "boolean"
+              },
+              "revoked_agent_session_id": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "entry_id",
+              "daemon_generation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonRetireAgentResult"
+      },
+      "timeout": {
+        "class": "retire",
+        "kind": "fixed",
+        "ms": 60000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.retry_room_delivery": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "daemon_generation": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "source_message_id": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "room_id",
+          "source_message_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "agent_session_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "accepted": {
+            "const": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "turn_control",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.rollback_room_move": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "error": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "entry_id",
+          "daemon_generation",
+          "error"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonRoomMoveRecord"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.skip_room_delivery": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "daemon_generation": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "source_message_id": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "room_id",
+          "source_message_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "agent_session_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "accepted": {
+            "const": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "turn_control",
+        "kind": "fixed",
+        "ms": 15000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.sync_execution_delegations": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "room_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "room_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "status": {
+            "enum": [
+              "queued",
+              "stale"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.update_agent_configuration": {
+      "handoffDrainAllowed": false,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "configuration": {
+            "$ref": "#/$defs/JsonRecord"
+          },
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "entry_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          },
+          "expected_revision": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entry_id",
+          "daemon_generation",
+          "expected_revision",
+          "configuration"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "$ref": "#/$defs/DaemonAgentConfigurationUpdateResult"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.verify_worker_session": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "agent_session_token": {
+            "type": "string"
+          },
+          "api_url": {
+            "type": "string"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "execution_generation_id": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "work_attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "room_id",
+          "work_attempt_id",
+          "execution_generation_id",
+          "agent_session_id",
+          "agent_session_token",
+          "api_url"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "verified": {
+            "const": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "verified",
+          "entry_id",
+          "agent_session_id"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.watch_agent_stream": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "after_sequence": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "wait_ms": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "entry_id"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "dropped_events": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ended": {
+            "type": "boolean"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/$defs/DaemonAgentStreamEvent"
+            },
+            "type": "array"
+          },
+          "sequence": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stream_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sequence",
+          "stream_generation",
+          "dropped_events",
+          "events",
+          "ended"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "defaultWaitMs": 25000,
+        "kind": "long_poll",
+        "maxWaitMs": 30000,
+        "overheadMs": 3000,
+        "waitParam": "wait_ms"
+      },
+      "versionAgnostic": false
+    },
+    "supervisor.watch_background_commands": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": false,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "after_version": {
+            "type": "number"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "wait_ms": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "entry_id"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "properties": {
+          "commands": {
+            "items": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "type": "array"
+          },
+          "ended": {
+            "type": "boolean"
+          },
+          "version": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "commands",
+          "ended"
+        ],
+        "type": "object"
+      },
+      "timeout": {
+        "defaultWaitMs": 25000,
+        "kind": "long_poll",
+        "maxWaitMs": 30000,
+        "overheadMs": 3000,
+        "waitParam": "wait_ms"
+      },
+      "versionAgnostic": false
+    }
+  },
+  "title": "LetAgents Supervisor Daemon Control Socket RPC Contract"
+}

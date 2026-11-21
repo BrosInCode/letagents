@@ -22,7 +22,7 @@
     "build:web": "npm --prefix src/web run build",
     "build:desktop": "npm --prefix apps/desktop run build",
     "build:all": "npm run build && npm run build:web",
-    "test:mcp": "node --import tsx --test src/mcp/__tests__/*.test.ts",
+    "test:mcp": "node --conditions=letagents-source --import tsx --test src/mcp/__tests__/*.test.ts",
     "test:package-runtime": "node --test scripts/package-runtime.test.mjs",
     "test:web": "node --import tsx --test src/web/tests/*.test.ts src/web/src/composables/*.test.ts",
     "test:dependency-age": "node --test scripts/verify-dependency-age.test.mjs",

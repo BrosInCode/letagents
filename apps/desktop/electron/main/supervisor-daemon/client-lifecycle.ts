@@ -7,7 +7,6 @@ import { desktopShellEnvironmentReady } from "#provider-runtime/desktop-shell-en
 import { SupervisedAgentsUnsupportedError, supervisorDaemonAllowed } from "../platform-capabilities.js";
 import { prepareSupervisorState } from "../supervisor-state-recovery.js";
 import {
-  HANDOFF_DRAIN_REQUEST_TIMEOUT_MS,
   MANIFEST_LIST_REQUEST_TIMEOUT_MS,
   SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
   SUPERVISOR_DAEMON_PROTOCOL_VERSION,
@@ -28,8 +27,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
   async getMaintenanceStatus(): Promise<{ held: boolean; ready: boolean }> {
     const hold = await readDaemonMaintenance(this.maintenancePath);
     if (!hold) return { held: false, ready: false };
-    const status = await this.request<Record<string, unknown>>("daemon.negotiate", undefined,
-      SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.requestTimeoutMs, false, undefined, undefined, true).catch(() => null);
+    const status = await this.call("daemon.negotiate", undefined, { maintenance: true }).catch(() => null);
     return { held: true, ready: status?.maintenance_hold_id === hold.id };
   }
 
@@ -45,8 +43,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
       const observed: { negotiated: Record<string, unknown> | null } = { negotiated: null };
       const identify = async () => {
         try {
-          observed.negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined,
-            SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.requestTimeoutMs, false, undefined, undefined, true);
+          observed.negotiated = await this.call("daemon.negotiate", undefined, { maintenance: true });
           return this.captureRetiredDaemon(observed.negotiated);
         } catch (error) {
           if (observed.negotiated || !this.maintenanceTarget) throw error;
@@ -58,8 +55,10 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
         if (!hold || observed.negotiated?.maintenance_hold_id !== hold.id) {
           throw new Error("Force restart the service before resuming supervision.");
         }
-        await this.request("daemon.prepare_handoff", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION,
-          this.requestTimeoutMs, false, undefined, undefined, true);
+        await this.call("daemon.prepare_handoff", undefined, {
+          timeoutMs: this.requestTimeoutMs,
+          maintenance: true,
+        });
         // macOS may briefly lose process identity during clean exit. Wait for
         // positive exit evidence without signalling or accepting a later match.
         const stopped = await waitForConfirmedDaemonExit({
@@ -184,7 +183,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
   async isRuntimeEnvironmentCurrent(): Promise<boolean> {
     await this.waitForStartup();
     try {
-      const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate");
+      const negotiated = await this.call("daemon.negotiate");
       return negotiated.runtime_environment_fingerprint ===
         supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
     } catch (error) {
@@ -204,11 +203,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
       return null;
     }
     try {
-      const negotiated = await this.request<Record<string, unknown>>(
-        "daemon.negotiate",
-        undefined,
-        SUPERVISOR_DAEMON_PROTOCOL_VERSION,
-      );
+      const negotiated = await this.call("daemon.negotiate");
       const status = mapStatus(negotiated);
       this.observeAttachedDaemon(status);
       return this.rememberReadyStatus(status);
@@ -229,15 +224,14 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     const expectedRuntimeEnvironmentFingerprint = spawnEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT!;
     let retiredGeneration: number | undefined;
     try {
-      const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION)
+      const negotiated = await this.call("daemon.negotiate")
         .catch((error: unknown) => {
           if (!(error instanceof SupervisorDaemonRequestTimeoutError) || error.method !== "daemon.negotiate") throw error;
           this.assertNotRestarting();
           // Sibling provider starts can briefly delay the service. Retry only
           // this read, once, with the existing rich-read bound. A timeout is
           // never evidence that another daemon may be spawned.
-          return this.request<Record<string, unknown>>("daemon.negotiate", undefined,
-            SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+          return this.call("daemon.negotiate", undefined, { timeoutMs: MANIFEST_LIST_REQUEST_TIMEOUT_MS });
         });
       this.assertNotRestarting();
       if (hold && negotiated.maintenance_hold_id !== hold.id) throw new Error("Service maintenance is pending. Use Force restart service in Settings → Updates.");
@@ -345,7 +339,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     try {
       // Approval reads must reach this live owner even when ensureOperation is
       // waiting for an upgrade. Joining that promise would deadlock the turn.
-      await this.request("daemon.prepare_handoff", undefined, daemonVersion, HANDOFF_DRAIN_REQUEST_TIMEOUT_MS);
+      await this.call("daemon.prepare_handoff", undefined, { version: daemonVersion });
     } finally {
       this.drainingCurrentDaemon = false;
     }
@@ -356,11 +350,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     await this.waitForOwnedDaemonReadiness();
     let negotiated: Record<string, unknown>;
     try {
-      negotiated = await this.request<Record<string, unknown>>(
-        "daemon.negotiate",
-        undefined,
-        SUPERVISOR_DAEMON_PROTOCOL_VERSION,
-      );
+      negotiated = await this.call("daemon.negotiate");
     } catch (error) {
       // A failed or never-started supervisor has no owner-only socket to
       // relinquish. Keep the update fence active, but do not prevent Squirrel
@@ -386,7 +376,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     let lastError: unknown = null;
     while (Date.now() < deadline) {
       try {
-        const result = await this.request<Record<string, unknown>>("daemon.negotiate");
+        const result = await this.call("daemon.negotiate");
         const status = mapStatus(result);
         if (status.protocolVersion !== SUPERVISOR_DAEMON_PROTOCOL_VERSION) {
           throw new SupervisorDaemonProtocolMismatchError(SUPERVISOR_DAEMON_PROTOCOL_VERSION, status.protocolVersion, "Replacement daemon protocol does not match the desktop.");
@@ -613,7 +603,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
 
   private async isSocketReleased(daemonVersion: number, maintenance = false): Promise<boolean> {
     try {
-      await this.request("daemon.negotiate", undefined, daemonVersion, this.requestTimeoutMs, false, undefined, undefined, maintenance);
+      await this.call("daemon.negotiate", undefined, { version: daemonVersion, maintenance });
       return false;
     } catch (error) {
       if (isConnectionUnavailable(error)) return true;

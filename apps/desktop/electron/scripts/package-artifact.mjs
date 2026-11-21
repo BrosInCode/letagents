@@ -196,11 +196,13 @@ await mkdir(app, { recursive: true });
 for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
   await cp(join(root, directory), join(app, directory), { recursive: true });
 }
-// The provider runtime build has type declarations for the compiler; the app runs only the code.
-await cp(join(root, "dist-provider-runtime"), join(app, "dist-provider-runtime"), {
-  recursive: true,
-  filter: async (source) => (await stat(source)).isDirectory() || isPackagedBuildFile(source),
-});
+// The shared packages' builds have type declarations for the compiler; the app runs only the code.
+for (const directory of ["dist-daemon-contract", "dist-provider-runtime"]) {
+  await cp(join(root, directory), join(app, directory), {
+    recursive: true,
+    filter: async (source) => (await stat(source)).isDirectory() || isPackagedBuildFile(source),
+  });
+}
 // Protocol/domain contracts are repository-neutral, but compiled desktop
 // imports resolve them from Contents/shared in the packaged application.
 await cp(join(root, "..", "..", "shared"), join(contents, "shared"), { recursive: true });
@@ -285,6 +287,12 @@ const requiredAppFiles = [
   "dist-electron/main.js",
   // The room page bridge: tsc writes it as CommonJS beside main.js.
   "dist-electron/page-preload.cjs",
+  "dist-daemon-contract/index.js",
+  "dist-daemon-contract/methods.js",
+  "dist-daemon-contract/schema-document.js",
+  "dist-daemon-contract/version.js",
+  "dist-daemon-contract/wire-boundary.js",
+  "dist-daemon-contract/wire-types.js",
   "dist-provider-runtime/agents/codex-provider-adapter.js",
   "dist-provider-runtime/agents/codex/adapter.js",
   "dist-provider-runtime/agents/codex/adapter-attach.js",
