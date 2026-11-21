@@ -2,7 +2,7 @@ import type { PreparedRoomContext } from "../shared/message-outcome.js";
 import type { DatabaseSync } from "node:sqlite";
 
 const TABLE = `CREATE TABLE IF NOT EXISTS supervised_agent_prepared_context (
-  inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+  inbox_item_id TEXT PRIMARY KEY REFERENCES inbox_items(inbox_item_id) ON DELETE CASCADE,
   snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json))
 ) STRICT`;
 
@@ -84,7 +84,7 @@ export function readPreparedRoomTurnFiles(database: DatabaseSync, input: {
       SELECT json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.files') AS files,
         json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.continuation') AS continuation,
         ROW_NUMBER() OVER (ORDER BY json_extract(c.snapshot_json,'$.preparedAt') DESC, i.rowid DESC) AS turn
-      FROM supervised_agent_prepared_context c JOIN supervised_agent_inbox i ON i.inbox_item_id=c.inbox_item_id
+      FROM supervised_agent_prepared_context c JOIN inbox_items i ON i.inbox_item_id=c.inbox_item_id
       WHERE i.agent_id=? AND i.room_id=? AND i.inbox_item_id<>?
     ) WHERE continuation=?`).all(input.agentId, input.roomId, input.inboxItemId, input.continuation) as Array<{ files: unknown; turn: number }>;
   const outcomes = new Map<string, RoomTurnFileOutcome>();

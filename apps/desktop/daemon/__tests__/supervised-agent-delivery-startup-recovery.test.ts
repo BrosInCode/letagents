@@ -174,7 +174,7 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       1,
     );
     const snapshot = await internals.store.load();
-    const birth = await internals.store.checkpointProviderBirth(snapshot.generation, {
+    await internals.store.checkpointProviderBirth(snapshot.versions.stone!, {
       entry: manifestEntry,
       executionGenerationId: identity.execution,
       providerConnection: connection,
@@ -182,7 +182,6 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       requestedAuthorityMode: "typed",
       observedAtMs: Date.now(),
     });
-    internals.manifestGeneration = birth.generation;
     await internals.providerStreams.install("stone", liveHandle, identity.execution, () => false);
     await waitForAsync(async () => internals.providerStreams.isDeliveryAdmitted("stone"));
     await internals.providerStreams.drainCallbacks();

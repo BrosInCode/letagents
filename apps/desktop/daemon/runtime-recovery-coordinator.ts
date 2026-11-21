@@ -33,8 +33,6 @@ export type AgentRuntimeRecoveryRequest = Omit<RuntimeRestartRequest, "entryId" 
 
 type RuntimeRecoveryAuthority = {
   currentDaemonGeneration: () => number;
-  currentManifestGeneration: () => number;
-  acceptManifestGeneration: (generation: number) => void;
   isHandoffScheduled: () => boolean;
   assertCurrent: () => Promise<void>;
   serializeManifest: <T>(operation: () => Promise<T>) => Promise<T>;
@@ -182,23 +180,31 @@ export class RuntimeRecoveryCoordinator {
         }
 
         const missingCorrectionIntent = control.has_correction && (!correctionText || !correctionStrategy);
-        const retireWithoutClaimingEffect = !exactLegacyCorrectionApplied && (control.status === "prepared"
+        const missingCausalTarget = !exactLegacyCorrectionApplied
+          && (!control.target_room_id?.trim() || !control.target_source_message_id?.trim());
+        const retireWithoutClaimingEffect = !exactLegacyCorrectionApplied && !missingCausalTarget && (control.status === "prepared"
           ? !control.has_correction || missingCorrectionIntent
           : control.status === "retryable" && missingCorrectionIntent);
         const nextStatus = exactLegacyCorrectionApplied || retireWithoutClaimingEffect
           ? "completed" as const
-          : control.status === "prepared"
-            ? "retryable" as const
-            : control.status === "dispatching"
-              ? "uncertain" as const
-              : control.status;
+          : missingCausalTarget
+            ? "uncertain" as const
+            : control.status === "prepared"
+              ? "retryable" as const
+              : control.status === "dispatching"
+                ? "uncertain" as const
+                : control.status;
         const nextError = exactLegacyCorrectionApplied
           ? "Recovered the predecessor supervisor's exact durable correction row; no provider control or FIFO mutation was replayed."
           : retireWithoutClaimingEffect
             ? control.has_correction
               ? "Supervisor restarted before a native effect was proven. The legacy correction payload was not durable, so no effect was claimed; reissue the correction."
               : "Supervisor restarted before native dispatch. The unapplied Stop was retired and the supervised lane was recovered."
-            : control.status === "dispatching"
+            : missingCausalTarget
+              ? missingCorrectionIntent
+                ? "The native effect is uncertain and the legacy correction payload is unavailable. Resolve the effect; if it was not applied, reissue the correction."
+                : "This turn-control action predates exact causal target fencing and cannot be replayed automatically."
+              : control.status === "dispatching"
               ? "Supervisor restarted after native dispatch began; verify the provider outcome before resolving the action."
               : control.status === "prepared"
                 ? correctionStrategy === "stop_then_resend"
@@ -245,12 +251,12 @@ export class RuntimeRecoveryCoordinator {
         });
       }
       if (!changed) return;
-      const next = await this.store.write(
-        this.authority.currentManifestGeneration(),
+      await this.store.write(
         entries,
         (commit) => this.authority.fenceCommit(commit),
+        undefined,
+        manifest.versions,
       );
-      this.authority.acceptManifestGeneration(next.generation);
     });
   }
 
@@ -269,8 +275,10 @@ export class RuntimeRecoveryCoordinator {
     const observedAt = new Date(this.nowMs()).toISOString();
     const checkpoint = await this.authority.serializeManifest(async () => {
       await this.authority.assertCurrent();
+      const loaded = await this.store.getEntryWithVersion(entry.id);
+      if (!loaded) throw new Error(`Unknown daemon manifest entry: ${entry.id}`);
       const committed = await this.store.commitTurnControlState(
-        this.authority.currentManifestGeneration(),
+        loaded.version,
         {
           agentId: entry.id,
           roomId: entry.room_id,
@@ -314,7 +322,6 @@ export class RuntimeRecoveryCoordinator {
         }),
         (commit) => this.authority.fenceCommit(commit),
       );
-      this.authority.acceptManifestGeneration(committed.generation);
       return committed;
     });
     return checkpoint.entry;
@@ -404,9 +411,10 @@ export class RuntimeRecoveryCoordinator {
     if (hold) this.exitHolds.set(entryId, hold);
     const record = await this.serializeEntry(entryId, () => this.authority.serializeManifest(async () => {
       await assertAuthority();
-      const prepared = await this.store.prepareRuntimeRecovery(this.authority.currentManifestGeneration(), request,
+      const loaded = await this.store.getEntryWithVersion(entryId);
+      if (!loaded) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+      const prepared = await this.store.prepareRuntimeRecovery(loaded.version, request,
         commit => this.authority.fenceCommit(commit));
-      this.authority.acceptManifestGeneration(prepared.generation);
       return prepared.record;
     }));
     const savedRef = JSON.parse(record.provider_ref_json) as NonNullable<DaemonManifestEntry["provider_ref"]>;
@@ -667,13 +675,14 @@ export class RuntimeRecoveryCoordinator {
       // or fresh-runtime intent AND a released FIFO, never a mix of the two.
       entry = await this.authority.serializeManifest(async () => {
         await this.authority.assertCurrent();
-        const current = await this.store.getEntry(entryId);
-        if (!current || (retirementGrant && this.workerAuthority.currentHostGrant(current) !== retirementGrant)
+        const loaded = await this.store.getEntryWithVersion(entryId);
+        const current = loaded?.entry;
+        if (!current || !loaded || (retirementGrant && this.workerAuthority.currentHostGrant(current) !== retirementGrant)
           || current.provider_ref?.execution_generation_id !== ref?.execution_generation_id
           || current.provider_ref?.provider_continuation_id !== ref?.provider_continuation_id) {
           throw new Error("Runtime recovery lost the exact provider reference before replacement.");
         }
-        const committed = await this.store.replaceEntry(this.authority.currentManifestGeneration(), {
+        const committed = await this.store.replaceEntry(loaded.version, {
           ...current,
           desired_state: "running",
           observed_state: "starting",
@@ -697,7 +706,6 @@ export class RuntimeRecoveryCoordinator {
           agentId: entryId,
           detail: "Room move cancelled because its activating provider runtime ended before destination membership was joined.",
         }, interruptedDelivery);
-        this.authority.acceptManifestGeneration(committed.generation);
         if (committed.recoveredRuntimeId) {
           this.options.releaseRecoveredObservation?.(entryId, committed.recoveredRuntimeId, ref?.execution_generation_id);
         }

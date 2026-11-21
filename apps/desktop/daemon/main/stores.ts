@@ -84,7 +84,7 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
     this.entryConcurrency = new EntryConcurrencyGate({
       isHandoffScheduled: () => this.handoffScheduled || this.handoffDraining,
     });
-    this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath, undefined, undefined, /* schemaPrepared */ true);
+    this.store = new ManifestStore(paths.manifestPath);
     this.activityWrites = new DaemonActivityWrites({ authority: this.authority, store: this.store,
       isHandoffScheduled: () => this.handoffScheduled, admittedFence: (commit) => this.fenceAdmittedTransitionCommit(commit) });
     this.manifestAdministration = new ManifestAdministrationCoordinator({
@@ -93,8 +93,6 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
         serialize: (operation) => this.serializeManifestMutation(operation),
         assertCurrent: () => this.singleton.assertCurrent(),
         currentDaemonGeneration: () => this.singleton.currentGeneration,
-        currentManifestGeneration: () => this.manifestGeneration,
-        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
         fenceCommit: (commit) => this.fenceDaemonCommit(commit),
       },
       policies: {
@@ -116,8 +114,6 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
     this.manifestTransitions = new ManifestTransitionCoordinator({
       store: this.store,
       authority: {
-        currentManifestGeneration: () => this.manifestGeneration,
-        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
         assertCurrent: () => this.singleton.assertCurrent(),
         serializeMutation: (operation) => this.serializeManifestMutation(operation),
         serializeCommit: (operation) => this.serializeManifestCommit(operation),
@@ -140,14 +136,14 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       undefined,
       undefined,
       undefined,
-      paths.manifestPath, undefined, /* schemaPrepared */ true,
+      paths.manifestPath,
     );
     this.provisioner = new WorkspaceProvisioner(root, gitCommand);
     this.ephemeralProvisioner = new EphemeralWorkspaceProvisioner(root);
     this.workerBindings = new WorkerBindingStore(
       paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`,
       (commit, notification) => this.fenceDaemonCommit(commit, notification),
-      paths.manifestPath, undefined, /* schemaPrepared */ true,
+      paths.manifestPath,
     );
     this.nativeActivity = new NativeActivityPublicationCoordinator({
       bindings: this.workerBindings,
@@ -194,8 +190,6 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       durability: this.durability,
       authority: {
         currentDaemonGeneration: () => this.singleton.currentGeneration,
-        currentManifestGeneration: () => this.manifestGeneration,
-        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
         assertCurrent: () => this.singleton.assertCurrent(),
         fenceCommit: (commit) => this.fenceDaemonCommit(commit),
         serializeManifestMutation: (operation) => this.serializeManifestMutation(operation),
@@ -213,11 +207,9 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       ephemeralProvisioner: this.ephemeralProvisioner,
       nowMs: () => this.nowMs(),
     });
-    // Inbox state belongs to the canonical daemon database. The worker-binding
-    // path is a legacy JSON import source and must never become a second SQLite
-    // authority for delivery receipts.
+    // Inbox state belongs to the canonical daemon database.
     this.supervisedInbox = new SupervisedAgentInboxStore(
-      paths.manifestPath, undefined, (agentId) => this.notifyStateChanged(agentId), /* schemaPrepared */ true,
+      paths.manifestPath, undefined, (agentId) => this.notifyStateChanged(agentId),
     );
     this.replyAttachmentSpool = new ReplyAttachmentSpool(join(dirname(paths.manifestPath), "reply-attachments"));
     this.convergencePacer = new ConvergencePacer({ nowMs: recoveryClock.nowMs, random: recoveryClock.random,

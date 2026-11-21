@@ -16,7 +16,7 @@ import { listExecutionDelegationInstanceIds, listExecutionDelegationsForApproval
 import { selectDelegatedApproval, type SelectDelegatedApproval } from "../execution-delegated-approval.js";
 import { executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import type { DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
-import { type Row, storeMethods } from "./shared.js";
+import { storeMethods } from "./shared.js";
 
 export const approvals = storeMethods({
   /** Filesystem preparation only; exact authority is revalidated at admission. */
@@ -98,12 +98,6 @@ export const approvals = storeMethods({
       LIMIT 1`).get(input.agentId, input.executionGenerationId, runtimeId));
   },
 
-  /** The committed manifest generation, read now. */
-  async readGeneration(): Promise<number> {
-    const database = await this.getDatabase();
-    return Number((this.reads.get(database, "generation").get() as Row).generation);
-  },
-
   /**
    * The daemon's batched activity: the newest runtime state of an entry's
    * admitted but uncommitted events. Durable-idle checks consult it, since a
@@ -124,7 +118,7 @@ export const approvals = storeMethods({
     const assertCurrent = () => {
       if (this.closed || this.database !== database) throw new Error("Runtime authority store is unavailable.");
       const entry = this.readEntryFromDatabase(database, snapshot.agentId);
-      const configuration = database.prepare(`SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?`).get(snapshot.agentId);
+      const configuration = database.prepare(`SELECT config_revision,runtime_configuration_revision FROM agents WHERE agent_id=?`).get(snapshot.agentId);
       const binding = database.prepare(`SELECT room_id,work_attempt_id,execution_generation_id,api_url FROM worker_session_bindings WHERE entry_id=?`).get(snapshot.agentId);
       if (!entry || entry.room_id !== snapshot.roomId || entry.work_attempt_id !== snapshot.workAttemptId
         || entry.provider !== "codex" || entry.desired_state !== "running"

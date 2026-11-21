@@ -1,245 +1,151 @@
 /**
- * The DaemonStateSchema class: constructor, createSchema dispatch and method composition.
+ * Clean-slate daemon schema v1, plain numbered migration runner, and exact
+ * in-memory reference shape comparison.
  *
- * Where new code goes: a new schema version's migration goes in
- * storage-migrations.ts (with its dispatch in schema.ts createSchema and the
- * DAEMON_STATE_SCHEMA_VERSION bump in shared.ts); a change
- * to the current shape goes in shapes-v17-current.ts. The other shapes-*.ts
- * files hold frozen historical versions and change only to fix a repair bug.
- * shapes-v4-v7.ts owns the plain apply/validate shapes for v4 to v7;
- * shapes-v6-v9.ts owns v8 and v9 plus the v6/v7 repair paths
- * (repairAndValidateV6Shape/V7Shape, bounded delivery, secret scrub) that
- * call into those v6/v7 shapes, so the two names overlap at v6 and v7.
+ * All future schema changes add a numbered migration in DAEMON_STATE_MIGRATIONS
+ * (keyed by source version: e.g. `1: migrateV1ToV2`), update applySchemaCurrent
+ * to match the new target shape, and bump DAEMON_STATE_SCHEMA_VERSION.
  */
-import type { DatabaseSync } from "node:sqlite";
-import { SCHEMA_VERSION, applyAgentAvatarColumn, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyAgentStateVersionSchema, applyDaemonEfficiencyMigration, retireDesktopEventsDelivery, type Row } from "./shared.js";
+import { DatabaseSync } from "node:sqlite";
+import { applyApprovalRequestClosureSchema } from "../execution-approval-journal.js";
+import { applyExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
+import { applyExecutionStorageSchema } from "../execution-storage-schema.js";
+import { applyHostToolRuleSchema } from "../host-tool-rules.js";
+import { applyManagedLaunchContractSchema } from "../managed-launch-contract.js";
+import { applyPreparedRoomContextSchema } from "../prepared-room-context.js";
+import { applyRoomWorkPublicationSchema } from "../room-work-publication-store.js";
+import { applyRuntimeRecoverySchema } from "../runtime-recovery-journal.js";
+import {
+  DAEMON_STATE_APPLICATION_ID,
+  SCHEMA_VERSION,
+  toSqliteUserVersion,
+  applyAgentStateVersionSchema,
+  normalizeSchemaSql,
+  type Row,
+} from "./shared.js";
 import { assertDaemonStateVersionSupported } from "./version-gate.js";
-import { migrationsV1ToV12 } from "./migrations-v1-v12.js";
-import { migrationsV13ToV24 } from "./migrations-v13-v24.js";
-import { storageMigrations } from "./storage-migrations.js";
-import { runtimeBirthRepairs } from "./runtime-birth-repairs.js";
-import { shapesV11V12 } from "./shapes-v11-v12.js";
-import { shapesV13ToV16 } from "./shapes-v13-v16.js";
-import { shapesV17ToCurrent } from "./shapes-v17-current.js";
-import { shapesV6ToV9 } from "./shapes-v6-v9.js";
-import { shapesV4ToV7 } from "./shapes-v4-v7.js";
-import { shapesV2V3 } from "./shapes-v2-v3.js";
 
-type MigrationsV1ToV12 = typeof migrationsV1ToV12;
-type MigrationsV13ToV24 = typeof migrationsV13ToV24;
-type StorageMigrations = typeof storageMigrations;
-type RuntimeBirthRepairs = typeof runtimeBirthRepairs;
-type ShapesV11V12 = typeof shapesV11V12;
-type ShapesV13ToV16 = typeof shapesV13ToV16;
-type ShapesV17ToCurrent = typeof shapesV17ToCurrent;
-type ShapesV6ToV9 = typeof shapesV6ToV9;
-type ShapesV4ToV7 = typeof shapesV4ToV7;
-type ShapesV2V3 = typeof shapesV2V3;
+export type SchemaMigration = (database: DatabaseSync) => void;
 
-/** Owns the single daemon-state schema and all version transitions. */
-export class DaemonStateSchema {
-  constructor(
-    readonly schemaInitializationHook?: (database: DatabaseSync) => void,
-    /** Test-only interruption seam after v6 COMMIT, before physical scrub. */
-    readonly postV6CommitBeforeScrubHook?: () => void,
-    /** Test-only failure seam used to prove a pending scrub fails closed. */
-    readonly beforeV6ScrubHook?: () => void,
-    /** Test-only interruption seam after the v13 repair journal is backed up. */
-    readonly afterV13RepairJournalBackupHook?: () => void,
-  ) {}
+/**
+ * Plain numbered migrations from schema v1 onward. Each entry upgrades from
+ * version `N` to `N + 1` inside the caller's write transaction.
+ */
+export const DAEMON_STATE_MIGRATIONS: Readonly<Record<number, SchemaMigration>> = {};
 
-createSchema(database: DatabaseSync): void {
-  this.createSchemaForVersion(database);
-  applyAgentAvatarColumn(database);
-  // Last, whatever path ran: a repair above may have rebuilt a source table and lost its triggers.
-  applyAgentStateVersionSchema(database);
+type SchemaEntry = { type: string; name: string; tblName: string; sql: string };
+
+let cachedReferenceSchema: readonly SchemaEntry[] | null = null;
+
+function readSchemaEntries(database: DatabaseSync): SchemaEntry[] {
+  const rows = database.prepare(`
+    SELECT type, name, tbl_name, sql
+    FROM sqlite_master
+    WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL
+    ORDER BY type, name
+  `).all() as Row[];
+  return rows.map((row) => ({
+    type: String(row.type),
+    name: String(row.name),
+    tblName: String(row.tbl_name),
+    sql: normalizeSchemaSql(String(row.sql)),
+  }));
 }
 
-createSchemaForVersion(database: DatabaseSync): void {
-  const existingVersion = assertDaemonStateVersionSupported(database);
-  if (existingVersion !== 0) retireDesktopEventsDelivery(database);
-  if (existingVersion === 1) {
-    this.migrateV1ToV2(database);
-    return;
-  }
-  if (existingVersion === 2) {
-    this.migrateV2ToV3(database);
-    return;
-  }
-  if (existingVersion === 3) {
-    this.migrateV3ToV4(database);
-    return;
-  }
-  if (existingVersion === 4) {
-    this.migrateV4ToV5(database);
-    return;
-  }
-  if (existingVersion === 5) {
-    this.migrateV5ToV6(database);
-    return;
-  }
-  if (existingVersion === 6) {
-    this.migrateV6ToV7(database);
-    return;
-  }
-  if (existingVersion === 7) {
-    this.migrateV7ToV8(database);
-    return;
-  }
-  if (existingVersion === 8) {
-    this.migrateV8ToV9(database);
-    return;
-  }
-  if (existingVersion === 9) {
-    this.migrateV9ToV10(database);
-    return;
-  }
-  if (existingVersion === 10) {
-    this.migrateV10ToV11(database);
-    return;
-  }
-  if (existingVersion === 11) {
-    this.migrateV11ToV12(database);
-    return;
-  }
-  if (existingVersion === 12) {
-    this.migrateV12ToV13(database);
-    return;
-  }
-  if (existingVersion === 13) {
-    this.migrateV13ToV14(database);
-    return;
-  }
-  if (existingVersion === 14) {
-    this.migrateV14ToV15(database);
-    return;
-  }
-  if (existingVersion === 15) {
-    this.migrateV15ToV16(database);
-    return;
-  }
-  if (existingVersion === 16) {
-    this.migrateV16ToV17(database);
-    return;
-  }
-  if (existingVersion === 17) {
-    this.migrateV17ToV18(database);
-    return;
-  }
-  if (existingVersion === 18) {
-    this.migrateV18ToV19(database);
-    return;
-  }
-  if (existingVersion === 19) {
-    this.migrateV19ToV20(database);
-    return;
-  }
-  if (existingVersion === 20) {
-    this.migrateV20ToV21(database);
-    return;
-  }
-  if (existingVersion === 21) {
-    this.migrateV21ToV22(database);
-    return;
-  }
-  if (existingVersion === 22) {
-    this.migrateV22ToV23(database);
-    return;
-  }
-  if (existingVersion === 23) {
-    this.migrateV23ToV24(database);
-    return;
-  }
-  if (existingVersion === 24 || existingVersion === 25) {
-    this.migratePollingOfferStorage(database);
-    return;
-  }
-  if (existingVersion === 26) {
-    this.migrateRoomWorkPublicationStorage(database);
-    return;
-  }
-  if (existingVersion === 27) {
-    this.migrateLifecycleProjectionStorage(database);
-    return;
-  }
-  if (existingVersion === 28) {
-    this.migrateLegacyActiveRuntimeBirths(database);
-    return;
-  }
-  if (existingVersion === 29) {
-    this.migrateLifecycleEffectStorage(database);
-    return;
-  }
-  if (existingVersion === 30) {
-    this.migrateRuntimeFailureEffectStorage(database);
-    return;
-  }
-  if (existingVersion === 31) {
-    this.migrateLifecycleProjectionProviderSet(database);
-    return;
-  }
-  if (existingVersion === 32) {
-    this.migrateIncompatibleCodexRuntimeBirths(database);
-    return;
-  }
-  if (existingVersion === 33) {
-    this.migrateExecutionDelegationAuthorityStorage(database);
-    return;
-  }
-  if (existingVersion === 34) {
-    this.migrateExecutionApprovalProjectionStorage(database);
-    return;
-  }
-  if (existingVersion >= 35 && existingVersion <= 41) {
-    this.migrateExecutionApprovalPublicationStorage(database);
-    return;
-  }
-  if (existingVersion >= 43 && existingVersion <= 50) {
-    this.migrateHostToolRules(database);
-    return;
-  }
-  if (existingVersion === 42) {
-    this.migratePreparedRoomContext(database);
-    return;
-  }
-  if (existingVersion === 51) {
-    this.migrateAgentAvatarStorage(database);
-    return;
-  }
-  if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
-    throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
-  }
-  if (existingVersion === SCHEMA_VERSION) {
-    this.validateLocalRoomMembershipShape(database);
-    this.repairAndValidateCurrentShape(database);
-    return;
-  }
-  database.exec("BEGIN IMMEDIATE");
-  try {
-    database.exec(`
-    CREATE TABLE IF NOT EXISTS manifest_metadata (
-      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-      generation INTEGER NOT NULL CHECK (generation >= 0),
-      schema_version INTEGER NOT NULL
-    ) STRICT;
-    INSERT OR IGNORE INTO manifest_metadata(singleton, generation, schema_version) VALUES (1, 0, ${SCHEMA_VERSION});
-
-    CREATE TABLE IF NOT EXISTS migration_records (
-      migration_key TEXT PRIMARY KEY,
-      checksum TEXT NOT NULL,
-      imported_at TEXT NOT NULL
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS migration_failures (
-      migration_key TEXT PRIMARY KEY,
-      reason TEXT NOT NULL,
-      failed_at TEXT NOT NULL,
-      quarantined_path TEXT NOT NULL
+/** Applies the complete clean-slate v1 schema inside an active write transaction. */
+export function applySchemaV1(database: DatabaseSync): void {
+  database.exec(`
+    -- Operational maintenance receipts/warnings (encrypted recovery backups,
+    -- space compaction). Replaces legacy migration_records/migration_failures.
+    CREATE TABLE daemon_maintenance_state (
+      key TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL CHECK (json_valid(value_json)),
+      updated_at TEXT NOT NULL
     ) STRICT;
 
-    -- Work-attempt authority lives in this same database.  The child tables
-    -- are intentionally separate so checkpoint and terminal updates never
-    -- rewrite unrelated attempts (or a JSON document).
-    CREATE TABLE IF NOT EXISTS work_attempts (
+    -- Core agent domain table. Replaces 11 1:1 agent_* tables, 17 *_present
+    -- columns, and global manifest_metadata.generation with per-agent version
+    -- optimistic concurrency.
+    CREATE TABLE agents (
+      agent_id TEXT PRIMARY KEY,
+      sort_order INTEGER NOT NULL UNIQUE,
+      version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      avatar_json TEXT CHECK (avatar_json IS NULL OR (json_valid(avatar_json) AND length(avatar_json) <= 44000)),
+      room_id TEXT NOT NULL,
+      local_room_id TEXT CHECK (local_room_id IS NULL OR (length(trim(local_room_id)) > 0 AND local_room_id = room_id)),
+      provider TEXT NOT NULL,
+      model TEXT,
+      reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low','medium','high','xhigh','max')),
+      charter TEXT NOT NULL,
+      permission_profile_id TEXT,
+      config_revision INTEGER NOT NULL DEFAULT 1 CHECK (config_revision >= 1),
+      runtime_configuration_revision INTEGER NOT NULL DEFAULT 1 CHECK (runtime_configuration_revision >= 1),
+      provider_launch_policy_json TEXT CHECK (provider_launch_policy_json IS NULL OR json_valid(provider_launch_policy_json)),
+      image_input INTEGER NOT NULL DEFAULT 0 CHECK (image_input IN (0, 1)),
+      live_sharing TEXT NOT NULL DEFAULT 'off' CHECK (live_sharing IN ('off', 'on', 'withdrawing')),
+      desired_state TEXT NOT NULL,
+      source_repo_path TEXT,
+      deployment_id TEXT UNIQUE,
+      run_id TEXT,
+      observed_state TEXT NOT NULL,
+      workspace_path TEXT,
+      work_attempt_id TEXT,
+      provider_work_attempt_id TEXT,
+      provider_continuation_id TEXT,
+      provider_execution_generation_id TEXT,
+      provider_connection_json TEXT CHECK (provider_connection_json IS NULL OR json_valid(provider_connection_json)),
+      workplace_liveness_json TEXT CHECK (workplace_liveness_json IS NULL OR json_valid(workplace_liveness_json)),
+      native_liveness_json TEXT CHECK (native_liveness_json IS NULL OR json_valid(native_liveness_json)),
+      condition TEXT NOT NULL,
+      last_error TEXT,
+      ready_reached_at TEXT,
+      last_turn_control_sequence INTEGER NOT NULL DEFAULT 0 CHECK (last_turn_control_sequence >= 0),
+      turn_control_inbox_item_id TEXT,
+      turn_control_status TEXT,
+      turn_control_json TEXT CHECK (turn_control_json IS NULL OR json_valid(turn_control_json)),
+      last_worker_binding_json TEXT CHECK (last_worker_binding_json IS NULL OR json_valid(last_worker_binding_json)),
+      reconciliation_json TEXT CHECK (reconciliation_json IS NULL OR json_valid(reconciliation_json)),
+      reconciliation_notices_json TEXT CHECK (reconciliation_notices_json IS NULL OR json_valid(reconciliation_notices_json)),
+      CHECK ((deployment_id IS NULL AND run_id IS NULL) OR (deployment_id IS NOT NULL AND run_id IS NOT NULL)),
+      CHECK ((turn_control_json IS NULL AND turn_control_inbox_item_id IS NULL AND turn_control_status IS NULL)
+        OR (turn_control_json IS NOT NULL AND turn_control_status IS NOT NULL)),
+      UNIQUE(agent_id, run_id)
+    ) STRICT;
+    CREATE INDEX agents_room ON agents(room_id, sort_order);
+    CREATE INDEX agents_turn_control_inbox_item ON agents(turn_control_inbox_item_id)
+      WHERE turn_control_inbox_item_id IS NOT NULL;
+
+    CREATE TABLE activity_events (
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      sort_order INTEGER NOT NULL,
+      observed_at TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      provider TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      method TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      status TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      payload_truncated INTEGER NOT NULL CHECK (payload_truncated IN (0, 1)),
+      payload_redacted INTEGER NOT NULL CHECK (payload_redacted IN (0, 1)),
+      durable_payload_ref TEXT,
+      PRIMARY KEY(agent_id, sort_order)
+    ) STRICT;
+    CREATE INDEX activity_events_summary ON activity_events(agent_id, sequence, sort_order);
+
+    -- Lifetime reconciliation action replay dedup. Updates to agents preserve
+    -- rows; deleting an agent cascades cleanup automatically.
+    CREATE TABLE reconciliation_action_tombstones (
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      action_id TEXT NOT NULL,
+      PRIMARY KEY(agent_id, action_id)
+    ) STRICT;
+
+    -- Work-attempt durability.
+    CREATE TABLE work_attempts (
       work_attempt_id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
       lease_id TEXT NOT NULL,
@@ -255,7 +161,7 @@ createSchemaForVersion(database: DatabaseSync): void {
       conclusion_cause TEXT,
       postmortem_diff TEXT
     ) STRICT;
-    CREATE TABLE IF NOT EXISTS work_attempt_lease_epochs (
+    CREATE TABLE work_attempt_lease_epochs (
       work_attempt_id TEXT NOT NULL REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,
       sort_order INTEGER NOT NULL,
       lease_id TEXT NOT NULL,
@@ -263,7 +169,7 @@ createSchemaForVersion(database: DatabaseSync): void {
       recorded_at TEXT NOT NULL,
       PRIMARY KEY(work_attempt_id, sort_order)
     ) STRICT;
-    CREATE TABLE IF NOT EXISTS work_attempt_checkpoints (
+    CREATE TABLE work_attempt_checkpoints (
       work_attempt_id TEXT NOT NULL REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,
       sort_order INTEGER NOT NULL,
       at TEXT NOT NULL,
@@ -271,7 +177,7 @@ createSchemaForVersion(database: DatabaseSync): void {
       provider_continuation_id TEXT,
       PRIMARY KEY(work_attempt_id, sort_order)
     ) STRICT;
-    CREATE TABLE IF NOT EXISTS work_attempt_executions (
+    CREATE TABLE work_attempt_executions (
       execution_generation_id TEXT PRIMARY KEY,
       work_attempt_id TEXT NOT NULL REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,
       started_at TEXT NOT NULL,
@@ -280,254 +186,484 @@ createSchemaForVersion(database: DatabaseSync): void {
       terminal_json TEXT,
       UNIQUE(work_attempt_id, generation)
     ) STRICT;
-    CREATE UNIQUE INDEX IF NOT EXISTS one_live_work_attempt_execution
+    CREATE UNIQUE INDEX one_live_work_attempt_execution
       ON work_attempt_executions(work_attempt_id) WHERE terminal_json IS NULL;
 
-    CREATE TABLE IF NOT EXISTS agent_identities (
-      agent_id TEXT PRIMARY KEY,
-      created_by TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      sort_order INTEGER NOT NULL UNIQUE
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS agent_profiles (
-      agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      display_name TEXT NOT NULL
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS agent_room_memberships (
-      agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
+    -- Worker bindings & supervised worker sessions.
+    CREATE TABLE worker_session_bindings (
+      entry_id TEXT PRIMARY KEY,
       room_id TEXT NOT NULL,
-      local_room_id TEXT CHECK (local_room_id IS NULL OR (length(trim(local_room_id)) > 0 AND local_room_id = room_id))
+      work_attempt_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL,
+      agent_session_id TEXT NOT NULL,
+      credential_ref TEXT NOT NULL,
+      api_url TEXT NOT NULL,
+      room_cursor TEXT,
+      last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+      last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0),
+      binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+      updated_at TEXT NOT NULL
     ) STRICT;
-    CREATE TABLE IF NOT EXISTS agent_configurations (
-      agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      provider TEXT NOT NULL,
-      model TEXT,
-      charter TEXT NOT NULL,
-      permission_profile_id TEXT,
-      delivery_mode TEXT NOT NULL DEFAULT 'mcp_polling' CHECK (delivery_mode IN ('mcp_polling','daemon_inbox')),
-      delivery_cutover_json TEXT,
-      provider_launch_policy_present INTEGER NOT NULL CHECK (provider_launch_policy_present IN (0, 1)),
-      provider_launch_policy_undefined INTEGER NOT NULL CHECK (provider_launch_policy_undefined IN (0, 1)),
-      provider_launch_policy_json TEXT
+    CREATE UNIQUE INDEX worker_session_binding_authority
+      ON worker_session_bindings(entry_id, binding_epoch, execution_generation_id, agent_session_id);
+    CREATE TABLE worker_binding_watermarks (
+      entry_id TEXT PRIMARY KEY,
+      binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+      last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+      last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0),
+      updated_at TEXT NOT NULL
     ) STRICT;
-    CREATE TABLE IF NOT EXISTS agent_launch_intents (
-      agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      desired_state TEXT NOT NULL,
-      source_repo_path_present INTEGER NOT NULL CHECK (source_repo_path_present IN (0, 1)),
-      source_repo_path TEXT
-    ) STRICT;
-
-    CREATE TABLE IF NOT EXISTS runtime_deployments (
-      agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      deployment_id TEXT UNIQUE,
-      run_id TEXT,
-      observed_state TEXT NOT NULL,
-      workspace_path_present INTEGER NOT NULL CHECK (workspace_path_present IN (0, 1)),
-      workspace_path TEXT,
-      work_attempt_id_present INTEGER NOT NULL CHECK (work_attempt_id_present IN (0, 1)),
-      work_attempt_id TEXT,
-      provider_ref_present INTEGER NOT NULL CHECK (provider_ref_present IN (0, 1)),
-      provider_work_attempt_id TEXT,
-      provider_continuation_id TEXT,
-      provider_connection_kind TEXT,
-      provider_connection_url TEXT,
-      provider_server_auth_path TEXT,
-      provider_connection_pid INTEGER,
-      provider_process_identity_present INTEGER NOT NULL CHECK (provider_process_identity_present IN (0, 1)),
-      provider_process_identity TEXT,
-      provider_execution_generation_id TEXT,
-      workplace_liveness_present INTEGER NOT NULL CHECK (workplace_liveness_present IN (0, 1)),
-      workplace_liveness_state TEXT,
-      workplace_liveness_observed_at TEXT,
-      workplace_liveness_detail TEXT,
-      native_liveness_present INTEGER NOT NULL CHECK (native_liveness_present IN (0, 1)),
-      native_liveness_state TEXT,
-      native_liveness_observed_at TEXT,
-      native_liveness_detail TEXT,
-      activity_present INTEGER NOT NULL CHECK (activity_present IN (0, 1)),
-      CHECK ((deployment_id IS NULL AND run_id IS NULL) OR (deployment_id IS NOT NULL AND run_id IS NOT NULL)),
-      UNIQUE(agent_id, run_id)
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS activity_events (
-      agent_id TEXT NOT NULL REFERENCES runtime_deployments(agent_id) ON DELETE CASCADE,
-      sort_order INTEGER NOT NULL,
-      observed_at TEXT NOT NULL,
-      sequence INTEGER NOT NULL,
-      provider TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      method TEXT NOT NULL,
-      summary TEXT NOT NULL,
-      status TEXT NOT NULL,
-      payload_json TEXT NOT NULL,
-      payload_truncated INTEGER NOT NULL CHECK (payload_truncated IN (0, 1)),
-      payload_redacted INTEGER NOT NULL CHECK (payload_redacted IN (0, 1)),
-      durable_payload_ref TEXT,
-      PRIMARY KEY(agent_id, sort_order)
-    ) STRICT;
-
-    CREATE TABLE IF NOT EXISTS agent_lifecycle_states (
-      agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      condition TEXT NOT NULL,
-      last_error_present INTEGER NOT NULL CHECK (last_error_present IN (0, 1)),
-      last_error TEXT
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS agent_readiness (
-      agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      ready_reached_at_present INTEGER NOT NULL CHECK (ready_reached_at_present IN (0, 1)),
-      ready_reached_at TEXT
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS turn_control_journals (
-      agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      turn_control_present INTEGER NOT NULL CHECK (turn_control_present IN (0, 1)),
-      action_id TEXT,
-      action_sequence INTEGER,
-      turn_work_attempt_id TEXT,
-      turn_execution_generation_id TEXT,
-      target_room_id TEXT,
-      target_source_message_id TEXT,
-      target_provider_continuation_id TEXT,
-      inbox_item_id TEXT,
-      provider_turn_id TEXT,
-      has_correction INTEGER,
-      correction_text TEXT,
-      correction_strategy TEXT CHECK (correction_strategy IS NULL OR correction_strategy IN ('native','stop_then_resend')),
-      operator_resolution TEXT CHECK (operator_resolution IS NULL OR operator_resolution IN ('applied','not_applied')),
-      status TEXT,
-      capability TEXT,
-      interrupted INTEGER,
-      resumed INTEGER,
-      turn_state TEXT,
-      error TEXT,
-      recorded_at TEXT,
-      updated_at TEXT
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS turn_control_stages (
-      agent_id TEXT NOT NULL REFERENCES turn_control_journals(agent_id) ON DELETE CASCADE,
-      sort_order INTEGER NOT NULL,
-      stage TEXT NOT NULL,
-      PRIMARY KEY(agent_id, sort_order)
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS retained_worker_bindings (
-      agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      last_worker_binding_present INTEGER NOT NULL CHECK (last_worker_binding_present IN (0, 1)),
-      binding_agent_session_id TEXT,
-      binding_work_attempt_id TEXT,
-      binding_execution_generation_id TEXT,
-      binding_updated_at TEXT
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS reconciliation_records (
-      agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      reconciliation_present INTEGER NOT NULL CHECK (reconciliation_present IN (0, 1)),
-      consecutive_action_failures INTEGER,
-      last_observed_state TEXT,
-      next_restart_at_ms INTEGER,
-      last_action_sequence INTEGER,
-      pending_action_id TEXT,
-      pending_action_sequence INTEGER,
-      pending_action_kind TEXT,
-      pending_action_recorded_at_ms INTEGER,
-      last_terminal_present INTEGER NOT NULL CHECK (last_terminal_present IN (0, 1)),
-      terminal_ended_at TEXT,
-      terminal_exit_code INTEGER,
-      terminal_signal TEXT,
-      terminal_stdio_archive_ref TEXT,
-      terminal_stdio_tail TEXT,
-      terminal_cause TEXT,
-      terminal_actor TEXT,
-      terminal_generation INTEGER,
-      terminal_provider_continuation_id TEXT,
-      reconciliation_notices_present INTEGER NOT NULL CHECK (reconciliation_notices_present IN (0, 1))
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS reconciliation_completed_actions (
-      agent_id TEXT NOT NULL REFERENCES reconciliation_records(agent_id) ON DELETE CASCADE,
-      sort_order INTEGER NOT NULL,
-      action_id TEXT NOT NULL,
-      PRIMARY KEY(agent_id, sort_order)
-    ) STRICT;
-    -- Lifetime replay authority is intentionally separate from the bounded
-    -- manifest projection. Targeted entry replacement deletes/reinserts the
-    -- projection graph, but must never erase historical effect identity.
-    CREATE TABLE IF NOT EXISTS reconciliation_action_tombstones (
-      agent_id TEXT NOT NULL,
-      action_id TEXT NOT NULL,
-      PRIMARY KEY(agent_id, action_id)
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS reconciliation_exit_timestamps (
-      agent_id TEXT NOT NULL REFERENCES reconciliation_records(agent_id) ON DELETE CASCADE,
-      sort_order INTEGER NOT NULL,
-      timestamp_ms INTEGER NOT NULL,
-      PRIMARY KEY(agent_id, sort_order)
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS reconciliation_notices (
-      agent_id TEXT NOT NULL REFERENCES reconciliation_records(agent_id) ON DELETE CASCADE,
-      sort_order INTEGER NOT NULL,
-      at TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      cause TEXT NOT NULL,
-      terminal_present INTEGER NOT NULL CHECK (terminal_present IN (0, 1)),
-      terminal_ended_at TEXT,
-      terminal_exit_code INTEGER,
-      terminal_signal TEXT,
-      terminal_stdio_archive_ref TEXT,
-      terminal_stdio_tail TEXT,
-      terminal_cause TEXT,
-      terminal_actor TEXT,
-      terminal_generation INTEGER,
-      terminal_provider_continuation_id TEXT,
-      PRIMARY KEY(agent_id, sort_order)
-    ) STRICT;
-
-    -- Unused since legacy provider lanes were retired. Kept for one release so
-    -- an older daemon (a downgrade, or a dev build sharing ~/.letagents) can
-    -- still open a database first created by this build; it read this table
-    -- unconditionally. Drop it once no older daemon can meet this database.
-    CREATE TABLE IF NOT EXISTS legacy_lane_owners (
+    CREATE TABLE worker_binding_publications (
       reservation_id TEXT PRIMARY KEY,
+      entry_id TEXT NOT NULL,
+      binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+      execution_generation_id TEXT NOT NULL,
+      agent_session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      observed_at TEXT NOT NULL,
+      observed_at_ms INTEGER NOT NULL CHECK (observed_at_ms >= 0),
+      state TEXT NOT NULL CHECK (state IN ('reserved', 'accepted', 'failed')),
+      created_at TEXT NOT NULL,
+      finalized_at TEXT,
+      UNIQUE(entry_id, sequence)
+    ) STRICT;
+    CREATE INDEX worker_binding_publications_current
+      ON worker_binding_publications(entry_id, binding_epoch, sequence DESC);
+    CREATE TABLE worker_generation_verifications (
+      reservation_id TEXT PRIMARY KEY,
+      entry_id TEXT NOT NULL,
+      binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+      from_execution_generation_id TEXT NOT NULL,
+      to_execution_generation_id TEXT NOT NULL,
+      agent_session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      observed_at TEXT NOT NULL,
+      observed_at_ms INTEGER NOT NULL CHECK (observed_at_ms >= 0),
+      state TEXT NOT NULL CHECK (state IN ('reserved', 'accepted', 'failed', 'lost_race')),
+      created_at TEXT NOT NULL,
+      finalized_at TEXT,
+      UNIQUE(entry_id, sequence)
+    ) STRICT;
+    CREATE INDEX worker_generation_verifications_current
+      ON worker_generation_verifications(entry_id, binding_epoch, sequence DESC);
+    CREATE TABLE worker_execution_bindings (
+      entry_id TEXT NOT NULL,
       room_id TEXT NOT NULL,
-      provider TEXT NOT NULL,
-      owner_pid INTEGER NOT NULL,
-      owner_process_identity TEXT NOT NULL,
-      state TEXT NOT NULL,
-      session_id TEXT,
+      api_url TEXT NOT NULL,
+      grant_id TEXT NOT NULL,
+      work_attempt_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL,
+      agent_session_id TEXT NOT NULL,
+      agent_key TEXT NOT NULL,
+      recorded_at TEXT NOT NULL,
+      PRIMARY KEY(entry_id, execution_generation_id, agent_session_id, grant_id),
+      FOREIGN KEY(work_attempt_id) REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE
+    ) STRICT;
+    CREATE TABLE supervised_worker_sessions (
+      agent_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      agent_session_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL,
+      credential_ref TEXT NOT NULL,
+      expires_at TEXT,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE supervised_worker_mint_states (
+      agent_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      agent_instance_id TEXT NOT NULL,
+      phase TEXT NOT NULL CHECK (phase IN ('never_minted','minting_unknown','exact')),
+      agent_session_id TEXT,
+      updated_at TEXT NOT NULL,
+      CHECK (
+        (phase = 'exact' AND agent_session_id IS NOT NULL)
+        OR (phase IN ('never_minted','minting_unknown') AND agent_session_id IS NULL)
+      )
+    ) STRICT;
+
+    -- Inbox items & delivery journals.
+    CREATE TABLE inbox_items (
+      inbox_item_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      source_message_json TEXT NOT NULL,
+      activation_json TEXT NOT NULL,
+      fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
+      state TEXT NOT NULL CHECK (state IN (
+        'pending','dispatching','awaiting_result','result_recovery','publishing',
+        'retryable','blocked','acknowledged','acknowledged_no_reply',
+        'cancelled_by_room_move','cancelled_by_user','acknowledged_failed'
+      )),
+      attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+      action_id TEXT NOT NULL,
+      reply_client_message_id TEXT NOT NULL,
+      provider_turn_id TEXT,
+      outcome TEXT,
+      last_error TEXT,
+      failure_code TEXT CHECK (failure_code IS NULL OR failure_code = 'provider_continuation_missing'),
+      blocked_by_inbox_item_id TEXT REFERENCES inbox_items(inbox_item_id),
+      next_attempt_at_ms INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      sort_order INTEGER NOT NULL UNIQUE
+      acknowledged_at TEXT,
+      terminal_reason TEXT CHECK (terminal_reason IS NULL OR terminal_reason = 'upgrade_authority_unavailable'),
+      UNIQUE(agent_id, room_id, source_message_id),
+      UNIQUE(agent_id, fifo_sequence),
+      UNIQUE(inbox_item_id, agent_id, room_id)
     ) STRICT;
-    `);
-    this.schemaInitializationHook?.(database);
-    this.applyLocalRoomMembershipShape(database);
-    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-    const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
-    if (version !== SCHEMA_VERSION) throw new Error(`Unsupported daemon state schema version ${version}.`);
-    const createdMetadataVersion = this.metadataSchemaVersion(database);
-    if (createdMetadataVersion !== SCHEMA_VERSION) throw new Error(`Unsupported daemon manifest metadata schema version ${createdMetadataVersion}.`);
-    this.validateV2Shape(database);
-    this.applyBoundedDeliveryV6Shape(database);
-    this.validateBoundedDeliveryV6Shape(database);
-    this.applyV3Shape(database);
-    this.validateV3Shape(database);
-    const requiresScrub = this.migrateWorkerShapeToV6(database);
-    this.advanceDeliveryToCurrent(database);
-    this.applyCurrentSchemaTail(database);
-    this.applyCurrentConfigurationShape(database);
-    applyAgentImageInputColumn(database);
-    applyAgentLiveSharingColumn(database);
-    applyDaemonEfficiencyMigration(database);
-    database.exec("COMMIT");
-  } catch (error) {
-    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
-    throw error;
-  }
-}
+    CREATE INDEX inbox_items_head ON inbox_items(agent_id, fifo_sequence);
+
+    CREATE TABLE supervised_agent_inbox_events (
+      inbox_item_id TEXT NOT NULL REFERENCES inbox_items(inbox_item_id) ON DELETE CASCADE,
+      event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+      idempotency_key TEXT NOT NULL,
+      phase TEXT NOT NULL CHECK (phase IN (
+        'received','queued','turn_started','turn_finished','result_unreadable',
+        'publish_started','published','no_reply','retry_scheduled','blocked',
+        'room_move_cancelled','conversation_restoring','conversation_restored','user_cancelled'
+      )),
+      observed_at TEXT NOT NULL,
+      detail TEXT,
+      PRIMARY KEY(inbox_item_id, event_sequence),
+      UNIQUE(inbox_item_id, idempotency_key)
+    ) STRICT;
+    CREATE INDEX supervised_agent_inbox_events_timeline
+      ON supervised_agent_inbox_events(inbox_item_id, event_sequence);
+
+    CREATE TABLE supervised_agent_publications (
+      inbox_item_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      client_message_id TEXT NOT NULL,
+      canonical_message_id TEXT NOT NULL,
+      published_at TEXT NOT NULL,
+      FOREIGN KEY(inbox_item_id, agent_id, room_id)
+        REFERENCES inbox_items(inbox_item_id, agent_id, room_id) ON DELETE CASCADE,
+      UNIQUE(room_id, client_message_id),
+      UNIQUE(room_id, canonical_message_id)
+    ) STRICT;
+    CREATE INDEX supervised_agent_publications_agent_room
+      ON supervised_agent_publications(agent_id, room_id);
+
+    CREATE TABLE supervised_agent_provider_turn_bindings (
+      inbox_item_id TEXT PRIMARY KEY REFERENCES inbox_items(inbox_item_id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      work_attempt_id TEXT NOT NULL,
+      origin_execution_generation_id TEXT NOT NULL,
+      provider_continuation_id TEXT NOT NULL,
+      provider_turn_id TEXT NOT NULL,
+      UNIQUE(agent_id, provider_continuation_id, provider_turn_id),
+      FOREIGN KEY(inbox_item_id, agent_id, room_id)
+        REFERENCES inbox_items(inbox_item_id, agent_id, room_id) ON DELETE CASCADE
+    ) STRICT;
+
+    CREATE TABLE supervised_agent_terminal_results (
+      inbox_item_id TEXT PRIMARY KEY REFERENCES inbox_items(inbox_item_id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL,
+      provider_turn_id TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK (outcome IN ('reply','no_reply','unreadable','failed','interrupted')),
+      normalized_text TEXT,
+      evidence_source TEXT NOT NULL CHECK (evidence_source IN ('transcript','stream','none')),
+      terminal_evidence_json TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (outcome NOT IN ('failed','interrupted') OR (normalized_text IS NULL AND evidence_source <> 'none'))
+    ) STRICT;
+    CREATE UNIQUE INDEX supervised_agent_terminal_result_turn
+      ON supervised_agent_terminal_results(agent_id, execution_generation_id, provider_turn_id);
+
+    CREATE TABLE supervised_agent_ingress_cursors (
+      agent_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      last_observed_message_id TEXT,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE supervised_agent_ingress_health (
+      agent_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('starting','observing','backoff','blocked','stopped')),
+      detail TEXT,
+      observed_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE supervised_agent_observed_messages (
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      source_message_json TEXT NOT NULL,
+      activation_json TEXT NOT NULL,
+      activation_decision TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      PRIMARY KEY(agent_id, room_id, source_message_id)
+    ) STRICT;
+    CREATE INDEX supervised_agent_observed_context
+      ON supervised_agent_observed_messages(agent_id, room_id, source_message_id);
+    CREATE TABLE supervised_agent_history_boundaries (
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      earliest_retained_observed_message_id TEXT,
+      earliest_retained_inbox_message_id TEXT,
+      earliest_retained_receipt_sequence INTEGER,
+      pruned_before_message_id TEXT,
+      pruned_at TEXT,
+      updated_at TEXT NOT NULL,
+      CHECK ((pruned_before_message_id IS NULL) = (pruned_at IS NULL)),
+      PRIMARY KEY(agent_id, room_id)
+    ) STRICT;
+    CREATE INDEX supervised_agent_history_boundaries_updated
+      ON supervised_agent_history_boundaries(agent_id, updated_at);
+    CREATE TABLE supervised_agent_pruned_sources (
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      pruned_at TEXT NOT NULL,
+      PRIMARY KEY(agent_id, room_id, source_message_id)
+    ) STRICT;
+    CREATE INDEX supervised_agent_pruned_sources_retention
+      ON supervised_agent_pruned_sources(agent_id, pruned_at, source_message_id);
+
+    -- Effects & per-feature operation journals.
+    CREATE TABLE effects (
+      effect_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL,
+      provider_turn_id TEXT NOT NULL,
+      mcp_request_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      request_json TEXT NOT NULL,
+      mutation INTEGER NOT NULL CHECK (mutation IN (0, 1)),
+      state TEXT NOT NULL CHECK (state IN ('prepared','executing','uncertain','completed','failed')),
+      result_json TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(agent_id, execution_generation_id, provider_turn_id, mcp_request_id)
+    ) STRICT;
+    CREATE INDEX effects_turn ON effects(agent_id, execution_generation_id, provider_turn_id);
+
+    CREATE TABLE effect_tombstones (
+      effect_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL,
+      provider_turn_id TEXT NOT NULL,
+      mcp_request_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      request_sha256 TEXT NOT NULL CHECK (length(request_sha256) = 64 AND request_sha256 NOT GLOB '*[^0-9a-f]*'),
+      request_bytes INTEGER NOT NULL CHECK (request_bytes >= 0),
+      mutation INTEGER NOT NULL CHECK (mutation IN (0, 1)),
+      state TEXT NOT NULL CHECK (state IN ('uncertain','completed','failed')),
+      result_json TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(agent_id, execution_generation_id, provider_turn_id, mcp_request_id)
+    ) STRICT;
+    CREATE INDEX effect_tombstones_turn
+      ON effect_tombstones(agent_id, execution_generation_id, provider_turn_id);
+
+    CREATE TABLE provider_continuation_repairs (
+      repair_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      inbox_item_id TEXT NOT NULL,
+      daemon_generation INTEGER NOT NULL CHECK (daemon_generation >= 1),
+      execution_generation_id TEXT NOT NULL,
+      work_attempt_id TEXT NOT NULL,
+      expected_pid INTEGER NOT NULL CHECK (expected_pid > 0),
+      expected_process_identity TEXT NOT NULL,
+      missing_continuation TEXT NOT NULL,
+      replacement_continuation TEXT,
+      phase TEXT NOT NULL CHECK (phase IN ('probing','replacement_created','committed','failed')),
+      attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(inbox_item_id, agent_id, room_id)
+        REFERENCES inbox_items(inbox_item_id, agent_id, room_id) ON DELETE CASCADE
+    ) STRICT;
+    CREATE UNIQUE INDEX one_active_provider_continuation_repair
+      ON provider_continuation_repairs(agent_id) WHERE phase NOT IN ('committed','failed');
+    CREATE INDEX provider_continuation_repairs_agent_created
+      ON provider_continuation_repairs(agent_id, created_at);
+    CREATE INDEX provider_continuation_repairs_inbox
+      ON provider_continuation_repairs(inbox_item_id, updated_at);
+    CREATE INDEX provider_continuation_repairs_inbox_created
+      ON provider_continuation_repairs(inbox_item_id, created_at);
+
+    CREATE TABLE agent_room_moves (
+      operation_id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL UNIQUE,
+      agent_id TEXT NOT NULL,
+      source_room_id TEXT NOT NULL,
+      destination_room_id TEXT NOT NULL,
+      daemon_generation INTEGER NOT NULL CHECK (daemon_generation >= 1),
+      work_attempt_id TEXT,
+      execution_generation_id TEXT,
+      agent_session_id TEXT,
+      activating_inbox_item_id TEXT,
+      provider_turn_id TEXT,
+      effect_id TEXT,
+      phase TEXT NOT NULL CHECK (phase IN (
+        'prepared','waiting_for_current_turn','joining_destination','membership_committed',
+        'rotating_credentials','bootstrapping_destination_tail','active','failed','rollback_required'
+      )),
+      remote_room_id TEXT,
+      destination_cursor TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      source_cursor_present INTEGER NOT NULL DEFAULT 0 CHECK (source_cursor_present IN (0, 1)),
+      source_cursor TEXT,
+      source_credentials_revoked INTEGER NOT NULL DEFAULT 0 CHECK (source_credentials_revoked IN (0, 1)),
+      CHECK (source_room_id <> destination_room_id),
+      CHECK ((work_attempt_id IS NULL) = (execution_generation_id IS NULL))
+    ) STRICT;
+    CREATE UNIQUE INDEX one_active_agent_room_move
+      ON agent_room_moves(agent_id) WHERE phase NOT IN ('active','failed');
+    CREATE INDEX agent_room_moves_agent_updated
+      ON agent_room_moves(agent_id, updated_at);
+
+    CREATE TABLE agent_purge_operations (
+      operation_id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL UNIQUE,
+      agent_id TEXT NOT NULL,
+      daemon_generation INTEGER NOT NULL CHECK (daemon_generation >= 1),
+      phase TEXT NOT NULL CHECK (phase IN (
+        'prepared','reprepare_credentials','revoking_credentials','local_commit','complete','failed'
+      )),
+      external_revoke_required INTEGER NOT NULL CHECK (external_revoke_required IN (0, 1)),
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      attached_work_attempt_id TEXT,
+      preserved_workspace_path TEXT,
+      worker_session_attestation TEXT NOT NULL CHECK (worker_session_attestation IN ('exact','none','unknown','not_required')),
+      agent_session_id TEXT,
+      CHECK (
+        (external_revoke_required = 0 AND worker_session_attestation = 'not_required' AND agent_session_id IS NULL)
+        OR (external_revoke_required = 1 AND (
+          (worker_session_attestation = 'exact' AND agent_session_id IS NOT NULL)
+          OR (worker_session_attestation IN ('none','unknown') AND agent_session_id IS NULL)
+        ))
+      )
+    ) STRICT;
+    CREATE UNIQUE INDEX one_active_agent_purge
+      ON agent_purge_operations(agent_id) WHERE phase NOT IN ('complete','failed');
+    CREATE INDEX agent_purge_operations_agent_updated
+      ON agent_purge_operations(agent_id, updated_at);
+  `);
+
+  applyExecutionStorageSchema(database);
+  applyApprovalRequestClosureSchema(database);
+  applyExecutionApprovalPublicationSchema(database);
+  applyHostToolRuleSchema(database);
+  applyRoomWorkPublicationSchema(database);
+  applyRuntimeRecoverySchema(database);
+  applyPreparedRoomContextSchema(database);
+  applyManagedLaunchContractSchema(database);
+  applyAgentStateVersionSchema(database);
 }
 
-// The version-range modules hold the remaining methods; merge their types here
-// and install them as non-enumerable prototype methods, exactly as class methods.
-export interface DaemonStateSchema extends MigrationsV1ToV12, MigrationsV13ToV24, StorageMigrations, RuntimeBirthRepairs, ShapesV11V12, ShapesV13ToV16, ShapesV17ToCurrent, ShapesV6ToV9, ShapesV4ToV7, ShapesV2V3 {}
-for (const methods of [migrationsV1ToV12, migrationsV13ToV24, storageMigrations, runtimeBirthRepairs, shapesV11V12, shapesV13ToV16, shapesV17ToCurrent, shapesV6ToV9, shapesV4ToV7, shapesV2V3]) {
-  for (const [name, value] of Object.entries(methods)) {
-    // Two modules defining one name would silently keep the later definition.
-    if (name in DaemonStateSchema.prototype) throw new Error(`DaemonStateSchema method ${name} is defined twice.`);
-    Object.defineProperty(DaemonStateSchema.prototype, name, { value, writable: true, configurable: true, enumerable: false });
+/** Runs plain numbered migrations `fromVersion -> targetVersion` inside a transaction. */
+export function runNumberedMigrations(
+  database: DatabaseSync,
+  fromVersion: number,
+  targetVersion: number,
+  migrations: Readonly<Record<number, SchemaMigration>> = DAEMON_STATE_MIGRATIONS,
+): void {
+  for (let version = fromVersion; version < targetVersion; version += 1) {
+    const step = migrations[version];
+    if (!step) throw new Error(`Missing daemon state migration from schema v${version} to v${version + 1}.`);
+    step(database);
+    database.exec(`PRAGMA user_version = ${toSqliteUserVersion(version + 1)}`);
+  }
+}
+
+function referenceSchema(): readonly SchemaEntry[] {
+  if (cachedReferenceSchema) return cachedReferenceSchema;
+  const memory = new DatabaseSync(":memory:");
+  try {
+    memory.exec("PRAGMA foreign_keys = ON");
+    applySchemaV1(memory);
+    memory.exec(`PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID}`);
+    memory.exec(`PRAGMA user_version = ${toSqliteUserVersion(SCHEMA_VERSION)}`);
+    cachedReferenceSchema = readSchemaEntries(memory);
+    return cachedReferenceSchema;
+  } finally {
+    memory.close();
+  }
+}
+
+/**
+ * Compares the database's full `sqlite_master` shape 1:1 against a fresh
+ * in-memory database built from the exact same schema code.
+ */
+export function validateDaemonStateShape(database: DatabaseSync): void {
+  if (assertDaemonStateVersionSupported(database) !== SCHEMA_VERSION) {
+    throw new Error(`Daemon state storage requires schema version ${SCHEMA_VERSION}.`);
+  }
+  const expected = referenceSchema();
+  const actual = readSchemaEntries(database);
+  const expectedMap = new Map(expected.map((entry) => [`${entry.type}:${entry.name}`, entry]));
+  const actualMap = new Map(actual.map((entry) => [`${entry.type}:${entry.name}`, entry]));
+  for (const [key, want] of expectedMap) {
+    const got = actualMap.get(key);
+    if (!got || got.tblName !== want.tblName || got.sql !== want.sql) {
+      throw new Error(`Daemon state schema mismatch on ${want.type} ${want.name}.`);
+    }
+  }
+  for (const [key, extra] of actualMap) {
+    if (!expectedMap.has(key)) {
+      throw new Error(`Daemon state schema contains unexpected ${extra.type} ${extra.name}.`);
+    }
+  }
+  if (database.prepare("PRAGMA foreign_key_check").get()) {
+    throw new Error("Daemon state failed foreign-key validation.");
+  }
+  const integrity = database.prepare("PRAGMA integrity_check(1)").get() as Row | undefined;
+  if (String(integrity?.integrity_check ?? "").toLowerCase() !== "ok") {
+    throw new Error(`Daemon state failed SQLite integrity validation: ${String(integrity?.integrity_check ?? "unknown")}`);
+  }
+}
+
+/** Owns the single daemon-state schema and plain numbered transitions from v1. */
+export class DaemonStateSchema {
+  constructor(readonly schemaInitializationHook?: (database: DatabaseSync) => void) {}
+
+  createSchema(database: DatabaseSync): void {
+    const existingVersion = assertDaemonStateVersionSupported(database);
+    if (existingVersion === SCHEMA_VERSION) {
+      this.validateCurrentShape(database);
+      return;
+    }
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      // Re-check under the write lock: another process may have finished bootstrapping
+      // or migrating between the unlocked read above and acquiring BEGIN IMMEDIATE.
+      const lockedVersion = assertDaemonStateVersionSupported(database);
+      if (lockedVersion === 0) {
+        applySchemaV1(database);
+        this.schemaInitializationHook?.(database);
+        database.exec(`PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID}`);
+        database.exec(`PRAGMA user_version = ${toSqliteUserVersion(SCHEMA_VERSION)}`);
+      } else if (lockedVersion < SCHEMA_VERSION) {
+        runNumberedMigrations(database, lockedVersion, SCHEMA_VERSION);
+      }
+      this.validateCurrentShape(database);
+      database.exec("COMMIT");
+    } catch (error) {
+      try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+      throw error;
+    }
+  }
+
+  validateCurrentShape(database: DatabaseSync): void {
+    validateDaemonStateShape(database);
   }
 }

@@ -64,19 +64,25 @@ export function liveSharingAvailability(agent: { id: string; deliveryMode: strin
 export type ManifestAdministrationStore = {
   load(): Promise<DaemonManifest>;
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+  getEntryVersion(entryId: string): Promise<number | undefined>;
+  getEntryWithVersion(entryId: string): Promise<{ entry: DaemonManifestEntry; version: number } | undefined>;
   getActivityState(entryId: string): Promise<{
-    observed_state: DaemonManifestEntry["observed_state"]; last_sequence: number;
+    version: number; observed_state: DaemonManifestEntry["observed_state"]; last_sequence: number;
   } | undefined>;
   getPurge(operationId: string): Promise<DaemonPurgeRecord | null | undefined>;
-  write(
-    expectedGeneration: number,
-    entries: DaemonManifestEntry[],
+  createEntry(
+    entry: DaemonManifestEntry,
     commitFence: CommitFence,
-  ): Promise<Pick<DaemonManifest, "generation">>;
+  ): Promise<{ version: number; entry: DaemonManifestEntry }>;
+  replaceEntry(
+    expectedVersion: number,
+    entry: DaemonManifestEntry,
+    commitFence: CommitFence,
+  ): Promise<{ version: number; entry: DaemonManifestEntry }>;
   getAgentConfiguration(entryId: string): Promise<StoredAgentConfiguration | undefined>;
   setAgentLiveSharing?(input: { agentId: string; enabled: boolean }, commitFence: CommitFence): Promise<"off" | "on" | "withdrawing" | null>;
   updateAgentConfiguration(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       agentId: string;
       expectedRevision: number;
@@ -89,40 +95,38 @@ export type ManifestAdministrationStore = {
     },
     commitFence: CommitFence,
   ): Promise<{
-    generation: number;
+    version: number;
     outcome: "updated" | "conflict" | "invalid";
     configuration?: StoredAgentConfiguration;
   }>;
   appendActivityOnly(
-    expectedGeneration: number,
+    expectedVersion: number,
     entryId: string,
     event: DaemonActivityEvent,
     limit: number,
     commitFence: CommitFence,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }>;
+  ): Promise<{ version: number; entry: DaemonManifestEntry }>;
   recordActivity(
-    expectedGeneration: number,
+    expectedVersion: number,
     entryId: string,
     event: DaemonActivityEvent,
     runtimeUpdate: { observedState: DaemonManifestEntry["observed_state"];
       nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]> } | null,
     limit: number,
     commitFence: CommitFence,
-  ): Promise<{ generation: number }>;
+  ): Promise<{ version: number }>;
   updateWorkplaceLiveness(
-    expectedGeneration: number,
+    expectedVersion: number,
     entryId: string,
     liveness: NonNullable<DaemonManifestEntry["workplace_liveness"]>,
     commitFence: CommitFence,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }>;
+  ): Promise<{ version: number; entry: DaemonManifestEntry }>;
 };
 
 export type ManifestAdministrationAuthority = {
   serialize<T>(operation: () => Promise<T>): Promise<T>;
   assertCurrent(): Promise<void>;
   currentDaemonGeneration(): number;
-  currentManifestGeneration(): number;
-  acceptManifestGeneration(generation: number): void;
   fenceCommit: CommitFence;
 };
 
@@ -254,13 +258,11 @@ export class ManifestAdministrationCoordinator {
         native_liveness: entry.native_liveness ?? { state: "unknown", observed_at: null, detail: null },
         activity: (entry.activity ?? []).slice(-200),
       };
-      const next = await this.options.store.write(
-        this.options.authority.currentManifestGeneration(),
-        [...manifest.entries, nextEntry],
+      const next = await this.options.store.createEntry(
+        nextEntry,
         this.options.authority.fenceCommit,
       );
-      this.options.authority.acceptManifestGeneration(next.generation);
-      return nextEntry;
+      return next.entry;
     });
     this.options.convergence.request(updated.id);
     return updated;
@@ -273,18 +275,16 @@ export class ManifestAdministrationCoordinator {
     }
     return this.options.authority.serialize(async () => {
       await this.options.authority.assertCurrent();
-      const manifest = await this.options.store.load();
-      const entry = manifest.entries.find((candidate) => candidate.id === id);
-      if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      if (entry.display_name === normalized) return entry;
-      const updated = { ...entry, display_name: normalized };
-      const next = await this.options.store.write(
-        this.options.authority.currentManifestGeneration(),
-        manifest.entries.map((candidate) => candidate.id === id ? updated : candidate),
+      const loaded = await this.options.store.getEntryWithVersion(id);
+      if (!loaded) throw new Error(`Unknown daemon manifest entry: ${id}`);
+      if (loaded.entry.display_name === normalized) return loaded.entry;
+      const updated = { ...loaded.entry, display_name: normalized };
+      const next = await this.options.store.replaceEntry(
+        loaded.version,
+        updated,
         this.options.authority.fenceCommit,
       );
-      this.options.authority.acceptManifestGeneration(next.generation);
-      return updated;
+      return next.entry;
     });
   }
 
@@ -302,13 +302,12 @@ export class ManifestAdministrationCoordinator {
         throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${lastSequence}.`);
       }
       const next = await this.options.store.appendActivityOnly(
-        this.options.authority.currentManifestGeneration(),
+        entry.version,
         id,
         sanitizedEvent,
         200,
         this.options.authority.fenceCommit,
       );
-      this.options.authority.acceptManifestGeneration(next.generation);
       return next.entry;
     });
   }
@@ -339,14 +338,13 @@ export class ManifestAdministrationCoordinator {
       }
       const observedState = sanitizedEvent.status === "working" || sanitizedEvent.status === "reviewing"
         ? "working" : sanitizedEvent.status === "blocked" ? state.observed_state : "idle";
-      const next = await this.options.store.recordActivity(
-        this.options.authority.currentManifestGeneration(), id, { ...sanitizedEvent, sequence },
+      await this.options.store.recordActivity(
+        state.version, id, { ...sanitizedEvent, sequence },
         activityOnly ? null : { observedState, nativeLiveness: {
           state: sanitizedEvent.status === "idle" ? "idle" : "active",
           observed_at: sanitizedEvent.observed_at, detail: sanitizedEvent.summary,
         } }, 200, this.options.authority.fenceCommit,
       );
-      this.options.authority.acceptManifestGeneration(next.generation);
     });
   }
 
@@ -394,20 +392,19 @@ export class ManifestAdministrationCoordinator {
     }
     return this.options.authority.serialize(async () => {
       await this.options.authority.assertCurrent();
-      const entry = await this.options.store.getEntry(id);
-      if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
+      const version = await this.options.store.getEntryVersion(id);
+      if (version === undefined) throw new Error(`Unknown daemon manifest entry: ${id}`);
       const workplaceLiveness: NonNullable<DaemonManifestEntry["workplace_liveness"]> = {
         state,
         observed_at: observedAt,
         detail,
       };
       const next = await this.options.store.updateWorkplaceLiveness(
-        this.options.authority.currentManifestGeneration(),
+        version,
         id,
         workplaceLiveness,
         this.options.authority.fenceCommit,
       );
-      this.options.authority.acceptManifestGeneration(next.generation);
       return next.entry;
     });
   }
@@ -519,8 +516,12 @@ export class ManifestAdministrationCoordinator {
       }, input.homeHarness ? { ...policy, ...HOME_HARNESS_ON } : policy);
       return this.options.authority.serialize(async () => {
         await this.options.authority.assertCurrent();
+        const version = await this.options.store.getEntryVersion(input.entryId);
+        if (version === undefined) {
+          return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
+        }
         const result = await this.options.store.updateAgentConfiguration(
-          this.options.authority.currentManifestGeneration(),
+          version,
           {
             agentId: input.entryId,
             expectedRevision: input.expectedRevision,
@@ -543,7 +544,6 @@ export class ManifestAdministrationCoordinator {
           },
           this.options.authority.fenceCommit,
         );
-        this.options.authority.acceptManifestGeneration(result.generation);
         if (result.outcome === "invalid") {
           return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
         }
@@ -632,8 +632,12 @@ export class ManifestAdministrationCoordinator {
       const permissionChanged = before !== normalized.permissionProfileId;
       return this.options.authority.serialize(async () => {
         await this.options.authority.assertCurrent();
+        const version = await this.options.store.getEntryVersion(input.entryId);
+        if (version === undefined) {
+          return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
+        }
         const result = await this.options.store.updateAgentConfiguration(
-          this.options.authority.currentManifestGeneration(),
+          version,
           {
             agentId: input.entryId,
             expectedRevision: input.expectedRevision,
@@ -651,7 +655,6 @@ export class ManifestAdministrationCoordinator {
           },
           this.options.authority.fenceCommit,
         );
-        this.options.authority.acceptManifestGeneration(result.generation);
         if (result.outcome === "invalid") {
           return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
         }

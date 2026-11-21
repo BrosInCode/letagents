@@ -5,9 +5,11 @@ import { dirname, resolve } from "node:path";
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated } from "../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
+import { DAEMON_STATE_APPLICATION_ID, DAEMON_STATE_USER_VERSION_OFFSET } from "./daemon-state-database/shared.js";
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const RECEIPT_KEY = "encrypted-state-recovery-backup";
+const WARNING_KEY = "encrypted-state-recovery-backup-warning";
 const MAGIC = "letagents-state-recovery-v1";
 const HEADER_LIMIT = 64 * 1_024;
 type Header = {
@@ -276,11 +278,15 @@ export async function prepareStateRecoveryBackup(
     await privateDirectory(path);
     database = new DatabaseSync(databasePath, { readOnly: true });
     database.exec("PRAGMA temp_store=MEMORY; BEGIN");
+    const applicationId = Number(database.prepare("PRAGMA application_id").get()!.application_id);
+    if (applicationId !== DAEMON_STATE_APPLICATION_ID) {
+      if (applicationId === 0) return null;
+      throw failure();
+    }
     const sourceVersion = Number(database.prepare("PRAGMA user_version").get()!.user_version);
-    if (sourceVersion > targetVersion) throw failure();
-    if (sourceVersion === targetVersion || sourceVersion === 0) return null;
-    const hasMetadata = database.prepare("SELECT 1 FROM sqlite_schema WHERE name='manifest_metadata'").get();
-    if (hasMetadata && Number(database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get()?.schema_version) !== sourceVersion) throw failure();
+    if (sourceVersion === 0) return null;
+    if (sourceVersion <= DAEMON_STATE_USER_VERSION_OFFSET || sourceVersion > targetVersion) throw failure();
+    if (sourceVersion === targetVersion) return null;
     await regularFile(path, true);
     // A prior crash can leave only ciphertext here. Never follow or truncate a link.
     if (await regularFile(candidate, true)) await unlink(candidate);
@@ -341,14 +347,36 @@ export async function prepareStateRecoveryBackup(
   }
 }
 
+type ReceiptValue = { checksum: string; validated_at: string };
+type WarningValue = { warning: StateRecoveryBackupWarning; failed_at: string };
+
+function readReceipt(database: DatabaseSync): ReceiptValue | null {
+  const row = database.prepare("SELECT value_json FROM daemon_maintenance_state WHERE key=?").get(RECEIPT_KEY) as { value_json?: unknown } | undefined;
+  if (!row || typeof row.value_json !== "string") return null;
+  try {
+    const parsed = JSON.parse(row.value_json) as Partial<ReceiptValue>;
+    if (typeof parsed.checksum === "string" && typeof parsed.validated_at === "string") {
+      return { checksum: parsed.checksum, validated_at: parsed.validated_at };
+    }
+  } catch { /* treat corrupt receipt as missing */ }
+  return null;
+}
+
 /** Safe, bounded diagnostics: no payload, source error, or quarantine path. */
 export function recordStateRecoveryBackupWarning(
   database: DatabaseSync, warning: StateRecoveryBackupWarning, now = new Date(),
 ): StateRecoveryBackupValidation {
-  database.prepare(`INSERT INTO migration_failures(migration_key,reason,failed_at,quarantined_path) VALUES(?,?,?,'')
-    ON CONFLICT(migration_key) DO UPDATE SET reason=excluded.reason,
-      failed_at=CASE WHEN migration_failures.reason=excluded.reason THEN migration_failures.failed_at ELSE excluded.failed_at END,
-      quarantined_path=''`).run(RECEIPT_KEY, warning, now.toISOString());
+  const existing = database.prepare("SELECT value_json FROM daemon_maintenance_state WHERE key=?").get(WARNING_KEY) as { value_json?: unknown } | undefined;
+  let failedAt = now.toISOString();
+  if (existing && typeof existing.value_json === "string") {
+    try {
+      const parsed = JSON.parse(existing.value_json) as Partial<WarningValue>;
+      if (parsed.warning === warning && typeof parsed.failed_at === "string") failedAt = parsed.failed_at;
+    } catch { /* overwrite corrupt warning */ }
+  }
+  database.prepare(`INSERT INTO daemon_maintenance_state(key,value_json,updated_at) VALUES(?,?,?)
+    ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+    .run(WARNING_KEY, JSON.stringify({ warning, failed_at: failedAt }), now.toISOString());
   return { status: "unverified", warning };
 }
 
@@ -367,12 +395,12 @@ export async function markStateRecoveryBackupValidated(
   const fresh = options.freshBackup;
   const authenticated = fresh ? authenticatedSnapshots.delete(fresh) && fresh.path === path : false;
   const warn = (warning: StateRecoveryBackupWarning) => recordStateRecoveryBackupWarning(database, warning, now);
-  const receipt = database.prepare("SELECT checksum,imported_at FROM migration_records WHERE migration_key=?").get(RECEIPT_KEY);
+  const receipt = readReceipt(database);
   let envelope: Awaited<ReturnType<typeof readEnvelope>>;
   try {
     if (!await regularFile(path, true)) {
       if (fresh || receipt) return warn("recovery_snapshot_missing");
-      database.prepare("DELETE FROM migration_failures WHERE migration_key=?").run(RECEIPT_KEY);
+      database.prepare("DELETE FROM daemon_maintenance_state WHERE key=?").run(WARNING_KEY);
       return { status: "absent" };
     }
     envelope = await readEnvelope(path);
@@ -381,16 +409,17 @@ export async function markStateRecoveryBackupValidated(
   if (Number(database.prepare("PRAGMA user_version").get()!.user_version) !== header.targetVersion) return warn("recovery_snapshot_schema_mismatch");
   const checksum = createHash("sha256").update(bytes).digest("hex");
   const matchesReceipt = receipt?.checksum === checksum;
-  if (!matchesReceipt || !Number.isFinite(Date.parse(String(receipt?.imported_at)))) {
+  if (!matchesReceipt || !Number.isFinite(Date.parse(String(receipt?.validated_at)))) {
     if (!authenticated || fresh!.sha256 !== checksum || fresh!.targetVersion !== header.targetVersion) {
       return warn(!receipt ? "recovery_snapshot_receipt_missing" : matchesReceipt
         ? "recovery_snapshot_receipt_invalid" : "recovery_snapshot_changed");
     }
-    database.prepare(`INSERT INTO migration_records(migration_key,checksum,imported_at) VALUES(?,?,?)
-      ON CONFLICT(migration_key) DO UPDATE SET checksum=excluded.checksum,imported_at=excluded.imported_at`)
-      .run(RECEIPT_KEY, checksum, now.toISOString());
+    const validatedAt = now.toISOString();
+    database.prepare(`INSERT INTO daemon_maintenance_state(key,value_json,updated_at) VALUES(?,?,?)
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+      .run(RECEIPT_KEY, JSON.stringify({ checksum, validated_at: validatedAt }), validatedAt);
   }
-  database.prepare("DELETE FROM migration_failures WHERE migration_key=?").run(RECEIPT_KEY);
+  database.prepare("DELETE FROM daemon_maintenance_state WHERE key=?").run(WARNING_KEY);
   return { status: "validated" };
 }
 
@@ -405,24 +434,22 @@ export async function cleanupStateRecoveryBackup(
     if (hadCandidate) { await unlink(candidate); await syncDirectory(candidate); }
     if (!await regularFile(path, true)) {
       if (options.clear) {
-        database.prepare("DELETE FROM migration_records WHERE migration_key=?").run(RECEIPT_KEY);
-        database.prepare("DELETE FROM migration_failures WHERE migration_key=?").run(RECEIPT_KEY);
+        database.prepare("DELETE FROM daemon_maintenance_state WHERE key IN (?,?)").run(RECEIPT_KEY, WARNING_KEY);
       }
       return hadCandidate;
     }
     if (!options.clear) {
       const { bytes } = await readEnvelope(path);
-      const receipt = database.prepare("SELECT checksum, imported_at FROM migration_records WHERE migration_key=?").get(RECEIPT_KEY);
+      const receipt = readReceipt(database);
       if (!receipt || receipt.checksum !== createHash("sha256").update(bytes).digest("hex")) return false;
-      const validatedAt = Date.parse(String(receipt.imported_at));
+      const validatedAt = Date.parse(receipt.validated_at);
       const now = (options.now ?? new Date()).getTime();
       if (!Number.isFinite(now)) throw failure();
       if (!Number.isFinite(validatedAt) || now - validatedAt < RETENTION_MS) return false;
     }
     await unlink(path);
     await syncDirectory(path);
-    database.prepare("DELETE FROM migration_records WHERE migration_key=?").run(RECEIPT_KEY);
-    database.prepare("DELETE FROM migration_failures WHERE migration_key=?").run(RECEIPT_KEY);
+    database.prepare("DELETE FROM daemon_maintenance_state WHERE key IN (?,?)").run(RECEIPT_KEY, WARNING_KEY);
     return true;
   } catch { throw failure(); }
 }

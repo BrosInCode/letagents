@@ -1,8 +1,7 @@
 import { RoomLatencyTrace } from "../room-latency-trace.js";
 import { PreparedReadStatements } from "../prepared-reads.js";
 import { DatabaseSync } from "node:sqlite";
-import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
-import { applyAgentStateVersionSchema } from "../daemon-state-database/shared.js";
+import { DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
 import { pruneSupervisedAgentHistory, settleSupervisedTerminalItem } from "../supervised-agent-history-retention.js";
 import type { SupervisedInboxItem, SupervisedInboxEvent, Row } from "./types.js";
 import { run, INBOX_READS } from "./sql.js";
@@ -22,27 +21,45 @@ export type InboxStateVersions = { scope: string; byAgent: Map<string, number> }
 
 export abstract class InboxStoreBase {
   private database: DatabaseSync | null = null;
+  private ownsDatabase = false;
   private initializing: Promise<DatabaseSync> | null = null;
   private writes: Promise<void> = Promise.resolve();
   private closed = false;
+  private writeFence: (() => void) | null = null;
   protected readonly reads = new PreparedReadStatements(INBOX_READS);
 
   constructor(
     private readonly databasePath: string,
     protected readonly now: () => string = () => new Date().toISOString(),
     private readonly onMutation: (affectedAgentId?: string) => void = () => undefined,
-    private readonly schemaPrepared = false,
   ) {}
+
+  /** Attach the process's single shared SQLite handle without taking ownership of closing it. */
+  attachDatabase(database: DatabaseSync, writeFence?: () => void): void {
+    this.reads.clear();
+    this.database = database;
+    this.ownsDatabase = false;
+    this.initializing = null;
+    this.closed = false;
+    if (writeFence) this.writeFence = writeFence;
+  }
+
+  bindWriteFence(writeFence: () => void): void {
+    this.writeFence = writeFence;
+  }
 
   async close(): Promise<void> {
     this.closed = true;
     await this.writes.catch(() => undefined);
     await this.initializing?.catch(() => undefined);
     this.reads.clear();
-    this.database?.close(); this.database = null; this.initializing = null;
+    if (this.ownsDatabase) this.database?.close();
+    this.database = null;
+    this.ownsDatabase = false;
+    this.initializing = null;
   }
   async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
-    return this.read(async (database) => { const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
+    return this.read(async (database) => { const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
   }
 
   /**
@@ -86,7 +103,7 @@ export abstract class InboxStoreBase {
       if (committed && shouldNotify()) this.onMutation(affectedAgentId);
     }
   }
-  protected transaction<T>(database: DatabaseSync, operation: () => T): T { database.exec("BEGIN IMMEDIATE"); try { const result = operation(); database.exec("COMMIT"); return result; } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; } }
+  protected transaction<T>(database: DatabaseSync, operation: () => T): T { database.exec("BEGIN IMMEDIATE"); try { this.writeFence?.(); const result = operation(); database.exec("COMMIT"); return result; } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; } }
   protected async transactionFenced<T>(database: DatabaseSync, operation: () => T, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<T> {
     let transactionOpen = false;
     let committed = false;
@@ -96,6 +113,7 @@ export abstract class InboxStoreBase {
         if (transactionOpen || committed) throw new Error("Supervised inbox transaction was already started.");
         database.exec("BEGIN IMMEDIATE");
         transactionOpen = true;
+        this.writeFence?.();
         result = operation();
         database.exec("COMMIT");
         transactionOpen = false;
@@ -112,14 +130,17 @@ export abstract class InboxStoreBase {
   private async getDatabase(): Promise<DatabaseSync> {
     if (this.closed) throw new Error("Supervised inbox store is closed.");
     if (this.database) return this.database;
-    if (!this.initializing) this.initializing = (this.schemaPrepared
-      ? openPreparedDaemonStateDatabase(this.databasePath)
-      : openDaemonStateDatabase(this.databasePath, (database) => new DaemonStateSchema().createSchema(database)))
-      .then((database) => {
-        // A repair on another connection may have rebuilt a table and lost the version triggers this store reads by.
-        applyAgentStateVersionSchema(database);
-        this.database = database; return database;
-      });
+    if (!this.initializing) this.initializing = openDaemonStateDatabase(
+      this.databasePath,
+      (database) => new DaemonStateSchema().createSchema(database),
+    ).then((database) => {
+      this.database = database;
+      this.ownsDatabase = true;
+      return database;
+    }).catch((error) => {
+      this.initializing = null;
+      throw error;
+    });
     return this.initializing;
   }
   protected require(value: string, field: string): void { if (!value?.trim()) throw new Error(`Supervised inbox ${field} is required.`); }
@@ -137,7 +158,7 @@ export abstract class InboxStoreBase {
     }, timestamp);
   }
   protected assertCurrentHead(database: DatabaseSync, item: SupervisedInboxItem): void {
-    const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
+    const head = database.prepare("SELECT inbox_item_id FROM inbox_items WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
     if (!head || String(head.inbox_item_id) !== item.inbox_item_id) throw new Error("Only the current FIFO head may change delivery state.");
   }
   /**

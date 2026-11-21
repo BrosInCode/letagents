@@ -58,7 +58,7 @@ async function fixture() {
     ) VALUES('attempt','agent','room','message','active',100);
     INSERT INTO execution_attempt_generations
       VALUES('attempt','agent','room','generation','workspace',100);
-    INSERT INTO execution_turns(
+    INSERT INTO runs(
       turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
       provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms
     ) VALUES('turn','attempt','agent','room','generation','runtime','continuation','native-turn','active','none',100);

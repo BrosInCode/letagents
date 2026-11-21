@@ -50,7 +50,7 @@ test("the steps of a stop that fence together do so before the first wait, and a
   assert.deepEqual(order, ["fence 1", "fence 2", "drain", "close"]);
 });
 
-type Step = "typedLifecycleEffects.close" | "boundedEffects.drainJournalReservations" | "providerReconciliation.disposeAll"
+type Step = "roomWorkPublisher.close" | "boundedEffects.drainJournalReservations" | "providerReconciliation.disposeAll"
   | "providerExecution.drainConvergence" | "providerStreams.disposeAll" | "socket.stop" | "store.close" | "supervisedInbox.close";
 
 /** A daemon on its own paths, with a provider and no agent: the provider is never asked to do anything. */
@@ -101,12 +101,12 @@ async function runningDaemon() {
   };
 }
 
-for (const failing of ["typedLifecycleEffects.close", "boundedEffects.drainJournalReservations", "providerReconciliation.disposeAll", "providerExecution.drainConvergence"] as const) {
+for (const failing of ["roomWorkPublisher.close", "boundedEffects.drainJournalReservations", "providerReconciliation.disposeAll", "providerExecution.drainConvergence"] as const) {
   test(`a daemon whose ${failing} fails while it stops still drains what is left, closes its socket and stores, and reports that failure`, async () => {
     const stopped = await runningDaemon();
     try {
       const failure = new Error(`${failing} failed.`);
-      const drains: Step[] = ["typedLifecycleEffects.close", "boundedEffects.drainJournalReservations", "providerReconciliation.disposeAll",
+      const drains: Step[] = ["roomWorkPublisher.close", "boundedEffects.drainJournalReservations", "providerReconciliation.disposeAll",
         "providerExecution.drainConvergence", "providerStreams.disposeAll"];
       for (const step of drains) stopped.watch(step, step === failing ? failure : undefined);
       stopped.watch("socket.stop");

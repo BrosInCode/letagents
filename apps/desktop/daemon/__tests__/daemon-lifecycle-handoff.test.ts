@@ -86,18 +86,21 @@ test("singleton fences a second daemon and detects a newer generation", async ()
   } finally { await env.cleanup(); }
 });
 
-test("manifest SQLite writes use generation CAS across concurrent callers", async () => {
+test("manifest SQLite writes use per-agent version CAS across concurrent callers", async () => {
   const env = await fixture();
   try {
     const path = join(env.root, "manifest.json");
     const store = new ManifestStore(path);
-    const saved = await store.write(0, [entry]);
-    assert.equal(saved.generation, 1);
-    await assert.rejects(() => store.write(0, []), ManifestConflictError);
-    const concurrent = await Promise.allSettled([store.write(1, [{ ...entry, id: "left" }]), store.write(1, [{ ...entry, id: "right" }])]);
+    const saved = await store.write([entry]);
+    assert.equal(saved.versions[entry.id], 1);
+    await assert.rejects(() => store.replaceEntry(0, { ...entry, display_name: "Stale" }), ManifestConflictError);
+    const concurrent = await Promise.allSettled([
+      store.replaceEntry(1, { ...entry, display_name: "Left" }),
+      store.replaceEntry(1, { ...entry, display_name: "Right" }),
+    ]);
     assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1);
     assert.equal(concurrent.filter((result) => result.status === "rejected" && result.reason instanceof ManifestConflictError).length, 1);
-    assert.equal((await store.load()).generation, 2);
+    assert.equal((await store.load()).versions[entry.id], 2);
     await store.close();
   } finally { await env.cleanup(); }
 });
@@ -764,7 +767,7 @@ for (const retried of [false, true]) test(`provider-aware handoff ${retried ? "i
       messages: [{ source_message_id: "task-continuation:parent", source_message: { text: "continue the task" }, activation: {} }] });
     // Exactly what the daemon saves for a follow-up that it makes blocked.
     const db = new DatabaseSync(env.paths.manifestPath);
-    db.prepare("UPDATE supervised_agent_inbox SET state='blocked',last_error='All three automatic attempts failed.' WHERE inbox_item_id=?").run(item!.inbox_item_id);
+    db.prepare("UPDATE inbox_items SET state='blocked',last_error='All three automatic attempts failed.' WHERE inbox_item_id=?").run(item!.inbox_item_id);
     db.prepare("INSERT INTO supervised_agent_inbox_events VALUES(?,3,'task-continuation:0','blocked',?,NULL)").run(item!.inbox_item_id, new Date().toISOString());
     db.close();
     assert.equal(await store.isUntouchedBlockedFollowUp(item!.inbox_item_id), true);
@@ -842,7 +845,7 @@ for (const scenario of [
     assert.equal(await env.internals.supervisedInbox.providerTurnBinding(item!.inbox_item_id), null);
     const readHistory = () => {
       const db = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
-      try { return db.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id); }
+      try { return db.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item!.inbox_item_id); }
       finally { db.close(); }
     };
     const history = readHistory();

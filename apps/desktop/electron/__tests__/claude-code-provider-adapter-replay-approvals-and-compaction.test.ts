@@ -73,7 +73,7 @@ for (const [tasks, ownedTasks] of [["holds no task", undefined], ["holds a task"
       }
 
       const stopped = await agent.view();
-      assert.deepEqual([stopped.observed_state, stopped.condition, stopped.last_error, stopped.room_agent_state.inbox.state], ["idle", "none", null, "empty"],
+      assert.deepEqual([stopped.observed_state, stopped.condition, stopped.last_error ?? null, stopped.room_agent_state.inbox.state], ["idle", "none", null, "empty"],
         "the agent is not blocked, and waits for no person");
       const next = await agent.begin(2);
       agent.reportStarted(next);

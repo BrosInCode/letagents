@@ -10,14 +10,14 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
   /** Only the unhandled tail can create work: a later message supersedes automatic continuation. */
   async taskContinuityCandidate(agentId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence DESC LIMIT 1").get(agentId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM inbox_items WHERE agent_id=? ORDER BY fifo_sequence DESC LIMIT 1").get(agentId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
       if (item.state !== "acknowledged_failed" || item.activation.task_continuity_considered
         || typeof item.activation.task_continuity_owner_session_id !== "string"
         || typeof item.activation.task_continuity_failed_at !== "string"
         || readDurableNativeFailure(database, item.inbox_item_id) !== "failed") return null;
-      const control = database.prepare("SELECT 1 FROM turn_control_journals WHERE agent_id=? AND turn_control_present=1 AND inbox_item_id=?").get(agentId, item.inbox_item_id);
+      const control = database.prepare("SELECT 1 FROM agents WHERE agent_id=? AND turn_control_inbox_item_id=?").get(agentId, item.inbox_item_id);
       return control ? null : item;
     });
   }
@@ -75,7 +75,7 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
     /** What the follow-up is for. It is saved with the follow-up, and the owner is told from it. */
     kind?: FollowUpKind | null }): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence DESC LIMIT 1").get(input.agentId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM inbox_items WHERE agent_id=? ORDER BY fifo_sequence DESC LIMIT 1").get(input.agentId) as Row | undefined;
       if (!row || row.inbox_item_id !== input.parentId) return null;
       const parent = rowToItem(row);
       if (parent.state !== "acknowledged_failed" || parent.activation.task_continuity_considered
@@ -83,7 +83,7 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
         || readDurableNativeFailure(database, parent.inbox_item_id) !== "failed") return null;
       const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(input.parentId) as Row | undefined;
       if (binding?.work_attempt_id !== input.workAttemptId || binding.provider_continuation_id !== input.providerContinuationId) return null;
-      if (database.prepare("SELECT 1 FROM turn_control_journals WHERE agent_id=? AND turn_control_present=1 AND inbox_item_id=?").get(input.agentId, input.parentId)) return null;
+      if (database.prepare("SELECT 1 FROM agents WHERE agent_id=? AND turn_control_inbox_item_id=?").get(input.agentId, input.parentId)) return null;
       const prior = this.readTaskContinuation(database, parent);
       const continuation: TaskContinuation = { parentId: parent.inbox_item_id,
         attempt: (prior?.attempt ?? 0) + 1, workAttemptId: input.workAttemptId,
@@ -92,9 +92,9 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
         ...(input.kind ? { kind: input.kind } : {}) };
       if (!parseTaskContinuation(continuation)) throw new Error("Invalid task continuation snapshot.");
       const childSource = `task-continuation:${parent.inbox_item_id}`;
-      run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
+      run(database.prepare("UPDATE inbox_items SET activation_json=? WHERE inbox_item_id=?"),
         JSON.stringify({ ...parent.activation, task_continuity_considered: childSource }), parent.inbox_item_id);
-      const setLastError = database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?");
+      const setLastError = database.prepare("UPDATE inbox_items SET last_error=?,updated_at=? WHERE inbox_item_id=?");
       // An uncertain earlier action ends the series like a settled one: no follow-up, and the reason where its owner looks.
       const uncertain = this.hasUncertainTaskEffects(database, parent);
       if (!uncertain && input.tasks?.length === 0) return null;
@@ -103,7 +103,7 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
         // Also show the reason on the room message the task continued from;
         // a synthetic follow-up has no chat message of its own.
         const origin = followUpOrigin(parent, (inboxItemId) => {
-          const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+          const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
           return row ? rowToItem(row) : undefined;
         });
         const timestamp = this.now();
@@ -123,10 +123,10 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
         ].join("\n") } });
       const reason = input.blockReason;
       const timestamp = this.now();
-      run(database.prepare("UPDATE supervised_agent_inbox SET state=?,last_error=?,next_attempt_at_ms=? WHERE inbox_item_id=?"),
+      run(database.prepare("UPDATE inbox_items SET state=?,last_error=?,next_attempt_at_ms=? WHERE inbox_item_id=?"),
         reason ? "blocked" : "pending", reason ?? input.detail, reason ? null : Date.parse(timestamp) + input.delayMs, child.inbox_item_id);
       this.recordEvent(database, child.inbox_item_id, "task-continuation:0", reason ? "blocked" : "retry_scheduled", timestamp, reason ?? input.detail);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(child.inbox_item_id) as Row);
+      return rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(child.inbox_item_id) as Row);
     }));
   }
 
@@ -134,7 +134,7 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
     if (!item.source_message_id.startsWith("task-continuation:")) return null;
     const metadata = parseTaskContinuation(item.activation.task_continuity);
     if (!metadata || item.source_message_id !== `task-continuation:${metadata.parentId}`) throw new Error("Task continuation metadata is invalid.");
-    const parent = database.prepare(`SELECT i.*,b.work_attempt_id,b.provider_continuation_id FROM supervised_agent_inbox i
+    const parent = database.prepare(`SELECT i.*,b.work_attempt_id,b.provider_continuation_id FROM inbox_items i
       JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id WHERE i.inbox_item_id=?`).get(metadata.parentId) as Row | undefined;
     const activation = parent ? rowToItem(parent).activation : null;
     if (!parent || parent.agent_id !== item.agent_id || parent.room_id !== item.room_id
@@ -147,7 +147,7 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
 
   async taskContinuation(inboxItemId: string): Promise<TaskContinuation | null> {
     return this.read(async (database) => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       return row ? this.readTaskContinuation(database, rowToItem(row)) : null;
     });
   }
@@ -157,17 +157,17 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
     // A turn that is kept without its binding cannot be matched to its actions. It is taken as uncertain: no follow-up is made for it, and
     // a note about it stays. A projection must never throw for it.
     if (!binding) return true;
-    return ["supervised_agent_effects", "supervised_agent_effect_tombstones"].some((table) => Boolean(database.prepare(`SELECT 1 FROM ${table}
+    return ["effects", "effect_tombstones"].some((table) => Boolean(database.prepare(`SELECT 1 FROM ${table}
       WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=? AND mutation=1 AND state IN ('executing','uncertain') LIMIT 1`)
       .get(parent.agent_id, parent.room_id, binding.origin_execution_generation_id as string, parent.provider_turn_id)));
   }
 
   async taskContinuationHasUncertainEffects(inboxItemId: string): Promise<boolean> {
     return this.read(async (database) => {
-      const item = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const item = rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row);
       const continuation = this.readTaskContinuation(database, item);
       if (!continuation) return false;
-      return this.hasUncertainTaskEffects(database, rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(continuation.parentId) as Row));
+      return this.hasUncertainTaskEffects(database, rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(continuation.parentId) as Row));
     });
   }
 
@@ -179,7 +179,7 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
   /** Resolve a previously unavailable snapshot, or remove tasks that have since finished. Never add to a known scope. */
   async refreshTaskContinuationSnapshot(inboxItemId: string, tasks: ContinuityTask[]): Promise<TaskContinuation> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const item = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const item = rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row);
       const previous = this.readTaskContinuation(database, item);
       if (!previous || item.state !== "pending" || item.provider_turn_id || item.outcome || !tasks.length
         || (previous.tasks && tasks.some((task) => !previous.tasks!.some((old) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch)))) throw new Error("Task continuation scope cannot expand.");
@@ -188,7 +188,7 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
       if (!parseTaskContinuation(metadata)) throw new Error("Invalid task continuation snapshot.");
       const source = item.source_message as Record<string, unknown>;
       const text = String(source.text).replace(/^Tasks and exact work leases:.*$/m, `Tasks and exact work leases: ${JSON.stringify(tasks)}`);
-      run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=?,source_message_json=? WHERE inbox_item_id=?"),
+      run(database.prepare("UPDATE inbox_items SET activation_json=?,source_message_json=? WHERE inbox_item_id=?"),
         JSON.stringify({ ...item.activation, task_continuity: metadata }), JSON.stringify({ ...source, text }), inboxItemId);
       return metadata;
     }));
@@ -196,7 +196,7 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
 
   /** A follow-up that waits for its time, and that nothing has started: the only kind its owner can start now or stop. */
   private scheduledTaskContinuation(database: DatabaseSync, inboxItemId: string): SupervisedInboxItem {
-    const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+    const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
     const item = row ? rowToItem(row) : null;
     if (!item || !this.readTaskContinuation(database, item) || item.state !== "pending" || item.provider_turn_id || item.outcome) {
       throw new Error("This automatic attempt has already started or ended.");
@@ -210,7 +210,7 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
     return this.exclusive(async (database) => this.transaction(database, () => {
       this.scheduledTaskContinuation(database, inboxItemId);
       const timestamp = this.now();
-      run(database.prepare("UPDATE supervised_agent_inbox SET next_attempt_at_ms=?,updated_at=? WHERE inbox_item_id=?"), Date.parse(timestamp), timestamp, inboxItemId);
+      run(database.prepare("UPDATE inbox_items SET next_attempt_at_ms=?,updated_at=? WHERE inbox_item_id=?"), Date.parse(timestamp), timestamp, inboxItemId);
       this.recordEvent(database, inboxItemId, `task-continuation:now:${timestamp}`, "retry_scheduled", timestamp, "Started now, as its owner asked.");
     }));
   }
@@ -220,7 +220,7 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const item = this.scheduledTaskContinuation(database, inboxItemId);
       const timestamp = this.now();
-      run(database.prepare(`UPDATE supervised_agent_inbox SET state='cancelled_by_user',last_error=?,next_attempt_at_ms=NULL,acknowledged_at=?,updated_at=?
+      run(database.prepare(`UPDATE inbox_items SET state='cancelled_by_user',last_error=?,next_attempt_at_ms=NULL,acknowledged_at=?,updated_at=?
         WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
       this.settleTerminalItem(database, item, timestamp);
       this.recordEvent(database, inboxItemId, "user_cancelled", "user_cancelled", timestamp, detail);
@@ -231,11 +231,11 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
   /** A never-dispatched synthetic continuation can become unnecessary; it has no native outcome to overwrite. */
   async finishUnusedTaskContinuation(inboxItemId: string, detail: string): Promise<void> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const item = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const item = rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row);
       if (!this.readTaskContinuation(database, item) || item.state !== "pending" || item.provider_turn_id || item.outcome) throw new Error("Only an undispatched task continuation can be skipped.");
       this.assertCurrentHead(database, item);
       const timestamp = this.now();
-      run(database.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',last_error=?,acknowledged_at=?,updated_at=? WHERE inbox_item_id=?"), detail, timestamp, timestamp, inboxItemId);
+      run(database.prepare("UPDATE inbox_items SET state='acknowledged_no_reply',last_error=?,acknowledged_at=?,updated_at=? WHERE inbox_item_id=?"), detail, timestamp, timestamp, inboxItemId);
       this.recordEvent(database, inboxItemId, "task-continuation:unused", "no_reply", timestamp, detail);
       this.settleTerminalItem(database, item, timestamp);
       this.pruneAgentHistory(database, item.agent_id);

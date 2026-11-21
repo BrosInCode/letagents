@@ -58,7 +58,7 @@ function agentEntry(index: number, running: boolean): DaemonManifestEntry {
 }
 
 function seedInbox(database: DatabaseSync, agentId: string, roomId: string, receipts: number, offset: number): void {
-  const insert = database.prepare(`INSERT INTO supervised_agent_inbox
+  const insert = database.prepare(`INSERT INTO inbox_items
     (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
     VALUES (?,?,?,?,?,?,?,?,1,?,?,?,NULL,NULL,NULL,NULL,NULL,?,?,?)`);
   const event = database.prepare(`INSERT INTO supervised_agent_inbox_events(inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)

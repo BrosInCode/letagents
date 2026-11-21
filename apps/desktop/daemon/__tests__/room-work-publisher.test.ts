@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
-import { DaemonStateSchema, openDaemonStateObservationDatabase } from "../daemon-state-database.js";
+import { DaemonStateSchema } from "../daemon-state-database.js";
 import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import { parseExecutionFact } from "../execution-protocol.js";
 import { RoomWorkPublicationStore } from "../room-work-publication-store.js";
@@ -70,7 +70,7 @@ async function fixture(t: TestContext, provider: "codex" | "claude-code" | "curs
     assertCurrent: async () => {}, diagnostic: (code: string) => { diagnostics.push(code); },
     publish: async (input: RoomWorkPublishInput): Promise<RoomWorkPublishResult> => { sent.push(input); return "acknowledged"; },
   };
-  let publisher = new RoomWorkPublisher(openDaemonStateObservationDatabase(path), options);
+  let publisher = new RoomWorkPublisher(db, options);
   t.after(async () => { publisher.close(); db.close(); await removeTestDirectory(directory); });
   let sequence = 0;
   const native = (id: number) => ({ turnId: `turn-${id}`, providerContinuationId: "conversation", providerTurnId: `native-${id}` });
@@ -100,7 +100,7 @@ async function fixture(t: TestContext, provider: "codex" | "claude-code" | "curs
   }
   return { db, path, location, capture, receipts, custody, grant, worker, agent, sent, diagnostics, options, fact, operation, captureMessage, summary,
     get publisher() { return publisher; },
-    restart() { publisher.close(); publisher = new RoomWorkPublisher(openDaemonStateObservationDatabase(path), options); },
+    restart() { publisher.close(); publisher = new RoomWorkPublisher(db, options); },
     row(id = 1) { return receipts.get("agent", "room", `msg_${id}`)!; },
   };
 }
@@ -169,7 +169,7 @@ test("publisher coalesces structural evidence, not output, and terminal state fo
 test("a failed delivery that capture never recorded is published as failed from its receipt, and only then", async t => {
   const f = await fixture(t);
   const reason = "PRIVATE provider reason";
-  const receipt = (id: number, state: string) => f.db.prepare(`INSERT INTO supervised_agent_inbox
+  const receipt = (id: number, state: string) => f.db.prepare(`INSERT INTO inbox_items
     (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,
      action_id,reply_client_message_id,provider_turn_id,outcome,last_error,created_at,updated_at,acknowledged_at)
     VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)`).run(`inbox-${id}`, "agent", "room", `msg_${id}`,
@@ -227,7 +227,7 @@ for (const gap of ["with", "without"] as const) {
     f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('automatic-1','agent','room','generation','runtime','resume','complete','{}',?,'2026-08-31T00:00:02Z','2026-08-31T00:00:02Z')").run(archived);
     f.db.exec(`UPDATE execution_observers SET observer_epoch=observer_epoch+1;
       UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',ended_at_ms=200;
-      UPDATE execution_turns SET state='lost',ended_at_ms=200`);
+      UPDATE runs SET state='lost',ended_at_ms=200`);
     f.capture.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
       provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 201 });
     f.capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "next-runtime", observerRuntimeGenerationId: "next-runtime",
@@ -276,7 +276,7 @@ for (const gap of ["with", "without"] as const) {
     f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('automatic-1','agent','room','generation','runtime','resume','complete','{}',?,'2026-08-31T00:00:02Z','2026-08-31T00:00:02Z')").run(archived);
     f.db.exec(`UPDATE execution_observers SET observer_epoch=observer_epoch+1;
       UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',ended_at_ms=200;
-      UPDATE execution_turns SET state='lost',ended_at_ms=200`);
+      UPDATE runs SET state='lost',ended_at_ms=200`);
     f.capture.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
       provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 201 });
     f.capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "next-runtime", observerRuntimeGenerationId: "next-runtime",
@@ -298,14 +298,14 @@ test("a message recorded after an agent's first ten thousand facts is published:
 
   // Weeks of work fill the record, and a recovery boundary lets the next runtime start a new window behind it.
   f.db.exec(`WITH RECURSIVE positions(value) AS (SELECT 1000001 UNION ALL SELECT value+1 FROM positions WHERE value<1010000)
-    INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+    INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
       source_sequence,domain,kind,state,side_effects,observed_at_ms)
-    SELECT 'filler-'||value,'agent','generation','runtime',1,value,'control','state_changed','responsive','none',value FROM positions`);
+    SELECT 'filler-'||value,'agent','generation','runtime','generation','runtime',1,value,'control','state_changed','responsive','none',value FROM positions`);
   const archived = JSON.stringify(f.db.prepare("SELECT * FROM execution_observers WHERE agent_id='agent'").get());
   f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('automatic-1','agent','room','generation','runtime','resume','complete','{}',?,'2026-08-31T00:00:02Z','2026-08-31T00:00:02Z')").run(archived);
   f.db.exec(`UPDATE execution_observers SET observer_epoch=observer_epoch+1;
     UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',ended_at_ms=200;
-    UPDATE execution_turns SET state='lost',ended_at_ms=200 WHERE state IN ('none','active')`);
+    UPDATE runs SET state='lost',ended_at_ms=200 WHERE state IN ('none','active')`);
   f.capture.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
     provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 201 });
   const next = f.capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "next-runtime", observerRuntimeGenerationId: "next-runtime",
@@ -333,12 +333,12 @@ test("after a daemon restart, a message on a runtime past one window's worth is 
   f.operation(1, { executionId: "a" });
   f.operation(1, { executionId: "a", kind: "completed", outcome: "succeeded" });
   const fill = (from: number, to: number, epoch = 1) => f.db.prepare(`WITH RECURSIVE positions(value) AS (SELECT ? UNION ALL SELECT value+1 FROM positions WHERE value<?)
-    INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+    INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
       source_sequence,domain,kind,state,side_effects,observed_at_ms)
-    SELECT 'filler-'||value,'agent','generation','runtime',?,value,'control','state_changed','responsive','none',value FROM positions`).run(from, to, epoch);
+    SELECT 'filler-'||value,'agent','generation','runtime','generation','runtime',?,value,'control','state_changed','responsive','none',value FROM positions`).run(from, to, epoch);
   fill(4, 9_995);
   // A second command of the same long turn, after all of that.
-  const columns = "agent_id,execution_generation_id,runtime_generation_id,observer_epoch,native_event_id,turn_id,execution_id,domain,kind,state,operation,outcome,side_effects,output_bytes,exit_code,signal_number,observed_at_ms,turn_outcome,control_evidence";
+  const columns = "agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,native_event_id,turn_id,execution_id,domain,kind,state,operation,outcome,side_effects,output_bytes,exit_code,signal_number,observed_at_ms,turn_outcome,control_evidence";
   f.db.exec(`INSERT INTO execution_facts(fact_id,source_sequence,${columns})
     SELECT 'b-'||kind, 9994+source_sequence, ${columns.replace("execution_id", "'command-b'")} FROM execution_facts WHERE execution_id='a' ORDER BY sequence`);
   f.db.exec("UPDATE execution_observers SET last_source_sequence=9997,max_observed_sequence=9997");
@@ -365,7 +365,7 @@ test("after a daemon restart, a message on a runtime past one window's worth is 
 test("a delivery that failed inside a gap is still published as failed after the daemon carried on past the gap", async t => {
   const f = await fixture(t);
   f.publisher.observeNewSources(f.agent)?.(["msg_1"]);
-  f.db.prepare(`INSERT INTO supervised_agent_inbox
+  f.db.prepare(`INSERT INTO inbox_items
     (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,
      action_id,reply_client_message_id,provider_turn_id,outcome,last_error,created_at,updated_at,acknowledged_at)
     VALUES ('inbox-1','agent','room','msg_1','{"id":"msg_1"}','{}',1,'acknowledged_failed',1,'action-1','reply-1','native-1',NULL,NULL,
@@ -388,7 +388,7 @@ test("a delivery that failed inside a gap is still published as failed after the
 
 test("failed deliveries behind any number of answered ones are all published from their receipts, a few per pass", async t => {
   const f = await fixture(t);
-  const receipt = (id: string, state: string) => f.db.prepare(`INSERT INTO supervised_agent_inbox
+  const receipt = (id: string, state: string) => f.db.prepare(`INSERT INTO inbox_items
     (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,
      action_id,reply_client_message_id,provider_turn_id,outcome,last_error,created_at,updated_at,acknowledged_at)
     VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)`).run(`inbox-${id}`, "agent", "room", `msg_${id}`,
@@ -1252,28 +1252,6 @@ test('legacy empty archive stays preserved without upload retries or payload rew
   assert.deepEqual(store.pendingPage('agent', 'room', 'msg_1'), oldPage, 'old evidence is retained, not falsely acknowledged or deleted');
 });
 
-test('v36 upgrades existing publication receipts to store real diffs without losing history', async t => {
-  const f = await fixture(t);
-  f.captureMessage(); await f.publisher.flush();
-  const before = f.row();
-  f.publisher.close();
-  const definitions = f.db.prepare("SELECT type,sql FROM sqlite_master WHERE tbl_name='room_work_publications' AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END").all();
-  f.db.exec('DROP TABLE room_workspace_captures; CREATE TEMP TABLE saved_publications AS SELECT * FROM room_work_publications; DROP TABLE room_work_publications');
-  f.db.exec(String(definitions[0].sql).replaceAll('524288', '2048'));
-  f.db.exec('INSERT INTO room_work_publications SELECT * FROM saved_publications; DROP TABLE saved_publications');
-  for (const definition of definitions.slice(1)) f.db.exec(String(definition.sql));
-  f.db.exec('PRAGMA user_version=36; UPDATE manifest_metadata SET schema_version=36');
-  new DaemonStateSchema().createSchema(f.db);
-  f.restart();
-  assert.deepEqual(f.row(), before);
-  const captured = f.summary();
-  const workspace = { captured_at: '2026-09-07T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready' as const,
-    files: [], additions: 0, deletions: 0, hidden_files: 0, patch: '+ substantial diff\n'.repeat(4000), patch_truncated: false };
-  f.receipts.stage(before, { ...captured, summary: { ...captured.summary, version: 2, workspace } });
-  f.restart();
-  assert.equal(f.row().summary?.workspace?.patch, workspace.patch);
-});
-
 test('a background staging pass preserves a workspace captured while its authority check yielded', async t => {
   const f = await fixture(t);
   f.captureMessage();
@@ -1398,19 +1376,6 @@ test('complete review pages resume after restart without recapturing or bloating
   assert.equal(f.db.prepare('SELECT uploaded_pages FROM room_workspace_reviews').get()?.uploaded_pages, first.total);
 });
 
-test('v38 migrates additively to full reviews without changing existing captured previews', async t => {
-  const f = await fixture(t);
-  f.captureMessage(); await f.publisher.flush();
-  const before = f.row();
-  f.publisher.close();
-  f.db.exec('DROP TABLE room_workspace_reviews; PRAGMA user_version=38; UPDATE manifest_metadata SET schema_version=38');
-  new DaemonStateSchema().createSchema(f.db);
-  f.restart();
-  assert.deepEqual(f.row(), before);
-  assert.equal(f.db.prepare('SELECT count(*) AS count FROM room_workspace_reviews').get()?.count, 0);
-});
-
-
 test('optional full-review capacity cannot discard a valid compact receipt', async t => {
   const { RoomWorkspaceStore } = await import('../room-workspace-store.js');
   const f = await fixture(t);
@@ -1450,7 +1415,7 @@ async function settledPeerGroup(f: Awaited<ReturnType<typeof fixture>>, roomId =
     return (await inbox.getBySourceMessage("agent", roomId, `msg_${start + 1}`))!;
   } finally { await inbox.close(); }
 }
-const pendingGrouped = (db: DatabaseSync) => db.prepare(`SELECT room_id,source_message_id FROM supervised_agent_inbox i
+const pendingGrouped = (db: DatabaseSync) => db.prepare(`SELECT room_id,source_message_id FROM inbox_items i
   WHERE ${PENDING_PEER_REPORT_SQL} ORDER BY fifo_sequence`).all();
 
 test("grouped report failure survives restart and retries through an authorized successor without fake execution", async t => {

@@ -1049,33 +1049,18 @@ test("real child requests its recovery key over private IPC and disconnects afte
   assert.equal(output.includes("test-sealed-key"), false);
 });
 
-test("real supervisor upgrades v17 through encrypted private bootstrap before socket admission", async () => {
+test("real supervisor moves aside a legacy database intact and boots cleanly on schema v1 before socket admission", async () => {
   const env = await fixture();
   const statePath = join(env.root, "daemon-state.sqlite");
   // Source-run contract test across the separately compiled Electron/daemon roots.
   const schemaModule = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
-  const backupModule = await import(new URL("../../daemon/state-recovery-backup.ts", import.meta.url).href);
   const database = new DatabaseSync(statePath);
-  new schemaModule.DaemonStateSchema().createSchema(database);
-  database.exec("DROP TABLE IF EXISTS custodial_polling_offers; DROP TABLE IF EXISTS custodial_polling_activations; ALTER TABLE runtime_deployments DROP COLUMN custodial_launch_agent_session_id");
-  database.exec("ALTER TABLE agent_configurations DROP COLUMN polling_contract");
-  database.exec("PRAGMA foreign_keys=OFF");
-  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*'").all()) {
-    database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
-  }
-  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
-  // Newer Node versions protect sqlite_master by default. Only this disposable
-  // historical-schema fixture intentionally rewrites it; production keeps protection.
-  database.enableDefensive?.(false);
-  database.exec("PRAGMA writable_schema=ON");
-  database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
-  database.prepare("UPDATE sqlite_master SET sql=replace(replace(sql, ?, ''), ?, '') WHERE name='supervised_agent_terminal_results'").run(
-    ",'failed','interrupted'",
-    ",CHECK(outcome NOT IN ('failed','interrupted') OR (normalized_text IS NULL AND evidence_source <> 'none'))",
-  );
-  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
-    UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
-  database.enableDefensive?.(true);
+  database.exec(`
+    PRAGMA application_id = 0;
+    PRAGMA user_version = 52;
+    CREATE TABLE legacy_canary (note TEXT NOT NULL);
+    INSERT INTO legacy_canary VALUES ('preserved-before-clean-v1');
+  `);
   database.close();
   await protectOwnerPrivate(statePath, "file", { force: true });
   const mainModule = new URL("../../daemon/main.ts", import.meta.url).href;
@@ -1110,13 +1095,21 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
       assert.fail(`${String(error)}\n${output}`);
     }
     assert.equal(await exited, 0, output);
-    assert.equal(keyRequests, 1);
+    assert.equal(keyRequests, 0, "legacy move-aside preserves the original file directly without an encrypted upgrade snapshot");
     const current = new DatabaseSync(statePath, { readOnly: true });
-    try { assert.equal(current.prepare("PRAGMA user_version").get()!.user_version, schemaModule.DAEMON_STATE_SCHEMA_VERSION); }
-    finally { current.close(); }
-    const restored = await backupModule.decryptStateRecoveryBackup(`${statePath}.recovery.enc`, Buffer.alloc(32, 17));
-    try { assert.equal(restored.prepare("PRAGMA user_version").get()!.user_version, 17); }
-    finally { restored.close(); }
+    try {
+      assert.equal(current.prepare("PRAGMA application_id").get()!.application_id, schemaModule.DAEMON_STATE_APPLICATION_ID);
+      assert.equal(current.prepare("PRAGMA user_version").get()!.user_version, schemaModule.DAEMON_STATE_USER_VERSION);
+      assert.equal(Number(current.prepare("SELECT COUNT(*) AS count FROM agents").get()!.count), 0);
+    } finally { current.close(); }
+    const legacyFiles = (await readdir(env.root)).filter((name) => /^daemon-state\.sqlite\.legacy-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z(?:-\d+)?$/.test(name));
+    assert.equal(legacyFiles.length, 1);
+    const archived = new DatabaseSync(join(env.root, legacyFiles[0]!), { readOnly: true });
+    try {
+      assert.equal(archived.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
+      assert.equal(archived.prepare("PRAGMA user_version").get()!.user_version, 52);
+      assert.equal(archived.prepare("SELECT note FROM legacy_canary").get()!.note, "preserved-before-clean-v1");
+    } finally { archived.close(); }
     assert.equal(output.includes("test-sealed-key"), false);
   } finally {
     if (child?.exitCode === null) child.kill();
@@ -2466,7 +2459,7 @@ test("production create durably proves no mint, grant-only purge survives restar
         "complete",
       );
       assert.equal(
-        Number((tombstoneDatabase.prepare("SELECT COUNT(*) AS count FROM agent_identities WHERE agent_id=?")
+        Number((tombstoneDatabase.prepare("SELECT COUNT(*) AS count FROM agents WHERE agent_id=?")
           .get(created.id) as { count: number }).count),
         0,
       );
@@ -3540,7 +3533,7 @@ test("desktop replaces the pre-avatar implementation and accepts only the new ex
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.284-modern.2");
+    assert.equal(status.implementationVersion, "2.0.284-modern.3");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

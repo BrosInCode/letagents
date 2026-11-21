@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { agentStateVersionSources, agentStateVersionTriggers, dropAgentStateVersionTriggers, validateAgentStateVersionSchema } from "../daemon-state-database/shared.js";
+import { agentStateVersionSources, agentStateVersionTriggers, validateAgentStateVersionSchema } from "../daemon-state-database/shared.js";
 import { ManifestStore } from "../manifest-store.js";
 import { MANIFEST_READS } from "../manifest-store/shared.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
@@ -17,7 +17,6 @@ type Versions = Record<string, { inbox: number; manifest: number }>;
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-agent-state-versions-"));
   const path = join(root, "daemon-state.sqlite");
-  // The first open of a fresh database is the manifest store's, and is where a repair rebuilds tables.
   const manifest = new ManifestStore(path);
   await manifest.load();
   const database = new DatabaseSync(path);
@@ -50,20 +49,19 @@ test("every table behind an entry's inbox inputs and manifest projection moves t
   // Read inline by blockedHeadSkip and blockedSkipRefusal (delivery.ts), followUpFacts (queries.ts) and
   // hasUncertainTaskEffects (task-continuations.ts). supervised_agent_terminal_results is read there too, but it is
   // only written in the transaction that also updates the item's inbox row, whose trigger counts for both.
-  const inlineInboxTables = ["supervised_agent_inbox", "runtime_deployments", "supervised_agent_provider_turn_bindings",
-    "supervised_agent_publications", "turn_control_journals", "supervised_agent_effects", "supervised_agent_effect_tombstones"];
+  const inlineInboxTables = ["inbox_items", "agents", "supervised_agent_provider_turn_bindings",
+    "supervised_agent_publications", "effects", "effect_tombstones"];
   for (const table of [...inboxReads.flatMap((sql) => [...tablesRead(sql)]), ...inlineInboxTables]) {
     if (table === "selected_inbox") continue; // the CTE of receiptTimelines, not a table
     assert.ok(scopesByTable.get(table)?.has("inbox"), `${table} is read for inbox inputs but does not move inbox_version`);
   }
-  const manifestReads = [MANIFEST_READS.allEntries, MANIFEST_READS.entry, MANIFEST_READS.entryIds, MANIFEST_READS.activitySummary,
-    MANIFEST_READS.stages, MANIFEST_READS.completedActions, MANIFEST_READS.exitTimestamps, MANIFEST_READS.notices];
+  const manifestReads = [MANIFEST_READS.allEntries, MANIFEST_READS.entry, MANIFEST_READS.entryIds, MANIFEST_READS.activitySummary];
   for (const table of manifestReads.flatMap((sql) => [...tablesRead(sql)])) {
     assert.ok(scopesByTable.get(table)?.has("manifest"), `${table} is read for a manifest entry but does not move manifest_version`);
   }
 });
 
-test("a fresh database has the version table and every trigger after its first open, validates, and gets a dropped trigger back on the next open", async () => {
+test("a fresh database has the version table and every trigger after its first open, validates, and fails closed if tampered", async () => {
   const env = await fixture();
   try {
     validateAgentStateVersionSchema(env.database);
@@ -71,21 +69,14 @@ test("a fresh database has the version table and every trigger after its first o
     for (const source of agentStateVersionSources) {
       for (const name of Object.keys(agentStateVersionTriggers(source))) assert.ok(names.has(name), `${name} missing after the first open`);
     }
-    // The previous daemon refuses a database with any trigger on the terminal-result authority.
     assert.equal(env.database.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='trigger' AND tbl_name='supervised_agent_terminal_results'").get()!.n, 0);
 
     env.database.exec("DROP TRIGGER agent_state_versions_activity_events_manifest_insert");
     assert.throws(() => validateAgentStateVersionSchema(env.database), /agent_state_versions_activity_events_manifest_insert/);
     const reopened = new ManifestStore(env.path);
-    try { await reopened.load(); } finally { await reopened.close(); }
-    validateAgentStateVersionSchema(env.database);
-
-    // A migration that rebuilds a source table drops them all first; a store open puts them back.
-    dropAgentStateVersionTriggers(env.database);
-    assert.equal(env.triggerNames().size, 0);
-    assert.throws(() => validateAgentStateVersionSchema(env.database));
-    await env.inbox.inboxStateVersions();
-    validateAgentStateVersionSchema(env.database);
+    try {
+      await assert.rejects(() => reopened.load(), /shape|trigger|missing/i);
+    } finally { await reopened.close(); }
   } finally {
     await env.cleanup();
   }
@@ -94,8 +85,8 @@ test("a fresh database has the version table and every trigger after its first o
 test("a write moves only the written agent's version, in the scope of the table and columns written, by any connection", async () => {
   const env = await fixture();
   try {
-    await env.inbox.inboxStateVersions(); // open the inbox connection before any baseline: its open applies the schema too
-    const saved = await env.manifest.write(0, [entry, { ...entry, id: "agent_2" }]);
+    await env.inbox.inboxStateVersions();
+    const saved = await env.manifest.write([entry, { ...entry, id: "agent_2" }]);
     const afterManifest = env.versions();
     assert.ok(afterManifest.agent_1!.manifest > 0);
     assert.ok(afterManifest.agent_2!.manifest > 0);
@@ -109,7 +100,7 @@ test("a write moves only the written agent's version, in the scope of the table 
     // A row keyed by the inbox item, written by a connection no store knows about.
     const other = new DatabaseSync(env.path);
     try {
-      const item = other.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id='agent_1'").get() as { inbox_item_id: string };
+      const item = other.prepare("SELECT inbox_item_id FROM inbox_items WHERE agent_id='agent_1'").get() as { inbox_item_id: string };
       other.prepare("INSERT INTO supervised_agent_inbox_events(inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail) VALUES (?,99,'probe:99','received',?,NULL)")
         .run(item.inbox_item_id, new Date().toISOString());
       const afterEvent = env.versions();
@@ -118,29 +109,29 @@ test("a write moves only the written agent's version, in the scope of the table 
       assert.deepEqual(afterEvent.agent_2, afterIngest.agent_2);
 
       // A manifest row updated in place, by that connection, for the other agent.
-      other.prepare("UPDATE agent_profiles SET display_name='Renamed' WHERE agent_id='agent_2'").run();
+      other.prepare("UPDATE agents SET display_name='Renamed' WHERE agent_id='agent_2'").run();
       const afterProfile = env.versions();
       assert.equal(afterProfile.agent_2!.manifest, afterEvent.agent_2!.manifest + 1);
       assert.equal(afterProfile.agent_2!.inbox, afterEvent.agent_2!.inbox);
       assert.deepEqual(afterProfile.agent_1, afterEvent.agent_1);
 
-      // The runtime row counts for the inbox only through the columns a blocked head's refusal reads.
-      other.prepare("UPDATE runtime_deployments SET native_liveness_detail='probe' WHERE agent_id='agent_1'").run();
+      // The agents row counts for the inbox only through the columns a blocked head's refusal reads.
+      other.prepare("UPDATE agents SET native_liveness_json='{\"state\":\"active\"}' WHERE agent_id='agent_1'").run();
       const afterLiveness = env.versions();
       assert.equal(afterLiveness.agent_1!.manifest, afterProfile.agent_1!.manifest + 1, "liveness is part of the entry");
       assert.equal(afterLiveness.agent_1!.inbox, afterProfile.agent_1!.inbox, "liveness is no inbox input");
-      other.prepare("UPDATE runtime_deployments SET provider_continuation_id='continuation_2' WHERE agent_id='agent_1'").run();
+      other.prepare("UPDATE agents SET provider_continuation_id='continuation_2' WHERE agent_id='agent_1'").run();
       const afterConversation = env.versions();
       assert.equal(afterConversation.agent_1!.manifest, afterLiveness.agent_1!.manifest + 1);
       assert.equal(afterConversation.agent_1!.inbox, afterLiveness.agent_1!.inbox + 1, "the runtime's conversation decides a blocked head's refusal");
 
       // Deleting the inbox row counts for its agent too.
-      other.prepare("DELETE FROM supervised_agent_inbox WHERE agent_id='agent_1'").run();
+      other.prepare("DELETE FROM inbox_items WHERE agent_id='agent_1'").run();
       assert.ok(env.versions().agent_1!.inbox > afterConversation.agent_1!.inbox);
     } finally {
       other.close();
     }
-    assert.equal(saved.generation, (await env.manifest.load()).generation);
+    assert.deepEqual(saved.versions, (await env.manifest.load()).versions);
   } finally {
     await env.cleanup();
   }

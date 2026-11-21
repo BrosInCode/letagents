@@ -13,13 +13,27 @@ export const deliveryAndPolling = storeMethods({
     const database = await this.getDatabase();
     const row = this.reads.get(database, "agentConfiguration").get(agentId) as Row | undefined;
     if (!row) return undefined;
-    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), delivery_mode: "daemon_inbox", image_input: bool(row.image_input), live_sharing: liveSharingState(row.live_sharing) };
+    return {
+      provider: String(row.provider),
+      model: nullableString(row.model),
+      reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"],
+      charter: String(row.charter),
+      permission_profile_id: nullableString(row.permission_profile_id),
+      provider_launch_policy: row.provider_launch_policy_json !== null && row.provider_launch_policy_json !== undefined
+        ? parseJson(row.provider_launch_policy_json)
+        : {},
+      config_revision: Number(row.config_revision),
+      runtime_configuration_revision: Number(row.runtime_configuration_revision),
+      delivery_mode: "daemon_inbox",
+      image_input: bool(row.image_input),
+      live_sharing: liveSharingState(row.live_sharing),
+    };
   },
 
-  /** Each agent's live sharing state. Agents without a configuration are left out. */
+  /** Each agent's live sharing state. */
   async liveSharingByAgent(): Promise<Map<string, LiveSharingState>> {
     const database = await this.getDatabase();
-    const rows = database.prepare("SELECT agent_id,live_sharing FROM agent_configurations").all() as Row[];
+    const rows = database.prepare("SELECT agent_id,live_sharing FROM agents").all() as Row[];
     return new Map(rows.map((row) => [String(row.agent_id), liveSharingState(row.live_sharing)]));
   },
 
@@ -44,12 +58,13 @@ export const deliveryAndPolling = storeMethods({
     commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<LiveSharingState | null> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      if (!database.prepare("SELECT 1 FROM agent_configurations WHERE agent_id=?").get(agentId)) return null;
+      if (!database.prepare("SELECT 1 FROM agents WHERE agent_id=?").get(agentId)) return null;
       let committed = false;
       let transactionOpen = false;
       const commit = async () => {
         database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
-        database.prepare(`UPDATE agent_configurations SET live_sharing=${next} WHERE agent_id=?${only ? " AND live_sharing=?" : ""}`)
+        this.writeFence?.();
+        database.prepare(`UPDATE agents SET live_sharing=${next} WHERE agent_id=?${only ? " AND live_sharing=?" : ""}`)
           .run(...(only ? [agentId, only] : [agentId]));
         database.exec("COMMIT"); transactionOpen = false; committed = true;
       };
@@ -60,7 +75,7 @@ export const deliveryAndPolling = storeMethods({
         if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
         throw error;
       }
-      const row = database.prepare("SELECT live_sharing FROM agent_configurations WHERE agent_id=?").get(agentId) as Row | undefined;
+      const row = database.prepare("SELECT live_sharing FROM agents WHERE agent_id=?").get(agentId) as Row | undefined;
       return row ? liveSharingState(row.live_sharing) : null;
     });
   },

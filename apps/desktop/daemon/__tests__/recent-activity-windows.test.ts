@@ -15,7 +15,7 @@ function agent(id: string): DaemonManifestEntry {
     id, room_id: "room_1", display_name: `Agent ${id}`, provider: "codex", model: "gpt-5.6-codex",
     charter: "Work on the room's tasks.", desired_state: "running", observed_state: "idle",
     condition: "none", last_error: null, permission_profile_id: "workspace-write",
-    provider_launch_policy: { deliveryMode: "mcp_polling" }, created_by: "user_1",
+    provider_launch_policy: {}, created_by: "user_1",
     created_at: "2026-10-19T00:00:00.000Z", source_repo_path: "/repo", workspace_path: `/worktrees/${id}`,
     work_attempt_id: `attempt_${id}`,
     workplace_liveness: { state: "reachable", observed_at: "2026-10-19T00:01:00.000Z", detail: null },
@@ -40,7 +40,7 @@ function write(agentId: string, sequence: number, limit = 200, extra: Partial<Da
 async function harness(maxBytes?: number) {
   const root = await mkdtemp(join(tmpdir(), "letagents-recent-activity-"));
   const store = new ManifestStore(join(root, "daemon-state.sqlite"));
-  let generation = (await store.write(0, [agent("a"), agent("b")])).generation;
+  await store.write([agent("a"), agent("b")]);
   // Full reads the windows make; the tests' own reference reads are not counted.
   let fullReads = 0;
   const counted = {
@@ -56,8 +56,7 @@ async function harness(maxBytes?: number) {
     get fullReads() { return fullReads; },
     setPending(events: DaemonActivityEvent[]) { pending = events; },
     async commit(items: ActivityWrite[]) {
-      const next = await store.recordActivityBatch(generation, items);
-      generation = next.generation;
+      const next = await store.recordActivityBatch(items);
       windows.committed(next.events);
       return next;
     },
@@ -66,8 +65,6 @@ async function harness(maxBytes?: number) {
       assert.deepEqual(read, overlay(await store.getEntry(agentId)));
       return read;
     },
-    get generation() { return generation; },
-    set generation(value: number) { generation = value; },
     cleanup: async () => { await store.close(); await rm(root, { recursive: true, force: true }); },
   };
 }
@@ -114,7 +111,7 @@ test("a write that bypasses the batches is found and answered with a full read",
     await h.commit([write("a", 1), write("a", 2)]);
     await h.expectSame("a");
     // A turn notice or another writer: appended without the windows.
-    h.generation = (await h.store.recordActivity(h.generation, "a", event(3), null, 200)).generation;
+    await h.store.recordActivity((await h.store.load()).versions.a!, "a", event(3), null, 200);
     let before = h.fullReads;
     await h.expectSame("a");
     assert.equal(h.fullReads, before + 1, "one fallback full read");
@@ -122,8 +119,8 @@ test("a write that bypasses the batches is found and answered with a full read",
     // The entry replaced: same count, first sequence and newest 16 events,
     // but an older event differs. Only the sum of sequences shows it.
     const replace = async (activity: DaemonActivityEvent[]) => {
-      h.generation = (await h.store.write(h.generation, [{ ...(await h.store.getEntry("a"))!, activity },
-        (await h.store.getEntry("b"))!])).generation;
+      await h.store.write([{ ...(await h.store.getEntry("a"))!, activity },
+        (await h.store.getEntry("b"))!]);
     };
     await replace(Array.from({ length: 20 }, (_, index) => event(index + 1)));
     await h.expectSame("a");
@@ -147,8 +144,7 @@ test("a full read that already holds a committed event is not extended twice", a
   const h = await harness();
   try {
     await h.expectSame("a");
-    const next = await h.store.recordActivityBatch(h.generation, [write("a", 1)]);
-    h.generation = next.generation;
+    const next = await h.store.recordActivityBatch([write("a", 1)]);
     // The window is rebuilt from a read after the commit, then the commit
     // reports its events.
     h.windows.forget("a");
@@ -194,9 +190,8 @@ test("DaemonActivityWrites reads the same entry as overlayEntry, before and afte
   const root = await mkdtemp(join(tmpdir(), "letagents-recent-activity-daemon-"));
   const store = new ManifestStore(join(root, "daemon-state.sqlite"));
   try {
-    const written = await store.write(0, [agent("a")]);
-    const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => false, notifyStateChanged: () => {} },
-      written.generation);
+    await store.write([agent("a")]);
+    const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => false, notifyStateChanged: () => {} });
     const writes = new DaemonActivityWrites({ authority, store, isHandoffScheduled: () => false,
       admittedFence: (commit) => authority.fenceDaemonCommit(commit), warn: () => {} });
     const same = async () => {

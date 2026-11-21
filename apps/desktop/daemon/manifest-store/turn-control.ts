@@ -14,7 +14,7 @@ import { type Row, ManifestConflictError, nullableString, canonicalManifestEntry
 
 export const turnControl = storeMethods({
   async prepareTurnControlState(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       agentId: string;
       roomId: string;
@@ -35,11 +35,11 @@ export const turnControl = storeMethods({
       recordedAt: string;
     },
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; linkedInboxItemId: string | null; providerTurnId: string | null; linkedState: string | null }> {
+  ): Promise<{ version: number; entry: DaemonManifestEntry; linkedInboxItemId: string | null; providerTurnId: string | null; linkedState: string | null }> {
     if (!Number.isSafeInteger(input.actionSequence) || input.actionSequence < 1) {
       throw new Error("Turn-control preparation requires a positive exact action sequence.");
     }
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
+    const result = await this.writeAgent(input.agentId, expectedVersion, (database, existingRow) => {
       const current = this.readEntryFromDatabase(database, input.agentId);
       if (!current
         || current.room_id !== input.roomId
@@ -74,25 +74,19 @@ export const turnControl = storeMethods({
       } else if (existing && existing.status !== "completed") {
         throw new ManifestConflictError(`Turn control action '${existing.action_id}' is unresolved.`);
       }
-      const watermarkRow = database.prepare("SELECT last_sequence FROM turn_control_sequence_watermarks WHERE agent_id=?")
-        .get(input.agentId) as Row | undefined;
-      const lastSequence = watermarkRow ? Number(watermarkRow.last_sequence) : 0;
+      const lastSequence = Number(existingRow.last_turn_control_sequence);
       if (existing?.action_id === input.actionId) {
         if (input.actionSequence !== lastSequence) {
           throw new ManifestConflictError("Turn-control retry no longer owns the latest exact action sequence.");
         }
-      } else {
-        if (input.actionSequence !== lastSequence + 1) {
-          throw new ManifestConflictError("Turn-control action sequence must be the exact next durable value.");
-        }
-        run(database.prepare(`INSERT INTO turn_control_sequence_watermarks(agent_id,last_sequence) VALUES (?,?)
-          ON CONFLICT(agent_id) DO UPDATE SET last_sequence=excluded.last_sequence`), input.agentId, input.actionSequence);
+      } else if (input.actionSequence !== lastSequence + 1) {
+        throw new ManifestConflictError("Turn-control action sequence must be the exact next durable value.");
       }
 
       if (current.delivery_mode !== "daemon_inbox") {
         throw new ManifestConflictError("Turn control requires a daemon-owned exact room turn.");
       }
-      const linkedRow = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?")
+      const linkedRow = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?")
         .get(input.expectedInboxItemId) as Row | undefined;
       const linkedState = linkedRow ? String(linkedRow.state) : null;
       if (!linkedRow
@@ -116,7 +110,7 @@ export const turnControl = storeMethods({
       // This transaction is the Stop/correction admission edge. Whichever
       // journal wins first owns the turn: effects not yet authorized to run
       // are failed here, while already-executing effects remain completable.
-      run(database.prepare(`UPDATE supervised_agent_effects
+      run(database.prepare(`UPDATE effects
         SET state='failed',error='The exact room turn was fenced by human turn control before this effect was authorized.',updated_at=?
         WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND state='prepared' AND tool_name<>'join_room'`),
       input.recordedAt, input.agentId, String(turnBinding.origin_execution_generation_id), input.expectedProviderTurnId);
@@ -124,7 +118,7 @@ export const turnControl = storeMethods({
       const terminalOrPublishing = Boolean(readDurableNativeFailure(database, input.expectedInboxItemId))
         || ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linkedState ?? "");
       if (!retryingExactAction || !terminalOrPublishing) {
-        const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
+        const head = database.prepare(`SELECT inbox_item_id FROM inbox_items
           WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
           ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
         if (!head || String(head.inbox_item_id) !== input.expectedInboxItemId
@@ -137,6 +131,7 @@ export const turnControl = storeMethods({
       const recordedAt = existing?.action_id === input.actionId ? existing.recorded_at : input.recordedAt;
       const normalized = canonicalManifestEntry({
         ...current,
+        last_turn_control_sequence: input.actionSequence,
         turn_control: {
           ...(existing?.action_id === input.actionId ? existing : {}),
           action_id: input.actionId,
@@ -163,18 +158,16 @@ export const turnControl = storeMethods({
           updated_at: input.recordedAt,
         },
       });
-      const order = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id=?").get(input.agentId) as Row;
-      const configuration = database.prepare("SELECT * FROM agent_configurations WHERE agent_id=?").get(input.agentId) as Row;
       const projection = projectDaemonManifestEntry(normalized);
-      this.preserveInspectorConfiguration(projection, configuration);
-      run(database.prepare("DELETE FROM agent_identities WHERE agent_id=?"), input.agentId);
-      this.insertProjection(database, projection, Number(order.sort_order));
+      this.updateProjection(database, projection, existingRow, expectedVersion, {
+        turnControlSequenceOverride: input.actionSequence,
+      });
       pruneSupervisedAgentHistory(database, input.agentId, () => input.recordedAt);
       const persisted = this.readEntryFromDatabase(database, input.agentId);
       if (!persisted) throw new Error("Turn-control entry disappeared during atomic preparation.");
       return { entry: persisted, linkedInboxItemId, providerTurnId, linkedState: linkedRow ? String(linkedRow.state) : null };
     }, commitFence);
-    return { generation: result.generation, ...result.value };
+    return { version: result.version, ...result.value };
   },
 
   /**
@@ -183,7 +176,7 @@ export const turnControl = storeMethods({
    * same transaction, so retry cannot split journal and FIFO authority.
    */
   async checkpointTurnControlTarget(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       agentId: string;
       roomId: string;
@@ -197,9 +190,9 @@ export const turnControl = storeMethods({
       observedAt: string;
     },
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+  ): Promise<{ version: number; entry: DaemonManifestEntry }> {
     if (!input.providerTurnId.trim()) throw new Error("Turn-control target checkpoint requires an exact provider turn id.");
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
+    const result = await this.writeAgent(input.agentId, expectedVersion, (database, existingRow) => {
       const current = this.readEntryFromDatabase(database, input.agentId);
       const control = current?.turn_control;
       if (!current
@@ -220,7 +213,7 @@ export const turnControl = storeMethods({
         throw new ManifestConflictError("Turn-control target checkpoint lost its exact prepared authority.");
       }
       if (control.inbox_item_id) {
-        const linked = database.prepare("SELECT agent_id,room_id,state,provider_turn_id FROM supervised_agent_inbox WHERE inbox_item_id=?")
+        const linked = database.prepare("SELECT agent_id,room_id,state,provider_turn_id FROM inbox_items WHERE inbox_item_id=?")
           .get(control.inbox_item_id) as Row | undefined;
         const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
           .get(control.inbox_item_id) as Row | undefined;
@@ -232,7 +225,7 @@ export const turnControl = storeMethods({
           throw new ManifestConflictError("Turn-control target checkpoint lost its exact linked FIFO invocation.");
         }
         if (!nullableString(linked.provider_turn_id)) {
-          run(database.prepare("UPDATE supervised_agent_inbox SET provider_turn_id=?,updated_at=? WHERE inbox_item_id=?"),
+          run(database.prepare("UPDATE inbox_items SET provider_turn_id=?,updated_at=? WHERE inbox_item_id=?"),
             input.providerTurnId, input.observedAt, control.inbox_item_id);
           run(database.prepare(`INSERT INTO supervised_agent_provider_turn_bindings
             (inbox_item_id,agent_id,room_id,work_attempt_id,origin_execution_generation_id,provider_continuation_id,provider_turn_id)
@@ -252,17 +245,13 @@ export const turnControl = storeMethods({
         ...current,
         turn_control: { ...control, provider_turn_id: input.providerTurnId, updated_at: input.observedAt },
       });
-      const order = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id=?").get(input.agentId) as Row;
-      const configuration = database.prepare("SELECT * FROM agent_configurations WHERE agent_id=?").get(input.agentId) as Row;
       const projection = projectDaemonManifestEntry(normalized);
-      this.preserveInspectorConfiguration(projection, configuration);
-      run(database.prepare("DELETE FROM agent_identities WHERE agent_id=?"), input.agentId);
-      this.insertProjection(database, projection, Number(order.sort_order));
+      this.updateProjection(database, projection, existingRow, expectedVersion);
       const persisted = this.readEntryFromDatabase(database, input.agentId);
       if (!persisted) throw new Error("Turn-control entry disappeared during exact target checkpoint.");
       return persisted;
     }, commitFence);
-    return { generation: result.generation, entry: result.value };
+    return { version: result.version, entry: result.value };
   },
 
   /**
@@ -272,7 +261,7 @@ export const turnControl = storeMethods({
    * wake/abort is deliberately outside and must happen only after this returns.
    */
   async commitTurnControlState(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       agentId: string;
       roomId: string;
@@ -289,8 +278,8 @@ export const turnControl = storeMethods({
       outcome: { original: "cancelled" | "publication_won" | "terminal_won" | "resumed" | "none"; inboxItemId: string | null; correctionInboxItemId: string | null; providerTurnId: string | null },
     ) => DaemonManifestEntry,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; original: "cancelled" | "publication_won" | "terminal_won" | "resumed" | "none"; correctionInboxItemId: string | null; providerTurnId: string | null }> {
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
+  ): Promise<{ version: number; entry: DaemonManifestEntry; original: "cancelled" | "publication_won" | "terminal_won" | "resumed" | "none"; correctionInboxItemId: string | null; providerTurnId: string | null }> {
+    const result = await this.writeAgent(input.agentId, expectedVersion, (database, existingRow) => {
       const current = this.readEntryFromDatabase(database, input.agentId);
       const control = current?.turn_control;
       const exactExecution = current
@@ -326,7 +315,7 @@ export const turnControl = storeMethods({
       }
 
       let linkedRow = control.inbox_item_id
-        ? database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(control.inbox_item_id) as Row | undefined
+        ? database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(control.inbox_item_id) as Row | undefined
         : undefined;
       if (control.inbox_item_id && (!linkedRow
         || String(linkedRow.agent_id) !== input.agentId
@@ -345,21 +334,16 @@ export const turnControl = storeMethods({
           const parsed = JSON.parse(String(linkedRow.outcome)) as { kind?: unknown; text?: unknown };
           if (parsed.kind === "reply" && typeof parsed.text === "string" && parsed.text.trim()) durableOutcomeKind = "reply";
           else if (parsed.kind === "no_reply") durableOutcomeKind = "no_reply";
-        } catch { /* Invalid legacy outcome is not authority. */ }
+        } catch { /* Invalid outcome is not authority. */ }
       }
       const linkedHasPublicationOnlyOutcome = durableOutcomeKind !== null;
       const linkedIsTerminal = linkedState !== null
         && (linkedHasPublicationOnlyOutcome || linkedNativeFailure !== null
           || ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(linkedState));
-      const linkedWasV16MigrationCancelled = Boolean(linkedRow
-        && linkedState === "cancelled_by_user"
-        && database.prepare(`SELECT 1 FROM supervised_agent_inbox_events
-          WHERE inbox_item_id=? AND idempotency_key='v16_missing_authority_cancelled' LIMIT 1`)
-          .get(String(linkedRow.inbox_item_id)));
       // Only a nonterminal row carrying a native turn can be made recoverable
       // by "not applied". Bind that decision to the turn's immutable origin
-      // scope; publication-only, unlinked legacy, and proven pre-native rows
-      // perform no provider recovery and therefore need no continuation gate.
+      // scope; publication-only and proven pre-native rows perform no provider
+      // recovery and therefore need no continuation gate.
       if (input.mode === "operator_not_applied" && linkedRow && linkedProviderTurnId && !linkedIsTerminal) {
         const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
           .get(String(linkedRow.inbox_item_id)) as Row | undefined;
@@ -373,13 +357,8 @@ export const turnControl = storeMethods({
           throw new ManifestConflictError("Not-applied resolution cannot recover through a different or unverifiable provider-turn authority binding.");
         }
       }
-      // Never infer an old journal's target from whichever FIFO row happens to
-      // be first now. Predecessor versions did not persist inbox_item_id, and
-      // A may have settled before B acquired the head. Historical resolution
-      // can retire the control barrier, but it may mutate a FIFO row only when
-      // the journal carries that row's exact durable identity.
       if (linkedRow && !["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linkedRow.state))) {
-        const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
+        const head = database.prepare(`SELECT inbox_item_id FROM inbox_items
           WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
           ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
         if (!head || String(head.inbox_item_id) !== String(linkedRow.inbox_item_id)) {
@@ -401,18 +380,14 @@ export const turnControl = storeMethods({
       if (linkedRow && String(linkedRow.state) === "cancelled_by_room_move") {
         throw new ManifestConflictError("Turn-control target was cancelled by a committed room move.");
       } else if (linkedRow && String(linkedRow.state) === "cancelled_by_user") {
-        if (input.mode === "operator_not_applied" && !linkedWasV16MigrationCancelled) {
+        if (input.mode === "operator_not_applied") {
           throw new ManifestConflictError("A cancelled turn cannot be recovered by marking its native control not applied.");
         }
-        // v16 fail-closed migration cancelled active legacy rows whose native
-        // turn binding could not be proven. An operator may still retire the
-        // matching uncertain journal as not applied, but that decision must
-        // never resurrect or replay the synthetically-cancelled provider turn.
         original = "cancelled";
       } else if (linkedRow && durableOutcomeKind === "reply") {
         const state = String(linkedRow.state);
         if (!["publishing", "acknowledged"].includes(state)) {
-          run(database.prepare(`UPDATE supervised_agent_inbox
+          run(database.prepare(`UPDATE inbox_items
             SET state='pending',last_error=NULL,failure_code=NULL,blocked_by_inbox_item_id=NULL,
                 next_attempt_at_ms=NULL,acknowledged_at=NULL,updated_at=? WHERE inbox_item_id=?`),
           input.observedAt, String(linkedRow.inbox_item_id));
@@ -422,7 +397,7 @@ export const turnControl = storeMethods({
         original = "publication_won";
       } else if (linkedRow && durableOutcomeKind === "no_reply") {
         if (String(linkedRow.state) !== "acknowledged_no_reply") {
-          run(database.prepare(`UPDATE supervised_agent_inbox
+          run(database.prepare(`UPDATE inbox_items
             SET state='acknowledged_no_reply',last_error=NULL,failure_code=NULL,
                 blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=?
             WHERE inbox_item_id=?`), input.observedAt, input.observedAt, String(linkedRow.inbox_item_id));
@@ -436,11 +411,11 @@ export const turnControl = storeMethods({
           const detail = linkedNativeFailure === "interrupted"
             ? "The provider turn was interrupted before completing this room request."
             : "The provider turn failed before completing this room request.";
-          run(database.prepare(`UPDATE supervised_agent_inbox
+          run(database.prepare(`UPDATE inbox_items
             SET state='acknowledged_failed',last_error=?,failure_code=NULL,
                 blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=?
             WHERE inbox_item_id=?`), detail, input.observedAt, input.observedAt, String(linkedRow.inbox_item_id));
-          linkedRow = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(String(linkedRow.inbox_item_id)) as Row;
+          linkedRow = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(String(linkedRow.inbox_item_id)) as Row;
         }
         original = "terminal_won";
       } else if (input.mode === "operator_not_applied" && linkedRow) {
@@ -469,7 +444,7 @@ export const turnControl = storeMethods({
           // its manual recovery state while completing the operator decision;
           // an accepted correction remains causally queued behind it.
           if (state !== "pending" && state !== "blocked") {
-            run(database.prepare(`UPDATE supervised_agent_inbox
+            run(database.prepare(`UPDATE inbox_items
               SET state='pending',last_error=NULL,failure_code=NULL,blocked_by_inbox_item_id=NULL,
                   next_attempt_at_ms=NULL,updated_at=? WHERE inbox_item_id=?`), input.observedAt, linkedInboxItemId);
             const sequence = Number((database.prepare("SELECT COALESCE(MAX(event_sequence),0)+1 AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=?").get(linkedInboxItemId) as Row).value);
@@ -485,7 +460,7 @@ export const turnControl = storeMethods({
         const state = String(linkedRow.state);
         if (["pending", "dispatching", "awaiting_result", "result_recovery", "retryable", "blocked"].includes(state)) {
           const linkedInboxItemId = String(linkedRow.inbox_item_id);
-          run(database.prepare(`UPDATE supervised_agent_inbox
+          run(database.prepare(`UPDATE inbox_items
             SET state='cancelled_by_user',last_error='Stopped by the user.',failure_code=NULL,
                 updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`), input.observedAt, input.observedAt, linkedInboxItemId);
           const sequence = Number((database.prepare("SELECT COALESCE(MAX(event_sequence),0)+1 AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=?").get(linkedInboxItemId) as Row).value);
@@ -519,10 +494,7 @@ export const turnControl = storeMethods({
         if (!correctionPredecessor
           && current.delivery_mode === "daemon_inbox"
           && input.mode !== "native_applied") {
-          // An unlinked historical journal cannot establish whether the
-          // current head is old A or an already-admitted successor B. Never
-          // reorder or cancel it; place the accepted correction behind it.
-          correctionPredecessor = database.prepare(`SELECT * FROM supervised_agent_inbox
+          correctionPredecessor = database.prepare(`SELECT * FROM inbox_items
             WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
             ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
           if (correctionPredecessor && String(correctionPredecessor.room_id) !== input.roomId) {
@@ -530,7 +502,7 @@ export const turnControl = storeMethods({
           }
         }
         if (linkedRow && ["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linkedRow.state))) {
-          const successor = database.prepare(`SELECT * FROM supervised_agent_inbox
+          const successor = database.prepare(`SELECT * FROM inbox_items
             WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
             ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
           const pristinePendingSuccessor = successor
@@ -542,11 +514,6 @@ export const turnControl = storeMethods({
             if (String(successor.room_id) !== input.roomId) {
               throw new ManifestConflictError("Turn-control correction found an admitted successor in a different room.");
             }
-            // This shape can only come from a predecessor implementation: the
-            // current atomic journal barrier never admits B after accepting the
-            // control. Preserve B's already-acquired authority and queue the
-            // correction immediately behind it instead of deadlocking the
-            // accepted action or reordering an in-flight/blocked invocation.
             correctionPredecessor = successor;
           }
         }
@@ -556,13 +523,13 @@ export const turnControl = storeMethods({
         const sequenceBounds = database.prepare(`SELECT
             MIN(CASE WHEN state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') THEN fifo_sequence END) AS first_active,
             COALESCE(MAX(fifo_sequence),0) AS maximum
-          FROM supervised_agent_inbox WHERE agent_id=?`).get(input.agentId) as Row;
+          FROM inbox_items WHERE agent_id=?`).get(input.agentId) as Row;
         const insertionSequence = correctionPredecessor
           ? Number(correctionPredecessor.fifo_sequence) + 1
           : sequenceBounds.first_active === null
             ? Number(sequenceBounds.maximum) + 1
             : Number(sequenceBounds.first_active);
-        const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agentId, input.roomId, sourceMessageId) as Row | undefined;
+        const existing = database.prepare("SELECT * FROM inbox_items WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agentId, input.roomId, sourceMessageId) as Row | undefined;
         if (existing) {
           if (String(existing.source_message_json) !== JSON.stringify(sourceMessage)
             || String(existing.activation_json) !== JSON.stringify(activation)) {
@@ -582,24 +549,19 @@ export const turnControl = storeMethods({
             if (!pristinePending || existingSequence < insertionSequence) {
               throw new ManifestConflictError("Turn-control correction no longer occupies its exact causal FIFO position.");
             }
-            // Recover the predecessor implementation's enqueue-before-journal
-            // crash: move its untouched correction immediately behind A and
-            // shift only the intervening suffix. Two positive temporary ranges
-            // preserve both the UNIQUE(agent,fifo_sequence) constraint and the
-            // CHECK(fifo_sequence > 0) invariant at every SQLite update step.
             const maximumSequence = Number(sequenceBounds.maximum);
             if (!Number.isSafeInteger(maximumSequence) || maximumSequence < 0 || maximumSequence > (Number.MAX_SAFE_INTEGER - 2) / 2) {
               throw new ManifestConflictError("Turn-control correction cannot safely repair its FIFO sequence.");
             }
             const parkedSequence = maximumSequence + 1;
             const temporaryOffset = parkedSequence + 1;
-            run(database.prepare("UPDATE supervised_agent_inbox SET fifo_sequence=? WHERE inbox_item_id=?"), parkedSequence, String(existing.inbox_item_id));
-            run(database.prepare(`UPDATE supervised_agent_inbox SET fifo_sequence=fifo_sequence+?
+            run(database.prepare("UPDATE inbox_items SET fifo_sequence=? WHERE inbox_item_id=?"), parkedSequence, String(existing.inbox_item_id));
+            run(database.prepare(`UPDATE inbox_items SET fifo_sequence=fifo_sequence+?
               WHERE agent_id=? AND fifo_sequence>=? AND fifo_sequence<?`), temporaryOffset, input.agentId, insertionSequence, existingSequence);
-            run(database.prepare(`UPDATE supervised_agent_inbox SET fifo_sequence=fifo_sequence-?+1
+            run(database.prepare(`UPDATE inbox_items SET fifo_sequence=fifo_sequence-?+1
               WHERE agent_id=? AND fifo_sequence>=? AND fifo_sequence<?`), temporaryOffset, input.agentId,
             insertionSequence + temporaryOffset, existingSequence + temporaryOffset);
-            run(database.prepare("UPDATE supervised_agent_inbox SET fifo_sequence=? WHERE inbox_item_id=?"), insertionSequence, String(existing.inbox_item_id));
+            run(database.prepare("UPDATE inbox_items SET fifo_sequence=? WHERE inbox_item_id=?"), insertionSequence, String(existing.inbox_item_id));
           }
           correctionInboxItemId = String(existing.inbox_item_id);
         } else {
@@ -608,17 +570,17 @@ export const turnControl = storeMethods({
           // successors). Move the suffix above the current maximum first, then
           // map it back one slot later; negative sentinels violate the schema's
           // CHECK(fifo_sequence > 0).
-          const maximumSequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence),0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agentId) as Row).value);
+          const maximumSequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence),0) AS value FROM inbox_items WHERE agent_id=?").get(input.agentId) as Row).value);
           if (!Number.isSafeInteger(maximumSequence) || maximumSequence < 0 || maximumSequence > (Number.MAX_SAFE_INTEGER - 1) / 2) {
             throw new ManifestConflictError("Turn-control correction cannot safely allocate another FIFO sequence.");
           }
           const temporaryOffset = maximumSequence + 1;
-          run(database.prepare("UPDATE supervised_agent_inbox SET fifo_sequence=fifo_sequence+? WHERE agent_id=? AND fifo_sequence>=?"), temporaryOffset, input.agentId, insertionSequence);
-          run(database.prepare("UPDATE supervised_agent_inbox SET fifo_sequence=fifo_sequence-?+1 WHERE agent_id=? AND fifo_sequence>=?"), temporaryOffset, input.agentId, insertionSequence + temporaryOffset);
+          run(database.prepare("UPDATE inbox_items SET fifo_sequence=fifo_sequence+? WHERE agent_id=? AND fifo_sequence>=?"), temporaryOffset, input.agentId, insertionSequence);
+          run(database.prepare("UPDATE inbox_items SET fifo_sequence=fifo_sequence-?+1 WHERE agent_id=? AND fifo_sequence>=?"), temporaryOffset, input.agentId, insertionSequence + temporaryOffset);
           correctionInboxItemId = randomUUID();
           const actionId = `supervised-room:${input.agentId}:${input.roomId}:${sourceMessageId}:action:v1`;
           const replyId = `supervised-room:${input.agentId}:${input.roomId}:${sourceMessageId}:reply:v1`;
-          run(database.prepare(`INSERT INTO supervised_agent_inbox
+          run(database.prepare(`INSERT INTO inbox_items
             (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
             VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
           correctionInboxItemId, input.agentId, input.roomId, sourceMessageId, JSON.stringify(sourceMessage), JSON.stringify(activation), insertionSequence, actionId, replyId, input.observedAt, input.observedAt);
@@ -663,15 +625,11 @@ export const turnControl = storeMethods({
           && (normalized.turn_control.operator_resolution ?? null) !== (input.mode === "operator_applied" ? "applied" : "not_applied"))) {
         throw new ManifestConflictError("Turn-control completion attempted to rewrite its durable action identity.");
       }
-      const order = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id=?").get(input.agentId) as Row;
-      const configuration = database.prepare("SELECT * FROM agent_configurations WHERE agent_id=?").get(input.agentId) as Row;
       const projection = projectDaemonManifestEntry(normalized);
-      this.preserveInspectorConfiguration(projection, configuration);
-      run(database.prepare("DELETE FROM agent_identities WHERE agent_id=?"), input.agentId);
-      this.insertProjection(database, projection, Number(order.sort_order));
+      this.updateProjection(database, projection, existingRow, expectedVersion);
       if (control.inbox_item_id) {
         const terminal = database.prepare(`SELECT inbox_item_id,agent_id,provider_turn_id,state
-          FROM supervised_agent_inbox WHERE inbox_item_id=?`).get(control.inbox_item_id) as Row | undefined;
+          FROM inbox_items WHERE inbox_item_id=?`).get(control.inbox_item_id) as Row | undefined;
         if (terminal && ["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(terminal.state))) {
           settleSupervisedTerminalItem(database, {
             inboxItemId: String(terminal.inbox_item_id),
@@ -685,6 +643,6 @@ export const turnControl = storeMethods({
       if (!persisted) throw new Error("Turn-control entry disappeared during atomic completion.");
       return { entry: persisted, ...outcome };
     }, commitFence);
-    return { generation: result.generation, ...result.value };
+    return { version: result.version, ...result.value };
   },
 });

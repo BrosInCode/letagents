@@ -1,6 +1,6 @@
 import type { AgentAvatar } from "../../../shared/agent-avatar.mjs";
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.284-modern.2";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.284-modern.3";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -433,8 +433,9 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
 };
 
 export type DaemonManifest = {
-  generation: number;
   entries: DaemonManifestEntry[];
+  /** Per-agent optimistic concurrency version from `agents.version`. */
+  versions?: Record<string, number>;
 };
 
 export type Transition = {

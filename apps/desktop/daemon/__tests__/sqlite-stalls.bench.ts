@@ -37,7 +37,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 
 import { ManifestStore } from "../manifest-store.js";
-import { openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
+import { openDaemonStateDatabase } from "../daemon-state-database.js";
 import { ActivityWriteBatcher } from "../activity-write-batcher.js";
 import { RecentActivityWindows } from "../recent-activity-windows.js";
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
@@ -109,9 +109,9 @@ async function main(): Promise<void> {
   const store = new ManifestStore(path);
   const sqlite = new DatabaseSync(":memory:").prepare("SELECT sqlite_version() AS v").get()!.v;
   try {
-    await store.write(0, Array.from({ length: AGENTS }, (_, index) => agentEntry(index)));
+    await store.write(Array.from({ length: AGENTS }, (_, index) => agentEntry(index)));
     // A second operational handle, like the worker binding store's.
-    const bindings = await openPreparedDaemonStateDatabase(path);
+    const bindings = await openDaemonStateDatabase(path);
     // Measurement-only handle. NOOP is a true no-op from SQLite 3.51.
     const observer = new DatabaseSync(Object.assign(pathToFileURL(path), { search: "?mode=rw" }).href);
     const frames = observer.prepare("PRAGMA wal_checkpoint(NOOP)");
@@ -293,8 +293,8 @@ async function commits(): Promise<void> {
   const path = join(root, "daemon-state.sqlite");
   const store = new ManifestStore(path);
   try {
-    await store.write(0, [agentEntry(0)]);
-    const database = await openPreparedDaemonStateDatabase(path);
+    await store.write([agentEntry(0)]);
+    const database = await openDaemonStateDatabase(path);
     const observer = new DatabaseSync(Object.assign(pathToFileURL(path), { search: "?mode=rw" }).href);
     const frames = observer.prepare("PRAGMA wal_checkpoint(NOOP)");
     if (mode === "commits-off") database.exec("PRAGMA synchronous = OFF");

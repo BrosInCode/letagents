@@ -128,31 +128,14 @@ export function applyRoomWorkPublicationSchema(database: DatabaseSync): void {
   if (!database.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(table)) {
     for (const definition of schema) database.exec(definition);
   }
-  const definition = String(database.prepare("SELECT sql FROM sqlite_master WHERE name=?").get(table)?.sql ?? "");
-  if (definition.includes("<=2048")) {
-    validateRoomWorkPublicationSchema(database, true);
-    const retained = `${columns.join(",")},attempt_id,revision,summary_json,digest,acknowledged_revision,state`;
-    database.exec(`DROP INDEX room_work_publications_open_agent;
-      DROP TRIGGER room_work_publication_capacity;
-      DROP TRIGGER room_work_publication_immutable;
-      DROP TRIGGER room_work_publication_no_delete;
-      ALTER TABLE ${table} RENAME TO room_work_publications_legacy`);
-    // Install capacity and immutability triggers only after copying existing receipts.
-    database.exec(schema[0]);
-    database.exec(`INSERT INTO ${table}(${retained}) SELECT ${retained} FROM room_work_publications_legacy`);
-    database.exec("DROP TABLE room_work_publications_legacy");
-    for (const definition of schema.slice(1)) database.exec(definition);
-  }
   validateRoomWorkPublicationSchema(database);
   applyRoomWorkspaceSchema(database);
 }
-export function validateRoomWorkPublicationSchema(database: DatabaseSync, allowLegacy = false): void {
+export function validateRoomWorkPublicationSchema(database: DatabaseSync): void {
   const actual = database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND sql IS NOT NULL").all(table)
     .map(row => normalizedSql(String(row.sql))).sort();
   const expected = schema.map(normalizedSql).sort();
-  const legacy = schema.map(sql => normalizedSql(sql.replaceAll("524288", "2048"))).sort();
-  const matches = (candidate: string[]) => actual.length === candidate.length && actual.every((definition, index) => definition === candidate[index]);
-  if (!matches(expected) && !(allowLegacy && matches(legacy))) {
+  if (actual.length !== expected.length || !actual.every((definition, index) => definition === expected[index])) {
     throw new Error("Room work publication journal has invalid or missing schema.");
   }
   const integrity = database.prepare(`PRAGMA integrity_check(${table})`).all();
@@ -211,7 +194,7 @@ export class RoomWorkPublicationStore {
    */
   unstagedFailedReceipts(agentId: string, limit: number): RoomWorkPublication[] {
     return this.database.prepare(`SELECT p.* FROM ${table} p
-      JOIN supervised_agent_inbox i ON i.agent_id=p.agent_id AND i.room_id=p.room_id AND i.source_message_id=p.source_message_id
+      JOIN inbox_items i ON i.agent_id=p.agent_id AND i.room_id=p.room_id AND i.source_message_id=p.source_message_id
       WHERE p.agent_id=? AND p.state='open' AND p.revision=0 AND i.state='acknowledged_failed'
         AND NOT EXISTS (SELECT 1 FROM execution_message_attempts a
           WHERE a.agent_id=p.agent_id AND a.room_id=p.room_id AND a.source_message_id=p.source_message_id)
@@ -233,7 +216,7 @@ export class RoomWorkPublicationStore {
       if (!current || !sameIdentity(current, key) || current.state !== "open" || current.revision !== 0) return null;
       if (this.database.prepare("SELECT 1 FROM execution_message_attempts WHERE agent_id=? AND room_id=? AND source_message_id=?")
         .get(key.agentId, key.roomId, key.sourceMessageId)) return null;
-      const receipt = this.database.prepare("SELECT inbox_item_id,state FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?")
+      const receipt = this.database.prepare("SELECT inbox_item_id,state FROM inbox_items WHERE agent_id=? AND room_id=? AND source_message_id=?")
         .get(key.agentId, key.roomId, key.sourceMessageId);
       if (receipt?.state !== "acknowledged_failed" || typeof receipt.inbox_item_id !== "string") return null;
       const hex = createHash("sha256").update(JSON.stringify(["room-work-failed-receipt", receipt.inbox_item_id])).digest("hex");

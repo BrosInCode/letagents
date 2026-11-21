@@ -6,7 +6,9 @@ import { parseRoomAgentWorkSummary, ROOM_WORK_OPERATION_OUTCOMES, type RoomAgent
 
 import { combineSideEffects, executionIdentity as id, ExecutionProtocolError, nativeTurnIdentity, parseExecutionFact, type ExecutionFact, type SideEffectState } from "./execution-protocol.js";
 import { emptyExecutionProjection, reduceParsedExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
+import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import { executionRecordWindowStart, hasRuntimeRecoveryBoundary, recoveredRuntime, runtimeRecoveryStorageAvailable } from "./runtime-recovery-journal.js";
+import type { DaemonProviderConnection, ObservedState } from "./types.js";
 
 type Row = Record<string, string | number | null>;
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -31,8 +33,19 @@ export type ShadowObserver = Readonly<{
   /** Durable cursor snapshot at admission; skip this source's committed replay prefix. */
   lastSourceSequence: number; maxObservedSequence: number;
 }>;
+export type ShadowIngestInstallation = {
+  workAttemptId: string;
+  providerContinuationId: string;
+  executionGenerationId: string;
+  configurationRevision: number;
+  providerConnection: DaemonProviderConnection;
+};
+export type ExecutionShadowStoreOptions = {
+  /** Synchronous generation fence check run inside every write transaction before COMMIT. */
+  assertWriteFence?: () => void;
+};
 export type ShadowIngestion =
-  | { status: "accepted" | "duplicate"; journalSequence: number; gapPending: boolean }
+  | { status: "accepted" | "duplicate"; journalSequence: number; gapPending: boolean; projectedObservedState?: ObservedState | null }
   | { status: "gap"; expectedSourceSequence: number; observedSourceSequence: number }
   | { status: "retention_limit"; limit: "facts" | "bytes"; expectedSourceSequence: number; observedSourceSequence: number };
 type RuntimeProjection = { projection: ExecutionProjection; unverifiedFacts: number; lastJournalSequence: number };
@@ -208,15 +221,15 @@ function materializeTurn(database: DatabaseSync, input: z.output<typeof turnInpu
   const fields = { turn_id: input.turnId, attempt_id: input.attemptId, agent_id: input.agentId, room_id: input.roomId,
     execution_generation_id: input.executionGenerationId, runtime_generation_id: input.runtimeGenerationId,
     provider_continuation_id: input.providerContinuationId, provider_turn_id: input.providerTurnId };
-  if (!exactRow(database, "execution_turns", "turn_id", input.turnId, fields)) {
-    insertIdentity(database, "execution_turns", { ...fields, state: "none", side_effects: "none", created_at_ms: input.createdAtMs });
+  if (!exactRow(database, "runs", "turn_id", input.turnId, fields)) {
+    insertIdentity(database, "runs", { ...fields, state: "none", side_effects: "none", created_at_ms: input.createdAtMs });
   }
 }
 
 /**
- * Structural shadow journal only; lifecycle and delivery authority stay separate.
- * This class owns neither the connection nor provider/delivery authority. Its
- * writes are restricted to execution_* tables; no handles for effects exist.
+ * Append-only execution evidence store and direct lifecycle projector on the
+ * process's single SQLite connection. Does not own the connection or provider
+ * control handles.
  */
 export class ExecutionShadowStore {
   private readonly observers = new WeakSet<ShadowObserver>();
@@ -233,12 +246,17 @@ export class ExecutionShadowStore {
   private cacheEpoch = 0;
   private cacheStamp: string | null = null;
   private schemaVersion: number | null = null;
-  constructor(private readonly database: DatabaseSync) {}
+  private agentsTablePresent: boolean | null = null;
+  constructor(
+    private readonly database: DatabaseSync,
+    private readonly options: ExecutionShadowStoreOptions = {},
+  ) {}
 
   private transaction<T>(body: () => T): T {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.synchronizeCaches();
+      this.options.assertWriteFence?.();
       const result = body();
       // Own metadata/cursor writes do not invalidate fact budgets or replay.
       // Capture before COMMIT; an external commit afterwards must invalidate us.
@@ -260,9 +278,16 @@ export class ExecutionShadowStore {
       // DDL can change what any cached projection or statement means.
       this.clearProjections();
       this.statements.clear();
+      this.agentsTablePresent = null;
     }
     this.schemaVersion = schemaVersion;
     return `${stamp.changes}:${stamp.data_version}:${schemaVersion}`;
+  }
+  private hasAgentsTable(): boolean {
+    if (this.agentsTablePresent === null) {
+      this.agentsTablePresent = Boolean(this.row("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agents'"));
+    }
+    return this.agentsTablePresent;
   }
   private clearProjections(): void {
     this.projections.clear();
@@ -374,7 +399,7 @@ export class ExecutionShadowStore {
     if (seen > MAX_RETAINED_FACTS_PER_AGENT || Number(key.last) < last) return undefined;
     if (Number(key.last) === last) return seen === cached.replay.facts ? { ...cached, epoch: this.cacheEpoch } : undefined;
     const rows = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
-      LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? AND f.sequence>? ORDER BY f.sequence
+      LEFT JOIN runs t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? AND f.sequence>? ORDER BY f.sequence
       LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}`).all(runtimeId, last) as Row[];
     if (cached.replay.facts + rows.length !== seen) return undefined;
     const state = { projection: cached.value.projection, unverifiedFacts: cached.value.unverifiedFacts,
@@ -386,7 +411,7 @@ export class ExecutionShadowStore {
   /** The first earlier verified witness of this native event, as a full replay would have kept it. */
   private firstRetainedNativeEvent(row: Row, fact: ExecutionFact): string | undefined {
     const earlier = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
-      LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? AND f.native_event_id=?
+      LEFT JOIN runs t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? AND f.native_event_id=?
       AND f.domain=? AND f.kind=? AND f.turn_id IS ? AND f.execution_id IS ? AND f.sequence<? ORDER BY f.sequence`).iterate(
       fact.runtimeGenerationId, fact.nativeEventId!, fact.domain, fact.kind, "turnId" in fact ? fact.turnId : null,
       fact.domain === "execution" ? fact.executionId : null, Number(row.sequence),
@@ -454,17 +479,17 @@ export class ExecutionShadowStore {
       this.required("SELECT 1 FROM execution_attempt_generations WHERE attempt_id=? AND execution_generation_id=?", input.attemptId, input.executionGenerationId);
       const runtime = this.required("SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
         input.agentId, input.executionGenerationId, input.runtimeGenerationId);
-      const existing = this.row("SELECT * FROM execution_turns WHERE turn_id=?", input.turnId);
+      const existing = this.row("SELECT * FROM runs WHERE turn_id=?", input.turnId);
       if (existing) {
         materializeTurn(this.database, input);
         return;
       }
       if (attempt.state !== "active") throw new ExecutionProtocolError("attempt_settled");
       if (runtime.runtime_state === "exited" || runtime.authority_mode !== "typed"
-        || this.row(runtimeRecoveryStorageAvailable(this.database) ? `SELECT 1 FROM execution_turns t WHERE t.agent_id=? AND t.state IN ('none','active','lost')
+        || this.row(runtimeRecoveryStorageAvailable(this.database) ? `SELECT 1 FROM runs t WHERE t.agent_id=? AND t.state IN ('none','active','lost')
           AND NOT EXISTS (SELECT 1 FROM agent_runtime_recoveries r WHERE r.agent_id=t.agent_id
             AND r.runtime_generation_id=t.runtime_generation_id AND r.phase IN ('stopped','complete'))`
-          : "SELECT 1 FROM execution_turns WHERE agent_id=? AND state IN ('none','active','lost')", input.agentId)) {
+          : "SELECT 1 FROM runs WHERE agent_id=? AND state IN ('none','active','lost')", input.agentId)) {
         throw new ExecutionProtocolError("invalid_transition");
       }
       materializeTurn(this.database, input);
@@ -484,7 +509,7 @@ export class ExecutionShadowStore {
       if (observer.runtime_state === "exited" || observer.authority_mode !== "typed" || subject.authority_mode !== "typed"
         || observer.provider !== subject.provider) throw new ExecutionProtocolError("identity_mismatch");
       if (input.recovery) {
-        this.required(`SELECT 1 FROM execution_turns WHERE turn_id=? AND agent_id=? AND execution_generation_id=?
+        this.required(`SELECT 1 FROM runs WHERE turn_id=? AND agent_id=? AND execution_generation_id=?
           AND runtime_generation_id=? AND provider_continuation_id=? AND provider_turn_id=?`,
         input.recovery.turnId, input.agentId, subject.execution_generation_id, subject.runtime_generation_id,
         input.recovery.providerContinuationId, input.recovery.providerTurnId);
@@ -575,7 +600,12 @@ export class ExecutionShadowStore {
   }
 
   /** sourceId must come from the observation, not be copied from the token. */
-  ingest(sourceId: string, token: ShadowObserver, value: unknown): ShadowIngestion {
+  ingest(
+    sourceId: string,
+    token: ShadowObserver,
+    value: unknown,
+    ingestOptions?: { liveInstallation?: ShadowIngestInstallation | null },
+  ): ShadowIngestion {
     const fact = parseExecutionFact(value);
     if (!this.observers.has(token)) throw new ExecutionProtocolError("stale_observer");
     if (validated(id, sourceId) !== token.sourceId) throw new ExecutionProtocolError("identity_mismatch");
@@ -585,14 +615,12 @@ export class ExecutionShadowStore {
       if (fact.observerEpoch !== token.epoch) throw new ExecutionProtocolError("stale_observer");
       if (fact.agentId !== token.agentId) throw new ExecutionProtocolError("identity_mismatch");
       let retainedTurn: Row | undefined;
-      let retainedRuntime: Row | undefined;
       if (fact.domain === "turn" || fact.domain === "execution") {
         if (fact.runtimeGenerationId !== token.runtimeGenerationId || fact.executionGenerationId !== token.executionGenerationId
           || (token.recoveryTurnId !== null && token.recoveryTurnId !== fact.turnId)) throw new ExecutionProtocolError("identity_mismatch");
-        retainedTurn = this.required(`SELECT * FROM execution_turns WHERE turn_id=? AND agent_id=? AND execution_generation_id=?
+        retainedTurn = this.required(`SELECT * FROM runs WHERE turn_id=? AND agent_id=? AND execution_generation_id=?
           AND runtime_generation_id=? AND provider_continuation_id=? AND provider_turn_id=?`, fact.turnId, fact.agentId,
         fact.executionGenerationId, fact.runtimeGenerationId, fact.providerContinuationId, fact.providerTurnId);
-        retainedRuntime = this.required("SELECT * FROM execution_runtime_generations WHERE runtime_generation_id=?", fact.runtimeGenerationId);
       } else if (fact.runtimeGenerationId !== token.observerRuntimeGenerationId || fact.executionGenerationId !== token.observerExecutionGenerationId) {
         throw new ExecutionProtocolError("identity_mismatch");
       }
@@ -603,10 +631,10 @@ export class ExecutionShadowStore {
       // fact's runtime belongs to its agent by foreign key) instead of
       // reading every retained fact of the agent.
       const duplicate = this.row(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
-        LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.fact_id=?`, fact.factId)
+        LEFT JOIN runs t ON t.turn_id=f.turn_id WHERE f.fact_id=?`, fact.factId)
         ?? this.row(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_runtime_generations r
           CROSS JOIN execution_facts f ON f.runtime_generation_id=r.runtime_generation_id AND f.observer_epoch=? AND f.source_sequence=?
-          LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE r.agent_id=? AND f.agent_id=? ORDER BY f.sequence LIMIT 1`,
+          LEFT JOIN runs t ON t.turn_id=f.turn_id WHERE r.agent_id=? AND f.agent_id=? ORDER BY f.sequence LIMIT 1`,
         fact.observerEpoch, fact.sourceSequence, fact.agentId, fact.agentId);
       if (duplicate) {
         if (JSON.stringify(this.decodeFact(duplicate)) !== JSON.stringify(fact)) throw new ExecutionProtocolError("sequence_conflict");
@@ -618,6 +646,8 @@ export class ExecutionShadowStore {
       if (fact.sourceSequence < expected) throw new ExecutionProtocolError("sequence_conflict");
       const stored: Row = {
         fact_id: fact.factId, agent_id: fact.agentId, execution_generation_id: fact.executionGenerationId, runtime_generation_id: fact.runtimeGenerationId,
+        observer_execution_generation_id: current.observer_execution_generation_id,
+        observer_runtime_generation_id: current.observer_runtime_generation_id,
         observer_epoch: fact.observerEpoch, source_sequence: fact.sourceSequence, native_event_id: fact.nativeEventId ?? null,
         turn_id: "turnId" in fact ? fact.turnId : null, execution_id: fact.domain === "execution" ? fact.executionId : null,
         domain: fact.domain, kind: fact.kind, state: "state" in fact ? fact.state : null,
@@ -644,7 +674,7 @@ export class ExecutionShadowStore {
       let replay = false;
       if (fact.nativeEventId !== undefined) {
         const observations = this.statement(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
-          LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? AND f.native_event_id=?
+          LEFT JOIN runs t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? AND f.native_event_id=?
           AND f.domain=? AND f.kind=? AND f.turn_id IS ? AND f.execution_id IS ? ORDER BY f.sequence`).all(
           fact.runtimeGenerationId, fact.nativeEventId, fact.domain, fact.kind, "turnId" in fact ? fact.turnId : null,
           fact.domain === "execution" ? fact.executionId : null,
@@ -672,35 +702,6 @@ export class ExecutionShadowStore {
       const next = replay ? previous.value.projection : reduceParsedExecutionFact(previous.value.projection, fact);
       this.insert("execution_facts", stored);
       const journalSequence = Number(this.required("SELECT sequence FROM execution_facts WHERE fact_id=?", fact.factId).sequence);
-      if (fact.domain !== "execution") {
-        const subjectRuntime = retainedRuntime ?? this.required(
-          "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
-          fact.agentId, fact.executionGenerationId, fact.runtimeGenerationId,
-        );
-        const observerRuntime = this.required(
-          "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
-          fact.agentId, current.observer_execution_generation_id, current.observer_runtime_generation_id,
-        );
-        const effectKind = replay ? "none" : lifecycleEffectKind(fact, String(subjectRuntime.provider));
-        const operational = subjectRuntime.authority_mode === "typed"
-          && observerRuntime.authority_mode === "typed"
-          && effectKind !== "none";
-        const state = operational ? "pending" : "applied";
-        this.insert("execution_lifecycle_effects", {
-          fact_id: fact.factId,
-          fact_sequence: journalSequence,
-          agent_id: fact.agentId,
-          observer_execution_generation_id: current.observer_execution_generation_id,
-          observer_runtime_generation_id: current.observer_runtime_generation_id,
-          observer_epoch: fact.observerEpoch,
-          subject_authority_mode: subjectRuntime.authority_mode,
-          observer_authority_mode: observerRuntime.authority_mode,
-          effect_kind: effectKind,
-          state,
-          created_at_ms: fact.observedAtMs,
-          disposed_at_ms: operational ? null : fact.observedAtMs,
-        });
-      }
       this.run("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?",
         fact.sourceSequence, fact.sourceSequence, fact.agentId);
       if (!replay && fact.domain === "runtime") {
@@ -717,11 +718,35 @@ export class ExecutionShadowStore {
         if (fact.domain === "execution") {
           // Late tool outcomes cannot rewrite independent native-turn state,
           // including migrated terminals whose exact outcome remains unknown.
-          this.run("UPDATE execution_turns SET side_effects=? WHERE turn_id=?", sideEffects, fact.turnId);
+          this.run("UPDATE runs SET side_effects=? WHERE turn_id=?", sideEffects, fact.turnId);
         } else {
-          this.run(`UPDATE execution_turns SET state=?,side_effects=?,
+          this.run(`UPDATE runs SET state=?,side_effects=?,
             ended_at_ms=CASE WHEN ? IN ('terminal','lost') THEN COALESCE(ended_at_ms,MAX(created_at_ms,?)) ELSE NULL END WHERE turn_id=?`,
           turn.state, sideEffects, turn.state, fact.observedAtMs, fact.turnId);
+        }
+      }
+      let projectedObservedState: ObservedState | null = null;
+      if (!replay && fact.domain !== "execution" && this.hasAgentsTable()) {
+        const subjectRuntime = this.required(
+          "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
+          fact.agentId, fact.executionGenerationId, fact.runtimeGenerationId,
+        );
+        const observerRuntime = this.required(
+          "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
+          fact.agentId, current.observer_execution_generation_id, current.observer_runtime_generation_id,
+        );
+        const effectKind = lifecycleEffectKind(fact, String(subjectRuntime.provider));
+        if (effectKind !== "none"
+          && subjectRuntime.authority_mode === "typed"
+          && observerRuntime.authority_mode === "typed") {
+          projectedObservedState = this.projectLifecycleToAgent(
+            fact,
+            effectKind,
+            current,
+            subjectRuntime,
+            observerRuntime,
+            ingestOptions?.liveInstallation,
+          );
         }
       }
       // Capture under the write transaction, never bless an external commit
@@ -736,6 +761,7 @@ export class ExecutionShadowStore {
       return {
         status: replay ? "duplicate" : "accepted", journalSequence,
         gapPending: Number(current.max_observed_sequence) > fact.sourceSequence,
+        ...(projectedObservedState !== null ? { projectedObservedState } : {}),
       };
     });
     if (committed) {
@@ -743,6 +769,117 @@ export class ExecutionShadowStore {
       this.rememberBudget(fact.agentId, committed.budget);
     }
     return result;
+  }
+
+  /**
+   * Direct in-transaction lifecycle projection onto `agents`, replacing the
+   * deleted `execution_lifecycle_effects` queue and async coordinator.
+   */
+  private projectLifecycleToAgent(
+    fact: ExecutionFact,
+    effectKind: "manifest_working" | "manifest_idle" | "manifest_failed",
+    observer: Row,
+    subjectRuntime: Row,
+    observerRuntime: Row,
+    liveInstallation?: ShadowIngestInstallation | null,
+  ): ObservedState | null {
+    const agent = this.row(`SELECT desired_state,observed_state,condition,work_attempt_id,
+      provider_work_attempt_id,provider_continuation_id,provider_execution_generation_id,
+      provider_connection_json,runtime_configuration_revision,turn_control_json
+      FROM agents WHERE agent_id=?`, fact.agentId);
+    if (!agent) return null;
+    const manifestConnection = typeof agent.provider_connection_json === "string"
+      ? JSON.parse(agent.provider_connection_json) as DaemonProviderConnection
+      : null;
+    const manifestRuntimeId = typeof agent.provider_execution_generation_id === "string"
+      && manifestConnection && manifestConnection.pid !== null && manifestConnection.pid !== undefined
+      && manifestConnection.processIdentity
+      ? executionRuntimeStorageIdentity(fact.agentId, agent.provider_execution_generation_id,
+        manifestConnection.kind, manifestConnection.pid, manifestConnection.processIdentity)
+      : null;
+    const observerExecutionGenerationId = String(observer.observer_execution_generation_id);
+    const observerRuntimeGenerationId = String(observer.observer_runtime_generation_id);
+    const terminal = typeof agent.provider_work_attempt_id === "string"
+      ? this.row(`SELECT terminal_json FROM work_attempt_executions
+          WHERE work_attempt_id=? AND execution_generation_id=?`,
+        agent.provider_work_attempt_id, observerExecutionGenerationId)
+      : undefined;
+    const durableBirth = manifestRuntimeId === observerRuntimeGenerationId
+      && agent.provider_execution_generation_id === observerExecutionGenerationId;
+    const runtimeFailure = effectKind === "manifest_failed";
+    const cursorTurnEffect = subjectRuntime.provider === "cursor"
+      && fact.domain === "turn" && (fact.state === "terminal" || fact.state === "lost");
+    const runtimeReady = effectKind === "manifest_idle"
+      && fact.domain === "runtime" && fact.state === "ready";
+    const turnControl = typeof agent.turn_control_json === "string"
+      ? JSON.parse(agent.turn_control_json) as Record<string, unknown>
+      : null;
+    const completedStopTurn = agent.desired_state === "running"
+      && turnControl?.execution_generation_id === agent.provider_execution_generation_id
+      && turnControl?.status === "completed"
+      && turnControl?.has_correction === false
+      && turnControl?.interrupted === true
+      && turnControl?.resumed === false
+      && turnControl?.state === "idle";
+    const definitivelyStale = !durableBirth
+      || (!runtimeFailure && !cursorTurnEffect && (subjectRuntime.runtime_state === "exited"
+        || observerRuntime.runtime_state === "exited" || (terminal?.terminal_json ?? null) !== null))
+      || (runtimeReady && !["starting", "recovering"].includes(String(agent.observed_state)))
+      || (runtimeFailure && completedStopTurn)
+      || agent.desired_state !== "running"
+      || agent.condition === "quarantined";
+    if (definitivelyStale) return null;
+
+    const durableCursorTurn = cursorTurnEffect && durableBirth
+      && subjectRuntime.runtime_state === "exited" && observerRuntime.runtime_state === "exited";
+    if (liveInstallation === null) {
+      if (!runtimeFailure && !durableCursorTurn) return null;
+      if (Number(agent.runtime_configuration_revision) !== Number(observerRuntime.config_revision)) return null;
+    } else if (liveInstallation !== undefined) {
+      if (liveInstallation.providerConnection.pid === null || !liveInstallation.providerConnection.processIdentity) {
+        return null;
+      }
+      const exactRuntimeId = executionRuntimeStorageIdentity(
+        fact.agentId,
+        liveInstallation.executionGenerationId,
+        liveInstallation.providerConnection.kind,
+        liveInstallation.providerConnection.pid,
+        liveInstallation.providerConnection.processIdentity,
+      );
+      if (exactRuntimeId !== observerRuntimeGenerationId
+        || Number(agent.runtime_configuration_revision) !== liveInstallation.configurationRevision
+        || agent.work_attempt_id !== liveInstallation.workAttemptId
+        || agent.provider_work_attempt_id !== liveInstallation.workAttemptId
+        || agent.provider_continuation_id !== liveInstallation.providerContinuationId
+        || agent.provider_execution_generation_id !== liveInstallation.executionGenerationId
+        || !sameProviderActionConnectionSnapshot(manifestConnection ?? undefined, liveInstallation.providerConnection)) {
+        return null;
+      }
+    } else if (Number(agent.runtime_configuration_revision) !== Number(observerRuntime.config_revision)) {
+      return null;
+    }
+
+    const observedAt = new Date(fact.observedAtMs).toISOString();
+    const observedState: ObservedState = effectKind === "manifest_working" ? "working"
+      : effectKind === "manifest_failed" ? "failed" : "idle";
+    const nativeLivenessJson = JSON.stringify({
+      state: effectKind === "manifest_working" ? "active"
+        : effectKind === "manifest_failed" ? "terminal" : "idle",
+      observed_at: observedAt,
+      detail: effectKind === "manifest_working" ? "Provider turn active"
+        : effectKind === "manifest_failed" ? "Provider runtime unavailable"
+          : runtimeReady ? "Provider runtime ready" : "Provider turn terminal",
+    });
+    if (runtimeReady) {
+      this.run(`UPDATE agents
+        SET observed_state=?,native_liveness_json=?,ready_reached_at=COALESCE(ready_reached_at,?),version=version+1
+        WHERE agent_id=?`, observedState, nativeLivenessJson, observedAt, fact.agentId);
+    } else {
+      this.run(`UPDATE agents
+        SET observed_state=?,native_liveness_json=?,version=version+1
+        WHERE agent_id=?`, observedState, nativeLivenessJson, fact.agentId);
+    }
+    return observedState;
   }
 
   /**
@@ -769,7 +906,7 @@ export class ExecutionShadowStore {
       // its own turns instead, or it would read as never saved.
       const rows = (this.recordRolledOver(agentId) ? this.database.prepare(`SELECT DISTINCT t.turn_id,t.runtime_generation_id,t.created_at_ms
         FROM execution_message_attempts a
-        CROSS JOIN execution_turns t ON t.agent_id=a.agent_id AND t.attempt_id=a.attempt_id AND t.room_id=a.room_id
+        CROSS JOIN runs t ON t.agent_id=a.agent_id AND t.attempt_id=a.attempt_id AND t.room_id=a.room_id
         CROSS JOIN execution_attempt_generations g ON g.attempt_id=a.attempt_id AND g.execution_generation_id=t.execution_generation_id
           AND g.agent_id=a.agent_id AND g.room_id=a.room_id
         WHERE a.agent_id=? AND a.room_id=? AND a.source_message_id=?
@@ -780,7 +917,7 @@ export class ExecutionShadowStore {
           SELECT agent_id,turn_id,runtime_generation_id,domain FROM execution_facts
           INDEXED BY execution_facts_agent_sequence WHERE agent_id=? ORDER BY sequence DESC LIMIT ${MAX_RETAINED_FACTS_PER_AGENT}
         ) SELECT DISTINCT t.turn_id,t.runtime_generation_id,t.created_at_ms FROM captured f
-        CROSS JOIN execution_turns t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id AND t.runtime_generation_id=f.runtime_generation_id
+        CROSS JOIN runs t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id AND t.runtime_generation_id=f.runtime_generation_id
         CROSS JOIN execution_message_attempts a ON a.attempt_id=t.attempt_id AND a.agent_id=t.agent_id AND a.room_id=t.room_id
         CROSS JOIN execution_attempt_generations g ON g.attempt_id=a.attempt_id AND g.execution_generation_id=t.execution_generation_id
           AND g.agent_id=a.agent_id AND g.room_id=a.room_id
@@ -876,7 +1013,7 @@ export class ExecutionShadowStore {
         // most recent facts, as a runtime's replay needs: a message in an
         // earlier window would otherwise read as never saved.
         const rows = (this.recordRolledOver(agentId) ? this.database.prepare(`WITH runtimes AS MATERIALIZED (
-            SELECT DISTINCT runtime_generation_id FROM execution_turns WHERE agent_id=? AND attempt_id=?
+            SELECT DISTINCT runtime_generation_id FROM runs WHERE agent_id=? AND attempt_id=?
           ), recent AS MATERIALIZED (
             SELECT * FROM (SELECT f.*, ROW_NUMBER() OVER (PARTITION BY f.runtime_generation_id ORDER BY f.sequence DESC) AS recency,
                 COUNT(*) OVER (PARTITION BY f.runtime_generation_id) AS runtime_facts
@@ -884,14 +1021,14 @@ export class ExecutionShadowStore {
               WHERE f.agent_id=? AND f.runtime_generation_id IN (SELECT runtime_generation_id FROM runtimes))
             WHERE recency <= ${MAX_RETAINED_FACTS_PER_AGENT}
           ) SELECT f.*,t.provider_continuation_id,t.provider_turn_id,t.attempt_id AS message_attempt_id
-          FROM recent f LEFT JOIN execution_turns t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
+          FROM recent f LEFT JOIN runs t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
             AND t.execution_generation_id=f.execution_generation_id AND t.runtime_generation_id=f.runtime_generation_id
           ORDER BY f.runtime_generation_id,f.sequence`).iterate(agentId, attempt.attempt_id, agentId)
           : this.database.prepare(`WITH captured AS MATERIALIZED (
             SELECT * FROM execution_facts INDEXED BY execution_facts_agent_sequence
             WHERE agent_id=? ORDER BY sequence DESC LIMIT ${MAX_RETAINED_FACTS_PER_AGENT}
           ) SELECT f.*,t.provider_continuation_id,t.provider_turn_id,t.attempt_id AS message_attempt_id
-          FROM captured f LEFT JOIN execution_turns t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
+          FROM captured f LEFT JOIN runs t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
             AND t.execution_generation_id=f.execution_generation_id AND t.runtime_generation_id=f.runtime_generation_id
           ORDER BY f.runtime_generation_id,f.sequence`).iterate(agentId)) as Iterable<Row>;
         for (const row of rows) {
@@ -948,7 +1085,7 @@ export class ExecutionShadowStore {
     const runtime = this.row("SELECT agent_id FROM execution_runtime_generations WHERE runtime_generation_id=?", runtimeGenerationId);
     if (runtime && exceededBudget(this.retainedBudget(String(runtime.agent_id)).budget)) throw new ExecutionProtocolError("retention_limit");
     const facts = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
-      LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? ORDER BY f.sequence LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}`)
+      LEFT JOIN runs t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? ORDER BY f.sequence LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}`)
       .iterate(runtimeGenerationId) as Iterable<Row>;
     const state = this.replayFrom(facts);
     return { value: { projection: state.projection, unverifiedFacts: state.unverifiedFacts, lastJournalSequence: state.lastJournalSequence },

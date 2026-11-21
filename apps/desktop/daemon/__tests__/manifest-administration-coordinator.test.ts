@@ -79,12 +79,12 @@ function storedConfiguration(overrides: Partial<StoredAgentConfiguration> = {}):
 
 function harness(initialEntries: DaemonManifestEntry[] = []) {
   const events: string[] = [];
-  let durableManifestGeneration = 4;
-  let acceptedManifestGeneration = 4;
-  let manifest: DaemonManifest = { generation: durableManifestGeneration, entries: initialEntries };
+  const versions = new Map<string, number>(initialEntries.map((candidate) => [candidate.id, 4]));
+  let entries: DaemonManifestEntry[] = [...initialEntries];
   let purgeComplete = false;
   let currentOwner = true;
   let handoffScheduled = false;
+  let forceStaleVersionError = false;
   let configuration: StoredAgentConfiguration | undefined = initialEntries.length
     ? storedConfiguration({ provider: initialEntries[0]!.provider })
     : undefined;
@@ -110,50 +110,74 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
   const store: ManifestAdministrationStore = {
     async load() {
       events.push("store:load");
-      return manifest;
+      return { entries, versions: Object.fromEntries(versions) };
     },
     async getEntry(entryId) {
       events.push(`store:get-entry:${entryId}`);
-      return manifest.entries.find((candidate) => candidate.id === entryId);
+      return entries.find((candidate) => candidate.id === entryId);
+    },
+    async getEntryVersion(entryId) {
+      events.push(`store:get-version:${entryId}`);
+      return versions.get(entryId);
+    },
+    async getEntryWithVersion(entryId) {
+      events.push(`store:get-entry-version:${entryId}`);
+      const current = entries.find((candidate) => candidate.id === entryId);
+      const version = versions.get(entryId);
+      return current && version !== undefined ? { entry: current, version } : undefined;
     },
     async getActivityState(entryId) {
       events.push(`store:activity-state:${entryId}`);
-      const current = manifest.entries.find((candidate) => candidate.id === entryId);
-      return current ? { observed_state: current.observed_state,
+      const current = entries.find((candidate) => candidate.id === entryId);
+      const version = versions.get(entryId);
+      return current && version !== undefined ? { version, observed_state: current.observed_state,
         last_sequence: current.activity?.at(-1)?.sequence ?? -1 } : undefined;
     },
     async getPurge(operationId) {
       events.push(`store:get-purge:${operationId}`);
       return purgeComplete ? { phase: "complete" } as never : null;
     },
-    async write(expectedGeneration, entries, commitFence) {
-      events.push(`store:write:${expectedGeneration}`);
-      assert.equal(expectedGeneration, durableManifestGeneration, "manifest write must use the durable generation");
+    async createEntry(nextEntry, commitFence) {
+      events.push(`store:create:${nextEntry.id}`);
       await commitFence(async () => {
         events.push("store:commit");
-        durableManifestGeneration += 1;
-        manifest = { generation: durableManifestGeneration, entries };
+        versions.set(nextEntry.id, 1);
+        entries = [...entries, nextEntry];
       });
-      return { generation: durableManifestGeneration };
+      return { version: 1, entry: nextEntry };
+    },
+    async replaceEntry(expectedVersion, nextEntry, commitFence) {
+      events.push(`store:replace:${expectedVersion}`);
+      const currentVersion = versions.get(nextEntry.id);
+      assert.equal(expectedVersion, currentVersion, "manifest replace must use the durable agent version");
+      await commitFence(async () => {
+        events.push("store:commit");
+        const nextVersion = expectedVersion + 1;
+        versions.set(nextEntry.id, nextVersion);
+        entries = entries.map((candidate) => candidate.id === nextEntry.id ? nextEntry : candidate);
+      });
+      return { version: versions.get(nextEntry.id)!, entry: nextEntry };
     },
     async getAgentConfiguration(entryId) {
       events.push(`store:get-config:${entryId}`);
       return configuration;
     },
-    async updateAgentConfiguration(expectedGeneration, input, commitFence) {
-      events.push(`store:update-config:${expectedGeneration}:${input.expectedRevision}`);
-      assert.equal(expectedGeneration, durableManifestGeneration,
-        "configuration update must use the durable manifest generation");
-      if (nextConfigurationOutcome === "invalid") {
-        return { generation: durableManifestGeneration, outcome: "invalid" };
+    async updateAgentConfiguration(expectedVersion, input, commitFence) {
+      events.push(`store:update-config:${expectedVersion}:${input.expectedRevision}`);
+      const currentVersion = versions.get(input.agentId);
+      if (forceStaleVersionError || expectedVersion !== currentVersion) {
+        throw new Error("configuration update must use the durable agent version");
       }
-      if (!configuration) return { generation: durableManifestGeneration, outcome: "invalid" };
+      if (nextConfigurationOutcome === "invalid") {
+        return { version: currentVersion, outcome: "invalid" };
+      }
+      if (!configuration) return { version: currentVersion, outcome: "invalid" };
       if (input.expectedRevision !== configuration.config_revision) {
-        return { generation: durableManifestGeneration, outcome: "conflict", configuration };
+        return { version: currentVersion, outcome: "conflict", configuration };
       }
       await commitFence(async () => {
         events.push("store:commit-config");
-        durableManifestGeneration += 1;
+        versions.set(input.agentId, currentVersion + 1);
         configuration = {
           ...configuration,
           model: input.model,
@@ -165,73 +189,67 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
           config_revision: input.expectedRevision + 1,
         };
       });
-      return { generation: durableManifestGeneration, outcome: "updated", configuration };
+      return { version: versions.get(input.agentId)!, outcome: "updated", configuration };
     },
-    async appendActivityOnly(expectedGeneration, entryId, event, limit, commitFence) {
+    async appendActivityOnly(expectedVersion, entryId, event, limit, commitFence) {
       events.push(`store:append-only:${event.sequence}:${limit}`);
-      assert.equal(expectedGeneration, durableManifestGeneration,
-        "activity-only append must use the durable manifest generation");
+      const currentVersion = versions.get(entryId);
+      if (forceStaleVersionError || expectedVersion !== currentVersion) {
+        throw new Error("activity-only append must use the durable agent version");
+      }
       let updated!: DaemonManifestEntry;
       await commitFence(async () => {
         events.push("store:commit-activity-only");
-        const current = manifest.entries.find((candidate) => candidate.id === entryId)!;
+        const current = entries.find((candidate) => candidate.id === entryId)!;
         updated = {
           ...current,
           activity: [...(current.activity ?? []), event].slice(-limit),
         };
-        durableManifestGeneration = expectedGeneration + 1;
-        manifest = {
-          ...manifest,
-          generation: durableManifestGeneration,
-          entries: manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate),
-        };
+        versions.set(entryId, expectedVersion + 1);
+        entries = entries.map((candidate) => candidate.id === entryId ? updated : candidate);
       });
-      return { generation: durableManifestGeneration, entry: updated };
+      return { version: versions.get(entryId)!, entry: updated };
     },
-    async recordActivity(expectedGeneration, entryId, event, runtimeUpdate, limit, commitFence) {
+    async recordActivity(expectedVersion, entryId, event, runtimeUpdate, limit, commitFence) {
       events.push(`store:record:${event.sequence}:${limit}`);
       if (!runtimeUpdate) {
-        const next = await store.appendActivityOnly(expectedGeneration, entryId, event, limit, commitFence);
-        return { generation: next.generation };
+        const next = await store.appendActivityOnly(expectedVersion, entryId, event, limit, commitFence);
+        return { version: next.version };
       }
-      assert.equal(expectedGeneration, durableManifestGeneration,
-        "activity append must use the durable manifest generation");
+      const currentVersion = versions.get(entryId);
+      if (forceStaleVersionError || expectedVersion !== currentVersion) {
+        throw new Error("activity append must use the durable agent version");
+      }
       let updated!: DaemonManifestEntry;
       await commitFence(async () => {
         events.push("store:commit-activity");
-        const current = manifest.entries.find((candidate) => candidate.id === entryId)!;
+        const current = entries.find((candidate) => candidate.id === entryId)!;
         updated = {
           ...current,
           observed_state: runtimeUpdate.observedState,
           native_liveness: runtimeUpdate.nativeLiveness,
           activity: [...(current.activity ?? []), event].slice(-limit),
         };
-        durableManifestGeneration = expectedGeneration + 1;
-        manifest = {
-          ...manifest,
-          generation: durableManifestGeneration,
-          entries: manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate),
-        };
+        versions.set(entryId, expectedVersion + 1);
+        entries = entries.map((candidate) => candidate.id === entryId ? updated : candidate);
       });
-      return { generation: durableManifestGeneration };
+      return { version: versions.get(entryId)! };
     },
-    async updateWorkplaceLiveness(expectedGeneration, entryId, liveness, commitFence) {
+    async updateWorkplaceLiveness(expectedVersion, entryId, liveness, commitFence) {
       events.push(`store:liveness:${liveness.state}`);
-      assert.equal(expectedGeneration, durableManifestGeneration,
-        "liveness update must use the durable manifest generation");
+      const currentVersion = versions.get(entryId);
+      if (forceStaleVersionError || expectedVersion !== currentVersion) {
+        throw new Error("liveness update must use the durable agent version");
+      }
       let updated!: DaemonManifestEntry;
       await commitFence(async () => {
         events.push("store:commit-liveness");
-        const current = manifest.entries.find((candidate) => candidate.id === entryId)!;
+        const current = entries.find((candidate) => candidate.id === entryId)!;
         updated = { ...current, workplace_liveness: liveness };
-        durableManifestGeneration = expectedGeneration + 1;
-        manifest = {
-          ...manifest,
-          generation: durableManifestGeneration,
-          entries: manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate),
-        };
+        versions.set(entryId, expectedVersion + 1);
+        entries = entries.map((candidate) => candidate.id === entryId ? updated : candidate);
       });
-      return { generation: durableManifestGeneration, entry: updated };
+      return { version: versions.get(entryId)!, entry: updated };
     },
   };
 
@@ -245,11 +263,6 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
       },
       assertCurrent,
       currentDaemonGeneration: () => DAEMON_GENERATION,
-      currentManifestGeneration: () => acceptedManifestGeneration,
-      acceptManifestGeneration: (generation) => {
-        events.push(`authority:accept:${generation}`);
-        acceptedManifestGeneration = generation;
-      },
       fenceCommit: fence,
     },
     policies: {
@@ -267,14 +280,14 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
   return {
     subject: new ManifestAdministrationCoordinator(options),
     events,
-    get manifest() { return manifest; },
+    get manifest(): DaemonManifest { return { entries, versions: Object.fromEntries(versions) }; },
     get configuration() { return configuration; },
     setConfiguration(next: StoredAgentConfiguration | undefined) { configuration = next; },
     setConfigurationOutcome(outcome: "updated" | "invalid") { nextConfigurationOutcome = outcome; },
     setPurgeComplete(value: boolean) { purgeComplete = value; },
     setCurrentOwner(value: boolean) { currentOwner = value; },
     setHandoffScheduled(value: boolean) { handoffScheduled = value; },
-    setAcceptedManifestGeneration(generation: number) { acceptedManifestGeneration = generation; },
+    setForceStaleVersionError(value: boolean) { forceStaleVersionError = value; },
   };
 }
 
@@ -301,19 +314,18 @@ test("entry validation and create replay preserve exact validation and convergen
     "authority:assert",
     "store:get-purge:purge:agent-1",
     "store:load",
-    "store:write:4",
+    "store:create:agent-1",
     "authority:fence",
     "authority:assert",
     "store:commit",
     "state:notify",
-    "authority:accept:5",
     "convergence:agent-1",
   ]);
 
   state.events.length = 0;
   const replay = await state.subject.putManifestEntry(withHistory);
   assert.equal(replay, created);
-  assert.equal(state.events.includes("store:write:5"), false);
+  assert.equal(state.events.includes("store:create:agent-1"), false);
   assert.equal(state.events.at(-1), "convergence:agent-1");
   await assert.rejects(state.subject.putManifestEntry({ ...withHistory, avatar: { kind: "initials", color: "rose" } }), /already bound to different agent parameters/);
 
@@ -564,31 +576,31 @@ test("workplace liveness preserves validation order, CAS adoption, and the exact
     observed_at: CREATED_AT,
     detail: "online",
   });
-  assert.equal(state.events.includes("authority:accept:5"), true);
+  assert.equal(state.manifest.versions["agent-1"], 5);
   assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
 });
 
-test("activity, liveness, and configuration stores reject a stale accepted manifest generation before fencing", async () => {
+test("activity, liveness, and configuration stores reject a stale per-agent version before fencing", async () => {
   const staleActivity = harness([entry()]);
-  staleActivity.setAcceptedManifestGeneration(3);
+  staleActivity.setForceStaleVersionError(true);
   await assert.rejects(
     staleActivity.subject.appendNativeActivity("agent-1", activity(), false),
-    /activity append must use the durable manifest generation/,
+    /activity append must use the durable agent version/,
   );
   assert.equal(staleActivity.events.includes("authority:fence"), false);
   assert.equal(staleActivity.events.includes("state:notify"), false);
 
   const staleLiveness = harness([entry()]);
-  staleLiveness.setAcceptedManifestGeneration(3);
+  staleLiveness.setForceStaleVersionError(true);
   await assert.rejects(
     staleLiveness.subject.updateWorkplaceLiveness("agent-1", "reachable", null, CREATED_AT),
-    /liveness update must use the durable manifest generation/,
+    /liveness update must use the durable agent version/,
   );
   assert.equal(staleLiveness.events.includes("authority:fence"), false);
   assert.equal(staleLiveness.events.includes("state:notify"), false);
 
   const staleConfiguration = harness([entry({ provider: "codex" })]);
-  staleConfiguration.setAcceptedManifestGeneration(3);
+  staleConfiguration.setForceStaleVersionError(true);
   await assert.rejects(
     staleConfiguration.subject.updateAgentConfiguration({
       entryId: "agent-1",
@@ -601,7 +613,7 @@ test("activity, liveness, and configuration stores reject a stale accepted manif
         permission_profile_id: "full_access",
       },
     }),
-    /configuration update must use the durable manifest generation/,
+    /configuration update must use the durable agent version/,
   );
   assert.equal(staleConfiguration.events.includes("authority:fence"), false);
   assert.equal(staleConfiguration.events.includes("state:notify"), false);
@@ -638,12 +650,12 @@ test("configuration keeps daemon and revision fences, trusted-policy derivation,
     "authority:serialize",
     "authority:assert",
     "authority:assert",
+    "store:get-version:agent-1",
     "store:update-config:4:3",
     "authority:fence",
     "authority:assert",
     "store:commit-config",
     "state:notify",
-    "authority:accept:5",
     "store:get-config:agent-1",
   ]);
 
@@ -683,8 +695,8 @@ test("configuration keeps daemon and revision fences, trusted-policy derivation,
   assert.equal(state.events.includes("store:commit-config"), false);
   assert.equal(state.events.includes("state:notify"), false,
     "a revision conflict must not notify state watchers");
-  assert.equal(state.events.includes("authority:accept:5"), true,
-    "the unchanged durable generation is still adopted exactly as production does");
+  assert.equal(state.manifest.versions["agent-1"], 5,
+    "the unchanged durable agent version stays intact on conflict");
 });
 
 const OWN_SETUP_KEY = "letagentsOwnerIsolation";

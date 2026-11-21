@@ -57,7 +57,7 @@ async function time(label: string, operation: () => Promise<unknown>): Promise<v
 const root = await mkdtemp(join(tmpdir(), "letagents-heartbeat-reads-"));
 const store = new ManifestStore(join(root, "daemon-state.sqlite"));
 try {
-  await store.write(0, [entry]);
+  await store.write([entry]);
   const stored = await store.getEntry("agent_0");
   console.log(`stored events: ${stored?.activity?.length}`);
   await time("getEntry full (heartbeat today)", () => store.getEntry("agent_0"));

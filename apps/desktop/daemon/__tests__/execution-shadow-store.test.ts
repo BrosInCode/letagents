@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 
+import { DaemonStateSchema } from "../daemon-state-database.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 import { ExecutionProtocolError, parseExecutionFact, type ExecutionFact } from "../execution-protocol.js";
 import { emptyExecutionProjection, publicApprovalState, reduceDeliveryEvidence, reduceExecutionFact, waitingForApproval, type DeliveryEvidence } from "../execution-reducer.js";
-import { ExecutionShadowStore, type ShadowObserver } from "../execution-shadow-store.js";
+import { ExecutionShadowStore, executionRuntimeStorageIdentity, type ShadowObserver } from "../execution-shadow-store.js";
 import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../../shared/room-agent-work.mjs";
 import { applyRuntimeRecoverySchema } from "../runtime-recovery-journal.js";
 
@@ -35,7 +36,7 @@ test("verified runtime replacement crosses an old source gap without erasing los
     const archived = JSON.stringify(db.prepare("SELECT * FROM execution_observers WHERE agent_id='agent'").get());
     db.prepare("INSERT INTO agent_runtime_recoveries VALUES('recovery','agent','room','generation','runtime','resume','prepared','{}',?, 'now','now')").run(archived);
     assert.throws(bindNew, /source_gap/, "accepted stop intent is not death proof");
-    db.exec("UPDATE agent_runtime_recoveries SET phase='stopped'; UPDATE execution_runtime_generations SET runtime_state='exited',ended_at_ms=200 WHERE runtime_generation_id='runtime'; UPDATE execution_turns SET state='lost',ended_at_ms=200 WHERE runtime_generation_id='runtime'");
+    db.exec("UPDATE agent_runtime_recoveries SET phase='stopped'; UPDATE execution_runtime_generations SET runtime_state='exited',ended_at_ms=200 WHERE runtime_generation_id='runtime'; UPDATE runs SET state='lost',ended_at_ms=200 WHERE runtime_generation_id='runtime'");
     const next = bindNew();
     store.trackNativeTurn(newTurn);
     store.ingest(next.sourceId, next, turnFact(1, { factId: "new-fact", executionGenerationId: "new-generation",
@@ -78,58 +79,93 @@ function fixture(path = ":memory:") {
   return { db, store };
 }
 
-test("lifecycle facts receive atomic pending dispositions while tool facts do not", () => {
-  const typed = fixture();
+function fullFixture(provider: "codex" | "cursor" = "codex") {
+  const db = new DatabaseSync(":memory:");
+  db.exec("PRAGMA foreign_keys=ON");
+  new DaemonStateSchema().createSchema(db);
+  const connection = provider === "cursor"
+    ? { kind: "cursor_cli" as const, pid: 42, processIdentity: "birth" }
+    : { kind: "codex_app_server" as const, url: "http://localhost", pid: 42, processIdentity: "birth" };
+  const runtimeGenerationId = executionRuntimeStorageIdentity("agent", "generation", connection.kind, 42, "birth");
+  db.prepare(`INSERT INTO agents(agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,config_revision,runtime_configuration_revision,desired_state,observed_state,condition,provider_work_attempt_id,provider_continuation_id,provider_execution_generation_id,provider_connection_json)
+    VALUES('agent',0,1,'owner','2026-08-31T00:00:00.000Z','Agent','room',?,'charter',1,1,'running','idle','none','workspace','conversation','generation',?)`)
+    .run(provider, JSON.stringify(connection));
+  const store = new ExecutionShadowStore(db);
+  store.registerRuntime({
+    agentId: "agent", executionGenerationId: "generation", runtimeGenerationId,
+    provider, authorityMode: "typed", configRevision: 1, createdAtMs: 100,
+  });
+  const attemptId = store.trackMessage({
+    agentId: "agent", roomId: "room", sourceMessageId: "message",
+    executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: 100,
+  });
+  store.trackNativeTurn({
+    agentId: "agent", executionGenerationId: "generation", runtimeGenerationId,
+    ...native, attemptId, roomId: "room", createdAtMs: 100,
+  });
+  const token = store.bindObserver({
+    agentId: "agent", subjectRuntimeGenerationId: runtimeGenerationId, observerRuntimeGenerationId: runtimeGenerationId,
+    sourceId: "source", daemonGenerationId: "daemon", expectedEpoch: 0, boundAtMs: 100,
+  });
+  const installation = {
+    workAttemptId: "workspace",
+    providerContinuationId: "conversation",
+    executionGenerationId: "generation",
+    configurationRevision: 1,
+    providerConnection: connection,
+  };
+  return { db, store, token, runtimeGenerationId, installation };
+}
+
+test("lifecycle facts project observed_state onto agents atomically while tool facts do not", () => {
+  const typed = fullFixture("codex");
   try {
-    seed(typed.store, "", "typed"); const token = observer(typed.store);
-    assert.equal(typed.store.ingest(token.sourceId, token, turnFact(1)).status, "accepted");
-    assert.equal(typed.store.ingest(token.sourceId, token, operationFact(2)).status, "accepted");
-    assert.deepEqual(typed.db.prepare(`SELECT effect_kind,state,disposed_at_ms
-      FROM execution_lifecycle_effects ORDER BY fact_sequence`).all().map(row => ({ ...row })), [{
-      effect_kind: "manifest_working", state: "pending", disposed_at_ms: null,
-    }]);
-    typed.db.exec(`CREATE TEMP TRIGGER reject_lifecycle_effect BEFORE INSERT ON execution_lifecycle_effects
-      BEGIN SELECT RAISE(ABORT,'injected disposition failure'); END`);
-    assert.throws(() => typed.store.ingest(token.sourceId, token,
-      turnFact(3, { state: "terminal", turnOutcome: "completed" })), /injected disposition failure/);
+    const activeResult = typed.store.ingest(typed.token.sourceId, typed.token,
+      turnFact(1, { runtimeGenerationId: typed.runtimeGenerationId }), typed.installation);
+    assert.equal(activeResult.status, "accepted");
+    assert.equal(activeResult.projectedObservedState, "working");
+    assert.equal(typed.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+    const opResult = typed.store.ingest(typed.token.sourceId, typed.token,
+      operationFact(2, { runtimeGenerationId: typed.runtimeGenerationId }), typed.installation);
+    assert.equal(opResult.status, "accepted");
+    assert.equal(opResult.projectedObservedState, undefined);
+    typed.db.exec(`CREATE TEMP TRIGGER reject_agent_projection BEFORE UPDATE OF observed_state ON agents
+      BEGIN SELECT RAISE(ABORT,'injected projection failure'); END`);
+    assert.throws(() => typed.store.ingest(typed.token.sourceId, typed.token,
+      turnFact(3, { runtimeGenerationId: typed.runtimeGenerationId, state: "terminal", turnOutcome: "completed" }),
+      typed.installation), /injected projection failure/);
     assert.equal(typed.db.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()?.count, 2,
-      "a fact cannot commit without its disposition");
+      "a fact cannot commit without its direct lifecycle projection");
     assert.equal(typed.db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 2);
-    typed.db.exec("DROP TRIGGER reject_lifecycle_effect");
-    assert.equal(typed.store.ingest(token.sourceId, token, {
-      ...fact(3), domain: "runtime", kind: "state_changed", state: "exited",
+    typed.db.exec("DROP TRIGGER reject_agent_projection");
+    const exitResult = typed.store.ingest(typed.token.sourceId, typed.token, {
+      ...fact(3, { runtimeGenerationId: typed.runtimeGenerationId }), domain: "runtime", kind: "state_changed", state: "exited",
       controlEvidence: "native_session_terminated", sideEffects: "none",
-    }).status, "accepted");
-    assert.deepEqual({ ...typed.db.prepare(`SELECT effect_kind,state,disposed_at_ms
-      FROM execution_lifecycle_effects WHERE fact_sequence=3`).get() }, {
-      effect_kind: "manifest_failed", state: "pending", disposed_at_ms: null,
-    });
+    }, typed.installation);
+    assert.equal(exitResult.status, "accepted");
+    assert.equal(exitResult.projectedObservedState, "failed");
+    assert.equal(typed.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "failed");
   } finally { typed.db.close(); }
 });
 
 test("Cursor child exit is historical while its validated turn owns the reusable lane", () => {
   for (const terminal of [
-    { state: "terminal", turnOutcome: "completed", effect: "manifest_idle" },
-    { state: "lost", effect: "manifest_failed" },
+    { state: "terminal", turnOutcome: "completed", expected: "idle" },
+    { state: "lost", expected: "failed" },
   ] as const) {
-    const { db, store } = fixture();
+    const { db, store, token, runtimeGenerationId, installation } = fullFixture("cursor");
     try {
-      seed(store, "", "typed", "cursor");
-      const token = observer(store);
-      store.ingest(token.sourceId, token, turnFact(1));
-      store.ingest(token.sourceId, token, turnFact(2, terminal.state === "terminal"
-        ? { state: terminal.state, turnOutcome: terminal.turnOutcome }
-        : { state: terminal.state }));
-      store.ingest(token.sourceId, token, {
-        ...fact(3), domain: "runtime", kind: "state_changed", state: "exited",
+      assert.equal(store.ingest(token.sourceId, token, turnFact(1, { runtimeGenerationId }), installation).projectedObservedState, "working");
+      const turnEnd = store.ingest(token.sourceId, token, turnFact(2, terminal.state === "terminal"
+        ? { runtimeGenerationId, state: terminal.state, turnOutcome: terminal.turnOutcome }
+        : { runtimeGenerationId, state: terminal.state }), installation);
+      assert.equal(turnEnd.projectedObservedState, terminal.expected);
+      const childExit = store.ingest(token.sourceId, token, {
+        ...fact(3, { runtimeGenerationId }), domain: "runtime", kind: "state_changed", state: "exited",
         controlEvidence: "process_exit", sideEffects: "none",
-      });
-      assert.deepEqual(db.prepare(`SELECT effect_kind,state FROM execution_lifecycle_effects
-        ORDER BY fact_sequence`).all().map(row => ({ ...row })), [
-        { effect_kind: "manifest_working", state: "pending" },
-        { effect_kind: terminal.effect, state: "pending" },
-        { effect_kind: "none", state: "applied" },
-      ]);
+      }, installation);
+      assert.equal(childExit.projectedObservedState, undefined);
+      assert.equal(db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, terminal.expected);
     } finally { db.close(); }
   }
 });
@@ -159,9 +195,9 @@ function countBudgetReads(t: TestContext, db: DatabaseSync): () => number {
 // The rows are the same strict runtime facts emitted by fact(sequence).
 function retainFacts(db: DatabaseSync, from: number, through: number): void {
   db.prepare(`WITH RECURSIVE positions(value) AS (SELECT CAST(? AS INTEGER) UNION ALL SELECT value+1 FROM positions WHERE value<?)
-    INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+    INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
       source_sequence,domain,kind,state,side_effects,observed_at_ms)
-    SELECT 'fact-'||value,'agent','generation','runtime',1,value,'runtime','state_changed','ready','none',100+value
+    SELECT 'fact-'||value,'agent','generation','runtime','generation','runtime',1,value,'runtime','state_changed','ready','none',100+value
     FROM positions`).run(from, through);
   db.prepare("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=? WHERE agent_id='agent'").run(through, through);
 }
@@ -305,7 +341,7 @@ test("retained message execution bounds operations and isolates optional read fa
     assert.deepEqual(store.retainedMessageExecution("agent", "room", "message"), { availability: "unavailable" });
     assert.deepEqual(store.roomWorkSummary("agent", "room", "message"), { availability: "unavailable" });
     assert.equal(db.isTransaction, false);
-    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM execution_turns").get()!.n, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM runs").get()!.n, 1);
   } finally { db.close(); }
 });
 
@@ -314,10 +350,10 @@ test("retained message execution bounds candidate scans before joining uncapture
   try {
     seed(store); const token = observer(store);
     for (let index = 0; index < 1000; index++) {
-      db.prepare(`INSERT INTO execution_turns(turn_id,agent_id,execution_generation_id,runtime_generation_id,attempt_id,
+      db.prepare(`INSERT INTO runs(turn_id,agent_id,execution_generation_id,runtime_generation_id,attempt_id,
         room_id,provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms)
         SELECT ?,agent_id,execution_generation_id,runtime_generation_id,attempt_id,room_id,
-          provider_continuation_id,?,'terminal','none',?,? FROM execution_turns WHERE turn_id='turn'`)
+          provider_continuation_id,?,'terminal','none',?,? FROM runs WHERE turn_id='turn'`)
         .run(`uncaptured-${index}`, `uncaptured-native-${index}`, 1000 + index, 1000 + index);
     }
     const prepare = db.prepare.bind(db);
@@ -398,9 +434,9 @@ test("retained message execution keeps selection and projection in one WAL snaps
     t.mock.method(store, "projectRuntime", (runtime: string) => {
       if (!wrote) {
         wrote = true;
-        peer.exec(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+        peer.exec(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
           source_sequence,domain,kind,state,side_effects,observed_at_ms,turn_id,turn_outcome)
-          VALUES('terminal','agent','generation','runtime',1,2,'turn','state_changed','terminal','none',102,'turn','completed');
+          VALUES('terminal','agent','generation','runtime','generation','runtime',1,2,'turn','state_changed','terminal','none',102,'turn','completed');
           UPDATE execution_observers SET last_source_sequence=2,max_observed_sequence=2 WHERE agent_id='agent'`);
       }
       return project(runtime);
@@ -476,9 +512,9 @@ test("room summary reads receipt, watermark and operations in one WAL snapshot",
     t.mock.method(db, "prepare", (sql: string) => {
       if (!wrote && sql.includes("AS message_attempt_id")) {
         wrote = true;
-        peer.exec(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+        peer.exec(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
           source_sequence,domain,kind,side_effects,observed_at_ms,turn_id,execution_id,operation,outcome)
-          VALUES('terminal','agent','generation','runtime',1,2,'execution','completed','none',102,'turn','op','command','failed');
+          VALUES('terminal','agent','generation','runtime','generation','runtime',1,2,'execution','completed','none',102,'turn','op','command','failed');
           UPDATE execution_message_attempts SET state='failed',conclusion='failed',settled_at_ms=200;
           UPDATE execution_observers SET last_source_sequence=2,max_observed_sequence=3 WHERE agent_id='agent'`);
       }
@@ -520,7 +556,7 @@ test("a failed tool leaves its native turn, runtime and continuation alive", () 
     assert.equal(projection.turns.get("turn")?.operations.get("command")?.outcome, "failed");
     assert.equal(projection.turns.get("turn")?.sideEffects, "observed");
     assert.equal(db.prepare("SELECT runtime_state FROM execution_runtime_generations").get()?.runtime_state, "ready");
-    assert.equal(db.prepare("SELECT state FROM execution_turns").get()?.state, "active");
+    assert.equal(db.prepare("SELECT state FROM runs").get()?.state, "active");
   } finally { db.close(); }
 });
 
@@ -618,9 +654,9 @@ test("a message in an earlier record window reads as saved after later windows f
     turnOf("newest", "runtime2", next, 4);
     // The new window fills up to its limit.
     db.prepare(`WITH RECURSIVE positions(value) AS (SELECT 7 UNION ALL SELECT value+1 FROM positions WHERE value<10000)
-      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
         source_sequence,domain,kind,state,side_effects,observed_at_ms)
-      SELECT 'later-'||value,'agent','generation2','runtime2',?,value,'runtime','state_changed','ready','none',300+value FROM positions`).run(next.epoch);
+      SELECT 'later-'||value,'agent','generation2','runtime2','generation2','runtime2',?,value,'runtime','state_changed','ready','none',300+value FROM positions`).run(next.epoch);
     db.prepare("UPDATE execution_observers SET last_source_sequence=10000,max_observed_sequence=10000").run();
     assert.ok(Number(db.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()!.n) > 10_000, "more facts than one window's worth");
 
@@ -653,9 +689,9 @@ test("a record of exactly one window's worth reads its oldest fact: a message sa
     // The message's turn started, and that is all the record holds of it: its first fact.
     assert.equal(store.ingest(token.sourceId, token, turnFact(1)).status, "accepted");
     db.prepare(`WITH RECURSIVE positions(value) AS (SELECT 2 UNION ALL SELECT value+1 FROM positions WHERE value<10000)
-      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
         source_sequence,domain,kind,state,side_effects,observed_at_ms)
-      SELECT 'filler-'||value,'agent','generation','runtime',1,value,'runtime','state_changed','ready','none',100+value FROM positions`).run();
+      SELECT 'filler-'||value,'agent','generation','runtime','generation','runtime',1,value,'runtime','state_changed','ready','none',100+value FROM positions`).run();
     db.prepare("UPDATE execution_observers SET last_source_sequence=10000,max_observed_sequence=10000").run();
     assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()!.n), 10_000);
     const detail = store.retainedMessageExecution("agent", "room", "message");
@@ -672,9 +708,9 @@ test("a message on a runtime that has recorded more than one window's worth is s
     applyRuntimeRecoverySchema(db);
     seed(store); const token = observer(store);
     const fill = (from: number, to: number, epoch = 1) => db.prepare(`WITH RECURSIVE positions(value) AS (SELECT ? UNION ALL SELECT value+1 FROM positions WHERE value<?)
-      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
         source_sequence,domain,kind,state,side_effects,observed_at_ms)
-      SELECT 'filler-'||value,'agent','generation','runtime',?,value,'runtime','state_changed','ready','none',100+value FROM positions`).run(from, to, epoch);
+      SELECT 'filler-'||value,'agent','generation','runtime','generation','runtime',?,value,'runtime','state_changed','ready','none',100+value FROM positions`).run(from, to, epoch);
     // A long turn: one command at its start and one near its end, with a great deal recorded between them.
     assert.equal(store.ingest(token.sourceId, token, turnFact(1)).status, "accepted");
     assert.equal(store.ingest(token.sourceId, token, operationFact(2, { executionId: "a" })).status, "accepted");
@@ -730,9 +766,9 @@ test("a recovery boundary starts a fresh record window: a full record no longer 
 
     // The new window has the same size as the first, and fills up the same way.
     db.prepare(`WITH RECURSIVE positions(value) AS (SELECT 2 UNION ALL SELECT value+1 FROM positions WHERE value<10000)
-      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
         source_sequence,domain,kind,state,side_effects,observed_at_ms)
-      SELECT 'later-'||value,'agent','generation2','runtime2',?,value,'runtime','state_changed','ready','none',300+value FROM positions`).run(rebound.epoch);
+      SELECT 'later-'||value,'agent','generation2','runtime2','generation2','runtime2',?,value,'runtime','state_changed','ready','none',300+value FROM positions`).run(rebound.epoch);
     db.prepare("UPDATE execution_observers SET last_source_sequence=10000,max_observed_sequence=10000").run();
     assert.equal(new ExecutionShadowStore(db).projectRuntime("runtime2").lastJournalSequence, 20000);
     assert.equal(store.ingest(rebound.sourceId, rebound, later(10001)).status, "retention_limit");
@@ -747,12 +783,12 @@ test("retention caps physical witnesses without deleting evidence, advancing acc
     retainFacts(db, 1, 9999);
     const last = fact(10000, { nativeEventId: "last-ready" });
     assert.equal(store.ingest(token.sourceId, token, last).status, "accepted");
-    for (const reason of ["active_turn", "active_execution", "pending_approval", "uncertain_dispatch", "unresolved_cutover", "replay_authority"]) {
+    for (const reason of ["active_turn", "active_execution", "pending_approval", "uncertain_dispatch", "replay_authority"]) {
       db.prepare("INSERT INTO execution_retention_pins VALUES(?,'agent',1,?,100)").run(reason, reason);
     }
     db.exec("CREATE TABLE supervised_agent_inbox(id TEXT PRIMARY KEY,state TEXT); INSERT INTO supervised_agent_inbox VALUES('message','dispatching')");
     const before = store.projectRuntime("runtime");
-    const protectedRows = ["execution_runtime_generations", "execution_turns", "execution_message_attempts", "execution_retention_pins", "supervised_agent_inbox"]
+    const protectedRows = ["execution_runtime_generations", "runs", "execution_message_attempts", "execution_retention_pins", "supervised_agent_inbox"]
       .map(table => db.prepare(`SELECT * FROM ${table}`).all());
     const reads = countBudgetReads(t, db);
     assert.deepEqual(store.ingest(token.sourceId, token, fact(10001, { nativeEventId: "last-ready" })), {
@@ -767,7 +803,7 @@ test("retention caps physical witnesses without deleting evidence, advancing acc
     assert.deepEqual({ ...db.prepare("SELECT last_source_sequence,max_observed_sequence FROM execution_observers").get() },
       { last_source_sequence: 10000, max_observed_sequence: 10005 });
     assert.deepEqual(store.projectRuntime("runtime"), before);
-    assert.deepEqual(["execution_runtime_generations", "execution_turns", "execution_message_attempts", "execution_retention_pins", "supervised_agent_inbox"]
+    assert.deepEqual(["execution_runtime_generations", "runs", "execution_message_attempts", "execution_retention_pins", "supervised_agent_inbox"]
       .map(table => db.prepare(`SELECT * FROM ${table}`).all()), protectedRows);
     assert.throws(() => observer(store, { expectedEpoch: 1 }), /source_gap/, "a replacement source must not erase suspended capture");
     store.registerRuntime({ agentId: "agent", executionGenerationId: "generation2", runtimeGenerationId: "runtime2",
@@ -885,10 +921,11 @@ test("public replay reads one WAL snapshot across agent capacity and every runti
           growBeforeReplay = false;
           assert.equal(db.isTransaction, true);
           writer.prepare(`WITH positions(value) AS (VALUES(10000),(10001))
-            INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+            INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
               source_sequence,domain,kind,state,side_effects,observed_at_ms)
-            SELECT 'fact-'||value,'agent',?,?,1,value,'runtime','state_changed','ready','none',100+value FROM positions`)
-            .run(sameRuntime ? "generation" : "generation-b", sameRuntime ? "runtime" : "runtime-b");
+            SELECT 'fact-'||value,'agent',?,?,?,?,1,value,'runtime','state_changed','ready','none',100+value FROM positions`)
+            .run(sameRuntime ? "generation" : "generation-b", sameRuntime ? "runtime" : "runtime-b",
+              sameRuntime ? "generation" : "generation-b", sameRuntime ? "runtime" : "runtime-b");
         }
         return prepare(sql);
       });
@@ -915,9 +952,9 @@ test("byte capacity counts persisted UTF-8 including embedded NUL, not character
     // accounting (or SQLite length(TEXT), which stops at NUL) would allow it.
     const payload = "é".repeat(Math.floor((payloadBytes - 1) / 2)) + ((payloadBytes - 1) % 2 ? "x" : "");
     assert.equal(1 + Buffer.byteLength(payload), payloadBytes);
-    db.prepare(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+    db.prepare(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
       source_sequence,native_event_id,domain,kind,state,side_effects,observed_at_ms)
-      VALUES('fact-1','agent','generation','runtime',1,1,char(0)||?,'runtime','state_changed','ready','none',101)`).run(payload);
+      VALUES('fact-1','agent','generation','runtime','generation','runtime',1,1,char(0)||?,'runtime','state_changed','ready','none',101)`).run(payload);
     db.exec("UPDATE execution_observers SET last_source_sequence=1,max_observed_sequence=1 WHERE agent_id='agent'");
     assert.equal(db.prepare("SELECT length(CAST(native_event_id AS BLOB)) n FROM execution_facts").get()?.n, payloadBytes);
     const reads = countHistoryReads(t, db);
@@ -1007,7 +1044,10 @@ function countIncrementalReads(t: TestContext, db: DatabaseSync): () => number {
 function insertRawFact(db: DatabaseSync, value: ExecutionFact, extra: Record<string, unknown> = {}): void {
   const row: Record<string, string | number | null> = {
     fact_id: value.factId, agent_id: value.agentId, execution_generation_id: value.executionGenerationId,
-    runtime_generation_id: value.runtimeGenerationId, observer_epoch: value.observerEpoch, source_sequence: value.sourceSequence,
+    runtime_generation_id: value.runtimeGenerationId,
+    observer_execution_generation_id: value.executionGenerationId,
+    observer_runtime_generation_id: value.runtimeGenerationId,
+    observer_epoch: value.observerEpoch, source_sequence: value.sourceSequence,
     native_event_id: value.nativeEventId ?? null, turn_id: "turnId" in value ? value.turnId : null,
     execution_id: value.domain === "execution" ? value.executionId : null, domain: value.domain, kind: value.kind,
     state: "state" in value ? value.state : null, operation: value.domain === "execution" ? value.operation : null,
@@ -1461,7 +1501,7 @@ test("replaying earlier native facts after terminal or lost state does not reque
       assert.equal(store.ingest(second.sourceId, second, { ...active, factId: "replayed-active", observerEpoch: 2 }).status, "duplicate");
       assert.equal(store.ingest(second.sourceId, second, { ...output, factId: "replayed-output", observerEpoch: 2 }).status, "duplicate");
       assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 2);
-      assert.equal(db.prepare("SELECT state FROM execution_turns").get()?.state, state);
+      assert.equal(db.prepare("SELECT state FROM runs").get()?.state, state);
       assert.equal(store.projectRuntime("runtime").projection.turns.get("turn")?.state, state);
       assert.equal(store.projectRuntime("runtime").projection.turns.get("turn")?.operations.get("command")?.outputBytes, 42);
     } finally { db.close(); }
@@ -1549,12 +1589,12 @@ test("unknown historical terminal evidence cannot resurrect a terminal turn or e
     assert.throws(() => store.ingest(token.sourceId, token, turnFact(4)), /invalid_transition/);
     assert.throws(() => store.ingest(token.sourceId, token, fact(4)), /invalid_transition/);
     store.ingest(token.sourceId, token, fact(4, { domain: "control", state: "lost", controlEvidence: "process_exit" }));
-    const retained = db.prepare("SELECT state,ended_at_ms FROM execution_turns").get();
+    const retained = db.prepare("SELECT state,ended_at_ms FROM runs").get();
     store.ingest(token.sourceId, token, operationFact(5, { kind: "completed", outcome: "failed", sideEffects: "observed" }));
-    assert.deepEqual(db.prepare("SELECT state,ended_at_ms FROM execution_turns").get(), retained);
-    assert.equal(db.prepare("SELECT side_effects FROM execution_turns").get()?.side_effects, "observed");
+    assert.deepEqual(db.prepare("SELECT state,ended_at_ms FROM runs").get(), retained);
+    assert.equal(db.prepare("SELECT side_effects FROM runs").get()?.side_effects, "observed");
     assert.equal(db.prepare("SELECT runtime_state FROM execution_runtime_generations").get()?.runtime_state, "exited");
-    assert.equal(db.prepare("SELECT state FROM execution_turns").get()?.state, "terminal");
+    assert.equal(db.prepare("SELECT state FROM runs").get()?.state, "terminal");
   } finally { db.close(); }
 });
 
@@ -1587,7 +1627,7 @@ test("one execution lane follows the agent across rooms and lost turns cannot re
     const recover = observer(store, { expectedEpoch: 1, recovery: native });
     store.ingest(recover.sourceId, recover, turnFact(1, { factId: "terminal", observerEpoch: 2, state: "terminal", turnOutcome: "failed" }));
     assert.doesNotThrow(() => store.trackNativeTurn(otherTurn));
-    assert.equal(db.prepare("SELECT room_id FROM execution_turns WHERE turn_id='turn'").get()?.room_id, "room");
+    assert.equal(db.prepare("SELECT room_id FROM runs WHERE turn_id='turn'").get()?.room_id, "room");
   } finally { db.close(); }
 });
 

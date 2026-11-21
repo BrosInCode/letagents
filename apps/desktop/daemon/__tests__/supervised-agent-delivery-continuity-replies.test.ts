@@ -38,7 +38,7 @@ test("task continuity survives restart after native failure, preserves files and
     await writeFile(join(root, "work.txt"), "partial implementation\n");
     // An already executed external mutation has its durable receipt before the provider fails.
     const db = new DatabaseSync(path);
-    db.prepare(`INSERT INTO supervised_agent_effects
+    db.prepare(`INSERT INTO effects
       (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
       VALUES ('effect',?,?,?,?,?,?,?,1,'completed',?,NULL,?,?)`).run(agent.agentId, agent.roomId, "generation-1",
       "failed-turn", effectRequest.mcp_request_id, effectRequest.tool_name, JSON.stringify(effectRequest.request),
@@ -247,7 +247,7 @@ test("an uncertain mutation prevents automatic continuation across restart witho
     await options?.beforeNativeDispatch?.(); runs++;
     await options?.checkpointTurnStarted?.("failed");
     const db = new DatabaseSync(path);
-    db.prepare(`INSERT INTO supervised_agent_effects
+    db.prepare(`INSERT INTO effects
       (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
       VALUES ('effect',?,?,?,'failed','request','publish_room_artifact','{}',1,'executing',NULL,NULL,?,?)`)
       .run(agent.agentId, agent.roomId, "generation-1", new Date().toISOString(), new Date().toISOString()); db.close();
@@ -447,7 +447,7 @@ test("an intercepted thread choice survives publication failure and restart with
         // The coordinator retains the intercepted request before returning USE_FINAL_ANSWER.
         const db = new DatabaseSync(path);
         try {
-          db.prepare(`INSERT INTO supervised_agent_effects
+          db.prepare(`INSERT INTO effects
             (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
             VALUES ('thread-choice',?,?,?,'native-turn','request',?,?,1,?,NULL,NULL,?,?)`)
             .run(agent.agentId, agent.roomId, "generation-1", toolName,
@@ -488,7 +488,7 @@ test("unrelated or non-thread message effects cannot redirect the daemon's activ
       await options?.checkpointTurnStarted?.("native-turn");
       const db = new DatabaseSync(path);
       try {
-        db.prepare(`INSERT INTO supervised_agent_effects
+        db.prepare(`INSERT INTO effects
           (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
           VALUES ('other-effect',?,?,?,?,'request',?,?,1,?,NULL,NULL,?,?)`)
           .run(variation === "agent" ? "other-agent" : agent.agentId,

@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
+import { DAEMON_STATE_USER_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
 import { ExecutionShadowStore } from "../execution-shadow-store.js";
@@ -39,7 +39,7 @@ function captureReceipt(database: DatabaseSync, item: Awaited<ReturnType<Supervi
     VALUES(?,?,?,?,'active',?)`).run(attempt, item.agent_id, item.room_id, item.source_message_id, created);
   database.prepare("INSERT INTO execution_attempt_generations VALUES(?,?,?,?,?,?)")
     .run(attempt, item.agent_id, item.room_id, generation, String(binding.work_attempt_id), created);
-  database.prepare(`INSERT INTO execution_turns
+  database.prepare(`INSERT INTO runs
     (turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms)
     VALUES(?,?,?,?,?,?,?,?,'none','none',?)`).run(`captured-turn:${item.inbox_item_id}`, attempt, item.agent_id, item.room_id,
     generation, runtime, String(binding.provider_continuation_id), item.provider_turn_id, created);
@@ -95,7 +95,7 @@ async function seedActiveAgent(env: Awaited<ReturnType<typeof fixture>>, input: 
     native_liveness: { state: "active", observed_at: "2026-08-05T00:00:00.000Z", detail: null },
     activity: [], restart_count: 0, last_turn_control_sequence: 0,
   };
-  await manifest.write(loaded.generation, [...loaded.entries.filter((entry) => entry.id !== input.agentId), active]);
+  await manifest.write([...loaded.entries.filter((entry) => entry.id !== input.agentId), active]);
   await manifest.close();
   if (input.operationalExecution) {
     const database = new DatabaseSync(env.database);
@@ -111,27 +111,6 @@ async function seedActiveAgent(env: Awaited<ReturnType<typeof fixture>>, input: 
         .run(input.executionGenerationId, input.workAttemptId, active.created_at);
     } finally { database.close(); }
   }
-}
-
-async function prepareSecretBearingV5(env: Awaited<ReturnType<typeof fixture>>): Promise<void> {
-  const initial = new WorkerBindingStore(env.legacy, undefined, env.database);
-  await initial.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "run", agent_session_id: "session", agent_session_token: "one-shot", api_url: "https://letagents.test" });
-  await initial.close();
-  const db = new DatabaseSync(env.database);
-  db.exec(`DROP INDEX worker_session_binding_authority;
-    ALTER TABLE worker_session_bindings RENAME TO worker_session_bindings_v6_source;
-    CREATE TABLE worker_session_bindings (
-      entry_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, work_attempt_id TEXT NOT NULL,
-      execution_generation_id TEXT NOT NULL, agent_session_id TEXT NOT NULL, agent_session_token TEXT NOT NULL,
-      api_url TEXT NOT NULL, room_cursor TEXT, last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
-      last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0), binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1), updated_at TEXT NOT NULL
-    ) STRICT;
-    INSERT INTO worker_session_bindings SELECT entry_id,room_id,work_attempt_id,execution_generation_id,agent_session_id,'old-persisted-secret',api_url,room_cursor,last_sequence,last_observed_at_ms,binding_epoch,updated_at FROM worker_session_bindings_v6_source;
-    DROP TABLE worker_session_bindings_v6_source;
-    CREATE UNIQUE INDEX worker_session_binding_authority ON worker_session_bindings(entry_id,binding_epoch,execution_generation_id,agent_session_id);
-    UPDATE manifest_metadata SET schema_version=5 WHERE singleton=1;
-    PRAGMA user_version=5;`);
-  db.close();
 }
 
 test("poll ingestion advances its cursor atomically, deduplicates replay, and retains FIFO", async () => {
@@ -172,23 +151,45 @@ test("message interventions require exact native-turn, message, room and executi
     await store.checkpointTurnStarted(item!.inbox_item_id, "native-1", TEST_PROVIDER_TURN_AUTHORITY);
     const database = new DatabaseSync(env.database);
     try {
-      database.prepare(`UPDATE turn_control_journals SET turn_control_present=1, action_id='control-1',
-        action_sequence=1, turn_work_attempt_id='attempt', turn_execution_generation_id='generation',
-        target_room_id='room', target_source_message_id='1', target_provider_continuation_id='continuation',
-        inbox_item_id=?, provider_turn_id='native-1', has_correction=1, correction_text='Keep the API unchanged',
-        correction_strategy='native', status='uncertain', capability='native_interrupt',
-        recorded_at='2026-09-20T09:00:00.000Z', updated_at='2026-09-20T09:00:00.000Z'
-        WHERE agent_id='stone'`).run(item!.inbox_item_id);
+      const baseControl: Record<string, unknown> = {
+        action_id: "control-1",
+        action_sequence: 1,
+        work_attempt_id: "attempt",
+        execution_generation_id: "generation",
+        target_room_id: "room",
+        target_source_message_id: "1",
+        target_provider_continuation_id: "continuation",
+        inbox_item_id: item!.inbox_item_id,
+        provider_turn_id: "native-1",
+        has_correction: true,
+        correction_text: "Keep the API unchanged",
+        correction_strategy: "native",
+        operator_resolution: null,
+        status: "uncertain",
+        capability: "native_interrupt",
+        interrupted: null,
+        resumed: null,
+        state: null,
+        stages: [],
+        error: null,
+        recorded_at: "2026-09-20T09:00:00.000Z",
+        updated_at: "2026-09-20T09:00:00.000Z",
+      };
+      const writeControl = (control: Record<string, unknown>) => {
+        database.prepare(`UPDATE agents SET last_turn_control_sequence=1,
+          turn_control_inbox_item_id=?, turn_control_status=?, turn_control_json=?
+          WHERE agent_id='stone'`).run(item!.inbox_item_id, String(control.status), JSON.stringify(control));
+      };
+      writeControl(baseControl);
       assert.equal((await store.detail("stone", "room", "1")).latest_intervention?.status, "uncertain");
       assert.equal((await store.detail("stone", "room", "1")).latest_intervention?.correctionText, "Keep the API unchanged");
-      for (const [column, original] of [
-        ["provider_turn_id", "native-1"], ["target_source_message_id", "1"], ["target_room_id", "room"],
-        ["turn_work_attempt_id", "attempt"], ["turn_execution_generation_id", "generation"],
-        ["target_provider_continuation_id", "continuation"],
+      for (const field of [
+        "provider_turn_id", "target_source_message_id", "target_room_id",
+        "work_attempt_id", "execution_generation_id", "target_provider_continuation_id",
       ]) {
-        database.prepare(`UPDATE turn_control_journals SET ${column}=? WHERE agent_id='stone'`).run("different");
-        assert.equal((await store.detail("stone", "room", "1")).latest_intervention, null, column);
-        database.prepare(`UPDATE turn_control_journals SET ${column}=? WHERE agent_id='stone'`).run(original!);
+        writeControl({ ...baseControl, [field]: "different" });
+        assert.equal((await store.detail("stone", "room", "1")).latest_intervention, null, field);
+        writeControl(baseControl);
       }
     } finally { database.close(); }
   } finally { await store.close(); await env.cleanup(); }
@@ -203,7 +204,7 @@ test("a successful poll exposes received work and observing health in one notifi
     () => "2026-08-28T00:28:08.282Z",
     () => {
       if (!observer) return;
-      const inbox = observer.prepare("SELECT COUNT(*) AS count FROM supervised_agent_inbox WHERE agent_id=?").get("cloudfern") as Record<string, unknown>;
+      const inbox = observer.prepare("SELECT COUNT(*) AS count FROM inbox_items WHERE agent_id=?").get("cloudfern") as Record<string, unknown>;
       const health = observer.prepare("SELECT state,detail,execution_generation_id FROM supervised_agent_ingress_health WHERE agent_id=?").get("cloudfern") as Record<string, unknown> | undefined;
       snapshots.push({
         inboxCount: Number(inbox.count),
@@ -302,7 +303,7 @@ test("new-source observation follows commit and excludes replay, synthetic inser
   let throwHint = false;
   const onInserted = (ids: readonly string[]) => {
     snapshots.push({ ids: [...ids],
-      persisted: observer!.prepare("SELECT source_message_id FROM supervised_agent_inbox ORDER BY fifo_sequence").all().map(row => String(row.source_message_id)),
+      persisted: observer!.prepare("SELECT source_message_id FROM inbox_items ORDER BY fifo_sequence").all().map(row => String(row.source_message_id)),
       cursor: observer!.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id='stone'").get()?.last_observed_message_id as string | null });
     if (throwHint) throw new Error("optional observer unavailable");
   };
@@ -327,12 +328,12 @@ test("new-source observation follows commit and excludes replay, synthetic inser
     assert.equal((await store.cursor("stone"))?.last_observed_message_id, "msg_3", "observer failure cannot reject committed ingress");
     await store.ingestSuccessfulPoll({ ...poll, last_observed_message_id: "msg_3", messages: [message("msg_2")] });
     assert.equal(snapshots.length, 2, "an older observed/pruned source is not fresh attribution just because its inbox row was absent");
-    assert.ok(observer.prepare("SELECT 1 FROM supervised_agent_inbox WHERE source_message_id='msg_2'").get(), "observation never changes ingestion behavior");
-    observer.exec(`CREATE TRIGGER reject_second_observed_source BEFORE INSERT ON supervised_agent_inbox
+    assert.ok(observer.prepare("SELECT 1 FROM inbox_items WHERE source_message_id='msg_2'").get(), "observation never changes ingestion behavior");
+    observer.exec(`CREATE TRIGGER reject_second_observed_source BEFORE INSERT ON inbox_items
       WHEN NEW.source_message_id='msg_5' BEGIN SELECT RAISE(ABORT,'rejected second source'); END;`);
     await assert.rejects(store.ingestSuccessfulPoll({ ...poll, last_observed_message_id: "msg_5", messages: [message("msg_4"), message("msg_5")] }), /rejected second source/);
     assert.equal(snapshots.length, 2, "even an earlier INSERT in a failed batch cannot publish a hint");
-    assert.equal(observer.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox WHERE source_message_id IN ('msg_4','msg_5')").get()!.n, 0);
+    assert.equal(observer.prepare("SELECT COUNT(*) n FROM inbox_items WHERE source_message_id IN ('msg_4','msg_5')").get()!.n, 0);
     assert.equal((await store.cursor("stone"))?.last_observed_message_id, "msg_3");
   } finally { observer?.close(); await store.close(); await env.cleanup(); }
 });
@@ -394,7 +395,7 @@ test("an undispatched reset refuses compact effect evidence without erasing turn
 
     const evidence = new DatabaseSync(env.database);
     try {
-      evidence.prepare(`INSERT INTO supervised_agent_effect_tombstones
+      evidence.prepare(`INSERT INTO effect_tombstones
         (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
          tool_name,request_sha256,request_bytes,mutation,state,result_json,error,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
@@ -434,7 +435,7 @@ test("an undispatched reset ignores compact evidence from an older execution gen
 
     const evidence = new DatabaseSync(env.database);
     try {
-      evidence.prepare(`INSERT INTO supervised_agent_effect_tombstones
+      evidence.prepare(`INSERT INTO effect_tombstones
         (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
          tool_name,request_sha256,request_bytes,mutation,state,result_json,error,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
@@ -694,8 +695,8 @@ test("payload-free receipt projections preserve ordering, terminal bounds, block
       messages: Array.from({ length: 205 }, (_, index) => ({ source_message_id: String(index + 1),
         source_message: { text: "payload".repeat(300) }, activation: { for_current_agent: true } })) });
     raw = new DatabaseSync(env.database);
-    raw.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_no_reply' WHERE agent_id='projection' AND fifo_sequence<=203").run();
-    raw.prepare("UPDATE supervised_agent_inbox SET state='blocked',last_error='blocked' WHERE inbox_item_id=?").run(items[203]!.inbox_item_id);
+    raw.prepare("UPDATE inbox_items SET state='acknowledged_no_reply' WHERE agent_id='projection' AND fifo_sequence<=203").run();
+    raw.prepare("UPDATE inbox_items SET state='blocked',last_error='blocked' WHERE inbox_item_id=?").run(items[203]!.inbox_item_id);
     raw.prepare("INSERT INTO supervised_agent_publications VALUES(?,?,?,?,?,?)").run(items[202]!.inbox_item_id, "projection", "room", "reply-203", "canonical-203", "2026-09-20T00:00:00Z");
     const event = raw.prepare("INSERT INTO supervised_agent_inbox_events VALUES(?,?,?,'queued',?,?)");
     for (let index = 3; index <= 82; index += 1) event.run(items[203]!.inbox_item_id, index, `extra-${index}`, "2026-09-20T00:00:00Z", `event-${index}`);
@@ -712,10 +713,10 @@ test("payload-free receipt projections preserve ordering, terminal bounds, block
       assert.ok(full.every(item => typeof item.source_message === "object" && item.activation.for_current_agent === true));
     }
     const before = await store.receiptProjection("projection");
-    raw.prepare("UPDATE supervised_agent_inbox SET source_message_json='invalid-json',activation_json='invalid-json' WHERE agent_id='projection'").run();
+    raw.prepare("UPDATE inbox_items SET source_message_json='invalid-json',activation_json='invalid-json' WHERE agent_id='projection'").run();
     assert.deepEqual(await store.receiptProjection("projection"), before, "projection does not load or parse either payload column");
     await assert.rejects(store.receipts("projection"), SyntaxError, "the operational full receipt reader retains its payload contract");
-    raw.prepare("UPDATE supervised_agent_inbox SET last_error='current error' WHERE inbox_item_id=?").run(items[203]!.inbox_item_id);
+    raw.prepare("UPDATE inbox_items SET last_error='current error' WHERE inbox_item_id=?").run(items[203]!.inbox_item_id);
     assert.equal((await store.receiptProjection("projection")).at(-2)?.last_error, "current error", "prepared reads return current rows");
   } finally { raw?.close(); await store.close(); await env.cleanup(); }
 });
@@ -873,377 +874,6 @@ test("a committed repair can be durably exhausted without reopening the blocked 
       "replayed exhaustion records one durable blocked event",
     );
     await store.close();
-  } finally { await env.cleanup(); }
-});
-
-test("v12 migration types only exact pre-turn historical missing-thread failures", async () => {
-  const env = await fixture(); try {
-    const store = new SupervisedAgentInboxStore(env.database);
-    const historicalError = "thread not found: 00000000-0000-0000-0000-000000000001";
-    const [safe] = await store.ingestPoll({
-      agent_id: "safe",
-      room_id: "room",
-      last_observed_message_id: "1",
-      messages: [{ source_message_id: "safe", source_message: {}, activation: {} }],
-    });
-    await store.transition(safe!.inbox_item_id, "blocked", { last_error: historicalError });
-
-    const [started] = await store.ingestPoll({
-      agent_id: "started",
-      room_id: "room",
-      last_observed_message_id: "1",
-      messages: [{ source_message_id: "started", source_message: {}, activation: {} }],
-    });
-    await store.transition(started!.inbox_item_id, "dispatching");
-    await store.checkpointTurnStarted(started!.inbox_item_id, "turn_started", TEST_PROVIDER_TURN_AUTHORITY);
-    await store.transition(started!.inbox_item_id, "blocked", { last_error: historicalError });
-
-    const [durableReply] = await store.ingestPoll({
-      agent_id: "durable-reply",
-      room_id: "room",
-      last_observed_message_id: "1",
-      messages: [{ source_message_id: "durable-reply", source_message: {}, activation: {} }],
-    });
-    await store.transition(durableReply!.inbox_item_id, "dispatching");
-    await store.checkpointTurnStarted(durableReply!.inbox_item_id, "turn_with_reply", TEST_PROVIDER_TURN_AUTHORITY);
-    await store.transition(durableReply!.inbox_item_id, "awaiting_result", {
-      outcome: JSON.stringify({ kind: "reply", text: "already durable", evidence: "transcript" }),
-    });
-    await store.transition(durableReply!.inbox_item_id, "publishing");
-
-    const [wrapped] = await store.ingestPoll({
-      agent_id: "wrapped",
-      room_id: "room",
-      last_observed_message_id: "1",
-      messages: [{ source_message_id: "wrapped", source_message: {}, activation: {} }],
-    });
-    await store.transition(wrapped!.inbox_item_id, "blocked", {
-      last_error: `Provider failed because ${historicalError}`,
-    });
-    await store.close();
-
-    // Recreate the physical v12 delivery tables around these real rows. This
-    // is the exact predecessor shape shipped before continuation repair.
-    const database = new DatabaseSync(env.database);
-    database.exec(`
-      PRAGMA foreign_keys=OFF;
-      BEGIN IMMEDIATE;
-      DROP TABLE supervised_agent_provider_turn_bindings;
-      DROP TABLE supervised_agent_prepared_context;
-      DROP TABLE provider_continuation_repairs;
-      DROP TABLE supervised_agent_inbox_events;
-      DROP TABLE supervised_agent_terminal_results;
-      DROP TABLE supervised_agent_publications;
-      ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_v13_source;
-      CREATE TABLE supervised_agent_inbox (
-        inbox_item_id TEXT PRIMARY KEY,
-        agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
-        source_message_json TEXT NOT NULL, activation_json TEXT NOT NULL,
-        fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
-        state TEXT NOT NULL CHECK (state IN ('pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move')),
-        attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-        action_id TEXT NOT NULL, reply_client_message_id TEXT NOT NULL,
-        provider_turn_id TEXT, outcome TEXT, last_error TEXT,
-        blocked_by_inbox_item_id TEXT REFERENCES supervised_agent_inbox(inbox_item_id),
-        next_attempt_at_ms INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, acknowledged_at TEXT,
-        UNIQUE(agent_id,room_id,source_message_id), UNIQUE(agent_id,fifo_sequence),
-        UNIQUE(inbox_item_id,agent_id,room_id)
-      ) STRICT;
-      INSERT INTO supervised_agent_inbox
-        (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
-        SELECT inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at
-        FROM supervised_agent_inbox_v13_source;
-      DROP TABLE supervised_agent_inbox_v13_source;
-      CREATE INDEX supervised_agent_inbox_head ON supervised_agent_inbox(agent_id,fifo_sequence);
-      CREATE TABLE supervised_agent_inbox_events (
-        inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
-        event_sequence INTEGER NOT NULL CHECK(event_sequence > 0), idempotency_key TEXT NOT NULL,
-        phase TEXT NOT NULL CHECK(phase IN ('received','queued','turn_started','turn_finished','result_unreadable','publish_started','published','no_reply','retry_scheduled','blocked','room_move_cancelled')),
-        observed_at TEXT NOT NULL, detail TEXT,
-        PRIMARY KEY(inbox_item_id,event_sequence), UNIQUE(inbox_item_id,idempotency_key)
-      ) STRICT;
-      CREATE INDEX supervised_agent_inbox_events_timeline ON supervised_agent_inbox_events(inbox_item_id,event_sequence);
-      CREATE TABLE supervised_agent_terminal_results (
-        inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
-        agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-        outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
-        normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
-        terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
-      ) STRICT;
-      CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id);
-      CREATE TABLE supervised_agent_publications (
-        inbox_item_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
-        client_message_id TEXT NOT NULL, canonical_message_id TEXT NOT NULL, published_at TEXT NOT NULL,
-        FOREIGN KEY(inbox_item_id,agent_id,room_id)
-          REFERENCES supervised_agent_inbox(inbox_item_id,agent_id,room_id) ON DELETE CASCADE,
-        UNIQUE(room_id,client_message_id), UNIQUE(room_id,canonical_message_id)
-      ) STRICT;
-      CREATE INDEX supervised_agent_publications_agent_room ON supervised_agent_publications(agent_id,room_id);
-      UPDATE manifest_metadata SET schema_version=12 WHERE singleton=1;
-      PRAGMA user_version=12;
-      COMMIT;
-      PRAGMA foreign_keys=ON;
-    `);
-    database.close();
-
-    const migrated = new SupervisedAgentInboxStore(env.database);
-    assert.equal((await migrated.get(safe!.inbox_item_id))?.failure_code, "provider_continuation_missing");
-    assert.equal((await migrated.get(started!.inbox_item_id))?.failure_code, null, "a started turn remains ambiguous");
-    assert.equal((await migrated.get(started!.inbox_item_id))?.state, "acknowledged_no_reply",
-      "the upgrade retires an unbound legacy provider turn without fabricating a user cancellation");
-    assert.equal((await migrated.get(started!.inbox_item_id))?.terminal_reason, "upgrade_authority_unavailable");
-    assert.match((await migrated.get(started!.inbox_item_id))?.last_error ?? "", /upgrade.*exact durable authority.*not replayed/i);
-    assert.equal((await migrated.receipts("started"))[0]?.timeline.at(-1)?.phase, "no_reply");
-    assert.equal((await migrated.get(durableReply!.inbox_item_id))?.state, "publishing",
-      "a durable legacy reply remains publication-only and never needs provider authority recovery");
-    assert.equal((await migrated.get(wrapped!.inbox_item_id))?.failure_code, null, "similar prose is never promoted to recovery authority");
-    await migrated.close();
-  } finally { await env.cleanup(); }
-});
-
-test("current v13 repairs an intermediate inbox missing the failure-code constraint", async () => {
-  const env = await fixture(); try {
-    const store = new SupervisedAgentInboxStore(env.database);
-    const [item] = await store.ingestPoll({
-      agent_id: "partial-v13",
-      room_id: "room",
-      last_observed_message_id: "1",
-      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
-    });
-    await store.transition(item!.inbox_item_id, "blocked", {
-      failure_code: "provider_continuation_missing",
-      last_error: "thread not found: 00000000-0000-0000-0000-000000000001",
-    });
-    const repair = await store.beginContinuationRepair({
-      agent_id: "partial-v13",
-      room_id: "room",
-      inbox_item_id: item!.inbox_item_id,
-      daemon_generation: 4,
-      execution_generation_id: "execution_1",
-      work_attempt_id: "attempt_1",
-      expected_pid: 4100,
-      expected_process_identity: "pid-4100-birth-1",
-      missing_continuation: "00000000-0000-0000-0000-000000000001",
-    });
-    await store.close();
-
-    // Reproduce the intermediate v13 build that added the column and journal
-    // but omitted the failure-code CHECK from the persisted table definition.
-    const partial = new DatabaseSync(env.database);
-    const schemaVersion = (partial.prepare("PRAGMA schema_version").get() as { schema_version: number }).schema_version;
-    partial.enableDefensive?.(false); // Only this disposable historical-schema fixture.
-    partial.exec("PRAGMA writable_schema=ON");
-    partial.prepare(`
-      UPDATE sqlite_master
-      SET sql=replace(
-        sql,
-        'failure_code TEXT CHECK(failure_code IS NULL OR failure_code=''provider_continuation_missing'')',
-        'failure_code TEXT'
-      )
-      WHERE type='table' AND name='supervised_agent_inbox'
-    `).run();
-    partial.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
-    partial.enableDefensive?.(true);
-    partial.close();
-
-    const repaired = new SupervisedAgentInboxStore(env.database);
-    assert.equal(
-      (await repaired.get(item!.inbox_item_id))?.failure_code,
-      "provider_continuation_missing",
-      "typed failure authority survives the table repair",
-    );
-    assert.equal(
-      (await repaired.latestContinuationRepair("partial-v13"))?.repair_id,
-      repair.repair_id,
-      "the continuation-repair journal survives the table repair",
-    );
-    await repaired.close();
-
-    const inspection = new DatabaseSync(env.database);
-    const inboxSql = (inspection.prepare(
-      "SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'",
-    ).get() as { sql: string }).sql;
-    assert.match(
-      inboxSql,
-      /CHECK\s*\(\s*failure_code\s+IS\s+NULL\s+OR\s+failure_code\s*=\s*'provider_continuation_missing'\s*\)/i,
-    );
-    assert.equal(
-      (inspection.prepare(
-        "SELECT COUNT(*) AS count FROM supervised_agent_inbox_events WHERE inbox_item_id=?",
-      ).get(item!.inbox_item_id) as { count: number }).count,
-      4,
-      "causal inbox events survive the table repair",
-    );
-    assert.equal(inspection.prepare("PRAGMA foreign_key_check").get(), undefined);
-    inspection.close();
-  } finally { await env.cleanup(); }
-});
-
-test("current v13 rejects unsupported failure codes even when the repair journal is absent", async () => {
-  const env = await fixture(); try {
-    const store = new SupervisedAgentInboxStore(env.database);
-    const [item] = await store.ingestPoll({
-      agent_id: "unsupported-failure",
-      room_id: "room",
-      last_observed_message_id: "1",
-      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
-    });
-    await store.close();
-
-    const malformed = new DatabaseSync(env.database);
-    const schemaVersion = (malformed.prepare("PRAGMA schema_version").get() as { schema_version: number }).schema_version;
-    malformed.enableDefensive?.(false); // Construct the rejected legacy table in the test fixture only.
-    malformed.exec(`
-      PRAGMA foreign_keys=OFF;
-      DROP TABLE provider_continuation_repairs;
-      PRAGMA writable_schema=ON;
-    `);
-    malformed.prepare(`
-      UPDATE sqlite_master
-      SET sql=replace(
-        sql,
-        'failure_code TEXT CHECK(failure_code IS NULL OR failure_code=''provider_continuation_missing'')',
-        'failure_code TEXT'
-      )
-      WHERE type='table' AND name='supervised_agent_inbox'
-    `).run();
-    malformed.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};`);
-    malformed.enableDefensive?.(true);
-    malformed.close();
-
-    const unsupported = new DatabaseSync(env.database);
-    unsupported.prepare(
-      "UPDATE supervised_agent_inbox SET failure_code='future_failure' WHERE inbox_item_id=?",
-    ).run(item!.inbox_item_id);
-    unsupported.close();
-
-    const rejected = new SupervisedAgentInboxStore(env.database);
-    await assert.rejects(
-      () => rejected.get(item!.inbox_item_id),
-      /unsupported continuation failure code/,
-    );
-    await rejected.close();
-  } finally { await env.cleanup(); }
-});
-
-test("current v13 repair rolls back its temporary journal backup as one atomic unit", async () => {
-  const env = await fixture(); try {
-    const store = new SupervisedAgentInboxStore(env.database);
-    const [item] = await store.ingestPoll({
-      agent_id: "repairable",
-      room_id: "room",
-      last_observed_message_id: "1",
-      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
-    });
-    await store.transition(item!.inbox_item_id, "blocked", {
-      failure_code: "provider_continuation_missing",
-      last_error: "thread not found: 00000000-0000-0000-0000-000000000001",
-    });
-    const repair = await store.beginContinuationRepair({
-      agent_id: "repairable",
-      room_id: "room",
-      inbox_item_id: item!.inbox_item_id,
-      daemon_generation: 4,
-      execution_generation_id: "execution_1",
-      work_attempt_id: "attempt_1",
-      expected_pid: 4100,
-      expected_process_identity: "pid-4100-birth-1",
-      missing_continuation: "00000000-0000-0000-0000-000000000001",
-    });
-    await store.close();
-
-    // Simulate a current v13 marker paired with the rolled-back v12 delivery
-    // graph that the repair path is designed to heal. Keep the v13 repair
-    // journal in place so applyV13Shape must use its TEMP backup path.
-    const database = new DatabaseSync(env.database);
-    const terminalSql = database.prepare("SELECT sql FROM sqlite_master WHERE name='supervised_agent_terminal_results'").get()!.sql;
-    database.exec(`
-      PRAGMA foreign_keys=OFF;
-      BEGIN IMMEDIATE;
-      CREATE TEMP TABLE inbox_v13_backup AS SELECT * FROM supervised_agent_inbox;
-      DROP TABLE supervised_agent_inbox_events;
-      DROP TABLE supervised_agent_terminal_results;
-      DROP TABLE supervised_agent_publications;
-      DROP TABLE supervised_agent_inbox;
-      CREATE TABLE supervised_agent_inbox (
-        inbox_item_id TEXT PRIMARY KEY,
-        agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
-        source_message_json TEXT NOT NULL, activation_json TEXT NOT NULL,
-        fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
-        state TEXT NOT NULL CHECK (state IN ('pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move')),
-        attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-        action_id TEXT NOT NULL, reply_client_message_id TEXT NOT NULL,
-        provider_turn_id TEXT, outcome TEXT, last_error TEXT,
-        blocked_by_inbox_item_id TEXT REFERENCES supervised_agent_inbox(inbox_item_id),
-        next_attempt_at_ms INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, acknowledged_at TEXT,
-        UNIQUE(agent_id,room_id,source_message_id), UNIQUE(agent_id,fifo_sequence),
-        UNIQUE(inbox_item_id,agent_id,room_id)
-      ) STRICT;
-      INSERT INTO supervised_agent_inbox
-        (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
-        SELECT inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at
-        FROM temp.inbox_v13_backup;
-      DROP TABLE temp.inbox_v13_backup;
-      CREATE INDEX supervised_agent_inbox_head ON supervised_agent_inbox(agent_id,fifo_sequence);
-      CREATE TABLE supervised_agent_inbox_events (
-        inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
-        event_sequence INTEGER NOT NULL CHECK(event_sequence > 0), idempotency_key TEXT NOT NULL,
-        phase TEXT NOT NULL CHECK(phase IN ('received','queued','turn_started','turn_finished','result_unreadable','publish_started','published','no_reply','retry_scheduled','blocked','room_move_cancelled')),
-        observed_at TEXT NOT NULL, detail TEXT,
-        PRIMARY KEY(inbox_item_id,event_sequence), UNIQUE(inbox_item_id,idempotency_key)
-      ) STRICT;
-      CREATE INDEX supervised_agent_inbox_events_timeline ON supervised_agent_inbox_events(inbox_item_id,event_sequence);
-      ${terminalSql};
-      CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id);
-      CREATE TABLE supervised_agent_publications (
-        inbox_item_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
-        client_message_id TEXT NOT NULL, canonical_message_id TEXT NOT NULL, published_at TEXT NOT NULL,
-        FOREIGN KEY(inbox_item_id,agent_id,room_id)
-          REFERENCES supervised_agent_inbox(inbox_item_id,agent_id,room_id) ON DELETE CASCADE,
-        UNIQUE(room_id,client_message_id), UNIQUE(room_id,canonical_message_id)
-      ) STRICT;
-      CREATE INDEX supervised_agent_publications_agent_room ON supervised_agent_publications(agent_id,room_id);
-      COMMIT;
-      PRAGMA foreign_keys=ON;
-    `);
-
-    const interrupted = new DaemonStateSchema(
-      undefined,
-      undefined,
-      undefined,
-      () => { throw new Error("interrupt after v13 journal backup"); },
-    );
-    assert.throws(
-      () => interrupted.createSchema(database),
-      /interrupt after v13 journal backup/,
-    );
-    assert.equal(
-      (database.prepare("SELECT COUNT(*) AS count FROM provider_continuation_repairs WHERE repair_id=?").get(repair.repair_id) as { count: number }).count,
-      1,
-      "rollback restores the authoritative continuation-repair journal",
-    );
-    assert.equal(
-      (database.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('supervised_agent_inbox') WHERE name='failure_code'").get() as { count: number }).count,
-      0,
-      "rollback restores the complete predecessor inbox shape",
-    );
-    assert.equal(
-      (database.prepare("SELECT COUNT(*) AS count FROM temp.sqlite_master WHERE name='provider_continuation_repairs_v13_backup'").get() as { count: number }).count,
-      0,
-      "rollback removes the temporary journal backup",
-    );
-
-    new DaemonStateSchema().createSchema(database);
-    assert.equal(
-      (database.prepare("SELECT COUNT(*) AS count FROM provider_continuation_repairs WHERE repair_id=?").get(repair.repair_id) as { count: number }).count,
-      1,
-      "a clean retry preserves the journal while repairing the inbox",
-    );
-    assert.equal(
-      (database.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('supervised_agent_inbox') WHERE name='failure_code'").get() as { count: number }).count,
-      1,
-    );
-    database.close();
   } finally { await env.cleanup(); }
 });
 
@@ -1407,10 +1037,11 @@ test("a started message can be skipped once its turn is finished or belongs to a
     await seed("stopping", TEST_PROVIDER_TURN_AUTHORITY.provider_continuation_id);
     const stopping = await startBlocked("stopping", "1", "unreadable");
     const journal = new DatabaseSync(env.database);
-    journal.prepare(`INSERT INTO turn_control_journals(agent_id,turn_control_present,inbox_item_id) VALUES(?,1,?)
-      ON CONFLICT(agent_id) DO UPDATE SET turn_control_present=1,inbox_item_id=excluded.inbox_item_id`).run("stopping", stopping.inbox_item_id);
+    journal.prepare(`UPDATE agents SET turn_control_inbox_item_id=?, turn_control_status='dispatching',
+      turn_control_json=? WHERE agent_id=?`)
+      .run(stopping.inbox_item_id, JSON.stringify({ action_id: "stop-1", status: "dispatching", inbox_item_id: stopping.inbox_item_id }), "stopping");
     await assert.rejects(store.skipBlocked(stopping.inbox_item_id), /stop or correction for this message is still being settled/);
-    journal.prepare("UPDATE turn_control_journals SET turn_control_present=0 WHERE agent_id=?").run("stopping");
+    journal.prepare("UPDATE agents SET turn_control_inbox_item_id=NULL, turn_control_status=NULL, turn_control_json=NULL WHERE agent_id=?").run("stopping");
     journal.close();
     assert.equal((await store.skipBlocked(stopping.inbox_item_id)).state, "cancelled_by_user");
 
@@ -1418,7 +1049,7 @@ test("a started message can be skipped once its turn is finished or belongs to a
     const [head, later] = await ingest("head", ["1", "2"]);
     await store.transition((await store.claimHead("head"))!.inbox_item_id, "blocked", { last_error: "blocked head" });
     const corrupt = new DatabaseSync(env.database);
-    corrupt.prepare("UPDATE supervised_agent_inbox SET state='blocked' WHERE inbox_item_id=?").run(later!.inbox_item_id);
+    corrupt.prepare("UPDATE inbox_items SET state='blocked' WHERE inbox_item_id=?").run(later!.inbox_item_id);
     corrupt.close();
     await assert.rejects(store.skipBlocked(later!.inbox_item_id), /Only the current FIFO head/);
     assert.equal((await store.get(head!.inbox_item_id))?.state, "blocked");
@@ -1454,7 +1085,7 @@ test("Skip on a follow-up says that it was skipped only when no turn started for
     await store.transition(item.inbox_item_id, "result_recovery");
     await store.transition(item.inbox_item_id, "blocked", { last_error: "The same turn was re-read and was not rerun." });
     const raw = new DatabaseSync(env.database);
-    raw.prepare("UPDATE supervised_agent_inbox SET source_message_id='task-continuation:parent' WHERE inbox_item_id=?").run(item.inbox_item_id);
+    raw.prepare("UPDATE inbox_items SET source_message_id='task-continuation:parent' WHERE inbox_item_id=?").run(item.inbox_item_id);
     raw.close();
     const skipped = await store.skipBlocked(item.inbox_item_id);
     assert.equal(skipped.source_message_id, "task-continuation:parent");
@@ -1481,12 +1112,12 @@ test("repeated pre-turn skips retain exactly bounded physical history", async ()
       assert.equal((await store.skipBlocked(item.inbox_item_id)).state, "cancelled_by_user");
     }
     const inspection = new DatabaseSync(env.database);
-    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM inbox_items
       WHERE agent_id='bounded-skip' AND state='cancelled_by_user'`).get() as { count: number }).count), 200);
     assert.ok(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox_events e
-      JOIN supervised_agent_inbox i USING (inbox_item_id) WHERE i.agent_id='bounded-skip'`).get() as { count: number }).count) <= 800);
-    assert.equal(inspection.prepare("SELECT 1 FROM supervised_agent_inbox WHERE inbox_item_id=?").get(oldest), undefined);
-    assert.ok(inspection.prepare("SELECT 1 FROM supervised_agent_inbox WHERE inbox_item_id=?").get(newest));
+      JOIN inbox_items i USING (inbox_item_id) WHERE i.agent_id='bounded-skip'`).get() as { count: number }).count) <= 800);
+    assert.equal(inspection.prepare("SELECT 1 FROM inbox_items WHERE inbox_item_id=?").get(oldest), undefined);
+    assert.ok(inspection.prepare("SELECT 1 FROM inbox_items WHERE inbox_item_id=?").get(newest));
     assert.deepEqual(inspection.prepare("PRAGMA foreign_key_check").all(), []);
     inspection.close();
     await store.close();
@@ -1663,20 +1294,20 @@ test("inconsistent native failure journals refuse recovery and Stop without chan
         if (["null", "malformed", "unreadable", "reply", "null_and_missing_binding"].includes(corruption)) {
           const outcome = corruption === "malformed" ? "{" : corruption === "reply" || corruption === "unreadable"
             ? JSON.stringify({ kind: corruption, text: corruption === "reply" ? "must not publish" : null, evidence: "stream" }) : null;
-          database.prepare("UPDATE supervised_agent_inbox SET outcome=? WHERE inbox_item_id=?").run(outcome, item!.inbox_item_id);
+          database.prepare("UPDATE inbox_items SET outcome=? WHERE inbox_item_id=?").run(outcome, item!.inbox_item_id);
         }
         if (corruption === "missing_binding" || corruption === "null_and_missing_binding") {
           database.prepare("DELETE FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").run(item!.inbox_item_id);
         } else if (corruption === "wrong_binding") {
           database.prepare("UPDATE supervised_agent_provider_turn_bindings SET provider_continuation_id='other' WHERE inbox_item_id=?").run(item!.inbox_item_id);
         }
-        const before = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id);
+        const before = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item!.inbox_item_id);
         await assert.rejects(() => store.nativeFailure(item!.inbox_item_id), /exact native terminal/);
         await assert.rejects(() => store.cancelInterruptedTurn(item!.inbox_item_id), /exact native terminal/);
         await assert.rejects(() => store.normalizeStartupRecovery("native"), /exact native terminal/);
         await store.close(); store = new SupervisedAgentInboxStore(env.database);
         await assert.rejects(() => store.normalizeStartupRecovery("native"), /exact native terminal/, `${kind}:${corruption}`);
-        assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id), before);
+        assert.deepEqual(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item!.inbox_item_id), before);
         assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_publications").get()?.n, 0);
       } finally { database.close(); await store.close(); await env.cleanup(); }
     }
@@ -1709,9 +1340,9 @@ test("failed receipts retain bounded history without hiding uncertain partial mu
     assert.equal((await store.receipts("native")).length, 200);
     const database = new DatabaseSync(env.database);
     try {
-      assert.equal(database.prepare("SELECT state FROM supervised_agent_effects WHERE mcp_request_id='partial-mutation'").get()?.state, "executing");
+      assert.equal(database.prepare("SELECT state FROM effects WHERE mcp_request_id='partial-mutation'").get()?.state, "executing");
       await store.normalizeStartupRecovery("native");
-      assert.equal(database.prepare("SELECT state FROM supervised_agent_effects WHERE mcp_request_id='partial-mutation'").get()?.state, "uncertain");
+      assert.equal(database.prepare("SELECT state FROM effects WHERE mcp_request_id='partial-mutation'").get()?.state, "uncertain");
       assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_terminal_results").get()?.n, 200);
       assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_publications").get()?.n, 0);
     } finally { database.close(); }
@@ -1839,7 +1470,7 @@ test("room-move compensation pins cancelled history until rollback or terminal r
       agentId: "bounded-move", roomId: "old-room", workAttemptId: "attempt",
       executionGenerationId: "generation", providerContinuationId: "continuation",
     });
-    const generation = (await manifest.load()).generation;
+    const generation = 1;
     for (let index = 1; index <= 205; index += 1) {
       await inbox.enqueueCorrection({
         agent_id: "bounded-move", room_id: "old-room", source_message_id: `move-${index}`,
@@ -1867,10 +1498,10 @@ test("room-move compensation pins cancelled history until rollback or terminal r
       operation_id: "move-rollback", agent_id: "bounded-move", old_room_id: "old-room", after_fifo_sequence: 0,
     }), 205);
     let inspection = new DatabaseSync(env.database);
-    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM inbox_items
       WHERE agent_id='bounded-move' AND state='cancelled_by_room_move'`).get() as { count: number }).count), 205,
     "nonterminal move authority may temporarily exceed receipt history because every row is rollback state");
-    const noisyItem = inspection.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id='bounded-move' ORDER BY fifo_sequence DESC LIMIT 1").get()!;
+    const noisyItem = inspection.prepare("SELECT inbox_item_id FROM inbox_items WHERE agent_id='bounded-move' ORDER BY fifo_sequence DESC LIMIT 1").get()!;
     const addNoise = inspection.prepare(`INSERT INTO supervised_agent_inbox_events
       VALUES (?,?,?,'conversation_restoring','2026-08-05T12:30:00.000Z',NULL)`);
     for (let index = 0; index < 100; index++) addNoise.run(String(noisyItem.inbox_item_id), index + 100, `move-noise:${index}`);
@@ -1889,7 +1520,7 @@ test("room-move compensation pins cancelled history until rollback or terminal r
       expectedExecutionGenerationId: "generation", from: ["membership_committed"], to: "failed",
     });
     inspection = new DatabaseSync(env.database);
-    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM inbox_items
       WHERE agent_id='bounded-move' AND state='pending'`).get() as { count: number }).count), 205);
     inspection.close();
 
@@ -1907,7 +1538,7 @@ test("room-move compensation pins cancelled history until rollback or terminal r
       expectedExecutionGenerationId: "generation", from: ["membership_committed"], to: "active",
     });
     inspection = new DatabaseSync(env.database);
-    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM inbox_items
       WHERE agent_id='bounded-move' AND state='cancelled_by_room_move'`).get() as { count: number }).count), 200,
     "terminal move release converges compensation rows to the ordinary history budget");
     await inbox.pruneHistory("bounded-move");
@@ -2008,7 +1639,7 @@ test("terminal receipts and observed context are bounded while prepared effects 
     assert.equal(
       (afterPrune.prepare(`SELECT COUNT(*) AS value
         FROM supervised_agent_inbox_events events
-        LEFT JOIN supervised_agent_inbox inbox ON inbox.inbox_item_id=events.inbox_item_id
+        LEFT JOIN inbox_items inbox ON inbox.inbox_item_id=events.inbox_item_id
         WHERE inbox.inbox_item_id IS NULL`).get() as { value: number }).value,
       0,
       "foreign-key cascading must remove timeline rows with pruned inbox receipts",
@@ -2212,215 +1843,6 @@ test("inspector detail checkpoints canonical publication and records a monotonic
   } finally { await env.cleanup(); }
 });
 
-test("v9 validation rejects malformed delivery-history table and relational shapes", async () => {
-  for (const mutation of [
-    `DROP INDEX supervised_agent_publications_agent_room; CREATE INDEX supervised_agent_publications_agent_room ON supervised_agent_publications(room_id,agent_id)`,
-    `DROP TABLE supervised_agent_publications; CREATE TABLE supervised_agent_publications (inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id),agent_id TEXT NOT NULL,room_id TEXT NOT NULL,client_message_id TEXT NOT NULL,canonical_message_id TEXT NOT NULL,published_at INTEGER NOT NULL,UNIQUE(room_id,client_message_id),UNIQUE(room_id,canonical_message_id)) STRICT`,
-  ]) {
-    const env = await fixture(); try {
-      const store = new SupervisedAgentInboxStore(env.database); await store.receipts("shape"); await store.close();
-      const database = new DatabaseSync(env.database); database.exec(mutation); database.close();
-      const rejected = new SupervisedAgentInboxStore(env.database);
-      await assert.rejects(() => rejected.receipts("shape"), /Daemon state v(?:8|9) (?:table|index|delivery-history constraints|publication index)/);
-      await rejected.close();
-    } finally { await env.cleanup(); }
-  }
-});
-
-test("v17 validation rejects malformed mutation policy and upgrade terminal classifications", async () => {
-  {
-    const env = await fixture(); try {
-      const store = new SupervisedAgentInboxStore(env.database);
-      await store.receipts("shape-v17");
-      await store.close();
-      const database = new DatabaseSync(env.database);
-      database.exec(`
-        DROP INDEX supervised_agent_effects_turn;
-        ALTER TABLE supervised_agent_effects RENAME TO supervised_agent_effects_valid_v17;
-        CREATE TABLE supervised_agent_effects (
-          effect_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
-          execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-          mcp_request_id TEXT NOT NULL, tool_name TEXT NOT NULL, request_json TEXT NOT NULL,
-          mutation INTEGER NOT NULL,
-          state TEXT NOT NULL CHECK(state IN ('prepared','executing','uncertain','completed','failed')),
-          result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-          UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
-        ) STRICT;
-        INSERT INTO supervised_agent_effects SELECT * FROM supervised_agent_effects_valid_v17;
-        DROP TABLE supervised_agent_effects_valid_v17;
-        CREATE INDEX supervised_agent_effects_turn
-          ON supervised_agent_effects(agent_id,execution_generation_id,provider_turn_id);
-      `);
-      database.close();
-      const rejected = new SupervisedAgentInboxStore(env.database);
-      await assert.rejects(() => rejected.receipts("shape-v17"), /v17 supervised-effect journal.*invalid durable classification shape/i);
-      await rejected.close();
-    } finally { await env.cleanup(); }
-  }
-
-  {
-    const env = await fixture(); try {
-      const store = new SupervisedAgentInboxStore(env.database);
-      const [item] = await store.ingestPoll({
-        agent_id: "terminal-v17", room_id: "room", last_observed_message_id: "1",
-        messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
-      });
-      await store.close();
-      const database = new DatabaseSync(env.database);
-      database.exec("PRAGMA ignore_check_constraints=ON");
-      database.prepare("UPDATE supervised_agent_inbox SET terminal_reason='upgrade_authority_unavailable' WHERE inbox_item_id=?")
-        .run(item!.inbox_item_id);
-      database.close();
-      const rejected = new SupervisedAgentInboxStore(env.database);
-      await assert.rejects(() => rejected.receipts("terminal-v17"), /mismatched upgrade terminal classification/i);
-      await rejected.close();
-    } finally { await env.cleanup(); }
-  }
-});
-
-test("v17 validation requires the exact supervised-effect request identity and turn index", async () => {
-  for (const malformed of ["missing_identity", "missing_turn_index"] as const) {
-    const env = await fixture(); try {
-      const store = new SupervisedAgentInboxStore(env.database);
-      await store.receipts(`shape-v17-${malformed}`);
-      await store.close();
-      const database = new DatabaseSync(env.database);
-      if (malformed === "missing_turn_index") {
-        database.exec("DROP INDEX supervised_agent_effects_turn");
-      } else {
-        database.exec(`
-          DROP INDEX supervised_agent_effects_turn;
-          ALTER TABLE supervised_agent_effects RENAME TO supervised_agent_effects_valid_identity;
-          CREATE TABLE supervised_agent_effects (
-            effect_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
-            execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-            mcp_request_id TEXT NOT NULL, tool_name TEXT NOT NULL, request_json TEXT NOT NULL,
-            mutation INTEGER NOT NULL CHECK(mutation IN (0,1)),
-            state TEXT NOT NULL CHECK(state IN ('prepared','executing','uncertain','completed','failed')),
-            result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-          ) STRICT;
-          INSERT INTO supervised_agent_effects SELECT * FROM supervised_agent_effects_valid_identity;
-          DROP TABLE supervised_agent_effects_valid_identity;
-          CREATE INDEX supervised_agent_effects_turn
-            ON supervised_agent_effects(agent_id,execution_generation_id,provider_turn_id);
-        `);
-      }
-      database.close();
-      const rejected = new SupervisedAgentInboxStore(env.database);
-      await assert.rejects(
-        () => rejected.receipts(`shape-v17-${malformed}`),
-        malformed === "missing_identity" ? /exact request identity constraint/i : /turn index is missing or malformed/i,
-      );
-      await rejected.close();
-    } finally { await env.cleanup(); }
-  }
-});
-
-test("v17 validation requires exact effect_id primary keys for full and compact effect journals", async () => {
-  for (const malformed of ["effects", "tombstones"] as const) {
-    const env = await fixture(); try {
-      const store = new SupervisedAgentInboxStore(env.database);
-      await store.receipts(`shape-v17-${malformed}-primary-key`);
-      await store.close();
-      const database = new DatabaseSync(env.database);
-      if (malformed === "effects") {
-        database.exec(`
-          DROP INDEX supervised_agent_effects_turn;
-          ALTER TABLE supervised_agent_effects RENAME TO supervised_agent_effects_valid_primary_key;
-          CREATE TABLE supervised_agent_effects (
-            effect_id TEXT NOT NULL, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
-            execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-            mcp_request_id TEXT NOT NULL, tool_name TEXT NOT NULL, request_json TEXT NOT NULL,
-            mutation INTEGER NOT NULL CHECK(mutation IN (0,1)),
-            state TEXT NOT NULL CHECK(state IN ('prepared','executing','uncertain','completed','failed')),
-            result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-            UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
-          ) STRICT;
-          INSERT INTO supervised_agent_effects SELECT * FROM supervised_agent_effects_valid_primary_key;
-          DROP TABLE supervised_agent_effects_valid_primary_key;
-          CREATE INDEX supervised_agent_effects_turn
-            ON supervised_agent_effects(agent_id,execution_generation_id,provider_turn_id);
-        `);
-      } else {
-        database.exec(`
-          DROP INDEX supervised_agent_effect_tombstones_turn;
-          ALTER TABLE supervised_agent_effect_tombstones RENAME TO supervised_agent_effect_tombstones_valid_primary_key;
-          CREATE TABLE supervised_agent_effect_tombstones (
-            effect_id TEXT NOT NULL, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
-            execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-            mcp_request_id TEXT NOT NULL, tool_name TEXT NOT NULL,
-            request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64 AND request_sha256 NOT GLOB '*[^0-9a-f]*'),
-            request_bytes INTEGER NOT NULL CHECK(request_bytes>=0),
-            mutation INTEGER NOT NULL CHECK(mutation IN (0,1)),
-            state TEXT NOT NULL CHECK(state IN ('uncertain','completed','failed')),
-            result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-            UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
-          ) STRICT;
-          INSERT INTO supervised_agent_effect_tombstones SELECT * FROM supervised_agent_effect_tombstones_valid_primary_key;
-          DROP TABLE supervised_agent_effect_tombstones_valid_primary_key;
-          CREATE INDEX supervised_agent_effect_tombstones_turn
-            ON supervised_agent_effect_tombstones(agent_id,execution_generation_id,provider_turn_id);
-        `);
-      }
-      database.close();
-      const rejected = new SupervisedAgentInboxStore(env.database);
-      await assert.rejects(
-        () => rejected.receipts(`shape-v17-${malformed}-primary-key`),
-        malformed === "effects"
-          ? /supervised-effect journal effect_id.*TEXT primary key/i
-          : /supervised-effect tombstone effect_id.*TEXT primary key/i,
-      );
-      await rejected.close();
-    } finally { await env.cleanup(); }
-  }
-});
-
-test("v9 rejects corrupt publication parent identity and unpaired pruning fields", async () => {
-  for (const corruption of ["publication", "boundary"] as const) {
-    const env = await fixture(); try {
-      const store = new SupervisedAgentInboxStore(env.database);
-      const [item] = await store.ingestPoll({
-        agent_id: "integrity", room_id: "room_a", last_observed_message_id: "msg_1",
-        messages: [{ source_message_id: "msg_1", source_message: {}, activation: {} }],
-      });
-      await store.close();
-      const database = new DatabaseSync(env.database);
-      if (corruption === "publication") {
-        database.exec("PRAGMA foreign_keys = OFF");
-        database.prepare(`INSERT INTO supervised_agent_publications
-          (inbox_item_id,agent_id,room_id,client_message_id,canonical_message_id,published_at)
-          VALUES (?,?,?,?,?,?)`).run(item!.inbox_item_id, "integrity", "room_b", "bad-client", "bad-canonical", "2026-07-23T00:00:00.000Z");
-      } else {
-        database.exec("PRAGMA ignore_check_constraints = ON");
-        database.prepare(`UPDATE supervised_agent_history_boundaries
-          SET pruned_before_message_id=?, pruned_at=NULL
-          WHERE agent_id=? AND room_id=?`).run("msg_1", "integrity", "room_a");
-      }
-      database.close();
-      const rejected = new SupervisedAgentInboxStore(env.database);
-      await assert.rejects(
-        () => rejected.receipts("integrity"),
-        corruption === "publication" ? /publication parent identity|foreign key integrity/ : /history boundary pruning fields/,
-      );
-      await rejected.close();
-    } finally { await env.cleanup(); }
-  }
-});
-
-test("older marker with physical v7 delivery tables installs v9 before advancing", async () => {
-  const env = await fixture(); try {
-    const store = new SupervisedAgentInboxStore(env.database); await store.receipts("repair-v8"); await store.close();
-    const database = new DatabaseSync(env.database);
-    database.exec(`DROP INDEX supervised_agent_publications_agent_room; DROP INDEX supervised_agent_history_boundaries_updated; DROP INDEX supervised_agent_pruned_sources_retention; DROP TABLE supervised_agent_publications; DROP TABLE supervised_agent_history_boundaries; DROP TABLE supervised_agent_pruned_sources; UPDATE manifest_metadata SET schema_version=5 WHERE singleton=1; PRAGMA user_version=5;`);
-    database.close();
-    const reopened = new SupervisedAgentInboxStore(env.database); await reopened.receipts("repair-v8"); await reopened.close();
-    const inspection = new DatabaseSync(env.database);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
-    assert.ok(inspection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='supervised_agent_pruned_sources'").get());
-    inspection.close();
-  } finally { await env.cleanup(); }
-});
-
 test("effect journal is exactly-once and rejects request-id or turn identity reuse", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
@@ -2518,77 +1940,11 @@ test("effect recovery redrives reads, quarantines mutations, and accepts a late 
 
     const inspection = new DatabaseSync(env.database);
     try {
-      const state = (effectId: string) => (inspection.prepare("SELECT state FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as { state: string }).state;
+      const state = (effectId: string) => (inspection.prepare("SELECT state FROM effects WHERE effect_id=?").get(effectId) as { state: string }).state;
       assert.equal(state(restartReadEffect.effect.effect_id), "prepared");
       assert.equal(state(restartMutationEffect.effect.effect_id), "uncertain");
     } finally { inspection.close(); }
     await store.close();
-  } finally { await env.cleanup(); }
-});
-
-test("v16 migration durably classifies interrupted reads and mutations", async () => {
-  const env = await fixture(); try {
-    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T18:10:00.000Z");
-    const [item] = await store.ingestPoll({
-      agent_id: "v16-effects", room_id: "room", last_observed_message_id: "1",
-      messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
-    });
-    await store.transition(item!.inbox_item_id, "dispatching");
-    await store.checkpointTurnStarted(item!.inbox_item_id, "turn", {
-      work_attempt_id: "attempt", origin_execution_generation_id: "run", provider_continuation_id: "continuation",
-    });
-    await seedActiveAgent(env, {
-      agentId: "v16-effects", roomId: "room", workAttemptId: "attempt",
-      executionGenerationId: "run", providerContinuationId: "continuation", provider: "claude-code",
-    });
-    const base = {
-      agent_id: "v16-effects", room_id: "room", execution_generation_id: "run", provider_turn_id: "turn",
-      work_attempt_id: "attempt", current_execution_generation_id: "run", provider_continuation_id: "continuation",
-    };
-    const read = { ...base, mcp_request_id: "read", tool_name: "wait_for_messages", request: {} };
-    const mutation = { ...base, mcp_request_id: "mutation", tool_name: "claim_task", request: { task_id: "1" } };
-    const readEffect = await store.prepareEffect(read);
-    const mutationEffect = await store.prepareEffect(mutation);
-    await store.markEffectExecuting({ effect_id: readEffect.effect.effect_id, ...read });
-    await store.markEffectExecuting({ effect_id: mutationEffect.effect.effect_id, ...mutation });
-    await store.close();
-
-    const legacy = new DatabaseSync(env.database);
-    legacy.exec(`
-      DROP INDEX supervised_agent_effects_turn;
-      ALTER TABLE supervised_agent_effects RENAME TO supervised_agent_effects_v17;
-      CREATE TABLE supervised_agent_effects (
-        effect_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
-        execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-        mcp_request_id TEXT NOT NULL, tool_name TEXT NOT NULL, request_json TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('prepared','executing','completed','failed')),
-        result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-        UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
-      ) STRICT;
-      INSERT INTO supervised_agent_effects
-        (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
-         tool_name,request_json,state,result_json,error,created_at,updated_at)
-      SELECT effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
-        tool_name,request_json,state,result_json,error,created_at,updated_at
-      FROM supervised_agent_effects_v17;
-      DROP TABLE supervised_agent_effects_v17;
-      CREATE INDEX supervised_agent_effects_turn
-        ON supervised_agent_effects(agent_id,execution_generation_id,provider_turn_id);
-      UPDATE manifest_metadata SET schema_version=16 WHERE singleton=1;
-      PRAGMA user_version=16;
-    `);
-    legacy.close();
-
-    const migrated = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T18:11:00.000Z");
-    assert.equal((await migrated.prepareEffect(read)).effect.state, "prepared", "the interrupted read remains safely redrivable");
-    const migratedMutation = await migrated.prepareEffect(mutation);
-    assert.equal(migratedMutation.effect.state, "uncertain");
-    assert.equal(migratedMutation.effect.mutation, true);
-    const inspection = new DatabaseSync(env.database);
-    try {
-      assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
-    } finally { inspection.close(); }
-    await migrated.close();
   } finally { await env.cleanup(); }
 });
 
@@ -2627,22 +1983,22 @@ test("33 active-turn uncertain mutations retain exact replay and late-completion
 
     const compacted = new DatabaseSync(env.database);
     try {
-      assert.equal((compacted.prepare("SELECT COUNT(*) AS count FROM supervised_agent_effects WHERE agent_id=? AND state='uncertain'")
+      assert.equal((compacted.prepare("SELECT COUNT(*) AS count FROM effects WHERE agent_id=? AND state='uncertain'")
         .get(base.agent_id) as { count: number }).count, 32, "only the Inspector diagnostic window retains full rows");
-      assert.equal((compacted.prepare("SELECT COUNT(*) AS count FROM supervised_agent_effect_tombstones WHERE agent_id=?")
+      assert.equal((compacted.prepare("SELECT COUNT(*) AS count FROM effect_tombstones WHERE agent_id=?")
         .get(base.agent_id) as { count: number }).count, 1, "request 1 retains a compact durable identity");
       assert.equal((compacted.prepare(`SELECT COUNT(*) AS count FROM (
-          SELECT effect_id FROM supervised_agent_effects
+          SELECT effect_id FROM effects
           WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
           UNION ALL
-          SELECT effect_id FROM supervised_agent_effect_tombstones
+          SELECT effect_id FROM effect_tombstones
           WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
         )`).get(
         base.agent_id, base.execution_generation_id, base.provider_turn_id,
         base.agent_id, base.execution_generation_id, base.provider_turn_id,
       ) as { count: number }).count, requests.length,
       "compaction preserves the same identities counted by bounded per-turn effect admission");
-      assert.equal(compacted.prepare("SELECT 1 FROM supervised_agent_effects WHERE effect_id=?").get(effects[0]!.effect_id), undefined);
+      assert.equal(compacted.prepare("SELECT 1 FROM effects WHERE effect_id=?").get(effects[0]!.effect_id), undefined);
     } finally { compacted.close(); }
 
     const firstReplay = await store.prepareEffect(requests[0]!);
@@ -2675,7 +2031,7 @@ test("33 active-turn uncertain mutations retain exact replay and late-completion
     await store.transition(item!.inbox_item_id, "acknowledged_no_reply");
     const terminalAuthority = new DatabaseSync(env.database);
     try {
-      assert.equal((terminalAuthority.prepare("SELECT COUNT(*) AS count FROM supervised_agent_effect_tombstones WHERE effect_id=?")
+      assert.equal((terminalAuthority.prepare("SELECT COUNT(*) AS count FROM effect_tombstones WHERE effect_id=?")
         .get(effects[0]!.effect_id) as { count: number }).count, 1,
       "terminal receipt retention keeps delayed completion/replay authority while its binding exists");
     } finally { terminalAuthority.close(); }
@@ -2697,9 +2053,9 @@ test("33 active-turn uncertain mutations retain exact replay and late-completion
 
     const bounded = new DatabaseSync(env.database);
     try {
-      assert.equal((bounded.prepare("SELECT COUNT(*) AS count FROM supervised_agent_effects WHERE agent_id=? AND state='uncertain'")
+      assert.equal((bounded.prepare("SELECT COUNT(*) AS count FROM effects WHERE agent_id=? AND state='uncertain'")
         .get("uncertain-budget") as { count: number }).count, 0);
-      assert.equal((bounded.prepare("SELECT COUNT(*) AS count FROM supervised_agent_effect_tombstones WHERE agent_id=?")
+      assert.equal((bounded.prepare("SELECT COUNT(*) AS count FROM effect_tombstones WHERE agent_id=?")
         .get("uncertain-budget") as { count: number }).count, 0,
       "bounded receipt retention removes the provider-turn binding before compact dedupe identity is discarded");
     } finally { bounded.close(); }
@@ -2875,18 +2231,11 @@ test("captured receipt settlement accepts typed authority mode and rejects non-t
     const readAttempt = () => ({ ...database!.prepare("SELECT state,conclusion FROM execution_message_attempts WHERE attempt_id=?").get(attempt) });
     const resetAttempt = database.prepare("UPDATE execution_message_attempts SET state='active',conclusion=NULL,settled_at_ms=NULL WHERE attempt_id=?");
     const setAuthorityMode = database.prepare(`UPDATE execution_runtime_generations SET authority_mode=?
-      WHERE runtime_generation_id=(SELECT runtime_generation_id FROM execution_turns WHERE attempt_id=?)`);
+      WHERE runtime_generation_id=(SELECT runtime_generation_id FROM runs WHERE attempt_id=?)`);
     assert.deepEqual(readAttempt(),
       { state: "cleanly_concluded", conclusion: "acknowledged_no_reply" });
-    for (const rejectedMode of ["typed_shadow", "legacy"] as const) {
-      resetAttempt.run(attempt);
-      setAuthorityMode.run(rejectedMode, attempt);
-      assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-authority"),
-        { lastFifoSequence: 1, hasMore: false, unavailable: true, changed: false });
-      assert.deepEqual(readAttempt(),
-        { state: "active", conclusion: null });
-    }
-    setAuthorityMode.run("typed", attempt);
+    assert.throws(() => setAuthorityMode.run("unsupported_mode", attempt), /CHECK constraint failed/i);
+    resetAttempt.run(attempt);
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-authority"),
       { lastFifoSequence: 1, hasMore: false, unavailable: false, changed: true });
     assert.deepEqual(readAttempt(),
@@ -2937,8 +2286,8 @@ test("captured receipt settlement batches advance past invalid proof without cro
       item.source_message_id === "5" ? "reply" : item.source_message_id === "6" ? "failed" : "no_reply"));
     database.prepare("UPDATE execution_attempt_generations SET workspace_id='other-workspace' WHERE attempt_id=?").run(attempts[0]!);
     database.prepare("UPDATE supervised_agent_provider_turn_bindings SET origin_execution_generation_id='other-generation' WHERE inbox_item_id=?").run(items[1]!.inbox_item_id);
-    database.prepare("UPDATE execution_turns SET provider_continuation_id='other-continuation' WHERE attempt_id=?").run(attempts[2]!);
-    database.prepare("UPDATE supervised_agent_inbox SET terminal_reason='upgrade_authority_unavailable' WHERE inbox_item_id=?").run(items[3]!.inbox_item_id);
+    database.prepare("UPDATE runs SET provider_continuation_id='other-continuation' WHERE attempt_id=?").run(attempts[2]!);
+    database.prepare("UPDATE inbox_items SET terminal_reason='upgrade_authority_unavailable' WHERE inbox_item_id=?").run(items[3]!.inbox_item_id);
     database.prepare("DELETE FROM supervised_agent_publications WHERE inbox_item_id=?").run(items[4]!.inbox_item_id);
     database.prepare("UPDATE supervised_agent_terminal_results SET terminal_evidence_json='{}' WHERE inbox_item_id=?").run(items[5]!.inbox_item_id);
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-batch"), { lastFifoSequence: 32, hasMore: true, unavailable: true, changed: true });
@@ -2965,13 +2314,13 @@ test("captured attempt conclusions preserve native failures, cancellation, no-re
       messages: outcomes.map((_, index) => ({ source_message_id: String(index + 1), source_message: {}, activation: {} })) });
     database = new DatabaseSync(env.database);
     for (const [index, outcome] of outcomes.entries()) await completeCapturedReceipt(store, database, items[index]!, outcome);
-    const receipts = database.prepare("SELECT * FROM supervised_agent_inbox ORDER BY fifo_sequence").all();
+    const receipts = database.prepare("SELECT * FROM inbox_items ORDER BY fifo_sequence").all();
     database.exec(`CREATE TRIGGER reject_second_optional_settlement BEFORE UPDATE ON execution_message_attempts
       WHEN NEW.source_message_id='2' AND EXISTS (
         SELECT 1 FROM execution_message_attempts WHERE source_message_id='1' AND conclusion='failed'
       ) BEGIN SELECT RAISE(ABORT,'second optional write rejected after first settled'); END`);
     database.exec("BEGIN IMMEDIATE");
-    database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?")
+    database.prepare("UPDATE inbox_items SET last_error=? WHERE inbox_item_id=?")
       .run("caller mutation survives", items[0]!.inbox_item_id);
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-outcomes"),
       { lastFifoSequence: null, hasMore: false, unavailable: true, changed: false });
@@ -2979,9 +2328,9 @@ test("captured attempt conclusions preserve native failures, cancellation, no-re
     assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_message_attempts WHERE state='active'").get()!.count, 5,
       "the second update's abort must roll back the successful first projection update too");
     database.exec("COMMIT");
-    assert.equal(database.prepare("SELECT last_error FROM supervised_agent_inbox WHERE inbox_item_id=?").get(items[0]!.inbox_item_id)!.last_error,
+    assert.equal(database.prepare("SELECT last_error FROM inbox_items WHERE inbox_item_id=?").get(items[0]!.inbox_item_id)!.last_error,
       "caller mutation survives");
-    database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?")
+    database.prepare("UPDATE inbox_items SET last_error=? WHERE inbox_item_id=?")
       .run(receipts[0]!.last_error, items[0]!.inbox_item_id);
     database.exec("DROP TRIGGER reject_second_optional_settlement");
 
@@ -2990,16 +2339,16 @@ test("captured attempt conclusions preserve native failures, cancellation, no-re
         SELECT 1 FROM execution_message_attempts WHERE source_message_id='1' AND conclusion='failed'
       ) BEGIN SELECT RAISE(ROLLBACK,'optional write destroyed caller transaction'); END`);
     database.exec("BEGIN IMMEDIATE");
-    database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?")
+    database.prepare("UPDATE inbox_items SET last_error=? WHERE inbox_item_id=?")
       .run("caller mutation must roll back", items[0]!.inbox_item_id);
     assert.throws(() => {
       settleCapturedExecutionAttempts(database!, "captured-outcomes");
-      database!.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?")
+      database!.prepare("UPDATE inbox_items SET last_error=? WHERE inbox_item_id=?")
         .run("must never commit in autocommit mode", items[1]!.inbox_item_id);
     }, /optional write destroyed caller transaction/);
     assert.equal(database.isTransaction, false, "SQLite rolled back the entire transaction");
     assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_message_attempts WHERE state='active'").get()!.count, 5);
-    assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_inbox ORDER BY fifo_sequence").all(), receipts,
+    assert.deepEqual(database.prepare("SELECT * FROM inbox_items ORDER BY fifo_sequence").all(), receipts,
       "transaction loss must propagate before any subsequent authoritative mutation");
     database.exec("DROP TRIGGER rollback_optional_settlement");
 
@@ -3017,7 +2366,7 @@ test("captured attempt conclusions preserve native failures, cancellation, no-re
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-outcomes"),
       { lastFifoSequence: null, hasMore: false, unavailable: false, changed: false });
     assert.deepEqual(database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all(), settled);
-    assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_inbox ORDER BY fifo_sequence").all(), receipts);
+    assert.deepEqual(database.prepare("SELECT * FROM inbox_items ORDER BY fifo_sequence").all(), receipts);
     database.close();
     database = new DatabaseSync(env.database);
     assert.deepEqual(database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all(), settled);
@@ -3036,7 +2385,7 @@ test("captured settlement does not conclude publishing, blocked or compensatable
     database = new DatabaseSync(env.database);
     const attempt = captureReceipt(database, started);
     for (const state of ["publishing", "blocked", "result_recovery", "cancelled_by_room_move"]) {
-      database.prepare("UPDATE supervised_agent_inbox SET state=? WHERE inbox_item_id=?").run(state, item!.inbox_item_id);
+      database.prepare("UPDATE inbox_items SET state=? WHERE inbox_item_id=?").run(state, item!.inbox_item_id);
       assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-unsettled", { inboxItemId: item!.inbox_item_id }),
         { lastFifoSequence: null, hasMore: false, unavailable: false, changed: false });
       assert.equal(database.prepare("SELECT state FROM execution_message_attempts WHERE attempt_id=?").get(attempt)!.state, "active");
@@ -3136,20 +2485,21 @@ test("effect retention is globally bounded across terminal turns while unresolve
         // provider-turn coordinates for audit/operator history. Reproduce that
         // durable terminal shape before enough later receipts trigger pruning.
         const journal = new DatabaseSync(env.database);
-        journal.prepare(`INSERT INTO turn_control_sequence_watermarks(agent_id,last_sequence)
-          VALUES (?,?) ON CONFLICT(agent_id) DO UPDATE SET last_sequence=excluded.last_sequence`)
-          .run("completed-retention", 1);
-        journal.prepare(`UPDATE turn_control_journals SET
-          turn_control_present=1,action_id=?,action_sequence=1,
-          turn_work_attempt_id=?,turn_execution_generation_id=?,
-          target_room_id=?,target_source_message_id=?,target_provider_continuation_id=?,
-          inbox_item_id=?,provider_turn_id=?,has_correction=0,correction_text=NULL,
-          correction_strategy=NULL,operator_resolution=NULL,status='completed',
-          capability='native_interrupt',interrupted=1,resumed=0,turn_state='stopped',
-          error=NULL,recorded_at=?,updated_at=? WHERE agent_id=?`).run(
-          "completed-control", "attempt", "run-completed", "room", item.source_message_id,
-          "continuation", item.inbox_item_id, providerTurnId,
-          "2026-08-05T17:30:00.000Z", "2026-08-05T17:30:00.000Z", "completed-retention",
+        journal.prepare(`UPDATE agents SET last_turn_control_sequence=1,
+          turn_control_inbox_item_id=?, turn_control_status='completed', turn_control_json=?
+          WHERE agent_id=?`).run(
+          item.inbox_item_id,
+          JSON.stringify({
+            action_id: "completed-control", action_sequence: 1, work_attempt_id: "attempt",
+            execution_generation_id: "run-completed", target_room_id: "room",
+            target_source_message_id: item.source_message_id, target_provider_continuation_id: "continuation",
+            inbox_item_id: item.inbox_item_id, provider_turn_id: providerTurnId,
+            has_correction: false, correction_text: null, correction_strategy: null,
+            operator_resolution: null, status: "completed", capability: "native_interrupt",
+            interrupted: true, resumed: false, state: null, stages: [], error: null,
+            recorded_at: "2026-08-05T17:30:00.000Z", updated_at: "2026-08-05T17:30:00.000Z",
+          }),
+          "completed-retention",
         );
         journal.close();
       }
@@ -3164,9 +2514,9 @@ test("effect retention is globally bounded across terminal turns while unresolve
     await store.close();
 
     const inspection = new DatabaseSync(env.database);
-    assert.equal((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_effects
+    assert.equal((inspection.prepare(`SELECT COUNT(*) AS count FROM effects
       WHERE agent_id='unresolved-retention' AND state IN ('prepared','executing')`).get() as { count: number }).count, 128);
-    assert.equal((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_effects
+    assert.equal((inspection.prepare(`SELECT COUNT(*) AS count FROM effects
       WHERE agent_id='completed-retention'`).get() as { count: number }).count, 200,
     "completed effects are pruned with the same retained receipt scope");
     assert.equal(inspection.prepare("PRAGMA foreign_key_check").get(), undefined);
@@ -3175,26 +2525,6 @@ test("effect retention is globally bounded across terminal turns while unresolve
     assert.ok(inspection.prepare(`SELECT 1 FROM supervised_agent_provider_turn_bindings
       WHERE inbox_item_id=?`).get(completedItems[0]!.inbox_item_id),
     "the pinned receipt keeps its exact provider-turn authority binding");
-
-    // Simulate the predecessor retention bug on a current-v16 database. Since
-    // the control is completed, startup repair must preserve its action audit
-    // while honestly dropping the now-unprovable causal target tuple.
-    inspection.prepare(`INSERT INTO supervised_agent_pruned_sources
-      (agent_id,room_id,source_message_id,pruned_at) VALUES (?,?,?,?)`).run(
-      "completed-retention", "room", completedItems[0]!.source_message_id, "2026-08-05T17:31:00.000Z",
-    );
-    inspection.prepare("DELETE FROM supervised_agent_inbox WHERE inbox_item_id=?")
-      .run(completedItems[0]!.inbox_item_id);
-    assert.doesNotThrow(() => new DaemonStateSchema().createSchema(inspection));
-    const repairedControl = inspection.prepare(`SELECT status,target_room_id,
-      target_source_message_id,target_provider_continuation_id,inbox_item_id,
-      provider_turn_id,error FROM turn_control_journals WHERE agent_id=?`)
-      .get("completed-retention") as Record<string, unknown>;
-    assert.equal(repairedControl.status, "completed");
-    for (const column of ["target_room_id", "target_source_message_id", "target_provider_continuation_id", "inbox_item_id", "provider_turn_id"]) {
-      assert.equal(repairedControl[column], null, `${column} is cleared instead of guessed`);
-    }
-    assert.match(String(repairedControl.error), /retained as audit-only/i);
     inspection.close();
   } finally { await env.cleanup(); }
 });
@@ -3238,10 +2568,10 @@ test("effect completion releases every terminal receipt pin and converges physic
     const executing = [];
     for (let index = 200; index < 328; index += 1) executing.push(await settle(index, true));
     let inspection = new DatabaseSync(env.database);
-    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM inbox_items
       WHERE agent_id='effect-unpin'`).get() as { count: number }).count), 328,
     "executing effects intentionally pin their terminal receipts above ordinary history retention");
-    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_effects
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM effects
       WHERE agent_id='effect-unpin' AND state='executing'`).get() as { count: number }).count), 128);
     inspection.close();
 
@@ -3252,12 +2582,12 @@ test("effect completion releases every terminal receipt pin and converges physic
       });
     }
     inspection = new DatabaseSync(env.database);
-    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM inbox_items
       WHERE agent_id='effect-unpin'`).get() as { count: number }).count), 200,
     "the final unpin transaction converges immediately to the exact receipt budget");
-    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_effects
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM effects
       WHERE agent_id='effect-unpin' AND state IN ('prepared','executing')`).get() as { count: number }).count), 0);
-    assert.ok(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_effects
+    assert.ok(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM effects
       WHERE agent_id='effect-unpin'`).get() as { count: number }).count) <= 128);
     assert.deepEqual(inspection.prepare("PRAGMA foreign_key_check").all(), []);
     inspection.close();
@@ -3298,7 +2628,7 @@ test("an effect that loses runtime authority before execution is durably failed"
 
     const manifest = new ManifestStore(env.database);
     const current = await manifest.load();
-    await manifest.write(current.generation, current.entries.map((candidate) => candidate.id === "stop-race"
+    await manifest.write(current.entries.map((candidate) => candidate.id === "stop-race"
       ? { ...candidate, desired_state: "stopped" as const }
       : candidate));
     await manifest.close();
@@ -3404,7 +2734,7 @@ test("structured room-turn completion is an atomic durable singleton across conc
     // upgrade: the request is durable but its old two-phase callback did not
     // checkpoint completion. Reopen must finish it locally, never quarantine.
     const legacy = new DatabaseSync(env.database);
-    legacy.prepare("UPDATE supervised_agent_effects SET state='executing',result_json=NULL WHERE effect_id=?")
+    legacy.prepare("UPDATE effects SET state='executing',result_json=NULL WHERE effect_id=?")
       .run(concurrent[0]!.effect.effect_id);
     legacy.close();
 
@@ -3469,7 +2799,7 @@ test("room-turn completion waits until every already-executing effect has durabl
     }), /cannot complete while an earlier effect is still executing/i,
     "completion cannot claim to be the last action while an earlier effect is across its execution boundary");
     const legacy = new DatabaseSync(env.database);
-    legacy.prepare(`INSERT INTO supervised_agent_effects
+    legacy.prepare(`INSERT INTO effects
       (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
       VALUES ('legacy-completion',?,?,?,?,?,'complete_room_turn',?,1,'executing',NULL,NULL,?,?)`).run(
       authority.agent_id, authority.room_id, authority.execution_generation_id, authority.provider_turn_id,
@@ -3571,34 +2901,20 @@ test("current schema refuses a missing causal-event table without erasing popula
     await first.recordRetryFailure(item!.inbox_item_id, { domain: "pre_dispatch", error: "setup unavailable" });
     await first.close();
     const damaged = new DatabaseSync(env.database);
-    const original = damaged.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id);
+    const original = damaged.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item!.inbox_item_id);
     damaged.exec("DROP TABLE supervised_agent_inbox_events");
-    assert.equal((damaged.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal((damaged.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_USER_VERSION);
     damaged.close();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const reopened = new SupervisedAgentInboxStore(env.database);
-      await assert.rejects(reopened.receipts("repair"), /missing inbox retry history/);
+      await assert.rejects(reopened.receipts("repair"), /schema mismatch|supervised_agent_inbox_events/i);
       await reopened.close();
     }
     const inspection = new DatabaseSync(env.database);
     assert.equal(inspection.prepare("SELECT 1 FROM sqlite_master WHERE name='supervised_agent_inbox_events'").get(), undefined);
-    assert.deepEqual(inspection.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id), original);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.deepEqual(inspection.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item!.inbox_item_id), original);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_USER_VERSION);
     inspection.close();
-  } finally { await env.cleanup(); }
-});
-
-test("current schema may repair an empty causal-event table only when no inbox items exist", async () => {
-  const env = await fixture(); try {
-    const first = new SupervisedAgentInboxStore(env.database);
-    await first.head("empty");
-    await first.close();
-    const database = new DatabaseSync(env.database);
-    database.exec("DROP TABLE supervised_agent_inbox_events");
-    database.close();
-    const reopened = new SupervisedAgentInboxStore(env.database);
-    assert.equal(await reopened.head("empty"), null);
-    await reopened.close();
   } finally { await env.cleanup(); }
 });
 
@@ -3662,48 +2978,6 @@ test("worker session secrets are memory-only and must be re-delivered after reop
   } finally { await env.cleanup(); }
 });
 
-test("v5 binding migration removes the persisted credential column and requires re-delivery", async () => {
-  const env = await fixture(); try {
-    await prepareSecretBearingV5(env);
-    const migrated = new WorkerBindingStore(env.legacy, undefined, env.database);
-    const binding = await migrated.get("stone");
-    assert.ok(binding); assert.equal(await migrated.credentialFor(binding), null);
-    await migrated.close();
-    const inspection = new DatabaseSync(env.database);
-    const columns = inspection.prepare("PRAGMA table_xinfo(worker_session_bindings)").all() as Array<{ name: string }>;
-    assert.equal(columns.some((column) => column.name === "agent_session_token"), false);
-    inspection.close();
-  } finally { await env.cleanup(); }
-});
-
-test("a post-COMMIT v6 scrub interruption leaves a durable marker that a reopen completes", async () => {
-  const env = await fixture(); try {
-    await prepareSecretBearingV5(env);
-    const interrupted = new DatabaseSync(env.database);
-    assert.throws(() => new DaemonStateSchema(undefined, () => { throw new Error("interrupt after v6 commit"); }).createSchema(interrupted), /interrupt after v6 commit/);
-    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
-    assert.equal((interrupted.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as { checksum: string }).checksum, "pending");
-    interrupted.close();
-    const reopened = new DatabaseSync(env.database);
-    new DaemonStateSchema().createSchema(reopened);
-    assert.equal(reopened.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get(), undefined);
-    reopened.close();
-  } finally { await env.cleanup(); }
-});
-
-test("a pending v6 scrub failure rejects reopen and retains its marker", async () => {
-  const env = await fixture(); try {
-    await prepareSecretBearingV5(env);
-    const interrupted = new DatabaseSync(env.database);
-    assert.throws(() => new DaemonStateSchema(undefined, () => { throw new Error("interrupt after v6 commit"); }).createSchema(interrupted), /interrupt after v6 commit/);
-    interrupted.close();
-    const reopened = new DatabaseSync(env.database);
-    assert.throws(() => new DaemonStateSchema(undefined, undefined, () => { throw new Error("scrub unavailable"); }).createSchema(reopened), /scrub unavailable/);
-    assert.equal((reopened.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as { checksum: string }).checksum, "pending");
-    reopened.close();
-  } finally { await env.cleanup(); }
-});
-
 test("generation rollover preserves only the exact in-memory credential authority", async () => {
   const env = await fixture(); try {
     const store = new WorkerBindingStore(env.legacy, undefined, env.database);
@@ -3713,20 +2987,6 @@ test("generation rollover preserves only the exact in-memory credential authorit
     assert.equal(await store.credentialFor(result.binding), "memory-only");
     assert.equal(await store.credentialFor(binding), null, "the predecessor generation cannot borrow the credential");
     await store.close();
-  } finally { await env.cleanup(); }
-});
-
-test("legacy import retains token-free recovery evidence", async () => {
-  const env = await fixture(); try {
-    const secret = "legacy-secret-must-not-survive";
-    await (await import("node:fs/promises")).writeFile(env.legacy, JSON.stringify({ version: 1, bindings: {
-      stone: { entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "run", agent_session_id: "session", agent_session_token: secret, api_url: "https://letagents.test", room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-01-01T00:00:00.000Z" },
-    } }));
-    const store = new WorkerBindingStore(env.legacy, undefined, env.database);
-    await store.list(); await store.close();
-    const evidence = await readFile(`${env.legacy}.migrated-backup`, "utf8");
-    assert.doesNotMatch(evidence, new RegExp(secret));
-    assert.doesNotMatch(evidence, /agent_session_token/);
   } finally { await env.cleanup(); }
 });
 
@@ -3955,9 +3215,8 @@ test("settled child history converges on migration and settlement, retaining exa
     const latest = await store.latestContinuationRepair("large-history");
     const maxSequence = database.prepare("SELECT MAX(event_sequence) AS n FROM supervised_agent_inbox_events WHERE inbox_item_id=?").get(item!.inbox_item_id)!.n;
     await store.close();
-    database.exec(`DROP INDEX provider_continuation_repairs_agent_created; DROP INDEX provider_continuation_repairs_inbox_created;
-      DROP INDEX activity_events_summary; UPDATE manifest_metadata SET schema_version=47; PRAGMA user_version=47`);
     store = new SupervisedAgentInboxStore(env.database);
+    await store.pruneHistory("large-history");
     assert.deepEqual(await store.get(item!.inbox_item_id), before);
     const assertBounded = (id: string) => {
       assert.equal(database!.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox_events WHERE inbox_item_id=?").get(id)!.n,
@@ -4004,16 +3263,16 @@ test("settled child history converges on migration and settlement, retaining exa
     store = new SupervisedAgentInboxStore(env.database);
     assert.equal((await store.latestContinuationRepair("large-history"))!.phase, "probing");
     database.prepare("UPDATE provider_continuation_repairs SET phase='committed' WHERE repair_id=?").run(`${failed!.inbox_item_id}:repair:99`);
-    database.prepare(`INSERT INTO supervised_agent_effects
+    database.prepare(`INSERT INTO effects
       (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
       VALUES ('generation-pin','large-history','room','generation','native:3','request','send_message','{}',1,'executing',NULL,NULL,?,?)`)
       .run("2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
     await store.pruneHistory("large-history");
     assert.equal(database.prepare("SELECT COUNT(*) AS n FROM provider_continuation_repairs WHERE inbox_item_id=?").get(failed!.inbox_item_id)!.n, 100);
-    database.exec("UPDATE supervised_agent_effects SET execution_generation_id='unrelated-generation' WHERE effect_id='generation-pin'");
+    database.exec("UPDATE effects SET execution_generation_id='unrelated-generation' WHERE effect_id='generation-pin'");
     await store.pruneHistory("large-history");
     assertBounded(failed!.inbox_item_id);
-    assert.equal(database.prepare("SELECT state FROM supervised_agent_effects WHERE effect_id='generation-pin'").get()!.state, "executing",
+    assert.equal(database.prepare("SELECT state FROM effects WHERE effect_id='generation-pin'").get()!.state, "executing",
       "unrelated generation authority is preserved without pinning this receipt's history");
     assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(failed!.inbox_item_id), failureEvidence);
     assert.equal((await store.get(failed!.inbox_item_id))!.state, "acknowledged_failed");
@@ -4234,14 +3493,14 @@ const ROW_TOUCHES: Record<string, (database: DatabaseSync, item: { inbox_item_id
     (inbox_item_id,agent_id,room_id,work_attempt_id,origin_execution_generation_id,provider_continuation_id,provider_turn_id)
     VALUES (?,?,?,'attempt','generation','continuation',?)`).run(item.inbox_item_id, item.agent_id, item.room_id, `bound-${item.agent_id}`),
   "turn-control history": (database, item) => {
-    database.prepare(`INSERT INTO agent_identities(agent_id,created_by,created_at,sort_order)
-      VALUES (?,'test','2026-10-01T07:00:00.000Z',(SELECT COALESCE(MAX(sort_order),0)+1 FROM agent_identities))`).run(item.agent_id);
-    database.prepare("INSERT INTO turn_control_journals(agent_id,turn_control_present,inbox_item_id) VALUES (?,0,?)").run(item.agent_id, item.inbox_item_id);
+    database.prepare(`INSERT INTO agents(agent_id,sort_order,created_by,created_at,display_name,room_id,provider,charter,desired_state,observed_state,condition,turn_control_inbox_item_id,turn_control_status,turn_control_json)
+      VALUES (?,(SELECT COALESCE(MAX(sort_order),0)+1 FROM agents),'test','2026-10-01T07:00:00.000Z',?,?,'codex','test','running','working','none',?,'completed',?)`)
+      .run(item.agent_id, item.agent_id, item.room_id, item.inbox_item_id, JSON.stringify({ action_id: "touch", status: "completed", inbox_item_id: item.inbox_item_id }));
   },
   "a retry event": (database, item) => database.prepare(`INSERT INTO supervised_agent_inbox_events
     (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail) VALUES (?,3,'retry_failure:pre_dispatch:1','retry_scheduled','2026-10-01T07:00:00.000Z','x')`)
     .run(item.inbox_item_id),
-  "a non-pending state": (database, item) => database.prepare("UPDATE supervised_agent_inbox SET state='retryable' WHERE inbox_item_id=?").run(item.inbox_item_id),
+  "a non-pending state": (database, item) => database.prepare("UPDATE inbox_items SET state='retryable' WHERE inbox_item_id=?").run(item.inbox_item_id),
 };
 for (const [touch, apply] of Object.entries(ROW_TOUCHES)) {
   test(`a queued row with ${touch} is a barrier for people and for notice batches`, async () => {
@@ -4306,7 +3565,7 @@ test("a completed turn settles only untouched notices its own claim listed, neve
     const head = (await store.claimHead("listed"))!;
     await store.ingestPoll({ agent_id: "listed", room_id: "room", last_observed_message_id: "3", messages: [personMessage("3")] });
     const activation = { ...head.activation, queued_notices: { notices: [{ id: "2" }, { id: "3" }] } };
-    database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?").run(JSON.stringify(activation), head.inbox_item_id);
+    database.prepare("UPDATE inbox_items SET activation_json=? WHERE inbox_item_id=?").run(JSON.stringify(activation), head.inbox_item_id);
     await runQueuedTurn(store, head);
     assert.equal((await store.getBySourceMessage("listed", "room", "2"))!.state, "acknowledged_no_reply");
     assert.equal((await store.getBySourceMessage("listed", "room", "3"))!.state, "pending", "a listed person's message is never settled");

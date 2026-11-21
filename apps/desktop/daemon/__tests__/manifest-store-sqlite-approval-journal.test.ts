@@ -100,7 +100,7 @@ test("approval journal rejects mismatched exact turns and content-bearing or del
       await assert.rejects(store.getExecutionApproval(wrong), { code: "identity_mismatch" });
       await assert.rejects(store.selectHostApproval({ authority, expected: wrong, decisionId: "decision", actorId: "owner", decision: "deny", projectionSha256: "c".repeat(64), atMs: 110 }, async commit => commit()), { code: "identity_mismatch" });
     }
-    database.exec("UPDATE supervised_agent_inbox SET outcome='{}'");
+    database.exec("UPDATE inbox_items SET outcome='{}'");
     await assert.rejects(store.selectHostApproval({ authority, expected, decisionId: "decision", actorId: "owner", decision: "deny", projectionSha256: "c".repeat(64), atMs: 120 }, async commit => commit()), { code: "missing_turn" });
     assert.equal((await store.getExecutionApproval(expected))!.decision, null);
     assert.equal(database.prepare("SELECT delegatable FROM execution_approval_requests").get()!.delegatable, 0);
@@ -200,7 +200,7 @@ test("approval journal requires ownership fences and rolls back both tables with
       "projection failure rolls back the request classification in the same transaction");
     assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 0);
     database.exec("DROP TRIGGER fail_approval_projection");
-    assert.equal((await store.load()).generation, 1);
+    assert.equal((await store.load()).versions.agent, 1);
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   } finally { database.close(); await store.close(); await env.cleanup(); }
 });
@@ -401,16 +401,16 @@ test("approval journal materializes atomically without capture and preserves lag
   try {
     const authority = await seedApprovalJournalTurn(env, store, database); await other.load();
     const { input, expected } = approvalJournalRequest();
-    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_turns").get()!.n, 0);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM runs").get()!.n, 0);
     database.exec("CREATE TRIGGER fail_approval_admission AFTER INSERT ON execution_approval_requests BEGIN SELECT RAISE(ABORT,'admission rollback'); END");
     await assert.rejects(admitApproval(store, input, authority, async commit => commit()), /admission rollback/);
-    for (const table of ["execution_generations", "execution_runtime_generations", "execution_message_attempts", "execution_attempt_generations", "execution_turns", "execution_approval_requests"]) {
+    for (const table of ["execution_generations", "execution_runtime_generations", "execution_message_attempts", "execution_attempt_generations", "runs", "execution_approval_requests"]) {
       assert.equal(database.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n, 0, table);
     }
     database.exec("DROP TRIGGER fail_approval_admission");
     const competing = await Promise.all([admitApproval(store, input, authority, async commit => commit()), admitApproval(other, input, authority, async commit => commit())]);
     assert.deepEqual(competing.map(value => value.created).sort(), [false, true]);
-    assert.equal(database.prepare("SELECT state FROM execution_turns").get()!.state, "none", "identity admission does not synthesize a turn-start fact");
+    assert.equal(database.prepare("SELECT state FROM runs").get()!.state, "none", "identity admission does not synthesize a turn-start fact");
     assert.equal(database.prepare("SELECT authority_mode FROM execution_runtime_generations").get()!.authority_mode, "typed",
       "approval-first daemon-owned Codex materialization uses typed authority");
     const shadow = new ExecutionShadowStore(database);
@@ -423,13 +423,13 @@ test("approval journal materializes atomically without capture and preserves lag
     shadow.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: expected.runtimeGenerationId, observerRuntimeGenerationId: expected.runtimeGenerationId,
       daemonGenerationId: "9", sourceId: "observer", expectedEpoch: 0, boundAtMs: 100 });
     const observer = database.prepare("SELECT * FROM execution_observers").get();
-    database.exec("UPDATE execution_turns SET state='lost',ended_at_ms=105; UPDATE execution_runtime_generations SET runtime_state='exited',ended_at_ms=105");
-    const before = database.prepare("SELECT * FROM execution_turns").get();
+    database.exec("UPDATE runs SET state='lost',ended_at_ms=105; UPDATE execution_runtime_generations SET runtime_state='exited',ended_at_ms=105");
+    const before = database.prepare("SELECT * FROM runs").get();
     const sibling = approvalJournalRequest("sibling", 2);
     await admitApproval(store, sibling.input, authority, async commit => commit());
     await store.selectHostApproval({ authority, expected, decisionId: "decision", actorId: "owner", decision: "allow_once", projectionSha256: "b".repeat(64), atMs: 110 }, async commit => commit());
     assert.equal((await store.beginExecutionApprovalDispatch({ authority, expected, decisionId: "decision", dispatchId: "dispatch", projectionSha256: "b".repeat(64), atMs: 120 }, async commit => commit())).dispatch, true);
-    assert.deepEqual(database.prepare("SELECT * FROM execution_turns").get(), before);
+    assert.deepEqual(database.prepare("SELECT * FROM runs").get(), before);
     assert.deepEqual(database.prepare("SELECT * FROM execution_observers").get(), observer);
     assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_message_attempts").get()!.n, 1);
     assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()!.n, 0);
@@ -497,20 +497,21 @@ test("approval journal rechecks operational checkpoint and configuration at sele
   try {
     const authority = await seedApprovalJournalTurn(env, store, database);
     const { input, expected } = approvalJournalRequest(); await admitApproval(store, input, authority, async commit => commit());
-    database.exec("UPDATE execution_turns SET state='active'");
+    database.exec("UPDATE runs SET state='active'");
     const selection = { authority, expected, decisionId: "decision", actorId: "owner", decision: "deny" as const, projectionSha256: "b".repeat(64), atMs: 110 };
     const dispatch = { authority, expected, decisionId: "decision", dispatchId: "dispatch", projectionSha256: "b".repeat(64), atMs: 120 };
+    const originalConn = JSON.stringify(authority.providerConnection);
     const changes = [
       ["supervised_agent_provider_turn_bindings", "work_attempt_id", "other", "workspace"],
       ["supervised_agent_provider_turn_bindings", "origin_execution_generation_id", "other", "generation"],
       ["supervised_agent_provider_turn_bindings", "provider_continuation_id", "other", "continuation"],
       ["supervised_agent_provider_turn_bindings", "provider_turn_id", "other", "native-turn"],
-      ["supervised_agent_inbox", "state", "blocked", "dispatching"],
-      ["supervised_agent_inbox", "outcome", "{}", null],
-      ["runtime_deployments", "provider_process_identity", "other", "birth"],
-      ["runtime_deployments", "provider_connection_url", "http://127.0.0.1:9999", "http://127.0.0.1:4311"],
-      ["agent_configurations", "runtime_configuration_revision", 2, 1],
-      ["agent_launch_intents", "desired_state", "paused", "running"],
+      ["inbox_items", "state", "blocked", "dispatching"],
+      ["inbox_items", "outcome", "{}", null],
+      ["agents", "provider_connection_json", JSON.stringify({ ...authority.providerConnection, processIdentity: "other" }), originalConn],
+      ["agents", "provider_connection_json", JSON.stringify({ ...authority.providerConnection, url: "http://127.0.0.1:9999" }), originalConn],
+      ["agents", "runtime_configuration_revision", 2, 1],
+      ["agents", "desired_state", "paused", "running"],
       ["work_attempt_executions", "terminal_json", "{}", null],
     ] as const;
     for (const selected of [false, true]) {
@@ -535,23 +536,23 @@ test("approval journal rechecks operational checkpoint and configuration at sele
     await store.selectHostApproval({ authority, expected: automatic.expected, decisionId: "automatic-decision", actorId: "automatic-review",
       decision: "allow_once", projectionSha256: "b".repeat(64), atMs: 111 }, async commit => commit());
     const assertNativeWriteAfterSave = await store.validateExecutionApprovalAuthority(expected, authority);
-    database.exec("UPDATE agent_configurations SET config_revision=2");
+    database.exec("UPDATE agents SET config_revision=2");
     assertNativeWriteAfterSave();
     await store.validateExecutionApprovalAuthority(expected, authority);
     await assert.rejects(store.validateExecutionApprovalAuthority(automatic.expected, authority), { code: "missing_turn" });
     await assert.rejects(store.validateExecutionApprovalAuthority(expected, { ...authority, ownerAnswer: true } as typeof authority), { code: "invalid_input" });
-    database.exec("UPDATE agent_configurations SET config_revision=1");
+    database.exec("UPDATE agents SET config_revision=1");
     await store.validateExecutionApprovalAuthority(automatic.expected, authority);
     await assert.rejects(store.beginExecutionApprovalDispatch(dispatch, async commit => {
-      database.exec("UPDATE supervised_agent_inbox SET outcome='{}'"); await commit();
+      database.exec("UPDATE inbox_items SET outcome='{}'"); await commit();
     }), { code: "missing_turn" }, "post-inspection checkpoint change is rechecked inside the committed intent");
-    database.exec("UPDATE supervised_agent_inbox SET outcome=NULL");
+    database.exec("UPDATE inbox_items SET outcome=NULL");
     const assertNativeWrite = await store.validateExecutionApprovalAuthority(expected, authority);
     const inbox = new SupervisedAgentInboxStore(env.databasePath, () => new Date(125).toISOString());
     try {
       await inbox.checkpointNormalizedTerminal({ inbox_item_id: authority.inboxItemId, agent_id: "agent", execution_generation_id: "generation",
         provider_turn_id: "native-turn", outcome: "unreadable", text: null, evidence: "none", terminal_evidence: {} });
-      database.exec("UPDATE supervised_agent_inbox SET outcome=NULL");
+      database.exec("UPDATE inbox_items SET outcome=NULL");
       await assert.rejects(store.beginExecutionApprovalDispatch(dispatch, async commit => commit()), { code: "missing_turn" }, "terminal journal is authority even if the inbox outcome was lost");
       assert.throws(assertNativeWrite, { code: "missing_turn" });
       await store.close();
@@ -576,7 +577,7 @@ test("approval journal never fabricates an original native birth after generatio
       const attempt = database.prepare("SELECT attempt_id FROM execution_message_attempts").get();
       database.exec(`UPDATE work_attempt_executions SET terminal_json='{}';
         INSERT INTO work_attempt_executions VALUES('successor','workspace','1970-01-01T00:00:00.105Z','provider',9,NULL)`);
-      database.prepare("UPDATE runtime_deployments SET provider_execution_generation_id='successor',run_id='successor',deployment_id=?")
+      database.prepare("UPDATE agents SET provider_execution_generation_id='successor',run_id='successor',deployment_id=?")
         .run(serializeDaemonDeploymentId("agent", "successor"));
       const recovered = { ...authority, executionGenerationId: "successor" };
       if (!captured) {

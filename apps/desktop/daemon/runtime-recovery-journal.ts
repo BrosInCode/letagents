@@ -46,8 +46,8 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
   // through the same death checks; never manufacture a historical grant receipt.
   const rows = database.prepare(`SELECT r.*,e.work_attempt_id,e.terminal_json,e.started_at,e.actor,e.generation,
     (EXISTS(SELECT 1 FROM execution_observers o WHERE o.agent_id=r.agent_id AND o.observer_runtime_generation_id=r.runtime_generation_id)
-      OR EXISTS(SELECT 1 FROM execution_turns t WHERE t.agent_id=r.agent_id AND t.runtime_generation_id=r.runtime_generation_id AND t.state IN ('none','active','lost'))
-      OR EXISTS(SELECT 1 FROM supervised_agent_provider_turn_bindings b JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id
+      OR EXISTS(SELECT 1 FROM runs t WHERE t.agent_id=r.agent_id AND t.runtime_generation_id=r.runtime_generation_id AND t.state IN ('none','active','lost'))
+      OR EXISTS(SELECT 1 FROM supervised_agent_provider_turn_bindings b JOIN inbox_items i ON i.inbox_item_id=b.inbox_item_id
         WHERE b.agent_id=r.agent_id AND b.room_id=? AND b.work_attempt_id=e.work_attempt_id AND b.origin_execution_generation_id=r.execution_generation_id
         AND i.state NOT IN ('publishing','acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_user','cancelled_by_room_move'))
       OR EXISTS(SELECT 1 FROM (
@@ -90,7 +90,7 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
       || executionRuntimeStorageIdentity(entry.id, String(row.execution_generation_id), death.kind, death.pid, death.processIdentity) !== row.runtime_generation_id) {
       throw new Error("Retired runtime evidence does not match its recorded process owner.");
     }
-    if (database.prepare(`SELECT 1 FROM execution_turns WHERE agent_id=? AND runtime_generation_id=? AND provider_continuation_id<>? LIMIT 1`)
+    if (database.prepare(`SELECT 1 FROM runs WHERE agent_id=? AND runtime_generation_id=? AND provider_continuation_id<>? LIMIT 1`)
       .get(entry.id, String(row.runtime_generation_id), terminal.provider_continuation_id)
       || database.prepare(`SELECT 1 FROM supervised_agent_provider_turn_bindings WHERE agent_id=? AND work_attempt_id=? AND origin_execution_generation_id=? AND provider_continuation_id<>? LIMIT 1`)
         .get(entry.id, String(row.work_attempt_id), String(row.execution_generation_id), terminal.provider_continuation_id)) {
@@ -210,7 +210,7 @@ export function prepareRuntimeRecovery(database: DatabaseSync, request: RuntimeR
     .run(request.operationId, request.entryId, request.roomId, request.executionGenerationId, request.runtimeGenerationId, request.mode, JSON.stringify(entry.provider_ref), at, at);
   // This intent survives daemon death. Neither convergence nor FIFO admission
   // may silently start a replacement after an interrupted operator action.
-  database.prepare("UPDATE agent_launch_intents SET desired_state='paused' WHERE agent_id=?").run(request.entryId);
+  database.prepare("UPDATE agents SET desired_state='paused' WHERE agent_id=?").run(request.entryId);
   return readRuntimeRecovery(database, request.operationId)!;
 }
 
@@ -240,20 +240,20 @@ function settleStoppedRuntimeWork(database: DatabaseSync,
     WHERE agent_id=? AND observer_runtime_generation_id=?`)
     .run(record.agent_id, record.runtime_generation_id);
   // A process exit does not prove a mutating operation succeeded or failed.
-  database.prepare(`UPDATE supervised_agent_effects SET state='uncertain',error=?,updated_at=?
+  database.prepare(`UPDATE effects SET state='uncertain',error=?,updated_at=?
     WHERE agent_id=? AND execution_generation_id=? AND mutation=1 AND state='executing'`)
     .run("The runtime was restarted before this action's result was confirmed. Check its result before repeating it.", at, record.agent_id, record.execution_generation_id);
   database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
     ended_at_ms=MAX(created_at_ms,?) WHERE agent_id=? AND runtime_generation_id=?`)
     .run(Date.parse(at), record.agent_id, record.runtime_generation_id);
-  database.prepare(`UPDATE execution_turns SET state='lost',ended_at_ms=MAX(created_at_ms,?)
+  database.prepare(`UPDATE runs SET state='lost',ended_at_ms=MAX(created_at_ms,?)
     WHERE agent_id=? AND runtime_generation_id=? AND state IN ('none','active')`)
     .run(Date.parse(at), record.agent_id, record.runtime_generation_id);
-  database.prepare(`UPDATE supervised_agent_inbox SET state='cancelled_by_user',last_error=?,
+  database.prepare(`UPDATE inbox_items SET state='cancelled_by_user',last_error=?,
     updated_at=?,acknowledged_at=?,next_attempt_at_ms=NULL,blocked_by_inbox_item_id=NULL
     WHERE agent_id=? AND room_id=?
     AND COALESCE(CASE WHEN json_valid(outcome) THEN json_extract(outcome,'$.kind') END,'') NOT IN ('reply','no_reply','failed','interrupted')
-    AND NOT EXISTS (SELECT 1 FROM supervised_agent_terminal_results terminal WHERE terminal.inbox_item_id=supervised_agent_inbox.inbox_item_id AND terminal.outcome IN ('reply','no_reply','failed','interrupted'))
+    AND NOT EXISTS (SELECT 1 FROM supervised_agent_terminal_results terminal WHERE terminal.inbox_item_id=inbox_items.inbox_item_id AND terminal.outcome IN ('reply','no_reply','failed','interrupted'))
     AND state NOT IN ('publishing','acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
     AND ((?=1 AND state='dispatching' AND provider_turn_id IS NULL) OR inbox_item_id IN
       (SELECT inbox_item_id FROM supervised_agent_provider_turn_bindings WHERE agent_id=? AND room_id=? AND work_attempt_id=? AND origin_execution_generation_id=?))`)
@@ -261,8 +261,8 @@ function settleStoppedRuntimeWork(database: DatabaseSync,
       at, at, record.agent_id, record.room_id, includeUnboundDispatch ? 1 : 0, record.agent_id, record.room_id, workAttemptId, record.execution_generation_id);
   database.prepare(`UPDATE execution_message_attempts SET state='lost',conclusion='lost',settled_at_ms=MAX(created_at_ms,?)
     WHERE agent_id=? AND state='active' AND attempt_id IN
-      (SELECT attempt_id FROM execution_turns WHERE agent_id=? AND runtime_generation_id=?)
-    AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i WHERE i.agent_id=execution_message_attempts.agent_id
+      (SELECT attempt_id FROM runs WHERE agent_id=? AND runtime_generation_id=?)
+    AND NOT EXISTS (SELECT 1 FROM inbox_items i WHERE i.agent_id=execution_message_attempts.agent_id
       AND i.room_id=execution_message_attempts.room_id AND i.source_message_id=execution_message_attempts.source_message_id
       AND ((CASE WHEN json_valid(i.outcome) THEN json_extract(i.outcome,'$.kind') END) IN ('reply','no_reply','failed','interrupted')
         OR EXISTS (SELECT 1 FROM supervised_agent_terminal_results terminal WHERE terminal.inbox_item_id=i.inbox_item_id AND terminal.outcome IN ('reply','no_reply','failed','interrupted'))))`)
@@ -333,9 +333,9 @@ export function exitedRuntimesToArchive(database: DatabaseSync, entry: DaemonMan
       AND (EXISTS (SELECT 1 FROM execution_observers o WHERE o.agent_id=r.agent_id
           AND o.observer_runtime_generation_id=r.runtime_generation_id
           AND (o.source_id IS NULL OR o.max_observed_sequence > o.last_source_sequence))
-        OR EXISTS (SELECT 1 FROM execution_turns t JOIN execution_message_attempts a ON a.attempt_id=t.attempt_id
+        OR EXISTS (SELECT 1 FROM runs t JOIN execution_message_attempts a ON a.attempt_id=t.attempt_id
           WHERE t.agent_id=r.agent_id AND t.runtime_generation_id=r.runtime_generation_id AND t.state IN ('none','active','lost')
-            AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i WHERE i.agent_id=a.agent_id AND i.room_id=a.room_id
+            AND NOT EXISTS (SELECT 1 FROM inbox_items i WHERE i.agent_id=a.agent_id AND i.room_id=a.room_id
               AND i.source_message_id=a.source_message_id
               AND i.state IN ('pending','dispatching','awaiting_result','result_recovery','retryable','blocked'))))
     ORDER BY r.runtime_generation_id`).all(entry.id, saved?.execution_generation_id ?? null) as Array<Record<string, string | number | null>>)
@@ -380,7 +380,7 @@ function archiveSelectedRuntimes(database: DatabaseSync, entry: DaemonManifestEn
     database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
       ended_at_ms=COALESCE(ended_at_ms,MAX(created_at_ms,?)) WHERE agent_id=? AND runtime_generation_id=?`)
       .run(Date.parse(at), entry.id, runtimeId);
-    database.prepare(`UPDATE execution_turns SET state='lost',ended_at_ms=MAX(created_at_ms,?)
+    database.prepare(`UPDATE runs SET state='lost',ended_at_ms=MAX(created_at_ms,?)
       WHERE agent_id=? AND runtime_generation_id=? AND state IN ('none','active')`).run(Date.parse(at), entry.id, runtimeId);
     archived.push(runtimeId);
   }
@@ -400,7 +400,7 @@ export function recoveredRuntime(database: DatabaseSync, agentId: string, runtim
 /** The caller proved the exact Cursor turn's origin execution terminal and owns the reset transaction. */
 export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: SupervisedProviderTurnBinding, at: string, laneRetirement?: CursorLaneRetirement): string | null {
   if (!database.isTransaction) throw new Error("Runtime recovery requires a fenced transaction.");
-  let runtime = database.prepare(`SELECT r.runtime_generation_id FROM execution_turns t
+  let runtime = database.prepare(`SELECT r.runtime_generation_id FROM runs t
     JOIN execution_runtime_generations r ON r.agent_id=t.agent_id
       AND r.execution_generation_id=t.execution_generation_id AND r.runtime_generation_id=t.runtime_generation_id
     JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
@@ -415,7 +415,7 @@ export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: Su
     runtime = database.prepare(`SELECT DISTINCT r.runtime_generation_id FROM execution_observers o
       JOIN execution_runtime_generations r ON r.agent_id=o.agent_id
         AND r.execution_generation_id=o.observer_execution_generation_id AND r.runtime_generation_id=o.observer_runtime_generation_id
-      JOIN execution_turns t ON t.agent_id=r.agent_id AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
+      JOIN runs t ON t.agent_id=r.agent_id AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
       JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
         AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id
       WHERE o.agent_id=? AND o.observer_execution_generation_id=? AND o.execution_generation_id=o.observer_execution_generation_id
@@ -465,9 +465,9 @@ export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: Su
     WHERE agent_id=? AND observer_runtime_generation_id=?`).run(turn.agent_id, runtimeId);
   database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
     ended_at_ms=MAX(created_at_ms,?) WHERE agent_id=? AND runtime_generation_id=? AND runtime_state<>'exited'`).run(Date.parse(at), turn.agent_id, runtimeId);
-  database.prepare(`UPDATE execution_turns SET state='lost',ended_at_ms=MAX(created_at_ms,?)
+  database.prepare(`UPDATE runs SET state='lost',ended_at_ms=MAX(created_at_ms,?)
     WHERE agent_id=? AND runtime_generation_id=? AND state IN ('none','active')`).run(Date.parse(at), turn.agent_id, runtimeId);
-  database.prepare(`UPDATE supervised_agent_effects SET state='uncertain',error=?,updated_at=?
+  database.prepare(`UPDATE effects SET state='uncertain',error=?,updated_at=?
     WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND mutation=1 AND state='executing'`)
     .run("The runtime was recovered before this action's result was confirmed. Check its result before repeating it.",
       at, turn.agent_id, turn.origin_execution_generation_id, turn.provider_turn_id);

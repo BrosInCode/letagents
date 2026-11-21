@@ -20,9 +20,8 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
     const [paths, , providerPort, , , , recoveryClock] = args;
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
-      observeExecution: (installation) => (this.typedLifecycleEffects?.changed(installation.entryId),
-        this.executionCapture?.install(installation) ?? (() => {})),
-      advanceExecution: (installation) => { this.typedLifecycleEffects?.changed(installation.entryId); this.executionCapture?.advance(installation); },
+      observeExecution: (installation) => this.executionCapture?.install(installation) ?? (() => {}),
+      advanceExecution: (installation) => { this.executionCapture?.advance(installation); this.providerStreams.typedLifecycleAdmissionChanged(installation.entryId); },
       typedLifecycleAdmission: (installation) => this.executionCapture?.typedLifecycleAdmission(installation) ?? "unavailable",
       recordBlock: (installation) => this.executionCapture?.recordBlock(installation) ?? null,
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
@@ -96,8 +95,6 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
           isHandoffScheduled: () => this.handoffScheduled,
           isDispatchPaused: () => this.handoffDraining,
           currentDaemonGeneration: () => this.singleton.currentGeneration,
-          currentManifestGeneration: () => this.manifestGeneration,
-          acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
           assertCurrent: () => this.singleton.assertCurrent(),
           ownsDaemonGeneration: (generation) => this.workerAuthority.ownsDaemonGeneration(generation),
           fenceCommit: (commit) => this.fenceDaemonCommit(commit),
@@ -168,8 +165,6 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
         store: this.store,
         authority: {
           assertCurrent: () => this.singleton.assertCurrent(),
-          currentManifestGeneration: () => this.manifestGeneration,
-          acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
           fenceCommit: (commit) => this.fenceDaemonCommit(commit),
           serializeManifest: (operation) => this.serializeManifestMutation(operation),
         },
