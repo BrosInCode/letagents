@@ -697,7 +697,7 @@ test("processes that open a new store at the same moment all open it without a l
       let released = false;
       let endedEarly: string | null = null;
       const exits = Array.from({ length: children }, (_value, index) => new Promise<string | null>((resolve) => {
-        execFile(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+        execFile(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "--eval", script], {
           cwd: process.cwd(),
           env: {
             ...process.env,
@@ -756,7 +756,7 @@ test("separate desktop processes serialize whole-store updates", async () => {
       });
       await Promise.all(roots.map((rootPath, index) => execFileAsync(
         process.execPath,
-        ["--import", "tsx", "--input-type=module", "--eval", script],
+        ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "--eval", script],
         {
           cwd: process.cwd(),
           env: {

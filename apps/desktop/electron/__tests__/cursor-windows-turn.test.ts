@@ -14,17 +14,17 @@ import {
   CURSOR_WINDOWS_UNSANDBOXED_NOTICE,
   cursorPermissionProfileInstructionLines,
   cursorPermissionProfileReadyDetail,
-} from "../main/agents/cursor-permission-profile.js";
-import { CURSOR_MCP_CONNECTOR_PARENT, cursorTurnStartTimeoutMs } from "../main/agents/cursor-provider-constants.js";
-import { cursorDaemonChildEnv } from "../main/agents/cursor-runner.js";
-import { cursorOsSandbox, prepareCursorTurnRuntimeDataDir } from "../main/agents/cursor-sandbox-policy.js";
-import { defaultCursorSignalProcess } from "../main/agents/cursor/dependencies.js";
-import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "../main/agents/cursor/profile-types.js";
-import { cursorTurnWrapperSource, defaultLaunchTurn, type CursorCliChild } from "../main/agents/cursor/turn-launcher.js";
-import { cursorWrapperMcpSource } from "../main/agents/cursor/turn-wrapper-mcp.js";
-import { cursorMcpConnectorRootPattern, WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE, WINDOWS_NATIVE_REAP_SOURCE } from "../main/agents/cursor/turn-wrapper-setup.js";
-import { linkWindowsCursorLogin, removeWindowsCursorLogin } from "../main/agents/cursor/profile-filesystem.js";
-import { cursorNativeSandboxArgs } from "../main/agents/cursor/launch-arguments.js";
+} from "#provider-runtime/agents/cursor-permission-profile.js";
+import { CURSOR_MCP_CONNECTOR_PARENT, cursorTurnStartTimeoutMs } from "#provider-runtime/agents/cursor-provider-constants.js";
+import { cursorDaemonChildEnv } from "#provider-runtime/agents/cursor-runner.js";
+import { cursorOsSandbox, prepareCursorTurnRuntimeDataDir } from "#provider-runtime/agents/cursor-sandbox-policy.js";
+import { defaultCursorSignalProcess } from "#provider-runtime/agents/cursor/dependencies.js";
+import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "#provider-runtime/agents/cursor/profile-types.js";
+import { cursorTurnWrapperSource, defaultLaunchTurn, type CursorCliChild } from "#provider-runtime/agents/cursor/turn-launcher.js";
+import { cursorWrapperMcpSource } from "#provider-runtime/agents/cursor/turn-wrapper-mcp.js";
+import { cursorMcpConnectorRootPattern, WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE, WINDOWS_NATIVE_REAP_SOURCE } from "#provider-runtime/agents/cursor/turn-wrapper-setup.js";
+import { linkWindowsCursorLogin, removeWindowsCursorLogin } from "#provider-runtime/agents/cursor/profile-filesystem.js";
+import { cursorNativeSandboxArgs } from "#provider-runtime/agents/cursor/launch-arguments.js";
 import {
   assertCursorMcpPipeAddon,
   assertCursorWindowsCommandLines,
@@ -35,7 +35,7 @@ import {
   cursorWrapperProgramBootstrap,
   requestCursorWrapperStop,
   writeCursorWrapperProgram,
-} from "../main/agents/cursor/windows-turn.js";
+} from "#provider-runtime/agents/cursor/windows-turn.js";
 import {
   cursorMcpAttestationFixtureSource,
   materializeAttestableMcpRuntime,

@@ -1,7 +1,7 @@
 import type { WebPreferences } from "electron";
 
 import { LIVE_DEMO, LIVE_DEMO_ANCHOR_DEPTH, isLiveDemoAnchorPath, isLiveDemoAnchorStep, type LiveDemoAnchor } from "../../../../../shared/live-demo.mjs";
-import { attachmentProtocolScheme, htmlDemoProtocolScheme } from "../paths.js";
+import { attachmentProtocolScheme, htmlDemoProtocolScheme } from "#provider-runtime/paths.js";
 
 /**
  * An HTML demo is a single file someone attached to a room message. It runs

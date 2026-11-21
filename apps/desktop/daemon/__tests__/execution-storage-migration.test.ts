@@ -516,7 +516,7 @@ for (const version of [17, 19, 20, 21, 22, 26, 27, 30, 33, 34]) test(`a killed m
       database.exec('PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL');
       new DaemonStateSchema(() => process.kill(process.pid, 'SIGKILL')).createSchema(database);
     `;
-    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, env.path], { encoding: "utf8", timeout: CHILD_PROCESS_TIMEOUT_MS });
+    const child = spawnSync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script, env.path], { encoding: "utf8", timeout: CHILD_PROCESS_TIMEOUT_MS });
     assertKilledBySelf(child);
     assert.deepEqual(legacyRows(env.database), before);
     if (cutovers) assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all(), cutovers);

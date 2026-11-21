@@ -15,7 +15,7 @@ import test from "node:test";
 import type { DesktopAgentProvider, DesktopAgentProviderPreflightInput } from "../ipc-types.js";
 import { createElectronTestEnv } from "./harness.js";
 import { writeFakeProvider, useTestProcessTreeHelper } from "./platform.js";
-import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+import { LETAGENTS_MCP_RUNTIME_VERSION } from "#provider-runtime/agents/letagents-mcp-runtime.js";
 import type { DesktopCursorPreflightOptions } from "../main/agents/cursor-provider-preflight.js";
 
 useTestProcessTreeHelper();
@@ -100,7 +100,7 @@ process.exit(2);
 
 const { runDesktopCursorProviderPreflight } = await import("../main/agents/cursor-provider-preflight.js");
 const { clearProbeCache } = await import("#provider-runtime/provider-probe-cache.js");
-const { CursorIdentityAuthRequiredError } = await import("../main/agents/cursor-provider-adapter.js");
+const { CursorIdentityAuthRequiredError } = await import("#provider-runtime/agents/cursor-provider-adapter.js");
 const cursorProvider: DesktopAgentProvider = {
   id: "cursor",
   name: "Cursor",

@@ -1,0 +1,348 @@
+import { processBirth, PROCESS_TREE_UNKILLABLE_EXIT_CODE, signalTree } from "../../../../shared/process-tree.mjs";
+
+// Shared process-evidence primitives for provider adapters (plan v10 §4.8).
+// Extracted verbatim from the Codex adapter (#765) so the liveness invariants
+// the room ratified — birth-identity fencing, control-loss-is-not-death,
+// recycled-PID non-evidence, no-orphan startup — have exactly ONE
+// implementation that every provider adapter consumes.
+
+export const DEFAULT_STOP_GRACE_MS = 5_000;
+export const MAX_STREAM_PAYLOAD_BYTES = 32 * 1024;
+const MAX_STREAM_COLLECTION_ENTRIES = 100;
+const SENSITIVE_PAYLOAD_KEY = /(?:authorization|cookie|credential|password|secret|api[_-]?key|private[_-]?key|(?:access|refresh|auth|bearer|session|letagents)[_-]?token|(?:^|[_-])token$)/i;
+const AUTHORIZATION_SECRET_ASSIGNMENT = /((?:\\?["']?)\bauthorization(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!(?:bearer|basic)\b)([^\\\s"',}\]]{4,})/gi;
+const EMBEDDED_SECRET_ASSIGNMENT = /((?:\\?["']?)\b(?:[a-z0-9_.-]*(?:cookie|setCookie|credential|password|secret|clientSecret|dbPassword|apiKey|api[_-]?key|privateKey|private[_-]?key|token|accessToken|refreshToken|authToken|bearerToken|sessionToken|letagentsToken|(?:access|refresh|auth|bearer|session|letagents)[_-]?token))(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!\[REDACTED\]|<redacted>|\*{3,})([^\\\s"',}\]]{4,})/gi;
+const AUTHORIZATION_SCHEME_SECRET = /(\b(?:bearer|basic)\s+)([a-z0-9._~+\/-]{8,}={0,2})/gi;
+const KNOWN_SECRET = /\b(?:las(?:b|hg)_[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|ATATT[a-z0-9_=-]{20,}|lin_(?:api|oauth)_[a-z0-9]{20,})\b/gi;
+
+export function redactCredentialText(value: string): { value: string; redacted: boolean } {
+  let redacted = false;
+  const safe = value
+    .replace(AUTHORIZATION_SCHEME_SECRET, (_match, prefix: string) => { redacted = true; return `${prefix}[REDACTED]`; })
+    .replace(AUTHORIZATION_SECRET_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}[REDACTED]`; })
+    .replace(EMBEDDED_SECRET_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}[REDACTED]`; })
+    .replace(KNOWN_SECRET, () => { redacted = true; return "[REDACTED]"; });
+  return { value: safe, redacted };
+}
+
+/**
+ * The minimal observed-exit shape the evidence primitives operate on. Provider
+ * exit types (e.g. CodexAppServerExit) are structural supersets of this.
+ */
+export type ProviderProcessExit =
+  /** `treeMayRun`: the helper's process is gone, but the tree in its job may not be, so its absence proves no exit. */
+  | { type: "error"; error: Error; treeMayRun?: boolean }
+  | { type: "exit"; code: number | null; signal: NodeJS.Signals | null };
+
+/** The exit of a provider in the helper's job. Its unkillable code is the helper's own answer: part of the tree may still run. */
+export function providerTreeExit(provider: string, code: number | null, signal: NodeJS.Signals | null): ProviderProcessExit {
+  if (code !== PROCESS_TREE_UNKILLABLE_EXIT_CODE) return { type: "exit", code, signal };
+  return { type: "error", treeMayRun: true, error: new Error(`${provider}'s processes did not end when LetAgents closed their job. They may still be running.`) };
+}
+
+/** A control channel whose loss is disconnect evidence (RPC socket, stdio). */
+export interface ProviderControlChannel {
+  onDisconnect(listener: () => void): () => void;
+}
+
+export interface ProviderProcessEvidenceDeps {
+  /**
+   * Signal the process tree led by pid. `identity` is its recorded birth: on
+   * Windows a pid this process does not hold is ended only with it.
+   */
+  signalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void;
+  /** null means verified absent; undefined means liveness could not be verified. */
+  getProcessIdentity(pid: number): string | null | undefined;
+}
+
+/** Process-local custody retained across failed acquisitions and PID reuse. */
+export class ProviderProcessCustody {
+  private readonly preparations = new Map<string, number>();
+  private readonly births = new Map<string, Set<{ child: object; pid: number | null; birth: string | null | undefined; uncertain: boolean }>>();
+
+  constructor(private readonly evidence: Pick<ProviderProcessEvidenceDeps, "getProcessIdentity">) {}
+
+  async acquire<T>(workAttemptId: string, operation: () => Promise<T>): Promise<T> {
+    this.preparations.set(workAttemptId, (this.preparations.get(workAttemptId) ?? 0) + 1);
+    try { return await operation(); }
+    finally {
+      const remaining = this.preparations.get(workAttemptId)! - 1;
+      if (remaining) this.preparations.set(workAttemptId, remaining);
+      else this.preparations.delete(workAttemptId);
+    }
+  }
+
+  record(workAttemptId: string, child: { pid: number | null; exited: Promise<ProviderProcessExit>; didNotSpawn?(): boolean }): () => string | null | undefined {
+    const record = { child, pid: child.pid, birth: undefined as string | null | undefined, uncertain: false };
+    let records = this.births.get(workAttemptId);
+    if (!records) this.births.set(workAttemptId, records = new Set());
+    records.add(record);
+    void child.exited.then(exit => {
+      // A transport/spawn error can precede physical death. Retain it until
+      // the immutable birth is proven gone by a later read.
+      if (exit.type === "exit" || child.didNotSpawn?.() === true) records!.delete(record);
+      else record.uncertain = true;
+    }, () => { record.uncertain = true; });
+    let captured = false;
+    // Register before any await, but preserve the adapter's native readiness
+    // boundary for its one authoritative birth read. Never adopt a later PID.
+    return () => {
+      if (!captured) {
+        captured = true;
+        try { record.birth = child.pid === null ? undefined : this.evidence.getProcessIdentity(child.pid); } catch { /* unknown custody is retained */ }
+      }
+      return record.birth;
+    };
+  }
+
+  state(workAttemptId: string, expectedChild?: object): "absent" | "owned" | "unknown" {
+    const records = this.births.get(workAttemptId);
+    let live = 0;
+    let unknown = Boolean(this.preparations.get(workAttemptId));
+    for (const record of records ?? []) {
+      if (record.pid === null) { unknown = true; continue; }
+      let current: string | null | undefined;
+      try { current = this.evidence.getProcessIdentity(record.pid); } catch { current = undefined; }
+      if (current === null || (typeof current === "string" && record.birth
+        && !sameProcessBirthIdentity(current, record.birth))) {
+        records!.delete(record);
+      } else if (typeof current === "string" && record.birth && record.child === expectedChild && !record.uncertain) live++;
+      else unknown = true;
+    }
+    if (records?.size === 0) this.births.delete(workAttemptId);
+    return unknown || live > 1 ? "unknown" : live ? "owned" : "absent";
+  }
+}
+
+export function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, Math.max(0, ms));
+    timeout.unref?.();
+  });
+}
+
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function defaultSignalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void {
+  // POSIX: the process group, then the pid alone. Windows: the helper's job
+  // of a tree this process holds, or of a pid whose recorded birth matches.
+  signalTree(pid, signal, { identity });
+}
+
+export function defaultGetProcessIdentity(pid: number): string | null | undefined {
+  return processBirth(pid);
+}
+
+const PS_LONG_START_PREFIX = /^\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}/;
+
+/**
+ * Compare the stable birth portion of a process identity. Before daemon 2.0.12
+ * identities also appended mutable argv; accepting that legacy prefix makes a
+ * live upgrade safe while all newly persisted identities are start-time only.
+ */
+export function sameProcessBirthIdentity(
+  current: string,
+  recorded: string,
+): boolean {
+  const stable = (value: string) => value.trim().match(PS_LONG_START_PREFIX)?.[0].replace(/\s+/g, " ") ?? value.trim();
+  return stable(current) === stable(recorded);
+}
+
+export async function defaultObserveProcessExit(
+  pid: number,
+  processIdentity: string,
+): Promise<ProviderProcessExit> {
+  while (true) {
+    const currentIdentity = defaultGetProcessIdentity(pid);
+    if (
+      currentIdentity === null
+      || (typeof currentIdentity === "string" && !sameProcessBirthIdentity(currentIdentity, processIdentity))
+    ) return { type: "exit", code: null, signal: null };
+    await delay(1_000);
+  }
+}
+
+function redactPayload(
+  value: unknown,
+  state: { redacted: boolean; truncated: boolean; seen: WeakSet<object> },
+  key = "",
+  depth = 0,
+): unknown {
+  if (SENSITIVE_PAYLOAD_KEY.test(key)) {
+    state.redacted = true;
+    return "[REDACTED]";
+  }
+  if (depth >= 12) {
+    state.truncated = true;
+    return "[MAX_DEPTH]";
+  }
+  if (value && typeof value === "object") {
+    if (state.seen.has(value)) { state.truncated = true; return "[CIRCULAR]"; }
+    state.seen.add(value);
+    if (Array.isArray(value)) {
+      if (value.length > MAX_STREAM_COLLECTION_ENTRIES) state.truncated = true;
+      return value.slice(0, MAX_STREAM_COLLECTION_ENTRIES).map((entry) => redactPayload(entry, state, "", depth + 1));
+    }
+    const record = value as Record<string, unknown>;
+    const sanitized: Record<string, unknown> = {};
+    let count = 0;
+    for (const entryKey in record) {
+      if (!Object.prototype.hasOwnProperty.call(record, entryKey)) continue;
+      if (count >= MAX_STREAM_COLLECTION_ENTRIES) { state.truncated = true; break; }
+      count += 1;
+      try { sanitized[entryKey] = redactPayload(record[entryKey], state, entryKey, depth + 1); }
+      catch { state.truncated = true; sanitized[entryKey] = "[UNREADABLE]"; }
+    }
+    return sanitized;
+  }
+  if (typeof value === "string") {
+    const safe = redactCredentialText(value);
+    state.redacted ||= safe.redacted;
+    return safe.value;
+  }
+  return value;
+}
+
+export function safeStreamPayload(value: unknown): {
+  payload: unknown;
+  payloadTruncated: boolean;
+  payloadRedacted: boolean;
+} {
+  const state = { redacted: false, truncated: false, seen: new WeakSet<object>() };
+  const payload = redactPayload(value, state);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(payload) ?? "null";
+  } catch {
+    return {
+      payload: { preview: "[UNSERIALIZABLE_PROVIDER_PAYLOAD]" },
+      payloadTruncated: true,
+      payloadRedacted: state.redacted,
+    };
+  }
+  if (Buffer.byteLength(serialized, "utf8") <= MAX_STREAM_PAYLOAD_BYTES) {
+    return { payload, payloadTruncated: state.truncated, payloadRedacted: state.redacted };
+  }
+  const serializedBytes = Buffer.from(serialized, "utf8");
+  return {
+    payload: { preview: serializedBytes.subarray(0, MAX_STREAM_PAYLOAD_BYTES).toString("utf8"), originalBytes: serializedBytes.length },
+    payloadTruncated: true,
+    payloadRedacted: state.redacted,
+  };
+}
+
+/**
+ * The msg_1188 invariant, verbatim from #765: control-channel loss on a
+ * known-PID child is evidence that CONTROL is lost, never that the child
+ * exited. On disconnect: verify the birth identity; if the exact child is
+ * verifiably gone, synthesize the exit; if it is verifiably still the same
+ * process, fence it (SIGTERM → grace → identity recheck → SIGKILL) and only
+ * the identity-verified observed exit becomes terminal; if identity cannot be
+ * verified, remain ambiguous/restart-blocking.
+ */
+export function observeFencedExit<E extends ProviderProcessExit>(
+  channel: ProviderControlChannel,
+  pid: number,
+  processIdentity: string,
+  observedExit: Promise<E>,
+  deps: ProviderProcessEvidenceDeps,
+): Promise<E | ProviderProcessExit> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let fencing = false;
+    let unsubscribe = () => {};
+    const finish = (exit: E | ProviderProcessExit) => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      resolve(exit);
+    };
+    observedExit.then(finish);
+    unsubscribe = channel.onDisconnect(() => {
+      if (settled || fencing) return;
+      fencing = true;
+      void (async () => {
+        const identityBeforeTerm = deps.getProcessIdentity(pid);
+        if (
+          identityBeforeTerm === null
+          || (typeof identityBeforeTerm === "string" && !sameProcessBirthIdentity(identityBeforeTerm, processIdentity))
+        ) {
+          finish({ type: "exit", code: null, signal: null });
+          return;
+        }
+        if (identityBeforeTerm === undefined) return;
+        deps.signalProcess(pid, "SIGTERM", processIdentity);
+        await delay(DEFAULT_STOP_GRACE_MS);
+        if (settled) return;
+        // Re-check the birth identity before escalation. A recycled PID must
+        // never be killed or mistaken for evidence that the original exited.
+        const identityBeforeKill = deps.getProcessIdentity(pid);
+        if (
+          identityBeforeKill === null
+          || (typeof identityBeforeKill === "string" && !sameProcessBirthIdentity(identityBeforeKill, processIdentity))
+        ) {
+          finish({ type: "exit", code: null, signal: null });
+          return;
+        }
+        if (identityBeforeKill === undefined) return;
+        deps.signalProcess(pid, "SIGKILL", processIdentity);
+        // Only actual process-identity disappearance can make the generation
+        // terminal. A control-channel close by itself remains ambiguous and
+        // restart-blocking.
+        finish(await observedExit);
+      })();
+    });
+    if (settled) unsubscribe();
+  });
+}
+
+/**
+ * No-orphan startup (#765 blocker 2 fix): a freshly launched child that fails
+ * pre-flight (identity unverifiable, workplace missing) is terminated and its
+ * real exit awaited BEFORE the launch error is thrown.
+ */
+export async function terminateFreshLaunch(
+  launch: { pid: number | null; exited: Promise<unknown>; processIdentity?: string },
+  deps: ProviderProcessEvidenceDeps,
+  graceMs = DEFAULT_STOP_GRACE_MS,
+): Promise<void> {
+  if (launch.pid === null) return;
+  let alreadyExited = false;
+  void launch.exited.then(() => { alreadyExited = true; });
+  await Promise.resolve();
+  if (alreadyExited) return;
+
+  if (launch.processIdentity) {
+    const identityBeforeTerm = deps.getProcessIdentity(launch.pid);
+    if (identityBeforeTerm === undefined) {
+      throw new Error("Fresh provider process identity could not be verified during cleanup.");
+    }
+    if (
+      identityBeforeTerm === null
+      || !sameProcessBirthIdentity(identityBeforeTerm, launch.processIdentity)
+    ) return;
+  }
+
+  deps.signalProcess(launch.pid, "SIGTERM", launch.processIdentity);
+  const graceful = await Promise.race([
+    launch.exited.then(() => true),
+    delay(graceMs).then(() => false),
+  ]);
+  if (graceful) return;
+
+  if (launch.processIdentity) {
+    const identityBeforeKill = deps.getProcessIdentity(launch.pid);
+    if (identityBeforeKill === undefined) {
+      throw new Error("Fresh provider process identity could not be verified before escalation.");
+    }
+    if (
+      identityBeforeKill === null
+      || !sameProcessBirthIdentity(identityBeforeKill, launch.processIdentity)
+    ) return;
+  }
+
+  deps.signalProcess(launch.pid, "SIGKILL", launch.processIdentity);
+  await launch.exited;
+}

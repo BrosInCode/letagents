@@ -552,7 +552,7 @@ test("process death during compact database replacement rolls back the SQLite ba
   const { database, path } = await fragmentedStateFixture(t);
   const originalPageCount = database.prepare("PRAGMA page_count").get()!.page_count;
   const moduleUrl = new URL("../state-recovery-backup.ts", import.meta.url).href;
-  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+  const child = spawnSync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", `
     import { DatabaseSync, backup } from 'node:sqlite';
     import { cloneStateDatabaseForCompaction } from ${JSON.stringify(moduleUrl)};
     const original = new DatabaseSync(process.argv[1]);

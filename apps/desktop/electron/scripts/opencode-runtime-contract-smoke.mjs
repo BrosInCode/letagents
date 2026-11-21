@@ -19,12 +19,12 @@ const {
   seedOpenCodeConfigHome,
   shieldOwnerInstructions,
   workspaceOpenCodeEnvironment,
-} = await import("../../dist-electron/main/agents/opencode-launch-contract.js");
+} = await import("#provider-runtime/agents/opencode-launch-contract.js");
 const { OPENCODE_RUNTIME_VERSION } = await import(
-  "../../dist-electron/main/agents/opencode-runtime.js"
+  "#provider-runtime/agents/opencode-runtime.js"
 );
 const { OpenCodeServerClient, eventReferencesSession, mintNativeUserMessageId, parseOpenCodePermissionEvent } = await import(
-  "../../dist-electron/main/agents/opencode-server-client.js"
+  "#provider-runtime/agents/opencode-server-client.js"
 );
 // The daemon gives every room's scratch workspace its own repository with this.
 const { ensureScratchWorkspaceRepository } = await import("../../../../shared/scratch-workspace-repository.mjs");

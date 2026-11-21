@@ -11,8 +11,8 @@ import {
   CLAUDE_BACKGROUND_WORK_TEXT,
   ClaudeCodeProviderAdapter,
   claudeBackgroundWorkWaitSummary,
-} from "../main/agents/claude-code-provider-adapter.js";
-import { CLAUDE_TURN_WITHOUT_MODEL_TEXT } from "../main/agents/claude-room-turn-evidence.js";
+} from "#provider-runtime/agents/claude-code-provider-adapter.js";
+import { CLAUDE_TURN_WITHOUT_MODEL_TEXT } from "#provider-runtime/agents/claude-room-turn-evidence.js";
 import { CLAUDE_REAL_CAPTURES, claudeCapturedTask, realClaudeCapture, realClaudeResult } from "./claude-result-shapes.js";
 import { mapEntry } from "../main/supervisor-daemon.js";
 import {

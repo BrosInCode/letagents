@@ -20,7 +20,7 @@ const {
   sensitiveCodexAppServerConfigValues,
   sensitiveCodexAppServerEnvValues,
   waitForLaunchedCodexAppServer,
-} = await import("../main/agents/codex-app-server.js");
+} = await import("#provider-runtime/agents/codex-app-server.js");
 
 type CodexAppServerLaunchForTest = ReturnType<typeof launchCodexAppServer>;
 type CodexAppServerExitForTest = Awaited<CodexAppServerLaunchForTest["exited"]>;

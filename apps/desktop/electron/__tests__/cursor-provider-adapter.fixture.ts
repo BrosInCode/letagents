@@ -23,20 +23,20 @@ import {
   defaultLaunchTurn,
   type CursorCliChild,
   type CursorProviderAdapterDependencies,
-} from "../main/agents/cursor-provider-adapter.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
 import type {
   ProviderHandle,
   ProviderRoomTurnResult,
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
-} from "../main/agents/provider-adapter.js";
-import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
-import { cursorSupervisedMcpServerName, type CursorManagedProfile } from "../main/agents/cursor-managed-profile.js";
-import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
-import { CURSOR_MCP_CONNECTOR_PARENT } from "../main/agents/cursor-provider-constants.js";
-import { cursorMcpPipeConnectorArgs } from "../main/agents/cursor/windows-turn.js";
-import { removeDisposableCursorProfileRoot } from "../main/agents/cursor/profile-filesystem.js";
+} from "#provider-runtime/agents/provider-adapter.js";
+import type { ProviderProcessExit } from "#provider-runtime/agents/provider-evidence.js";
+import { cursorSupervisedMcpServerName, type CursorManagedProfile } from "#provider-runtime/agents/cursor-managed-profile.js";
+import { LETAGENTS_MCP_RUNTIME_VERSION } from "#provider-runtime/agents/letagents-mcp-runtime.js";
+import { CURSOR_MCP_CONNECTOR_PARENT } from "#provider-runtime/agents/cursor-provider-constants.js";
+import { cursorMcpPipeConnectorArgs } from "#provider-runtime/agents/cursor/windows-turn.js";
+import { removeDisposableCursorProfileRoot } from "#provider-runtime/agents/cursor/profile-filesystem.js";
 import { testDaemonEndpoint, writeFakeProvider } from "./platform.js";
 
 /** Where Cursor's private folders go: /tmp on POSIX (the sandbox profile names it), the temporary folder on Windows. */

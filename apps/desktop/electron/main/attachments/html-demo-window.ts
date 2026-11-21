@@ -2,7 +2,7 @@ import electron from "electron";
 import type { BrowserWindow as ElectronBrowserWindow } from "electron";
 import { randomUUID } from "node:crypto";
 
-import { htmlDemoProtocolScheme } from "../paths.js";
+import { htmlDemoProtocolScheme } from "#provider-runtime/paths.js";
 import { assertHtmlDemoAttachmentHref, htmlDemoWindowTitle, MAX_OPEN_HTML_DEMOS } from "./html-demo-policy.js";
 import {
   htmlDemoContents,

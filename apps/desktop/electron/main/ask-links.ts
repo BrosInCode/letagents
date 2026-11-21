@@ -1,5 +1,5 @@
 import { app, autoUpdater } from "electron";
-import { desktopLinkScheme, normalizeDesktopPreviewLink } from "./preview-mode.js";
+import { desktopLinkScheme, normalizeDesktopPreviewLink } from "#provider-runtime/preview-mode.js";
 
 import { parseDesktopRoomLink, type DesktopRoomLink } from "../../../../shared/room-app-links.mjs";
 import {

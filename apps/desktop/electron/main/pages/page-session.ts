@@ -1,7 +1,7 @@
 import type { Session } from "electron";
 
 import { prepareLockedHtmlSession } from "../attachments/html-demo-session.js";
-import { pageProtocolScheme } from "../paths.js";
+import { pageProtocolScheme } from "#provider-runtime/paths.js";
 import { PAGE_PARTITION } from "./page-policy.js";
 
 /** Page documents by host; a host exists only while its lease is live. */

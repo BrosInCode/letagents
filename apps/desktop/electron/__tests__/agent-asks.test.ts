@@ -303,9 +303,9 @@ test("providers without a verified folder lock can't be given", async () => {
 });
 
 test("a guest Claude launches with no built-in tools and refuses to run with any", async () => {
-  const { attestProviderSpawnPolicy } = await import("../main/agents/provider-spawn-configuration.js");
+  const { attestProviderSpawnPolicy } = await import("#provider-runtime/agents/provider-spawn-configuration.js");
   const { GUEST_CLAUDE_LAUNCH_POLICY } = await import("../asks/give-coordinator.js");
-  const { guestHasOnlyRoomTools } = await import("../main/agents/claude-code-provider-adapter.js");
+  const { guestHasOnlyRoomTools } = await import("#provider-runtime/agents/claude-code-provider-adapter.js");
   const request = (launchPolicy: unknown, permissionProfileId = "read_only") => ({ launchPolicy: { ...(launchPolicy as object) }, permissionProfileId,
     supervisorEntryId: giftEntryId("ask_1", "try_1"), configurationRevision: 1, deliveryMode: "daemon_inbox" }) as any;
   assert.deepEqual(attestProviderSpawnPolicy("claude-code", request(GUEST_CLAUDE_LAUNCH_POLICY)).tools, []);
@@ -317,7 +317,7 @@ test("a guest Claude launches with no built-in tools and refuses to run with any
 });
 
 test("a guest Codex launch must be Read-only", async () => {
-  const { attestProviderSpawnPolicy } = await import("../main/agents/provider-spawn-configuration.js");
+  const { attestProviderSpawnPolicy } = await import("#provider-runtime/agents/provider-spawn-configuration.js");
   const request = (permissionProfileId: string, launchPolicy: unknown) => ({ launchPolicy, permissionProfileId,
     supervisorEntryId: giftEntryId("ask_1", "try_1"), configurationRevision: 1, deliveryMode: "daemon_inbox" }) as any;
   assert.throws(() => attestProviderSpawnPolicy("codex", request("full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } })), /guest agent runs Read-only/);

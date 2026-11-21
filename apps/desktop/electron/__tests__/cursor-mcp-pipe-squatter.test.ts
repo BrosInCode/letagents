@@ -10,17 +10,17 @@ import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { DAEMON_PIPE_ADDON_NAME, loadDaemonPipeAddon } from "../../../../shared/daemon-pipe-native.mjs";
-import { CURSOR_MCP_CONNECTOR_PARENT } from "../main/agents/cursor-provider-constants.js";
-import { prepareCursorTurnRuntimeDataDir } from "../main/agents/cursor-sandbox-policy.js";
-import { defaultLaunchTurn } from "../main/agents/cursor/turn-launcher.js";
-import { WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE } from "../main/agents/cursor/turn-wrapper-setup.js";
+import { CURSOR_MCP_CONNECTOR_PARENT } from "#provider-runtime/agents/cursor-provider-constants.js";
+import { prepareCursorTurnRuntimeDataDir } from "#provider-runtime/agents/cursor-sandbox-policy.js";
+import { defaultLaunchTurn } from "#provider-runtime/agents/cursor/turn-launcher.js";
+import { WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE } from "#provider-runtime/agents/cursor/turn-wrapper-setup.js";
 import {
   CURSOR_MCP_CONNECTOR_SERVER_FILE,
   cursorMcpConnectorListenPath,
   cursorMcpPipeConnectorArgs,
   cursorWindowsMcpRuntimeEnv,
   prepareCursorWindowsConnectorRoot,
-} from "../main/agents/cursor/windows-turn.js";
+} from "#provider-runtime/agents/cursor/windows-turn.js";
 import { materializeAttestableMcpRuntime, withLoopAlive, wrapperMcpRuntimeEnv } from "./cursor-provider-adapter.fixture.js";
 
 // Cursor's MCP connector pipe on Windows, against a hostile server. The

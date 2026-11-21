@@ -52,7 +52,7 @@ function assertPackagedAppImports() {
 }
 
 async function assertPackagedDaemonExecutorSeal() {
-  const verifierPath = join(appRoot, "dist-electron", "main", "agents", "letagents-mcp-runtime.js");
+  const verifierPath = join(appRoot, "dist-provider-runtime", "agents", "letagents-mcp-runtime.js");
   const executorPath = join(appRoot, "runtime", "letagents", "node_modules", "letagents", "dist", "mcp", "server", "daemon-tool-executor.js");
   const loader = await import(pathToFileURL(join(appRoot, "dist-daemon", "supervised-tool-runtime.js")).href);
   const verifier = await import(pathToFileURL(verifierPath).href);

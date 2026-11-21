@@ -35,7 +35,7 @@ import {
   replaceDesktopSupervisorGrantForAgent,
   revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
 } from "../main/supervisor-grant.js";
-import { apiUrl as configuredApiUrl } from "../main/paths.js";
+import { apiUrl as configuredApiUrl } from "#provider-runtime/paths.js";
 import { createStateRecoveryKey, prepareSupervisorState } from "../main/supervisor-state-recovery.js";
 import { loadHostApprovalSigner } from "../main/host-approval-auth.js";
 import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/host-approvals.js";
@@ -677,7 +677,7 @@ test("current-schema child privately enrolls host approval verifier before readi
         });
         assert.equal(process.connected, false);
       `;
-      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
         stdio: ["ignore", "pipe", "pipe", "ipc"],
       });
       let output = ""; child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { output += data; });
@@ -1037,7 +1037,7 @@ test("real child requests its recovery key over private IPC and disconnects afte
     await reportStateRecoveryReady();
     assert.equal(process.connected, false);
   `;
-  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+  const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
   let output = "";
@@ -1092,7 +1092,7 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
   `;
   let child: ChildProcess | undefined;
   try {
-    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
     let output = "";
@@ -3515,7 +3515,11 @@ test("desktop replaces the pre-avatar implementation and accepts only the new ex
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.281",
+    // The daemon of the build before the adapters moved. It loads each adapter
+    // from dist-electron/main/agents at the first use of a provider, and those
+    // files are gone after an update at the same install path. So this app
+    // must replace it, and that needs a different implementation version.
+    "2.0.284-modern.1",
   );
   oldServer = old.server;
   try {
@@ -3536,7 +3540,7 @@ test("desktop replaces the pre-avatar implementation and accepts only the new ex
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.284-modern.1");
+    assert.equal(status.implementationVersion, "2.0.284-modern.2");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

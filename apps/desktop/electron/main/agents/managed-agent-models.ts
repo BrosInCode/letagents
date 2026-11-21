@@ -11,13 +11,13 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopManagedAgentEffort,
 } from "../../ipc-types.js";
-import { claudeCodeVersionAtLeast, inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
-import { resolveCodexExecutable } from "./codex-executable.js";
-import { DEFAULT_CURSOR_MCP_POLICY, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
-import { buildCursorChildEnv } from "./cursor-runner.js";
-import { resolveOpenModelEffortCatalog } from "./open-model-efforts.js";
-import { readOpenModelSettings } from "./open-model-settings.js";
-import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "../desktop-shell-environment.js";
+import { claudeCodeVersionAtLeast, inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "#provider-runtime/agents/claude-code-version.js";
+import { resolveCodexExecutable } from "#provider-runtime/agents/codex-executable.js";
+import { DEFAULT_CURSOR_MCP_POLICY, prepareCursorManagedProfile } from "#provider-runtime/agents/cursor-managed-profile.js";
+import { buildCursorChildEnv } from "#provider-runtime/agents/cursor-runner.js";
+import { resolveOpenModelEffortCatalog } from "#provider-runtime/agents/open-model-efforts.js";
+import { readOpenModelSettings } from "#provider-runtime/agents/open-model-settings.js";
+import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "#provider-runtime/desktop-shell-environment.js";
 
 type ModelListCacheEntry = {
   expiresAt: number;

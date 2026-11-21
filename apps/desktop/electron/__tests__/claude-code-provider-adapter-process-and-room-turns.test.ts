@@ -4,15 +4,15 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { join } from "node:path";
 import test from "node:test";
-import { ClaudeCodeProviderAdapter, claudeChildEnvironment, claudeTranscriptsRoot } from "../main/agents/claude-code-provider-adapter.js";
+import { ClaudeCodeProviderAdapter, claudeChildEnvironment, claudeTranscriptsRoot } from "#provider-runtime/agents/claude-code-provider-adapter.js";
 import type {
   ProviderRoomTurnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
   NativeExecutionObservation,
-} from "../main/agents/provider-adapter.js";
-import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
-import { defaultGetProcessIdentity, sameProcessBirthIdentity } from "../main/agents/provider-evidence.js";
+} from "#provider-runtime/agents/provider-adapter.js";
+import { PROCESS_ENDED_DURING_TURN } from "#provider-runtime/agents/provider-adapter.js";
+import { defaultGetProcessIdentity, sameProcessBirthIdentity } from "#provider-runtime/agents/provider-evidence.js";
 import {
   FakeClaudeChild,
   birthIdentity,

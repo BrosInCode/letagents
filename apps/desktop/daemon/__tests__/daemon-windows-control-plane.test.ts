@@ -184,7 +184,7 @@ test("Windows: the singleton excludes another process until that process exits",
     process.send({ generation: await singleton.acquire() });
     setInterval(() => {}, 1000);
   `;
-  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+  const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
     cwd: process.cwd(), stdio: ["ignore", "ignore", "pipe", "ipc"],
   });
   let stderr = "";
@@ -232,7 +232,7 @@ test("across processes: a daemon starts, a second start is refused, a client con
     process.send({ type: "handed_off" });
     process.exit(0);
   `;
-  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+  const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
     cwd: process.cwd(), stdio: ["ignore", "ignore", "pipe", "ipc"],
   });
   let stderr = "";

@@ -23,10 +23,10 @@ import {
   defaultLaunchTurn,
   type CursorCliChild,
   type CursorProviderAdapterDependencies,
-} from "../main/agents/cursor-provider-adapter.js";
-import type { ProviderRoomTurnResult, ProviderTerminalPayload } from "../main/agents/provider-adapter.js";
-import { relocateCursorConversationNamespace } from "../main/agents/cursor-managed-profile.js";
-import { cursorAuthorityUnprovenDetail } from "../main/agents/cursor-turn-settlement.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
+import type { ProviderRoomTurnResult, ProviderTerminalPayload } from "#provider-runtime/agents/provider-adapter.js";
+import { relocateCursorConversationNamespace } from "#provider-runtime/agents/cursor-managed-profile.js";
+import { cursorAuthorityUnprovenDetail } from "#provider-runtime/agents/cursor-turn-settlement.js";
 import {
   productionPersonalIdentityDependencies,
   wrapperHostedMcpFixture,

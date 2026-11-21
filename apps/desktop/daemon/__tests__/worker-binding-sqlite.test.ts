@@ -195,7 +195,7 @@ test("synchronized fresh multi-process importers converge through WAL and schema
     for (let round = 0; round < 3; round += 1) {
       // First round opens and imports the legacy source; later rounds make
       // repeated fresh openers contend on the same complete DB as well.
-      const children = Array.from({ length: 6 }, () => spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, env.legacy, env.database], { stdio: ["ignore", "pipe", "pipe", "ipc"] }));
+      const children = Array.from({ length: 6 }, () => spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script, env.legacy, env.database], { stdio: ["ignore", "pipe", "pipe", "ipc"] }));
       await Promise.all(children.map((child) => new Promise<void>((resolve, reject) => child.once("message", (message) => message === "ready" ? resolve() : reject(new Error(`child readiness ${String(message)}`))))));
       for (const child of children) child.send("go");
       const stderr = children.map((child) => { let text = ""; child.stderr?.on("data", (chunk) => { text += String(chunk); }); return () => text; });

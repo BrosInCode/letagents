@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 
-import { redactCredentialText } from "./agents/provider-evidence.js";
+import { redactCredentialText } from "#provider-runtime/agents/provider-evidence.js";
 import { DesktopSecureStorageUnavailableError } from "./supervisor-grant.js";
 import type {
   DesktopLaunchEvent,

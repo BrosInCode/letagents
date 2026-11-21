@@ -25,7 +25,7 @@ import {
 import { suggestLetAgentsCodename } from "./agents/codenames.js";
 import { agentDisplayNameKey, isPlaceholderAgentDisplayName } from "../../../../shared/agent-codenames.mjs";
 import { PacedQueue } from "../../../../shared/paced-queue.mjs";
-import { readOpenModelSettings, type StoredOpenModelSettings } from "./agents/open-model-settings.js";
+import { readOpenModelSettings, type StoredOpenModelSettings } from "#provider-runtime/agents/open-model-settings.js";
 import { assertGuestSafePermissionProfile, assertRentalSafePermissionProfile, isGivenAgentEntryId, isGuestEntryId } from "./agents/rental-permission-profiles.js";
 import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry, DesktopSupervisorRoomMove } from "../ipc-types.js";
 

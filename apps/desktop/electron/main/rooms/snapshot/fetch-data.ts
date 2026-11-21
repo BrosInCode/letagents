@@ -5,7 +5,7 @@ import {
   localRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
 } from "../local-store.js";
-import { roomMessageHistoryPageSize } from "../../paths.js";
+import { roomMessageHistoryPageSize } from "#provider-runtime/paths.js";
 import type { GitHubEventsResponse } from "../events.js";
 import { getLocalRoomArtifacts } from "../artifacts/local-store.js";
 import { getLatestLocalChatMessages } from "../messages/local-store.js";

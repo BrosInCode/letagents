@@ -725,7 +725,7 @@ test("workspace provisioning survives deletion of the daemon's inherited launch 
     ].join("\n");
     const { stdout } = await execFileAsync(
       process.execPath,
-      ["--import", tsxImport, "--input-type=module", "-e", script],
+      ["--conditions=letagents-source", "--import", tsxImport, "--input-type=module", "-e", script],
       { cwd: launchCwd, maxBuffer: 8 * 1024 * 1024 },
     );
     const result = JSON.parse(stdout) as { path: string; reused: boolean };

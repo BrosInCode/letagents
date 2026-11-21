@@ -1,14 +1,14 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodexProviderAdapter } from "../main/agents/codex-provider-adapter.js";
+import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
 import type {
   ProviderActivityEvent,
   ProviderContinuationRef,
   ProviderStreamEvent,
   ProviderTerminalPayload,
-} from "../main/agents/provider-adapter.js";
-import { ProviderExecutionObserver } from "../main/agents/provider-execution-observer.js";
+} from "#provider-runtime/agents/provider-adapter.js";
+import { ProviderExecutionObserver } from "#provider-runtime/agents/provider-execution-observer.js";
 import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 import {
   providerStreamLifecycle,

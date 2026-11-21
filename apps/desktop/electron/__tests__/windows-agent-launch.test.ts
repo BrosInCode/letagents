@@ -17,15 +17,15 @@ import {
   environmentValue,
   shadowProfileEnvironment,
   windowsSystemEnvironment,
-} from "../main/agents/windows-child-environment.js";
-import { minimalOpenCodeEnvironment } from "../main/agents/opencode-launch-contract.js";
-import { openCodeMcpLaunch } from "../main/agents/open-model/adapter-launch.js";
-import { windowsCodexArguments } from "../main/agents/codex-home-harness.js";
-import { providerTreeExit } from "../main/agents/provider-evidence.js";
-import { rentalIsolatedChildEnvironment } from "../main/agents/rental-child-environment.js";
-import { icaclsReadOnlyFolderArguments, sddlIsReadOnlyFolderFor } from "../main/agents/codex-agent-home.js";
-import { cursorWindowsProgram } from "../main/agents/cursor/windows-turn.js";
-import { buildCursorChildEnv } from "../main/agents/cursor-runner.js";
+} from "#provider-runtime/agents/windows-child-environment.js";
+import { minimalOpenCodeEnvironment } from "#provider-runtime/agents/opencode-launch-contract.js";
+import { openCodeMcpLaunch } from "#provider-runtime/agents/open-model/adapter-launch.js";
+import { windowsCodexArguments } from "#provider-runtime/agents/codex-home-harness.js";
+import { providerTreeExit } from "#provider-runtime/agents/provider-evidence.js";
+import { rentalIsolatedChildEnvironment } from "#provider-runtime/agents/rental-child-environment.js";
+import { icaclsReadOnlyFolderArguments, sddlIsReadOnlyFolderFor } from "#provider-runtime/agents/codex-agent-home.js";
+import { cursorWindowsProgram } from "#provider-runtime/agents/cursor/windows-turn.js";
+import { buildCursorChildEnv } from "#provider-runtime/agents/cursor-runner.js";
 
 const ELECTRON = "C:\\Program Files\\LetAgents\\LetAgents.exe";
 const SHIM = [

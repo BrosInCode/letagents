@@ -1,7 +1,7 @@
 import {
   CodexProviderAdapter,
   type CodexProviderAdapterDependencies,
-} from "../../main/agents/codex-provider-adapter.js";
+} from "#provider-runtime/agents/codex-provider-adapter.js";
 import type {
   ProviderActivityEvent,
   ProviderObservedState,
@@ -10,7 +10,7 @@ import type {
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
-} from "../../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/provider-adapter.js";
 import type { NativeExecutionObservation } from "../../../shared/execution-protocol.js";
 
 /**

@@ -32,8 +32,8 @@ import { ExecutionDelegationCoordinator } from "../execution-delegation-coordina
 import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordinator.js";
 import { launchProgress } from "../launch-progress.js";
 import { setTurnStartLatencyReporter, type StartLatencyRecord } from "../turn-start-latency.js";
-import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-spawn-configuration.js";
-import { OpenModelProviderAdapter } from "../../electron/main/agents/open-model-provider-adapter.js";
+import { attestProviderSpawnPolicy } from "#provider-runtime/agents/provider-spawn-configuration.js";
+import { OpenModelProviderAdapter } from "#provider-runtime/agents/open-model-provider-adapter.js";
 import { ProviderActionPortRouter } from "../provider-action-port-router.js";
 import { ExecutionProtocolError } from "../execution-protocol.js";
 import { ProviderStopError } from "../daemon-error-policy.js";
@@ -944,10 +944,10 @@ const scratchWorkspaceIdentity: TaskWorkAttempt["workspace_identity"] = {
 test("authorized worker routes reach the real provider MCP configuration on launch and resume", async () => {
   // Exercise default adapter factories, not helpers with a manually supplied
   // URL. Only native process creation is replaced; no credentials or network.
-  const { ClaudeCodeProviderAdapter } = await import(new URL("../../electron/main/agents/claude-code-provider-adapter.ts", import.meta.url).href);
-  const { CursorProviderAdapter } = await import(new URL("../../electron/main/agents/cursor-provider-adapter.ts", import.meta.url).href);
-  const { CodexProviderAdapter } = await import(new URL("../../electron/main/agents/codex-provider-adapter.ts", import.meta.url).href);
-  const { LETAGENTS_MCP_RUNTIME_VERSION } = await import(new URL("../../electron/main/agents/letagents-mcp-runtime.ts", import.meta.url).href);
+  const { ClaudeCodeProviderAdapter } = await import(new URL("../../provider-runtime/agents/claude-code-provider-adapter.ts", import.meta.url).href);
+  const { CursorProviderAdapter } = await import(new URL("../../provider-runtime/agents/cursor-provider-adapter.ts", import.meta.url).href);
+  const { CodexProviderAdapter } = await import(new URL("../../provider-runtime/agents/codex-provider-adapter.ts", import.meta.url).href);
+  const { LETAGENTS_MCP_RUNTIME_VERSION } = await import(new URL("../../provider-runtime/agents/letagents-mcp-runtime.ts", import.meta.url).href);
   const { letAgentsRuntimeContract } = await import(new URL("../../../../src/mcp/server/runtime-contract.ts", import.meta.url).href);
   const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-worker-route-")));
   const env = {

@@ -9,30 +9,30 @@ import {
   CursorIdentityAuthRequiredError as FacadeCursorIdentityAuthRequiredError,
   CursorTeamManagedIdentityError as FacadeCursorTeamManagedIdentityError,
   defaultLaunchTurn as facadeDefaultLaunchTurn,
-} from "../main/agents/cursor-provider-adapter.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
 import {
   assertCursorPersonalIdentity,
   CursorIdentityAuthRequiredError,
   CursorTeamManagedIdentityError,
-} from "../main/agents/cursor-identity.js";
+} from "#provider-runtime/agents/cursor-identity.js";
 import {
   cursorCliEnv,
   defaultLaunchTurn,
 } from "../main/agents/cursor-turn-launcher.js";
 
-const adapterSource = read("../main/agents/cursor-provider-adapter.ts");
+const adapterSource = read("../../provider-runtime/agents/cursor-provider-adapter.ts");
 // The adapter state machine is split across these cursor/ modules.
 const adapterModuleSources = [
   "dependencies", "lane-state", "launch-arguments", "provider-adapter", "room-turn", "stream-events",
   "supervised-turn-preparation", "turn-completion", "turn-control", "turn-launch", "turn-process",
   "turn-recovery", "workspace-generation",
-].map((name) => read(`../main/agents/cursor/${name}.ts`));
-const identitySource = read("../main/agents/cursor-identity.ts");
+].map((name) => read(`../../provider-runtime/agents/cursor/${name}.ts`));
+const identitySource = read("../../provider-runtime/agents/cursor-identity.ts");
 // The launcher composes its wrapper program from ordered cursor/ slices.
 const launcherSource = [
   "turn-launcher", "turn-wrapper-setup", "turn-wrapper-mcp", "turn-wrapper-proxies", "turn-wrapper-start", "windows-turn",
-].map((name) => read(`../main/agents/cursor/${name}.ts`)).join("\n");
-const sandboxSource = read("../main/agents/cursor-sandbox-policy.ts");
+].map((name) => read(`../../provider-runtime/agents/cursor/${name}.ts`)).join("\n");
+const sandboxSource = read("../../provider-runtime/agents/cursor-sandbox-policy.ts");
 
 test("Cursor's public adapter facade preserves the extracted runtime identities", () => {
   assert.equal(facadeAssertCursorPersonalIdentity, assertCursorPersonalIdentity);

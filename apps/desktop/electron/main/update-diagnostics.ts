@@ -11,7 +11,7 @@ import {
 import { dirname } from "node:path";
 
 import type { DesktopUpdateDiagnosticEvent } from "./desktop-updater.js";
-import { redactCredentialText } from "./agents/provider-evidence.js";
+import { redactCredentialText } from "#provider-runtime/agents/provider-evidence.js";
 
 const DEFAULT_MAX_UPDATE_LOG_BYTES = 256 * 1024;
 

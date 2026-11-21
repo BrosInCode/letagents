@@ -9,7 +9,7 @@ import {
   recoverExactClaudeTurnFailureFromSession,
   recoverExactClaudeTurnFromSession,
   type ClaudeEvidenceRecord,
-} from "../main/agents/claude-room-turn-evidence.js";
+} from "#provider-runtime/agents/claude-room-turn-evidence.js";
 import {
   CLAUDE_API_ERROR_CAPTURES, CLAUDE_API_FAILURE_POLICY, CLAUDE_INVALID_REQUESTS, CLAUDE_REAL_CAPTURES, CLAUDE_RESULT_CELLS, CLAUDE_RESULT_TEXT, claudeCapturedTask,
   claudeInvalidRequestRows, claudeParentChain, claudeResultEvent, realClaudeCapture, realClaudeResult,

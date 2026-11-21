@@ -6,9 +6,9 @@ import {
   clearOpenModelEffortCatalogCacheForTest,
   parseOpenModelSupportedEfforts,
   resolveOpenModelEffortCatalog,
-} from "../main/agents/open-model-efforts.js";
-import { openCodeConfig, OPEN_MODEL_OPENCODE_PROVIDER_ID } from "../main/agents/opencode-launch-contract.js";
-import { attestProviderSpawnPolicy } from "../main/agents/provider-spawn-configuration.js";
+} from "#provider-runtime/agents/open-model-efforts.js";
+import { openCodeConfig, OPEN_MODEL_OPENCODE_PROVIDER_ID } from "#provider-runtime/agents/opencode-launch-contract.js";
+import { attestProviderSpawnPolicy } from "#provider-runtime/agents/provider-spawn-configuration.js";
 
 // Shapes from OpenRouter's GET /api/v1/models on 2026-10-26.
 const openRouterModels = {

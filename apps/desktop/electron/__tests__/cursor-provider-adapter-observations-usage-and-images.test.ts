@@ -20,9 +20,9 @@ import {
   CursorProviderAdapter,
   cursorLiveDisplayProjections,
   type CursorProviderAdapterDependencies,
-} from "../main/agents/cursor-provider-adapter.js";
-import type { ProviderStreamEvent, ProviderTerminalPayload, NativeExecutionObservation } from "../main/agents/provider-adapter.js";
-import { prepareCursorSupervisedProfile } from "../main/agents/cursor-managed-profile.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
+import type { ProviderStreamEvent, ProviderTerminalPayload, NativeExecutionObservation } from "#provider-runtime/agents/provider-adapter.js";
+import { prepareCursorSupervisedProfile } from "#provider-runtime/agents/cursor-managed-profile.js";
 import {
   emptyExecutionProjection,
   reduceExecutionFact,

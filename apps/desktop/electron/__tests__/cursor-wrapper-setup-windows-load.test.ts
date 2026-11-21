@@ -13,9 +13,9 @@ test("the Cursor wrapper module loads on Windows with a backslash temporary fold
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   Object.defineProperty(process, "platform", { value: "win32" });
   try {
-    const constants = await import("../main/agents/cursor-provider-constants.js");
+    const constants = await import("#provider-runtime/agents/cursor-provider-constants.js");
     assert.equal(constants.CURSOR_MCP_CONNECTOR_PARENT, windowsTemp);
-    const setup = await import("../main/agents/cursor/turn-wrapper-setup.js");
+    const setup = await import("#provider-runtime/agents/cursor/turn-wrapper-setup.js");
     assert.equal(typeof setup.cursorWrapperSetupSource, "function");
     // On Windows the pattern is built for the backslash temporary folder at the call.
     const pattern = new RegExp(setup.cursorMcpConnectorRootPattern(windowsTemp));
@@ -30,7 +30,7 @@ test("the Cursor wrapper module loads on Windows with a backslash temporary fold
 });
 
 test("the macOS connector pattern is unchanged", async () => {
-  const { cursorMcpConnectorRootPattern } = await import("../main/agents/cursor/turn-wrapper-setup.js");
+  const { cursorMcpConnectorRootPattern } = await import("#provider-runtime/agents/cursor/turn-wrapper-setup.js");
   assert.equal(
     cursorMcpConnectorRootPattern("/tmp", "darwin"),
     "^/tmp/letagents-cursor-mcp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",

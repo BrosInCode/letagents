@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { GIT_NOT_FOUND_MESSAGE, resolveGitExecutable } from "../../../../shared/git-executable.mjs";
-import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "./desktop-shell-environment.js";
+import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "#provider-runtime/desktop-shell-environment.js";
 
 const execFileAsync = promisify(execFile);
 

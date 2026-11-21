@@ -1,9 +1,9 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stopCodexBackgroundTerminal } from "../main/agents/codex/background-terminals.js";
-import { boundedCommandEnd } from "../main/agents/codex/adapter-events.js";
-import { MAX_STREAM_PAYLOAD_BYTES, safeStreamPayload } from "../main/agents/provider-evidence.js";
+import { stopCodexBackgroundTerminal } from "#provider-runtime/agents/codex/background-terminals.js";
+import { boundedCommandEnd } from "#provider-runtime/agents/codex/adapter-events.js";
+import { MAX_STREAM_PAYLOAD_BYTES, safeStreamPayload } from "#provider-runtime/agents/provider-evidence.js";
 
 test("a command's end with a large whole output keeps its ids: only the newest output is kept, and it says so", () => {
   const lines = Array.from({ length: 2_000 }, (_, index) => `[dev-server] request ${index} served`).join("\n");

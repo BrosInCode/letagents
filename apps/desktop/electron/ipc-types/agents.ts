@@ -2,14 +2,22 @@ import type { AgentAvatar } from "../../../../shared/agent-avatar.mjs";
 import type { DesktopGitRoomInfo } from "./room.js";
 import type { DesktopMcpInstallTargetId } from "./setup.js";
 import type { RetainedExecutionDetail } from "../../shared/execution-protocol.js";
-
-export type DesktopAgentProviderId =
-  | "claude-code"
-  | "antigravity"
-  | "cursor"
-  | "codex"
-  | "open-model"
-  | (string & {});
+import type {
+  DesktopAgentProviderId,
+  DesktopManagedAgentPermissionProfile,
+  DesktopManagedAgentPermissionProfileId,
+} from "../../shared/provider-desktop-types.js";
+export type {
+  DesktopAgentCommitIdentitySettings,
+  DesktopAgentProviderId,
+  DesktopCursorMcpPolicy,
+  DesktopManagedAgentPermissionProfile,
+  DesktopManagedAgentPermissionProfileId,
+  DesktopManagedAgentPermissionProfileRisk,
+  DesktopManagedAgentPermissionProfileStatus,
+  DesktopOpenModelSaveSettingsInput,
+  DesktopOpenModelSettingsStatus,
+} from "../../shared/provider-desktop-types.js";
 
 export type DesktopAgentProviderCapability =
   | "external_mcp"
@@ -114,11 +122,6 @@ export type DesktopManagedAgentEffort =
   | "xhigh"
   | "max";
 
-export type DesktopCursorMcpPolicy =
-  | "filter_letagents"
-  | "normal"
-  | "none";
-
 export type DesktopAgentProviderModelSource =
   | "provider"
   | "known"
@@ -161,34 +164,6 @@ export interface DesktopAgentProviderModelsResult {
   defaultModel: string | null;
   error: string | null;
   cliUpdate?: DesktopAgentProviderCliUpdate | null;
-}
-
-export type DesktopManagedAgentPermissionProfileId =
-  | "read_only"
-  | "ask_before_write"
-  | "auto_review"
-  | "sandboxed_write"
-  | "full_access"
-  | (string & {});
-
-export type DesktopManagedAgentPermissionProfileStatus =
-  | "available"
-  | "gated"
-  | "unsupported";
-
-export type DesktopManagedAgentPermissionProfileRisk =
-  | "low"
-  | "medium"
-  | "high";
-
-export interface DesktopManagedAgentPermissionProfile {
-  id: DesktopManagedAgentPermissionProfileId;
-  label: string;
-  description: string;
-  status: DesktopManagedAgentPermissionProfileStatus;
-  risk: DesktopManagedAgentPermissionProfileRisk;
-  detail: string | null;
-  isDefault: boolean;
 }
 
 export type DesktopManagedAgentChangeFileStatus =
@@ -899,30 +874,4 @@ export interface DesktopSupervisorAgentInspectorDetail {
   publication: { client_message_id: string; canonical_message_id: string | null; room_id: string | null } | null;
   continuation_repair: DesktopSupervisorContinuationRepair | null;
   timeline: DesktopRoomAgentCausalEvent[]; items: DesktopSupervisorAgentInspectorItem[]; uncertain_effects: DesktopSupervisorUncertainEffect[]; history_boundary: DesktopSupervisorAgentInspectorHistoryBoundary | null;
-}
-
-export interface DesktopOpenModelSettingsStatus {
-  configured: boolean;
-  hasApiKey: boolean;
-  baseUrl: string;
-  model: string;
-  savedAt: string | null;
-  settingsPath: string;
-  error: string | null;
-  contextWindow?: number | null;
-}
-
-export interface DesktopOpenModelSaveSettingsInput {
-  baseUrl?: string | null;
-  model?: string | null;
-  /** A string saves a new key, null clears the saved key, undefined keeps the current key. */
-  apiKey?: string | null;
-  contextWindow?: number | null;
-}
-
-export interface DesktopAgentCommitIdentitySettings {
-  /** True when the owner chose to keep the host's own Git identity for agent commits. */
-  useHostGitIdentity: boolean;
-  /** The signed-in GitHub account's noreply identity, or null when no GitHub account is known. */
-  githubIdentity: { name: string; email: string } | null;
 }

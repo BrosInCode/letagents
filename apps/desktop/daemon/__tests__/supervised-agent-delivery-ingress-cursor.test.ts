@@ -10,7 +10,7 @@ import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
-import { cursorAuthorityUnprovenDetail } from "../../electron/main/agents/cursor-turn-settlement.js";
+import { cursorAuthorityUnprovenDetail } from "#provider-runtime/agents/cursor-turn-settlement.js";
 import { type DaemonManifestEntry } from "../types.js";
 import {
   agent,

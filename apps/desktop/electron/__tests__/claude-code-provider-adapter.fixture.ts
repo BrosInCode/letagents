@@ -13,16 +13,16 @@ import {
   type ClaudeCliChild,
   type ClaudeCodeProviderAdapterDependencies,
   type ClaudeCodeProviderAdapterOptions,
-} from "../main/agents/claude-code-provider-adapter.js";
+} from "#provider-runtime/agents/claude-code-provider-adapter.js";
 import type {
   ProviderSpawnRequest,
   ProviderActivityEvent,
   ProviderRoomTurnResult,
   ProviderStreamEvent,
   NativeExecutionObservation,
-} from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/provider-adapter.js";
 import { CLAUDE_FAILURE_TEXT, CLAUDE_REAL_CAPTURES, claudeCapturedTask, realClaudeCapture } from "./claude-result-shapes.js";
-import { type ProviderProcessExit } from "../main/agents/provider-evidence.js";
+import { type ProviderProcessExit } from "#provider-runtime/agents/provider-evidence.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
 // separately compiled source tree into Electron's production rootDir.

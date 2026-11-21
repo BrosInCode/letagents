@@ -12,7 +12,7 @@ import {
   refreshDesktopShellEnvironment,
   resetDesktopShellEnvironmentForTests,
   startDesktopShellEnvironmentHydration,
-} from "../main/desktop-shell-environment.js";
+} from "#provider-runtime/desktop-shell-environment.js";
 import { runGit, runGitStdout } from "../main/git-exec.js";
 
 const desktopMainSource = readFileSync(

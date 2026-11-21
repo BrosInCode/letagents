@@ -15,7 +15,7 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import type { ProviderStreamCoordinator } from "../provider-stream-coordinator.js";
-import { OpenCodeRuntimeGoneError } from "../../electron/main/agents/open-model-provider-adapter.js";
+import { OpenCodeRuntimeGoneError } from "#provider-runtime/agents/open-model-provider-adapter.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import {
   SupervisorDaemon,

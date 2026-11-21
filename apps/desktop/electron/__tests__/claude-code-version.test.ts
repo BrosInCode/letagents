@@ -11,7 +11,7 @@ import {
   MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION,
   requireSupportedClaudeCodeVersion,
   resolveClaudeCodeExecutable,
-} from "../main/agents/claude-code-version.js";
+} from "#provider-runtime/agents/claude-code-version.js";
 import { clearProbeCache } from "#provider-runtime/provider-probe-cache.js";
 import { writeFakeProvider } from "./platform.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";

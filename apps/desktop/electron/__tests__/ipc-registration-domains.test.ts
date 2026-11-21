@@ -344,7 +344,7 @@ test("rental registration defers recovery and host startup to one explicit appli
     mock.module("../main/agents/providers.js", { namedExports: { runDesktopAgentProviderPreflight: unexpected } }),
     mock.module("../main/agents/state.js", { namedExports: { getOrCreateDesktopHostId: unexpected } }),
     mock.module("../main/auth.js", { namedExports: { readStoredAuth: unexpected } }),
-    mock.module("../main/paths.js", { namedExports: { apiUrl: "http://127.0.0.1:9" } }),
+    mock.module("#provider-runtime/paths.js", { namedExports: { apiUrl: "http://127.0.0.1:9" } }),
     mock.module("../main/room-stream.js", { namedExports: {
       emitRoomStreamEvent: unexpected, getActiveRoomIdentifier: unexpected,
     } }),
@@ -383,7 +383,7 @@ test("application registers startup preparation before rental recovery without d
       calls.push("register");
       return () => { calls.push("rental-start"); };
     } } }),
-    mock.module("../main/desktop-shell-environment.js", { namedExports: {
+    mock.module("#provider-runtime/desktop-shell-environment.js", { namedExports: {
       startDesktopShellEnvironmentHydration: () => preparation,
     } }),
     mock.module("../main/supervisor-daemon.js", { namedExports: { supervisorDaemonClient: {
@@ -406,7 +406,7 @@ test("application registers startup preparation before rental recovery without d
     mock.module("../main/ask-links.js", { namedExports: { claimDesktopInstance: () => true, registerAskLinks() {} } }),
     mock.module("../main/company-links.js", { namedExports: { prepareCompanyLinks() {} } }),
     mock.module("../main/menu.js", { namedExports: { configureApplicationMenu() {} } }),
-    mock.module("../main/paths.js", { namedExports: { attachmentProtocolScheme: "fixture", htmlDemoProtocolScheme: "fixture-demo", pageProtocolScheme: "fixture-page", workspaceRoot: "/fixture" } }),
+    mock.module("#provider-runtime/paths.js", { namedExports: { attachmentProtocolScheme: "fixture", htmlDemoProtocolScheme: "fixture-demo", pageProtocolScheme: "fixture-page", workspaceRoot: "/fixture" } }),
     mock.module("../main/room-stream.js", { namedExports: {
       setExecutionDelegationInvalidationHandler() {}, stopDesktopRoomStream: async () => {},
     } }),
@@ -504,8 +504,9 @@ test("host approval sender accepts only the live trusted main frame", async () =
       show() { if (destroyed) throw new Error("Object has been destroyed"); shown += 1; }
       focus() { if (destroyed) throw new Error("Object has been destroyed"); }
     } } }),
-    mock.module("../main/paths.js", { namedExports: { devServerUrl: "http://127.0.0.1:4310",
-      electronMainDir: "/test", rendererDistPath: "/test/index.html" } }),
+    mock.module("#provider-runtime/paths.js", { namedExports: { devServerUrl: "http://127.0.0.1:4310",
+      rendererDistPath: "/test/index.html" } }),
+    mock.module("../main/electron-main-dir.js", { namedExports: { electronMainDir: "/test" } }),
     mock.module("../main/external-url.js", { namedExports: { openExternalWebUrl: async () => {} } }),
     mock.module("../main/attachments/html-demo-inline.js", { namedExports: {
       installInlineHtmlDemoHost: (window: unknown) => { inlineDemoHosts.push(window); },

@@ -7,17 +7,17 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { LETAGENTS_MCP_SERVER_NAME, listCodexMcpServers } from "../../../../shared/codex-owner-isolation.mjs";
-import { codexAgentHomeDirectory } from "../main/agents/codex-agent-home.js";
+import { codexAgentHomeDirectory } from "#provider-runtime/agents/codex-agent-home.js";
 import {
   launchManagedCodexAppServer,
   sensitiveCodexAppServerEnvValues,
   terminateSpawnedProcess,
   type CodexAppServerExit,
-} from "../main/agents/codex-app-server.js";
-import { resolveCodexExecutable } from "../main/agents/codex-executable.js";
-import type { CodexProviderAdapterDependencies } from "../main/agents/codex-provider-adapter.js";
-import { CodexRpcClient, type CodexRpcWebSocketCtor } from "../main/agents/codex-rpc-client.js";
-import { defaultSignalProcess } from "../main/agents/provider-evidence.js";
+} from "#provider-runtime/agents/codex-app-server.js";
+import { resolveCodexExecutable } from "#provider-runtime/agents/codex-executable.js";
+import type { CodexProviderAdapterDependencies } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { CodexRpcClient, type CodexRpcWebSocketCtor } from "#provider-runtime/agents/codex-rpc-client.js";
+import { defaultSignalProcess } from "#provider-runtime/agents/provider-evidence.js";
 import { CODEX_REPLAY_PROTOCOL } from "../__tests__/provider-replay/codex-replay.js";
 import {
   CODEX_RESUMED_SCENARIO,

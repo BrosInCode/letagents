@@ -25,8 +25,8 @@ import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 import {
   OpenModelProviderAdapter,
   type OpenModelProviderAdapterDependencies,
-} from "../../electron/main/agents/open-model-provider-adapter.js";
-import type { ProviderProcessExit } from "../../electron/main/agents/provider-evidence.js";
+} from "#provider-runtime/agents/open-model-provider-adapter.js";
+import type { ProviderProcessExit } from "#provider-runtime/agents/provider-evidence.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt-native-resolution",

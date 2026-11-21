@@ -13,7 +13,7 @@ import {
   OpenModelProviderAdapter,
   type OpenCodePermissionObservation,
   type OpenModelProviderAdapterDependencies,
-} from "../main/agents/open-model-provider-adapter.js";
+} from "#provider-runtime/agents/open-model-provider-adapter.js";
 import {
   PROCESS_ENDED_DURING_TURN,
   ProviderTurnControlError,
@@ -22,21 +22,21 @@ import {
   type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStreamEvent,
-} from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/provider-adapter.js";
 import {
   terminateFreshLaunch,
   type ProviderProcessExit,
-} from "../main/agents/provider-evidence.js";
+} from "#provider-runtime/agents/provider-evidence.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import {
   OpenCodePermissionReplyError,
   OpenCodeServerClient,
   parseOpenCodePermissionEvent,
   type OpenCodePermissionRequest,
-} from "../main/agents/opencode-server-client.js";
-import { clearOpenModelEffortCatalogCacheForTest } from "../main/agents/open-model-efforts.js";
-import { OPEN_MODEL_OPENCODE_PROVIDER_ID, seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
-import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
+} from "#provider-runtime/agents/opencode-server-client.js";
+import { clearOpenModelEffortCatalogCacheForTest } from "#provider-runtime/agents/open-model-efforts.js";
+import { OPEN_MODEL_OPENCODE_PROVIDER_ID, seedOpenCodeConfigHome, shieldOwnerInstructions } from "#provider-runtime/agents/opencode-launch-contract.js";
+import { OPENCODE_RUNTIME_VERSION } from "#provider-runtime/agents/opencode-runtime.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 import { ProviderInstallError } from "../../../../shared/provider-executable.mjs";

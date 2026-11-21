@@ -1,13 +1,13 @@
 import "./isolated-home.js";
-import { ClaudeCompaction } from "../main/agents/claude-compaction.js";
+import { ClaudeCompaction } from "#provider-runtime/agents/claude-compaction.js";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
-import { CLAUDE_BACKGROUND_WORK_TEXT, ClaudeCodeProviderAdapter, createManagedClaudeMcpConfig } from "../main/agents/claude-code-provider-adapter.js";
-import type { ProviderStreamEvent, NativeExecutionObservation } from "../main/agents/provider-adapter.js";
-import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
-import { CLAUDE_TURN_WITHOUT_MODEL_TEXT } from "../main/agents/claude-room-turn-evidence.js";
+import { CLAUDE_BACKGROUND_WORK_TEXT, ClaudeCodeProviderAdapter, createManagedClaudeMcpConfig } from "#provider-runtime/agents/claude-code-provider-adapter.js";
+import type { ProviderStreamEvent, NativeExecutionObservation } from "#provider-runtime/agents/provider-adapter.js";
+import { PROCESS_ENDED_DURING_TURN } from "#provider-runtime/agents/provider-adapter.js";
+import { CLAUDE_TURN_WITHOUT_MODEL_TEXT } from "#provider-runtime/agents/claude-room-turn-evidence.js";
 import {
   CLAUDE_API_ERROR_CAPTURES,
   CLAUDE_FAILURE_TEXT,

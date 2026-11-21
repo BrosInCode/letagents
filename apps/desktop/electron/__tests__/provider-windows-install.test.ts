@@ -16,7 +16,7 @@ import test from "node:test";
 
 import { execProviderFile, ProviderBatchFileError, ProviderInstallError, providerLaunchCommand } from "../../../../shared/provider-executable.mjs";
 import { spawnTree } from "../../../../shared/process-tree.mjs";
-import { cursorWindowsNativeLaunch, cursorWindowsProgram } from "../main/agents/cursor/windows-turn.js";
+import { cursorWindowsNativeLaunch, cursorWindowsProgram } from "#provider-runtime/agents/cursor/windows-turn.js";
 
 const windowsOnly = { skip: process.platform === "win32" ? false : "needs Windows" };
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/windows-provider-installs/${name}`, import.meta.url), "utf8")

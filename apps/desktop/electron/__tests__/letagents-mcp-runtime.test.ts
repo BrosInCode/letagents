@@ -12,7 +12,7 @@ import {
   letAgentsMcpRuntimeTreeWalkCountsForTest,
   resolveLetAgentsMcpRuntime,
   warmLetAgentsMcpRuntime,
-} from "../main/agents/letagents-mcp-runtime.js";
+} from "#provider-runtime/agents/letagents-mcp-runtime.js";
 
 const { tempDir } = createElectronTestEnv({
   prefix: "letagents-packaged-mcp-runtime-",

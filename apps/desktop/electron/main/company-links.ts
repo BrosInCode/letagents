@@ -1,7 +1,7 @@
 import electron from "electron";
 import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { normalizeDesktopPreviewLink } from "./preview-mode.js";
+import { normalizeDesktopPreviewLink } from "#provider-runtime/preview-mode.js";
 import { parseCompanyLink } from "./company-link.js";
 import { createWindow, emitToMainWindow, focusMainWindow, hasOpenWindows } from "./window.js";
 

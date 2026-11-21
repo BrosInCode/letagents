@@ -34,8 +34,8 @@ export const PROVIDER_ADAPTER_ENTRIES = [
   "cursor-provider-adapter.js",
   "open-model-provider-adapter.js",
 ];
-/** Where an adapter entry file can be: the shared package, or the Electron build before the adapters move. */
-const ADAPTER_FOLDERS = ["dist-provider-runtime", join("dist-electron", "main", "agents")];
+/** The folder of the adapter entry files in the shared package. */
+const ADAPTER_FOLDER = join("dist-provider-runtime", "agents");
 const BUILD_FOLDERS = ["dist-electron", "dist-daemon", "dist-provider-runtime"];
 
 function buildFiles(directory, found = [], pattern = /\.(js|mjs|cjs)$/) {
@@ -164,8 +164,8 @@ export async function checkPackagedAppImports(appRoot, { log = console.log } = {
   log(`packaged-imports: ${paths} path(s) from a file's own place exist`);
 
   for (const entry of PROVIDER_ADAPTER_ENTRIES) {
-    const path = ADAPTER_FOLDERS.map((folder) => join(app, folder, entry)).find((candidate) => existsSync(candidate));
-    if (!path) throw new Error(`the packaged app has no provider adapter entry file ${entry}`);
+    const path = join(app, ADAPTER_FOLDER, entry);
+    if (!existsSync(path)) throw new Error(`the packaged app has no provider adapter entry file ${entry}`);
     try {
       await import(pathToFileURL(path).href);
     } catch (error) {

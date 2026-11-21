@@ -12,7 +12,7 @@ import { watchGuestEventFlood } from "../attachments/guest-event-flood.js";
 import { inlineHtmlDemoBucket, type InlineHtmlDemoBucket } from "../attachments/html-demo-policy.js";
 import { lockHtmlDemoContents } from "../attachments/html-demo-session.js";
 import { addWebviewRoute } from "../attachments/webview-router.js";
-import { electronMainDir } from "../paths.js";
+import { electronMainDir } from "../electron-main-dir.js";
 import type { RoomPageSource } from "./page-adapter.js";
 import type { PageGrantKeeper } from "./page-grants.js";
 import { PAGE_RELAY_RESOURCES } from "./page-watch.js";

@@ -36,11 +36,11 @@ delete process.env.CODEX_HOME;
 // Node asks the keychain for certificates when it starts, which no Codex sandbox lets a command do, with or without a deny.
 delete process.env.NODE_USE_SYSTEM_CA;
 
-const { codexSandboxedProfileId, codexSandboxedProfileOverrides, codexSignInPaths, linkCodexAgentHome } = await import("../main/agents/codex-agent-home.js");
-const { launchManagedCodexAppServer, terminateSpawnedProcess } = await import("../main/agents/codex-app-server.js");
-const { resolveCodexExecutable } = await import("../main/agents/codex-executable.js");
-const { CodexProviderAdapter } = await import("../main/agents/codex-provider-adapter.js");
-const { CodexRpcClient } = await import("../main/agents/codex-rpc-client.js");
+const { codexSandboxedProfileId, codexSandboxedProfileOverrides, codexSignInPaths, linkCodexAgentHome } = await import("#provider-runtime/agents/codex-agent-home.js");
+const { launchManagedCodexAppServer, terminateSpawnedProcess } = await import("#provider-runtime/agents/codex-app-server.js");
+const { resolveCodexExecutable } = await import("#provider-runtime/agents/codex-executable.js");
+const { CodexProviderAdapter } = await import("#provider-runtime/agents/codex-provider-adapter.js");
+const { CodexRpcClient } = await import("#provider-runtime/agents/codex-rpc-client.js");
 
 let fixtureSerial = 0;
 function fixture(name: string): string {

@@ -8,7 +8,7 @@ createElectronTestEnv({ prefix: "letagents-codex-runtime-reasoning-", paths: [] 
 const {
   summarizeCodexReasoningNotification,
   summarizeCodexRuntimeNotification,
-} = await import("../main/agents/codex-runtime-reasoning.js");
+} = await import("#provider-runtime/agents/codex-runtime-reasoning.js");
 
 test("desktop Codex runtime reasoning summaries accumulate readable app-server deltas", () => {
   const params = { threadId: "thread_reasoning", turnId: "turn_reasoning", itemId: "item_reasoning" };

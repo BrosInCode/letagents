@@ -58,7 +58,7 @@ type SupervisedToolRuntimeLoadOptions = {
 function defaultVerifierPath(): string {
   return resolve(
     dirname(fileURLToPath(import.meta.url)),
-    "../dist-electron/main/agents/letagents-mcp-runtime.js",
+    "../dist-provider-runtime/agents/letagents-mcp-runtime.js",
   );
 }
 

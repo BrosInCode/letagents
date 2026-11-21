@@ -8,7 +8,7 @@ import { DaemonStateSchema } from "../daemon-state-database.js";
 import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity } from "../execution-shadow-store.js";
 import { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
-import { ProviderExecutionObserver } from "../../electron/main/agents/provider-execution-observer.js";
+import { ProviderExecutionObserver } from "#provider-runtime/agents/provider-execution-observer.js";
 import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
 import type { ProviderActionConnectionRef, ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";

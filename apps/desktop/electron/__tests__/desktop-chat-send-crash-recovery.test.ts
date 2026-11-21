@@ -546,7 +546,7 @@ test("real OS SIGKILL crash after composer persistence preserves local thread re
 
   const child = spawnSync(
     process.execPath,
-    ["--import", "tsx", "--experimental-test-module-mocks", "--input-type=module", "-e", childScript],
+    ["--conditions=letagents-source", "--import", "tsx", "--experimental-test-module-mocks", "--input-type=module", "-e", childScript],
     {
       cwd: process.cwd(),
       env: process.env,
@@ -1070,7 +1070,7 @@ test("unreadable local-chat.sqlite still delivers fresh cloud sends through real
 
   const child = spawnSync(
     process.execPath,
-    ["--import", "tsx", "--experimental-test-module-mocks", "--input-type=module", "-e", childScript],
+    ["--conditions=letagents-source", "--import", "tsx", "--experimental-test-module-mocks", "--input-type=module", "-e", childScript],
     {
       cwd: process.cwd(),
       env: {

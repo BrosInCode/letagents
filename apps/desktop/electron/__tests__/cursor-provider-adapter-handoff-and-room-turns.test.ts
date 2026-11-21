@@ -9,8 +9,8 @@ import {
   CURSOR_NO_ROOM_REPLY_SENTINEL,
   CursorProviderAdapter,
   type CursorProviderAdapterDependencies,
-} from "../main/agents/cursor-provider-adapter.js";
-import type { NativeExecutionObservation } from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
+import type { NativeExecutionObservation } from "#provider-runtime/agents/provider-adapter.js";
 import { expectedCursorSandbox } from "./platform.js";
 import {
   argValue,

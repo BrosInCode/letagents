@@ -9,7 +9,7 @@ import {
   CursorBackgroundShells,
   cursorBackgroundShell,
   type CursorBackgroundShellPort,
-} from "../main/agents/cursor/background-shells.js";
+} from "#provider-runtime/agents/cursor/background-shells.js";
 import type { LiveBackgroundCommandPayload } from "../../../../shared/live-command-output.mjs";
 
 async function eventually(condition: () => boolean, what: string, timeoutMs = 4_000): Promise<void> {

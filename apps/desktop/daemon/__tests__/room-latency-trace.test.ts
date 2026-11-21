@@ -23,7 +23,7 @@ test("entrypoint diagnostics persist timing and process exit with discarded stdi
         trace.finish();
         ${fail ? "throw new Error('synthetic startup failure');" : ""}
       `;
-      const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script],
+      const child = spawnSync(process.execPath, ['--conditions=letagents-source', '--import', 'tsx', '--input-type=module', '-e', script],
         { stdio: 'ignore', timeout: 10_000 });
       assert.ifError(child.error);
       assert.equal(child.status, fail ? 1 : 0);

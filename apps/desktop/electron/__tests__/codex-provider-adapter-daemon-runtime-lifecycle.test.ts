@@ -1,7 +1,7 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodexProviderAdapter } from "../main/agents/codex-provider-adapter.js";
+import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
 import {
   ProviderActionPortRouter,
   createHarness,
@@ -1062,7 +1062,7 @@ for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
 
 for (const shown of ["still shows the turn as running", "does not hold the turn"] as const) for (const started of [true, false]) {
   test(`a turn whose runtime exited under it${started ? "" : " before the record saw it start"}, in a thread that ${shown}, is settled as cut off by the exit${started ? " and closed in the record" : ", with no ending recorded for it"}, and the next message is answered`, async () => {
-    const { PROCESS_ENDED_DURING_TURN } = await import("../main/agents/provider-adapter.js");
+    const { PROCESS_ENDED_DURING_TURN } = await import("#provider-runtime/agents/provider-adapter.js");
     const agent = await codexDaemonFixture({ holdExits: true });
     const turnStates = () => agent.read<{ provider_turn_id: string; state: string }>(
       "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id");

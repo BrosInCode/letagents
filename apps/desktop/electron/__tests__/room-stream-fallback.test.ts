@@ -1951,7 +1951,7 @@ test("local board follows cross-process commits with no idle, message, or other-
   const exec = promisify(execFile);
   const mcpUrl = new URL("../../../../src/mcp/local-state/local-chat.ts", import.meta.url).href;
   const runMcp = (code: string) => exec(process.execPath,
-    ["--import", "tsx", "--input-type=module", "-e", `const m = await import(${JSON.stringify(mcpUrl)}); ${code}`],
+    ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", `const m = await import(${JSON.stringify(mcpUrl)}); ${code}`],
     // On Windows the child finds the board pipe's proof through the state directory.
     { cwd: fileURLToPath(new URL("../../../../", import.meta.url)), env: { ...process.env, [DAEMON_STATE_DIR_ENV]: env.tempDir } });
   const updates = () => emitted.filter((event): event is Extract<DesktopRoomStreamEvent, { type: "task_update" }> =>

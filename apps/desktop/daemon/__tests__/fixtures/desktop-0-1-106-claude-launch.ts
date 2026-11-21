@@ -4,9 +4,9 @@
 // does with them. Do not update it to match the current code.
 import { isDeepStrictEqual } from "node:util";
 
-import type { ProviderSpawnRequest } from "../../../electron/main/agents/provider-adapter.js";
-import { assertManagedAgentPermissionProfileAvailable } from "../../../electron/main/agents/managed-agent-permission-profiles.js";
-import { supervisedOpenCodePermissionPolicy, supervisedOpenCodePermissionProfileId } from "../../../electron/main/agents/opencode-launch-contract.js";
+import type { ProviderSpawnRequest } from "#provider-runtime/agents/provider-adapter.js";
+import { assertManagedAgentPermissionProfileAvailable } from "#provider-runtime/agents/managed-agent-permission-profiles.js";
+import { supervisedOpenCodePermissionPolicy, supervisedOpenCodePermissionProfileId } from "#provider-runtime/agents/opencode-launch-contract.js";
 
 /**
  * Shared final attestation used by every native adapter. The daemon has

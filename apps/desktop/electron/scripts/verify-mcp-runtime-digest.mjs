@@ -21,7 +21,7 @@ const mcpVersion = desktopPackage.letagentsRuntime?.mcpVersion;
 if (typeof mcpVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(mcpVersion)) {
   throw new Error("apps/desktop/package.json must declare letagentsRuntime.mcpVersion.");
 }
-const integrity = await import(pathToFileURL(join(desktopRoot, "electron", "main", "agents", "letagents-mcp-runtime.ts")).href);
+const integrity = await import(pathToFileURL(join(desktopRoot, "provider-runtime", "agents", "letagents-mcp-runtime.ts")).href);
 
 const destination = await mkdtemp(join(tmpdir(), "letagents-mcp-runtime-"));
 try {
@@ -37,7 +37,7 @@ try {
     console.error(
       `The locked LetAgents MCP runtime tree digest changed: sealed ${result.expected}, found ${result.found}.\n`
       + "The runtime lock at apps/desktop/electron/runtime/letagents and the seal in "
-      + "apps/desktop/electron/main/agents/letagents-mcp-runtime.ts (LETAGENTS_MCP_RUNTIME_TREE_SHA256) "
+      + "apps/desktop/provider-runtime/agents/letagents-mcp-runtime.ts (LETAGENTS_MCP_RUNTIME_TREE_SHA256) "
       + "must change together: reseal it to the value found, in the same commit as the lock change.",
     );
     // Not process.exit: that would end the process before the install below
