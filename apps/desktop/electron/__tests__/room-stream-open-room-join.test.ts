@@ -173,6 +173,47 @@ test("an open room repeats its join only when the remembered answer ended, and r
   }
 });
 
+test("a room that stays open sends the join again when the answer ends, on the same stream", async (t) => {
+  const room = "long-visit";
+  const clock = movableClock(t);
+  const server = installServer(room);
+  try {
+    roomInfo.rememberJoinedRoomInfo(room, { room_id: room, name: "Long visit", role: "participant" });
+    // The remembered answer ends shortly after the room opens.
+    clock.advance(roomInfo.JOINED_ROOM_INFO_TTL_MS - 300);
+    server.answer({ body: { room_id: room, name: "Long visit", role: "participant" } });
+    await openRoom(room);
+    await sleep(FIRST_CHECK_MS * 3);
+    assert.deepEqual(server.joins, [], "the first check finds an answer that still holds");
+    // The next check waits for that answer to end (plus one second), with no reopen of the room.
+    await waitUntil(() => server.joins.length === 1, 4_000);
+    assert.equal(repairRequests().length, 1, "the same answer asks for no room read");
+    await sleep(FIRST_CHECK_MS * 3);
+    assert.equal(server.joins.length, 1, "the new answer holds for five minutes");
+  } finally {
+    server.restore();
+  }
+});
+
+test("a changed answer replaces a room read that is still owed: that read may have used the old answer", async (t) => {
+  const room = "busy-start";
+  const clock = movableClock(t);
+  const server = installServer(room);
+  try {
+    roomInfo.rememberJoinedRoomInfo(room, { room_id: room, name: "Busy start", role: "participant" });
+    clock.advance(roomInfo.JOINED_ROOM_INFO_TTL_MS + 1);
+    server.answer({ body: { room_id: room, name: "Busy start", role: "admin" } });
+    // The room opens, and the renderer has not read it yet (token 1 is owed) when the join answers.
+    emitted.length = 0;
+    await startDesktopRoomStream(room);
+    await waitUntil(() => repairRequests().length === 2);
+    assert.deepEqual(repairRequests().map((event) => event.deliveryRepairToken), [1, 2]);
+    assert.deepEqual(server.others, [], "the new request repeats no message repair that was done");
+  } finally {
+    server.restore();
+  }
+});
+
 test("a join that the server refuses asks for one room read, which shows why the room is closed", async (t) => {
   const room = "members-only";
   const clock = movableClock(t);

@@ -1404,20 +1404,29 @@ test("the first handshake of a connection asks for one room read, and its cursor
       "a cursor is not sent before the room read that makes it true");
     second.pushRaw(roomSyncFrame(room, "msg_1", false, "cursor_second"));
     await waitUntil(() => openEvents().filter((event) => event.verified && !event.gap).length === 2);
-    assert.equal(verifiedGaps().length, 1, "the read that is still owed is not asked for twice");
+    // The read owed for the first connection may be on its way already. It began before this
+    // connection, so it cannot say what happened while no connection was up: a new token replaces the old.
+    assert.deepEqual(verifiedGaps().map((event) => event.deliveryRepairToken), [1, 2]);
+    // Between the two connections the fallback long-poll ran, as it does whenever the stream is down.
+    assert.equal(router.pollCalls.filter((call) => call.timeout === "0").length, 2,
+      "one catch-up for each connection, no message request for the repair itself");
+    acknowledgeDesktopRoomStreamGapRepair(room, { token: 1 });
+    second.pushTask({ id: "task_between", status: "open" }, "cursor_between");
+    await waitUntil(() => emitted.filter((event) => event.type === "task_update").length === 2);
 
-    // The renderer read the room: the cursor is now one the room on screen has followed.
+    // The renderer read the room after the second connection began: the cursor is now one the room on screen has followed.
     acknowledgeConnectionStart(room);
     second.pushTask({ id: "task_later", status: "open" }, "cursor_later");
-    await waitUntil(() => emitted.filter((event) => event.type === "task_update").length === 2);
+    await waitUntil(() => emitted.filter((event) => event.type === "task_update").length === 3);
     router.enqueueCatchUp([]);
     second.error();
     await waitUntil(() => router.streamCalls.length === 3, 4_000);
-    assert.equal(router.streamCalls[2]?.headers.get("Last-Event-ID"), "cursor_later");
+    assert.equal(router.streamCalls[2]?.headers.get("Last-Event-ID"), "cursor_later",
+      "the answer to the old token committed nothing; the answer to the new one committed the newest cursor");
     third.pushRaw(": connected\n\n");
     third.pushRaw(roomSyncFrame(room, "msg_1", false, "cursor_third"));
     await waitUntil(() => openEvents().filter((event) => event.verified && !event.gap).length === 3);
-    assert.equal(verifiedGaps().length, 1,
+    assert.equal(verifiedGaps().length, 2,
       "a reconnect that sent the stream's own cursor continues: the server replays, and no room read is asked for");
     third.close();
   } finally {

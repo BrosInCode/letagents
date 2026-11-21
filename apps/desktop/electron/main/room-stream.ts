@@ -421,22 +421,29 @@ function repairMalformedRoomStreamFrame(
  * (the catch-up of this connection just ended well, or the read is about the
  * room itself and no event was missed), so only the room read is owed and no
  * message request is sent.
+ *
+ * `supersede`: the cause is newer than a read that may already be on its way
+ * for the pending repair (a new connection, a changed room answer). That
+ * read cannot close it. The pending repair is replaced by one with a new
+ * token, which the renderer can close only with a read that begins now. The
+ * new repair keeps the cursor boundary the old one had reached.
  */
 function startRoomStreamGapRepair(
   roomIdentifier: string,
-  { messagesRepaired = false }: { messagesRepaired?: boolean } = {},
+  { messagesRepaired = false, supersede = false }: { messagesRepaired?: boolean; supersede?: boolean } = {},
 ): void {
   const stream = activeRoomStream;
   if (!stream || !isCurrentRoomStream(stream) || stream.roomIdentifier !== roomIdentifier) return;
-  if (stream.pendingGapRepair) {
-    if (!messagesRepaired) repairDurableMessagesAfterBrokerGap(stream, stream.pendingGapRepair.token);
+  const owed = stream.pendingGapRepair;
+  if (owed && !supersede) {
+    if (!messagesRepaired) repairDurableMessagesAfterBrokerGap(stream, owed.token);
     return;
   }
   const gapRepairToken = ++stream.gapRepairGeneration;
   stream.pendingGapRepair = {
     token: gapRepairToken,
-    cursorPresent: false,
-    cursor: null,
+    cursorPresent: owed?.cursorPresent ?? false,
+    cursor: owed?.cursor ?? null,
     messagesRepaired,
     snapshotRepaired: false,
   };
@@ -483,7 +490,9 @@ function repairUnprovenConnectionStart(
   stream.connectGapPending = false;
   // A gap in this same handshake starts the same repair, with its cursor.
   if (serverReportsGap) return;
-  startRoomStreamGapRepair(stream.roomIdentifier, { messagesRepaired: stream.connectCatchUpDone });
+  // A room read that is on its way for an earlier repair began before this
+  // connection: it cannot say what happened while no connection was up.
+  startRoomStreamGapRepair(stream.roomIdentifier, { messagesRepaired: stream.connectCatchUpDone, supersede: true });
 }
 
 function handleRoomStreamFrame(
@@ -1665,8 +1674,13 @@ onJoinedRoomInfoChange((roomIdentifiers) => {
   if (!stream || !isCurrentRoomStream(stream) || stream.localRoomIdentifier) return;
   const open = new Set([stream.roomIdentifier, stream.canonicalRoomIdentifier].map(roomInfoCacheKey).filter(Boolean));
   if (roomIdentifiers.some((identifier) => open.has(roomInfoCacheKey(identifier)))) {
-    // No event was missed: only the room read is owed.
-    startRoomStreamGapRepair(stream.roomIdentifier, { messagesRepaired: true });
+    // No event was missed: only the room read is owed, and what a pending
+    // repair still owes for its messages stays owed. A read on its way may
+    // have used the earlier answer, so it cannot close this.
+    startRoomStreamGapRepair(stream.roomIdentifier, {
+      messagesRepaired: stream.pendingGapRepair ? stream.pendingGapRepair.messagesRepaired : true,
+      supersede: true,
+    });
   }
 });
 
