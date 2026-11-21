@@ -138,14 +138,19 @@ export function defaultGetProcessIdentity(pid: number): string | null | undefine
 const PS_LONG_START_PREFIX = /^\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}/;
 
 /**
- * Compare the stable birth portion of a process identity. Before daemon 2.0.12
- * identities also appended mutable argv; accepting that legacy prefix makes a
- * live upgrade safe while all newly persisted identities are start-time only.
+ * Compare the stable birth portion of a process identity. The daemon and the
+ * adapters both use this one function. On POSIX the stable portion is the
+ * `ps -o lstart=` prefix; on Windows it is the whole `win32-ft:` creation
+ * time, compared exactly. Before daemon 2.0.12 identities also appended
+ * mutable argv; accepting that legacy prefix makes a live upgrade safe while
+ * all newly persisted identities are start-time only.
  */
 export function sameProcessBirthIdentity(
   current: string,
   recorded: string,
 ): boolean {
+  // Unexpected or malformed values fall back to exact comparison. The outer
+  // kill(0) EPERM/ESRCH check remains the liveness safety net.
   const stable = (value: string) => value.trim().match(PS_LONG_START_PREFIX)?.[0].replace(/\s+/g, " ") ?? value.trim();
   return stable(current) === stable(recorded);
 }
