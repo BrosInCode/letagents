@@ -257,8 +257,8 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
     this.providerExecution?.clearRecovery(entryId);
   }
 
-  protected async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {
-    return this.nativeActivity.publish(entryId, method, status, observedAt);
+  protected async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString(), whenDue = false): Promise<boolean> {
+    return whenDue ? this.nativeActivity.publishIfDue(entryId, method, status, observedAt) : this.nativeActivity.publish(entryId, method, status, observedAt);
   }
 
   protected async updateManifestEntry(entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry,

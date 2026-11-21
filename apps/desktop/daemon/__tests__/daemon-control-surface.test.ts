@@ -548,7 +548,7 @@ test("workplace reachability outlives the configured room long poll", () => {
   assert.equal(workplaceLivenessStaleAfterMs("invalid"), 210_000);
 });
 
-test("production room observation polls stay below common proxy idle cutoffs", async () => {
+test("production room observation polls stay below common proxy idle cutoffs until a longer hold is proven", async () => {
   const previousFetch = globalThis.fetch;
   try {
     let requestedUrl = "";
@@ -559,18 +559,26 @@ test("production room observation polls stay below common proxy idle cutoffs", a
         headers: { "content-type": "application/json" },
       });
     }) as typeof fetch;
-
-    await productionSupervisedDeliveryHttp.poll({
+    const input = {
       roomId: "github.com/example/repo",
       apiUrl: "https://letagents.test",
       bearer: "worker-secret",
       afterMessageId: "msg_42",
       signal: new AbortController().signal,
-    });
+    };
 
+    // A lane whose health still waits for its first answer.
+    await productionSupervisedDeliveryHttp.poll(input);
     const request = new URL(requestedUrl);
     assert.equal(request.searchParams.get("timeout"), "25000");
     assert.equal(request.searchParams.get("after"), "msg_42");
+
+    // An observing lane may ask for twice the time a poll is proven to stay
+    // open. These answers came at once, so the 25 s floor is all that is proven.
+    await productionSupervisedDeliveryHttp.poll({ ...input, observing: true });
+    assert.equal(new URL(requestedUrl).searchParams.get("timeout"), "50000");
+    await productionSupervisedDeliveryHttp.poll({ ...input, observing: true });
+    assert.equal(new URL(requestedUrl).searchParams.get("timeout"), "50000");
   } finally {
     globalThis.fetch = previousFetch;
   }

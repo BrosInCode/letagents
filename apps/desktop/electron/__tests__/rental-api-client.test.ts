@@ -64,11 +64,13 @@ function makeFetchHarness(
 function makeClient(opts: {
   authToken?: string | null;
   fetchFn: FetchLike;
+  userAgent?: string;
 }): RentalApiClient {
   return new RentalApiClient({
     apiBaseUrl: "https://letagents.chat/", // trailing slash to exercise trim
     authToken: opts.authToken,
     fetchFn: opts.fetchFn,
+    ...(opts.userAgent ? { userAgent: opts.userAgent } : {}),
   });
 }
 
@@ -110,6 +112,18 @@ describe("URL composition + auth header", () => {
     await client.listProviderListings();
     const headers = calls[0].init.headers as Record<string, string>;
     assert.equal(headers.authorization, "Bearer lt_abc_123");
+  });
+
+  it("sends the given User-Agent, and none of its own when it has none", async () => {
+    const named = makeFetchHarness(() => ({ body: {} }));
+    await makeClient({ fetchFn: named.fetchFn, userAgent: "LetAgents-Desktop/9.9.9 (darwin; arm64)" }).listProviderListings();
+    assert.equal(
+      (named.calls[0].init.headers as Record<string, string>)["user-agent"],
+      "LetAgents-Desktop/9.9.9 (darwin; arm64)",
+    );
+    const unnamed = makeFetchHarness(() => ({ body: {} }));
+    await makeClient({ fetchFn: unnamed.fetchFn }).listProviderListings();
+    assert.equal("user-agent" in (unnamed.calls[0].init.headers as Record<string, string>), false);
   });
 
   it("omits Authorization when authToken is missing or blank", async () => {

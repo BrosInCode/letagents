@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SseClient, type Message, type SseGap } from "../sse-client.js";
+import {
+  SSE_HEALTHY_STREAM_MS,
+  SSE_RETRY_BASE_MS,
+  SSE_RETRY_MAX_MS,
+  SseClient,
+  sseRetryWaitMs,
+  sseStreamEarnsShortRetry,
+  type Message,
+  type SseGap,
+} from "../sse-client.js";
 
 test("SSE client reconnects with the broker cursor and surfaces room gaps", async () => {
   const originalFetch = globalThis.fetch;
@@ -161,7 +170,7 @@ test("an unterminated oversized frame clears the cursor and forces gap repair", 
     sawReconnect();
     return new Response("", { status: 200 });
   }) as typeof fetch;
-  const client = new SseClient("https://example.test");
+  const client = new SseClient("https://example.test", undefined, { random: () => 0 });
   try {
     client.subscribe({ roomId: "room_overflow" }, () => undefined, (gap) => gaps.push(gap));
     await withTestDeadline(reconnected, 3_000, "SSE did not reconnect after frame overflow");
@@ -192,7 +201,8 @@ test("a small malformed frame clears the cursor and forces gap repair", async ()
     sawReconnect();
     return new Response("", { status: 200 });
   }) as typeof fetch;
-  const client = new SseClient("https://example.test");
+  // Shortest waits (0.75 s, then 1.1 s): the 3 s deadline below holds on every run.
+  const client = new SseClient("https://example.test", undefined, { random: () => 0 });
   try {
     client.subscribe({ roomId: "room_malformed" }, () => undefined, (gap) => gaps.push(gap));
     await withTestDeadline(reconnected, 3_000, "SSE did not reconnect after malformed frame");
@@ -202,6 +212,125 @@ test("a small malformed frame clears the cursor and forces gap repair", async ()
     client.unsubscribeAll();
     globalThis.fetch = originalFetch;
   }
+});
+
+test("the reconnect delay starts over only after a stream that worked", () => {
+  // A stream the server opened and ended at once: no handshake, no time open.
+  assert.equal(sseStreamEarnsShortRetry({ livedMs: 5, endedCleanly: true, deliveredRoomSync: false }), false);
+  // The handshake arrived and the stream ended without an error.
+  assert.equal(sseStreamEarnsShortRetry({ livedMs: 5, endedCleanly: true, deliveredRoomSync: true }), true);
+  // An error soon after the handshake still backs off, as before.
+  assert.equal(sseStreamEarnsShortRetry({ livedMs: 5_000, endedCleanly: false, deliveredRoomSync: true }), false);
+  // A stream that stayed open long enough worked, however it ended.
+  assert.equal(sseStreamEarnsShortRetry({ livedMs: SSE_HEALTHY_STREAM_MS, endedCleanly: false, deliveredRoomSync: false }), true);
+  assert.equal(sseStreamEarnsShortRetry({ livedMs: SSE_HEALTHY_STREAM_MS - 1, endedCleanly: false, deliveredRoomSync: false }), false);
+});
+
+test("each reconnect wait is spread by a quarter around its delay", () => {
+  assert.equal(sseRetryWaitMs(1_000, 0), 750);
+  assert.equal(sseRetryWaitMs(1_000, 0.5), 1_000);
+  assert.equal(sseRetryWaitMs(1_000, 0.999), 1_250);
+  assert.equal(sseRetryWaitMs(SSE_RETRY_MAX_MS, 0.999), 37_485);
+});
+
+/** Runs one subscription with instant waits and returns each wait the client asked for. */
+async function recordedWaits(input: {
+  respond: (request: number) => Response | Promise<Response>;
+  waits: number;
+  now?: () => number;
+}): Promise<number[]> {
+  const originalFetch = globalThis.fetch;
+  const originalError = console.error;
+  const waits: number[] = [];
+  let request = 0;
+  let enough!: () => void;
+  const done = new Promise<void>((resolve) => { enough = resolve; });
+  globalThis.fetch = (async () => input.respond(++request)) as typeof fetch;
+  console.error = () => undefined;
+  const client = new SseClient("https://example.test", () => "token", {
+    random: () => 0.5,
+    ...(input.now ? { now: input.now } : {}),
+    wait: async (signal, delayMs) => {
+      waits.push(delayMs);
+      if (waits.length >= input.waits) {
+        enough();
+        // Hold the loop here until the test unsubscribes.
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      }
+    },
+  });
+  try {
+    client.subscribe({ roomId: "room_retry" }, () => undefined);
+    await withTestDeadline(done, 2_000, "the client did not ask for the expected waits");
+    return waits;
+  } finally {
+    client.unsubscribeAll();
+    globalThis.fetch = originalFetch;
+    console.error = originalError;
+  }
+}
+
+const roomSyncStream = () => new Response(
+  ["event: room_sync", 'data: {"gap":false,"room_id":"room_retry","event_cursor":"c1"}', "", ""].join("\n"),
+  { status: 200 },
+);
+
+test("a stream the server opens and ends at once backs off instead of reconnecting every second", async () => {
+  // HTTP 200, the opening comment, then the end: what a refused stream looked like before the server answered 4xx.
+  const waits = await recordedWaits({ respond: () => new Response(": connected\n\n", { status: 200 }), waits: 12 });
+  assert.deepEqual(waits.slice(0, 6), [1_000, 1_500, 2_250, 3_375, 5_063, 7_595]);
+  assert.equal(waits.at(-1), SSE_RETRY_MAX_MS, "the delay stops at its cap");
+  // The first minute of this is 9 opened streams (the 8 waits between them sum to 49 s). With a fixed 1 s wait it was 60.
+  let elapsed = 0;
+  const opensInOneMinute = 1 + waits.filter((wait) => (elapsed += wait) <= 60_000).length;
+  assert.equal(opensInOneMinute, 9);
+});
+
+test("a stream that gave its handshake and ended cleanly reconnects after the base delay every time", async () => {
+  const waits = await recordedWaits({ respond: roomSyncStream, waits: 5 });
+  assert.deepEqual(waits, [SSE_RETRY_BASE_MS, SSE_RETRY_BASE_MS, SSE_RETRY_BASE_MS, SSE_RETRY_BASE_MS, SSE_RETRY_BASE_MS]);
+});
+
+test("a refused stream keeps backing off, and one stream that works starts the delay over", async () => {
+  const waits = await recordedWaits({
+    respond: (request) => (request === 4 ? roomSyncStream() : new Response("{}", { status: 503 })),
+    waits: 6,
+  });
+  assert.deepEqual(waits, [1_000, 1_500, 2_250, 1_000, 1_500, 2_250]);
+});
+
+test("a stream that stayed open for 30 seconds starts the delay over even when it ends with an error", async () => {
+  let clock = 0;
+  const waits = await recordedWaits({
+    now: () => clock,
+    respond: (request) => {
+      if (request !== 3) return new Response("", { status: 200 });
+      // The third stream stays open (the clock moves on while it is read) and then breaks.
+      // No read-ahead, so the clock moves only once the client reads the open stream.
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          clock += SSE_HEALTHY_STREAM_MS;
+          controller.error(new Error("connection lost"));
+        },
+      }, { highWaterMark: 0 }), { status: 200 });
+    },
+    waits: 4,
+  });
+  assert.deepEqual(waits, [1_000, 1_500, 1_000, 1_500]);
+});
+
+test("a request that waited 30 seconds for a refusal was never open: the delay keeps growing", async () => {
+  let clock = 0;
+  const waits = await recordedWaits({
+    now: () => clock,
+    // A proxy that holds each request for its own limit and then answers 504.
+    respond: () => {
+      clock += SSE_HEALTHY_STREAM_MS;
+      return new Response("{}", { status: 504 });
+    },
+    waits: 4,
+  });
+  assert.deepEqual(waits, [1_000, 1_500, 2_250, 3_375]);
 });
 
 async function withTestDeadline<T>(work: Promise<T>, timeoutMs: number, message: string): Promise<T> {

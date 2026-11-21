@@ -15,6 +15,7 @@ import { RenterTriggerRuntime } from "../../rental/renter-trigger.js";
 import { runDesktopAgentProviderPreflight } from "../agents/providers.js";
 import { getOrCreateDesktopHostId } from "../agents/state.js";
 import { readStoredAuth } from "../auth.js";
+import { DESKTOP_USER_AGENT } from "../client-identity.js";
 import { apiUrl } from "../paths.js";
 import { emitRoomStreamEvent, getActiveRoomIdentifier } from "../room-stream.js";
 import { supervisorDaemonClient } from "../supervisor-daemon.js";
@@ -33,6 +34,7 @@ export function registerDesktopRentalDomainIpcHandlers(targetIpcMain: IpcMain): 
   // successful listing, session, or launch when the server is unavailable.
   const rentalApiClient = new RentalApiClient({
     apiBaseUrl: apiUrl,
+    userAgent: DESKTOP_USER_AGENT,
     async getAuthToken() {
       try {
         const stored = await readStoredAuth();
