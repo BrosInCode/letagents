@@ -5,7 +5,6 @@ import {
   ExecutionShadowStore,
   executionRuntimeStorageIdentity,
   executionStorageIdentity as opaque,
-  type PendingLifecycleProjection,
   type ShadowIngestInstallation,
   type ShadowObserver,
 } from "./execution-shadow-store.js";
@@ -51,8 +50,6 @@ type Lane = {
   knownRuntimes: Map<string, Runtime>;
   /** The last source ID this lane's enqueue already validated. */
   validatedSourceId: string | null;
-  /** Latest non-stale lifecycle fact awaiting exact installation/manifest alignment. */
-  pendingLifecycle: PendingLifecycleProjection | null;
 };
 export type PreparedRuntime = {
   agentId: string; executionGenerationId: string; handle: ProviderActionHandle;
@@ -125,8 +122,7 @@ export class ExecutionCaptureCoordinator {
       pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
       detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0,
       expectedAuthorityMode: installation.authorityMode, pendingChange: true, notifiedAdmission: null,
-      storageRetry: null, storageRetryAttempts: 0, knownRuntimes: new Map(), validatedSourceId: null,
-      pendingLifecycle: null };
+      storageRetry: null, storageRetryAttempts: 0, knownRuntimes: new Map(), validatedSourceId: null };
     this.lanes.set(agentId, lane);
     let pending: Promise<NativeExecutionSubscription>;
     try {
@@ -549,7 +545,7 @@ export class ExecutionCaptureCoordinator {
     if (!lane || lane.installation !== installation || !lane.subscription || !lane.observer) return "unavailable";
     try {
       const position = lane.subscription.position();
-      const durable = this.row(`SELECT observer_epoch,last_source_sequence,max_observed_sequence
+      const durable = this.row(`SELECT observer_epoch,last_source_sequence,max_observed_sequence,pending_lifecycle_fact_id
         FROM execution_observers WHERE agent_id=?`, installation.entryId);
       if (!durable || Number(durable.observer_epoch) !== lane.observer.epoch) return "unavailable";
       const last = Number(durable.last_source_sequence);
@@ -557,7 +553,7 @@ export class ExecutionCaptureCoordinator {
       if (maximum > last) return "unavailable";
       if (last < position.latestSequence) return "pending";
       if (last !== position.latestSequence || maximum !== last) return "unavailable";
-      if (lane.pendingLifecycle !== null) return "pending";
+      if (durable.pending_lifecycle_fact_id !== null) return "pending";
       return "ready";
     } catch { return "unavailable"; }
   }
@@ -600,7 +596,7 @@ export class ExecutionCaptureCoordinator {
     const subscription = lane.subscription;
     lane.subscription = null;
     try { subscription?.dispose(); } catch { /* optional observation cleanup */ }
-    lane.pending.clear(); lane.checkpoints.clear(); lane.bytes = 0; lane.pendingLifecycle = null;
+    lane.pending.clear(); lane.checkpoints.clear(); lane.bytes = 0;
   }
   private report(lane: Lane, code: CaptureCode): void {
     if (code === "settlement_unavailable" && lane.diagnostic !== null && lane.diagnostic !== code) {
@@ -751,15 +747,12 @@ export class ExecutionCaptureCoordinator {
   }
 
   private retryPendingLifecycle(lane: Lane): void {
-    if (!lane.pendingLifecycle) return;
-    const outcome = this.store.retryLifecycleProjection(lane.pendingLifecycle, this.liveInstallationFor(lane));
+    const outcome = this.store.retryPendingLifecycleProjection(lane.agentId, this.liveInstallationFor(lane));
     if (outcome.status === "applied") {
-      lane.pendingLifecycle = null;
       lane.pendingChange = true;
       try { this.options.lifecycleProjected?.(lane.agentId, outcome.observedState); }
       catch { /* optional observation */ }
     } else if (outcome.status === "superseded") {
-      lane.pendingLifecycle = null;
       lane.pendingChange = true;
     }
   }
@@ -846,18 +839,9 @@ export class ExecutionCaptureCoordinator {
       }
       if (result.status === "accepted" || lane.diagnostic !== null) lane.pendingChange = true;
       cursor = sequence; lane.pending.delete(sequence); lane.bytes -= queued.bytes; lane.diagnostic = null;
-      if (result.lifecycleProjection?.status === "applied") {
-        lane.pendingLifecycle = null;
-        try { this.options.lifecycleProjected?.(lane.agentId, result.lifecycleProjection.observedState); }
+      if (result.projectedObservedState !== undefined && result.projectedObservedState !== null) {
+        try { this.options.lifecycleProjected?.(lane.agentId, result.projectedObservedState); }
         catch { /* optional observation */ }
-      } else if (result.lifecycleProjection?.status === "pending") {
-        lane.pendingLifecycle = {
-          fact: ingestedFact,
-          observerExecutionGenerationId: token.observerExecutionGenerationId,
-          observerRuntimeGenerationId: token.observerRuntimeGenerationId,
-        };
-      } else if (result.lifecycleProjection?.status === "superseded") {
-        lane.pendingLifecycle = null;
       }
     }
     if (cursor < position.latestSequence) { lane.suspended = true; this.report(lane, "source_gap"); }

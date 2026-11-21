@@ -1527,6 +1527,99 @@ test("pending lifecycle projection keeps typedLifecycleAdmission pending until i
   }
 });
 
+test("superseded runtime ready fact does not erase an unrelated pending active-turn projection", async () => {
+  const f = fixture();
+  try {
+    f.db.prepare("UPDATE agents SET observed_state='idle', provider_continuation_id='lagging-continuation' WHERE agent_id='agent'").run();
+    f.bindTurn();
+    await f.install();
+    f.emit(ready);
+    f.emit(active);
+    await flush();
+
+    assert.equal(f.capture.typedLifecycleAdmission(f.tokenFor()), "pending");
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    // Emit another runtime ready fact while alignment is still lagging:
+    // runtime/ready is superseded (agent is already idle), but MUST NOT clear the pending active-turn projection.
+    f.emit(ready);
+    await flush();
+
+    assert.equal(f.capture.typedLifecycleAdmission(f.tokenFor()), "pending",
+      "superseded runtime/ready must not clear an unrelated pending turn/active projection");
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    // Align continuation and refresh: the preserved pending turn/active projection must apply.
+    f.db.prepare("UPDATE agents SET provider_continuation_id='continuation' WHERE agent_id='agent'").run();
+    f.capture.refresh("agent");
+    await flush();
+
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+    assert.equal(f.capture.typedLifecycleAdmission(f.tokenFor()), "ready");
+    assert.equal(f.db.prepare("SELECT pending_lifecycle_fact_id FROM execution_observers WHERE agent_id='agent'").get()?.pending_lifecycle_fact_id, null);
+  } finally {
+    f.capture.close();
+    if (f.db.isOpen) f.db.close();
+  }
+});
+
+test("pending lifecycle projection survives coordinator restart and reconciles once alignment completes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-pending-restart-"));
+  const dbPath = join(root, "daemon.sqlite");
+  const first = fixture("claude_cli", undefined, undefined, new DatabaseSync(dbPath));
+  try {
+    first.db.prepare("UPDATE agents SET observed_state='idle', provider_continuation_id='lagging-continuation' WHERE agent_id='agent'").run();
+    first.bindTurn();
+    await first.install();
+    first.emit(ready);
+    first.emit(active);
+    await flush();
+
+    assert.equal(first.capture.typedLifecycleAdmission(first.tokenFor()), "pending");
+    assert.equal(first.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+    assert.notEqual(first.db.prepare("SELECT pending_lifecycle_fact_id FROM execution_observers WHERE agent_id='agent'").get()?.pending_lifecycle_fact_id, null);
+    first.capture.close();
+
+    // Restart coordinator on a fresh handle against the same durable SQLite file.
+    const database = new DatabaseSync(dbPath);
+    const observer = new ProviderExecutionObserver(() => now);
+    const projected: string[] = [];
+    const restarted = new ExecutionCaptureCoordinator(database, {
+      provider: { onExecution: (_handle, listener) => observer.subscribe(listener) },
+      currentHandle: () => first.handle,
+      daemonGeneration: () => 2,
+      diagnostic: () => {},
+      lifecycleProjected: (_agentId, observedState) => { projected.push(observedState); },
+    });
+    try {
+      await restarted.install(first.tokenFor());
+      await flush();
+
+      assert.equal(restarted.captureAdmission(first.tokenFor()), "ready");
+      assert.equal(restarted.typedLifecycleAdmission(first.tokenFor()), "pending",
+        "restarted coordinator must keep typedLifecycleAdmission pending while durable pending_lifecycle_json awaits alignment");
+      assert.equal(database.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+      // Complete manifest alignment and refresh on the restarted coordinator.
+      database.prepare("UPDATE agents SET provider_continuation_id='continuation' WHERE agent_id='agent'").run();
+      restarted.refresh("agent");
+      await flush();
+
+      assert.equal(database.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+      assert.deepEqual(projected, ["working"]);
+      assert.equal(restarted.typedLifecycleAdmission(first.tokenFor()), "ready");
+      assert.equal(database.prepare("SELECT pending_lifecycle_fact_id FROM execution_observers WHERE agent_id='agent'").get()?.pending_lifecycle_fact_id, null);
+    } finally {
+      restarted.close();
+      if (database.isOpen) database.close();
+    }
+  } finally {
+    first.capture.close();
+    if (first.db.isOpen) first.db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("detached-lane runtimeFailure stays pending until both subject and observer runtimes are exited", () => {
   // 1. Cursor turn/lost (manifest_failed) with liveInstallation: null while runtime is still live -> pending until runtime exits.
   const c = fixture("cursor_cli");

@@ -1,11 +1,12 @@
+import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, mkdir, open } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { isOwnerPrivate, ownerPrivatePlatform, protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
-import { signalTree, signalTreeOutcome, type TreeSignalOutcome } from "../../../../shared/process-tree.mjs";
+import { isOwnerPrivate, ownerPrivatePlatform, protectOwnerPrivate, windowsToolPaths } from "../../../../shared/owner-private-fs.mjs";
+import { isBirthEvidence, signalTree, signalTreeOutcome, windowsProcessInfo, type TreeSignalOutcome } from "../../../../shared/process-tree.mjs";
 import { renameWithRetryAsync } from "../../../../shared/rename-retry.mjs";
-import { processBirthState } from "../process-identity.js";
+import { processBirthState, sameProcessBirthIdentity } from "../process-identity.js";
 import { DaemonStateSchema } from "./schema.js";
 import { SCHEMA_VERSION, type Row } from "./shared.js";
 import { assertDaemonStateVersionSupported, inspectDaemonStateDatabase } from "./version-gate.js";
@@ -38,13 +39,32 @@ async function syncDirectory(path: string): Promise<void> {
 async function ensureOwnerPrivateFilesOnWindows(path: string): Promise<void> {
   if (ownerPrivatePlatform() !== "win32") return;
   for (const candidate of [path, `${path}-wal`, `${path}-shm`]) {
-    const info = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
-    if (!info || await isOwnerPrivate(candidate, info)) continue;
-    try { await protectOwnerPrivate(candidate, "file", { force: true }); }
-    catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const isTransientSidecar = candidate !== path;
+    for (let attempt = 0; attempt < (isTransientSidecar ? 4 : 1); attempt += 1) {
+      const info = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (!info || await isOwnerPrivate(candidate, info)) break;
+      try {
+        await protectOwnerPrivate(candidate, "file", { force: true });
+        break;
+      } catch (error: unknown) {
+        const err = error as NodeJS.ErrnoException;
+        if (err.code === "ENOENT") break;
+        // SQLite deletes and recreates -wal/-shm during concurrent close/open.
+        // Retry only transient replacement on sidecars; never suppress ownership
+        // or symlink errors.
+        if (isTransientSidecar
+          && attempt < 3
+          && err.code === "EOWNERPRIVATE"
+          && /was replaced while it was being made private/i.test(err.message)) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+          continue;
+        }
+        throw error;
+      }
+    }
   }
 }
 
@@ -63,16 +83,252 @@ async function uniqueLegacyDestination(path: string, now: Date): Promise<string>
 
 type LegacyLiveRuntime = { pid: number; birth: string };
 
+export type PosixBirthReadResult =
+  | { kind: "birth"; birth: string }
+  | { kind: "absent" }
+  | { kind: "error" };
+
 export type MoveAsideLegacyOptions = {
   now?: Date;
   platform?: NodeJS.Platform;
   birthState?: (pid: number, birth: string) => "live" | "gone" | "unknown";
+  probePid?: (pid: number) => void;
+  readPosixBirth?: (pid: number) => PosixBirthReadResult;
+  queryWindowsWmiCreations?: (pids: readonly number[]) => Map<number, string> | null;
+  checkWindowsProcessAbsent?: (pid: number) => boolean;
   signalProcessTree?: typeof signalTree;
   signalProcessTreeOutcome?: typeof signalTreeOutcome;
   renameFile?: (from: string, to: string) => Promise<void>;
   graceMs?: number;
   killWaitMs?: number;
 };
+
+const FILETIME_UNIX_EPOCH_MS = 11_644_473_600_000n;
+const MAX_FILETIME = (1n << 64n) - 1n;
+const WINDOWS_BIRTH_PATTERN = /^win32-ft:([1-9]\d{0,19})$/;
+const CIM_DATETIME_PATTERN = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-])(\d{3})$/;
+
+/**
+ * Parses a recorded `win32-ft:<FILETIME>` string into an exact 64-bit unsigned
+ * integer (100-ns ticks since 1601-01-01T00:00:00Z).
+ */
+export function parseWindowsBirthFiletime(birth: string): bigint | null {
+  const match = WINDOWS_BIRTH_PATTERN.exec(birth.trim());
+  if (!match) return null;
+  const value = BigInt(match[1]!);
+  return value >= 1n && value <= MAX_FILETIME ? value : null;
+}
+
+/**
+ * Parses a WMI CIM_DATETIME string (`YYYYMMDDHHMMSS.mmmmmm±OOO`) into an exact
+ * UTC FILETIME (100-ns ticks since 1601-01-01T00:00:00Z) using BigInt math,
+ * preserving the UTC offset and exact microsecond digits without float loss.
+ * Returns null for any malformed date, invalid calendar date, or invalid offset.
+ */
+export function parseWindowsCimDateTimeToFiletimeUtc(raw: string): bigint | null {
+  const match = CIM_DATETIME_PATTERN.exec(raw.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const microseconds = BigInt(match[7]!);
+  const offsetSign = match[8] === "-" ? -1n : 1n;
+  const offsetMinutes = BigInt(match[9]!);
+  if (year < 1601 || month < 1 || month > 12 || day < 1 || day > 31
+    || hour > 23 || minute > 59 || second > 59 || offsetMinutes > 840n) {
+    return null;
+  }
+  const localUtcMs = Date.UTC(year, month - 1, day, hour, minute, second);
+  const verified = new Date(localUtcMs);
+  if (verified.getUTCFullYear() !== year || verified.getUTCMonth() !== month - 1
+    || verified.getUTCDate() !== day || verified.getUTCHours() !== hour
+    || verified.getUTCMinutes() !== minute || verified.getUTCSeconds() !== second) {
+    return null;
+  }
+  const utcMs = BigInt(localUtcMs) - offsetSign * offsetMinutes * 60_000n;
+  const filetime = (utcMs + FILETIME_UNIX_EPOCH_MS) * 10_000n + microseconds * 10n;
+  if (filetime < 1n || filetime > MAX_FILETIME) return null;
+  return filetime;
+}
+
+/**
+ * Compares a 100-ns helper FILETIME against a microsecond-precision WMI
+ * FILETIME. Values within 1 microsecond (10 FILETIME ticks) are treated as
+ * compatible (same process) so WMI's lower precision can never become false
+ * proof of PID reuse.
+ */
+export function areWindowsFiletimesCompatibleAtWmiPrecision(recorded100ns: bigint, wmi100ns: bigint): boolean {
+  const diff = recorded100ns >= wmi100ns ? recorded100ns - wmi100ns : wmi100ns - recorded100ns;
+  return diff <= 10n;
+}
+
+function defaultReadPosixBirth(pid: number): PosixBirthReadResult {
+  const result = spawnSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 5_000,
+  });
+  if (result.error || result.signal) return { kind: "error" };
+  const output = String(result.stdout ?? "").trim();
+  if (result.status === 0) {
+    return output ? { kind: "birth", birth: output } : { kind: "error" };
+  }
+  // `ps -p <pid>` exits 1 with empty output when no process has that PID.
+  if (result.status === 1 && !output) return { kind: "absent" };
+  return { kind: "error" };
+}
+
+/**
+ * Batched single-invocation WMI query for Windows `Win32_Process.CreationDate`
+ * in raw CIM_DATETIME format (`YYYYMMDDHHMMSS.mmmmmm±OOO`). Used only during
+ * legacy reset when `letagents-process-tree.exe info <pid>` cannot open a
+ * system/protected process without elevation (measured on Windows 11 desktop
+ * session: WMI reads `CreationDate` for System(4), csrss, lsass, MsMpEng, and
+ * svchost without elevation). Returns null on any invocation/parse failure.
+ */
+function defaultQueryWindowsWmiCreations(pids: readonly number[]): Map<number, string> | null {
+  const validPids = [...new Set(pids.filter((pid) => Number.isSafeInteger(pid) && pid >= 1 && pid <= 0xffffffff))];
+  if (validPids.length === 0) return new Map();
+  const filter = validPids.map((pid) => `ProcessId=${pid}`).join(" OR ");
+  const script = `$ErrorActionPreference='Stop'; $s=[wmisearcher]"SELECT ProcessId,CreationDate FROM Win32_Process WHERE ${filter}"; $s.Get() | ForEach-Object { "$($_.ProcessId)|$($_.CreationDate)" }`;
+  const result = spawnSync(
+    windowsToolPaths().powershell,
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: 15_000 },
+  );
+  if (result.error || result.signal || result.status !== 0) return null;
+  const creations = new Map<number, string>();
+  for (const rawLine of String(result.stdout ?? "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const sep = line.indexOf("|");
+    if (sep <= 0) return null;
+    const pidText = line.slice(0, sep).trim();
+    const cimDate = line.slice(sep + 1).trim();
+    if (!/^[1-9]\d{0,9}$/.test(pidText) || !cimDate) return null;
+    const pid = Number(pidText);
+    if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0xffffffff) return null;
+    creations.set(pid, cimDate);
+  }
+  return creations;
+}
+
+function defaultProbePid(pid: number): void {
+  process.kill(pid, 0);
+}
+
+function isPidAbsentByProbe(pid: number, probe: (target: number) => void): boolean {
+  try {
+    probe(pid);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ESRCH";
+  }
+}
+
+/**
+ * Reset-local birth state resolver for legacy runtime records. Keeps
+ * `processBirthState` in `process-identity.ts` untouched for live recovery,
+ * while resolving cross-account PID reuse using only hard OS evidence:
+ * - POSIX (`EPERM` on `kill(0)`): reads `/bin/ps -p <pid> -o lstart=` directly;
+ *   only a verified different birth (or `ps` absent + `ESRCH` re-probe) proves
+ *   `"gone"`. Equal birth, `ps` timeout/error, or unreadable output stays `"unknown"`.
+ * - Windows (helper access-denied in non-elevated desktop sessions): performs
+ *   one batched WMI `Win32_Process.CreationDate` query for all unresolved PIDs
+ *   and compares raw CIM_DATETIME UTC offsets against recorded `win32-ft:` at
+ *   microsecond precision (diff > 10 ticks). Compatible timestamps, malformed
+ *   output, and query failures stay `"unknown"`.
+ */
+function resolveLegacyRuntimeStates(
+  targets: readonly LegacyLiveRuntime[],
+  options: MoveAsideLegacyOptions,
+): Map<string, "live" | "gone" | "unknown"> {
+  const platform = options.platform ?? process.platform;
+  const baseBirthState = options.birthState ?? ((pid, birth) => processBirthState(pid, birth));
+  const probe = options.probePid ?? defaultProbePid;
+  const results = new Map<string, "live" | "gone" | "unknown">();
+  const unresolved: Array<{ key: string; pid: number; birth: string }> = [];
+
+  for (const { pid, birth } of targets) {
+    const key = `${pid}:${birth}`;
+    const state = baseBirthState(pid, birth);
+    results.set(key, state);
+    if (state === "unknown") unresolved.push({ key, pid, birth });
+  }
+  if (unresolved.length === 0) return results;
+
+  // If the caller injected a custom birthState without OS fallback hooks, keep
+  // its exact "unknown" answer unless the OS fallback is explicitly provided.
+  const hasCustomBirthState = options.birthState !== undefined;
+
+  if (platform !== "win32") {
+    if (hasCustomBirthState && !options.probePid && !options.readPosixBirth) return results;
+    const readPosix = options.readPosixBirth ?? defaultReadPosixBirth;
+    for (const item of unresolved) {
+      let probeCode: string | null = null;
+      try {
+        probe(item.pid);
+      } catch (error) {
+        probeCode = (error as NodeJS.ErrnoException)?.code ?? "UNKNOWN";
+      }
+      if (probeCode === "ESRCH") {
+        results.set(item.key, "gone");
+        continue;
+      }
+      if (probeCode !== "EPERM" || !isBirthEvidence(item.birth, platform)) {
+        continue;
+      }
+      const ps = readPosix(item.pid);
+      if (ps.kind === "birth") {
+        if (isBirthEvidence(ps.birth, platform) && !sameProcessBirthIdentity(ps.birth, item.birth)) {
+          results.set(item.key, "gone");
+        }
+      } else if (ps.kind === "absent" && isPidAbsentByProbe(item.pid, probe)) {
+        results.set(item.key, "gone");
+      }
+    }
+    return results;
+  }
+
+  if (hasCustomBirthState && !options.queryWindowsWmiCreations && !options.checkWindowsProcessAbsent) {
+    return results;
+  }
+  const isWindowsAbsent = options.checkWindowsProcessAbsent
+    ?? ((pid: number) => isPidAbsentByProbe(pid, probe) || windowsProcessInfo(pid) === null);
+  const wmiCandidates: Array<{ key: string; pid: number; recordedFiletime: bigint }> = [];
+  for (const item of unresolved) {
+    if (isWindowsAbsent(item.pid)) {
+      results.set(item.key, "gone");
+      continue;
+    }
+    const recordedFiletime = parseWindowsBirthFiletime(item.birth);
+    if (recordedFiletime !== null) {
+      wmiCandidates.push({ key: item.key, pid: item.pid, recordedFiletime });
+    }
+  }
+  if (wmiCandidates.length === 0) return results;
+
+  const queryWmi = options.queryWindowsWmiCreations ?? defaultQueryWindowsWmiCreations;
+  const creations = queryWmi(wmiCandidates.map((item) => item.pid));
+  if (!creations) return results;
+
+  for (const item of wmiCandidates) {
+    const cimDate = creations.get(item.pid);
+    if (cimDate === undefined) {
+      if (isWindowsAbsent(item.pid)) results.set(item.key, "gone");
+      continue;
+    }
+    const actualFiletime = parseWindowsCimDateTimeToFiletimeUtc(cimDate);
+    if (actualFiletime === null) continue;
+    if (!areWindowsFiletimesCompatibleAtWmiPrecision(item.recordedFiletime, actualFiletime)) {
+      results.set(item.key, "gone");
+    }
+  }
+  return results;
+}
 
 /**
  * Reads only exact (pid, process_identity) pairs from a pre-reset database so
@@ -104,9 +360,10 @@ function readLegacyLiveRuntimes(database: DatabaseSync): LegacyLiveRuntime[] {
     }
     return targets;
   } catch (error) {
-    if (isSqliteBusyOrLocked(error)) throw error;
-    console.warn("[daemon_state] could not inspect legacy runtime_deployments before move-aside:", error);
-    return [];
+    if (!isSqliteBusyOrLocked(error)) {
+      console.warn("[daemon_state] failed to inspect legacy runtime_deployments before move-aside:", error);
+    }
+    throw error;
   }
 }
 
@@ -135,8 +392,10 @@ async function stopLegacyLiveRuntimes(
   targets: readonly LegacyLiveRuntime[],
   options: MoveAsideLegacyOptions = {},
 ): Promise<void> {
+  if (targets.length === 0) return;
   const platform = options.platform ?? process.platform;
   const birthState = options.birthState ?? ((pid, birth) => processBirthState(pid, birth));
+  const initialStates = resolveLegacyRuntimeStates(targets, options);
   const graceMs = options.graceMs ?? 2_000;
   const killWaitMs = options.killWaitMs ?? 1_000;
   const sendSignal = options.signalProcessTree ?? signalTree;
@@ -147,7 +406,7 @@ async function stopLegacyLiveRuntimes(
       : signalTreeOutcome);
 
   await Promise.all(targets.map(async ({ pid, birth }) => {
-    const initialState = birthState(pid, birth);
+    const initialState = initialStates.get(`${pid}:${birth}`) ?? "unknown";
     if (initialState === "gone") return;
     if (initialState === "unknown") {
       throw new Error(`Cannot reset legacy daemon state: legacy provider process ${pid} birth identity could not be resolved.`);
@@ -282,7 +541,10 @@ export async function moveAsideLegacyDaemonStateDatabase(
   }
   if (inspection.kind === "modern") {
     if (inspection.schemaVersion < 1 || inspection.schemaVersion > SCHEMA_VERSION) {
-      throw new Error(`Unsupported daemon state schema version ${inspection.schemaVersion} (user_version=${inspection.userVersion}).`);
+      const detail = inspection.schemaVersion >= 1
+        ? `${inspection.schemaVersion} (user_version=${inspection.userVersion})`
+        : `(user_version=${inspection.userVersion})`;
+      throw new Error(`Unsupported daemon state schema version ${detail}.`);
     }
     return null;
   }

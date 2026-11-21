@@ -17,8 +17,11 @@ import {
   DAEMON_STATE_USER_VERSION_OFFSET,
   DaemonStateDatabase,
   DaemonStateSchema,
+  areWindowsFiletimesCompatibleAtWmiPrecision,
   fromSqliteUserVersion,
   moveAsideLegacyDaemonStateDatabase,
+  parseWindowsBirthFiletime,
+  parseWindowsCimDateTimeToFiletimeUtc,
   runNumberedMigrations,
   toSqliteUserVersion,
   validateDaemonStateShape,
@@ -1061,5 +1064,376 @@ test("presentation-only recordActivityBatch advances only the affected agent ver
   } finally {
     await store.close();
     await env.cleanup();
+  }
+});
+
+test("legacy DB move-aside fails closed on unexpected runtime_deployments SQLite read errors without archiving or skipping live providers", async () => {
+  const env = await tempDir("letagents-legacy-read-err-");
+  const dbPath = join(env.root, "daemon-state.sqlite");
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], { stdio: "ignore" });
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  try {
+    assert.ok(child.pid);
+    const birth = systemProcessIdentity.readBirthIdentity(child.pid).trim();
+    assert.equal(processBirthState(child.pid, birth), "live");
+
+    const seed = new DatabaseSync(dbPath);
+    try {
+      seed.exec(`
+        PRAGMA application_id = 0;
+        PRAGMA user_version = 52;
+        CREATE TABLE runtime_deployments (
+          agent_id TEXT PRIMARY KEY,
+          provider_connection_pid INTEGER,
+          provider_process_identity TEXT
+        );
+      `);
+      seed.prepare("INSERT INTO runtime_deployments VALUES (?, ?, ?)").run("live_io_err", child.pid, birth);
+    } finally {
+      seed.close();
+    }
+    await protectOwnerPrivate(dbPath, "file", { force: true });
+
+    DatabaseSync.prototype.prepare = function patchedPrepare(sql: string) {
+      if (sql.includes("FROM runtime_deployments")) {
+        throw Object.assign(new Error("disk I/O error"), { code: "ERR_SQLITE_ERROR", errcode: 10 });
+      }
+      return originalPrepare.call(this, sql);
+    };
+
+    await assert.rejects(
+      () => moveAsideLegacyDaemonStateDatabase(dbPath),
+      /disk I\/O error/i,
+    );
+    assert.equal((await readdir(env.root)).some((name) => name.includes(".legacy-")), false,
+      "unexpected inspection error must not archive the database");
+    assert.ok((await stat(dbPath)).isFile(), "original legacy database must remain in place");
+    assert.equal(processBirthState(child.pid, birth), "live", "live provider must remain tracked until inspection succeeds");
+  } finally {
+    DatabaseSync.prototype.prepare = originalPrepare;
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await env.cleanup();
+  }
+});
+
+test("legacy DB move-aside resolves cross-account POSIX PID reuse via verified ps birth while failing closed on matching birth or ps errors", async () => {
+  const seedLegacyWithRuntime = async (dbPath: string, pid: number, birth: string) => {
+    const seed = new DatabaseSync(dbPath);
+    try {
+      seed.exec(`
+        PRAGMA application_id = 0;
+        PRAGMA user_version = 52;
+        CREATE TABLE runtime_deployments (
+          agent_id TEXT PRIMARY KEY,
+          provider_connection_pid INTEGER,
+          provider_process_identity TEXT
+        );
+      `);
+      seed.prepare("INSERT INTO runtime_deployments VALUES (?, ?, ?)").run("legacy_agent", pid, birth);
+    } finally {
+      seed.close();
+    }
+    await protectOwnerPrivate(dbPath, "file", { force: true });
+  };
+
+  // 1. Live macOS proof: recorded PID 1 (launchd, EPERM on kill(0)) with an older birth resolves via real /bin/ps and moves cleanly.
+  if (process.platform === "darwin") {
+    const env = await tempDir("letagents-legacy-launchd-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWithRuntime(dbPath, 1, "Mon Jan  1 00:00:00 1990");
+      const archived = await moveAsideLegacyDaemonStateDatabase(dbPath);
+      assert.ok(archived && archived.includes(".legacy-"), "PID 1 (launchd) with a different birth must not block legacy reset");
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 2. EPERM + verified different ps birth (root/other account) -> gone, moves cleanly without signalling.
+  {
+    const env = await tempDir("letagents-posix-eperm-diff-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWithRuntime(dbPath, 1, "Mon Jan  1 00:00:00 1990");
+      let signalled = false;
+      const archived = await moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "darwin",
+        birthState: () => "unknown",
+        probePid: () => { throw Object.assign(new Error("EPERM"), { code: "EPERM" }); },
+        readPosixBirth: () => ({ kind: "birth", birth: "Fri Oct 30 03:28:39 2026" }),
+        signalProcessTree: () => { signalled = true; return true; },
+      });
+      assert.ok(archived && archived.includes(".legacy-"));
+      assert.equal(signalled, false);
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 3. EPERM + matching ps birth -> stays unknown and refuses reset.
+  {
+    const env = await tempDir("letagents-posix-eperm-same-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWithRuntime(dbPath, 500, "Fri Oct 30 03:28:39 2026");
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+          platform: "darwin",
+          birthState: () => "unknown",
+          probePid: () => { throw Object.assign(new Error("EPERM"), { code: "EPERM" }); },
+          readPosixBirth: () => ({ kind: "birth", birth: "Fri Oct 30 03:28:39 2026" }),
+        }),
+        /birth identity could not be resolved/i,
+      );
+      assert.equal((await readdir(env.root)).some((name) => name.includes(".legacy-")), false);
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 4. EPERM + ps absent (exited between kill(0) and ps) + ESRCH re-probe -> gone, moves cleanly.
+  {
+    const env = await tempDir("letagents-posix-eperm-absent-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWithRuntime(dbPath, 501, "Mon Jan  1 00:00:00 1990");
+      let probes = 0;
+      const archived = await moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "darwin",
+        birthState: () => "unknown",
+        probePid: () => {
+          probes += 1;
+          throw Object.assign(new Error(probes === 1 ? "EPERM" : "ESRCH"), { code: probes === 1 ? "EPERM" : "ESRCH" });
+        },
+        readPosixBirth: () => ({ kind: "absent" }),
+      });
+      assert.ok(archived && archived.includes(".legacy-"));
+      assert.equal(probes, 2);
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 5. EPERM + ps timeout/error (unreadable birth) -> fails closed (no inference from EPERM alone).
+  {
+    const env = await tempDir("letagents-posix-eperm-err-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWithRuntime(dbPath, 502, "Mon Jan  1 00:00:00 1990");
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+          platform: "darwin",
+          birthState: () => "unknown",
+          probePid: () => { throw Object.assign(new Error("EPERM"), { code: "EPERM" }); },
+          readPosixBirth: () => ({ kind: "error" }),
+        }),
+        /birth identity could not be resolved/i,
+      );
+      assert.equal((await readdir(env.root)).some((name) => name.includes(".legacy-")), false);
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 6. Wrong-platform birth string on an absent PID (ESRCH) -> gone, moves cleanly; on a live PID -> fails closed.
+  {
+    const env = await tempDir("letagents-posix-bad-birth-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWithRuntime(dbPath, 503, "win32-ft:134378009191465763");
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+          platform: "darwin",
+          birthState: () => "unknown",
+          probePid: () => {},
+          readPosixBirth: () => ({ kind: "birth", birth: "Fri Oct 30 03:28:39 2026" }),
+        }),
+        /birth identity could not be resolved/i,
+      );
+      const archived = await moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "darwin",
+        birthState: () => "unknown",
+        probePid: () => { throw Object.assign(new Error("ESRCH"), { code: "ESRCH" }); },
+      });
+      assert.ok(archived && archived.includes(".legacy-"));
+    } finally {
+      await env.cleanup();
+    }
+  }
+});
+
+test("legacy DB move-aside Windows WMI fallback preserves UTC offsets and microsecond precision, batches queries, and fails closed on compatible or invalid timestamps", async () => {
+  // 1. Exact BigInt CIM_DATETIME parsing + microsecond precision comparator (CreekPeak's measured System(4) example).
+  const recordedSystem4 = parseWindowsBirthFiletime("win32-ft:134378009191465763");
+  const wmiSystem4UtcPlus1 = parseWindowsCimDateTimeToFiletimeUtc("20261030032839.146576+060");
+  assert.equal(recordedSystem4, 134378009191465763n);
+  assert.equal(wmiSystem4UtcPlus1, 134378009191465760n);
+  assert.equal(areWindowsFiletimesCompatibleAtWmiPrecision(recordedSystem4!, wmiSystem4UtcPlus1!), true,
+    "100-ns helper value vs truncated microsecond WMI value of the same process must be compatible");
+  assert.equal(areWindowsFiletimesCompatibleAtWmiPrecision(134378009191465769n, 134378009191465770n), true,
+    "1-tick rounding boundary must stay compatible");
+  assert.equal(areWindowsFiletimesCompatibleAtWmiPrecision(134378009191465763n, 134378009191465740n), false,
+    "genuinely different birth (>1 microsecond apart) must not be compatible");
+
+  // UTC offset preservation across negative, positive, and half-hour offsets for the exact same UTC instant.
+  assert.equal(parseWindowsCimDateTimeToFiletimeUtc("20261030022839.146576+000"), wmiSystem4UtcPlus1);
+  assert.equal(parseWindowsCimDateTimeToFiletimeUtc("20261029212839.146576-300"), wmiSystem4UtcPlus1);
+  assert.equal(parseWindowsCimDateTimeToFiletimeUtc("20261030075839.146576+330"), wmiSystem4UtcPlus1);
+  assert.equal(parseWindowsCimDateTimeToFiletimeUtc("20260230032839.146576+060"), null, "invalid calendar date must fail closed");
+  assert.equal(parseWindowsCimDateTimeToFiletimeUtc("2026-10-30T03:28:39.1465760"), null, "missing offset must fail closed");
+  assert.equal(parseWindowsCimDateTimeToFiletimeUtc("not-a-timestamp"), null);
+
+  const seedLegacyWindowsRuntimes = async (dbPath: string, entries: Array<{ id: string; pid: number; birth: string }>) => {
+    const seed = new DatabaseSync(dbPath);
+    try {
+      seed.exec(`
+        PRAGMA application_id = 0;
+        PRAGMA user_version = 52;
+        CREATE TABLE runtime_deployments (
+          agent_id TEXT PRIMARY KEY,
+          provider_connection_pid INTEGER,
+          provider_process_identity TEXT
+        );
+      `);
+      for (const item of entries) {
+        seed.prepare("INSERT INTO runtime_deployments VALUES (?, ?, ?)").run(item.id, item.pid, item.birth);
+      }
+    } finally {
+      seed.close();
+    }
+    await protectOwnerPrivate(dbPath, "file", { force: true });
+  };
+
+  // 2. Live Windows proof: recorded System (PID 4) with an older birth resolves via helper/WMI without blocking reset.
+  if (process.platform === "win32") {
+    const env = await tempDir("letagents-legacy-win-sys4-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWindowsRuntimes(dbPath, [{ id: "win_sys4", pid: 4, birth: "win32-ft:130000000000000000" }]);
+      const archived = await moveAsideLegacyDaemonStateDatabase(dbPath);
+      assert.ok(archived && archived.includes(".legacy-"), "Windows System (PID 4) with a different birth must not block legacy reset");
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 3. Multiple unresolved system PIDs (System 4, csrss 512, lsass 888) resolved in ONE batched WMI call with genuinely different births -> moves cleanly.
+  {
+    const env = await tempDir("letagents-win-wmi-batch-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWindowsRuntimes(dbPath, [
+        { id: "a1", pid: 4, birth: "win32-ft:130000000000000000" },
+        { id: "a2", pid: 512, birth: "win32-ft:130000000000000000" },
+        { id: "a3", pid: 888, birth: "win32-ft:130000000000000000" },
+      ]);
+      let wmiCalls = 0;
+      let queriedPids: readonly number[] = [];
+      let signalled = false;
+      const archived = await moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "win32",
+        birthState: () => "unknown",
+        checkWindowsProcessAbsent: () => false,
+        queryWindowsWmiCreations: (pids) => {
+          wmiCalls += 1;
+          queriedPids = pids;
+          return new Map([
+            [4, "20261030032839.146576+060"],
+            [512, "20261030032840.000000+060"],
+            [888, "20261030032841.000000+060"],
+          ]);
+        },
+        signalProcessTreeOutcome: () => { signalled = true; return "ended"; },
+      });
+      assert.ok(archived && archived.includes(".legacy-"));
+      assert.equal(wmiCalls, 1, "all unresolved Windows PIDs must share one batched WMI query");
+      assert.deepEqual([...queriedPids].sort((a, b) => a - b), [4, 512, 888]);
+      assert.equal(signalled, false);
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 3. Compatible WMI timestamp (CreekPeak's precision example) -> stays unresolved and refuses reset.
+  {
+    const env = await tempDir("letagents-win-wmi-compatible-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWindowsRuntimes(dbPath, [
+        { id: "same_proc", pid: 4, birth: "win32-ft:134378009191465763" },
+      ]);
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+          platform: "win32",
+          birthState: () => "unknown",
+          checkWindowsProcessAbsent: () => false,
+          queryWindowsWmiCreations: () => new Map([[4, "20261030032839.146576+060"]]),
+        }),
+        /birth identity could not be resolved/i,
+      );
+      assert.equal((await readdir(env.root)).some((name) => name.includes(".legacy-")), false);
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 4. Malformed WMI timestamp or WMI query failure/timeout -> stays unresolved and refuses reset.
+  {
+    const env = await tempDir("letagents-win-wmi-fail-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWindowsRuntimes(dbPath, [
+        { id: "sys", pid: 4, birth: "win32-ft:130000000000000000" },
+      ]);
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+          platform: "win32",
+          birthState: () => "unknown",
+          checkWindowsProcessAbsent: () => false,
+          queryWindowsWmiCreations: () => new Map([[4, "bad-cim-date"]]),
+        }),
+        /birth identity could not be resolved/i,
+      );
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+          platform: "win32",
+          birthState: () => "unknown",
+          checkWindowsProcessAbsent: () => false,
+          queryWindowsWmiCreations: () => null,
+        }),
+        /birth identity could not be resolved/i,
+      );
+      assert.equal((await readdir(env.root)).some((name) => name.includes(".legacy-")), false);
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 5. Wrong-platform (macOS) birth on Windows: absent PID moves cleanly; live PID fails closed.
+  {
+    const env = await tempDir("letagents-win-bad-birth-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyWindowsRuntimes(dbPath, [
+        { id: "wrong_plat", pid: 4000, birth: "Mon Jan  1 00:00:00 1990" },
+      ]);
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+          platform: "win32",
+          birthState: () => "unknown",
+          checkWindowsProcessAbsent: () => false,
+          queryWindowsWmiCreations: () => new Map([[4000, "20261030032839.146576+060"]]),
+        }),
+        /birth identity could not be resolved/i,
+      );
+      const archived = await moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "win32",
+        birthState: () => "unknown",
+        checkWindowsProcessAbsent: () => true,
+      });
+      assert.ok(archived && archived.includes(".legacy-"));
+    } finally {
+      await env.cleanup();
+    }
   }
 });

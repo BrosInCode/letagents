@@ -149,6 +149,7 @@ const tables: Record<string, string> = {
     recovery_turn_id TEXT,
     bound_at_ms INTEGER NOT NULL CHECK(bound_at_ms >= 0),
     source_id TEXT CHECK(source_id IS NULL OR (length(source_id) BETWEEN 1 AND 512 AND source_id GLOB '[A-Za-z0-9]*' AND source_id NOT GLOB '*[^A-Za-z0-9_.:/-]*' AND instr(source_id,char(0))=0)),
+    pending_lifecycle_fact_id TEXT CHECK(pending_lifecycle_fact_id IS NULL OR length(pending_lifecycle_fact_id) BETWEEN 1 AND 512),
     FOREIGN KEY(agent_id,execution_generation_id,runtime_generation_id)
       REFERENCES execution_runtime_generations(agent_id,execution_generation_id,runtime_generation_id),
     FOREIGN KEY(agent_id,observer_execution_generation_id,observer_runtime_generation_id)

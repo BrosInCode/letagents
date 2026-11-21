@@ -19,8 +19,12 @@ export {
 } from "./schema.js";
 export {
   DaemonStateDatabase,
+  areWindowsFiletimesCompatibleAtWmiPrecision,
   moveAsideLegacyDaemonStateDatabase,
   openDaemonStateDatabase,
   ensureDaemonStateDatabase,
+  parseWindowsBirthFiletime,
+  parseWindowsCimDateTimeToFiletimeUtc,
   type MoveAsideLegacyOptions,
+  type PosixBirthReadResult,
 } from "./connection.js";

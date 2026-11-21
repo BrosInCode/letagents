@@ -741,27 +741,63 @@ export class ExecutionShadowStore {
         }
       }
       let lifecycleProjection: LifecycleProjectionOutcome | undefined;
-      if (!replay && fact.domain !== "execution" && this.hasAgentsTable()) {
-        const subjectRuntime = this.required(
-          "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
-          fact.agentId, fact.executionGenerationId, fact.runtimeGenerationId,
-        );
-        const observerRuntime = this.required(
-          "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
-          fact.agentId, current.observer_execution_generation_id, current.observer_runtime_generation_id,
-        );
-        const effectKind = lifecycleEffectKind(fact, String(subjectRuntime.provider));
-        if (effectKind !== "none"
-          && subjectRuntime.authority_mode === "typed"
-          && observerRuntime.authority_mode === "typed") {
-          lifecycleProjection = this.projectLifecycleToAgent(
-            fact,
-            effectKind,
-            current,
-            subjectRuntime,
-            observerRuntime,
-            ingestOptions?.liveInstallation,
+      let projectedObservedState: ObservedState | null = null;
+      if (!replay && this.hasAgentsTable()) {
+        // First retry any durable pending lifecycle projection before evaluating
+        // the incoming fact so FIFO ordering is preserved and an unrelated
+        // superseded incoming fact never drops earlier pending work.
+        const existingPendingOutcome = this.tryApplyPendingLifecycle(current, ingestOptions?.liveInstallation);
+        let hasPendingRemaining = existingPendingOutcome.status === "pending";
+        if (existingPendingOutcome.status === "applied") {
+          projectedObservedState = existingPendingOutcome.observedState;
+        }
+        if (fact.domain !== "execution") {
+          const subjectRuntime = this.required(
+            "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
+            fact.agentId, fact.executionGenerationId, fact.runtimeGenerationId,
           );
+          const observerRuntime = this.required(
+            "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
+            fact.agentId, current.observer_execution_generation_id, current.observer_runtime_generation_id,
+          );
+          const effectKind = lifecycleEffectKind(fact, String(subjectRuntime.provider));
+          if (effectKind !== "none"
+            && subjectRuntime.authority_mode === "typed"
+            && observerRuntime.authority_mode === "typed") {
+            const incoming = this.projectLifecycleToAgent(
+              fact,
+              effectKind,
+              current,
+              subjectRuntime,
+              observerRuntime,
+              ingestOptions?.liveInstallation,
+            );
+            if (incoming.status === "applied") {
+              if (hasPendingRemaining) {
+                this.run("UPDATE execution_observers SET pending_lifecycle_fact_id=NULL WHERE agent_id=?", fact.agentId);
+                hasPendingRemaining = false;
+              }
+              projectedObservedState = incoming.observedState;
+              lifecycleProjection = incoming;
+            } else if (incoming.status === "pending") {
+              const incomingIsRuntimeReady = fact.domain === "runtime" && fact.state === "ready";
+              if (!hasPendingRemaining || !incomingIsRuntimeReady) {
+                this.run("UPDATE execution_observers SET pending_lifecycle_fact_id=? WHERE agent_id=?",
+                  fact.factId, fact.agentId);
+                hasPendingRemaining = true;
+              }
+              lifecycleProjection = { status: "pending" };
+            } else {
+              // An unrelated superseded incoming fact (for example runtime/ready
+              // after the agent is already idle) MUST NOT erase a different
+              // pending projection such as an active turn awaiting alignment.
+              lifecycleProjection = hasPendingRemaining ? { status: "pending" } : { status: "superseded" };
+            }
+          } else if (hasPendingRemaining) {
+            lifecycleProjection = { status: "pending" };
+          }
+        } else if (hasPendingRemaining) {
+          lifecycleProjection = { status: "pending" };
         }
       }
       // Capture under the write transaction, never bless an external commit
@@ -773,7 +809,6 @@ export class ExecutionShadowStore {
           replay: { facts: previous.replay.facts + 1, bytes: previous.replay.bytes + storedBytes }, epoch: this.cacheEpoch },
         budget: { budget, windowStart: retained.windowStart, last: journalSequence, epoch: this.cacheEpoch },
       };
-      const projectedObservedState = lifecycleProjection?.status === "applied" ? lifecycleProjection.observedState : null;
       return {
         status: replay ? "duplicate" : "accepted", journalSequence,
         gapPending: Number(current.max_observed_sequence) > fact.sourceSequence,
@@ -786,6 +821,25 @@ export class ExecutionShadowStore {
       this.rememberBudget(fact.agentId, committed.budget);
     }
     return result;
+  }
+
+  /**
+   * Retries any durable pending lifecycle projection referenced by
+   * `execution_observers.pending_lifecycle_fact_id` for `agentId`. Fast no-op
+   * (no write lock) when no projection is pending.
+   */
+  retryPendingLifecycleProjection(
+    agentId: string,
+    liveInstallation?: ShadowIngestInstallation | null,
+  ): LifecycleProjectionOutcome | { status: "none" } {
+    if (!this.hasAgentsTable()) return { status: "none" };
+    const peek = this.row("SELECT pending_lifecycle_fact_id FROM execution_observers WHERE agent_id=?", agentId);
+    if (!peek || peek.pending_lifecycle_fact_id === null) return { status: "none" };
+    return this.transaction(() => {
+      const current = this.row("SELECT * FROM execution_observers WHERE agent_id=?", agentId);
+      if (!current || current.pending_lifecycle_fact_id === null) return { status: "none" };
+      return this.tryApplyPendingLifecycle(current, liveInstallation);
+    });
   }
 
   /**
@@ -802,32 +856,76 @@ export class ExecutionShadowStore {
       if (!current
         || String(current.observer_execution_generation_id) !== pending.observerExecutionGenerationId
         || String(current.observer_runtime_generation_id) !== pending.observerRuntimeGenerationId) {
+        if (current?.pending_lifecycle_fact_id !== null) {
+          this.run("UPDATE execution_observers SET pending_lifecycle_fact_id=NULL WHERE agent_id=?", pending.fact.agentId);
+        }
         return { status: "superseded" };
       }
-      const subjectRuntime = this.row(
-        "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
-        pending.fact.agentId, pending.fact.executionGenerationId, pending.fact.runtimeGenerationId,
-      );
-      const observerRuntime = this.row(
-        "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
-        pending.fact.agentId, pending.observerExecutionGenerationId, pending.observerRuntimeGenerationId,
-      );
-      if (!subjectRuntime || !observerRuntime
-        || subjectRuntime.authority_mode !== "typed"
-        || observerRuntime.authority_mode !== "typed") {
-        return { status: "superseded" };
+      const outcome = this.evaluatePendingLifecycle(pending, current, liveInstallation);
+      if (outcome.status === "applied" || outcome.status === "superseded") {
+        this.run("UPDATE execution_observers SET pending_lifecycle_fact_id=NULL WHERE agent_id=?", pending.fact.agentId);
       }
-      const effectKind = lifecycleEffectKind(pending.fact, String(subjectRuntime.provider));
-      if (effectKind === "none") return { status: "superseded" };
-      return this.projectLifecycleToAgent(
-        pending.fact,
-        effectKind,
-        current,
-        subjectRuntime,
-        observerRuntime,
-        liveInstallation,
-      );
+      return outcome;
     });
+  }
+
+  private tryApplyPendingLifecycle(
+    current: Row,
+    liveInstallation?: ShadowIngestInstallation | null,
+  ): LifecycleProjectionOutcome | { status: "none" } {
+    if (typeof current.pending_lifecycle_fact_id !== "string") return { status: "none" };
+    const agentId = String(current.agent_id);
+    const factRow = this.row(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id
+      FROM execution_facts f LEFT JOIN runs t ON t.turn_id=f.turn_id
+      WHERE f.fact_id=? AND f.agent_id=?`, current.pending_lifecycle_fact_id, agentId);
+    if (!factRow) {
+      this.run("UPDATE execution_observers SET pending_lifecycle_fact_id=NULL WHERE agent_id=?", agentId);
+      return { status: "superseded" };
+    }
+    const pending: PendingLifecycleProjection = {
+      fact: this.decodeFact(factRow),
+      observerExecutionGenerationId: String(factRow.observer_execution_generation_id),
+      observerRuntimeGenerationId: String(factRow.observer_runtime_generation_id),
+    };
+    const outcome = this.evaluatePendingLifecycle(pending, current, liveInstallation);
+    if (outcome.status === "applied" || outcome.status === "superseded") {
+      this.run("UPDATE execution_observers SET pending_lifecycle_fact_id=NULL WHERE agent_id=?", agentId);
+    }
+    return outcome;
+  }
+
+  private evaluatePendingLifecycle(
+    pending: PendingLifecycleProjection,
+    current: Row,
+    liveInstallation?: ShadowIngestInstallation | null,
+  ): LifecycleProjectionOutcome {
+    if (String(current.observer_execution_generation_id) !== pending.observerExecutionGenerationId
+      || String(current.observer_runtime_generation_id) !== pending.observerRuntimeGenerationId) {
+      return { status: "superseded" };
+    }
+    const subjectRuntime = this.row(
+      "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
+      pending.fact.agentId, pending.fact.executionGenerationId, pending.fact.runtimeGenerationId,
+    );
+    const observerRuntime = this.row(
+      "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
+      pending.fact.agentId, pending.observerExecutionGenerationId, pending.observerRuntimeGenerationId,
+    );
+    if (!subjectRuntime || !observerRuntime
+      || subjectRuntime.authority_mode !== "typed"
+      || observerRuntime.authority_mode !== "typed") {
+      return { status: "superseded" };
+    }
+    const effectKind = lifecycleEffectKind(pending.fact, String(subjectRuntime.provider));
+    if (effectKind === "none") return { status: "superseded" };
+    return this.projectLifecycleToAgent(
+      pending.fact,
+      effectKind,
+      current,
+      subjectRuntime,
+      observerRuntime,
+      liveInstallation,
+    );
   }
 
   /**
