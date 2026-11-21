@@ -6,10 +6,14 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
+import { isolatePackagedBundle } from "./packaged-artifact-isolation.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const windows = process.platform === "win32";
-const bundle = windows ? join(root, "release", "LetAgents-win32", "LetAgents") : join(root, "release", "LetAgents-darwin", "LetAgents.app");
+const builtBundle = windows ? join(root, "release", "LetAgents-win32", "LetAgents") : join(root, "release", "LetAgents-darwin", "LetAgents.app");
+// Every check of the packaged app uses a copy outside the checkout: see packaged-artifact-isolation.mjs.
+const isolated = await isolatePackagedBundle(builtBundle);
+const bundle = isolated.bundle;
 const executable = windows ? join(bundle, "LetAgents.exe") : join(bundle, "Contents", "MacOS", "LetAgents");
 const developmentDaemon = join(root, "dist-daemon", "main.js");
 const daemonTypes = await import(pathToFileURL(join(root, "dist-daemon", "types.js")).href);
@@ -35,7 +39,8 @@ function assertPackagedAppImports() {
     const result = spawnSync(executable, [importCheck, appRoot], {
       cwd: appRoot,
       encoding: "utf8",
-      env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), ELECTRON_RUN_AS_NODE: "1", NODE_OPTIONS: nodeOptions },
+      // No NODE_PATH: it would let the check load packages from outside the app.
+      env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), ELECTRON_RUN_AS_NODE: "1", NODE_OPTIONS: nodeOptions, NODE_PATH: "" },
       timeout: 120_000,
     });
     process.stdout.write(result.stdout ?? "");
@@ -135,9 +140,29 @@ async function launchDevelopmentDaemon() {
   throw new Error("development daemon did not become ready");
 }
 
+// The import checks start no app, so they register no letagents:// link
+// handler. A developer machine with an installed app can run them alone.
+const importsOnly = process.env.LETAGENTS_PACKAGED_SMOKE_IMPORTS_ONLY === "1";
 try {
+  console.log(`packaged-smoke: copy of the packaged app at ${bundle}`);
   console.log("packaged-smoke: import names and provider adapters");
   assertPackagedAppImports();
+  if (importsOnly) {
+    console.log(JSON.stringify({ packagedApp: bundle, importsOnly: true }));
+    process.exitCode = 0;
+  } else {
+    await runLaunchChecks();
+  }
+} finally {
+  if (!importsOnly) {
+    await request("daemon.prepare_handoff").catch(() => undefined);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  await rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  await rm(isolated.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+}
+
+async function runLaunchChecks() {
   console.log("packaged-smoke: sealed daemon executor");
   await assertPackagedDaemonExecutorSeal();
   console.log("packaged-smoke: cross-install predecessor");
@@ -157,8 +182,4 @@ try {
     throw new Error(`daemon did not survive packaged app relaunch: ${JSON.stringify({ first, second })}`);
   }
   console.log(JSON.stringify({ packagedApp: bundle, daemonPid: first.pid, generation: first.generation, survivedRelaunch: true }));
-} finally {
-  await request("daemon.prepare_handoff").catch(() => undefined);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  await rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 }
