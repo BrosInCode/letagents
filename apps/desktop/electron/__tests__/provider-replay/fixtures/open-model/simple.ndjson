@@ -1,0 +1,8 @@
+{"type":"transcript_start","format":1,"provider":"open-model","protocol":"opencode.server/http-sse","providerVersion":"1.18.20","scenario":"simple","capture":{"kind":"opencode-edge-fixture","description":"Single room message produces exactly one reply."}}
+{"type":"expect_outbound","label":"prompt_async","frame":{"method":"POST","path":"/session/<session>/prompt_async"}}
+{"type":"emit_inbound","label":"assistant_started","frame":{"type":"message.updated","properties":{"info":{"id":"<assistantId>","sessionID":"<session>","role":"assistant","parentID":"<turnId>","time":{"created":"<now>"}}}}}
+{"type":"emit_inbound","label":"assistant_part","frame":{"type":"message.part.updated","properties":{"part":{"id":"prt_simple_1","sessionID":"<session>","messageID":"<assistantId>","type":"text","text":"open-model-ready"}}}}
+{"type":"emit_inbound","label":"assistant_finish_part","frame":{"type":"message.part.updated","properties":{"part":{"id":"prt_simple_finish","sessionID":"<session>","messageID":"<assistantId>","type":"step-finish","reason":"stop"}}}}
+{"type":"emit_inbound","label":"assistant_completed","frame":{"type":"message.updated","properties":{"info":{"id":"<assistantId>","sessionID":"<session>","role":"assistant","parentID":"<turnId>","time":{"created":"<now>","completed":"<now>"}}}}}
+{"type":"emit_inbound","label":"session_idle","frame":{"type":"session.idle","properties":{"sessionID":"<session>"}}}
+{"type":"runtime_exit","requested":true,"transportClosedBeforeExit":false,"code":0,"signal":null}

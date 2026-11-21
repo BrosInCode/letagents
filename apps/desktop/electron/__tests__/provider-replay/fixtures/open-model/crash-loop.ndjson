@@ -1,0 +1,2 @@
+{"type":"transcript_start","format":1,"provider":"open-model","protocol":"opencode.server/http-sse","providerVersion":"1.18.20","scenario":"crash-loop","capture":{"kind":"opencode-edge-fixture","description":"OpenCode starts cleanly and crashes repeatedly until daemon applies backoff and quarantines the agent."}}
+{"type":"runtime_exit","requested":false,"transportClosedBeforeExit":false,"code":1,"signal":null}
