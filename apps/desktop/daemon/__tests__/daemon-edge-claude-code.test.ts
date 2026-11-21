@@ -36,6 +36,8 @@ interface ClaudeScenario {
   release(label: string): void;
   /** Wait until start `launch` of the stand-in stands at the hold `label`. */
   reached(launch: number, label: string): Promise<void>;
+  /** Wait until start `launch` of the stand-in has written the inbound entry with this label. */
+  emitted(launch: number, label: string): Promise<void>;
   /** The texts of the user lines the daemon wrote to start `launch`, in order. */
   prompts(launch: number): string[];
   /**
@@ -93,6 +95,11 @@ async function startClaudeScenario(name: string): Promise<ClaudeScenario> {
     hold: (label) => writeFileSync(join(planDir, `hold-${label}`), ""),
     release: (label) => rmSync(join(planDir, `hold-${label}`), { force: true }),
     reached: (launch, label) => waitFor(`start ${launch} of the stand-in at ${label}`, () => existsSync(claimFile(launch, `reached-${label}`))),
+    emitted: (launch, label) => waitFor(`start ${launch} of the stand-in to emit ${label}`, () => {
+      const path = claimFile(launch, "emitted.ndjson");
+      return existsSync(path) && readFileSync(path, "utf8").split("\n").filter(Boolean)
+        .some((line) => (JSON.parse(line) as { label: string | null }).label === label);
+    }),
     prompts,
     sources: (launch) => prompts(launch).map(promptSourceText),
     standInErrors: () => readdirSync(planDir).filter((entry) => entry.startsWith("claim-"))
@@ -290,22 +297,30 @@ describe(
       await inScenario(scenario, async () => {
         await startAgentAndWaitIdle(scenario);
 
-        // The program has the room message and has not answered when the daemon dies.
-        scenario.hold("t2-assistant");
+        // The program reports its answer, and the daemon dies before the end of the turn reaches it:
+        // the recording has the assistant message of this turn and no result.
         harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[survived-kill]" });
-        await scenario.reached(1, "t2-assistant");
+        await scenario.emitted(1, "t2-assistant");
         await harness.waitForEntry(
           agent.entryId,
           (entry) => entry.room_agent_state?.turn.state === "responding" && Boolean(entry.room_agent_state.turn.provider_turn_id),
           WAIT_MS,
           "a responding turn that the daemon has recorded",
         );
+        assert.equal(harness.roomServer.publishedMessages(agent.roomId).length, 0);
         await harness.kill("SIGKILL");
 
-        // Claude Code does not live through a daemon restart. With its reader gone it ends,
-        // and the end of the turn is in its session file only.
-        scenario.release("t2-assistant");
-        await waitFor("the first start of the stand-in to end", () => existsSync(join(scenario.planDir, "claim-1", "exit.json")));
+        // Claude Code does not live through a daemon restart: it ends when its daemon is gone, or
+        // with it. The end of the turn is then in its session file only.
+        const standInPid = (JSON.parse(readFileSync(join(scenario.planDir, "claim-1", "launch.json"), "utf8")) as { pid: number }).pid;
+        await waitFor("the first start of the stand-in to end", () => {
+          try {
+            process.kill(standInPid, 0);
+            return false;
+          } catch (error) {
+            return (error as NodeJS.ErrnoException).code === "ESRCH";
+          }
+        });
         assert.equal(existsSync(join(scenario.planDir, "claim-1", "session-error.txt")), false);
         assert.equal(harness.roomServer.publishedMessages(agent.roomId).length, 0);
 

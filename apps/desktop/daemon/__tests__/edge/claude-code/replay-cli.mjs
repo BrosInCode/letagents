@@ -11,9 +11,9 @@
 // The plan folder (LETAGENTS_EDGE_CLAUDE_REPLAY_DIR) holds:
 //
 //   launch-1.ndjson, launch-2.ndjson, ...  the transcript for each start, in order
-//   session-1.ndjson, ...                  optional: the rows Claude Code had in
-//                                          its own session file when that start
-//                                          ended; see "The session file" below
+//   session-1.ndjson, ...                  optional: the rows of Claude Code's
+//                                          own session file for that start; see
+//                                          "The session file" below
 //   hold-<label>                           a test makes this file to stop the
 //                                          replay before the inbound entry with
 //                                          that label, and removes it to go on
@@ -22,6 +22,7 @@
 //
 //   launch.json      argv, cwd and pid of this start
 //   outbound.ndjson  every line the daemon wrote, as it wrote it
+//   emitted.ndjson   the label of every inbound entry, when it has been written
 //   reached-<label>  the replay stopped at that hold
 //   exit.json        how the replay ended
 //   error.txt        the daemon sent a line the recording does not have
@@ -36,8 +37,11 @@
 // `<config>/projects/<cwd, every other character as "-">/<session>.jsonl`. A
 // daemon that lost the program during a turn reads the end of the turn from
 // that file. So the file is part of what the program shows the daemon, and a
-// plan can hold its rows: when the start ends, for any reason, the stand-in
-// writes them where Claude Code would.
+// plan can hold its rows. The stand-in writes them where Claude Code would,
+// and as far as the replay has come: up to the row of a user line when it has
+// read that line, and up to the row of an assistant message when it has
+// emitted that message. It does not wait for its own end to write them: on
+// Windows a program can be ended with its daemon, with no chance to write.
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -109,26 +113,34 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
 }
 writeFileSync(join(claimDir, "launch.json"), `${JSON.stringify({ argv, cwd: process.cwd(), pid: process.pid, sessionId }, null, 2)}\n`);
 
-/** Leave the session file as Claude Code left it when this start ended. */
-function writeSessionFile() {
-  const rowsPath = join(planDir, `session-${launchIndex}.ndjson`);
-  if (!existsSync(rowsPath) || !sessionId) return;
-  const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(process.env.HOME?.trim() || homedir(), ".claude");
-  const projectDir = join(configDir, "projects", process.cwd().replace(/[^A-Za-z0-9]/g, "-"));
-  mkdirSync(projectDir, { recursive: true });
-  const rows = readFileSync(rowsPath, "utf8").split("\n").filter((line) => line.trim())
-    .map((line) => fillPlaceholders(JSON.parse(line)));
-  writeFileSync(join(projectDir, `${sessionId}.jsonl`), `${rows.join("\n")}\n`);
+const sessionRowsPath = join(planDir, `session-${launchIndex}.ndjson`);
+const sessionRows = existsSync(sessionRowsPath) && sessionId
+  ? readFileSync(sessionRowsPath, "utf8").split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line))
+  : [];
+let sessionRowsWritten = 0;
+
+/**
+ * Bring the session file up to the row that `isRow` finds, as Claude Code has
+ * it at this point of the turn. The rows before it come with it.
+ */
+function writeSessionFileThrough(isRow) {
+  const upTo = sessionRows.findIndex((row, at) => at >= sessionRowsWritten && isRow(row)) + 1;
+  if (upTo <= sessionRowsWritten) return;
+  try {
+    const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(process.env.HOME?.trim() || homedir(), ".claude");
+    const projectDir = join(configDir, "projects", process.cwd().replace(/[^A-Za-z0-9]/g, "-"));
+    mkdirSync(projectDir, { recursive: true });
+    const text = sessionRows.slice(sessionRowsWritten, upTo).map((row) => `${fillPlaceholders(row)}\n`).join("");
+    appendFileSync(join(projectDir, `${sessionId}.jsonl`), text);
+    sessionRowsWritten = upTo;
+  } catch (error) {
+    writeFileSync(join(claimDir, "session-error.txt"), `${error instanceof Error ? error.stack : String(error)}\n`);
+  }
 }
 
 function end(outcome, exit) {
   if (ended) return;
   ended = true;
-  try {
-    writeSessionFile();
-  } catch (error) {
-    writeFileSync(join(claimDir, "session-error.txt"), `${error instanceof Error ? error.stack : String(error)}\n`);
-  }
   writeFileSync(join(claimDir, "exit.json"), `${JSON.stringify({ outcome, ...exit })}\n`);
   if (exit.signal && process.platform !== "win32") {
     // End by the recorded signal, so the daemon sees what it saw from Claude Code.
@@ -224,7 +236,12 @@ async function play() {
     if (entry.type === "emit_inbound") {
       await holdBefore(entry.label);
       if (ended) return;
+      if (entry.frame.type === "assistant" && entry.frame.message?.id) {
+        // Claude Code has the message in its session file when it reports it.
+        writeSessionFileThrough((row) => row.type === "assistant" && row.message?.id === entry.frame.message.id);
+      }
       process.stdout.write(`${fillPlaceholders(entry.frame)}\n`);
+      appendFileSync(join(claimDir, "emitted.ndjson"), `${JSON.stringify({ label: entry.label ?? null, line: entry.line })}\n`);
       continue;
     }
     if (entry.type === "expect_outbound") {
@@ -243,6 +260,9 @@ async function play() {
       }
       const mismatch = matchOutbound(entry.frame, actual, "frame");
       if (mismatch) return fail(`${transcript.path}:${entry.line}: ${mismatch}`);
+      if (entry.frame.type === "user" && typeof entry.frame.uuid === "string") {
+        writeSessionFileThrough((row) => row.type === "user" && row.uuid === entry.frame.uuid);
+      }
       continue;
     }
     // runtime_exit, always the last entry.

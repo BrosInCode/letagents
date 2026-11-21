@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -192,6 +192,53 @@ describe("the stand-in claude of the daemon edge tests", () => {
     assert.equal((await standIn.next()).result, "READY");
     standIn.child.kill("SIGKILL");
     await standIn.exit;
+  });
+
+  it("writes the rows of the session file as far as the replay has come", async () => {
+    const assistant = (id: string, text: string): Entry => ({
+      type: "assistant", session_id: "<session>", message: { id, role: "assistant", content: [{ type: "text", text }] },
+    });
+    const planDir = plan([[
+      { type: "expect_outbound", label: "prompt", frame: userLine("<turn-1>", "recorded wording") },
+      { type: "emit_inbound", label: "assistant", frame: assistant("msg_1", "ANSWER") },
+      { type: "emit_inbound", label: "result", frame: { type: "result", subtype: "success", result: "ANSWER", session_id: "<session>" } },
+      { type: "runtime_exit", requested: true, transportClosedBeforeExit: false, code: 0, signal: null },
+    ]]);
+    writeFileSync(join(planDir, "session-1.ndjson"), [
+      { type: "queue-operation", sessionId: "<session>" },
+      { type: "user", uuid: "<turn-1>", sessionId: "<session>", cwd: "<workspace>" },
+      { type: "attachment", parentUuid: "<turn-1>" },
+      { type: "assistant", parentUuid: "<turn-1>", message: { id: "msg_1", stop_reason: "end_turn" } },
+      { type: "last-prompt", sessionId: "<session>" },
+    ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const home = join(planDir, "home");
+    // Stop before the assistant message, to read the file between the two steps.
+    writeFileSync(join(planDir, "hold-assistant"), "");
+    const child = spawn(process.execPath, [REPLAY_CLI, "--session-id", SESSION], {
+      cwd: planDir,
+      env: { ...process.env, LETAGENTS_EDGE_CLAUDE_REPLAY_DIR: planDir, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: "" },
+    });
+    const exit = new Promise((resolve) => child.once("exit", resolve));
+    const sessionRows = (): Array<{ type: string; uuid?: string }> => {
+      const projects = join(home, ".claude", "projects");
+      const [project] = readdirSync(projects);
+      return readFileSync(join(projects, project!, `${SESSION}.jsonl`), "utf8").trim().split("\n")
+        .map((line) => JSON.parse(line) as { type: string; uuid?: string });
+    };
+
+    child.stdin.write(`${JSON.stringify(userLine("turn-a", "this run"))}\n`);
+    await waitForFile(join(planDir, "claim-1", "reached-assistant"));
+    // The user line is read: its row is there with this run's id, and nothing after it.
+    assert.deepEqual(sessionRows().map((row) => row.type), ["queue-operation", "user"]);
+    assert.equal(sessionRows()[1]!.uuid, "turn-a");
+
+    rmSync(join(planDir, "hold-assistant"));
+    await waitForFile(join(planDir, "claim-1", "emitted.ndjson"));
+    // The assistant message is emitted: its row is there, and the rows before it. The row after it is not.
+    assert.deepEqual(sessionRows().map((row) => row.type), ["queue-operation", "user", "attachment", "assistant"]);
+    assert.equal(existsSync(join(planDir, "claim-1", "session-error.txt")), false);
+    child.kill("SIGKILL");
+    await exit;
   });
 
   it("takes the next transcript for the next start", async () => {
