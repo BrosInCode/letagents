@@ -6,6 +6,7 @@ import { rememberGitHubEventsVisible } from "../../components/desktop/content/ro
 import { exportRoomChat } from "../../components/desktop/content/room-shell/roomExport";
 import type { RoomTabId } from "../../components/desktop/content/room-shell/types";
 import { desktopIpc } from "../../ipc/index.js";
+import { safeUserVisibleErrorDetail } from "../../domain/user-visible-error";
 import { supervisedAgentsSupported } from "../../domain/supervised-agents-support";
 import type { RoomShellContextOf } from "./context";
 
@@ -114,7 +115,7 @@ export function useRoomShellToolActions(context: unknown) {
     } catch (error) {
       if (props.room.identifier === roomIdentifier) storageFeedback.value = {
         error: true,
-        message: error instanceof Error ? error.message : "Local chat could not be published. Your history is still on this device.",
+        message: safeUserVisibleErrorDetail(error, "Local chat could not be published. Your history is still on this device."),
       };
     } finally {
       storageBusy.value = false;
