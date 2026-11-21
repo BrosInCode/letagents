@@ -338,6 +338,7 @@ export function registerApiRoutes(app: Express): void {
     resolveRoomRequestOrReply,
     requireAdmin,
     requireParticipant,
+    resolveProjectRole,
     getProjectAccessRoomId,
     resolveProjectRepoRoomAccessDecision,
   };
