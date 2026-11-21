@@ -192,6 +192,11 @@ describe(
         assert.equal(harness.roomServer.publishedMessages(agent.roomId).length, 0);
         scenario.release("t2-result");
 
+        // Check the order as soon as the daemon takes the next message, so that a wrong order
+        // fails here, by name, and not later by a wait for replies that never come.
+        await waitFor("the prompt for the next room message", () => scenario.sources(1).length >= 3);
+        assert.equal(scenario.sources(1)[2], "EDGE_SAY[reply-b]", "the daemon takes B, the older waiting message, before C");
+
         await harness.roomServer.waitForPublishedMessages(agent.roomId, (messages) => messages.length >= 3, WAIT_MS);
         await harness.waitForEntry(
           agent.entryId,
