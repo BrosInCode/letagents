@@ -169,7 +169,7 @@ function coordinatorHarness(input: {
   startCutover?: (entryId: string) => Promise<void>;
   bindingGet?: (entryId: string) => Promise<WorkerSessionBinding | null>;
   heartbeat?: Partial<ProviderStreamCoordinatorOptions["heartbeat"]>;
-  publishNativeActivity?: (entryId?: string, method?: string, status?: "working" | "idle") => Promise<void>;
+  publishNativeActivity?: (entryId?: string, method?: string, status?: "working" | "idle", observedAt?: string, whenDue?: boolean) => Promise<void>;
   observeActivitySummary?: ProviderStreamCoordinatorOptions["observeActivitySummary"];
   requestConvergence?: (entryId: string) => void;
   serializeManifest?: <T>(operation: () => Promise<T>) => Promise<T>;
@@ -264,7 +264,7 @@ function coordinatorHarness(input: {
       input.appendedActivity?.(event);
       return activityOnly ? input.appendActivityOnly?.(event.method) : input.appendActivity?.(event.method);
     },
-    publishNativeActivity: async (entryId, method, status) => input.publishNativeActivity?.(entryId, method, status),
+    publishNativeActivity: async (entryId, method, status, observedAt, whenDue) => input.publishNativeActivity?.(entryId, method, status, observedAt, whenDue),
     observeActivitySummary: input.observeActivitySummary,
     handleTerminal: async () => {},
     streams: {
@@ -1037,6 +1037,36 @@ test("daemon-inbox heartbeats probe exact live runtimes without granting recover
   assert.equal(harness.stopCalls(), 0);
   assert.equal(harness.getManifest().observed_state, "working");
   assert.equal(harness.getManifest().condition, "none");
+  await harness.coordinator.disposeAll();
+});
+
+test("the heartbeat and provider events leave their publication to its due time, except for an entry that waits for its credential handoff", async () => {
+  let heartbeat: (() => void) | null = null;
+  const published: Array<[string | undefined, "working" | "idle" | undefined, boolean | undefined]> = [];
+  // A legacy lane: its provider events publish too.
+  const harness = coordinatorHarness({
+    authorityMode: "legacy",
+    publishNativeActivity: async (_entryId, method, status, _observedAt, whenDue) => { published.push([method, status, whenDue]); },
+    setInterval: ((callback: () => void) => { heartbeat = callback; return { unref() {} }; }) as unknown as typeof setInterval,
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  harness.runtimeCustody.installLiveBinding("agent-1", {
+    agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+  });
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  await harness.coordinator.handle("agent-1", handle, streamEvent(1, "item/started"), "generation-2");
+  assert.deepEqual(published, [["native_harness.heartbeat", "working", true], ["item/started", "working", true]],
+    "nobody waits on these answers");
+
+  // Only an accepted publication of the exact binding ends this wait, so each one must be sent.
+  published.length = 0;
+  harness.setManifest({ ...harness.getManifest(), observed_state: "recovering", condition: "coordination_blocked",
+    last_error: "Provider is running; waiting for desktop credential handoff." });
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  await harness.coordinator.handle("agent-1", handle, streamEvent(2, "item/updated"), "generation-2");
+  assert.deepEqual(published, [["native_harness.heartbeat", "working", false], ["item/updated", "working", false]]);
   await harness.coordinator.disposeAll();
 });
 

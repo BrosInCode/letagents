@@ -103,6 +103,13 @@ export class LiveActivitySummaryRelay {
     return state.sent;
   }
 
+  /** The line `take` would return now. Nothing is taken: for a caller that only decides whether to publish. */
+  peek(entryId: string): string | null {
+    const state = this.states.get(entryId);
+    if (!state) return null;
+    return state.latest !== state.sent && this.nowMs() - state.sentAtMs >= this.minIntervalMs ? state.latest : state.sent;
+  }
+
   /** The agent is idle or gone: its line is cleared and nothing waits to be sent. */
   reset(entryId: string): void {
     const state = this.states.get(entryId);

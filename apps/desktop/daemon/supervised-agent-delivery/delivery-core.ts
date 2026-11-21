@@ -38,7 +38,8 @@ export abstract class SupervisedAgentDeliveryCore {
     this.historySummaryGiven.set(agentId, given);
     while (this.historySummaryGiven.size > 256) this.historySummaryGiven.delete(this.historySummaryGiven.keys().next().value!);
   }
-  protected readonly loopOwners = new Map<string, { context: string; bearer: string; agent: SupervisedIngressAgent; roomRefused?: boolean }>();
+  /** `observing`: the lane's last poll was ingested, so its ingress health says observing; a failed poll ends it. */
+  protected readonly loopOwners = new Map<string, { context: string; bearer: string; agent: SupervisedIngressAgent; roomRefused?: boolean; observing?: boolean }>();
   /** Lanes whose bearer a same-session rotation is replacing; see holdIngressForBearerRotation. */
   protected readonly bearerRotations = new Map<string, BearerRotationHold>();
   protected readonly loopControllers = new Map<string, AbortController>();

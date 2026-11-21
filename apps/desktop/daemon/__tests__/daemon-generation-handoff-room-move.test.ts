@@ -203,6 +203,13 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await eventually(async () => deliveryPolls > 0, "credential recovery resumes daemon inbox polling");
     await deliveryRecoveryInternals.supervisedDelivery.stop("supervised_handoff");
     await deliveryRecoveryInternals.updateManifestEntry("supervised_handoff", (current) => ({ ...current, delivery_mode: "mcp_polling" }));
+    // From here the test follows what the provider stream publishes. A status the room already has is
+    // not published again at once, and this fixture's heartbeat always says "working": it would publish a
+    // change to working before the stream event that the test looks for. So this daemon's heartbeats are left out.
+    const publicationSeam = first as unknown as { publishNativeActivity: (entryId: string, method: string, ...rest: unknown[]) => Promise<boolean> };
+    const publishNative = publicationSeam.publishNativeActivity.bind(first);
+    publicationSeam.publishNativeActivity = async (entryId, method, ...rest) =>
+      method === "native_harness.heartbeat" ? false : publishNative(entryId, method, ...rest);
     const manifestAfterFirstBind = await new ManifestStore(paths.manifestPath).load();
     const workplaceObservedAtAfterFirstBind = manifestAfterFirstBind.entries
       .find((candidate) => candidate.id === "supervised_handoff")?.workplace_liveness?.observed_at;
@@ -252,6 +259,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
         durablePayloadRef: null,
       });
     };
+    const firstWaitAt = Date.now();
     emitCompatWaitCursor("msg_2818");
     await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).get("supervised_handoff"))?.room_cursor === "msg_2818", "published-runtime native wait cursor checkpoint");
     await flushActivity(first);
@@ -277,6 +285,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(regressiveFormalCursor.ok, true);
     assert.equal((regressiveFormalCursor.result as { room_cursor: string }).room_cursor, "msg_2820",
       "out-of-order formal acknowledgements report and preserve the newest durable cursor");
+    const secondWaitAt = Date.now();
     emitCompatWaitCursor("msg_2819");
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 2), "delayed compatibility cursor evidence");
     const formalCursorWins = await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).get("supervised_handoff");
@@ -286,6 +295,11 @@ test("generation handoff reattaches the same provider and publishes its supervis
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "tool_lifecycle", method: "item/toolCall/started", payload: { tool: "test" }, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 3), "first native stream event after cursor evidence");
     await eventually(async () => nativeRequests.some((request) => request.body.method === "item/toolCall/started"), "daemon-supervised stream HTTP publication");
+    // This daemon's heartbeat is 2 s, so an idle status is due again after 5 s. A machine that slow would publish the second wait too.
+    if (secondWaitAt - firstWaitAt < 4_000) {
+      assert.deepEqual(nativeRequests.filter((request) => request.body.method === "assistant").map((request) => request.body.status), ["idle"],
+        "the second wait told the room nothing new, so the daemon did not publish it again");
+    }
     const workingProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(workingProjection.observed_state, "working", "real Codex tool work restores the active projection");
     const diagnosticProjection = workingProjection as DaemonManifestEntryView;
@@ -304,21 +318,22 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.doesNotMatch(JSON.stringify((await daemonRequest(paths.socketPath, "manifest.list")).result), /session-secret/);
     const nativeCanary = "canary-not-a-real-native-secret-123456789";
     const nativeInternals = first as unknown as { publishNativeActivity: (entryId: string, method: string, status: "working" | "idle") => Promise<boolean> };
-    await nativeInternals.publishNativeActivity("supervised_handoff", `tool Authorization: Bearer ${nativeCanary}`, "working");
+    await nativeInternals.publishNativeActivity("supervised_handoff", `tool Authorization: Bearer ${nativeCanary}`, "idle");
     const canaryPublication = nativeRequests.at(-1)!;
     assert.doesNotMatch(JSON.stringify(canaryPublication.body), new RegExp(nativeCanary));
     assert.match(canaryPublication.body.method, /REDACTED/);
 
+    // Each event changes the status the room has (working, idle, working), so each one is published.
     const sameObservedAt = new Date().toISOString();
     for (const [method, eventObservedAt] of [
       ["turn/same-millisecond-a", sameObservedAt],
-      ["turn/same-millisecond-b", sameObservedAt],
+      ["turn/same-millisecond-b/completed", sameObservedAt],
       ["turn/reordered-older", new Date(Date.parse(sameObservedAt) - 60_000).toISOString()],
     ] as const) {
       for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: eventObservedAt, sequence: ++sequence, provider: "codex", kind: "turn_lifecycle", method, payload: {}, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
     }
     await eventually(async () => nativeRequests.filter((request) => /same-millisecond|reordered-older/.test(request.body.method)).length === 3, "same-ms and reordered native publications");
-    const orderedPublications = ["item/toolCall/started", "turn/same-millisecond-a", "turn/same-millisecond-b", "turn/reordered-older"]
+    const orderedPublications = ["item/toolCall/started", "turn/same-millisecond-a", "turn/same-millisecond-b/completed", "turn/reordered-older"]
       .map((method) => nativeRequests.find((request) => request.body.method === method)!.body);
     for (let index = 1; index < orderedPublications.length; index += 1) {
       assert.ok(orderedPublications[index]!.sequence > orderedPublications[index - 1]!.sequence);

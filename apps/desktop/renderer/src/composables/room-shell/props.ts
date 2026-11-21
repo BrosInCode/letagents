@@ -76,6 +76,8 @@ export type DesktopRoomShellEmits = {
   "room-renamed": [room: DesktopRoomInfo];
   "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [snapshot?: DesktopRoomSnapshot];
+  /** The Activity tab came on screen (true) or left it (false). */
+  "activity-history-visible": [visible: boolean];
   "content-deleted": [roomIdentifier: string];
   "open-focus-room": [roomIdentifier: string];
   "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];

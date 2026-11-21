@@ -71,7 +71,7 @@ export const PAGE_WATCHABLE_READS = Object.freeze([
 export const PAGE_CHANGE_RESOURCES = Object.freeze(["work_items", "documents", "jobs", "intents", "pages", "tasks"]);
 
 /** How the desktop runs watches; a test compares these with its constants. */
-export const PAGE_WATCH_LIMITS = Object.freeze({ debounceMs: 250, workItemPollMs: 120_000, maxWatches: 16 });
+export const PAGE_WATCH_LIMITS = Object.freeze({ debounceMs: 250, workItemPollMs: 120_000, planningPollMs: 60_000, maxWatches: 16 });
 
 /** Calls the desktop asks the viewer about first, in an app-drawn sheet. */
 export const PAGE_CONFIRMED_METHODS = Object.freeze(["jobs.start", "intents.propose"]);
@@ -184,7 +184,7 @@ ${helpers.join("\n")}
 - \`use("data").collection(scope, name)\` (${DATA_SCOPES.map((scope) => `${scope}: ${DATA_SCOPE_CAPABILITIES[scope]}`).join(", ")}): \`list(input?)\`, \`get(docId)\`, \`set(docId, data, options?)\`, \`update(docId, data, options?)\`, \`delete(docId, options?)\`, \`onSnapshot(cb, input?)\` watches data.list. \`options\`: \`{ ifRevision? }\`.
 
 ## Live updates
-- A watch runs its read now, then again about ${PAGE_WATCH_LIMITS.debounceMs} ms after each change in the room; work item reads also run at least every ${PAGE_WATCH_LIMITS.workItemPollMs / 60_000} minutes. Each answer calls \`cb(result, error)\`: one of the two is null. A watch returns a function that stops it.
+- A watch runs its read now, then again about ${PAGE_WATCH_LIMITS.debounceMs} ms after each change in the room; work item reads also run at least every ${PAGE_WATCH_LIMITS.workItemPollMs / 60_000} minutes, and the planning read every ${PAGE_WATCH_LIMITS.planningPollMs / 1_000} seconds (a sprint or release edit sends no change). Each answer calls \`cb(result, error)\`: one of the two is null. A watch returns a function that stops it.
 - \`letagents.watch(method, input, cb)\` watches any of: ${PAGE_WATCHABLE_READS.join(", ")}. It needs the method's capability.
 - At most ${PAGE_WATCH_LIMITS.maxWatches} watches run per page; one more calls back with \`too_large\`.
 - \`letagents.events.onChange(cb)\` gets \`{ resource }\` (${PAGE_CHANGE_RESOURCES.join(", ")}) when something changes, or \`{ resource: "*" }\` after a gap; returns an unsubscribe function.

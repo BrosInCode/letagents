@@ -4,8 +4,10 @@ import type {
   DesktopReasoningSession,
   DesktopRoomLiveMetadata,
   DesktopRoomMessage,
+  DesktopRoomLiveMetadataSourceKey,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
+  DesktopSnapshotSourceKey,
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
 import { toRaw } from "vue";
@@ -264,6 +266,91 @@ export function preserveErroredSnapshotSources(
   };
 }
 
+/** Every snapshot source, for a placeholder that has read none of them. */
+export const ALL_SNAPSHOT_SOURCES: readonly DesktopSnapshotSourceKey[] = [
+  "focusRooms",
+  "tasks",
+  "participants",
+  "presence",
+  "reasoning",
+  "activityHistory",
+  "roomArtifacts",
+  "boardSettings",
+  "messages",
+  "githubEvents",
+];
+
+/** The snapshot fields that the read of each source fills. */
+const SNAPSHOT_SOURCE_FIELDS: Record<DesktopSnapshotSourceKey, readonly (keyof DesktopRoomSnapshot)[]> = {
+  focusRooms: ["focusRooms"],
+  tasks: ["tasks"],
+  participants: ["participants", "participantHiddenCount"],
+  presence: ["presence"],
+  reasoning: ["reasoningSessions", "liveActivitySessions"],
+  activityHistory: ["recentActivity"],
+  roomArtifacts: ["roomArtifacts"],
+  boardSettings: ["boardSettings"],
+  messages: ["messages"],
+  githubEvents: ["githubEvents"],
+};
+
+/** Whether every source of this snapshot was read: it may give its sections to a later partial read. */
+export function isCompleteRoomSnapshot(snapshot: DesktopRoomSnapshot | null): snapshot is DesktopRoomSnapshot {
+  return Boolean(snapshot && snapshot.access.status === "ready" && !snapshot.unloadedSources?.length);
+}
+
+/**
+ * Whether the snapshot on screen can stand in for a kept copy of the same
+ * room: it is ready, every source of it was read, and it is the same room in
+ * the same storage. Stream events and gap reads change only the snapshot on
+ * screen, so such a snapshot is never older than the copy.
+ */
+export function snapshotCoversRoomCopy(
+  shown: DesktopRoomSnapshot | null,
+  copy: DesktopRoomSnapshot,
+): shown is DesktopRoomSnapshot {
+  return isCompleteRoomSnapshot(shown)
+    && copy.access.status === "ready"
+    && roomSnapshotsMatch(shown, copy)
+    && snapshotStorageNamespacesMatch(shown, copy);
+}
+
+/**
+ * Complete a read that left sources out (`incoming.unloadedSources`, as a read
+ * after a stream gap does) from the snapshot on screen: each section it did not
+ * read keeps the value and the source state that `current` has. The result is
+ * a complete snapshot.
+ *
+ * When `current` cannot give those sections (another room, not ready, or not
+ * complete itself), the read comes back unchanged and still names what it
+ * lacks, so the caller can ask for a full read.
+ */
+export function completeRoomSnapshot(
+  current: DesktopRoomSnapshot | null,
+  incoming: DesktopRoomSnapshot,
+): DesktopRoomSnapshot {
+  const unloaded = incoming.unloadedSources;
+  if (!unloaded?.length) return incoming;
+  if (
+    incoming.access.status !== "ready"
+    || !isCompleteRoomSnapshot(current)
+    || !roomSnapshotsMatch(current, incoming)
+    || !snapshotStorageNamespacesMatch(current, incoming)
+  ) return incoming;
+  const shown = toRaw(current);
+  const { unloadedSources: _left, ...read } = incoming;
+  const completed: DesktopRoomSnapshot = { ...read };
+  // A snapshot without source states (an older main process) stays without them.
+  const sourceStates = incoming.sourceStates ? { ...incoming.sourceStates } : null;
+  const assign = <K extends keyof DesktopRoomSnapshot>(field: K) => { completed[field] = shown[field]; };
+  for (const source of unloaded) {
+    for (const field of SNAPSHOT_SOURCE_FIELDS[source] ?? []) assign(field);
+    if (sourceStates && shown.sourceStates?.[source]) sourceStates[source] = shown.sourceStates[source];
+  }
+  if (sourceStates) completed.sourceStates = sourceStates;
+  return completed;
+}
+
 /**
  * Apply poll-only room metadata (focus rooms, participants, presence, recent
  * activity, board settings) onto the current snapshot. This is what the
@@ -276,15 +363,22 @@ export function preserveErroredSnapshotSources(
  * `preserveErroredSnapshotSources` — so a transient outage does not blank the
  * room; its error state is still recorded so degraded-state banners show. The
  * sourceStates of the skipped event-fed sections are preserved verbatim.
+ *
+ * `requested` names the sources the read asked for (absent: all five). A
+ * section that was not requested came back as an empty placeholder: the
+ * snapshot keeps its own data and source state for it.
  */
 export function applyRoomLiveMetadata(
   snapshot: DesktopRoomSnapshot | null,
   metadata: DesktopRoomLiveMetadata,
+  requested?: readonly DesktopRoomLiveMetadataSourceKey[],
 ): DesktopRoomSnapshot | null {
   if (!snapshot) return snapshot;
   if (!snapshotMatchesRoom(snapshot, metadata.roomIdentifier)) return snapshot;
   const states = metadata.sourceStates;
-  const errored = (key: keyof typeof states): boolean => states[key]?.status === "error";
+  const kept = (key: keyof typeof states): boolean => Boolean(requested && !requested.includes(key));
+  // A failed section and a section that was not requested both keep what the snapshot has.
+  const errored = (key: keyof typeof states): boolean => kept(key) || states[key]?.status === "error";
   // Unwrap the top-level Vue proxy. Nested sections read from it are then raw
   // objects, so reused sections stay plain data in the new snapshot.
   const current = toRaw(snapshot);
@@ -304,13 +398,14 @@ export function applyRoomLiveMetadata(
   const boardSettings = errored("boardSettings")
     ? current.boardSettings
     : reuseUnchanged(current.boardSettings, metadata.boardSettings);
+  const state = (key: keyof typeof states) => (kept(key) ? current.sourceStates?.[key] ?? states[key] : states[key]);
   const sourceStates = reuseUnchanged(current.sourceStates, {
     ...current.sourceStates,
-    focusRooms: states.focusRooms,
-    participants: states.participants,
-    presence: states.presence,
-    activityHistory: states.activityHistory,
-    boardSettings: states.boardSettings,
+    focusRooms: state("focusRooms"),
+    participants: state("participants"),
+    presence: state("presence"),
+    activityHistory: state("activityHistory"),
+    boardSettings: state("boardSettings"),
   });
   if (
     focusRooms === current.focusRooms

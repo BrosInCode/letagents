@@ -70,6 +70,32 @@ function invalidatePendingJoinedRoomInfo(): void {
   joinedRoomInfoInFlight.clear();
 }
 
+type JoinedRoomInfoChangeListener = (roomIdentifiers: readonly string[]) => void;
+let joinedRoomInfoChangeListener: JoinedRoomInfoChangeListener | null = null;
+
+/**
+ * One listener for a join whose answer differs from the answer remembered
+ * before it for the same room: another name, role or focus state. The room
+ * stream listens, because the room on screen was built from the earlier
+ * answer and no stream event carries these fields.
+ */
+export function onJoinedRoomInfoChange(listener: JoinedRoomInfoChangeListener | null): void {
+  joinedRoomInfoChangeListener = listener;
+}
+
+/** How long the remembered join of a room still answers without a request; 0 when it is too old or absent. */
+export function joinedRoomInfoRemainingMs(roomIdentifier: string): number {
+  const cacheKey = roomInfoCacheKey(roomIdentifier);
+  const cached = cacheKey ? joinedRoomInfoCache.get(cacheKey) : null;
+  return cached ? Math.max(0, JOINED_ROOM_INFO_TTL_MS - (Date.now() - cached.storedAt)) : 0;
+}
+
+/** Whether two join answers give the room another face: what `mapDesktopRoomInfoPayload` makes of them. */
+function joinedRoomInfoDiffers(roomIdentifier: string, before: RoomInfoPayload, after: RoomInfoPayload): boolean {
+  return JSON.stringify(mapDesktopRoomInfoPayload(roomIdentifier, before))
+    !== JSON.stringify(mapDesktopRoomInfoPayload(roomIdentifier, after));
+}
+
 export function createRoomAccess(
   input: Partial<DesktopRoomAccess>,
 ): DesktopRoomAccess {
@@ -168,6 +194,8 @@ export async function getJoinedRoomInfo(
     }
     joinedRoomInfoCache.delete(cacheKey);
   }
+  // The answer that just ended: what a room opened earlier still shows.
+  const previous = cached?.payload ?? null;
 
   const noCreate = options?.create === false;
   const flightKey = cacheKey ? `${cacheKey}\n${noCreate ? "no-create" : "create"}` : null;
@@ -184,7 +212,14 @@ export async function getJoinedRoomInfo(
     );
     // After sign-out or an account change the answer belongs to the old account;
     // after a forget it may describe access the person lost.
-    if (generation === joinedRoomInfoGeneration) rememberJoinedRoomInfo(roomIdentifier, joined);
+    if (generation === joinedRoomInfoGeneration) {
+      rememberJoinedRoomInfo(roomIdentifier, joined);
+      if (previous && joinedRoomInfoDiffers(roomIdentifier, previous, joined)) {
+        try {
+          joinedRoomInfoChangeListener?.([...new Set(roomInfoCacheKeys(roomIdentifier, joined))]);
+        } catch { /* A listener never fails the join. */ }
+      }
+    }
     return joined;
   })();
   if (flightKey) {

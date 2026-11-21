@@ -406,6 +406,54 @@ describe("useDesktopRoomLiveSync full-refresh path", () => {
     assert.deepEqual(harness.getLiveMetadataRequests, []);
   });
 
+  // The data layer holds the stream's events back while a room read runs and
+  // applies them over it. A read made here on its own cannot do that.
+  it("hands the full refresh to the stream's read barrier while a stream of the room runs", async () => {
+    const throughStream: string[] = [];
+    const read = deferred<boolean>();
+    const harness = createHarness({
+      readRoomThroughStream: (roomIdentifier) => { throughStream.push(roomIdentifier); return read.promise; },
+    });
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    const shown = harness.selectedSnapshot.value;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      assert.deepEqual(throughStream, [ROOM]);
+      // A second request while the read runs is one trailing read, as before.
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      assert.deepEqual(throughStream, [ROOM]);
+      read.resolve(true);
+      await harness.settle();
+    });
+
+    assert.deepEqual(throughStream, [ROOM, ROOM], "the request that came during the read is read once more");
+    assert.deepEqual(harness.getSnapshotRequests, [], "no read of its own beside the barrier's");
+    assert.strictEqual(harness.selectedSnapshot.value, shown, "the barrier's owner puts its read on screen, not this refresh");
+    assert.equal(harness.workersListCalls, 2, "the worker list is still read with each refresh");
+  });
+
+  it("reads on its own when no stream of the room runs", async () => {
+    const throughStream: string[] = [];
+    const harness = createHarness({
+      readRoomThroughStream: async (roomIdentifier) => { throughStream.push(roomIdentifier); return false; },
+    });
+    harness.currentRoomId.value = ROOM;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      await harness.settle();
+    });
+
+    assert.deepEqual(throughStream, [ROOM]);
+    assert.deepEqual(harness.getSnapshotRequests, [ROOM]);
+    assert.ok(harness.selectedSnapshot.value, "its own read goes on screen as before");
+  });
+
   it("coalesces overlapping full refreshes and applies the trailing canonical snapshot with the same merge semantics", async () => {
     const harness = createHarness();
     harness.currentRoomId.value = ROOM;
@@ -780,6 +828,111 @@ describe("useDesktopRoomLiveSync full-refresh path", () => {
   });
 });
 
+describe("useDesktopRoomLiveSync activity history on demand", () => {
+  const WITHOUT_HISTORY = ["focusRooms", "participants", "presence", "boardSettings"];
+
+  it("asks for the activity history only while the Activity tab is on screen", async () => {
+    const visible = ref(false);
+    const harness = createHarness({ activityHistoryVisible: visible });
+    const history = [{ id: "agent:river" }] as unknown as DesktopRoomSnapshot["recentActivity"];
+    harness.selectedSnapshot.value = { ...snapshotWithEventData(), recentActivity: history };
+    harness.rootRoomSnapshot.value = { ...snapshotWithEventData(), recentActivity: history };
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.runInterval();
+      // Tab not shown: the read leaves the history out, and the snapshots keep theirs.
+      assert.deepEqual(harness.getLiveMetadataIncludes, [WITHOUT_HISTORY]);
+      assert.deepEqual(harness.selectedSnapshot.value?.recentActivity, history);
+      assert.deepEqual(harness.rootRoomSnapshot.value?.recentActivity, history);
+      assert.deepEqual(
+        harness.selectedSnapshot.value?.participants.map((p) => (p as { participantKey: string }).participantKey),
+        ["fresh"],
+      );
+
+      // The tab comes on screen: one read at once, with every source.
+      harness.nextMetadata = Promise.resolve({
+        ...liveMetadata(),
+        recentActivity: [{ id: "agent:new" }] as unknown as DesktopRoomLiveMetadata["recentActivity"],
+      });
+      visible.value = true;
+      await harness.settle();
+      assert.deepEqual(harness.getLiveMetadataIncludes, [WITHOUT_HISTORY, null]);
+      assert.deepEqual(harness.selectedSnapshot.value?.recentActivity, [{ id: "agent:new" }]);
+
+      // It stays on screen: each tick reads the history.
+      await harness.runInterval();
+      assert.deepEqual(harness.getLiveMetadataIncludes, [WITHOUT_HISTORY, null, null]);
+
+      // It leaves the screen: no read for that, and the next tick leaves the history out again.
+      visible.value = false;
+      await harness.settle();
+      await harness.runInterval();
+      assert.deepEqual(harness.getLiveMetadataIncludes, [WITHOUT_HISTORY, null, null, WITHOUT_HISTORY]);
+      assert.deepEqual(harness.selectedSnapshot.value?.recentActivity, [{ id: "agent:new" }]);
+    });
+    assert.deepEqual(harness.getSnapshotRequests, []);
+  });
+
+  it("adds no metadata read when the tab comes on screen while a full room read is scheduled or running", async () => {
+    const visible = ref(false);
+    const harness = createHarness({ activityHistoryVisible: visible });
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    const gate = deferred<DesktopRoomSnapshot>();
+    harness.nextSnapshot = gate.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      // The tab asks for a room refresh when it mounts, then reports itself on screen.
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      visible.value = true;
+      await harness.settle();
+      assert.deepEqual(harness.getLiveMetadataRequests, [], "the scheduled full read covers the history");
+      await harness.runTimeout();
+      assert.deepEqual(harness.getSnapshotRequests, [ROOM]);
+      // Hidden and shown again while that full read runs: still no extra read.
+      visible.value = false;
+      visible.value = true;
+      await harness.settle();
+      assert.deepEqual(harness.getLiveMetadataRequests, []);
+      gate.resolve(baseSnapshot());
+      await harness.settle();
+    });
+  });
+
+  it("reads once more when the tab comes on screen during a periodic read that left the history out", async () => {
+    const visible = ref(false);
+    const harness = createHarness({ activityHistoryVisible: visible });
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    const gate = deferred<DesktopRoomLiveMetadata>();
+    harness.nextMetadata = gate.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.tickOnce();
+      assert.deepEqual(harness.getLiveMetadataIncludes, [WITHOUT_HISTORY]);
+      visible.value = true;
+      await harness.settle();
+      assert.deepEqual(harness.getLiveMetadataIncludes, [WITHOUT_HISTORY], "one read at a time");
+      harness.nextMetadata = Promise.resolve(liveMetadata());
+      gate.resolve(liveMetadata());
+      await harness.settle();
+      await harness.settle();
+      assert.deepEqual(harness.getLiveMetadataIncludes, [WITHOUT_HISTORY, null]);
+    });
+  });
+
+  it("reads every source on each tick when no visibility is given", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.runInterval();
+    });
+    assert.deepEqual(harness.getLiveMetadataIncludes, [null]);
+  });
+});
+
 function snapshotWithEventData(): DesktopRoomSnapshot {
   return {
     ...baseSnapshot(),
@@ -943,7 +1096,10 @@ function unchangedRoomAgentWork(cursor = WORK_CURSOR): DesktopRoomAgentWorkPollR
   };
 }
 
-function createHarness() {
+function createHarness(input: {
+  activityHistoryVisible?: Ref<boolean>;
+  readRoomThroughStream?: (roomIdentifier: string) => Promise<boolean>;
+} = {}) {
   const accountId = ref<string | null>("account_1");
   const currentRoomId = ref<string | null>(null);
   const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
@@ -953,6 +1109,8 @@ function createHarness() {
 
   const getSnapshotRequests: Array<string | null> = [];
   const getLiveMetadataRequests: string[] = [];
+  /** The `include` list of each metadata read, or null when the read asked for every source. */
+  const getLiveMetadataIncludes: Array<readonly string[] | null> = [];
   const pollAgentWorkRequests: Array<{ roomIdentifier: string; cursor: string | null }> = [];
   let workersListCalls = 0;
   let stopStreamCalls = 0;
@@ -971,6 +1129,8 @@ function createHarness() {
 
   const sync = useDesktopRoomLiveSync({
     accountId: computed(() => accountId.value),
+    ...(input.activityHistoryVisible ? { activityHistoryVisible: input.activityHistoryVisible } : {}),
+    ...(input.readRoomThroughStream ? { readRoomThroughStream: input.readRoomThroughStream } : {}),
     rootRoomSnapshot,
     selectedRoomIdentifier: computed(() => currentRoomId.value),
     selectedSnapshot,
@@ -992,8 +1152,12 @@ function createHarness() {
           getSnapshotRequests.push(roomIdentifier);
           return state.nextSnapshot;
         },
-        getLiveMetadata: async (roomIdentifier: string): Promise<DesktopRoomLiveMetadata> => {
+        getLiveMetadata: async (
+          roomIdentifier: string,
+          options?: { include?: readonly string[] },
+        ): Promise<DesktopRoomLiveMetadata> => {
           getLiveMetadataRequests.push(roomIdentifier);
+          getLiveMetadataIncludes.push(options?.include ?? null);
           return state.nextMetadata;
         },
         pollAgentWork: async (
@@ -1044,6 +1208,7 @@ function createHarness() {
     windowBridge,
     getSnapshotRequests,
     getLiveMetadataRequests,
+    getLiveMetadataIncludes,
     pollAgentWorkRequests,
     sessionGeneration,
     workers,

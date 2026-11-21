@@ -1,5 +1,10 @@
 import { getCurrentScope, onScopeDispose, ref, watch, type ComputedRef, type Ref } from "vue";
-import type { DesktopRoomAgentWork, DesktopRoomSnapshot, WorkerSnapshot } from "../../../electron/ipc-types";
+import type {
+  DesktopRoomAgentWork,
+  DesktopRoomLiveMetadataSourceKey,
+  DesktopRoomSnapshot,
+  WorkerSnapshot,
+} from "../../../electron/ipc-types";
 import {
   applyRoomLiveMetadata,
   mergeRoomSnapshotMessages,
@@ -12,6 +17,19 @@ import { desktopIpc } from "../ipc/index.js";
 
 interface DesktopRoomLiveSyncOptions {
   accountId: ComputedRef<string | null>;
+  /**
+   * Whether the room's Activity tab is on screen. It is the only reader of the
+   * activity history, so the periodic read asks for that history only then.
+   * Absent: always (the earlier behaviour).
+   */
+  activityHistoryVisible?: Readonly<Ref<boolean>>;
+  /**
+   * Reads the whole selected room through the stream's read barrier, so
+   * stream events that arrive while the read runs are applied over it.
+   * Resolves to false when no stream of that room runs; the full refresh
+   * then reads on its own. Absent: always on its own (the earlier behaviour).
+   */
+  readRoomThroughStream?: (roomIdentifier: string) => Promise<boolean>;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   selectedRoomIdentifier: ComputedRef<string | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
@@ -28,6 +46,18 @@ interface DesktopRoomLiveSyncOptions {
  */
 const PERIODIC_METADATA_REFRESH_INTERVAL_MS = 15_000;
 
+/**
+ * The periodic read while the Activity tab is not on screen: every poll-only
+ * source except the activity history. The server builds one page of that
+ * history from every participant and status row of the room.
+ */
+const METADATA_WITHOUT_ACTIVITY_HISTORY: readonly DesktopRoomLiveMetadataSourceKey[] = [
+  "focusRooms",
+  "participants",
+  "presence",
+  "boardSettings",
+];
+
 export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   let liveMetadataRefreshTimer: number | null = null;
   let liveMetadataRefreshInterval: number | null = null;
@@ -36,6 +66,8 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   let liveMetadataRefreshContext = 0;
   let liveMetadataRefreshDisposed = false;
   let periodicMetadataRefreshInFlight: number | null = null;
+  // The Activity tab came on screen while a periodic read without its history ran.
+  let activityHistoryReadWanted = false;
   let fullSnapshotRefresh: { context: number; invalidated: boolean } | null = null;
   let streamStartInFlight: { key: string; context: number; promise: Promise<void> } | null = null;
   let roomAgentWorkCursor: string | null = null;
@@ -164,6 +196,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     liveMetadataRefreshContext += 1;
     fullSnapshotRefresh = null;
     periodicMetadataRefreshInFlight = null;
+    activityHistoryReadWanted = false;
     clearLiveMetadataRefreshTimer();
   }
 
@@ -178,6 +211,21 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     invalidateMetadataRefresh();
     clearLiveMetadataRefreshInterval();
   });
+
+  // The Activity tab came on screen: read its history now, not at the next
+  // tick. A full room read that is scheduled or running already covers it
+  // (the tab asks for one when it mounts).
+  if (options.activityHistoryVisible) {
+    watch(options.activityHistoryVisible, (visible) => {
+      if (!visible || liveMetadataRefreshTimer !== null || fullSnapshotRefresh) return;
+      // A periodic read in flight asked without the history: read once more after it.
+      if (periodicMetadataRefreshInFlight !== null) {
+        activityHistoryReadWanted = true;
+        return;
+      }
+      void refreshSelectedRoomLiveMetadata().catch(() => undefined);
+    }, { flush: "sync" });
+  }
 
   function isStaleRefresh(
     refreshSequence: number,
@@ -200,6 +248,10 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
    * events, manual refresh, and missing-thread backfill. Because there is no SSE
    * replay, this stays a full rebuild so it can reconcile anything missed during
    * an outage. NOT used by the periodic interval tick.
+   *
+   * While the room's stream runs, the read goes through the stream's read
+   * barrier (`readRoomThroughStream`). A read made here on its own puts the
+   * room on screen without the events that arrived while it ran.
    */
   async function refreshSelectedRoomSnapshotFromServer(): Promise<void> {
     const roomIdentifier = options.selectedRoomIdentifier.value;
@@ -213,9 +265,17 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     const sessionGeneration = options.sessionGeneration.value;
     const refreshSequence = ++liveMetadataRefreshSequence;
     try {
+      const workers = desktopIpc.workers.list().catch(() => options.workers.value);
+      if (options.readRoomThroughStream && await options.readRoomThroughStream(roomIdentifier)) {
+        const nextWorkers = await workers;
+        if (!isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration, request.context)) {
+          options.workers.value = nextWorkers;
+        }
+        return;
+      }
       const [snapshot, nextWorkers] = await Promise.all([
         desktopIpc.room.getSnapshot(roomIdentifier),
-        desktopIpc.workers.list().catch(() => options.workers.value),
+        workers,
       ]);
       if (request.invalidated || isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration, request.context)) return;
       options.workers.value = nextWorkers;
@@ -238,8 +298,8 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   /**
    * Periodic bounded refresh — the interval tick. Fetches the metadata
    * the server pushes no events for (focus rooms, participants, presence,
-   * recent activity, board settings), the retained room-work replacement, and
-   * the cheap local `workers.list()`, then
+   * board settings, and recent activity while the Activity tab shows it), the
+   * retained room-work replacement, and the cheap local `workers.list()`, then
    * applies them onto the current snapshot without touching event-fed sections
    * (messages, tasks, GitHub events, artifacts, reasoning).
    *
@@ -274,22 +334,34 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     const context = liveMetadataRefreshContext;
     const refreshSequence = ++liveMetadataRefreshSequence;
     periodicMetadataRefreshInFlight = refreshSequence;
+    // Decided once: the sections left out here keep what the snapshot has.
+    const requested = options.activityHistoryVisible && !options.activityHistoryVisible.value
+      ? METADATA_WITHOUT_ACTIVITY_HISTORY
+      : undefined;
     try {
       const [metadata, nextWorkers] = await Promise.all([
-        desktopIpc.room.getLiveMetadata?.(roomIdentifier),
+        requested
+          ? desktopIpc.room.getLiveMetadata?.(roomIdentifier, { include: requested })
+          : desktopIpc.room.getLiveMetadata?.(roomIdentifier),
         desktopIpc.workers.list().catch(() => options.workers.value),
       ]);
       if (!metadata || isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration, context)) return;
       options.workers.value = nextWorkers;
-      options.selectedSnapshot.value = applyRoomLiveMetadata(options.selectedSnapshot.value, metadata);
+      options.selectedSnapshot.value = applyRoomLiveMetadata(options.selectedSnapshot.value, metadata, requested);
       if (
         options.rootRoomSnapshot.value
         && snapshotMatchesRoom(options.rootRoomSnapshot.value, metadata.roomIdentifier)
       ) {
-        options.rootRoomSnapshot.value = applyRoomLiveMetadata(options.rootRoomSnapshot.value, metadata);
+        options.rootRoomSnapshot.value = applyRoomLiveMetadata(options.rootRoomSnapshot.value, metadata, requested);
       }
     } finally {
-      if (periodicMetadataRefreshInFlight === refreshSequence) periodicMetadataRefreshInFlight = null;
+      if (periodicMetadataRefreshInFlight === refreshSequence) {
+        periodicMetadataRefreshInFlight = null;
+        if (activityHistoryReadWanted) {
+          activityHistoryReadWanted = false;
+          if (options.activityHistoryVisible?.value) void refreshSelectedRoomLiveMetadata().catch(() => undefined);
+        }
+      }
     }
     await roomAgentWorkRefresh;
   }

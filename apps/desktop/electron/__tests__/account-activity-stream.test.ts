@@ -6,8 +6,10 @@ import { after, before, mock, test } from "node:test";
 // A real HTTP server stands in for the API, so the client is tested over a socket.
 const responders: Array<(res: ServerResponse, auth: string | undefined) => void> = [];
 const requests: string[] = [];
+const userAgents: Array<string | undefined> = [];
 const server = createServer((req, res) => {
   requests.push(req.url ?? "");
+  userAgents.push(req.headers["user-agent"]);
   const respond = responders.shift();
   if (!respond) { res.writeHead(503).end(); return; }
   respond(res, req.headers.authorization);
@@ -54,6 +56,7 @@ test("a snapshot, then single-room changes, reach the window as one current stat
   await until(() => Boolean(send), "the stream to open");
   assert.equal(seenAuth, "Bearer session-token");
   assert.equal(requests.at(-1), "/account/activity/stream");
+  assert.match(userAgents.at(-1) ?? "", /^LetAgents-Desktop\/\d+\.\d+\.\d+ \(/, "the stream names the desktop app and its version");
 
   send("snapshot", { rooms: [
     { room_id: "github.com/org/repo", latest_message_id: "msg_4", latest_message_at: "2026-10-01T09:00:00.000Z", working: [] },
