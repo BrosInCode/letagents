@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -89,12 +89,18 @@ function launch() {
   return new Promise((resolveLaunch, reject) => {
     const child = spawn(executable, [], {
       // Its own APPDATA: an installed app holds the single-instance lock of the real one.
-      env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1" },
+      env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1", ELECTRON_ENABLE_LOGGING: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
     let ready = false;
-    const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`packaged Electron launch timed out: ${output}`)); }, launchTimeoutMs);
+    const timeout = setTimeout(() => {
+      // Report where the app waits before the kill; a timeout with no evidence cannot tell a hang from a slow start.
+      void launchTimeoutEvidence(child.pid).then((evidence) => {
+        child.kill("SIGKILL");
+        reject(new Error(`packaged Electron launch timed out after ${launchTimeoutMs} ms: ${output}\n${evidence}`));
+      });
+    }, launchTimeoutMs);
     const capture = (chunk) => {
       output += chunk;
       if (!ready && output.includes("LETAGENTS_PACKAGED_SUPERVISOR_READY")) {
@@ -117,6 +123,23 @@ function launch() {
       if (!ready) reject(new Error(`packaged Electron exited ${code}: ${output}`));
     });
   });
+}
+
+/** What is known at a launch timeout: the app's call stacks (macOS), the daemon's answer, and the log files of the scratch home. */
+async function launchTimeoutEvidence(pid) {
+  const parts = [];
+  if (process.platform === "darwin" && pid) {
+    const sampled = spawnSync("sample", [String(pid), "3"], { encoding: "utf8", timeout: 20_000 });
+    parts.push(`sample of pid ${pid}:\n${`${sampled.stdout ?? ""}${sampled.stderr ?? ""}`.split("\n").slice(0, 160).join("\n")}`);
+  }
+  parts.push(`daemon.status: ${await request("daemon.status").then((status) => JSON.stringify(status), (error) => `no answer (${error instanceof Error ? error.message : String(error)})`)}`);
+  const entries = await readdir(home, { recursive: true }).catch(() => []);
+  parts.push(`files in the scratch home: ${entries.length}`);
+  for (const entry of entries.filter((name) => name.endsWith(".log")).slice(0, 8)) {
+    const text = await readFile(join(home, entry), "utf8").catch(() => "");
+    parts.push(`${entry} (last lines):\n${text.split("\n").slice(-40).join("\n")}`);
+  }
+  return parts.join("\n");
 }
 
 async function launchDevelopmentDaemon() {
