@@ -5,6 +5,11 @@ import { PageCallFailure, type PageCallError } from "./page-policy.js";
  * main run them again. A pointer re-runs a read after the debounce. A tracker
  * read also re-runs every 2 minutes when no pointer came: a ticket can change
  * in a tracker without a webhook, and the server's poll catches it then.
+ *
+ * The planning read re-runs every minute, the cadence of the app's own
+ * release widget: an edit of a sprint or a release sends no room event, so
+ * only a task change would run it again. (Until 2026-11 every stream
+ * keep-alive counted as a gap and re-ran all watches every 15 seconds.)
  */
 export const PAGE_WATCHABLE_METHODS: Readonly<Record<string, { resources: readonly string[]; pollMs: number | null }>> = {
   "work_items.search": { resources: ["work_items"], pollMs: 120_000 },
@@ -18,7 +23,7 @@ export const PAGE_WATCHABLE_METHODS: Readonly<Record<string, { resources: readon
   "intents.get": { resources: ["intents"], pollMs: null },
   "tasks.list": { resources: ["tasks"], pollMs: null },
   "tasks.get": { resources: ["tasks"], pollMs: null },
-  "planning.get": { resources: ["tasks"], pollMs: null },
+  "planning.get": { resources: ["tasks"], pollMs: 60_000 },
 };
 
 /** Room stream resources main relays to pages; any other pointer is not theirs. */
