@@ -2903,6 +2903,36 @@ describe("useDesktopAppData snapshot reads per room switch", () => {
       assert.equal(reads.length, 2);
     });
 
+    it("starts one read, not two, when a refresh is queued and a repair token arrives during the same read", async () => {
+      const simulation = await connectedSwitchSimulation("gap");
+      const { harness } = simulation;
+      harness.selectedSnapshot.value = withTask("room_parent", "in_progress");
+      const reads: Array<ReturnType<typeof deferred<DesktopRoomSnapshot>>> = [];
+      simulation.read = () => { const next = deferred<DesktopRoomSnapshot>(); reads.push(next); return next.promise; };
+      await withDesktopBridge(harness.windowBridge, async () => {
+        const refreshing = harness.state.readSelectedRoomThroughStream("room_parent");
+        await simulation.settle();
+        // While that read runs: a second refresh is asked for, and a new connection asks for a room read.
+        assert.equal(await harness.state.readSelectedRoomThroughStream("room_parent"), true);
+        simulation.emit({ type: "open", roomIdentifier: "room_parent", checkpoint: null, gap: true, verified: true, deliveryRepairToken: 600 });
+        simulation.emit({ type: "open", roomIdentifier: "room_parent", checkpoint: null, gap: false, verified: true });
+        await simulation.settle();
+        reads[0]!.resolve(withTask("room_parent", "in_progress"));
+        await refreshing;
+        await simulation.settle();
+        // The queued refresh is the read that follows. It begins after the token came, so it closes the token too.
+        assert.equal(reads.length, 2, "one read serves the queued refresh and the token");
+        reads[1]!.resolve(withTask("room_parent", "done"));
+        await simulation.settle();
+      });
+      simulation.dispose();
+
+      assert.equal(reads.length, 2);
+      assert.deepEqual(harness.getSnapshotOptions.slice(-1), [undefined], "it is the full read that the refresh asked for");
+      assert.deepEqual(acks(harness), ["room_parent:600"]);
+      assert.deepEqual(shownTasks(harness), ["task_1:done"]);
+    });
+
     it("reads once more after the app's root read when a refresh was asked for while it ran", async () => {
       const simulation = createSwitchSimulation({ handshake: "gap", coldStart: { storedEntry: parentEntry() } });
       const { harness } = simulation;
