@@ -1,3 +1,23 @@
+/**
+ * Transcript-driven Codex `app-server` stand-in for black-box daemon edge tests.
+ *
+ * Protocol initialization, `thread/start`, turn streaming deltas/completions,
+ * approval prompts, and interrupts replay recorded frames from real
+ * `codex-cli 0.162.1` fixtures in `./fixtures/*.ndjson` (note: `crash-loop.ndjson`
+ * reuses the recorded `simple` handshake and appends a fault-injected exit).
+ *
+ * Methods answered by the stand-in, not recorded (and why):
+ * - `config/read` (stdio probe & WebSocket): returns local sandbox/model config for
+ *   the ephemeral test home created by `codex-agent-home.ts`.
+ * - `hooks/list` (stdio probe): returns `{ data: [] }` for the ephemeral test home.
+ * - `account/read` (stdio probe): validates `CODEX_REFRESH_TOKEN_URL_OVERRIDE` in-place
+ *   rewrite during `ask_before_write` sandbox preflight.
+ * - `command/exec` (stdio probe): verifies `-c permissions.<profile>` denied-path
+ *   overrides during `ask_before_write` sandbox preflight.
+ * - `model/list` (WebSocket): advertises the configured test model when queried.
+ * - `mcpServerStatus/list` (fallback only): replays the recorded response when present
+ *   in the transcript; falls back to `{ data: [] }` when the recording did not emit one.
+ */
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";

@@ -523,8 +523,12 @@ describe(
         );
         const totalSpanMs = exitTimes.at(-1)! - exitTimes[0]!;
         assert.ok(
-          totalSpanMs >= 5_000,
-          `expected cumulative crash-loop backoff span >= 5000ms, got ${totalSpanMs}ms (gaps=${JSON.stringify(gaps)})`,
+          totalSpanMs >= 10_000,
+          `expected cumulative crash-loop backoff span >= 10000ms (1+2+4+8s schedule), got ${totalSpanMs}ms (gaps=${JSON.stringify(gaps)})`,
+        );
+        assert.ok(
+          Math.max(...gaps) >= 4_000,
+          `expected exponential backoff gap >= 4000ms before quarantine, got gaps=${JSON.stringify(gaps)}`,
         );
 
         const sqlite = harness.openSqlite();

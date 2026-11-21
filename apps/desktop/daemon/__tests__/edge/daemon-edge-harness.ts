@@ -53,6 +53,10 @@ export interface EdgeDaemonOptions {
   readyTimeoutMs?: number;
   /** Keep the isolated home folder after `dispose()` for debugging. */
   keepHome?: boolean;
+  /** Optional parent directory where the isolated `letagents-edge-*` home folder is created. Defaults to `os.tmpdir()`. */
+  tempRoot?: string;
+  /** Optional process-table enumerator override (defaults to OS `ps` / PowerShell lookup). */
+  listProcesses?: () => ProcessSnapshotEntry[];
 }
 
 export interface EdgeDaemonStatus {
@@ -385,7 +389,8 @@ export interface ProcessSnapshotEntry {
   command: string;
 }
 
-function listOsProcesses(): ProcessSnapshotEntry[] {
+export function listOsProcesses(): ProcessSnapshotEntry[] {
+  const command = process.platform === "win32" ? "powershell.exe" : "ps";
   try {
     if (process.platform === "win32") {
       const output = execFileSync(
@@ -396,7 +401,13 @@ function listOsProcesses(): ProcessSnapshotEntry[] {
           "-Command",
           "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)\t$($_.ParentProcessId)\t$($_.CommandLine)\" }",
         ],
-        { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          maxBuffer: 16 * 1024 * 1024,
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+        },
       );
       const entries: ProcessSnapshotEntry[] = [];
       for (const line of output.split(/\r?\n/)) {
@@ -406,15 +417,21 @@ function listOsProcesses(): ProcessSnapshotEntry[] {
         if (firstTab < 0 || secondTab < 0) continue;
         const pid = Number.parseInt(line.slice(0, firstTab), 10);
         const ppid = Number.parseInt(line.slice(firstTab + 1, secondTab), 10);
-        const command = line.slice(secondTab + 1);
-        if (Number.isInteger(pid) && pid > 1) entries.push({ pid, ppid: Number.isInteger(ppid) ? ppid : 0, pgid: pid, command });
+        const commandLine = line.slice(secondTab + 1);
+        if (Number.isInteger(pid) && pid > 1) {
+          entries.push({ pid, ppid: Number.isInteger(ppid) ? ppid : 0, pgid: pid, command: commandLine });
+        }
+      }
+      if (entries.length === 0) {
+        throw new Error("powershell.exe returned an empty process list.");
       }
       return entries;
     }
     const output = execFileSync("ps", ["-axo", "pid=,ppid=,pgid=,command="], {
       encoding: "utf8",
-      timeout: 3_000,
-      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
     });
     const entries: ProcessSnapshotEntry[] = [];
     for (const line of output.split(/\r?\n/)) {
@@ -427,20 +444,31 @@ function listOsProcesses(): ProcessSnapshotEntry[] {
         entries.push({ pid, ppid, pgid, command: match[4]! });
       }
     }
+    if (entries.length === 0) {
+      throw new Error("ps returned an empty process list.");
+    }
     return entries;
-  } catch {
-    return [];
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`OS process enumeration failed (${command}): ${detail}`, { cause: error });
   }
 }
 
 /**
  * Return every live OS process (excluding the current test runner process)
  * whose command line references `needle` (normalized path match).
+ *
+ * Throws if OS process enumeration fails so a failed inspection can never
+ * satisfy a zero-process assertion.
  */
-export function findProcessesReferencingPath(needle: string): ProcessSnapshotEntry[] {
+export function findProcessesReferencingPath(
+  needle: string,
+  listProcesses: () => ProcessSnapshotEntry[] = listOsProcesses,
+): ProcessSnapshotEntry[] {
   const normalized = needle.replaceAll("\\", "/").toLowerCase();
+  const processes = listProcesses();
   if (!normalized) return [];
-  return listOsProcesses().filter(
+  return processes.filter(
     (entry) =>
       entry.pid !== process.pid &&
       entry.command.replaceAll("\\", "/").toLowerCase().includes(normalized),
@@ -727,6 +755,7 @@ export class EdgeDaemonHarness {
     private readonly keepHome: boolean,
     private readonly approvalKeyPair: { publicKeyBase64: string; privateKey: KeyObject; keyFingerprint: string },
     shimPaths: Record<string, string>,
+    private readonly listProcesses: () => ProcessSnapshotEntry[] = listOsProcesses,
   ) {
     this.stateDir = join(homeDir, ".letagents");
     this.databasePath = join(this.stateDir, "daemon-state.sqlite");
@@ -1134,99 +1163,155 @@ export class EdgeDaemonHarness {
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
-    this.disposed = true;
-    // Collect any live provider PIDs from the daemon or on-disk SQLite before tearing down.
-    if (this.activeDaemon && !this.activeDaemon.exitInfo) {
+    let cleanupError: Error | null = null;
+    let verifiedClean = false;
+    try {
+      // Collect any live provider PIDs from the daemon before tearing down.
+      if (this.activeDaemon && !this.activeDaemon.exitInfo) {
+        try {
+          const entries = await this.rpc.listManifest().catch(() => []);
+          for (const entry of entries) {
+            this.trackProviderPid(entry.provider_ref?.provider_connection?.pid);
+            if (entry.desired_state !== "stopped") {
+              await this.rpc.setDesiredState(entry.id, "stopped").catch(() => undefined);
+            }
+          }
+          await this.rpc.prepareHandoff(3_000).catch(() => undefined);
+          await Promise.race([
+            this.activeDaemon.exited,
+            new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
+          ]);
+        } catch {
+          // Fall through to force kill below.
+        }
+      }
+      for (const proc of this.allProcesses) {
+        if (!proc.exitInfo) {
+          try { proc.child.kill("SIGKILL"); } catch { /* already exited */ }
+          await Promise.race([
+            proc.exited,
+            new Promise((resolveWait) => setTimeout(resolveWait, 1_000)),
+          ]);
+        }
+      }
+
+      const normalizedHome = this.homeDir.replaceAll("\\", "/").toLowerCase();
+      let snapshot: ProcessSnapshotEntry[] = [];
       try {
-        const entries = await this.rpc.listManifest().catch(() => []);
-        for (const entry of entries) {
-          this.trackProviderPid(entry.provider_ref?.provider_connection?.pid);
-          if (entry.desired_state !== "stopped") {
-            await this.rpc.setDesiredState(entry.id, "stopped").catch(() => undefined);
+        snapshot = this.listProcesses();
+      } catch (error) {
+        cleanupError = new Error(
+          `Edge harness dispose could not verify process cleanup for ${this.homeDir}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+
+      if (!cleanupError) {
+        const byPid = new Map(snapshot.map((entry) => [entry.pid, entry]));
+        const childrenByParent = new Map<number, ProcessSnapshotEntry[]>();
+        for (const entry of snapshot) {
+          const list = childrenByParent.get(entry.ppid) ?? [];
+          list.push(entry);
+          childrenByParent.set(entry.ppid, list);
+        }
+
+        const targetsByPid = new Map<number, { pid: number; pgid?: number }>();
+        const addTargetWithDescendants = (rootPid: number) => {
+          if (rootPid <= 1 || rootPid === process.pid || targetsByPid.has(rootPid)) return;
+          const info = byPid.get(rootPid);
+          targetsByPid.set(rootPid, { pid: rootPid, pgid: info?.pgid });
+          for (const child of childrenByParent.get(rootPid) ?? []) {
+            addTargetWithDescendants(child.pid);
+          }
+        };
+
+        // 1. Any daemon child process that is somehow still alive after SIGKILL.
+        for (const proc of this.allProcesses) {
+          const pid = proc.child.pid;
+          if (pid && isPidAlive(pid)) {
+            addTargetWithDescendants(pid);
           }
         }
-        await this.rpc.prepareHandoff(3_000).catch(() => undefined);
-        await Promise.race([
-          this.activeDaemon.exited,
-          new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
-        ]);
-      } catch {
-        // Fall through to force kill below.
+
+        // 2. Tracked provider PIDs whose command line references this isolated home (or that have a child referencing it).
+        for (const pid of this.trackedProviderPids) {
+          if (!isPidAlive(pid)) continue;
+          const commandLine = byPid.get(pid)?.command ?? readProcessCommandLine(pid) ?? "";
+          const directMatch = commandLine.replaceAll("\\", "/").toLowerCase().includes(normalizedHome);
+          const childMatch = (childrenByParent.get(pid) ?? []).some((child) =>
+            child.command.replaceAll("\\", "/").toLowerCase().includes(normalizedHome),
+          );
+          if (directMatch || childMatch) addTargetWithDescendants(pid);
+        }
+
+        // 3. Any remaining OS process whose command line references this isolated temp home
+        // (including detached provider servers and MCP stub children spawned under this home).
+        for (const entry of snapshot) {
+          if (entry.pid === process.pid) continue;
+          if (!entry.command.replaceAll("\\", "/").toLowerCase().includes(normalizedHome)) continue;
+          addTargetWithDescendants(entry.pid);
+          // If an edge dev-mcp stub child points to this temp home, also stop its detached provider parent.
+          const parent = byPid.get(entry.ppid);
+          if (
+            parent &&
+            parent.pid > 1 &&
+            parent.pid !== process.pid &&
+            entry.command.replaceAll("\\", "/").toLowerCase().includes("/dev-mcp/server.mjs") &&
+            /\b(?:opencode|codex)\b/i.test(parent.command)
+          ) {
+            addTargetWithDescendants(parent.pid);
+          }
+        }
+
+        await terminateProcessTrees([...targetsByPid.values()]);
+
+        // 4. Re-scan once in case a parent spawned a child right before exiting, then verify zero survivors.
+        try {
+          const stragglers = findProcessesReferencingPath(this.homeDir, this.listProcesses);
+          if (stragglers.length > 0) {
+            await terminateProcessTrees(stragglers.map((entry) => ({ pid: entry.pid, pgid: entry.pgid })));
+          }
+          const remaining = findProcessesReferencingPath(this.homeDir, this.listProcesses);
+          const survivingTargets = [...targetsByPid.keys()].filter((pid) => isPidAlive(pid));
+          const survivingDaemons = this.allProcesses
+            .map((proc) => proc.child.pid)
+            .filter((pid): pid is number => typeof pid === "number" && isPidAlive(pid));
+          const survivingPids = [...new Set([...survivingTargets, ...survivingDaemons])].filter(
+            (pid) => !remaining.some((entry) => entry.pid === pid),
+          );
+          if (remaining.length > 0 || survivingPids.length > 0) {
+            const detail = [
+              ...remaining.map((entry) => `pid=${entry.pid} cmd=${entry.command}`),
+              ...survivingPids.map((pid) => `pid=${pid} (still alive)`),
+            ].join("; ");
+            cleanupError = new Error(
+              `Edge harness dispose left live processes referencing ${this.homeDir}: ${detail}`,
+            );
+          } else {
+            verifiedClean = true;
+            this.trackedProviderPids.clear();
+          }
+        } catch (error) {
+          cleanupError = new Error(
+            `Edge harness dispose failed final survivor verification for ${this.homeDir}: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        }
+      }
+    } finally {
+      for (const fn of this.extraCleanup.splice(0)) {
+        try { await fn(); } catch { /* best effort */ }
+      }
+      await this.roomServer.close().catch(() => undefined);
+      if (verifiedClean) {
+        this.disposed = true;
+        if (!this.keepHome) {
+          await rm(this.homeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 150 }).catch(() => undefined);
+        }
       }
     }
-    for (const proc of this.allProcesses) {
-      if (!proc.exitInfo) {
-        try { proc.child.kill("SIGKILL"); } catch { /* already exited */ }
-        await Promise.race([
-          proc.exited,
-          new Promise((resolveWait) => setTimeout(resolveWait, 1_000)),
-        ]);
-      }
-    }
-    const normalizedHome = this.homeDir.replaceAll("\\", "/").toLowerCase();
-    const snapshot = listOsProcesses();
-    const byPid = new Map(snapshot.map((entry) => [entry.pid, entry]));
-    const childrenByParent = new Map<number, ProcessSnapshotEntry[]>();
-    for (const entry of snapshot) {
-      const list = childrenByParent.get(entry.ppid) ?? [];
-      list.push(entry);
-      childrenByParent.set(entry.ppid, list);
-    }
-
-    const targetsByPid = new Map<number, { pid: number; pgid?: number }>();
-    const addTargetWithDescendants = (rootPid: number) => {
-      if (rootPid <= 1 || rootPid === process.pid || targetsByPid.has(rootPid)) return;
-      const info = byPid.get(rootPid);
-      targetsByPid.set(rootPid, { pid: rootPid, pgid: info?.pgid });
-      for (const child of childrenByParent.get(rootPid) ?? []) {
-        addTargetWithDescendants(child.pid);
-      }
-    };
-
-    // 1. Tracked provider PIDs whose command line references this isolated home (or that have a child referencing it).
-    for (const pid of this.trackedProviderPids) {
-      if (!isPidAlive(pid)) continue;
-      const commandLine = byPid.get(pid)?.command ?? readProcessCommandLine(pid) ?? "";
-      const directMatch = commandLine.replaceAll("\\", "/").toLowerCase().includes(normalizedHome);
-      const childMatch = (childrenByParent.get(pid) ?? []).some((child) =>
-        child.command.replaceAll("\\", "/").toLowerCase().includes(normalizedHome),
-      );
-      if (directMatch || childMatch) addTargetWithDescendants(pid);
-    }
-
-    // 2. Any remaining OS process whose command line references this isolated temp home
-    // (including detached provider servers and MCP stub children spawned under this home).
-    for (const entry of snapshot) {
-      if (entry.pid === process.pid) continue;
-      if (!entry.command.replaceAll("\\", "/").toLowerCase().includes(normalizedHome)) continue;
-      addTargetWithDescendants(entry.pid);
-      // If an edge dev-mcp stub child points to this temp home, also stop its detached provider parent.
-      const parent = byPid.get(entry.ppid);
-      if (
-        parent &&
-        parent.pid > 1 &&
-        parent.pid !== process.pid &&
-        entry.command.replaceAll("\\", "/").toLowerCase().includes("/dev-mcp/server.mjs") &&
-        /\b(?:opencode|codex)\b/i.test(parent.command)
-      ) {
-        addTargetWithDescendants(parent.pid);
-      }
-    }
-
-    await terminateProcessTrees([...targetsByPid.values()]);
-
-    // Re-scan once in case a parent spawned or left a child right before exiting.
-    const stragglers = findProcessesReferencingPath(this.homeDir);
-    if (stragglers.length > 0) {
-      await terminateProcessTrees(stragglers.map((entry) => ({ pid: entry.pid, pgid: entry.pgid })));
-    }
-    this.trackedProviderPids.clear();
-    for (const fn of this.extraCleanup.splice(0)) {
-      try { await fn(); } catch { /* best effort */ }
-    }
-    await this.roomServer.close().catch(() => undefined);
-    if (!this.keepHome) {
-      await rm(this.homeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 150 }).catch(() => undefined);
+    if (cleanupError) {
+      throw cleanupError;
     }
   }
 }
@@ -1243,7 +1328,9 @@ export async function startEdgeDaemon(options: EdgeDaemonOptions = {}): Promise<
   // Resolve the daemon command before allocating temp directories or sockets
   // so missing builds fail fast without leaking resources.
   const command = options.daemonCommand ?? resolveDefaultDaemonCommand();
-  const homeDir = await realpath(await mkdtemp(join(tmpdir(), "letagents-edge-")));
+  const baseTempDir = options.tempRoot ? resolve(options.tempRoot) : tmpdir();
+  await mkdir(baseTempDir, { recursive: true });
+  const homeDir = await realpath(await mkdtemp(join(baseTempDir, "letagents-edge-")));
   const roomServer = new FakeRoomServer();
   let harness: EdgeDaemonHarness | null = null;
   try {
@@ -1326,13 +1413,20 @@ export async function startEdgeDaemon(options: EdgeDaemonOptions = {}): Promise<
       options.keepHome === true,
       { publicKeyBase64, privateKey, keyFingerprint },
       shimPaths,
+      options.listProcesses ?? listOsProcesses,
     );
 
     await harness.startDaemonProcess();
     return harness;
   } catch (error) {
     if (harness) {
-      await harness.dispose();
+      try {
+        await harness.dispose();
+      } catch (disposeError) {
+        const startMessage = error instanceof Error ? error.message : String(error);
+        const disposeMessage = disposeError instanceof Error ? disposeError.message : String(disposeError);
+        throw new Error(`${startMessage} (cleanup also failed: ${disposeMessage})`, { cause: error });
+      }
     } else {
       await roomServer.close().catch(() => undefined);
       if (options.keepHome !== true) {
