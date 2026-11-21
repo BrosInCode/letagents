@@ -6,7 +6,10 @@
 // It proves that the shipped app can load the code that the daemon loads
 // only when an agent starts, which a start of the app alone does not load:
 //
-//   1. the app's package.json has no conditional import target;
+//   1. the app's package.json has no conditional import target, and no other
+//      package.json in the shipped build output declares import names. Then
+//      a name has one target for every file and for both kinds of module
+//      loading (import and require);
 //   2. every "#..." import name in the shipped build output resolves to an
 //      existing file inside that build output, from the place that uses it,
 //      and to the same file as from the app's own package.json. Node keeps
@@ -31,11 +34,11 @@ export const PROVIDER_ADAPTER_ENTRIES = [
 const ADAPTER_FOLDERS = ["dist-provider-runtime", join("dist-electron", "main", "agents")];
 const BUILD_FOLDERS = ["dist-electron", "dist-daemon", "dist-provider-runtime"];
 
-function buildFiles(directory, found = []) {
+function buildFiles(directory, found = [], pattern = /\.(js|mjs|cjs)$/) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
-    if (entry.isDirectory()) buildFiles(path, found);
-    else if (/\.(js|mjs|cjs)$/.test(entry.name)) found.push(path);
+    if (entry.isDirectory()) buildFiles(path, found, pattern);
+    else if (pattern.test(entry.name)) found.push(path);
   }
   return found;
 }
@@ -52,6 +55,24 @@ export async function checkPackagedAppImports(appRoot, { log = console.log } = {
   for (const name of names) {
     if (typeof packageJson.imports[name] !== "string") {
       throw new Error(`package.json imports entry ${name} has conditional targets; a packaged app must have the build output only.`);
+    }
+  }
+
+  // Node takes the meaning of a "#" name from the nearest package.json above
+  // the file that uses it. A second map below the build output could give
+  // some files another target, and could give `import` and `require` two
+  // different ones, which a check by one kind of resolution does not see.
+  for (const folder of BUILD_FOLDERS) {
+    const root = join(app, folder);
+    if (!existsSync(root)) continue;
+    for (const file of buildFiles(root, [], /^package\.json$/)) {
+      let nested;
+      try { nested = JSON.parse(readFileSync(file, "utf8")); } catch (error) {
+        throw new Error(`${relative(app, file)} is not readable JSON: ${error.message}`);
+      }
+      if (nested !== null && typeof nested === "object" && nested.imports !== undefined) {
+        throw new Error(`${relative(app, file)} declares import names; only the package.json of the packaged app may, or two files could load two copies of one module`);
+      }
     }
   }
 

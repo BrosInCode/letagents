@@ -106,7 +106,38 @@ test("the check fails when two users of one import name get two different files"
     writeFileSync(join(agents, "package.json"), JSON.stringify({ type: "module", imports: { "#provider-runtime/*.js": "./copy/*.js" } }));
     const result = runCheck(app);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /imports #provider-runtime\/shared\.js and gets .*copy.shared\.js, but the app's package\.json gives dist-provider-runtime.shared\.js/);
+    assert.match(result.stderr, /agents.package\.json declares import names; only the package\.json of the packaged app may/);
+  } finally {
+    rmSync(app, { recursive: true, force: true });
+  }
+});
+
+test("the check fails when a second import map gives import and require two different files", () => {
+  const app = temporaryApp();
+  try {
+    // CommonJS resolution of this map gives the shared file of the app, and
+    // ESM resolution gives a copy. The adapters are ESM, so they load the copy.
+    const agents = join(app, "dist-electron", "main", "agents");
+    mkdirSync(join(agents, "copy"));
+    writeFileSync(join(agents, "copy", "shared.js"), "export const shared = 2;\n");
+    writeFileSync(join(agents, "package.json"), JSON.stringify({
+      type: "module",
+      imports: { "#provider-runtime/*.js": { require: "../../../dist-provider-runtime/*.js", import: "./copy/*.js" } },
+    }));
+    const result = runCheck(app);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /agents.package\.json declares import names/);
+  } finally {
+    rmSync(app, { recursive: true, force: true });
+  }
+});
+
+test("a package.json below the build output that declares no import names is accepted", () => {
+  const app = temporaryApp();
+  try {
+    writeFileSync(join(app, "dist-provider-runtime", "package.json"), JSON.stringify({ type: "module" }));
+    // The file that uses the name is in another folder, so its scope is the app's package.json.
+    assert.equal(runCheck(app).status, 0);
   } finally {
     rmSync(app, { recursive: true, force: true });
   }
