@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { connectDaemon, daemonEndpoint } from "../../../../../shared/daemon-endpoint.mjs";
 import { processTreeHelperPath } from "../../../../../shared/process-tree.mjs";
-import { materializeNodeShim, type MaterializeNodeShimOptions } from "./executable-shim.js";
+import { materializeNodeShim, resolveStandInRuntime, type MaterializeNodeShimOptions } from "./executable-shim.js";
 import { FakeRoomServer } from "./fake-room-server.js";
 import { EdgeSqliteInspector } from "./sqlite-inspector.js";
 
@@ -846,12 +846,36 @@ async function terminateProcessTrees(targets: ReadonlyArray<{ pid: number; pgid?
   }
 }
 
+/** The folder that each daemon starts in. */
+const DAEMON_LAUNCH_FOLDER = DESKTOP_ROOT;
+
+/**
+ * The environment that a daemon starts with. One function for the start and for the choice of the
+ * stand-in program, so that both find the daemon command with the same `PATH`.
+ */
+function daemonLaunchEnvironment(
+  baseEnv: Record<string, string>,
+  command: EdgeDaemonCommand,
+  extraEnv: Record<string, string> = {},
+): NodeJS.ProcessEnv {
+  return {
+    ...allowedHostEnvironment(process.env),
+    ...baseEnv,
+    ...(command.env ?? {}),
+    ...extraEnv,
+  };
+}
+
 export function resolveDefaultDaemonCommand(): EdgeDaemonCommand {
   const overrideCommand = process.env.LETAGENTS_EDGE_DAEMON_CMD?.trim();
   if (overrideCommand) {
     const rawArgs = process.env.LETAGENTS_EDGE_DAEMON_ARGS?.trim();
     const args = rawArgs ? (JSON.parse(rawArgs) as string[]) : [];
-    return { command: overrideCommand, args, useNodeIpc: false };
+    // A packaged app runs the daemon script only in Node mode, and the harness passes an allowlist of
+    // variables to the daemon. So the command gets the variable here, with no wrapper file: a wrapper
+    // would become "the program of the command", and the stand-ins must run under the daemon's real
+    // program. The variable has no effect on a plain Node program or on a daemon in another language.
+    return { command: overrideCommand, args, env: { ELECTRON_RUN_AS_NODE: "1" }, useNodeIpc: false };
   }
   const builtDaemon = join(DESKTOP_ROOT, "dist-daemon", "main.js");
   if (!existsSync(builtDaemon)) {
@@ -1105,7 +1129,13 @@ export class EdgeDaemonHarness {
     scriptPath: string,
     options?: MaterializeNodeShimOptions,
   ): Promise<string> {
-    return materializeNodeShim(this.binDir, name, scriptPath, options);
+    return materializeNodeShim(this.binDir, name, scriptPath, {
+      ...options,
+      nodeBin: options?.nodeBin ?? resolveStandInRuntime(this.baseCommand, {
+        env: daemonLaunchEnvironment(this.baseEnv, this.baseCommand),
+        cwd: DAEMON_LAUNCH_FOLDER,
+      }),
+    });
   }
 
   openSqlite(): EdgeSqliteInspector {
@@ -1126,14 +1156,9 @@ export class EdgeDaemonHarness {
   async startDaemonProcess(extraEnv: Record<string, string> = {}): Promise<EdgeDaemonStatus> {
     const command = this.baseCommand;
     const useNodeIpc = command.useNodeIpc !== false;
-    const mergedEnv: NodeJS.ProcessEnv = {
-      ...allowedHostEnvironment(process.env),
-      ...this.baseEnv,
-      ...(command.env ?? {}),
-      ...extraEnv,
-    };
+    const mergedEnv = daemonLaunchEnvironment(this.baseEnv, command, extraEnv);
     const child = spawn(command.command, command.args, {
-      cwd: DESKTOP_ROOT,
+      cwd: DAEMON_LAUNCH_FOLDER,
       env: mergedEnv,
       windowsHide: true,
       stdio: useNodeIpc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
@@ -1717,6 +1742,18 @@ export async function startEdgeDaemon(options: EdgeDaemonOptions = {}): Promise<
     const apiUrl = await roomServer.start();
     const devMcpEntryPath = await materializeDevMcpPackage(devMcpDir);
 
+    const existingPath = process.env.PATH ?? process.env.Path ?? "";
+    const prependedPath = existingPath ? `${binDir}${delimiter}${existingPath}` : binDir;
+    const pathEnv: Record<string, string> = {
+      PATH: prependedPath,
+      ...(process.platform === "win32" ? { Path: prependedPath } : {}),
+    };
+    // The stand-in program is the daemon's program. Find the daemon command as the start of the daemon
+    // finds it: with the daemon's own PATH (the command and the options can change it) and folder.
+    const standInRuntime = resolveStandInRuntime(command, {
+      env: daemonLaunchEnvironment({ ...pathEnv, ...(options.env ?? {}) }, command),
+      cwd: DAEMON_LAUNCH_FOLDER,
+    });
     const shimPaths: Record<string, string> = {};
     const shimEnv: Record<string, string> = {};
     for (const shim of options.shims ?? []) {
@@ -1727,6 +1764,8 @@ export async function startEdgeDaemon(options: EdgeDaemonOptions = {}): Promise<
         },
         nodeArgs: shim.nodeArgs,
         copyScript: shim.copyScript,
+        // The daemon's sandbox admits the daemon's own program only: see resolveStandInRuntime.
+        nodeBin: standInRuntime,
       });
       shimPaths[shim.name] = path;
       if (shim.envVar) shimEnv[shim.envVar] = path;
@@ -1737,8 +1776,6 @@ export async function startEdgeDaemon(options: EdgeDaemonOptions = {}): Promise<
     const publicKeyBase64 = spkiDer.toString("base64");
     const keyFingerprint = createHash("sha256").update(spkiDer).digest("hex");
 
-    const existingPath = process.env.PATH ?? process.env.Path ?? "";
-    const prependedPath = existingPath ? `${binDir}${delimiter}${existingPath}` : binDir;
     const windowsHelper = process.platform === "win32"
       ? (process.env.LETAGENTS_PROCESS_TREE_HELPER?.trim() || process.env.LETAGENTS_TEST_PROCESS_TREE_HELPER?.trim() || "")
       : "";
@@ -1751,8 +1788,7 @@ export async function startEdgeDaemon(options: EdgeDaemonOptions = {}): Promise<
       XDG_DATA_HOME: xdgDataDir,
       XDG_STATE_HOME: xdgStateDir,
       XDG_CACHE_HOME: xdgCacheDir,
-      PATH: prependedPath,
-      ...(process.platform === "win32" ? { Path: prependedPath } : {}),
+      ...pathEnv,
       ...(windowsHelper ? { LETAGENTS_PROCESS_TREE_HELPER: windowsHelper } : {}),
       LETAGENTS_API_URL: apiUrl,
       LETAGENTS_POLL_MAX_MS: "5000",
