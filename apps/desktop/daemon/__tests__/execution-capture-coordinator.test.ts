@@ -182,7 +182,7 @@ test("Codex reattach admission requires the exact durable outstanding turn", asy
     exact.emit(active); await flush();
     assert.equal(exact.admission(), "ready");
     assert.equal(exact.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'")
-      .get()?.observed_state, "working", "typed-shadow reconstruction cannot mutate legacy authority");
+      .get()?.observed_state, "working", "capture reconstruction alone cannot mutate runtime deployment state");
   } finally { exact.capture.close(); }
 
   const mismatched = fixture();
@@ -213,11 +213,14 @@ test("Codex reattach admission requires the exact durable outstanding turn", asy
 });
 
 test("typed lifecycle admission requires a caught-up source and fully disposed fact journal", async () => {
-  const shadow = fixture();
-  try {
-    await shadow.install(); await flush();
-    assert.equal(shadow.typedAdmission(), "unavailable", "typed-shadow observation never grows authority");
-  } finally { shadow.capture.close(); }
+  for (const priorMode of ["typed_shadow", "legacy"] as const) {
+    const prior = fixture();
+    try {
+      prior.db.prepare("UPDATE execution_runtime_generations SET authority_mode=?").run(priorMode);
+      await prior.install(); await flush();
+      assert.equal(prior.typedAdmission(), "unavailable", `pre-upgrade ${priorMode} runtime never grows typed authority`);
+    } finally { prior.capture.close(); }
+  }
 
   const typed = fixture("codex_app_server", undefined, undefined, new DatabaseSync(":memory:"), "typed");
   try {
