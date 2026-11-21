@@ -17,14 +17,12 @@ export const roomMovesAndPurges = storeMethods({
   ): Promise<{ created: boolean; move: DaemonRoomMoveRecord }> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      let transactionOpen = false;
       let committed = false;
       let result!: { created: boolean; move: DaemonRoomMoveRecord };
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Room-move preparation transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          transactionOpen = true;
+      const commit = async () => {
+        if (committed) throw new Error("Room-move preparation transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
           this.writeFence?.();
           const existing = database.prepare("SELECT * FROM agent_room_moves WHERE request_id=?").get(input.request_id) as Row | undefined;
           if (existing) {
@@ -48,17 +46,16 @@ export const roomMovesAndPurges = storeMethods({
             result = { created: true, move: roomMoveFromRow(row) };
           }
           database.exec("COMMIT");
-          transactionOpen = false;
           committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Room-move preparation fence returned without committing the transaction.");
-        return result;
-      } catch (error) {
-        if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
-        throw error;
-      }
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
+        }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Room-move preparation fence returned without committing the transaction.");
+      return result;
     });
   },
 
@@ -86,14 +83,12 @@ export const roomMovesAndPurges = storeMethods({
   ): Promise<DaemonRoomMoveRecord> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      let transactionOpen = false;
       let committed = false;
       let updated!: DaemonRoomMoveRecord;
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Room-move transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          transactionOpen = true;
+      const commit = async () => {
+        if (committed) throw new Error("Room-move transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
           this.writeFence?.();
           const row = database.prepare("SELECT * FROM agent_room_moves WHERE operation_id=?").get(input.operationId) as Row | undefined;
           if (!row) throw new Error("Unknown room-move operation.");
@@ -153,17 +148,16 @@ export const roomMovesAndPurges = storeMethods({
             pruneSupervisedAgentHistory(database, input.agentId, () => updatedAt);
           }
           database.exec("COMMIT");
-          transactionOpen = false;
           committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Room-move commit fence returned without committing the transaction.");
-        return updated;
-      } catch (error) {
-        if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
-        throw error;
-      }
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
+        }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Room-move commit fence returned without committing the transaction.");
+      return updated;
     });
   },
 
@@ -385,42 +379,48 @@ export const roomMovesAndPurges = storeMethods({
   async commitPurge(expectedVersion: number, input: { operationId: string; agentId: string; daemonGeneration: number }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ version: number; purge: DaemonPurgeRecord }> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      let transactionOpen = false;
       let committed = false;
       const commit = async () => {
-        database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
-        this.writeFence?.();
-        const agentRow = database.prepare("SELECT version FROM agents WHERE agent_id=?").get(input.agentId) as Row | undefined;
-        if (!agentRow) throw new Error("Purge target disappeared before local commit.");
-        if (Number(agentRow.version) !== expectedVersion) throw new ManifestConflictError("Agent version changed before purge commit.");
-        const purgeRow = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
-        if (!purgeRow) throw new Error("Unknown purge operation.");
-        const purge = purgeFromRow(purgeRow);
-        if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.daemonGeneration || purge.phase !== "local_commit") throw new ManifestConflictError("Purge is not authorized for local commit.");
-        // A message that reached the stopped guest after preparation is settled here as well; otherwise the commit would refuse for good.
-        this.settleGivenAgentInboxForPurge(database, input.agentId, new Date().toISOString());
-        const attachment = this.assertPurgePreconditions(database, input.agentId);
-        if (attachment.attachedWorkAttemptId !== purge.attached_work_attempt_id || attachment.preservedWorkspacePath !== purge.preserved_workspace_path) {
-          throw new ManifestConflictError("Purge target attachment changed after preparation.");
+        if (committed) throw new Error("Purge transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          this.writeFence?.();
+          const agentRow = database.prepare("SELECT version FROM agents WHERE agent_id=?").get(input.agentId) as Row | undefined;
+          if (!agentRow) throw new Error("Purge target disappeared before local commit.");
+          if (Number(agentRow.version) !== expectedVersion) throw new ManifestConflictError("Agent version changed before purge commit.");
+          const purgeRow = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
+          if (!purgeRow) throw new Error("Unknown purge operation.");
+          const purge = purgeFromRow(purgeRow);
+          if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.daemonGeneration || purge.phase !== "local_commit") throw new ManifestConflictError("Purge is not authorized for local commit.");
+          // A message that reached the stopped guest after preparation is settled here as well; otherwise the commit would refuse for good.
+          this.settleGivenAgentInboxForPurge(database, input.agentId, new Date().toISOString());
+          const attachment = this.assertPurgePreconditions(database, input.agentId);
+          if (attachment.attachedWorkAttemptId !== purge.attached_work_attempt_id || attachment.preservedWorkspacePath !== purge.preserved_workspace_path) {
+            throw new ManifestConflictError("Purge target attachment changed after preparation.");
+          }
+          for (const [table, column] of [
+            ["effects", "agent_id"], ["effect_tombstones", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
+            ["supervised_agent_ingress_cursors", "agent_id"], ["supervised_agent_history_boundaries", "agent_id"], ["supervised_agent_pruned_sources", "agent_id"],
+            ["supervised_worker_mint_states", "agent_id"], ["supervised_worker_sessions", "agent_id"], ["inbox_items", "agent_id"], ["worker_binding_publications", "entry_id"],
+            ["worker_generation_verifications", "entry_id"], ["worker_binding_watermarks", "entry_id"], ["worker_session_bindings", "entry_id"],
+            ["agent_room_moves", "agent_id"], ["reconciliation_action_tombstones", "agent_id"],
+          ] as const) run(database.prepare(`DELETE FROM ${table} WHERE ${column}=?`), input.agentId);
+          if (purge.attached_work_attempt_id !== null) {
+            const deletedAttempt = database.prepare("DELETE FROM work_attempts WHERE work_attempt_id=?").run(purge.attached_work_attempt_id);
+            if (Number(deletedAttempt.changes) !== 1) throw new ManifestConflictError("Purge work attempt disappeared before local commit.");
+          }
+          const deleted = database.prepare("DELETE FROM agents WHERE agent_id=? AND version=?").run(input.agentId, expectedVersion);
+          if (Number(deleted.changes) !== 1) throw new ManifestConflictError("Purge target disappeared or changed before local commit.");
+          run(database.prepare("UPDATE agent_purge_operations SET phase='complete',error=NULL,updated_at=? WHERE operation_id=?"), new Date().toISOString(), input.operationId);
+          database.exec("COMMIT");
+          committed = true;
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
         }
-        for (const [table, column] of [
-          ["effects", "agent_id"], ["effect_tombstones", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
-          ["supervised_agent_ingress_cursors", "agent_id"], ["supervised_agent_history_boundaries", "agent_id"], ["supervised_agent_pruned_sources", "agent_id"],
-          ["supervised_worker_mint_states", "agent_id"], ["supervised_worker_sessions", "agent_id"], ["inbox_items", "agent_id"], ["worker_binding_publications", "entry_id"],
-          ["worker_generation_verifications", "entry_id"], ["worker_binding_watermarks", "entry_id"], ["worker_session_bindings", "entry_id"],
-          ["agent_room_moves", "agent_id"], ["reconciliation_action_tombstones", "agent_id"],
-        ] as const) run(database.prepare(`DELETE FROM ${table} WHERE ${column}=?`), input.agentId);
-        if (purge.attached_work_attempt_id !== null) {
-          const deletedAttempt = database.prepare("DELETE FROM work_attempts WHERE work_attempt_id=?").run(purge.attached_work_attempt_id);
-          if (Number(deletedAttempt.changes) !== 1) throw new ManifestConflictError("Purge work attempt disappeared before local commit.");
-        }
-        const deleted = database.prepare("DELETE FROM agents WHERE agent_id=? AND version=?").run(input.agentId, expectedVersion);
-        if (Number(deleted.changes) !== 1) throw new ManifestConflictError("Purge target disappeared or changed before local commit.");
-        run(database.prepare("UPDATE agent_purge_operations SET phase='complete',error=NULL,updated_at=? WHERE operation_id=?"), new Date().toISOString(), input.operationId);
-        database.exec("COMMIT"); transactionOpen = false; committed = true;
       };
-      try { if (commitFence) await commitFence(commit); else await commit(); if (!committed) throw new Error("Purge commit fence returned without committing."); }
-      catch (error) { if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} } throw error; }
+      if (commitFence) await commitFence(commit); else await commit();
+      if (!committed) throw new Error("Purge commit fence returned without committing.");
       return { version: expectedVersion + 1, purge: purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row) };
     });
   },

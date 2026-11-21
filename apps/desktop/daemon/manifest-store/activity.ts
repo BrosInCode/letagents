@@ -164,6 +164,10 @@ export const activity = storeMethods({
         WHERE agent_id = ?`).run(runtimeUpdate.observedState, nativeJson, agentId);
       return Number(updated.changes) === 1;
     }
+    if (bumpVersion) {
+      const updated = database.prepare("UPDATE agents SET version = version + 1 WHERE agent_id = ?").run(agentId);
+      return Number(updated.changes) === 1;
+    }
     return Boolean(database.prepare("SELECT 1 FROM agents WHERE agent_id = ?").get(agentId));
   },
 

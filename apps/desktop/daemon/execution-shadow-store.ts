@@ -44,8 +44,23 @@ export type ExecutionShadowStoreOptions = {
   /** Synchronous generation fence check run inside every write transaction before COMMIT. */
   assertWriteFence?: () => void;
 };
+export type LifecycleProjectionOutcome =
+  | { status: "applied"; observedState: ObservedState }
+  | { status: "pending" }
+  | { status: "superseded" };
+export type PendingLifecycleProjection = {
+  fact: ExecutionFact;
+  observerExecutionGenerationId: string;
+  observerRuntimeGenerationId: string;
+};
 export type ShadowIngestion =
-  | { status: "accepted" | "duplicate"; journalSequence: number; gapPending: boolean; projectedObservedState?: ObservedState | null }
+  | {
+    status: "accepted" | "duplicate";
+    journalSequence: number;
+    gapPending: boolean;
+    projectedObservedState?: ObservedState | null;
+    lifecycleProjection?: LifecycleProjectionOutcome;
+  }
   | { status: "gap"; expectedSourceSequence: number; observedSourceSequence: number }
   | { status: "retention_limit"; limit: "facts" | "bytes"; expectedSourceSequence: number; observedSourceSequence: number };
 type RuntimeProjection = { projection: ExecutionProjection; unverifiedFacts: number; lastJournalSequence: number };
@@ -725,7 +740,7 @@ export class ExecutionShadowStore {
           turn.state, sideEffects, turn.state, fact.observedAtMs, fact.turnId);
         }
       }
-      let projectedObservedState: ObservedState | null = null;
+      let lifecycleProjection: LifecycleProjectionOutcome | undefined;
       if (!replay && fact.domain !== "execution" && this.hasAgentsTable()) {
         const subjectRuntime = this.required(
           "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
@@ -739,7 +754,7 @@ export class ExecutionShadowStore {
         if (effectKind !== "none"
           && subjectRuntime.authority_mode === "typed"
           && observerRuntime.authority_mode === "typed") {
-          projectedObservedState = this.projectLifecycleToAgent(
+          lifecycleProjection = this.projectLifecycleToAgent(
             fact,
             effectKind,
             current,
@@ -758,10 +773,12 @@ export class ExecutionShadowStore {
           replay: { facts: previous.replay.facts + 1, bytes: previous.replay.bytes + storedBytes }, epoch: this.cacheEpoch },
         budget: { budget, windowStart: retained.windowStart, last: journalSequence, epoch: this.cacheEpoch },
       };
+      const projectedObservedState = lifecycleProjection?.status === "applied" ? lifecycleProjection.observedState : null;
       return {
         status: replay ? "duplicate" : "accepted", journalSequence,
         gapPending: Number(current.max_observed_sequence) > fact.sourceSequence,
         ...(projectedObservedState !== null ? { projectedObservedState } : {}),
+        ...(lifecycleProjection !== undefined ? { lifecycleProjection } : {}),
       };
     });
     if (committed) {
@@ -769,6 +786,48 @@ export class ExecutionShadowStore {
       this.rememberBudget(fact.agentId, committed.budget);
     }
     return result;
+  }
+
+  /**
+   * Retries a previously pending lifecycle projection inside a fenced write
+   * transaction once the lane's live installation or `agents` row advances.
+   */
+  retryLifecycleProjection(
+    pending: PendingLifecycleProjection,
+    liveInstallation?: ShadowIngestInstallation | null,
+  ): LifecycleProjectionOutcome {
+    return this.transaction(() => {
+      if (!this.hasAgentsTable()) return { status: "superseded" };
+      const current = this.row("SELECT * FROM execution_observers WHERE agent_id=?", pending.fact.agentId);
+      if (!current
+        || String(current.observer_execution_generation_id) !== pending.observerExecutionGenerationId
+        || String(current.observer_runtime_generation_id) !== pending.observerRuntimeGenerationId) {
+        return { status: "superseded" };
+      }
+      const subjectRuntime = this.row(
+        "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
+        pending.fact.agentId, pending.fact.executionGenerationId, pending.fact.runtimeGenerationId,
+      );
+      const observerRuntime = this.row(
+        "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
+        pending.fact.agentId, pending.observerExecutionGenerationId, pending.observerRuntimeGenerationId,
+      );
+      if (!subjectRuntime || !observerRuntime
+        || subjectRuntime.authority_mode !== "typed"
+        || observerRuntime.authority_mode !== "typed") {
+        return { status: "superseded" };
+      }
+      const effectKind = lifecycleEffectKind(pending.fact, String(subjectRuntime.provider));
+      if (effectKind === "none") return { status: "superseded" };
+      return this.projectLifecycleToAgent(
+        pending.fact,
+        effectKind,
+        current,
+        subjectRuntime,
+        observerRuntime,
+        liveInstallation,
+      );
+    });
   }
 
   /**
@@ -782,12 +841,12 @@ export class ExecutionShadowStore {
     subjectRuntime: Row,
     observerRuntime: Row,
     liveInstallation?: ShadowIngestInstallation | null,
-  ): ObservedState | null {
+  ): LifecycleProjectionOutcome {
     const agent = this.row(`SELECT desired_state,observed_state,condition,work_attempt_id,
       provider_work_attempt_id,provider_continuation_id,provider_execution_generation_id,
       provider_connection_json,runtime_configuration_revision,turn_control_json
       FROM agents WHERE agent_id=?`, fact.agentId);
-    if (!agent) return null;
+    if (!agent) return { status: "superseded" };
     const manifestConnection = typeof agent.provider_connection_json === "string"
       ? JSON.parse(agent.provider_connection_json) as DaemonProviderConnection
       : null;
@@ -828,16 +887,20 @@ export class ExecutionShadowStore {
       || (runtimeFailure && completedStopTurn)
       || agent.desired_state !== "running"
       || agent.condition === "quarantined";
-    if (definitivelyStale) return null;
+    if (definitivelyStale) return { status: "superseded" };
 
-    const durableCursorTurn = cursorTurnEffect && durableBirth
-      && subjectRuntime.runtime_state === "exited" && observerRuntime.runtime_state === "exited";
+    const bothRuntimesExited = subjectRuntime.runtime_state === "exited"
+      && observerRuntime.runtime_state === "exited";
+    const durableCursorTurn = cursorTurnEffect && durableBirth && bothRuntimesExited;
     if (liveInstallation === null) {
-      if (!runtimeFailure && !durableCursorTurn) return null;
-      if (Number(agent.runtime_configuration_revision) !== Number(observerRuntime.config_revision)) return null;
+      if (!runtimeFailure && !durableCursorTurn) return { status: "pending" };
+      if (!bothRuntimesExited
+        || Number(agent.runtime_configuration_revision) !== Number(observerRuntime.config_revision)) {
+        return { status: "pending" };
+      }
     } else if (liveInstallation !== undefined) {
       if (liveInstallation.providerConnection.pid === null || !liveInstallation.providerConnection.processIdentity) {
-        return null;
+        return { status: "pending" };
       }
       const exactRuntimeId = executionRuntimeStorageIdentity(
         fact.agentId,
@@ -853,10 +916,10 @@ export class ExecutionShadowStore {
         || agent.provider_continuation_id !== liveInstallation.providerContinuationId
         || agent.provider_execution_generation_id !== liveInstallation.executionGenerationId
         || !sameProviderActionConnectionSnapshot(manifestConnection ?? undefined, liveInstallation.providerConnection)) {
-        return null;
+        return { status: "pending" };
       }
     } else if (Number(agent.runtime_configuration_revision) !== Number(observerRuntime.config_revision)) {
-      return null;
+      return { status: "pending" };
     }
 
     const observedAt = new Date(fact.observedAtMs).toISOString();
@@ -879,7 +942,7 @@ export class ExecutionShadowStore {
         SET observed_state=?,native_liveness_json=?,version=version+1
         WHERE agent_id=?`, observedState, nativeLivenessJson, fact.agentId);
     }
-    return observedState;
+    return { status: "applied", observedState };
   }
 
   /**

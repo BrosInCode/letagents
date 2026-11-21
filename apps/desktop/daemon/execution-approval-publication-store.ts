@@ -197,11 +197,14 @@ export function validateExecutionApprovalPublicationSchema(database: DatabaseSyn
 
 /** Immutable publication custody and exact remote receipt journal. */
 export class ExecutionApprovalPublicationStore {
-  constructor(private readonly database: DatabaseSync) {}
+  constructor(
+    private readonly database: DatabaseSync,
+    private readonly assertWriteFence?: () => void,
+  ) {}
   private transaction<T>(body: () => T): T {
     if (this.database.isTransaction) throw new Error("Execution approval publication requires its own transaction.");
     this.database.exec("BEGIN IMMEDIATE");
-    try { const result = body(); this.database.exec("COMMIT"); return result; }
+    try { this.assertWriteFence?.(); const result = body(); this.database.exec("COMMIT"); return result; }
     catch (error) { try { this.database.exec("ROLLBACK"); } catch { /* already rolled back */ } throw error; }
   }
   get(value: ExecutionApprovalPublicationPin): ExecutionApprovalPublicationRecord | null {

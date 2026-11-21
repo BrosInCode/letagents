@@ -21,6 +21,8 @@ type Options = {
   daemonGeneration(): number;
   isClosing(): boolean;
   assertCurrent(): Promise<void>;
+  /** Synchronous generation fence check run inside every write transaction before COMMIT. */
+  assertWriteFence?(): void;
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
   reportGroupedNoReply?: typeof reportGroupedNoReply;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict" | `remote_unanswered: ${string}`): void;
@@ -113,9 +115,9 @@ export class RoomWorkPublisher {
   }
 
   constructor(private readonly database: DatabaseSync, private readonly options: Options) {
-    this.store = new RoomWorkPublicationStore(database);
-    this.capture = new ExecutionShadowStore(database);
-    this.workspaces = new RoomWorkspaceStore(database);
+    this.store = new RoomWorkPublicationStore(database, options.assertWriteFence);
+    this.capture = new ExecutionShadowStore(database, { assertWriteFence: options.assertWriteFence });
+    this.workspaces = new RoomWorkspaceStore(database, options.assertWriteFence);
   }
 
   /** Called before the worker-authenticated poll, never after delayed native capture. */

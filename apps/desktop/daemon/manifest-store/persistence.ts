@@ -38,45 +38,40 @@ export const persistence = storeMethods({
       const database = await this.getDatabase();
       const normalizedEntries = entries.map(canonicalManifestEntry);
       let committed = false;
-      let transactionOpen = false;
       let versions: Record<string, number> = {};
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Manifest transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          transactionOpen = true;
+      const commit = async () => {
+        if (committed) throw new Error("Manifest transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
           this.writeFence?.();
           if (roomMoveCancellation) this.failPreMembershipRoomMoves(database, roomMoveCancellation);
           versions = this.replaceEntries(database, normalizedEntries, expectedVersions);
           database.exec("COMMIT");
-          transactionOpen = false;
           committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
-
-        const persistedEntries = normalizedEntries.map((entry) => {
-          const persisted = this.readEntryFromDatabase(database, entry.id);
-          if (!persisted) throw new Error(`Daemon manifest entry disappeared after full replacement: ${entry.id}`);
-          return persisted;
-        });
-        const returnedEntries = persistedEntries.map((entry) => entry.reconciliation
-          ? {
-            ...entry,
-            reconciliation: {
-              ...entry.reconciliation,
-              completed_action_ids: entry.reconciliation.completed_action_ids.slice(-MAX_PROJECTED_COMPLETED_ACTION_IDS),
-            },
-          }
-          : entry);
-        return { entries: returnedEntries, versions };
-      } catch (error) {
-        if (transactionOpen) {
+        } catch (error) {
           try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+          throw error;
         }
-        throw error;
-      }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
+
+      const persistedEntries = normalizedEntries.map((entry) => {
+        const persisted = this.readEntryFromDatabase(database, entry.id);
+        if (!persisted) throw new Error(`Daemon manifest entry disappeared after full replacement: ${entry.id}`);
+        return persisted;
+      });
+      const returnedEntries = persistedEntries.map((entry) => entry.reconciliation
+        ? {
+          ...entry,
+          reconciliation: {
+            ...entry.reconciliation,
+            completed_action_ids: entry.reconciliation.completed_action_ids.slice(-MAX_PROJECTED_COMPLETED_ACTION_IDS),
+          },
+        }
+        : entry);
+      return { entries: returnedEntries, versions };
     });
   },
 

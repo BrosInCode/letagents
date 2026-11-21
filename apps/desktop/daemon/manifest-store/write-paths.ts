@@ -127,28 +127,25 @@ export const writePaths = storeMethods({
   writeOperationalJournal<T>(mutation: (database: DatabaseSync) => T, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<T> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      let open = false;
       let committed = false;
       let value!: T;
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Operational journal transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          open = true;
+      const commit = async () => {
+        if (committed) throw new Error("Operational journal transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
           this.writeFence?.();
           value = mutation(database);
           database.exec("COMMIT");
-          open = false;
           committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Operational journal fence returned without committing the transaction.");
-        return value;
-      } catch (error) {
-        if (open) { try { database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ } }
-        throw error;
-      }
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+          throw error;
+        }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Operational journal fence returned without committing the transaction.");
+      return value;
     });
   },
 
@@ -169,13 +166,11 @@ export const writePaths = storeMethods({
     return this.serialize(async () => {
       const database = await this.getDatabase();
       let committed = false;
-      let transactionOpen = false;
       let value!: T;
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Manifest transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          transactionOpen = true;
+      const commit = async () => {
+        if (committed) throw new Error("Manifest transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
           this.writeFence?.();
           const row = database.prepare("SELECT * FROM agents WHERE agent_id = ?").get(agentId) as Row | undefined;
           if (!row) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
@@ -197,19 +192,16 @@ export const writePaths = storeMethods({
             }
           }
           database.exec("COMMIT");
-          transactionOpen = false;
           committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
-        return { version: bumpVersion ? expectedVersion + 1 : expectedVersion, value };
-      } catch (error) {
-        if (transactionOpen) {
+        } catch (error) {
           try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+          throw error;
         }
-        throw error;
-      }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
+      return { version: bumpVersion ? expectedVersion + 1 : expectedVersion, value };
     });
   },
 

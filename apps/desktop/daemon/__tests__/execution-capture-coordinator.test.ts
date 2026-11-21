@@ -344,9 +344,10 @@ test("capture admission recovers from durable observer rows after coordinator re
       assert.equal(restarted.captureAdmission(first.tokenFor()), "ready");
       assert.equal(database.prepare("SELECT daemon_generation_id FROM execution_observers WHERE agent_id='agent'").get()!.daemon_generation_id, "2",
         "restart readiness is re-derived from a newly committed observer, not the old in-memory lane");
-    } finally { restarted.close(); }
+    } finally { restarted.close(); if (database.isOpen) database.close(); }
   } finally {
     first.capture.close();
+    if (first.db.isOpen) first.db.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -763,7 +764,7 @@ test("planned capture handoff defers on a real storage lock without detaching ob
     assert.deepEqual({ ...f.position() }, { last_source_sequence: 3, max_observed_sequence: 3 });
   } finally {
     if (competing.isTransaction) competing.exec("ROLLBACK");
-    competing.close(); f.capture.close(); rmSync(directory, { recursive: true, force: true });
+    competing.close(); f.capture.close(); if (f.db.isOpen) f.db.close(); rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -1356,7 +1357,7 @@ for (const initialFact of [false, true]) test(`capture automatically revalidates
     assert.deepEqual(f.facts(), before, "the successful frontier is not repeatedly ingested");
   } finally {
     if (competing.isTransaction) competing.exec("ROLLBACK");
-    competing.close(); f.capture.close(); rmSync(directory, { recursive: true, force: true });
+    competing.close(); f.capture.close(); if (f.db.isOpen) f.db.close(); rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -1468,4 +1469,216 @@ test("shutdown fences queued work and disposes a subscription that arrives late"
   assert.doesNotThrow(() => db.prepare("SELECT 1").get(), "shared database stays open for its owner to close");
   await capture.install(f.tokenFor()); await flush(); assert.equal(subscribed, 1);
   db.close();
+});
+
+test("pending lifecycle projection keeps typedLifecycleAdmission pending until installation aligns and retries on refresh and advance", async () => {
+  // 1. Refresh path: agent row temporarily lags installation continuation id, then aligns and retries on refresh().
+  const f = fixture();
+  try {
+    f.db.prepare("UPDATE agents SET observed_state='idle', provider_continuation_id='lagging-continuation' WHERE agent_id='agent'").run();
+    f.bindTurn();
+    await f.install();
+    f.emit(ready);
+    f.emit(active);
+    await flush();
+
+    assert.equal(f.admission(), "ready", "capture admission is ready once the source cursor is durable");
+    assert.equal(f.capture.typedLifecycleAdmission(f.tokenFor()), "pending",
+      "typedLifecycleAdmission must remain pending while a non-stale lifecycle projection awaits alignment");
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle",
+      "mismatched projection must not prematurely overwrite agents.observed_state");
+
+    // Align the manifest row and refresh; retryLifecycleProjection must apply the held transition.
+    f.db.prepare("UPDATE agents SET provider_continuation_id='continuation' WHERE agent_id='agent'").run();
+    f.capture.refresh("agent");
+    await flush();
+
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+    assert.equal(f.capture.typedLifecycleAdmission(f.tokenFor()), "ready");
+  } finally {
+    f.capture.close();
+    if (f.db.isOpen) f.db.close();
+  }
+
+  // 2. Advance path: Cursor installation starts idle (pid: null) while facts arrive, then advances to the committed child token.
+  const c = fixture("cursor_cli");
+  try {
+    const committed = { ...c.handle.providerConnection! };
+    c.db.prepare("UPDATE agents SET observed_state='idle' WHERE agent_id='agent'").run();
+    c.bindTurn();
+    const laggingToken = { ...c.tokenFor(), providerContinuationId: "lagging-cursor-continuation" };
+    await c.capture.install(laggingToken);
+    c.emit(ready);
+    c.emit(active);
+    await flush();
+
+    assert.equal(c.capture.typedLifecycleAdmission(laggingToken), "pending");
+    assert.equal(c.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    const alignedToken = { ...laggingToken, providerContinuationId: "continuation", providerConnection: committed };
+    c.capture.advance(alignedToken);
+    await flush();
+
+    assert.equal(c.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+    assert.equal(c.capture.typedLifecycleAdmission(alignedToken), "ready");
+  } finally {
+    c.capture.close();
+    if (c.db.isOpen) c.db.close();
+  }
+});
+
+test("detached-lane runtimeFailure stays pending until both subject and observer runtimes are exited", () => {
+  // 1. Cursor turn/lost (manifest_failed) with liveInstallation: null while runtime is still live -> pending until runtime exits.
+  const c = fixture("cursor_cli");
+  try {
+    c.db.prepare("UPDATE agents SET observed_state='idle' WHERE agent_id='agent'").run();
+    const store = new ExecutionShadowStore(c.db);
+    const runtimeId = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
+    const attemptId = store.trackMessage({
+      agentId: "agent",
+      roomId: "room",
+      sourceMessageId: "msg_1",
+      executionGenerationId: "generation",
+      workspaceId: "workspace",
+      createdAtMs: Date.parse(now),
+    });
+    store.trackNativeTurn({
+      agentId: "agent",
+      roomId: "room",
+      executionGenerationId: "generation",
+      runtimeGenerationId: runtimeId,
+      attemptId,
+      turnId: "turn-cursor-lost",
+      providerContinuationId: "continuation",
+      providerTurnId: "provider-turn-lost",
+      createdAtMs: Date.parse(now),
+    });
+    const observer = store.bindObserver({
+      agentId: "agent",
+      subjectRuntimeGenerationId: runtimeId,
+      observerRuntimeGenerationId: runtimeId,
+      sourceId: "detached-cursor-source",
+      daemonGenerationId: "1",
+      expectedEpoch: 0,
+      boundAtMs: Date.parse(now),
+    });
+    const lostFact = {
+      factId: "detached-cursor-turn-lost",
+      agentId: "agent",
+      executionGenerationId: "generation",
+      runtimeGenerationId: runtimeId,
+      observerEpoch: observer.epoch,
+      sourceSequence: 1,
+      observedAtMs: Date.parse(now) + 10,
+      domain: "turn" as const,
+      kind: "state_changed" as const,
+      state: "lost" as const,
+      sideEffects: "none" as const,
+      turnId: "turn-cursor-lost",
+      providerContinuationId: "continuation",
+      providerTurnId: "provider-turn-lost",
+    };
+    const first = store.ingest("detached-cursor-source", observer, lostFact, { liveInstallation: null });
+    assert.equal(first.status, "accepted");
+    assert.deepEqual(first.lifecycleProjection, { status: "pending" },
+      "detached runtimeFailure must stay pending while runtime is not yet exited");
+    assert.equal(c.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    c.db.prepare("UPDATE execution_runtime_generations SET runtime_state='exited', ended_at_ms=? WHERE runtime_generation_id=?")
+      .run(Date.parse(now) + 20, runtimeId);
+    const retried = store.retryLifecycleProjection({
+      fact: lostFact,
+      observerExecutionGenerationId: observer.observerExecutionGenerationId,
+      observerRuntimeGenerationId: observer.observerRuntimeGenerationId,
+    }, null);
+    assert.deepEqual(retried, { status: "applied", observedState: "failed" });
+    assert.equal(c.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "failed");
+  } finally {
+    c.capture.close();
+    if (c.db.isOpen) c.db.close();
+  }
+
+  // 2. Cross-runtime recovery: subject runtime is exited while observer runtime is still ready -> pending until observer also exits.
+  const f = fixture("cursor_cli");
+  try {
+    f.db.prepare("UPDATE agents SET observed_state='idle' WHERE agent_id='agent'").run();
+    const store = new ExecutionShadowStore(f.db);
+    const subjectRuntimeId = executionRuntimeStorageIdentity("agent", "subject-generation", "cursor_cli", 99, "subject-birth");
+    const observerRuntimeId = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
+    store.registerRuntime({
+      agentId: "agent",
+      executionGenerationId: "subject-generation",
+      runtimeGenerationId: subjectRuntimeId,
+      provider: "cursor",
+      authorityMode: "typed",
+      configRevision: 2,
+      createdAtMs: Date.parse(now),
+    });
+    const attemptId = store.trackMessage({
+      agentId: "agent",
+      roomId: "room",
+      sourceMessageId: "msg_2",
+      executionGenerationId: "subject-generation",
+      workspaceId: "workspace",
+      createdAtMs: Date.parse(now),
+    });
+    const recovery = {
+      turnId: "turn-cross-runtime",
+      providerContinuationId: "continuation",
+      providerTurnId: "provider-turn-cross",
+    };
+    store.trackNativeTurn({
+      agentId: "agent",
+      roomId: "room",
+      executionGenerationId: "subject-generation",
+      runtimeGenerationId: subjectRuntimeId,
+      attemptId,
+      ...recovery,
+      createdAtMs: Date.parse(now),
+    });
+    f.db.prepare("UPDATE execution_runtime_generations SET runtime_state='exited', ended_at_ms=? WHERE runtime_generation_id=?")
+      .run(Date.parse(now) + 5, subjectRuntimeId);
+    const observer = store.bindObserver({
+      agentId: "agent",
+      subjectRuntimeGenerationId: subjectRuntimeId,
+      observerRuntimeGenerationId: observerRuntimeId,
+      sourceId: "detached-source",
+      daemonGenerationId: "1",
+      expectedEpoch: 0,
+      boundAtMs: Date.parse(now),
+      recovery,
+    });
+    const lostTurnFact = {
+      factId: "detached-cross-turn-lost",
+      agentId: "agent",
+      executionGenerationId: "subject-generation",
+      runtimeGenerationId: subjectRuntimeId,
+      observerEpoch: observer.epoch,
+      sourceSequence: 1,
+      observedAtMs: Date.parse(now) + 10,
+      domain: "turn" as const,
+      kind: "state_changed" as const,
+      state: "lost" as const,
+      sideEffects: "none" as const,
+      ...recovery,
+    };
+    const first = store.ingest("detached-source", observer, lostTurnFact, { liveInstallation: null });
+    assert.equal(first.status, "accepted");
+    assert.deepEqual(first.lifecycleProjection, { status: "pending" },
+      "detached runtimeFailure must remain pending while observer runtime is not yet exited");
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    f.db.prepare("UPDATE execution_runtime_generations SET runtime_state='exited', ended_at_ms=? WHERE runtime_generation_id=?")
+      .run(Date.parse(now) + 20, observerRuntimeId);
+    const retried = store.retryLifecycleProjection({
+      fact: lostTurnFact,
+      observerExecutionGenerationId: observer.observerExecutionGenerationId,
+      observerRuntimeGenerationId: observer.observerRuntimeGenerationId,
+    }, null);
+    assert.deepEqual(retried, { status: "applied", observedState: "failed" });
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "failed");
+  } finally {
+    f.capture.close();
+    if (f.db.isOpen) f.db.close();
+  }
 });

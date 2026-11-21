@@ -1,7 +1,14 @@
 import type { DatabaseSync, SQLInputValue, StatementSync } from "node:sqlite";
 import type { NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
-import { ExecutionProtocolError, executionIdentity, type NativeTurnIdentity } from "./execution-protocol.js";
-import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity as opaque, type ShadowObserver } from "./execution-shadow-store.js";
+import { ExecutionProtocolError, executionIdentity, type ExecutionFact, type NativeTurnIdentity } from "./execution-protocol.js";
+import {
+  ExecutionShadowStore,
+  executionRuntimeStorageIdentity,
+  executionStorageIdentity as opaque,
+  type PendingLifecycleProjection,
+  type ShadowIngestInstallation,
+  type ShadowObserver,
+} from "./execution-shadow-store.js";
 import { recoveredRuntime } from "./runtime-recovery-journal.js";
 import { isIdleCursorConnection } from "./provider-state-policy.js";
 import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
@@ -44,6 +51,8 @@ type Lane = {
   knownRuntimes: Map<string, Runtime>;
   /** The last source ID this lane's enqueue already validated. */
   validatedSourceId: string | null;
+  /** Latest non-stale lifecycle fact awaiting exact installation/manifest alignment. */
+  pendingLifecycle: PendingLifecycleProjection | null;
 };
 export type PreparedRuntime = {
   agentId: string; executionGenerationId: string; handle: ProviderActionHandle;
@@ -116,7 +125,8 @@ export class ExecutionCaptureCoordinator {
       pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
       detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0,
       expectedAuthorityMode: installation.authorityMode, pendingChange: true, notifiedAdmission: null,
-      storageRetry: null, storageRetryAttempts: 0, knownRuntimes: new Map(), validatedSourceId: null };
+      storageRetry: null, storageRetryAttempts: 0, knownRuntimes: new Map(), validatedSourceId: null,
+      pendingLifecycle: null };
     this.lanes.set(agentId, lane);
     let pending: Promise<NativeExecutionSubscription>;
     try {
@@ -547,6 +557,7 @@ export class ExecutionCaptureCoordinator {
       if (maximum > last) return "unavailable";
       if (last < position.latestSequence) return "pending";
       if (last !== position.latestSequence || maximum !== last) return "unavailable";
+      if (lane.pendingLifecycle !== null) return "pending";
       return "ready";
     } catch { return "unavailable"; }
   }
@@ -589,7 +600,7 @@ export class ExecutionCaptureCoordinator {
     const subscription = lane.subscription;
     lane.subscription = null;
     try { subscription?.dispose(); } catch { /* optional observation cleanup */ }
-    lane.pending.clear(); lane.checkpoints.clear(); lane.bytes = 0;
+    lane.pending.clear(); lane.checkpoints.clear(); lane.bytes = 0; lane.pendingLifecycle = null;
   }
   private report(lane: Lane, code: CaptureCode): void {
     if (code === "settlement_unavailable" && lane.diagnostic !== null && lane.diagnostic !== code) {
@@ -729,7 +740,32 @@ export class ExecutionCaptureCoordinator {
     return { runtime: observed, identity };
   }
 
+  private liveInstallationFor(lane: Lane): ShadowIngestInstallation | null {
+    return lane.detached ? null : {
+      workAttemptId: lane.installation.workAttemptId,
+      providerContinuationId: lane.installation.providerContinuationId,
+      executionGenerationId: lane.installation.executionGenerationId,
+      configurationRevision: lane.installation.configurationRevision,
+      providerConnection: lane.installation.providerConnection,
+    };
+  }
+
+  private retryPendingLifecycle(lane: Lane): void {
+    if (!lane.pendingLifecycle) return;
+    const outcome = this.store.retryLifecycleProjection(lane.pendingLifecycle, this.liveInstallationFor(lane));
+    if (outcome.status === "applied") {
+      lane.pendingLifecycle = null;
+      lane.pendingChange = true;
+      try { this.options.lifecycleProjected?.(lane.agentId, outcome.observedState); }
+      catch { /* optional observation */ }
+    } else if (outcome.status === "superseded") {
+      lane.pendingLifecycle = null;
+      lane.pendingChange = true;
+    }
+  }
+
   private drain(lane: Lane): boolean {
+    this.retryPendingLifecycle(lane);
     if (lane.detached && !lane.pending.size && !lane.checkpoints.size && lane.subscription!.position().latestSequence === 0) {
       lane.frontierStored = true; return false;
     }
@@ -799,25 +835,29 @@ export class ExecutionCaptureCoordinator {
       if ((event.fact.domain === "turn" || event.fact.domain === "execution") && !turn) { this.report(lane, "identity_unavailable"); return false; }
       const subject = turn?.runtime ?? runtime;
       token = this.bind(lane, subject, runtime, turn && subject.id !== runtime.id ? turn.identity : undefined);
-      const liveInstallation = lane.detached ? null : {
-        workAttemptId: lane.installation.workAttemptId,
-        providerContinuationId: lane.installation.providerContinuationId,
-        executionGenerationId: lane.installation.executionGenerationId,
-        configurationRevision: lane.installation.configurationRevision,
-        providerConnection: lane.installation.providerConnection,
-      };
-      const result = this.store.ingest(event.sourceId, token, { ...event.fact, ...(turn?.identity ?? {}),
+      const liveInstallation = this.liveInstallationFor(lane);
+      const ingestedFact = { ...event.fact, ...(turn?.identity ?? {}),
         factId: opaque("fact", lane.agentId, event.sourceId, String(sequence)), agentId: lane.agentId,
         executionGenerationId: subject.generation, runtimeGenerationId: subject.id, observerEpoch: token.epoch,
-        sourceSequence: sequence, observedAtMs: event.observedAtMs }, { liveInstallation });
+        sourceSequence: sequence, observedAtMs: event.observedAtMs } as ExecutionFact;
+      const result = this.store.ingest(event.sourceId, token, ingestedFact, { liveInstallation });
       if (result.status !== "accepted" && result.status !== "duplicate") {
         lane.suspended = true; this.report(lane, result.status === "gap" ? "source_gap" : "retention_limit"); return false;
       }
       if (result.status === "accepted" || lane.diagnostic !== null) lane.pendingChange = true;
       cursor = sequence; lane.pending.delete(sequence); lane.bytes -= queued.bytes; lane.diagnostic = null;
-      if (result.projectedObservedState) {
-        try { this.options.lifecycleProjected?.(lane.agentId, result.projectedObservedState); }
+      if (result.lifecycleProjection?.status === "applied") {
+        lane.pendingLifecycle = null;
+        try { this.options.lifecycleProjected?.(lane.agentId, result.lifecycleProjection.observedState); }
         catch { /* optional observation */ }
+      } else if (result.lifecycleProjection?.status === "pending") {
+        lane.pendingLifecycle = {
+          fact: ingestedFact,
+          observerExecutionGenerationId: token.observerExecutionGenerationId,
+          observerRuntimeGenerationId: token.observerRuntimeGenerationId,
+        };
+      } else if (result.lifecycleProjection?.status === "superseded") {
+        lane.pendingLifecycle = null;
       }
     }
     if (cursor < position.latestSequence) { lane.suspended = true; this.report(lane, "source_gap"); }

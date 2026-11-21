@@ -60,21 +60,22 @@ export const deliveryAndPolling = storeMethods({
       const database = await this.getDatabase();
       if (!database.prepare("SELECT 1 FROM agents WHERE agent_id=?").get(agentId)) return null;
       let committed = false;
-      let transactionOpen = false;
       const commit = async () => {
-        database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
-        this.writeFence?.();
-        database.prepare(`UPDATE agents SET live_sharing=${next} WHERE agent_id=?${only ? " AND live_sharing=?" : ""}`)
-          .run(...(only ? [agentId, only] : [agentId]));
-        database.exec("COMMIT"); transactionOpen = false; committed = true;
+        if (committed) throw new Error("Live sharing transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          this.writeFence?.();
+          database.prepare(`UPDATE agents SET live_sharing=${next} WHERE agent_id=?${only ? " AND live_sharing=?" : ""}`)
+            .run(...(only ? [agentId, only] : [agentId]));
+          database.exec("COMMIT");
+          committed = true;
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
+        }
       };
-      try {
-        if (commitFence) await commitFence(commit); else await commit();
-        if (!committed) throw new Error("Live sharing commit fence returned without committing.");
-      } catch (error) {
-        if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
-        throw error;
-      }
+      if (commitFence) await commitFence(commit); else await commit();
+      if (!committed) throw new Error("Live sharing commit fence returned without committing.");
       const row = database.prepare("SELECT live_sharing FROM agents WHERE agent_id=?").get(agentId) as Row | undefined;
       return row ? liveSharingState(row.live_sharing) : null;
     });

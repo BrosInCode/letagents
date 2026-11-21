@@ -22,4 +22,5 @@ export {
   moveAsideLegacyDaemonStateDatabase,
   openDaemonStateDatabase,
   ensureDaemonStateDatabase,
+  type MoveAsideLegacyOptions,
 } from "./connection.js";

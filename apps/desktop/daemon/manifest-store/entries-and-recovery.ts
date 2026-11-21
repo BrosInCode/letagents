@@ -26,13 +26,11 @@ export const entriesAndRecovery = storeMethods({
     return this.serialize(async () => {
       const database = await this.getDatabase();
       let committed = false;
-      let transactionOpen = false;
       let persisted!: DaemonManifestEntry;
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Manifest transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          transactionOpen = true;
+      const commit = async () => {
+        if (committed) throw new Error("Manifest transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
           this.writeFence?.();
           if (database.prepare("SELECT 1 FROM agents WHERE agent_id = ?").get(normalized.id)) {
             throw new ManifestConflictError(`Daemon manifest entry already exists: ${normalized.id}`);
@@ -45,17 +43,16 @@ export const entriesAndRecovery = storeMethods({
           if (!readBack) throw new Error(`Daemon manifest entry disappeared during creation: ${normalized.id}`);
           persisted = readBack;
           database.exec("COMMIT");
-          transactionOpen = false;
           committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
-        return { version: 1, entry: persisted };
-      } catch (error) {
-        if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
-        throw error;
-      }
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
+        }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
+      return { version: 1, entry: persisted };
     });
   },
 
@@ -76,28 +73,29 @@ export const entriesAndRecovery = storeMethods({
         return { version: currentVersion, outcome: "conflict" as const, configuration: await this.getAgentConfiguration(input.agentId) };
       }
       let committed = false;
-      let transactionOpen = false;
       const commit = async () => {
-        database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
-        this.writeFence?.();
-        const policyJson = input.providerLaunchPolicy === undefined ? null : json(input.providerLaunchPolicy);
-        const changed = database.prepare(`UPDATE agents
-          SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,
-              provider_launch_policy_json=?,image_input=?,config_revision=config_revision+1,version=version+1
-          WHERE agent_id=? AND version=? AND config_revision=?`).run(
-          input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId,
-          policyJson, input.imageInput ? 1 : 0, input.agentId, expectedVersion, input.expectedRevision,
-        );
-        if (Number(changed.changes) !== 1) throw new ManifestConflictError("Agent configuration version or revision changed during update.");
-        database.exec("COMMIT"); transactionOpen = false; committed = true;
+        if (committed) throw new Error("Configuration transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          this.writeFence?.();
+          const policyJson = input.providerLaunchPolicy === undefined ? null : json(input.providerLaunchPolicy);
+          const changed = database.prepare(`UPDATE agents
+            SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,
+                provider_launch_policy_json=?,image_input=?,config_revision=config_revision+1,version=version+1
+            WHERE agent_id=? AND version=? AND config_revision=?`).run(
+            input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId,
+            policyJson, input.imageInput ? 1 : 0, input.agentId, expectedVersion, input.expectedRevision,
+          );
+          if (Number(changed.changes) !== 1) throw new ManifestConflictError("Agent configuration version or revision changed during update.");
+          database.exec("COMMIT");
+          committed = true;
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
+        }
       };
-      try {
-        if (commitFence) await commitFence(commit); else await commit();
-        if (!committed) throw new Error("Configuration commit fence returned without committing.");
-      } catch (error) {
-        if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
-        throw error;
-      }
+      if (commitFence) await commitFence(commit); else await commit();
+      if (!committed) throw new Error("Configuration commit fence returned without committing.");
       return { version: expectedVersion + 1, outcome: "updated" as const, configuration: await this.getAgentConfiguration(input.agentId) };
     });
   },

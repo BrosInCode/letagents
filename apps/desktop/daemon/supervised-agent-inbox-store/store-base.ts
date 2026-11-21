@@ -105,27 +105,24 @@ export abstract class InboxStoreBase {
   }
   protected transaction<T>(database: DatabaseSync, operation: () => T): T { database.exec("BEGIN IMMEDIATE"); try { this.writeFence?.(); const result = operation(); database.exec("COMMIT"); return result; } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; } }
   protected async transactionFenced<T>(database: DatabaseSync, operation: () => T, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<T> {
-    let transactionOpen = false;
     let committed = false;
     let result!: T;
-    try {
-      const transaction = async () => {
-        if (transactionOpen || committed) throw new Error("Supervised inbox transaction was already started.");
-        database.exec("BEGIN IMMEDIATE");
-        transactionOpen = true;
+    const transaction = async () => {
+      if (committed) throw new Error("Supervised inbox transaction was already started.");
+      database.exec("BEGIN IMMEDIATE");
+      try {
         this.writeFence?.();
         result = operation();
         database.exec("COMMIT");
-        transactionOpen = false;
         committed = true;
-      };
-      if (commitFence) await commitFence(transaction); else await transaction();
-      if (!committed) throw new Error("Supervised inbox commit fence returned without committing.");
-      return result;
-    } catch (error) {
-      if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
-      throw error;
-    }
+      } catch (error) {
+        try { database.exec("ROLLBACK"); } catch {}
+        throw error;
+      }
+    };
+    if (commitFence) await commitFence(transaction); else await transaction();
+    if (!committed) throw new Error("Supervised inbox commit fence returned without committing.");
+    return result;
   }
   private async getDatabase(): Promise<DatabaseSync> {
     if (this.closed) throw new Error("Supervised inbox store is closed.");

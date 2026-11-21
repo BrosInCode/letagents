@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { mkdtemp, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { renameWithRetryAsync } from "../../../../shared/rename-retry.mjs";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import { testDaemonEndpoint } from "../../electron/__tests__/platform.js";
 import { provisionedWorkspace } from "./helpers/daemon-fixture.js";
@@ -17,15 +18,19 @@ import {
   DaemonStateDatabase,
   DaemonStateSchema,
   fromSqliteUserVersion,
+  moveAsideLegacyDaemonStateDatabase,
   runNumberedMigrations,
   toSqliteUserVersion,
   validateDaemonStateShape,
 } from "../daemon-state-database.js";
 import { WorkDurabilityStore } from "../durability-store.js";
+import { ExecutionApprovalPublicationStore } from "../execution-approval-publication-store.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import { SupervisorDaemon } from "../main.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { processBirthState, systemProcessIdentity } from "../process-identity.js";
+import { RoomWorkPublicationStore } from "../room-work-publication-store.js";
+import { RoomWorkspaceStore } from "../room-workspace-store.js";
 import { DaemonFenceLostError } from "../singleton.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry } from "../types.js";
@@ -203,8 +208,9 @@ test("legacy DB move-aside stops only exact-birth legacy processes, preserves le
         CREATE TABLE legacy_canary (note TEXT NOT NULL);
         INSERT INTO legacy_canary VALUES ('legacy-row-preserved');
       `);
+      const mismatchedBirth = process.platform === "win32" ? "win32-ft:1" : "Mon Jan  1 00:00:00 1990";
       legacy.prepare("INSERT INTO runtime_deployments VALUES (?, ?, ?)").run("legacy_match", matchingChild.pid, matchingBirth);
-      legacy.prepare("INSERT INTO runtime_deployments VALUES (?, ?, ?)").run("legacy_mismatch", mismatchedChild.pid, "Mon Jan  1 00:00:00 1990");
+      legacy.prepare("INSERT INTO runtime_deployments VALUES (?, ?, ?)").run("legacy_mismatch", mismatchedChild.pid, mismatchedBirth);
     } finally {
       legacy.close();
     }
@@ -473,6 +479,29 @@ test("in-transaction synchronous write fence blocks stale writes across every st
     const shadow = new ExecutionShadowStore(internals.stateDatabase.connection, {
       assertWriteFence: () => internals.singleton.assertCurrentSync(),
     });
+    const workPubStore = new RoomWorkPublicationStore(
+      internals.stateDatabase.connection,
+      () => internals.singleton.assertCurrentSync(),
+    );
+    const workspaceStore = new RoomWorkspaceStore(
+      internals.stateDatabase.connection,
+      () => internals.singleton.assertCurrentSync(),
+    );
+    const approvalPubStore = new ExecutionApprovalPublicationStore(
+      internals.stateDatabase.connection,
+      () => internals.singleton.assertCurrentSync(),
+    );
+    // Pin one room_work_publications row before fencing so workspace capture FK exists.
+    workPubStore.pin({
+      agentId: "fenced_agent",
+      roomId: "room_v1",
+      apiOrigin: "https://letagents.test",
+      agentKey: "owner/fenced",
+      agentInstanceId: "instance-1",
+      hostId: "host-1",
+      installationId: "install-1",
+      sourceSessionId: "session-1",
+    }, ["msg_1"]);
     shadow.registerRuntime({
       agentId: "fenced_agent",
       executionGenerationId: "gen-1",
@@ -545,6 +574,70 @@ test("in-transaction synchronous write fence blocks stale writes across every st
       DaemonFenceLostError,
       "ExecutionShadowStore.ingest must fail closed inside BEGIN IMMEDIATE",
     );
+    assert.throws(
+      () => workPubStore.pin({
+        agentId: "fenced_agent",
+        roomId: "room_v1",
+        apiOrigin: "https://letagents.test",
+        agentKey: "owner/fenced",
+        agentInstanceId: "instance-1",
+        hostId: "host-1",
+        installationId: "install-1",
+        sourceSessionId: "session-1",
+      }, ["msg_2"]),
+      DaemonFenceLostError,
+      "RoomWorkPublicationStore write must fail closed inside BEGIN IMMEDIATE",
+    );
+    assert.throws(
+      () => workspaceStore.begin({
+        agentId: "fenced_agent",
+        roomId: "room_v1",
+        sourceMessageId: "msg_1",
+        workAttemptId: fencedAttemptId,
+        inboxItemId: "inbox-1",
+      }),
+      DaemonFenceLostError,
+      "RoomWorkspaceStore write must fail closed inside BEGIN IMMEDIATE",
+    );
+    const hex64 = "a".repeat(64);
+    assert.throws(
+      () => approvalPubStore.pin({
+        agentId: "fenced_agent",
+        roomId: "room_v1",
+        apiOrigin: "https://letagents.test",
+        agentKey: "owner/fenced",
+        agentInstanceId: "instance-1",
+        hostId: "host-1",
+        installationId: "install-1",
+        sourceSessionId: "session-1",
+        sourceMessageId: "msg_1",
+        inboxItemId: "inbox-1",
+        workAttemptId: fencedAttemptId,
+        delegationInstanceId: "del-1",
+        delegationRevision: 1,
+        delegationScopeSha256: hex64,
+        approverAccountId: "acct-1",
+        expected: {
+          requestId: "req-1",
+          requestVersion: 1,
+          requestSha256: hex64,
+          agentId: "fenced_agent",
+          roomId: "room_v1",
+          executionGenerationId: "gen-1",
+          runtimeGenerationId,
+          turnId: "turn-1",
+          providerContinuationId: "cont-1",
+          providerTurnId: "pturn-1",
+          connectionId: "conn-1",
+          nativeRequestId: "nreq-1",
+        },
+        projectionSha256: hex64,
+        producedAtMs: 100,
+        expiresAtMs: 200,
+      }),
+      DaemonFenceLostError,
+      "ExecutionApprovalPublicationStore write must fail closed inside BEGIN IMMEDIATE",
+    );
 
     // Verify zero partial writes committed across any table.
     const db = internals.stateDatabase.connection;
@@ -553,8 +646,420 @@ test("in-transaction synchronous write fence blocks stale writes across every st
     assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM inbox_items").get()?.n), 0);
     assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM work_attempt_executions").get()?.n), 0);
     assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()?.n), 0);
+    assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM room_work_publications").get()?.n), 1);
+    assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM room_workspace_captures").get()?.n), 0);
+    assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM execution_approval_publications").get()?.n), 0);
   } finally {
     await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("fenced transactions roll back synchronously inside commit() before rejecting so shared-connection continuations never see an open transaction", async () => {
+  const env = await tempDir("letagents-sync-rollback-");
+  const dbPath = join(env.root, "daemon-state.sqlite");
+  const stateDb = await DaemonStateDatabase.open(dbPath);
+  const db = stateDb.connection;
+  const manifest = new ManifestStore(dbPath);
+  const inbox = new SupervisedAgentInboxStore(dbPath);
+  manifest.attachDatabase(db);
+  inbox.attachDatabase(db);
+  try {
+    await manifest.createEntry(sampleEntry("agent_rollback"));
+
+    let probeCounter = 0;
+    const makeAsyncUnwindFence = (label: string) => async (commit: () => Promise<void>): Promise<void> => {
+      await Promise.resolve();
+      let seenOpen = false;
+      try {
+        await commit();
+      } finally {
+        // Every microtask after commit() rejects MUST see db.isTransaction === false,
+        // and unrelated writes on the same connection MUST commit and survive.
+        for (let tick = 0; tick < 3; tick += 1) {
+          if (db.isTransaction) seenOpen = true;
+          await Promise.resolve();
+        }
+        assert.equal(seenOpen, false, `${label}: database.isTransaction must never be true after commit() rejects`);
+        const key = `surviving-${label}-${++probeCounter}`;
+        db.prepare("INSERT INTO daemon_maintenance_state(key,value_json,updated_at) VALUES(?,?,?)")
+          .run(key, JSON.stringify({ ok: true }), "2026-11-21T00:00:00.000Z");
+        db.exec("BEGIN IMMEDIATE");
+        db.prepare("INSERT INTO daemon_maintenance_state(key,value_json,updated_at) VALUES(?,?,?)")
+          .run(`${key}-tx`, JSON.stringify({ tx: true }), "2026-11-21T00:00:00.000Z");
+        db.exec("COMMIT");
+      }
+    };
+
+    // 1. ManifestStore.replaceEntry (writeAgent) throws ManifestConflictError inside BEGIN IMMEDIATE.
+    await assert.rejects(
+      () => manifest.replaceEntry(99, { ...sampleEntry("agent_rollback"), observed_state: "idle" }, makeAsyncUnwindFence("writeAgent")),
+      ManifestConflictError,
+    );
+    // 2. ManifestStore.replaceEntriesBatch (writeOperationalJournal) throws ManifestConflictError inside BEGIN IMMEDIATE.
+    await assert.rejects(
+      () => manifest.replaceEntriesBatch({ agent_rollback: 99 }, [{ ...sampleEntry("agent_rollback"), observed_state: "idle" }], makeAsyncUnwindFence("writeOperationalJournal")),
+      ManifestConflictError,
+    );
+    // 3. ManifestStore.createEntry throws ManifestConflictError on duplicate id inside BEGIN IMMEDIATE.
+    await assert.rejects(
+      () => manifest.createEntry(sampleEntry("agent_rollback"), makeAsyncUnwindFence("createEntry")),
+      ManifestConflictError,
+    );
+    // 4. ManifestStore.updateAgentConfiguration throws when writeFence fails inside BEGIN IMMEDIATE.
+    manifest.attachDatabase(db, () => { throw new DaemonFenceLostError("stale-gen"); });
+    await assert.rejects(
+      () => manifest.updateAgentConfiguration(1, {
+        agentId: "agent_rollback",
+        expectedRevision: 1,
+        model: null,
+        reasoningEffort: null,
+        charter: "changed",
+        permissionProfileId: null,
+        providerLaunchPolicy: null,
+        imageInput: false,
+      }, makeAsyncUnwindFence("updateAgentConfiguration")),
+      DaemonFenceLostError,
+    );
+    // 5. ManifestStore.write throws when writeFence fails inside BEGIN IMMEDIATE.
+    await assert.rejects(
+      () => manifest.write([sampleEntry("agent_rollback")], makeAsyncUnwindFence("write")),
+      DaemonFenceLostError,
+    );
+    // 6. ManifestStore.setAgentLiveSharing (writeLiveSharing) throws when writeFence fails inside BEGIN IMMEDIATE.
+    await assert.rejects(
+      () => manifest.setAgentLiveSharing({ agentId: "agent_rollback", enabled: true }, makeAsyncUnwindFence("writeLiveSharing")),
+      DaemonFenceLostError,
+    );
+    // 7. ManifestStore.prepareRoomMove throws when writeFence fails inside BEGIN IMMEDIATE.
+    await assert.rejects(
+      () => manifest.prepareRoomMove({
+        operation_id: "move-1",
+        request_id: "req-1",
+        agent_id: "agent_rollback",
+        source_room_id: "room_v1",
+        destination_room_id: "room_v2",
+        daemon_generation: 1,
+        work_attempt_id: null,
+        execution_generation_id: null,
+        agent_session_id: null,
+        activating_inbox_item_id: null,
+        provider_turn_id: null,
+        effect_id: null,
+        phase: "prepared",
+      }, makeAsyncUnwindFence("prepareRoomMove")),
+      DaemonFenceLostError,
+    );
+    // 8. SupervisedAgentInboxStore.ingestPoll (transactionFenced) throws when writeFence fails inside BEGIN IMMEDIATE.
+    inbox.attachDatabase(db, () => { throw new DaemonFenceLostError("stale-inbox"); });
+    await assert.rejects(
+      () => inbox.ingestPoll({
+        agent_id: "agent_rollback",
+        room_id: "room_v1",
+        last_observed_message_id: "msg_1",
+        messages: [{ source_message_id: "msg_1", source_message: { id: "msg_1" }, activation: {} }],
+      }, makeAsyncUnwindFence("inboxTransactionFenced")),
+      DaemonFenceLostError,
+    );
+
+    // Every single unrelated write performed during rejection unwind microtasks must have survived!
+    assert.equal(db.isTransaction, false);
+    const survived = Number(db.prepare("SELECT COUNT(*) AS n FROM daemon_maintenance_state WHERE key LIKE 'surviving-%'").get()?.n);
+    assert.equal(survived, probeCounter * 2, "all concurrent writes during rejection unwind must remain committed");
+  } finally {
+    await manifest.close();
+    await inbox.close();
+    stateDb.close();
+    await env.cleanup();
+  }
+});
+
+function createSigkilledUncheckpointedLegacyDb(dbPath: string): void {
+  const script = `
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(${JSON.stringify(dbPath)});
+    db.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; PRAGMA application_id = 0; PRAGMA user_version = 52;");
+    db.exec("CREATE TABLE canary (id INTEGER PRIMARY KEY, val TEXT NOT NULL);");
+    db.exec("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL);");
+    db.exec("INSERT INTO canary VALUES (1, 'wal-one'), (2, 'wal-two'), (3, 'wal-three');");
+    db.exec("INSERT INTO notes VALUES (10, 'note-a'), (20, 'note-b');");
+    process.kill(process.pid, "SIGKILL");
+  `;
+  const res = spawnSync(process.execPath, ["-e", script], { stdio: "ignore" });
+  assert.ok(res.signal === "SIGKILL" || res.status !== 0, "seed child must terminate abruptly to retain uncheckpointed WAL");
+}
+
+test("legacy DB move-aside checkpoints uncheckpointed WAL after SIGKILL, preserves row counts, recovers across rename failures, and fails closed on orphaned WAL", async () => {
+  // 1. Complete archive from an uncheckpointed WAL after SIGKILL with exact row counts before and after.
+  {
+    const env = await tempDir("letagents-legacy-wal-ok-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      createSigkilledUncheckpointedLegacyDb(dbPath);
+      const walBefore = await stat(`${dbPath}-wal`);
+      assert.ok(walBefore.size > 0, "fixture must start with non-empty uncheckpointed -wal");
+      await writeFile(`${dbPath}.recovery.enc`, "enc-bytes", "utf8");
+      await protectOwnerPrivate(dbPath, "file", { force: true });
+
+      const opened = await DaemonStateDatabase.open(dbPath);
+      try {
+        assert.equal(Number(opened.connection.prepare("PRAGMA user_version").get()?.user_version), DAEMON_STATE_USER_VERSION);
+      } finally {
+        opened.close();
+      }
+
+      const entries = await readdir(env.root);
+      const archived = entries.filter((name) => /^daemon-state\.sqlite\.legacy-.*Z(?:-\d+)?$/.test(name));
+      assert.equal(archived.length, 1);
+      const archivedPath = join(env.root, archived[0]!);
+      assert.equal(entries.includes(`${archived[0]!}-wal`), false, "checkpointed archive must not rely on a -wal sidecar");
+      assert.equal(await readFile(`${archivedPath}.recovery.enc`, "utf8"), "enc-bytes");
+
+      const verify = new DatabaseSync(archivedPath, { readOnly: true });
+      try {
+        assert.equal(verify.prepare("PRAGMA integrity_check").get()?.integrity_check, "ok");
+        assert.equal(Number(verify.prepare("PRAGMA user_version").get()?.user_version), 52);
+        assert.equal(Number(verify.prepare("SELECT COUNT(*) AS n FROM canary").get()?.n), 3);
+        assert.equal(Number(verify.prepare("SELECT COUNT(*) AS n FROM notes").get()?.n), 2);
+      } finally {
+        verify.close();
+      }
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 2. Rename failure (injected EIO on main file rename) rolls back sidecar rename and preserves complete archive on retry.
+  {
+    const env = await tempDir("letagents-legacy-wal-eio-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      createSigkilledUncheckpointedLegacyDb(dbPath);
+      await writeFile(`${dbPath}.recovery.enc`, "enc-rollback", "utf8");
+      await protectOwnerPrivate(dbPath, "file", { force: true });
+
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+          renameFile: async (from, to) => {
+            if (from === dbPath) throw Object.assign(new Error("EIO: injected main rename error"), { code: "EIO" });
+            await renameWithRetryAsync(from, to);
+          },
+        }),
+        /injected main rename error/,
+      );
+
+      // Original DB and .recovery.enc must still be in place with all canary rows readable!
+      assert.equal(await readFile(`${dbPath}.recovery.enc`, "utf8"), "enc-rollback");
+      const stillThere = new DatabaseSync(dbPath, { readOnly: true });
+      try {
+        assert.equal(Number(stillThere.prepare("SELECT COUNT(*) AS n FROM canary").get()?.n), 3);
+      } finally {
+        stillThere.close();
+      }
+
+      // Subsequent normal startup archives the intact DB and opens fresh schema v1.
+      const opened = await DaemonStateDatabase.open(dbPath);
+      try {
+        assert.equal(Number(opened.connection.prepare("PRAGMA user_version").get()?.user_version), DAEMON_STATE_USER_VERSION);
+      } finally {
+        opened.close();
+      }
+      const entries = await readdir(env.root);
+      const archived = entries.filter((name) => /^daemon-state\.sqlite\.legacy-.*Z(?:-\d+)?$/.test(name));
+      assert.equal(archived.length, 1);
+      const verify = new DatabaseSync(join(env.root, archived[0]!), { readOnly: true });
+      try {
+        assert.equal(Number(verify.prepare("SELECT COUNT(*) AS n FROM canary").get()?.n), 3);
+        assert.equal(Number(verify.prepare("SELECT COUNT(*) AS n FROM notes").get()?.n), 2);
+      } finally {
+        verify.close();
+      }
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 3. Orphaned non-empty -wal without main DB file fails closed so SQLite never deletes stranded WAL data.
+  {
+    const env = await tempDir("letagents-orphaned-wal-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      createSigkilledUncheckpointedLegacyDb(dbPath);
+      const walSize = (await stat(`${dbPath}-wal`)).size;
+      assert.ok(walSize > 0);
+      // Simulate an external/manual partial move of only the main file.
+      await rename(dbPath, `${dbPath}.manual-partial`);
+
+      await assert.rejects(
+        () => DaemonStateDatabase.open(dbPath),
+        /orphaned non-empty -wal/i,
+      );
+      // Stranded -wal must remain untouched on disk!
+      assert.equal((await stat(`${dbPath}-wal`)).size, walSize);
+    } finally {
+      await env.cleanup();
+    }
+  }
+});
+
+test("legacy DB move-aside fails closed before archiving when provider termination fails, birth is unknown, or Windows kill is unkillable/incomplete", async () => {
+  const env = await tempDir("letagents-legacy-stop-fail-");
+  const dbPath = join(env.root, "daemon-state.sqlite");
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], { stdio: "ignore" });
+  try {
+    assert.ok(child.pid);
+    const birth = systemProcessIdentity.readBirthIdentity(child.pid).trim();
+    assert.equal(processBirthState(child.pid, birth), "live");
+
+    const seed = new DatabaseSync(dbPath);
+    try {
+      seed.exec(`
+        PRAGMA application_id = 0;
+        PRAGMA user_version = 52;
+        CREATE TABLE runtime_deployments (
+          agent_id TEXT PRIMARY KEY,
+          provider_connection_pid INTEGER,
+          provider_process_identity TEXT
+        );
+      `);
+      seed.prepare("INSERT INTO runtime_deployments VALUES (?, ?, ?)").run("live_legacy", child.pid, birth);
+    } finally {
+      seed.close();
+    }
+    await protectOwnerPrivate(dbPath, "file", { force: true });
+
+    // 1. POSIX failed signalling: signalProcessTree returns false -> fails closed before any rename, child stays live.
+    await assert.rejects(
+      () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "darwin",
+        signalProcessTree: () => false,
+        graceMs: 50,
+        killWaitMs: 50,
+      }),
+      /could not be confirmed stopped/i,
+    );
+    assert.equal(processBirthState(child.pid, birth), "live");
+    assert.equal((await readdir(env.root)).some((name) => name.includes(".legacy-")), false);
+
+    // 2. Unresolved birth identity ("unknown"): fails closed without sending any signal.
+    let signalled = false;
+    await assert.rejects(
+      () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+        birthState: () => "unknown",
+        signalProcessTree: () => { signalled = true; return true; },
+      }),
+      /birth identity could not be resolved/i,
+    );
+    assert.equal(signalled, false, "must never signal a process whose birth is unknown");
+    assert.equal((await readdir(env.root)).some((name) => name.includes(".legacy-")), false);
+
+    // 3. Windows signalling outcomes: "unkillable", "none", and "ended"-but-still-live all fail closed.
+    await assert.rejects(
+      () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "win32",
+        birthState: () => "live",
+        signalProcessTreeOutcome: () => "unkillable",
+      }),
+      /unkillable/i,
+    );
+    await assert.rejects(
+      () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "win32",
+        birthState: () => "live",
+        signalProcessTreeOutcome: () => "none",
+      }),
+      /failed to stop legacy provider process/i,
+    );
+    await assert.rejects(
+      () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "win32",
+        birthState: () => "live",
+        signalProcessTreeOutcome: () => "ended",
+        killWaitMs: 60,
+      }),
+      /remained live after Windows termination/i,
+    );
+    assert.equal((await readdir(env.root)).some((name) => name.includes(".legacy-")), false);
+
+    // 4. Windows "ended" followed by birth transitioning to "gone" succeeds and archives the DB.
+    let winPolls = 0;
+    const archived = await moveAsideLegacyDaemonStateDatabase(dbPath, {
+      platform: "win32",
+      birthState: () => (++winPolls === 1 ? "live" : "gone"),
+      signalProcessTreeOutcome: () => "ended",
+      killWaitMs: 200,
+    });
+    assert.ok(archived && archived.includes(".legacy-"));
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await env.cleanup();
+  }
+});
+
+test("presentation-only recordActivityBatch advances only the affected agent version and rejects stale replaceEntry snapshots", async () => {
+  const env = await tempDir("letagents-activity-cas-");
+  const dbPath = join(env.root, "daemon-state.sqlite");
+  const store = new ManifestStore(dbPath);
+  try {
+    await store.write([sampleEntry("agent_a"), sampleEntry("agent_b")]);
+    const saved = await store.getEntryWithVersion("agent_a");
+    assert.ok(saved);
+    assert.equal(saved.version, 1);
+
+    const makeEvent = (sequence: number) => ({
+      observed_at: "2026-11-21T00:00:01.000Z",
+      sequence,
+      provider: "codex" as const,
+      kind: "turn_item" as const,
+      method: "item/updated",
+      summary: `event-${sequence}`,
+      status: "working" as const,
+      payload: { seq: sequence },
+      payload_truncated: false,
+      payload_redacted: false,
+      durable_payload_ref: null,
+    });
+
+    // Presentation-only batch (runtimeUpdate: null) MUST bump agent_a's version without touching agent_b.
+    const batch1 = await store.recordActivityBatch([{
+      agentId: "agent_a",
+      event: makeEvent(1),
+      runtimeUpdate: null,
+      limit: 200,
+    }]);
+    assert.equal(batch1.written, 1);
+
+    const afterBatch1A = await store.getEntryWithVersion("agent_a");
+    const afterBatch1B = await store.getEntryWithVersion("agent_b");
+    assert.equal(afterBatch1A?.version, 2, "presentation-only activity batch must advance agent_a version");
+    assert.equal(afterBatch1B?.version, 1, "unrelated agent_b version must remain unchanged");
+
+    // Stale replacement at version 1 must be rejected and committed activity preserved.
+    await assert.rejects(
+      () => store.replaceEntry(saved.version, saved.entry),
+      ManifestConflictError,
+    );
+    assert.equal((await store.getEntry("agent_a"))?.activity?.length, 1);
+
+    // Batch with runtimeUpdate bumps version by exactly 1 (no double-increment).
+    const batch2 = await store.recordActivityBatch([{
+      agentId: "agent_a",
+      event: makeEvent(2),
+      runtimeUpdate: {
+        observedState: "working",
+        nativeLiveness: { state: "active", observed_at: "2026-11-21T00:00:02.000Z", detail: "active" },
+      },
+      limit: 200,
+    }]);
+    assert.equal(batch2.written, 1);
+    assert.equal((await store.getEntryWithVersion("agent_a"))?.version, 3);
+
+    // Single appendActivityOnly bumps version by exactly 1 (no double-increment).
+    const appended = await store.appendActivityOnly(3, "agent_a", makeEvent(3), 200);
+    assert.equal(appended.version, 4);
+    assert.equal((await store.getEntryWithVersion("agent_a"))?.version, 4);
+  } finally {
+    await store.close();
     await env.cleanup();
   }
 });

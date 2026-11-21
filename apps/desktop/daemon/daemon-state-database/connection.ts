@@ -3,7 +3,7 @@ import { lstat, mkdir, open } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isOwnerPrivate, ownerPrivatePlatform, protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
-import { signalTree } from "../../../../shared/process-tree.mjs";
+import { signalTree, signalTreeOutcome, type TreeSignalOutcome } from "../../../../shared/process-tree.mjs";
 import { renameWithRetryAsync } from "../../../../shared/rename-retry.mjs";
 import { processBirthState } from "../process-identity.js";
 import { DaemonStateSchema } from "./schema.js";
@@ -63,6 +63,17 @@ async function uniqueLegacyDestination(path: string, now: Date): Promise<string>
 
 type LegacyLiveRuntime = { pid: number; birth: string };
 
+export type MoveAsideLegacyOptions = {
+  now?: Date;
+  platform?: NodeJS.Platform;
+  birthState?: (pid: number, birth: string) => "live" | "gone" | "unknown";
+  signalProcessTree?: typeof signalTree;
+  signalProcessTreeOutcome?: typeof signalTreeOutcome;
+  renameFile?: (from: string, to: string) => Promise<void>;
+  graceMs?: number;
+  killWaitMs?: number;
+};
+
 /**
  * Reads only exact (pid, process_identity) pairs from a pre-reset database so
  * surviving provider processes (Codex / Open Model) can be stopped cleanly by
@@ -92,54 +103,158 @@ function readLegacyLiveRuntimes(database: DatabaseSync): LegacyLiveRuntime[] {
       targets.push({ pid, birth });
     }
     return targets;
-  } catch {
+  } catch (error) {
+    if (isSqliteBusyOrLocked(error)) throw error;
+    console.warn("[daemon_state] could not inspect legacy runtime_deployments before move-aside:", error);
     return [];
   }
 }
 
-async function stopLegacyLiveRuntimes(targets: readonly LegacyLiveRuntime[]): Promise<void> {
+async function waitForLegacyRuntimeExit(
+  pid: number,
+  birth: string,
+  birthState: (pid: number, birth: string) => "live" | "gone" | "unknown",
+  timeoutMs: number,
+): Promise<"live" | "gone" | "unknown"> {
+  const deadline = Date.now() + timeoutMs;
+  let state = birthState(pid, birth);
+  while (state === "live" && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    state = birthState(pid, birth);
+  }
+  return state;
+}
+
+/**
+ * Stops surviving exact-birth legacy provider processes and requires hard proof
+ * (`"gone"`) before the legacy database can be moved aside. Reused PIDs resolve
+ * to `"gone"` and are never signalled; failed signalling, unkillable trees, or
+ * unresolved birth identities (`"unknown"`) fail closed.
+ */
+async function stopLegacyLiveRuntimes(
+  targets: readonly LegacyLiveRuntime[],
+  options: MoveAsideLegacyOptions = {},
+): Promise<void> {
+  const platform = options.platform ?? process.platform;
+  const birthState = options.birthState ?? ((pid, birth) => processBirthState(pid, birth));
+  const graceMs = options.graceMs ?? 2_000;
+  const killWaitMs = options.killWaitMs ?? 1_000;
+  const sendSignal = options.signalProcessTree ?? signalTree;
+  const sendSignalOutcome: (pid: number, signal: NodeJS.Signals, opts: { identity?: string; platform?: NodeJS.Platform }) => TreeSignalOutcome =
+    options.signalProcessTreeOutcome
+    ?? (options.signalProcessTree
+      ? (pid, signal, opts) => (options.signalProcessTree!(pid, signal, opts) ? "ended" : "none")
+      : signalTreeOutcome);
+
   await Promise.all(targets.map(async ({ pid, birth }) => {
-    if (processBirthState(pid, birth) !== "live") return;
-    if (process.platform === "win32") {
-      signalTree(pid, "SIGTERM", { identity: birth, platform: "win32" });
+    const initialState = birthState(pid, birth);
+    if (initialState === "gone") return;
+    if (initialState === "unknown") {
+      throw new Error(`Cannot reset legacy daemon state: legacy provider process ${pid} birth identity could not be resolved.`);
+    }
+    if (platform === "win32") {
+      const outcome = sendSignalOutcome(pid, "SIGTERM", { identity: birth, platform: "win32" });
+      if (outcome === "unkillable") {
+        throw new Error(`Cannot reset legacy daemon state: legacy provider process ${pid} is unkillable.`);
+      }
+      if (outcome === "none") {
+        const after = birthState(pid, birth);
+        if (after === "gone") return;
+        throw new Error(`Cannot reset legacy daemon state: failed to stop legacy provider process ${pid} on Windows (${after}).`);
+      }
+      const finalState = await waitForLegacyRuntimeExit(pid, birth, birthState, killWaitMs);
+      if (finalState !== "gone") {
+        throw new Error(`Cannot reset legacy daemon state: legacy provider process ${pid} remained ${finalState} after Windows termination.`);
+      }
       return;
     }
-    signalTree(pid, "SIGTERM");
-    const deadline = Date.now() + 2_000;
-    while (Date.now() < deadline && processBirthState(pid, birth) === "live") {
-      await new Promise<void>((resolve) => setTimeout(resolve, 50));
-    }
-    if (processBirthState(pid, birth) === "live") {
-      signalTree(pid, "SIGKILL");
-      const killDeadline = Date.now() + 1_000;
-      while (Date.now() < killDeadline && processBirthState(pid, birth) === "live") {
-        await new Promise<void>((resolve) => setTimeout(resolve, 50));
-      }
-    } else {
+
+    const termSent = sendSignal(pid, "SIGTERM");
+    let state = termSent ? await waitForLegacyRuntimeExit(pid, birth, birthState, graceMs) : birthState(pid, birth);
+    if (state === "live") {
+      const killSent = sendSignal(pid, "SIGKILL");
+      state = killSent ? await waitForLegacyRuntimeExit(pid, birth, birthState, killWaitMs) : birthState(pid, birth);
+    } else if (state === "gone") {
       // Leader exited on SIGTERM; clear any surviving grandchildren in its process group
       // without touching a potentially reused leader PID.
-      signalTree(pid, "SIGKILL", { groupOnly: true });
+      sendSignal(pid, "SIGKILL", { groupOnly: true });
+    }
+    const finalState = birthState(pid, birth);
+    if (finalState !== "gone") {
+      throw new Error(`Cannot reset legacy daemon state: legacy provider process ${pid} could not be confirmed stopped (${finalState}).`);
     }
   }));
 }
 
 /**
+ * Folds any uncheckpointed WAL frames into the legacy database main file with
+ * `PRAGMA synchronous = FULL` and `PRAGMA wal_checkpoint(TRUNCATE)` before any
+ * file moves, without altering user tables, rows, `user_version`, or
+ * `application_id`. Once closed with no non-empty `-wal` left behind, renaming
+ * the main file is a single self-contained commit point.
+ */
+async function checkpointLegacyDaemonStateDatabase(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    let database: DatabaseSync | null = null;
+    try {
+      database = new DatabaseSync(path);
+      database.exec("PRAGMA busy_timeout = 5000");
+      database.exec("PRAGMA synchronous = FULL");
+      const result = database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as Row | undefined;
+      const busy = Number(result?.busy ?? 0);
+      const log = Number(result?.log ?? -1);
+      const checkpointed = Number(result?.checkpointed ?? -1);
+      if (busy !== 0 || (log >= 0 && checkpointed < log)) {
+        if (attempt === 7) {
+          throw new Error(`Cannot move aside legacy daemon database: WAL checkpoint incomplete (busy=${busy}, log=${log}, checkpointed=${checkpointed}).`);
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+        continue;
+      }
+      break;
+    } catch (error) {
+      if (attempt === 7 || !isSqliteBusyOrLocked(error)) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    } finally {
+      try { database?.close(); } catch { /* ignore */ }
+    }
+  }
+  const walInfo = await lstat(`${path}-wal`).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (walInfo && (!walInfo.isFile() || walInfo.isSymbolicLink() || walInfo.size > 0)) {
+    throw new Error("Cannot move aside legacy daemon database: uncheckpointed WAL file remains after checkpoint.");
+  }
+}
+
+/**
  * Inspects an existing database read-only before backup or open. Any pre-reset
  * legacy database (application_id = 0 with user_version > 0 or existing tables)
- * has its surviving exact-birth provider runtimes stopped, then is moved aside
- * untouched along with its -wal, -shm, and .recovery.enc sidecars so the daemon
- * starts clean on schema v1. Future modern schemas and foreign SQLite files
- * fail closed without being moved or modified.
+ * has its surviving exact-birth provider runtimes stopped and confirmed gone,
+ * checkpoints its WAL into the main file so the main file alone is complete,
+ * and then moves aside recovery sidecars and the main file so the daemon starts
+ * clean on schema v1. Future modern schemas, foreign SQLite files, and orphaned
+ * non-empty WAL files with no main database fail closed without modification.
  */
 export async function moveAsideLegacyDaemonStateDatabase(
   path: string,
-  options: { now?: Date } = {},
+  options: MoveAsideLegacyOptions = {},
 ): Promise<string | null> {
   const info = await lstat(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
     throw error;
   });
-  if (!info) return null;
+  if (!info) {
+    const strandedWal = await lstat(`${path}-wal`).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (strandedWal && (!strandedWal.isFile() || strandedWal.isSymbolicLink() || strandedWal.size > 0)) {
+      throw new Error("Refusing to initialize a fresh daemon database while an orphaned non-empty -wal file exists.");
+    }
+    return null;
+  }
   if (!info.isFile() || info.isSymbolicLink()) {
     throw new Error("Daemon state path must be a regular file.");
   }
@@ -173,17 +288,45 @@ export async function moveAsideLegacyDaemonStateDatabase(
   }
   if (inspection.kind !== "legacy") return null;
 
-  await stopLegacyLiveRuntimes(legacyRuntimes);
+  await stopLegacyLiveRuntimes(legacyRuntimes, options);
+  await checkpointLegacyDaemonStateDatabase(path);
+
   const destination = await uniqueLegacyDestination(path, options.now ?? new Date());
-  await renameWithRetryAsync(path, destination);
-  for (const suffix of ["-wal", "-shm", ".recovery.enc", ".recovery.enc.pending"]) {
+  const renameFile = options.renameFile ?? renameWithRetryAsync;
+  // Move recovery sidecars first (separate filesystem operations) and roll them
+  // back if renaming the checkpointed main file fails. Once the main file
+  // rename succeeds, `destination` is already complete and self-contained.
+  const movedRecovery: Array<{ from: string; to: string }> = [];
+  try {
+    for (const suffix of [".recovery.enc", ".recovery.enc.pending"]) {
+      const sidecar = `${path}${suffix}`;
+      const sidecarInfo = await lstat(sidecar).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (sidecarInfo && sidecarInfo.isFile() && !sidecarInfo.isSymbolicLink()) {
+        const target = `${destination}${suffix}`;
+        await renameFile(sidecar, target);
+        movedRecovery.push({ from: sidecar, to: target });
+      }
+    }
+    await renameFile(path, destination);
+  } catch (error) {
+    for (const entry of movedRecovery.reverse()) {
+      await renameFile(entry.to, entry.from).catch(() => undefined);
+    }
+    throw error;
+  }
+  // Clean up any leftover 0-byte -wal or -shm files if SQLite left them behind
+  // after checkpoint + close; `destination` already holds all committed pages.
+  for (const suffix of ["-wal", "-shm"]) {
     const sidecar = `${path}${suffix}`;
     const sidecarInfo = await lstat(sidecar).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
     if (sidecarInfo && sidecarInfo.isFile() && !sidecarInfo.isSymbolicLink()) {
-      await renameWithRetryAsync(sidecar, `${destination}${suffix}`).catch((error: NodeJS.ErrnoException) => {
+      await renameFile(sidecar, `${destination}${suffix}`).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
       });
     }
