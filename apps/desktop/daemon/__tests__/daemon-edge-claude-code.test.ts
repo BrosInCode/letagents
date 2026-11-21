@@ -12,6 +12,7 @@ import {
   type EdgeAgentRegistration,
   type EdgeDaemonHarness,
 } from "./edge/daemon-edge-harness.js";
+import { promptSourceText } from "./edge/claude-code/prompt-source.js";
 
 // The daemon edge scenarios for Claude Code. The daemon is a real process, and
 // a test talks to it over the control socket only. In place of the `claude`
@@ -93,10 +94,7 @@ async function startClaudeScenario(name: string): Promise<ClaudeScenario> {
     release: (label) => rmSync(join(planDir, `hold-${label}`), { force: true }),
     reached: (launch, label) => waitFor(`start ${launch} of the stand-in at ${label}`, () => existsSync(claimFile(launch, `reached-${label}`))),
     prompts,
-    sources: (launch) => prompts(launch).map((prompt) => {
-      const line = /^Source message: (.*)$/m.exec(prompt)?.[1];
-      return line ? (JSON.parse(line) as { text: string }).text : null;
-    }),
+    sources: (launch) => prompts(launch).map(promptSourceText),
     standInErrors: () => readdirSync(planDir).filter((entry) => entry.startsWith("claim-"))
       .map((entry) => join(planDir, entry, "error.txt")).filter((path) => existsSync(path))
       .map((path) => readFileSync(path, "utf8")),
