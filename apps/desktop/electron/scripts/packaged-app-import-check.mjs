@@ -15,10 +15,10 @@
 //      and to the same file as from the app's own package.json. Node keeps
 //      one module for one file, so two users of one name that resolve to
 //      two files would each get their own copy of its state;
-//   3. every file that the build output names by a path from its own place,
-//      `new URL("<relative path>", import.meta.url)`, exists. A moved file
-//      changes its depth in the build output, and the compiler does not see
-//      a path that breaks that way;
+//   3. every file that the build output names by a path from its own place
+//      exists. A moved file changes its depth in the build output, and the
+//      compiler does not see a path that breaks that way. Three forms are
+//      read, see ownPlacePaths below;
 //   4. each provider adapter entry file loads.
 //
 // This file imports nothing outside Node, because it runs inside the app.
@@ -50,6 +50,30 @@ function buildFiles(directory, found = [], pattern = /\.(js|mjs|cjs)$/) {
 function inside(folder, path) {
   const rest = relative(folder, path);
   return rest !== "" && !rest.startsWith("..") && !rest.startsWith(sep) && !/^[A-Za-z]:/.test(rest);
+}
+
+/**
+ * The paths that a compiled file makes from its own place, in the three forms
+ * that the build output uses:
+ *
+ *   new URL("<path>", import.meta.url)
+ *   new URL(import.meta.url.endsWith(".ts") ? "<source path>" : "<path>", import.meta.url)
+ *   resolve(dirname(fileURLToPath(import.meta.url)), "<path>", ...)   (also join)
+ *
+ * In the second form the first path is for a run from TypeScript source. A
+ * compiled file never takes it, and a packaged app does not have it.
+ */
+export function ownPlacePaths(source) {
+  const found = [];
+  const plain = /new URL\(\s*(["'])(\.\.?\/[^"']+)\1\s*,\s*import\.meta\.url\s*\)/g;
+  for (const match of source.matchAll(plain)) found.push([match[2]]);
+  const sourceOrBuilt = /new URL\(\s*import\.meta\.url\.endsWith\(\s*["']\.ts["']\s*\)\s*\?\s*["'][^"']+["'][^"']*?:\s*(["'])(\.\.?\/[^"']+)\1\s*,\s*import\.meta\.url\s*\)/g;
+  for (const match of source.matchAll(sourceOrBuilt)) found.push([match[2]]);
+  const fromFolder = /\b(?:resolve|join)\(\s*dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)\s*,((?:\s*["'][^"']+["']\s*,?)+)\s*\)/g;
+  for (const match of source.matchAll(fromFolder)) {
+    found.push([...match[1].matchAll(/["']([^"']+)["']/g)].map((part) => part[1]));
+  }
+  return found;
 }
 
 export async function checkPackagedAppImports(appRoot, { log = console.log } = {}) {
@@ -120,7 +144,6 @@ export async function checkPackagedAppImports(appRoot, { log = console.log } = {
 
   // Compiled tests are in the build output too; their paths point at fixtures
   // of the repository, which a packaged app does not have.
-  const ownPlacePath = /new URL\(\s*(["'])(\.\.?\/[^"']+)\1\s*,\s*import\.meta\.url\s*\)/g;
   let paths = 0;
   for (const folder of BUILD_FOLDERS) {
     const root = join(app, folder);
@@ -129,10 +152,10 @@ export async function checkPackagedAppImports(appRoot, { log = console.log } = {
       if (relative(root, file).split(sep).includes("__tests__")) continue;
       const source = readFileSync(file, "utf8");
       if (!source.includes("import.meta.url")) continue;
-      for (const match of source.matchAll(ownPlacePath)) {
-        const target = resolve(dirname(file), match[2]);
+      for (const parts of ownPlacePaths(source)) {
+        const target = resolve(dirname(file), ...parts);
         if (!existsSync(target)) {
-          throw new Error(`${relative(app, file)} names ${match[2]} from its own place, and the packaged app has no file there: ${target}`);
+          throw new Error(`${relative(app, file)} names ${parts.join("/")} from its own place, and the packaged app has no file there: ${target}`);
         }
         paths += 1;
       }

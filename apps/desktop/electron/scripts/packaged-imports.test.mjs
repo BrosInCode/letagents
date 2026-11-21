@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { PROVIDER_ADAPTER_ENTRIES } from "./packaged-app-import-check.mjs";
+import { ownPlacePaths, PROVIDER_ADAPTER_ENTRIES } from "./packaged-app-import-check.mjs";
 import { isPackagedBuildFile, packagedImports, packagedPackageJson } from "./packaged-imports.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -152,6 +152,21 @@ test("a package.json below the build output that declares no import names is acc
   } finally {
     rmSync(app, { recursive: true, force: true });
   }
+});
+
+test("the three forms of a path from a file's own place are read", () => {
+  assert.deepEqual(ownPlacePaths('import(new URL("../a/b.js", import.meta.url).href)'), [["../a/b.js"]]);
+  assert.deepEqual(
+    ownPlacePaths(`runtime ??= import(new URL(import.meta.url.endsWith(".ts")\n    ? "../electron/main/x.ts" // repository tests and development only\n    : "../dist-electron/main/x.js", import.meta.url).href)`),
+    [["../dist-electron/main/x.js"]],
+  );
+  assert.deepEqual(
+    ownPlacePaths('return resolve(dirname(fileURLToPath(import.meta.url)), "../dist-electron/main/agents/y.js");'),
+    [["../dist-electron/main/agents/y.js"]],
+  );
+  assert.deepEqual(ownPlacePaths('join(dirname(fileURLToPath(import.meta.url)), "..", "shared", "z.mjs")'), [["..", "shared", "z.mjs"]]);
+  // Not a path from the file's own place.
+  assert.deepEqual(ownPlacePaths('new URL("/auth/github", base); new URL("https://example.test/x")'), []);
 });
 
 test("the check fails when a file names a path from its own place that the app does not have", () => {
