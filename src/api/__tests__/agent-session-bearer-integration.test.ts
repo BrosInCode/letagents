@@ -249,6 +249,48 @@ test("flag-off worker registration issues no bearer and cannot authenticate one"
   }
 });
 
+test("a removed member's own worker bearer stops at once, even when ending its session failed", { skip: requiresDatabase }, async () => {
+  const { room, session } = await seed();
+  const token = session.worker_bearer!;
+  const authKind = async () => (await resolveRequestAuth({ headers: { authorization: `Bearer ${token}` } } as never)).authKind;
+  assert.equal(await authKind(), "agent_session");
+
+  // A removal of someone else in the room changes nothing.
+  await pool!.query(`INSERT INTO accounts (id, provider, provider_user_id, login, created_at, updated_at)
+    VALUES ('acct_other_member', 'github', 'other-member', 'other-member', now(), now())`);
+  await pool!.query(`INSERT INTO room_member_removals (room_id, account_id) VALUES ($1, 'acct_other_member')`, [room.id]);
+  assert.equal(await authKind(), "agent_session");
+
+  // The owner is removed, and the session stays live (its end failed).
+  await pool!.query(`INSERT INTO room_member_removals (room_id, account_id) VALUES ($1, $2)`, [room.id, "acct_bearer_test"]);
+  assert.equal(await authKind(), null, "the bearer of a removed owner is refused");
+  const [live] = await db!.select().from(room_agent_sessions!).where(eq(room_agent_sessions!.session_id, session.session_id));
+  assert.equal(live!.ended_at, null, "the session itself was not ended");
+
+  // A worker in a focus room under the room follows its parent.
+  await pool!.query(`INSERT INTO rooms (id, display_name, kind, parent_room_id, focus_key, focus_status, created_at)
+    VALUES ('focus_77', 'Focus', 'focus', $1, 'focus-77', 'active', now())`, [room.id]);
+  const focus = await createRoomAgentSession!({
+    room_id: "focus_77",
+    session_kind: "worker",
+    runtime: "codex",
+    actor_label: "FocusWorker | Worker Owner's agent | Agent",
+    agent_key: "WorkerOwner/focusworker",
+    agent_instance_id: "instance_focus_worker",
+    display_name: "FocusWorker",
+    owner_account_id: "acct_bearer_test",
+    owner_label: "Worker Owner",
+    ide_label: "Agent",
+  });
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${focus.worker_bearer}` } } as never)).authKind, null);
+
+  // Added back: the removal record is gone, and the bearer works again.
+  await pool!.query(`DELETE FROM room_member_removals WHERE room_id = $1 AND account_id = $2`, [room.id, "acct_bearer_test"]);
+  await pool!.query(`INSERT INTO room_members (room_id, account_id, added_via, created_at) VALUES ($1, $2, 'invite', now())
+    ON CONFLICT DO NOTHING`, [room.id, "acct_bearer_test"]);
+  assert.equal(await authKind(), "agent_session");
+});
+
 test("ended, expired, revoked, and rotated worker bearers cannot replay", { skip: requiresDatabase }, async () => {
   const { session } = await seed();
   const token = session.worker_bearer!;

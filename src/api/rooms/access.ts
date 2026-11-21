@@ -1,6 +1,7 @@
 import type { Response } from "express";
 
 import {
+  GITHUB_SIGN_IN_REQUIRED_REASON,
   REPO_ACCESS_UNAVAILABLE,
   REPO_ACCESS_UNAVAILABLE_MESSAGE,
   repoCollaboratorRequiredBody,
@@ -110,6 +111,8 @@ function landingRedirectReason(decision: RepoRoomAccessDenial): LandingRedirectR
       return "repo_signin_required";
     case "unsupported_repo_provider":
       return "repo_provider_unsupported";
+    case "github_sign_in_required":
+      return "repo_signin_required";
     case "private_repo_no_access":
     case "repo_collaborator_required":
     case "repo_access_unavailable":
@@ -185,6 +188,13 @@ export function replyRepoRoomAccessDecision(
 
   if (decision.kind === "repo_collaborator_required") {
     res.status(403).json(repoCollaboratorRequiredBody({ room_id: roomName }));
+    return false;
+  }
+
+  if (decision.kind === "github_sign_in_required") {
+    // A 403, not a 401: the LetAgents sign-in is good, and the MCP client
+    // deletes its saved sign-in on any 401.
+    res.status(403).json(repoCollaboratorRequiredBody({ room_id: roomName, reason: GITHUB_SIGN_IN_REQUIRED_REASON }));
     return false;
   }
 

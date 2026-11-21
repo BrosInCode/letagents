@@ -27,6 +27,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
+  GITHUB_SIGN_IN_REQUIRED_MESSAGE,
   REPO_COLLABORATOR_REQUIRED_MESSAGE,
   ROOM_MEMBERSHIP_REQUIRED_MESSAGE,
   roomAccessRefusal,
@@ -42,6 +43,8 @@ const props = defineProps<{
   displayName: string | null
   initialRequest: RoomJoinRequestSummary | null
   login: string | null
+  /** LetAgents holds no live GitHub token for the person: a new GitHub sign-in clears the refusal. */
+  needsGitHubSignIn?: boolean
 }>()
 
 const emit = defineEmits<{ retry: [] }>()
@@ -61,7 +64,7 @@ const errorText = computed(() => repoError.value || joinRequest.error.value)
 const state = computed(() => isRepoRoom.value ? 'repo' : joinRequest.view.value.kind)
 
 const statusLabel = computed(() => ({
-  repo: 'GitHub role required',
+  repo: props.needsGitHubSignIn ? 'GitHub sign-in required' : 'GitHub role required',
   main_room_only: 'Members only',
   ask: 'Members only',
   pending: 'Waiting for an admin',
@@ -69,7 +72,7 @@ const statusLabel = computed(() => ({
 })[state.value])
 
 const body = computed(() => {
-  if (isRepoRoom.value) return REPO_COLLABORATOR_REQUIRED_MESSAGE
+  if (isRepoRoom.value) return props.needsGitHubSignIn ? GITHUB_SIGN_IN_REQUIRED_MESSAGE : REPO_COLLABORATOR_REQUIRED_MESSAGE
   const view = joinRequest.view.value
   const now = joinRequest.now.value
   if (view.kind === 'pending') {
