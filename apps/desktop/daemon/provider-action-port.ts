@@ -34,32 +34,12 @@ export type ProviderActionConnectionRef =
   | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null }
   | { kind: "opencode_server"; url: string; pid: number | null; processIdentity?: string | null; serverAuthPath: string };
 
-/**
- * Compare the complete durable identity of two native provider connections.
- * A missing connection, PID, or process-birth identity is unknown evidence and
- * therefore never sufficient to authenticate a cached live handle.
- */
-export function sameProviderActionConnectionIdentity(
-  expected: ProviderActionConnectionRef | null | undefined,
-  actual: ProviderActionConnectionRef | null | undefined,
-): boolean {
-  if (!expected || !actual || expected.kind !== actual.kind) return false;
-  if (expected.pid === null || actual.pid === null) return false;
-  if (expected.pid !== actual.pid) return false;
-  if (!expected.processIdentity || !actual.processIdentity) return false;
-  if (expected.processIdentity !== actual.processIdentity) return false;
-  if (expected.kind === "codex_app_server") {
-    return actual.kind === "codex_app_server" && Boolean(expected.url) && expected.url === actual.url;
-  }
-  if (expected.kind === "opencode_server") {
-    return actual.kind === "opencode_server"
-      && Boolean(expected.url)
-      && expected.url === actual.url
-      && Boolean(expected.serverAuthPath)
-      && expected.serverAuthPath === actual.serverAuthPath;
-  }
-  return true;
-}
+// The comparison of the complete durable identity of two provider connections
+// has one definition, in the provider runtime package. A missing connection,
+// PID or process-birth identity is unknown evidence there, and so it is never
+// sufficient to authenticate a cached live handle. The adapters use the same
+// function, so the daemon and an adapter cannot disagree on it.
+export { sameProviderConnectionIdentity as sameProviderActionConnectionIdentity } from "#provider-runtime/agents/provider-adapter.js";
 
 /**
  * Compare durable provider-state snapshots, including the honest idle shape
