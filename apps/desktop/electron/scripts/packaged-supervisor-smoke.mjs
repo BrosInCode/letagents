@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
@@ -20,9 +20,32 @@ const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
 // macOS: <home>/.letagents/daemon.sock. Windows: the named pipe for that folder.
 const socketPath = daemonEndpoint(join(home, ".letagents")).connectPath;
 const protocolVersion = daemonTypes.DAEMON_PROTOCOL_VERSION;
+const appRoot = windows ? join(bundle, "resources", "app") : join(bundle, "Contents", "Resources", "app");
+const importCheck = join(dirname(fileURLToPath(import.meta.url)), "packaged-app-import-check.mjs");
+
+/**
+ * The daemon runs the packaged program in Node mode and loads a provider
+ * adapter only when an agent starts, so a start of the app does not prove
+ * that the adapters load. Run the same program in the same mode on the
+ * import check, once as the app starts it and once with the condition that
+ * the repository's tests use, which must not change what a shipped app loads.
+ */
+function assertPackagedAppImports() {
+  for (const nodeOptions of ["", "--conditions=letagents-source"]) {
+    const result = spawnSync(executable, [importCheck, appRoot], {
+      cwd: appRoot,
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), ELECTRON_RUN_AS_NODE: "1", NODE_OPTIONS: nodeOptions },
+      timeout: 120_000,
+    });
+    process.stdout.write(result.stdout ?? "");
+    if (result.status !== 0) {
+      throw new Error(`packaged import check failed (NODE_OPTIONS=${JSON.stringify(nodeOptions)}): ${result.error?.message ?? result.stderr}`);
+    }
+  }
+}
 
 async function assertPackagedDaemonExecutorSeal() {
-  const appRoot = windows ? join(bundle, "resources", "app") : join(bundle, "Contents", "Resources", "app");
   const verifierPath = join(appRoot, "dist-electron", "main", "agents", "letagents-mcp-runtime.js");
   const executorPath = join(appRoot, "runtime", "letagents", "node_modules", "letagents", "dist", "mcp", "server", "daemon-tool-executor.js");
   const loader = await import(pathToFileURL(join(appRoot, "dist-daemon", "supervised-tool-runtime.js")).href);
@@ -113,6 +136,8 @@ async function launchDevelopmentDaemon() {
 }
 
 try {
+  console.log("packaged-smoke: import names and provider adapters");
+  assertPackagedAppImports();
   console.log("packaged-smoke: sealed daemon executor");
   await assertPackagedDaemonExecutorSeal();
   console.log("packaged-smoke: cross-install predecessor");

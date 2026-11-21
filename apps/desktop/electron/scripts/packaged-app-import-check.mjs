@@ -1,0 +1,106 @@
+// Run by the packaged program in Node mode, with the packaged app folder as
+// the argument:
+//
+//   ELECTRON_RUN_AS_NODE=1 <packaged program> packaged-app-import-check.mjs <app folder>
+//
+// It proves that the shipped app can load the code that the daemon loads
+// only when an agent starts, which a start of the app alone does not load:
+//
+//   1. the app's package.json has no conditional import target;
+//   2. every "#..." import name in the shipped build output resolves to an
+//      existing file inside that build output, from the place that uses it;
+//   3. each provider adapter entry file loads.
+//
+// This file imports nothing outside Node, because it runs inside the app.
+
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join, relative, sep } from "node:path";
+import { pathToFileURL } from "node:url";
+
+export const PROVIDER_ADAPTER_ENTRIES = [
+  "codex-provider-adapter.js",
+  "claude-code-provider-adapter.js",
+  "cursor-provider-adapter.js",
+  "open-model-provider-adapter.js",
+];
+/** Where an adapter entry file can be: the shared package, or the Electron build before the adapters move. */
+const ADAPTER_FOLDERS = ["dist-provider-runtime", join("dist-electron", "main", "agents")];
+const BUILD_FOLDERS = ["dist-electron", "dist-daemon", "dist-provider-runtime"];
+
+function buildFiles(directory, found = []) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) buildFiles(path, found);
+    else if (/\.(js|mjs|cjs)$/.test(entry.name)) found.push(path);
+  }
+  return found;
+}
+
+function inside(folder, path) {
+  const rest = relative(folder, path);
+  return rest !== "" && !rest.startsWith("..") && !rest.startsWith(sep) && !/^[A-Za-z]:/.test(rest);
+}
+
+export async function checkPackagedAppImports(appRoot, { log = console.log } = {}) {
+  const app = realpathSync(appRoot);
+  const packageJson = JSON.parse(readFileSync(join(app, "package.json"), "utf8"));
+  const names = Object.keys(packageJson.imports ?? {});
+  for (const name of names) {
+    if (typeof packageJson.imports[name] !== "string") {
+      throw new Error(`package.json imports entry ${name} has conditional targets; a packaged app must have the build output only.`);
+    }
+  }
+
+  const importName = /(?:from\s*|import\s*\(\s*|import\s*|require\s*\(\s*)["'](#[^"']+)["']/g;
+  let resolved = 0;
+  for (const folder of BUILD_FOLDERS) {
+    const root = join(app, folder);
+    if (!existsSync(root)) continue;
+    for (const file of buildFiles(root)) {
+      const source = readFileSync(file, "utf8");
+      if (!source.includes("#")) continue;
+      const resolveFrom = createRequire(file);
+      for (const match of source.matchAll(importName)) {
+        let target;
+        try {
+          target = realpathSync(resolveFrom.resolve(match[1]));
+        } catch (error) {
+          throw new Error(`${relative(app, file)} imports ${match[1]}, which does not resolve in the packaged app: ${error.message}`);
+        }
+        if (!BUILD_FOLDERS.some((buildFolder) => inside(join(app, buildFolder), target))) {
+          throw new Error(`${relative(app, file)} imports ${match[1]}, which resolves outside the packaged build output: ${target}`);
+        }
+        resolved += 1;
+      }
+    }
+  }
+  log(`packaged-imports: ${resolved} import name use(s) resolve inside the app`);
+
+  for (const entry of PROVIDER_ADAPTER_ENTRIES) {
+    const path = ADAPTER_FOLDERS.map((folder) => join(app, folder, entry)).find((candidate) => existsSync(candidate));
+    if (!path) throw new Error(`the packaged app has no provider adapter entry file ${entry}`);
+    try {
+      await import(pathToFileURL(path).href);
+    } catch (error) {
+      throw new Error(`${relative(app, path)} does not load in the packaged app: ${error?.stack ?? error}`);
+    }
+    log(`packaged-imports: loaded ${relative(app, path)}`);
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+  const appRoot = process.argv[2];
+  if (!appRoot) {
+    console.error("usage: packaged-app-import-check.mjs <packaged app folder>");
+    process.exit(2);
+  }
+  try {
+    await checkPackagedAppImports(appRoot);
+    // An adapter module can leave a timer or a handle open; the check is done.
+    process.exit(0);
+  } catch (error) {
+    console.error(`packaged-imports: FAILED: ${error.message}`);
+    process.exit(1);
+  }
+}
