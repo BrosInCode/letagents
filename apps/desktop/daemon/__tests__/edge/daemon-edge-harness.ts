@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { connectDaemon, daemonEndpoint } from "../../../../../shared/daemon-endpoint.mjs";
 import { processTreeHelperPath } from "../../../../../shared/process-tree.mjs";
-import { materializeNodeShim, type MaterializeNodeShimOptions } from "./executable-shim.js";
+import { materializeNodeShim, resolveStandInRuntime, type MaterializeNodeShimOptions } from "./executable-shim.js";
 import { FakeRoomServer } from "./fake-room-server.js";
 import { EdgeSqliteInspector } from "./sqlite-inspector.js";
 
@@ -1105,7 +1105,10 @@ export class EdgeDaemonHarness {
     scriptPath: string,
     options?: MaterializeNodeShimOptions,
   ): Promise<string> {
-    return materializeNodeShim(this.binDir, name, scriptPath, options);
+    return materializeNodeShim(this.binDir, name, scriptPath, {
+      ...options,
+      nodeBin: options?.nodeBin ?? resolveStandInRuntime(this.baseCommand),
+    });
   }
 
   openSqlite(): EdgeSqliteInspector {
@@ -1717,6 +1720,7 @@ export async function startEdgeDaemon(options: EdgeDaemonOptions = {}): Promise<
     const apiUrl = await roomServer.start();
     const devMcpEntryPath = await materializeDevMcpPackage(devMcpDir);
 
+    const standInRuntime = resolveStandInRuntime(command);
     const shimPaths: Record<string, string> = {};
     const shimEnv: Record<string, string> = {};
     for (const shim of options.shims ?? []) {
@@ -1727,6 +1731,8 @@ export async function startEdgeDaemon(options: EdgeDaemonOptions = {}): Promise<
         },
         nodeArgs: shim.nodeArgs,
         copyScript: shim.copyScript,
+        // The daemon's sandbox admits the daemon's own program only: see resolveStandInRuntime.
+        nodeBin: standInRuntime,
       });
       shimPaths[shim.name] = path;
       if (shim.envVar) shimEnv[shim.envVar] = path;

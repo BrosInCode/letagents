@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -24,7 +24,7 @@ import {
   selectWindowsEdgeProcessCandidates,
   startEdgeDaemon,
 } from "./edge/daemon-edge-harness.js";
-import { materializeNodeShim } from "./edge/executable-shim.js";
+import { EDGE_STAND_IN_RUNTIME_ENV, materializeNodeShim, resolveStandInRuntime } from "./edge/executable-shim.js";
 import { parseOpenCodeEdgeTranscript } from "./edge/open-model/parser.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -47,6 +47,71 @@ test("edge executable shim generates a parseNodeShim-compatible Windows .cmd wra
     assert.equal(existsSync(join(dir, "codex.script.mjs")), true);
     const entryText = await readFile(join(dir, "codex.entry.mjs"), "utf8");
     assert.ok(entryText.includes("codex.script.mjs"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the stand-in runtime is the test process program for the default daemon command and for a daemon that is no script", () => {
+  const env = {};
+  // The default command: the daemon is a script under the program of the test process.
+  assert.equal(resolveStandInRuntime({ command: process.execPath, args: ["/x/dist-daemon/main.js"] }, { env }), process.execPath);
+  // A daemon in another language starts no script, so it cannot run a stand-in.
+  assert.equal(resolveStandInRuntime({ command: "/opt/daemon/letagents-daemon", args: ["--foreground"] }, { env, execPath: "/usr/bin/node" }), "/usr/bin/node");
+  // A command that does not exist changes nothing.
+  assert.equal(resolveStandInRuntime({ command: "/no/such/runtime", args: ["main.js"] }, { env, execPath: "/usr/bin/node" }), "/usr/bin/node");
+});
+
+test("the stand-in runtime is the daemon's program when an overridden command starts a script", async () => {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), "letagents-shim-runtime-")));
+  try {
+    const runtime = join(dir, "runtime");
+    await writeFile(runtime, "", { mode: 0o755 });
+    // An absolute path.
+    assert.equal(resolveStandInRuntime({ command: runtime, args: ["/x/dist-daemon/main.js"] }, { env: {}, execPath: "/usr/bin/node" }), runtime);
+    // A name on PATH.
+    assert.equal(
+      resolveStandInRuntime({ command: "runtime", args: ["--flag", "main.mjs"] }, { env: { PATH: ["/no/such/folder", dir].join(delimiter) }, execPath: "/usr/bin/node" }),
+      runtime,
+    );
+    // The explicit variable decides before each other rule.
+    assert.equal(
+      resolveStandInRuntime({ command: runtime, args: ["main.js"] }, { env: { [EDGE_STAND_IN_RUNTIME_ENV]: "/chosen/runtime" }, execPath: "/usr/bin/node" }),
+      "/chosen/runtime",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test(
+  "the stand-in runtime is the target of a link, as the daemon sees its own program",
+  { skip: process.platform === "win32" ? "a link needs a special right on Windows" : false },
+  async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "letagents-shim-runtime-link-")));
+    try {
+      const runtime = join(dir, "runtime");
+      const link = join(dir, "link");
+      await writeFile(runtime, "", { mode: 0o755 });
+      await symlink(runtime, link);
+      assert.equal(resolveStandInRuntime({ command: link, args: ["main.js"] }, { env: {}, execPath: "/usr/bin/node" }), runtime);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("a POSIX shim starts the given runtime, in Node mode only when it is not the test process program", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "letagents-shim-posix-"));
+  try {
+    const script = join(CODEX_EDGE_DIR, "server.mjs");
+    const standard = await readFile(await materializeNodeShim(dir, "standard", script, { platform: "linux" }), "utf8");
+    assert.ok(standard.includes(`exec '${process.execPath}' `));
+    assert.equal(standard.includes("ELECTRON_RUN_AS_NODE"), false, "the default shim is unchanged");
+
+    const other = await readFile(await materializeNodeShim(dir, "other", script, { platform: "linux", nodeBin: "/Apps/Let Agents.app/Contents/MacOS/LetAgents" }), "utf8");
+    assert.ok(other.includes("exec '/Apps/Let Agents.app/Contents/MacOS/LetAgents' "));
+    assert.ok(other.indexOf("export ELECTRON_RUN_AS_NODE") < other.indexOf("exec "), "Node mode is set before the program starts");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
