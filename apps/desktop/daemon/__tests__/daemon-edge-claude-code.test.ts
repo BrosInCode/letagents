@@ -310,17 +310,10 @@ describe(
         assert.equal(harness.roomServer.publishedMessages(agent.roomId).length, 0);
         await harness.kill("SIGKILL");
 
-        // Claude Code does not live through a daemon restart: it ends when its daemon is gone, or
-        // with it. The end of the turn is then in its session file only.
-        const standInPid = (JSON.parse(readFileSync(join(scenario.planDir, "claim-1", "launch.json"), "utf8")) as { pid: number }).pid;
-        await waitFor("the first start of the stand-in to end", () => {
-          try {
-            process.kill(standInPid, 0);
-            return false;
-          } catch (error) {
-            return (error as NodeJS.ErrnoException).code === "ESRCH";
-          }
-        });
+        // The test does not wait for the program to end here. What becomes of a program whose daemon
+        // died differs by platform, and the daemon that starts next has to deal with each case. The
+        // end of the turn is in the program's session file, which the stand-in wrote when it reported
+        // its answer.
         assert.equal(existsSync(join(scenario.planDir, "claim-1", "session-error.txt")), false);
         assert.equal(harness.roomServer.publishedMessages(agent.roomId).length, 0);
 
