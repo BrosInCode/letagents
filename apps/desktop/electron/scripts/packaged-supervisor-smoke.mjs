@@ -87,7 +87,10 @@ function request(method, params) {
 
 function launch() {
   return new Promise((resolveLaunch, reject) => {
-    const child = spawn(executable, [], {
+    // macOS: with a scratch HOME there is no login keychain, so the first use of secure storage opens a
+    // dialog to create one and the app waits for a person. Chromium's mock keychain keeps secure storage
+    // working with no dialog. The switch belongs to this test start only; a shipped app is never started with it.
+    const child = spawn(executable, process.platform === "darwin" ? ["--use-mock-keychain"] : [], {
       // Its own APPDATA: an installed app holds the single-instance lock of the real one.
       env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1", ELECTRON_ENABLE_LOGGING: "1" },
       stdio: ["ignore", "pipe", "pipe"],
