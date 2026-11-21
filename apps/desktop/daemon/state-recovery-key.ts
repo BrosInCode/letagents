@@ -42,17 +42,26 @@ export function requestHostApprovalVerifier(): Promise<string | null> {
   });
 }
 
+export type ProtectedStateUpgradeContext = {
+  /** True when a schema upgrade backup or compaction rewrote state and every stored payload must parse before validation completes. */
+  validateFullState: boolean;
+};
+
 /** Caller holds the daemon singleton; initialize is the existing schema owner. */
 export async function withProtectedStateUpgrade<T>(
-  path: string, initialize: () => Promise<T>, bootstrap: StateRecoveryBootstrap,
+  path: string,
+  initialize: (context: ProtectedStateUpgradeContext) => Promise<T>,
+  bootstrap: StateRecoveryBootstrap,
   assertCurrent?: () => Promise<void>,
 ): Promise<T> {
   let database: DatabaseSync | null = null;
   try {
     const freshBackup = await prepareStateRecoveryBackup(path, DAEMON_STATE_SCHEMA_VERSION, bootstrap.getBackupKey ?? requestStateRecoveryKey);
     database = await openDaemonStateDatabase(path, (opened) => new DaemonStateSchema().createSchema(opened));
+    let compacted = false;
     if (assertCurrent) {
       const maintenance = await compactDaemonStateDatabase(path, database, assertCurrent);
+      compacted = maintenance === "compacted";
       if (maintenance !== "not_needed" && maintenance !== "compacted") {
         database.prepare(`INSERT INTO migration_failures(migration_key,reason,failed_at,quarantined_path)
           VALUES ('state-space-maintenance',?,?, '') ON CONFLICT(migration_key)
@@ -62,7 +71,7 @@ export async function withProtectedStateUpgrade<T>(
         database.exec("DELETE FROM migration_failures WHERE migration_key='state-space-maintenance'");
       }
     }
-    const result = await initialize();
+    const result = await initialize({ validateFullState: freshBackup !== null || compacted });
     new DaemonStateSchema().validateCurrentShape(database);
     const validation = await markStateRecoveryBackupValidated(path, database, { freshBackup });
     if (validation.status !== "unverified") {

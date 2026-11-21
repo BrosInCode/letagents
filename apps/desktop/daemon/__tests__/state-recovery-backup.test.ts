@@ -572,3 +572,26 @@ test("process death during compact database replacement rolls back the SQLite ba
   assert.equal(await compactDaemonStateDatabase(path, database, async () => {}), "compacted",
     "a later startup can safely retry after the killed backup");
 });
+
+test("withProtectedStateUpgrade sets validateFullState only on schema upgrade or compaction", async t => {
+  const upgrade = await realStateFixture(t);
+  const upgradeFlags: boolean[] = [];
+  await withProtectedStateUpgrade(upgrade.path, async ({ validateFullState }) => {
+    upgradeFlags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  await withProtectedStateUpgrade(upgrade.path, async ({ validateFullState }) => {
+    upgradeFlags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  assert.deepEqual(upgradeFlags, [true, false]);
+
+  const fragmented = await fragmentedStateFixture(t);
+  fragmented.database.close();
+  const compactionFlags: boolean[] = [];
+  await withProtectedStateUpgrade(fragmented.path, async ({ validateFullState }) => {
+    compactionFlags.push(validateFullState);
+  }, {}, async () => {});
+  await withProtectedStateUpgrade(fragmented.path, async ({ validateFullState }) => {
+    compactionFlags.push(validateFullState);
+  }, {}, async () => {});
+  assert.deepEqual(compactionFlags, [true, false]);
+});

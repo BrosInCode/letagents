@@ -16,8 +16,9 @@ import type { SupervisedProviderTurnBinding } from "../supervised-agent-inbox-st
 import { composeDaemonManifestEntry, projectDaemonManifestEntry } from "../manifest-entry-projection.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
 import { lifecycleAuthorityProviderSchema, type LifecycleAuthorityMode } from "../lifecycle-authority-mode.js";
-import type { DaemonAgentConfiguration, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
-import { type Row, type StoredAgentConfiguration, type PreMembershipRoomMoveCancellation, ManifestConflictError, json, canonicalManifestEntry, run, storeMethods } from "./shared.js";
+import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "../reconciler-state.js";
+import type { DaemonAgentConfiguration, DaemonManifestEntry, DaemonProviderConnection, ReconciliationNotice, ReconciliationState } from "../types.js";
+import { type Row, type StoredAgentConfiguration, type PreMembershipRoomMoveCancellation, type ManifestTransitionCommit, ManifestConflictError, json, parseJson, canonicalManifestEntry, run, storeMethods } from "./shared.js";
 
 export const entriesAndRecovery = storeMethods({
   async updateAgentConfiguration(expectedGeneration: number, input: { agentId: string; expectedRevision: number; model: string | null; reasoningEffort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permissionProfileId: string | null; providerLaunchPolicy: unknown; imageInput: boolean }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; outcome: "updated" | "conflict" | "invalid"; configuration?: StoredAgentConfiguration }> {
@@ -98,6 +99,99 @@ export const entriesAndRecovery = storeMethods({
       return persisted;
     }, commitFence);
     return { generation: result.generation, entry: result.value, recoveredRuntimeId };
+  },
+
+  /**
+   * Targeted observed-state and reconciliation transition. Updates only the
+   * runtime state, lifecycle, readiness, and reconciliation tables without
+   * deleting agent_identities or reading/rewriting activity_events.
+   */
+  async commitTransition(
+    expectedGeneration: number,
+    input: ManifestTransitionCommit,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number }> {
+    const state = parseJson<ReconciliationState>(json(input.reconciliation));
+    const notices = parseJson<ReconciliationNotice[]>(json(input.reconciliationNotices.slice(-32)));
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
+      const runtime = database.prepare("UPDATE runtime_deployments SET observed_state = ? WHERE agent_id = ?")
+        .run(input.observedState, input.agentId);
+      if (Number(runtime.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${input.agentId}`);
+      const lifecycle = database.prepare(`
+        UPDATE agent_lifecycle_states
+        SET condition = ?, last_error_present = 1, last_error = ?
+        WHERE agent_id = ?
+      `).run(input.condition, input.lastError, input.agentId);
+      if (Number(lifecycle.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${input.agentId}`);
+      if (input.readyReachedAt) {
+        const readiness = database.prepare(`
+          UPDATE agent_readiness
+          SET ready_reached_at_present = 1, ready_reached_at = ?
+          WHERE agent_id = ?
+        `).run(input.readyReachedAt, input.agentId);
+        if (Number(readiness.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${input.agentId}`);
+      }
+      const terminalPresent = Boolean(state.last_terminal);
+      const terminal = state.last_terminal;
+      const reconciliation = database.prepare(`
+        UPDATE reconciliation_records
+        SET reconciliation_present = 1,
+            consecutive_action_failures = ?,
+            last_observed_state = ?,
+            next_restart_at_ms = ?,
+            last_action_sequence = ?,
+            pending_action_id = ?,
+            pending_action_sequence = ?,
+            pending_action_kind = ?,
+            pending_action_recorded_at_ms = ?,
+            last_terminal_present = ?,
+            terminal_ended_at = ?,
+            terminal_exit_code = ?,
+            terminal_signal = ?,
+            terminal_stdio_archive_ref = ?,
+            terminal_stdio_tail = ?,
+            terminal_cause = ?,
+            terminal_actor = ?,
+            terminal_generation = ?,
+            terminal_provider_continuation_id = ?,
+            reconciliation_notices_present = 1
+        WHERE agent_id = ?
+      `).run(
+        state.consecutive_action_failures, state.last_observed_state, state.next_restart_at_ms ?? null,
+        state.last_action_sequence, state.pending_action?.id ?? null, state.pending_action?.sequence ?? null,
+        state.pending_action?.kind ?? null, state.pending_action?.recorded_at_ms ?? null,
+        Number(terminalPresent), terminal?.ended_at ?? null, terminal?.exit_code ?? null,
+        terminal?.signal ?? null, terminal?.stdio_archive_ref ?? null, terminal?.stdio_tail ?? null,
+        terminal?.terminal_cause ?? null, terminal?.actor ?? null, terminal?.generation ?? null,
+        terminal?.provider_continuation_id ?? null, input.agentId,
+      );
+      if (Number(reconciliation.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${input.agentId}`);
+      run(database.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?"), input.agentId);
+      if (state.exit_timestamps_ms.length > 0) {
+        const insertExitTimestamp = database.prepare("INSERT INTO reconciliation_exit_timestamps VALUES (?, ?, ?)");
+        state.exit_timestamps_ms.forEach((timestamp, index) => run(insertExitTimestamp, input.agentId, index, timestamp));
+      }
+      run(database.prepare("DELETE FROM reconciliation_completed_actions WHERE agent_id = ?"), input.agentId);
+      const projectedActionIds = state.completed_action_ids.slice(-MAX_PROJECTED_COMPLETED_ACTION_IDS);
+      if (projectedActionIds.length > 0) {
+        const insertAction = database.prepare("INSERT INTO reconciliation_completed_actions VALUES (?, ?, ?)");
+        projectedActionIds.forEach((actionId, index) => run(insertAction, input.agentId, index, actionId));
+      }
+      run(database.prepare("DELETE FROM reconciliation_notices WHERE agent_id = ?"), input.agentId);
+      if (notices.length > 0) {
+        const insertNotice = database.prepare(`INSERT INTO reconciliation_notices VALUES (${Array.from({ length: 15 }, () => "?").join(", ")})`);
+        notices.forEach((notice, index) => {
+          const noticeTerminal = notice.terminal;
+          run(insertNotice, input.agentId, index, notice.at, notice.kind, notice.cause,
+            Number(Boolean(noticeTerminal)), noticeTerminal?.ended_at ?? null, noticeTerminal?.exit_code ?? null,
+            noticeTerminal?.signal ?? null, noticeTerminal?.stdio_archive_ref ?? null,
+            noticeTerminal?.stdio_tail ?? null, noticeTerminal?.terminal_cause ?? null,
+            noticeTerminal?.actor ?? null, noticeTerminal?.generation ?? null,
+            noticeTerminal?.provider_continuation_id ?? null);
+        });
+      }
+    }, commitFence);
+    return { generation: result.generation };
   },
 
   /**
@@ -251,8 +345,8 @@ export const entriesAndRecovery = storeMethods({
   async archiveExitedRuntimes(agentId: string, commitFence: (commit: () => Promise<void>) => Promise<void>, identity?: ProcessIdentity): Promise<string[]> {
     // Asked on every convergence pass, and nearly always with nothing to do: look before taking the write lock.
     const database = await this.getDatabase();
-    if (!exitedRuntimesToArchive(database, this.readEntryFromDatabase(database, agentId), identity).length) return [];
-    return this.writeOperationalJournal(current => archiveExitedRuntimes(current, this.readEntryFromDatabase(current, agentId), identity), commitFence);
+    if (!exitedRuntimesToArchive(database, this.readEntryFromDatabase(database, agentId, "summary"), identity).length) return [];
+    return this.writeOperationalJournal(current => archiveExitedRuntimes(current, this.readEntryFromDatabase(current, agentId, "summary"), identity), commitFence);
   },
 
   async completeRuntimeRecovery(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>) {

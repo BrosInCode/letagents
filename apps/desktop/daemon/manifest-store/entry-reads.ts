@@ -100,6 +100,19 @@ export const entryReads = storeMethods({
       .map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row, activityMode)));
   },
 
+  async listEntryIds(): Promise<string[]> {
+    const database = await this.getDatabase();
+    return (this.reads.get(database, "entryIds").all() as Row[]).map((row) => String(row.agent_id));
+  },
+
+  async listUnresolvedTurnControlRecovery(): Promise<{ generation: number; agentIds: string[] }> {
+    const database = await this.getDatabase();
+    const generation = Number((this.reads.get(database, "generation").get() as Row).generation);
+    const agentIds = (this.reads.get(database, "unresolvedTurnControlAgentIds").all() as Row[])
+      .map((row) => String(row.agent_id));
+    return { generation, agentIds };
+  },
+
   /**
    * Read the authority frozen onto one exact native process birth. This never
    * consults current release policy and never materializes or relabels a row.
@@ -187,7 +200,7 @@ export const entryReads = storeMethods({
         || pending.observerRuntimeGenerationId !== row.observer_runtime_generation_id) {
         throw new Error("Lifecycle effect installation identity is invalid.");
       }
-      const entry = this.readEntryFromDatabase(database, pending.agentId);
+      const entry = this.readEntryFromDatabase(database, pending.agentId, "summary");
       const configuration = database.prepare(`SELECT runtime_configuration_revision
         FROM agent_configurations WHERE agent_id=?`).get(pending.agentId) as Row | undefined;
       const manifestConnection = entry?.provider_ref?.provider_connection;

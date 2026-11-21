@@ -1270,3 +1270,45 @@ test("v51 profile migration preserves identity and stores chosen avatar across r
     assert.deepEqual((await store.load()).entries[0]!.avatar, avatar);
   } finally { await store.close(); await env.cleanup(); }
 });
+
+test("listEntryIds and listUnresolvedTurnControlRecovery read scalar rows in sort order without hydrating payloads", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const baseControl = {
+      action_id: "ctrl",
+      action_sequence: 1,
+      work_attempt_id: "attempt",
+      execution_generation_id: "exec",
+      has_correction: false,
+      capability: "interrupt_and_resume" as const,
+      interrupted: null,
+      resumed: null,
+      state: "working" as const,
+      stages: ["delivered" as const],
+      error: null,
+      recorded_at: "2026-10-01T00:00:00.000Z",
+      updated_at: "2026-10-01T00:00:00.000Z",
+    };
+    const absent = { ...entry, id: "z-absent", turn_control: undefined, last_turn_control_sequence: 0, activity: undefined, reconciliation: undefined, reconciliation_notices: undefined };
+    const nulled = { ...entry, id: "a-null", turn_control: null, last_turn_control_sequence: 0 };
+    const completed = { ...entry, id: "m-done", last_turn_control_sequence: 1, turn_control: { ...baseControl, status: "completed" as const } };
+    const prepared = { ...entry, id: "b-prep", last_turn_control_sequence: 1, turn_control: { ...baseControl, status: "prepared" as const } };
+    const dispatching = { ...entry, id: "c-disp", last_turn_control_sequence: 1, turn_control: { ...baseControl, status: "dispatching" as const } };
+    const saved = await store.write(0, [absent, nulled, completed, prepared, dispatching]);
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      database.exec("UPDATE activity_events SET payload_json='invalid-json'");
+      assert.deepEqual(await store.listEntryIds(), ["z-absent", "a-null", "m-done", "b-prep", "c-disp"]);
+      assert.deepEqual(await store.listUnresolvedTurnControlRecovery(), {
+        generation: saved.generation,
+        agentIds: ["b-prep", "c-disp"],
+      });
+      const summaryAbsent = await store.getEntry("z-absent", "summary");
+      assert.equal(summaryAbsent?.activity, undefined);
+      assert.equal(summaryAbsent?.turn_control, undefined);
+      assert.equal(summaryAbsent?.reconciliation, undefined);
+      assert.equal(summaryAbsent?.reconciliation_notices, undefined);
+    } finally { database.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
