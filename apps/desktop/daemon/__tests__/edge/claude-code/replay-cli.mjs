@@ -47,6 +47,8 @@ import { createInterface } from "node:readline";
 const PLAN_ENV = "LETAGENTS_EDGE_CLAUDE_REPLAY_DIR";
 const PROTOCOL = "claude-code.cli/stream-json-stdio";
 const HOLD_POLL_MS = 25;
+/** The longest a hold lasts. No test holds for more than a few seconds. */
+const HOLD_LIMIT_MS = 120_000;
 /** Exit code for "the daemon and the recording disagree". No Claude Code exit uses it. */
 const MISMATCH_EXIT_CODE = 70;
 const BOUND_PLACEHOLDER = /^<(turn|control)-\d+>$/;
@@ -208,7 +210,12 @@ lines.on("close", () => {
 async function holdBefore(label) {
   if (!label || !existsSync(join(planDir, `hold-${label}`))) return;
   writeFileSync(join(claimDir, `reached-${label}`), "");
-  while (existsSync(join(planDir, `hold-${label}`))) await new Promise((resolve) => setTimeout(resolve, HOLD_POLL_MS));
+  // A test that died leaves its hold in place. The stand-in must not wait for it for ever.
+  const deadline = Date.now() + HOLD_LIMIT_MS;
+  while (existsSync(join(planDir, `hold-${label}`))) {
+    if (Date.now() > deadline) return end("hold_expired", { code: MISMATCH_EXIT_CODE, signal: null, label });
+    await new Promise((resolve) => setTimeout(resolve, HOLD_POLL_MS));
+  }
 }
 
 async function play() {

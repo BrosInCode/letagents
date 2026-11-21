@@ -37,6 +37,12 @@ interface ClaudeScenario {
   reached(launch: number, label: string): Promise<void>;
   /** The texts of the user lines the daemon wrote to start `launch`, in order. */
   prompts(launch: number): string[];
+  /**
+   * The text of the room message each prompt of start `launch` is for, in order. A prompt also
+   * quotes other recent room messages, so only its "Source message" line says which one it answers.
+   * The first prompt of a session is for no room message: null.
+   */
+  sources(launch: number): Array<string | null>;
   /** What went wrong in a stand-in, if anything did: a line the recording does not have. */
   standInErrors(): string[];
 }
@@ -75,6 +81,10 @@ async function startClaudeScenario(name: string): Promise<ClaudeScenario> {
     permissionProfileId: "full_access",
   };
   const claimFile = (launch: number, file: string): string => join(planDir, `claim-${launch}`, file);
+  const prompts = (launch: number): string[] => readFileSync(claimFile(launch, "outbound.ndjson"), "utf8").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as { type: string; message?: { content?: Array<{ type: string; text?: string }> } })
+    .filter((frame) => frame.type === "user")
+    .map((frame) => (frame.message?.content ?? []).map((block) => block.text ?? "").join(""));
   return {
     harness,
     agent,
@@ -82,10 +92,11 @@ async function startClaudeScenario(name: string): Promise<ClaudeScenario> {
     hold: (label) => writeFileSync(join(planDir, `hold-${label}`), ""),
     release: (label) => rmSync(join(planDir, `hold-${label}`), { force: true }),
     reached: (launch, label) => waitFor(`start ${launch} of the stand-in at ${label}`, () => existsSync(claimFile(launch, `reached-${label}`))),
-    prompts: (launch) => readFileSync(claimFile(launch, "outbound.ndjson"), "utf8").split("\n").filter(Boolean)
-      .map((line) => JSON.parse(line) as { type: string; message?: { content?: Array<{ type: string; text?: string }> } })
-      .filter((frame) => frame.type === "user")
-      .map((frame) => (frame.message?.content ?? []).map((block) => block.text ?? "").join("")),
+    prompts,
+    sources: (launch) => prompts(launch).map((prompt) => {
+      const line = /^Source message: (.*)$/m.exec(prompt)?.[1];
+      return line ? (JSON.parse(line) as { text: string }).text : null;
+    }),
     standInErrors: () => readdirSync(planDir).filter((entry) => entry.startsWith("claim-"))
       .map((entry) => join(planDir, entry, "error.txt")).filter((path) => existsSync(path))
       .map((path) => readFileSync(path, "utf8")),
@@ -145,9 +156,7 @@ describe(
 
         // One start of the program, and two prompts on it: the first prompt of the session, then the room message.
         assert.equal(existsSync(join(scenario.planDir, "claim-2")), false);
-        const prompts = scenario.prompts(1);
-        assert.equal(prompts.length, 2);
-        assert.match(prompts[1]!, /EDGE_SAY\[claude-ready\]/);
+        assert.deepEqual(scenario.sources(1), [null, "EDGE_SAY[claude-ready]"]);
 
         const sqlite = harness.openSqlite();
         try {
@@ -161,45 +170,49 @@ describe(
       });
     });
 
-    test("2. FIFO order for two queued room messages", async () => {
-      const scenario = await startClaudeScenario("fifo-two");
+    test("2. FIFO order: one message in a turn, two more in the queue", async () => {
+      const scenario = await startClaudeScenario("fifo-three");
       const { harness, agent } = scenario;
       await inScenario(scenario, async () => {
         await startAgentAndWaitIdle(scenario);
 
-        // Keep the first turn open, so the second message has to wait in the queue.
+        // Keep the turn of A open. B and C then both wait, so the daemon has a choice to make:
+        // with one message in the queue, any order of taking is the right one.
         scenario.hold("t2-result");
-        harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[first-reply]" });
+        harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[reply-a]" });
         await scenario.reached(1, "t2-result");
-        harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[second-reply]" });
+        harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[reply-b]" });
+        harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[reply-c]" });
         await harness.waitForEntry(
           agent.entryId,
-          (entry) => (entry.room_agent_state?.inbox.pending_count ?? 0) >= 1 && entry.room_agent_state?.turn.state === "responding",
+          (entry) => entry.room_agent_state?.inbox.pending_count === 3 && entry.room_agent_state.turn.state === "responding",
           WAIT_MS,
-          "the second message in the queue behind the open turn",
+          "B and C in the queue behind the open turn of A",
         );
         assert.equal(harness.roomServer.publishedMessages(agent.roomId).length, 0);
         scenario.release("t2-result");
 
-        await harness.roomServer.waitForPublishedMessages(agent.roomId, (messages) => messages.length >= 2, WAIT_MS);
-        await waitTurnIdle(scenario);
+        await harness.roomServer.waitForPublishedMessages(agent.roomId, (messages) => messages.length >= 3, WAIT_MS);
+        await harness.waitForEntry(
+          agent.entryId,
+          (entry) => entry.observed_state === "idle" && entry.room_agent_state?.turn.state === "idle"
+            && entry.room_agent_state.inbox.pending_count === 0,
+          WAIT_MS,
+          "claude idle with an empty queue",
+        );
         assert.deepEqual(
           harness.roomServer.publishedMessages(agent.roomId).map((message) => message.text),
-          ["first-reply", "second-reply"],
+          ["reply-a", "reply-b", "reply-c"],
         );
 
-        // The stand-in does not compare prompt text, so the order is proved here:
-        // the daemon gave the program the first message first.
-        const prompts = scenario.prompts(1);
-        assert.equal(prompts.length, 3);
-        assert.match(prompts[1]!, /EDGE_SAY\[first-reply\]/);
-        assert.doesNotMatch(prompts[1]!, /EDGE_SAY\[second-reply\]/);
-        assert.match(prompts[2]!, /EDGE_SAY\[second-reply\]/);
+        // The stand-in does not compare prompt text, so the order at the program is proved here:
+        // the daemon gave it B before C.
+        assert.deepEqual(scenario.sources(1), [null, "EDGE_SAY[reply-a]", "EDGE_SAY[reply-b]", "EDGE_SAY[reply-c]"]);
 
         const sqlite = harness.openSqlite();
         try {
           const inbox = sqlite.inboxItems(agent.entryId);
-          assert.deepEqual(inbox.map((item) => item.state), ["acknowledged", "acknowledged"]);
+          assert.deepEqual(inbox.map((item) => item.state), ["acknowledged", "acknowledged", "acknowledged"]);
         } finally {
           sqlite.close();
         }
@@ -311,8 +324,8 @@ describe(
         assert.deepEqual(harness.roomServer.publishedMessages(agent.roomId).map((message) => message.text), ["survived-kill"]);
 
         // The room message went to the program once. The second start resumed the session and got the first prompt only.
-        assert.equal(scenario.prompts(1).filter((prompt) => prompt.includes("EDGE_SAY[survived-kill]")).length, 1);
-        assert.equal(scenario.prompts(2).filter((prompt) => prompt.includes("EDGE_SAY[survived-kill]")).length, 0);
+        assert.deepEqual(scenario.sources(1), [null, "EDGE_SAY[survived-kill]"]);
+        assert.deepEqual(scenario.sources(2), [null]);
         const resumed = JSON.parse(readFileSync(join(scenario.planDir, "claim-2", "launch.json"), "utf8")) as { argv: string[]; sessionId: string };
         const first = JSON.parse(readFileSync(join(scenario.planDir, "claim-1", "launch.json"), "utf8")) as { sessionId: string };
         assert.ok(resumed.argv.includes("--resume"));

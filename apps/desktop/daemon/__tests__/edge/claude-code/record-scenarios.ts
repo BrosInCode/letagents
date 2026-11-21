@@ -166,11 +166,24 @@ const SCENARIOS: Record<string, (context: ScenarioContext) => Promise<void>> = {
     harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[claude-ready]" });
     await harness.roomServer.waitForPublishedMessages(agent.roomId, (messages) => messages.length >= 1, 60_000);
   },
-  /** Two room messages that wait in the queue, answered in their order. */
-  async "fifo-two"({ harness, agent }) {
-    harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[first-reply]" });
-    harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[second-reply]" });
-    await harness.roomServer.waitForPublishedMessages(agent.roomId, (messages) => messages.length >= 2, 60_000);
+  /** One room message in a turn, and two more that wait in the queue behind it. */
+  async "fifo-three"({ harness, agent, messages }) {
+    const release = messages.holdNext();
+    harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[reply-a]" });
+    await harness.waitForEntry(agent.entryId, (entry) => entry.room_agent_state?.turn.state === "responding", 60_000, "a responding turn");
+    harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[reply-b]" });
+    harness.roomServer.enqueueMessage(agent.roomId, { text: "EDGE_SAY[reply-c]" });
+    await harness.waitForEntry(
+      agent.entryId,
+      (entry) => (entry.room_agent_state?.inbox.pending_count ?? 0) >= 3,
+      60_000,
+      "two messages in the queue behind the open turn",
+    ).catch(async () => {
+      const entry = await harness.rpc.getEntry(agent.entryId);
+      console.error(`inbox: ${JSON.stringify(entry?.room_agent_state?.inbox)}`);
+    });
+    release();
+    await harness.roomServer.waitForPublishedMessages(agent.roomId, (published) => published.length >= 3, 60_000);
   },
   /** A turn that the owner stops while the model has not answered. */
   async "turn-interrupt"(context) {
