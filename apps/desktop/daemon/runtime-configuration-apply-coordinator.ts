@@ -146,7 +146,7 @@ export class RuntimeConfigurationApplyCoordinator {
    */
   private async continuePastBlockedRecord(entryId: string): Promise<"replaced" | ManagedRefreshRetry | null> {
     const installation = this.options.streams.currentInstallation(entryId);
-    const entry = installation && this.options.streams.recordBlock ? await this.options.store.getEntry(entryId) : undefined;
+    const entry = installation && this.options.streams.recordBlock ? await this.options.store.getEntry(entryId, "summary") : undefined;
     if (!installation || !entry) return null;
     if (this.options.streams.recordBlock!(entry) === null) {
       this.recordBlocks.delete(installation);
@@ -373,7 +373,8 @@ export class RuntimeConfigurationApplyCoordinator {
     const managed = this.options.managed;
     const provider = this.options.provider;
     if (!managed || !provider?.stopIdle || !provider.describeManagedLaunchContract) return;
-    const entry = await this.options.store.getEntry(entryId);
+    if (!this.options.streams.currentInstallation(entryId)) return;
+    const entry = await this.options.store.getEntry(entryId, "summary");
     const configuration = await this.options.store.getAgentConfiguration(entryId);
     const installation = this.options.streams.currentInstallation(entryId);
     if (!entry || entry.provider !== "codex" || entry.observed_state !== "idle"
@@ -391,7 +392,7 @@ export class RuntimeConfigurationApplyCoordinator {
       contract = await this.desiredContract(binding.api_url);
     } catch (error) {
       if (!transientProviderStartFailure(error)) throw error;
-      const current = await this.options.store.getEntry(entryId);
+      const current = await this.options.store.getEntry(entryId, "summary");
       const currentConfiguration = await this.options.store.getAgentConfiguration(entryId);
       if (this.options.authority.isHandoffScheduled()
         || this.options.authority.currentDaemonGeneration() !== daemonGeneration
@@ -520,7 +521,7 @@ export class RuntimeConfigurationApplyCoordinator {
         || input.daemonGeneration !== this.options.authority.currentDaemonGeneration()) {
         return { outcome: "conflict" };
       }
-      const entry = await this.options.store.getEntry(input.entryId);
+      const entry = await this.options.store.getEntry(input.entryId, "summary");
       const configuration = await this.options.store.getAgentConfiguration(input.entryId);
       if (!entry || !configuration
         || configuration.config_revision !== input.expectedConfigurationRevision) {

@@ -2308,3 +2308,81 @@ for (const trigger of ["arrival", "retry", "deferred", "descriptor failure", "re
     } finally { await delivery.fenceAndDrain(); await inbox.close(); await rm(root, { recursive: true, force: true }); }
   });
 }
+
+test("refreshManaged skips all store reads when no runtime is installed and uses summary reads otherwise", async () => {
+  const entryReadModes: Array<"full" | "summary" | undefined> = [];
+  let configReads = 0;
+  let current: ProviderInstallationToken | undefined = undefined;
+  let describeShouldFail = false;
+  const env = applyHarness({
+    streams: {
+      recordBlock: () => null,
+      deliveryAdmission: () => "ready",
+    },
+  });
+  env.configuration.config_revision = 1;
+  env.configuration.runtime_configuration_revision = 1;
+  env.options.streams.currentInstallation = () => current;
+  env.options.managed = {
+    store: {
+      readManagedLaunchContract: async () => "old-contract",
+      validateManagedRuntimeReplacement: async () => () => {},
+      hasUnclosedRuntimeApprovals: async () => false,
+    },
+    bindings: {
+      get: async () => ({
+        entry_id: "agent-1",
+        room_id: "room-1",
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-1",
+        agent_session_id: "session-1",
+        credential_ref: "cred-1",
+        api_url: "https://letagents.test",
+        room_cursor: null,
+        last_sequence: 0,
+        last_observed_at_ms: 0,
+        updated_at: "2026-09-02T00:00:00.000Z",
+      }),
+    },
+    reserveApprovalIdle: () => ({ assertCurrent: () => {}, release: () => {} }),
+    resumeDelivery: async () => {},
+  };
+  env.options.provider = {
+    ...env.options.provider!,
+    stopIdle: async () => terminal,
+    describeManagedLaunchContract: async () => {
+      if (describeShouldFail) throw Object.assign(new Error("temporarily unavailable"), { transientProviderStart: true });
+      return "new-contract";
+    },
+  };
+  const originalGetEntry = env.options.store.getEntry;
+  env.options.store.getEntry = async (id, mode) => {
+    entryReadModes.push(mode);
+    return originalGetEntry(id, mode);
+  };
+  const originalGetConfig = env.options.store.getAgentConfiguration;
+  env.options.store.getAgentConfiguration = async (id) => {
+    configReads += 1;
+    return originalGetConfig(id);
+  };
+
+  // Stopped / unattached agent: 0 store reads!
+  assert.equal(await env.coordinator.refreshManaged("agent-1"), undefined);
+  assert.deepEqual(entryReadModes, [], "stopped/unattached agent performs zero getEntry reads");
+  assert.equal(configReads, 0, "stopped/unattached agent performs zero getAgentConfiguration reads");
+
+  // Installed agent: transient probe failure exercises continuePastBlockedRecord, refreshManaged, and catch re-read.
+  current = installation;
+  describeShouldFail = true;
+  const retry = await env.coordinator.refreshManaged("agent-1");
+  assert.deepEqual(retry, { retryAfterMs: 15_000 });
+  assert.ok(entryReadModes.length >= 3);
+  assert.ok(entryReadModes.every((mode) => mode === "summary"), `expected only summary reads, got ${JSON.stringify(entryReadModes)}`);
+
+  // Installed agent: successful apply exercises inspect() as well.
+  describeShouldFail = false;
+  entryReadModes.length = 0;
+  await env.coordinator.refreshManaged("agent-1");
+  assert.ok(entryReadModes.length >= 4);
+  assert.ok(entryReadModes.every((mode) => mode === "summary"), `expected only summary reads, got ${JSON.stringify(entryReadModes)}`);
+});

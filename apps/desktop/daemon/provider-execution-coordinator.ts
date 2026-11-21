@@ -121,8 +121,8 @@ export type ProviderExecutionStore = {
   archiveExitedRuntimes?(agentId: string, commitFence: CommitFence): Promise<string[]>;
   unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
   unresolvedPollingActivation(agentId: string): Promise<PollingActivationRecord | null>;
-  load(): Promise<{ generation: number; entries: DaemonManifestEntry[] }>;
-  getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+  readGeneration(): Promise<number>;
+  getEntry(entryId: string, activityMode?: "full" | "summary"): Promise<DaemonManifestEntry | undefined>;
   getAgentConfiguration(entryId: string): Promise<ProviderExecutionConfiguration | undefined>;
   readRuntimeLifecycleAuthority(input: {
     agentId: string;
@@ -515,7 +515,7 @@ export class ProviderExecutionCoordinator {
   ): Promise<DaemonManifestEntry | null> {
     if (this.options.authority.isHandoffScheduled()
       || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch) return null;
-    const current = await this.options.store.getEntry(entryId);
+    const current = await this.options.store.getEntry(entryId, "summary");
     if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return null;
     if (this.options.authority.isHandoffScheduled()
       || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch
@@ -710,7 +710,7 @@ export class ProviderExecutionCoordinator {
     generation: number,
   ): Promise<boolean> {
     await this.options.authority.serializeManifestMutation(async () => undefined);
-    const current = await this.options.store.getEntry(entryId);
+    const current = await this.options.store.getEntry(entryId, "summary");
     if (!current || current.desired_state === "running") return false;
     await this.options.delivery.stop(entryId).catch(() => undefined);
     await this.options.transition(
@@ -794,14 +794,16 @@ export class ProviderExecutionCoordinator {
     await this.options.authority.serializeManifestMutation(async () => {
       for (let attempt = 0; attempt < 8; attempt += 1) {
         await this.options.authority.assertCurrent();
-        const snapshot = await this.options.store.load();
-        const current = snapshot.entries.find((candidate) => candidate.id === entryId);
+        // Read generation before the full entry so any concurrent commit
+        // between them causes checkpointProviderBirth to conflict and retry.
+        const generation = await this.options.store.readGeneration();
+        const current = await this.options.store.getEntry(entryId, "full");
         if (!current || current.work_attempt_id !== handle.workAttemptId) {
           throw new DaemonFenceLostError("Provider birth no longer matches the durable work attempt.");
         }
         try {
           const next = await this.options.store.checkpointProviderBirth(
-            snapshot.generation,
+            generation,
             {
               entry: this.providerBirthEntry(current, handle, executionGenerationId),
               executionGenerationId,
@@ -913,8 +915,8 @@ export class ProviderExecutionCoordinator {
         || activeBeforeRead.daemonGeneration !== this.options.authority.currentDaemonGeneration()) {
         throw new DaemonFenceLostError("Retiring provider dispatch persistence gate closed.");
       }
-      const snapshot = await this.options.store.load();
-      const current = snapshot.entries.find((candidate) => candidate.id === entryId);
+      const generation = await this.options.store.readGeneration();
+      const current = await this.options.store.getEntry(entryId, "full");
       if (!current || current.work_attempt_id !== handle.workAttemptId) {
         throw new DaemonFenceLostError(
           "Retiring provider dispatch no longer matches the durable work attempt.",
@@ -927,7 +929,7 @@ export class ProviderExecutionCoordinator {
         // fenced new mutations, but the retiring daemon must still journal an
         // already-returned native birth before yielding singleton authority.
         const next = await this.options.store.checkpointProviderBirth(
-          snapshot.generation,
+          generation,
           {
             entry: updated,
             executionGenerationId,
@@ -1096,8 +1098,8 @@ export class ProviderExecutionCoordinator {
       authoritativeEntry = await this.options.authority.serializeManifestMutation(async () => {
         for (let attemptIndex = 0; attemptIndex < 8; attemptIndex += 1) {
           await this.options.authority.assertCurrent();
-          const snapshot = await this.options.store.load();
-          const current = snapshot.entries.find((candidate) => candidate.id === entry.id);
+          const generation = await this.options.store.readGeneration();
+          const current = await this.options.store.getEntry(entry.id, "full");
           const currentRef = current?.provider_ref;
           if (!current || current.work_attempt_id !== ref.work_attempt_id
             || currentRef?.work_attempt_id !== ref.work_attempt_id
@@ -1118,7 +1120,7 @@ export class ProviderExecutionCoordinator {
           }
           try {
             const next = await this.options.store.checkpointProviderBirth(
-              snapshot.generation,
+              generation,
               {
                 entry: {
                   ...current,
@@ -1193,7 +1195,7 @@ export class ProviderExecutionCoordinator {
     await this.options.settleRuntimeApprovals(entryId);
     if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
     if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return;
-    let entry = await this.options.store.getEntry(entryId);
+    let entry = await this.options.store.getEntry(entryId, "summary");
     if (!entry) {
       this.failedLaunchAdmissions.delete(entryId);
       this.workspaceRepositoryRetries.delete(entryId);
@@ -1320,7 +1322,7 @@ export class ProviderExecutionCoordinator {
         this.scheduleRecovery(entry.id, 250);
         return;
       }
-      entry = await this.options.store.getEntry(entry.id) ?? entry;
+      entry = await this.options.store.getEntry(entry.id, "summary") ?? entry;
     }
     if (handle) {
       await this.convergeAttachedHandle(entry, handle);
@@ -1398,7 +1400,7 @@ export class ProviderExecutionCoordinator {
           minted = await this.options.host.mintSession(entry, executionGenerationId);
           if (minted) {
             await this.options.host.bindMintedSession(entry.id, minted);
-            entry = await this.options.store.getEntry(entry.id) ?? entry;
+            entry = await this.options.store.getEntry(entry.id, "summary") ?? entry;
           }
         } catch (error) {
           if (this.options.authority.isHandoffScheduled()
@@ -1432,7 +1434,7 @@ export class ProviderExecutionCoordinator {
         try {
           await this.options.host.confirmExactBinding(entry.id, () => !this.options.authority.isHandoffScheduled()
             && this.options.concurrency.currentControlEpoch(entry.id) === controlEpoch);
-          entry = await this.options.store.getEntry(entry.id) ?? entry;
+          entry = await this.options.store.getEntry(entry.id, "summary") ?? entry;
         } catch (error) {
           if (this.options.authority.isHandoffScheduled()
             || this.options.authority.currentDaemonGeneration() !== daemonGeneration
@@ -1573,7 +1575,7 @@ export class ProviderExecutionCoordinator {
       if (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id) return false;
     } else if (!await this.options.host.requiresGrant(entry) || !binding.room_cursor) return false;
     if (!await this.options.authority.ownsDaemonGeneration(daemonGeneration)) return false;
-    const current = await this.options.store.getEntry(entry.id);
+    const current = await this.options.store.getEntry(entry.id, "summary");
     return Boolean(current && current.desired_state === "running"
       && current.delivery_mode === entry.delivery_mode && current.room_id === entry.room_id
       && current.work_attempt_id === ref.work_attempt_id
@@ -2153,7 +2155,7 @@ export class ProviderExecutionCoordinator {
     // failure.
     this.options.host.clearSuccessfulRecovery(entry.id);
     if (requiresGrant) {
-      const current = await this.options.store.getEntry(entry.id);
+      const current = await this.options.store.getEntry(entry.id, "summary");
       if (current) await this.convergeAttachedHandle(current, handle);
       return;
     }

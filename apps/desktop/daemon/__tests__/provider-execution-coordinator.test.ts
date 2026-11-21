@@ -157,7 +157,7 @@ function harness(input: {
       unresolvedDeliveryDrain: async () => null,
       pendingRuntimeRecovery: async () => null,
       unresolvedPollingActivation: async () => null,
-      load: async () => ({ generation: manifestGeneration, entries: [manifestEntry] }),
+      readGeneration: async () => manifestGeneration,
       getEntry: async (entryId) => entryId === manifestEntry.id ? manifestEntry : undefined,
       getAgentConfiguration: async () => ({
         provider: manifestEntry.provider,
@@ -3166,4 +3166,154 @@ test("while an agent is still to be replaced the scheduler converges again after
   await failing.drainConvergence();
   assert.deepEqual(failures, [failed]);
   assert.deepEqual(timers, [], "and it is not tried again behind the owner's back");
+});
+
+test("converge reads entries in summary mode while provider-birth checkpoints read generation before full entry and preserve activity", async () => {
+  const { ManifestConflictError } = await import("../manifest-store.js");
+  const fullActivity = Array.from({ length: 24 }, (_, index) => ({
+    observed_at: "2026-08-26T00:00:00.000Z",
+    sequence: index + 1,
+    provider: "codex" as const,
+    kind: "tool" as const,
+    method: `item/${index + 1}`,
+    summary: `event ${index + 1}`,
+    status: "idle" as const,
+    payload: { index: index + 1, blob: "x".repeat(64) },
+    payload_truncated: false,
+    payload_redacted: false,
+    durable_payload_ref: null,
+  }));
+  const summarize = (entry: DaemonManifestEntry): DaemonManifestEntry => ({
+    ...entry,
+    activity: (entry.activity ?? []).slice(-16).map((event) => ({ ...event, payload: null })),
+  });
+
+  // 1. Stopped entry convergence uses strictly summary reads.
+  const stoppedCalls: Array<"full" | "summary" | undefined> = [];
+  const stopped = harness({
+    entry: { ...baseEntry(), desired_state: "stopped", observed_state: "stopped", activity: fullActivity },
+  });
+  const baseStoppedGet = stopped.options.store.getEntry;
+  stopped.options.store.getEntry = async (id, mode) => {
+    stoppedCalls.push(mode);
+    const entry = await baseStoppedGet(id, mode);
+    return entry && mode === "summary" ? summarize(entry) : entry;
+  };
+  await stopped.coordinator.converge("agent-1");
+  assert.deepEqual(stoppedCalls, ["summary"]);
+
+  // 2. Running launch: all read-only convergence reads use "summary", while
+  // persistProviderHandle reads generation BEFORE full entry, retries cleanly
+  // on ManifestConflictError, and preserves all 24 activity payloads intact.
+  const ops: string[] = [];
+  const running = harness({
+    entry: { ...baseEntry(), desired_state: "running", observed_state: "absent", activity: fullActivity },
+  });
+  let gen = 1;
+  let conflictOnce = true;
+  running.options.store.readGeneration = async () => {
+    ops.push(`readGeneration:${gen}`);
+    return gen;
+  };
+  const baseRunningGet = running.options.store.getEntry;
+  running.options.store.getEntry = async (id, mode) => {
+    ops.push(`getEntry:${mode ?? "default"}`);
+    const entry = await baseRunningGet(id, mode);
+    return entry && mode === "summary" ? summarize(entry) : entry;
+  };
+  const baseCheckpoint = running.options.store.checkpointProviderBirth;
+  running.options.store.checkpointProviderBirth = async (expectedGeneration, input, commitFence) => {
+    ops.push(`checkpoint:${expectedGeneration}`);
+    if (conflictOnce) {
+      conflictOnce = false;
+      gen += 1;
+      throw new ManifestConflictError("concurrent commit");
+    }
+    assert.equal(expectedGeneration, gen);
+    // Align underlying harness generation before delegating.
+    running.setEntry(input.entry);
+    await commitFence(async () => { gen += 1; });
+    return { generation: gen, entry: input.entry, authorityMode: input.requestedAuthorityMode };
+  };
+  await running.coordinator.converge("agent-1");
+
+  const fullIndexes = ops.flatMap((op, index) => op === "getEntry:full" ? [index] : []);
+  assert.equal(fullIndexes.length, 2, "only persistProviderHandle (initial + conflict retry) reads full mode");
+  for (const index of fullIndexes) {
+    assert.match(ops[index - 1] ?? "", /^readGeneration:/, "readGeneration must precede full getEntry");
+  }
+  assert.equal(ops.includes("getEntry:default"), false, "no untagged default full getEntry calls remain");
+  assert.ok(ops.includes("getEntry:summary"), "read-only convergence sites read in summary mode");
+  assert.equal(running.entry().activity?.length, 24, "checkpointProviderBirth preserves full stored activity");
+  assert.deepEqual(running.entry().activity?.[0]?.payload, { index: 1, blob: "x".repeat(64) });
+  assert.deepEqual(running.entry().activity?.[23]?.payload, { index: 24, blob: "x".repeat(64) });
+
+  // 3. Handoff persistence (persistReturnedProviderForHandoff) and recovered
+  // connection checkpoint (attachReservedProvider) also read generation -> full entry
+  // and preserve all 24 activity payloads intact.
+  const handoffOps: string[] = [];
+  const handoffRuntime = harness({
+    entry: { ...baseEntry(), desired_state: "running", observed_state: "absent", activity: fullActivity },
+    provider: provider({
+      spawn: async () => {
+        handoffRuntime.setHandoff(true);
+        return returnedHandle;
+      },
+    }),
+  });
+  handoffRuntime.options.store.readGeneration = async () => { handoffOps.push("readGeneration"); return 1; };
+  const baseHandoffGet = handoffRuntime.options.store.getEntry;
+  handoffRuntime.options.store.getEntry = async (id, mode) => {
+    handoffOps.push(`getEntry:${mode ?? "default"}`);
+    const entry = await baseHandoffGet(id, mode);
+    return entry && mode === "summary" ? summarize(entry) : entry;
+  };
+  await handoffRuntime.coordinator.converge("agent-1");
+  const handoffFullIdx = handoffOps.indexOf("getEntry:full");
+  assert.ok(handoffFullIdx > 0 && handoffOps[handoffFullIdx - 1] === "readGeneration",
+    "persistReturnedProviderForHandoff reads generation before full entry");
+  assert.equal(handoffRuntime.entry().activity?.length, 24);
+  assert.deepEqual(handoffRuntime.entry().activity?.[0]?.payload, { index: 1, blob: "x".repeat(64) });
+
+  // 4. attachReservedProvider recovered connection checkpoint path.
+  const attachOps: string[] = [];
+  const attachRuntime = harness({
+    entry: {
+      ...baseEntry(),
+      desired_state: "running",
+      observed_state: "recovering",
+      provider_ref: {
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-1",
+        provider_continuation_id: "continuation-1",
+        provider_connection: null,
+      },
+      activity: fullActivity,
+    },
+    frozenAuthorityMode: null,
+    provider: provider({ attach: async () => returnedHandle }),
+  });
+  attachRuntime.executionGenerations.push({
+    execution_generation_id: "generation-1",
+    work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:01.000Z",
+    actor: "daemon-provider",
+    generation: 1,
+    terminal: null,
+  });
+  attachRuntime.options.store.readGeneration = async () => { attachOps.push("readGeneration"); return 1; };
+  const baseAttachGet = attachRuntime.options.store.getEntry;
+  attachRuntime.options.store.getEntry = async (id, mode) => {
+    attachOps.push(`getEntry:${mode ?? "default"}`);
+    const entry = await baseAttachGet(id, mode);
+    return entry && mode === "summary" ? summarize(entry) : entry;
+  };
+  await attachRuntime.coordinator.converge("agent-1");
+  const attachFullIdx = attachOps.indexOf("getEntry:full");
+  assert.ok(attachFullIdx > 0 && attachOps[attachFullIdx - 1] === "readGeneration",
+    "attachReservedProvider reads generation before full entry when checkpointing recovered connection");
+  assert.equal(attachOps.includes("getEntry:default"), false);
+  assert.equal(attachRuntime.entry().activity?.length, 24);
+  assert.deepEqual(attachRuntime.entry().activity?.[0]?.payload, { index: 1, blob: "x".repeat(64) });
+  void baseCheckpoint;
 });

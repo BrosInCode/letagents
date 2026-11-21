@@ -33,7 +33,7 @@ type DeliveryCutoverIdentity = Omit<
 export type DeliveryCutoverExecutionCoordinatorOptions = {
   isHandoffScheduled: () => boolean;
   provider?: ProviderActionPort;
-  getEntry: (entryId: string) => Promise<DaemonManifestEntry | undefined>;
+  getEntry: (entryId: string, activityMode?: "full" | "summary") => Promise<DaemonManifestEntry | undefined>;
   getAttempt: (workAttemptId: string) => Promise<TaskWorkAttempt>;
   updateEntry: (
     entryId: string,
@@ -119,7 +119,7 @@ export class DeliveryCutoverExecutionCoordinator {
           if (activation.phase !== "complete" && activation.phase !== "cancelled") this.observation.scheduleRetry(input.entryId, 0);
           return activation;
         }
-        const entry = await this.getEntry(input.entryId);
+        const entry = await this.getEntry(input.entryId, "summary");
         const handle = this.getLiveHandle(input.entryId);
         const request = await this.pollingLaunchRequest(entry, handle, input.operationId);
         if (entry!.room_id !== input.roomId || entry!.provider_ref!.execution_generation_id !== input.executionGenerationId) {
@@ -133,7 +133,7 @@ export class DeliveryCutoverExecutionCoordinator {
           await this.provider!.activateCustodialPolling!(handle!, request, {
             beforeNativeDispatch: async () => {
               this.assertAttached();
-              const currentRequest = await this.pollingLaunchRequest(await this.getEntry(input.entryId), handle, input.operationId);
+              const currentRequest = await this.pollingLaunchRequest(await this.getEntry(input.entryId, "summary"), handle, input.operationId);
               if (JSON.stringify(currentRequest) !== JSON.stringify(request)) throw new Error("Polling activation authority changed before dispatch.");
               const latestBoundary = await this.provider!.inspectTurnBoundary!(handle!);
               this.assertAttached();
@@ -247,7 +247,7 @@ export class DeliveryCutoverExecutionCoordinator {
           if (!["complete", "cancelled", "failed"].includes(existing.phase)) this.observation.scheduleRetry(input.entryId, 0);
           return existing;
         }
-        const entry = await this.getEntry(input.entryId);
+        const entry = await this.getEntry(input.entryId, "summary");
         const handle = this.getLiveHandle(input.entryId);
         if (!entry || entry.provider !== "codex" || (entry.delivery_mode ?? "mcp_polling") !== (forward ? "mcp_polling" : "daemon_inbox")
           || entry.room_id !== input.roomId || entry.provider_ref?.execution_generation_id !== input.executionGenerationId
@@ -368,7 +368,7 @@ export class DeliveryCutoverExecutionCoordinator {
           }
           if (readiness.status !== "ready") throw new Error("Delivery drain is still settling admitted work.");
           const handle = this.getLiveHandle(cutover.agent_id);
-          if (!handle || !this.exactDrainRef(cutover, await this.getEntry(cutover.agent_id))) {
+          if (!handle || !this.exactDrainRef(cutover, await this.getEntry(cutover.agent_id, "summary"))) {
             throw new Error("Delivery drain lost its owned native idle boundary before dispatch.");
           }
           const boundary = await this.observation.observe(signal, this.provider!.inspectTurnBoundary!(handle));
@@ -380,7 +380,7 @@ export class DeliveryCutoverExecutionCoordinator {
       this.observation.assertObservation(signal);
       if (!deliveryDrainBlocksRuntime(cutover)) return;
       if (processBirthState(cutover.native_pid, cutover.native_process_identity, drain.processIdentity) !== "gone") {
-        const ref = this.exactDrainRef(cutover, await this.getEntry(cutover.agent_id));
+        const ref = this.exactDrainRef(cutover, await this.getEntry(cutover.agent_id, "summary"));
         if (!ref) throw new Error("Delivery drain cannot signal a missing or changed native connection.");
         this.observation.assertObservation(signal);
         // The durable stop intent already exists. Repeating this after a crash
@@ -441,7 +441,7 @@ export class DeliveryCutoverExecutionCoordinator {
         if (!activation.provider_turn_id || !this.provider?.inspectCustodialPollingActivation) {
           throw new Error("Polling activation has no exact turn acknowledgement to reconcile.");
         }
-        const entry = await this.getEntry(initial.agent_id);
+        const entry = await this.getEntry(initial.agent_id, "summary");
         if (!entry || !matchesPollingActivationRuntime(activation, entry)) throw new Error("Polling activation runtime changed.");
         const ref = entry.provider_ref!;
         const handle = this.getLiveHandle(initial.agent_id) ?? await this.observation.observe(signal, this.provider.attach({
@@ -452,7 +452,7 @@ export class DeliveryCutoverExecutionCoordinator {
         const observed = await this.observation.observe(signal,
           this.provider.inspectCustodialPollingActivation(handle, activation.provider_turn_id));
         this.observation.assertObservation(signal);
-        const current = await this.getEntry(initial.agent_id);
+        const current = await this.getEntry(initial.agent_id, "summary");
         if (!current || !matchesPollingActivationRuntime(activation, current, handle)) {
           throw new Error("Polling activation lost its observed runtime.");
         }
@@ -492,7 +492,7 @@ export class DeliveryCutoverExecutionCoordinator {
     if ((await this.drain?.store.getAgentConfiguration(entryId))?.polling_contract) return;
     const provider = this.provider;
     if (this.isHandoffScheduled() || !provider?.controlExactTurn) return;
-    let entry = await this.getEntry(entryId);
+    let entry = await this.getEntry(entryId, "summary");
     this.observation.assertObservation(detachSignal);
     if (!entry) return;
 

@@ -247,7 +247,7 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
     this.deliveryCutoverExecution = new DeliveryCutoverExecutionCoordinator({
       isHandoffScheduled: () => this.handoffScheduled,
       ...(providerPort ? { provider: providerPort } : {}),
-      getEntry: (entryId) => this.store.getEntry(entryId),
+      getEntry: (entryId, mode) => this.store.getEntry(entryId, mode),
       getAttempt: (workAttemptId) => this.durability.getAttempt(workAttemptId),
       updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
       getLiveHandle: (entryId) => this.liveHandles.get(entryId),

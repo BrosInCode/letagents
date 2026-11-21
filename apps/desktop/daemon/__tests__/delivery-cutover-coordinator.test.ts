@@ -641,7 +641,7 @@ async function reverseFixture() {
     get store() { return store; }, get inbox() { return inbox; }, root, path, handle, provider, authority, events, state, entries, controller, signal: controller.signal,
     request: { entryId: "agent", roomId: "room", operationId: "operation", requestId: "request", executionGenerationId: "run" },
     driver: (overrides: Partial<DeliveryCutoverExecutionCoordinatorOptions> = {}) => new DeliveryCutoverExecutionCoordinator({ isHandoffScheduled: () => state.handoff, provider,
-      getEntry: (id) => store.getEntry(id), getAttempt: async () => { throw new Error("legacy attempt path"); },
+      getEntry: (id, mode) => store.getEntry(id, mode), getAttempt: async () => { throw new Error("legacy attempt path"); },
       updateEntry: async () => { throw new Error("legacy manifest path"); }, getLiveHandle: () => handle,
       startDelivery: async () => { events.push("start"); },
       observation: new DeliveryCutoverCoordinator({ isHandoffScheduled: () => state.handoff, drive: async () => {}, setRetryTimeout: () => ({ unref() {} }) }),
@@ -673,3 +673,106 @@ function deferred<T>(): Deferred<T> {
   });
   return { promise, resolve, reject };
 }
+
+test("cutover reads use summary mode while cutover mutations preserve full stored activity payloads", async () => {
+  const fullActivity = Array.from({ length: 24 }, (_, index) => ({
+    observed_at: "2026-08-31T08:00:00Z",
+    sequence: index + 1,
+    provider: "codex" as const,
+    kind: "tool" as const,
+    method: `item/${index + 1}`,
+    summary: `event ${index + 1}`,
+    status: "idle" as const,
+    payload: { index: index + 1, body: "payload-data" },
+    payload_truncated: false,
+    payload_redacted: false,
+    durable_payload_ref: null,
+  }));
+  const connection = { kind: "codex_app_server" as const, url: "ws://127.0.0.1:4567", pid: 4567, processIdentity: BIRTH };
+  const handle: ProviderActionHandle = { workAttemptId: "work", pid: 4567, providerContinuationId: "thread", providerConnection: connection, observedState: "working" };
+  let stored: DaemonManifestEntry = {
+    id: "agent",
+    room_id: "room",
+    display_name: "Agent",
+    provider: "codex",
+    model: null,
+    charter: "test",
+    desired_state: "running",
+    observed_state: "working",
+    condition: "none",
+    permission_profile_id: null,
+    created_by: "test",
+    created_at: "2026-08-31T08:00:00Z",
+    delivery_mode: "mcp_polling",
+    work_attempt_id: "work",
+    provider_ref: {
+      work_attempt_id: "work",
+      execution_generation_id: "run",
+      provider_continuation_id: "thread",
+      provider_connection: connection,
+    },
+    activity: fullActivity,
+  };
+  const getEntryModes: Array<"full" | "summary" | undefined> = [];
+  let turnInspectState: "unknown" | "terminal" = "unknown";
+  const coordinator = new DeliveryCutoverExecutionCoordinator({
+    isHandoffScheduled: () => false,
+    provider: {
+      capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+      spawn: async () => { throw new Error("unused"); },
+      resume: async () => { throw new Error("unused"); },
+      attach: async () => { throw new Error("unused"); },
+      poke: async () => {},
+      stop: async () => { throw new Error("unused"); },
+      onExit: async () => () => {},
+      controlExactTurn: async (_handle, input) => {
+        await input.checkpointTargetTurn("turn-1");
+        await input.markDispatched();
+        return { outcome: "interrupt_dispatched", targetTurnId: "turn-1" };
+      },
+      inspectTurn: async () => turnInspectState,
+    },
+    getEntry: async (_id, mode) => {
+      getEntryModes.push(mode);
+      if (mode === "summary") {
+        return {
+          ...stored,
+          activity: (stored.activity ?? []).slice(-16).map((event) => ({ ...event, payload: null })),
+        };
+      }
+      return structuredClone(stored);
+    },
+    getAttempt: async () => ({ work_attempt_id: "work", execution_generations: [] }) as never,
+    updateEntry: async (_id, update) => {
+      // Mirrors ManifestAdministrationCoordinator.updateEntry reading full stored state.
+      stored = update(structuredClone(stored));
+      return structuredClone(stored);
+    },
+    getLiveHandle: () => handle,
+    startDelivery: async () => {},
+    observation: new DeliveryCutoverCoordinator({
+      isHandoffScheduled: () => false,
+      drive: async () => {},
+      setRetryTimeout: () => ({ unref() {} }),
+    }),
+  });
+
+  // First drive hits markUncertain (appending delivery_cutover activity on top of full stored activity).
+  const controller = new AbortController();
+  await coordinator.drive("agent", controller.signal);
+  assert.deepEqual(getEntryModes, ["summary"]);
+  assert.equal(stored.delivery_cutover?.phase, "uncertain");
+  assert.equal(stored.activity?.length, 25, "markUncertain preserves all 24 prior events and appends the new event");
+  assert.equal(stored.activity?.[24]?.sequence, 25);
+  assert.deepEqual(stored.activity?.[0]?.payload, { index: 1, body: "payload-data" });
+
+  // Second drive inspects terminal and completes cutover without losing any stored activity payload.
+  turnInspectState = "terminal";
+  await coordinator.drive("agent", controller.signal);
+  assert.deepEqual(getEntryModes, ["summary", "summary"]);
+  assert.equal(stored.delivery_mode, "daemon_inbox");
+  assert.equal(stored.delivery_cutover, null);
+  assert.equal(stored.activity?.length, 25);
+  assert.deepEqual(stored.activity?.[0]?.payload, { index: 1, body: "payload-data" });
+  assert.deepEqual(stored.activity?.[23]?.payload, { index: 24, body: "payload-data" });
+});
