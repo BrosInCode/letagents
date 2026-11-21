@@ -294,7 +294,10 @@ export class ProviderRuntimeBoundary {
   release(ref: ProviderRuntimeRef): void {
     this.reference(ref);
     const handle = this.handles.get(ref.runtimeId);
-    if (handle && this.matches(ref, handle)) this.handles.delete(ref.runtimeId);
+    if (!handle || !this.matches(ref, handle)) return;
+    this.handles.delete(ref.runtimeId);
+    // A released reference stays stale: the same handle object gets a new id if an adapter returns it again.
+    this.runtimeIds.delete(handle);
   }
 
   async poke(ref: ProviderRuntimeRef, message: string): Promise<void> {

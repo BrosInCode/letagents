@@ -150,6 +150,22 @@ test("the same provider handle keeps its reference, and a new handle gets a new 
   assert.notEqual(other.ref.runtimeId, first.runtime.ref.runtimeId);
 });
 
+test("a released reference stays stale when the adapter returns the same handle object again", async () => {
+  const kept = new FakeHandle("attempt-1");
+  const boundary = new ProviderRuntimeBoundary("codex", fakeAdapter({ attach: async () => kept }).adapter);
+  const continuation = { workAttemptId: "attempt-1", providerContinuationId: "thread-1" };
+  const first = await boundary.attach(continuation);
+  assert.equal(first.state, "attached");
+  if (first.state !== "attached") return;
+  boundary.release(first.runtime.ref);
+  const again = await boundary.attach(continuation);
+  assert.equal(again.state, "attached");
+  if (again.state !== "attached") return;
+  assert.notEqual(again.runtime.ref.runtimeId, first.runtime.ref.runtimeId);
+  assert.throws(() => boundary.inspect(first.runtime.ref), StaleProviderRuntimeRefError);
+  assert.equal(boundary.inspect(again.runtime.ref).pid, 4242);
+});
+
 test("attach reports absent, attached and terminal as data", async () => {
   const absent = new ProviderRuntimeBoundary("codex", fakeAdapter().adapter);
   assert.deepEqual(await absent.attach({ workAttemptId: "attempt-1", providerContinuationId: "thread-1" }), { state: "absent" });

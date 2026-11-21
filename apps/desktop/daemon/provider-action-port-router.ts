@@ -211,6 +211,8 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         // The adapter can stop a runtime that fails a check against the policy it is given
         // here. Its proof that the process is gone is then the answer, as at a first attach.
         if (bound.state !== "attached" || bound.runtime.ref.runtimeId !== handle.ref.runtimeId) {
+          // A runtime that is not the installed one is not named by the router, so the boundary forgets it.
+          if (bound.state === "attached") remembered.boundary.release(bound.runtime.ref);
           return bound.state === "terminal" ? attachTerminal(bound) : null;
         }
       }
