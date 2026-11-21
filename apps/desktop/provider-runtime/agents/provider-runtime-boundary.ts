@@ -9,14 +9,15 @@
 // reference whose id this boundary does not hold is stale, and it is refused.
 // It is never resolved to the newest runtime of the same work attempt.
 //
-// Step 4d-1 moves the references, the values of the operations that carry
-// data only, and the value guard. The operations in TRANSITIONAL_OPERATIONS
-// still take a callback or an AbortSignal beside the reference; steps 4d-2
-// and 4d-3 replace those.
+// Step 4d-1 moved the references, the values of the operations that carry
+// data only, and the value guard. Step 4d-2 moves the events: the daemon
+// connects one sink, a subscription is data, and each event reaches the sink
+// as an envelope. The operations in TRANSITIONAL_OPERATIONS still take a
+// callback or an AbortSignal beside the reference; step 4d-3 replaces those.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { assertPlainWireValue, assertWireBoundarySchema, jsonValueSchema } from "#daemon-contract/wire-boundary.js";
-import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../shared/provider-permissions.js";
 import type { ProviderUsage } from "../../shared/provider-usage.js";
 import type {
@@ -27,14 +28,12 @@ import type {
   ProviderExactTurnControlOptions,
   ProviderExactTurnControlResult,
   ProviderHandle,
-  ProviderNativePermissionEvent,
   ProviderNativePermissionRequest,
   ProviderRoomTurnOptions,
   ProviderRoomTurnRecoveryRequest,
   ProviderRoomTurnRequest,
   ProviderRoomTurnResult,
   ProviderSpawnRequest,
-  ProviderStreamEvent,
   ProviderTerminalPayload,
   ProviderTurnControlOptions,
   ProviderTurnControlResult,
@@ -123,7 +122,68 @@ export const providerStopOptionsSchema = z.strictObject({
 });
 export type ProviderBoundaryStopOptions = z.output<typeof providerStopOptionsSchema>;
 
-/** The schemas of the values that step 4d-1 moved. Each one meets the shared wire rule of the RPC contract. */
+export const PROVIDER_EVENT_KINDS = ["exit", "stream", "execution", "permissions"] as const;
+export type ProviderEventKind = (typeof PROVIDER_EVENT_KINDS)[number];
+
+const subscriptionId = boundedText;
+const eventCounter = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
+
+/**
+ * One event on its way to the daemon. `seq` counts in one subscription from 1
+ * with no hole. `order` is one counter for the whole boundary: it is the order
+ * in which the adapter made its calls, across all subscriptions and kinds.
+ * The body is the adapter's own event, unchanged: an execution observation
+ * keeps its `sourceId` and `sequence`, and a stream event keeps its `sequence`.
+ */
+export const providerEventEnvelopeSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.enum(PROVIDER_EVENT_KINDS),
+    subscriptionId,
+    ref: providerRuntimeRefSchema,
+    seq: eventCounter,
+    order: eventCounter,
+    /** The last envelope of this subscription. The boundary has ended the subscription. */
+    final: z.literal(true).optional(),
+    body: jsonValueSchema,
+  }),
+  // One or more events of this subscription did not reach the daemon because they were not plain data.
+  z.strictObject({
+    kind: z.literal("gap"),
+    subscriptionId,
+    ref: providerRuntimeRefSchema,
+    seq: eventCounter,
+    order: eventCounter,
+    body: z.strictObject({ dropped: z.enum(["stream", "execution"]), count: eventCounter }),
+  }),
+  // A hint from a start that is in progress. There is no runtime yet, so the operation id of the start names it.
+  z.strictObject({
+    kind: z.literal("start"),
+    operationId: boundedText,
+    order: eventCounter,
+    body: z.strictObject({ hint: z.enum(["progress", "native_started"]) }),
+  }),
+]);
+export type ProviderEventEnvelope =
+  | { kind: ProviderEventKind; subscriptionId: string; ref: ProviderRuntimeRef; seq: number; order: number; final?: true; body: unknown }
+  | { kind: "gap"; subscriptionId: string; ref: ProviderRuntimeRef; seq: number; order: number; body: { dropped: "stream" | "execution"; count: number } }
+  | { kind: "start"; operationId: string; order: number; body: { hint: "progress" | "native_started" } };
+
+/** The transport for all events of one boundary. The daemon connects it one time. It is not a per-call callback. */
+export type ProviderEventSink = (event: ProviderEventEnvelope) => void;
+
+export const providerSubscriptionSchema = z.strictObject({
+  subscriptionId,
+  /** Execution only: the identity of the adapter's observer, as in each of its observations. */
+  sourceId: z.string().optional(),
+});
+export type ProviderSubscription = z.output<typeof providerSubscriptionSchema>;
+
+export const providerSubscriptionPositionSchema = z.strictObject({
+  firstRetainedSequence: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  latestSequence: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+});
+
+/** The schemas of the values that steps 4d-1 and 4d-2 moved. Each one meets the shared wire rule of the RPC contract. */
 export const PROVIDER_BOUNDARY_SCHEMAS = {
   providerConnectionRef: providerConnectionRefSchema,
   providerRuntimeRef: providerRuntimeRefSchema,
@@ -132,6 +192,9 @@ export const PROVIDER_BOUNDARY_SCHEMAS = {
   providerContinuationRef: providerContinuationRefSchema,
   providerAttachResult: providerAttachResultSchema,
   providerStopOptions: providerStopOptionsSchema,
+  providerEventEnvelope: providerEventEnvelopeSchema,
+  providerSubscription: providerSubscriptionSchema,
+  providerSubscriptionPosition: providerSubscriptionPositionSchema,
 } as const;
 for (const schema of Object.values(PROVIDER_BOUNDARY_SCHEMAS)) assertWireBoundarySchema(schema);
 
@@ -144,18 +207,17 @@ export const DATA_OPERATIONS = [
   "inspectTurnBoundary", "probeControl", "readUsage", "stopBackgroundCommand", "roomTurnImageDelivery",
   "roomTurnFileAccess", "compactionProgress", "runtimeCustody", "describeManagedLaunchContract",
   "correlatePermissionTurn", "inspectPermissionFileChanges", "inspectPermissionProfile",
-  "inspectPermissionMcpToolCall", "stop", "stopRef",
+  "inspectPermissionMcpToolCall", "stop", "stopRef", "subscribe", "unsubscribe", "subscriptionPosition",
 ] as const;
 
+/** The one place where the daemon gives the boundary a function: the transport for events. */
+export const TRANSPORT_OPERATIONS = ["connectEventSink"] as const;
+
 /**
- * Operations that name the runtime by data but still take a callback, a
- * listener or an AbortSignal. The part that is not data is named for each.
- * `spawn` and `resume` are data operations with two optional start hints,
- * which are listed here too.
+ * Operations that name the runtime by data but still take a callback or an
+ * AbortSignal. The part that is not data is named for each.
  */
 export const TRANSITIONAL_OPERATIONS = {
-  spawn: ["onProgress", "onNativeStarted"],
-  resume: ["onProgress", "onNativeStarted"],
   controlTurn: ["checkpointTurnStarted", "markDispatched"],
   controlExactTurn: ["checkpointTargetTurn", "markDispatched", "detachSignal"],
   runRoomTurn: [
@@ -166,11 +228,7 @@ export const TRANSITIONAL_OPERATIONS = {
   recoverRoomTurn: ["detachSignal", "checkpointProviderState", "settleLifecycleBeforeIdle", "checkpointTerminalResult"],
   repairContinuation: ["checkpointReplacement", "detachSignal", "result.noticesRecorded"],
   stopIdle: ["assertCurrent"],
-  observePermissions: ["listener", "signal"],
   replyPermission: ["beforeNativeDispatch", "assertNativeDispatch"],
-  onExit: ["listener", "unsubscribe"],
-  onStream: ["listener", "unsubscribe"],
-  onExecution: ["listener", "subscription"],
 } as const;
 
 /** The reference names a runtime that this boundary does not hold. Nothing was sent to a provider. */
@@ -191,7 +249,9 @@ export class ProviderBoundaryValueError extends Error {
   }
 }
 
-export type ProviderStartHints = Pick<ProviderSpawnRequest, "onProgress" | "onNativeStarted">;
+/** Names the start for its hint events. The daemon makes the id and listens for `start` envelopes that carry it. */
+export const providerStartOptionsSchema = z.strictObject({ startOperationId: boundedText.optional() });
+export type ProviderStartOptions = z.output<typeof providerStartOptionsSchema>;
 export type ProviderBoundarySpawnRequest = Omit<ProviderSpawnRequest, "onProgress" | "onNativeStarted">;
 export type ProviderBoundaryRepairResult = Omit<ProviderContinuationRepairResult, "handle"> & { runtime: ProviderRuntimeSnapshot };
 export type ProviderBoundaryOperation = keyof SupervisedProviderAdapter;
@@ -228,6 +288,15 @@ function isAttachTerminal(value: ProviderHandle | { state: "terminal" }): value 
 export class ProviderRuntimeBoundary {
   private readonly handles = new Map<string, ProviderHandle>();
   private readonly runtimeIds = new WeakMap<ProviderHandle, string>();
+  private readonly subscriptions = new Map<string, {
+    ref: ProviderRuntimeRef;
+    kind: ProviderEventKind;
+    seq: number;
+    end: () => void;
+    position?: () => { firstRetainedSequence: number; latestSequence: number };
+  }>();
+  private sink: ProviderEventSink | null = null;
+  private order = 0;
 
   constructor(readonly provider: string, private readonly adapter: SupervisedProviderAdapter) {}
 
@@ -251,15 +320,87 @@ export class ProviderRuntimeBoundary {
     return guarded("capabilities", "result", this.adapter.capabilities());
   }
 
-  async spawn(request: ProviderBoundarySpawnRequest, hints: ProviderStartHints = {}): Promise<ProviderRuntimeSnapshot> {
-    guarded("spawn", "request", request);
-    return this.installed("spawn", await this.adapter.spawn({ ...request, ...hints }));
+  /** Connect the transport for events. One sink for the life of the boundary. */
+  connectEventSink(sink: ProviderEventSink): void {
+    if (this.sink) throw new Error("The provider boundary already has an event sink.");
+    this.sink = sink;
   }
 
-  async resume(continuation: ProviderContinuationRef, request: ProviderBoundarySpawnRequest, hints: ProviderStartHints = {}): Promise<ProviderRuntimeSnapshot> {
+  async spawn(request: ProviderBoundarySpawnRequest, options: ProviderStartOptions = {}): Promise<ProviderRuntimeSnapshot> {
+    guarded("spawn", "request", request);
+    return this.installed("spawn", await this.adapter.spawn({ ...request, ...this.startHints("spawn", options) }));
+  }
+
+  async resume(continuation: ProviderContinuationRef, request: ProviderBoundarySpawnRequest, options: ProviderStartOptions = {}): Promise<ProviderRuntimeSnapshot> {
     this.continuation("resume", continuation);
     guarded("resume", "request", request);
-    return this.installed("resume", await this.adapter.resume(continuation, { ...request, ...hints }));
+    return this.installed("resume", await this.adapter.resume(continuation, { ...request, ...this.startHints("resume", options) }));
+  }
+
+  /**
+   * Start one subscription. It is exactly one listener of the adapter, so each
+   * subscriber gets what a listener got before: a late `exit` subscriber gets
+   * the terminal, and a new `execution` subscriber gets the retained history
+   * first. The daemon makes the id, because an adapter can deliver the first
+   * events before this call returns.
+   */
+  subscribe(ref: ProviderRuntimeRef, kind: ProviderEventKind, id: string): ProviderSubscription {
+    const handle = this.held(ref);
+    guarded("subscribe", "kind", kind);
+    guarded("subscribe", "subscriptionId", id);
+    if (!PROVIDER_EVENT_KINDS.includes(kind)) throw new ProviderBoundaryValueError("subscribe", "kind: not an event kind");
+    if (typeof id !== "string" || !id || id.length > 4096) throw new ProviderBoundaryValueError("subscribe", "subscriptionId: invalid");
+    if (this.subscriptions.has(id)) throw new ProviderBoundaryValueError("subscribe", "subscriptionId: in use");
+    if (!this.sink) throw new Error("The provider boundary has no event sink.");
+    const record: NonNullable<ReturnType<typeof this.subscriptions.get>> = {
+      ref: { provider: ref.provider, workAttemptId: ref.workAttemptId, runtimeId: ref.runtimeId },
+      kind,
+      seq: 0,
+      end: () => undefined,
+    };
+    this.subscriptions.set(id, record);
+    try {
+      if (kind === "exit") {
+        record.end = this.adapter.onExit(handle, (terminal) => this.deliver(id, terminal, handle));
+      } else if (kind === "stream") {
+        record.end = this.adapter.onStream(handle, (event) => this.deliver(id, event, handle));
+      } else if (kind === "execution") {
+        const subscription = this.required("onExecution")(handle, (event) => this.deliver(id, event, handle));
+        record.end = () => subscription.dispose();
+        record.position = () => subscription.position();
+        return { subscriptionId: id, sourceId: guarded("subscribe", "sourceId", subscription.sourceId) };
+      } else {
+        const controller = new AbortController();
+        record.end = () => controller.abort();
+        // The adapter's promise is reported as one event, so nothing but data comes back. It does not end the
+        // subscription: an adapter may call the listener after its promise settled, and only the daemon ends it.
+        void this.required("observePermissions")(handle, (event) => this.deliver(id, event, handle), controller.signal).then(
+          () => this.deliver(id, { type: "settled", outcome: "ended" }, handle),
+          (error: unknown) => this.deliver(id, { type: "settled", outcome: "failed", message: error instanceof Error ? error.message : "failed" }, handle),
+        );
+      }
+    } catch (error) {
+      this.subscriptions.delete(id);
+      throw error;
+    }
+    return { subscriptionId: id };
+  }
+
+  /** End a subscription. A second call, or a call for an id that is not known, does nothing. */
+  unsubscribe(id: string): void {
+    const record = typeof id === "string" ? this.subscriptions.get(id) : undefined;
+    if (!record) return;
+    this.subscriptions.delete(id);
+    record.end();
+  }
+
+  /** Execution only: the adapter's retained range for this subscription. Null for an ended or unknown subscription. */
+  subscriptionPosition(id: string): { firstRetainedSequence: number; latestSequence: number } | null {
+    const position = typeof id === "string" ? this.subscriptions.get(id)?.position : undefined;
+    if (!position) return null;
+    const value = position();
+    guarded("subscriptionPosition", "result", value);
+    return conforming("subscriptionPosition", providerSubscriptionPositionSchema, { ...value });
   }
 
   /** `absent` means only "not attached". It is not evidence that the process is gone. */
@@ -290,7 +431,11 @@ export class ProviderRuntimeBoundary {
     return handle && this.matches(ref, handle) ? this.snapshot("inspect", ref, handle) : null;
   }
 
-  /** Forget a runtime that the daemon no longer names. Its reference is stale from here. */
+  /**
+   * Forget a runtime that the daemon no longer names. Its reference is stale from here.
+   * Its subscriptions stay until the daemon ends them: the daemon forgets a runtime inside the delivery of its exit
+   * event, and the other subscribers must still get that event and the events after it.
+   */
   release(ref: ProviderRuntimeRef): void {
     this.reference(ref);
     const handle = this.handles.get(ref.runtimeId);
@@ -446,11 +591,6 @@ export class ProviderRuntimeBoundary {
     return this.required("stopIdle")(handle, assertCurrent);
   }
 
-  observePermissions(ref: ProviderRuntimeRef, listener: (event: ProviderNativePermissionEvent) => void, signal: AbortSignal): Promise<void> {
-    const handle = this.held(ref);
-    return this.required("observePermissions")(handle, listener, signal);
-  }
-
   replyPermission(
     ref: ProviderRuntimeRef,
     request: ProviderNativePermissionRequest,
@@ -463,17 +603,47 @@ export class ProviderRuntimeBoundary {
     return this.required("replyPermission")(handle, request, reply, options);
   }
 
-  onExit(ref: ProviderRuntimeRef, listener: (payload: ProviderTerminalPayload) => void): () => void {
-    return this.adapter.onExit(this.held(ref), listener);
+  /**
+   * Give one adapter event to the sink. The call is synchronous, at the moment
+   * of the adapter's own call, as a listener was called before. An error of
+   * the sink goes back to the adapter, as an error of a listener did.
+   */
+  private deliver(id: string, body: unknown, handle: ProviderHandle): void {
+    const record = this.subscriptions.get(id);
+    const sink = this.sink;
+    if (!record || !sink) return;
+    const base = { subscriptionId: id, ref: record.ref };
+    let safe = body;
+    let last = false;
+    let plain = true;
+    try { assertPlainWireValue(body, GUARD); } catch { plain = false; }
+    if (record.kind === "exit") {
+      // An exit is never dropped. A terminal that is not what the contract says is reported as a protocol error.
+      if (!plain || !providerTerminalSchema.safeParse(body).success) {
+        safe = { endedAt: new Date().toISOString(), exitCode: null, signal: null, terminalCause: "protocol_error", providerContinuationId: handle.providerContinuationId };
+      }
+      last = true;
+    } else if (!plain && record.kind === "permissions") {
+      // A permission event must not vanish: the daemon then shows no prompt. It learns that the lane cannot be read.
+      safe = { type: "unavailable" };
+    } else if (!plain) {
+      sink({ kind: "gap", ...base, seq: ++record.seq, order: ++this.order, body: { dropped: record.kind as "stream" | "execution", count: 1 } });
+      return;
+    }
+    // The record ends here. The adapter's own listener is left as it is: a listener was never removed at its last event before.
+    if (last) this.subscriptions.delete(id);
+    sink({ kind: record.kind, ...base, seq: ++record.seq, order: ++this.order, ...(last ? { final: true as const } : {}), body: safe });
   }
 
-  onStream(ref: ProviderRuntimeRef, listener: (event: ProviderStreamEvent) => void): () => void {
-    return this.adapter.onStream(this.held(ref), listener);
-  }
-
-  onExecution(ref: ProviderRuntimeRef, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription {
-    const handle = this.held(ref);
-    return this.required("onExecution")(handle, listener);
+  private startHints(operation: string, options: ProviderStartOptions): Pick<ProviderSpawnRequest, "onProgress" | "onNativeStarted"> {
+    guarded(operation, "options", options);
+    conforming(operation, providerStartOptionsSchema, options);
+    const operationId = options.startOperationId;
+    if (operationId === undefined) return {};
+    const hint = (name: "progress" | "native_started") => () => {
+      this.sink?.({ kind: "start", operationId, order: ++this.order, body: { hint: name } });
+    };
+    return { onProgress: hint("progress"), onNativeStarted: hint("native_started") };
   }
 
   private required<K extends ProviderBoundaryOperation>(operation: K): NonNullable<SupervisedProviderAdapter[K]> {

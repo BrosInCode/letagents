@@ -620,7 +620,11 @@ test("provider router carries native shadow facts and probes without invoking le
   const handle = await router.spawn(request);
   const received: NativeExecutionObservation[] = [];
   const observed = await router.onExecution(handle, (event) => received.push(event));
-  assert.equal(observed, subscription, "the router forwards the source's subscription without inventing identity or positions");
+  // The adapter's subscription object stays behind the boundary. The daemon gets the same identity and
+  // positions as data, with no value that the router made up.
+  assert.notEqual(observed, subscription);
+  assert.equal(observed.sourceId, subscription.sourceId);
+  assert.deepEqual(observed.position(), subscription.position());
   assert.equal(observed.sourceId, "opaque-observer-source");
   assert.deepEqual(observed.position(), { firstRetainedSequence: 1, latestSequence: 0 });
   const observation: NativeExecutionObservation = {
