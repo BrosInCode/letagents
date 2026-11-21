@@ -22,6 +22,7 @@
 // unit / process): the daemon/reconciler maps this to its own vocabulary at the
 // control-socket boundary. Deliberately no cross-rootDir import into the daemon.
 import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../shared/execution-protocol.js";
+import type { ClaudeNativePermissionRequest, ClaudePermissionObservation, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../shared/provider-permissions.js";
 export type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
 
 export type ProviderObservedState =
@@ -312,6 +313,10 @@ export interface ProviderHandle {
   readonly launchNotices?: readonly string[];
   /** The process was started with its owner's own provider setup. */
   readonly ownerSetup?: boolean;
+  /** The launch contract text of a managed launch; the daemon records it with the runtime. */
+  readonly managedLaunchContract?: string;
+  /** The lifecycle authority of this runtime; the daemon accepts only "typed". */
+  readonly lifecycleAuthorityMode?: "typed";
   observedState(): ProviderObservedState;
 }
 
@@ -697,6 +702,65 @@ export interface ProviderAdapter {
     handle: ProviderHandle,
     listener: (event: ProviderStreamEvent) => void,
   ): () => void;
+}
+
+/** A native permission request of one of the providers that have them. */
+export type ProviderNativePermissionRequest =
+  | CodexNativePermissionRequest
+  | OpenCodeNativePermissionRequest
+  | ClaudeNativePermissionRequest;
+
+/** What a provider reports about its open permission requests. */
+export type ProviderNativePermissionEvent =
+  | { type: "snapshot"; connectionId?: string; requests: readonly ProviderNativePermissionRequest[] }
+  | Extract<ClaudePermissionObservation, { type: "request_closed" }>
+  | { type: "request_closed"; request: CodexNativePermissionRequest }
+  | { type: "degraded" | "unavailable" };
+
+/**
+ * The one contract between the daemon and a provider adapter.
+ *
+ * It is ProviderAdapter, with turn control and the ordered event stream
+ * required, and with the calls that only some providers have: permission
+ * requests, runtime custody, the managed launch contract and the idle stop.
+ * A provider that does not have a call omits it, and the daemon asks for the
+ * call before it uses it.
+ *
+ * The four adapter classes declare that they implement this interface, so a
+ * class that does not meet it fails to compile in this package. The daemon
+ * imports the type from here and has no second definition.
+ *
+ * Each argument and result is plain data, a callback or an AbortSignal. No
+ * call hands out a provider object, so the contract can later cross a process
+ * border.
+ */
+export interface SupervisedProviderAdapter extends ProviderAdapter {
+  controlTurn(handle: ProviderHandle, correction?: string | null, options?: ProviderTurnControlOptions): Promise<ProviderTurnControlResult>;
+  onStream(handle: ProviderHandle, listener: (event: ProviderStreamEvent) => void): () => void;
+
+  /** Whether this adapter still owns a runtime for the work attempt. */
+  runtimeCustody?(workAttemptId: string, handle?: ProviderHandle): "absent" | "owned" | "unknown";
+
+  observePermissions?(handle: ProviderHandle, listener: (event: ProviderNativePermissionEvent) => void, signal: AbortSignal): Promise<void>;
+  replyPermission?(
+    handle: ProviderHandle,
+    request: ProviderNativePermissionRequest,
+    reply: "once" | "reject",
+    options?: ProviderPermissionDispatchOptions,
+  ): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
+  correlatePermissionTurn?(
+    handle: ProviderHandle,
+    request: OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest,
+    options?: { roomTurnId?: string },
+  ): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
+  inspectPermissionFileChanges?(handle: ProviderHandle, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null>;
+  inspectPermissionProfile?(handle: ProviderHandle, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null>;
+  inspectPermissionMcpToolCall?(handle: ProviderHandle, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null>;
+
+  /** A text that names the launch contract of a managed launch, for the environment fingerprint. */
+  describeManagedLaunchContract?(input: { apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null>;
+  /** Stop a runtime that has no turn in progress; assertCurrent throws when the caller is no longer the owner. */
+  stopIdle?(handle: ProviderHandle, assertCurrent: () => void): Promise<ProviderTerminalPayload>;
 }
 
 // task_28 cell (d): a raw SIGKILL leaves NO native terminal payload in the

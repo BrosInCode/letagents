@@ -24,61 +24,18 @@ import type {
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
-import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
+import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
-type NativeHandle = {
-  managedLaunchContract?: string;
-  lifecycleAuthorityMode?: "typed";
-  workAttemptId: string;
-  pid: number | null;
-  providerContinuationId: string | null;
-  providerConnection?: ProviderActionHandle["providerConnection"];
-  launchNotices?: readonly string[];
-  ownerSetup?: boolean;
-  observedState(): ProviderActionHandle["observedState"];
-};
+import type { ProviderHandle, SupervisedProviderAdapter } from "#provider-runtime/agents/provider-adapter.js";
 
-export type NativeProviderAdapter = {
-  readUsage?(handle: NativeHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
-  stopBackgroundCommand?(handle: NativeHandle, taskId: string): Promise<"stopping" | "not_running" | "failed">;
-  compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
-  runtimeCustody?(workAttemptId: string, handle?: NativeHandle): "absent" | "owned" | "unknown";
-  observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; connectionId?: string; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | Extract<ClaudePermissionObservation, { type: "request_closed" }> | { type: "request_closed"; request: CodexNativePermissionRequest } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
-  replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
-  correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest, options?: { roomTurnId?: string }): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
-  inspectPermissionFileChanges?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null>;
-  inspectPermissionProfile?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null>;
-  inspectPermissionMcpToolCall?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null>;
-  onExecution?(handle: NativeHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
-  probeControl?(handle: NativeHandle): Promise<ControlProbeResult>;
-  capabilities(): ProviderActionCapabilities;
-  spawn(input: ProviderActionSpawn): Promise<NativeHandle>;
-  attach(input: ProviderActionRef): Promise<NativeHandle | ProviderActionAttachTerminal | null>;
-  resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
-  poke(handle: NativeHandle, message: string): Promise<void>;
-  controlTurn(handle: NativeHandle, correction?: string | null, options?: { targetTurnId?: string | null; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
-  inspectTurn?(handle: NativeHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
-  inspectTurnBoundary?(handle: NativeHandle): Promise<NativeTurnBoundary>;
-  controlExactTurn?(handle: NativeHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
-  runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointPreparedTurn?: (state: { providerTurnId: string; providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; markDurableTurnStarted?: () => void; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
-  roomTurnImageDelivery?(handle: NativeHandle): RoomTurnImageDelivery;
-  roomTurnFileAccess?(handle: NativeHandle): RoomTurnFileAccess;
-  recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void> }): Promise<ProviderRoomTurnResult>;
-  repairContinuation?(handle: NativeHandle, request: ProviderContinuationRepairRequest, options: { checkpointReplacement: (providerContinuationId: string) => Promise<void>; detachSignal?: AbortSignal }): Promise<{
-    handle: NativeHandle;
-    outcome: "rematerialized" | "replaced";
-    previousProviderContinuationId: string;
-    replacementProviderContinuationId: string;
-    notices?: readonly string[];
-    noticesRecorded?: () => void;
-  }>;
-  stopRef?(ref: ProviderActionRef, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
-  describeManagedLaunchContract?(input: { apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null>;
-  stopIdle?(handle: NativeHandle, assertCurrent: () => void): Promise<ProviderActionTerminal>;
-  stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
-  onExit(handle: NativeHandle, listener: (terminal: ProviderActionTerminal) => void): () => void;
-  onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
-};
+type NativeHandle = ProviderHandle;
+
+/**
+ * The contract between the daemon and a provider adapter. Its one definition
+ * is in the provider runtime package; the four adapter classes implement it
+ * there. This name stays for the daemon code and its tests.
+ */
+export type NativeProviderAdapter = SupervisedProviderAdapter;
 
 export type ProviderAdapterLoader = () => Promise<NativeProviderAdapter>;
 
@@ -604,20 +561,24 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       const loader = this.adapterLoaders[provider];
       if (loader) return loader();
       if (provider === "codex") {
-        const module = await import("#provider-runtime/agents/codex-provider-adapter.js") as { CodexProviderAdapter?: new () => NativeProviderAdapter };
-        if (module.CodexProviderAdapter) return new module.CodexProviderAdapter();
+        const module = await import("#provider-runtime/agents/codex-provider-adapter.js");
+        const adapter: NativeProviderAdapter = new module.CodexProviderAdapter();
+        return adapter;
       }
       if (provider === "claude-code") {
-        const module = await import("#provider-runtime/agents/claude-code-provider-adapter.js") as { ClaudeCodeProviderAdapter?: new () => NativeProviderAdapter };
-        if (module.ClaudeCodeProviderAdapter) return new module.ClaudeCodeProviderAdapter();
+        const module = await import("#provider-runtime/agents/claude-code-provider-adapter.js");
+        const adapter: NativeProviderAdapter = new module.ClaudeCodeProviderAdapter();
+        return adapter;
       }
       if (provider === "cursor") {
-        const module = await import("#provider-runtime/agents/cursor-provider-adapter.js") as { CursorProviderAdapter?: new () => NativeProviderAdapter };
-        if (module.CursorProviderAdapter) return new module.CursorProviderAdapter();
+        const module = await import("#provider-runtime/agents/cursor-provider-adapter.js");
+        const adapter: NativeProviderAdapter = new module.CursorProviderAdapter();
+        return adapter;
       }
       if (provider === "open-model") {
-        const module = await import("#provider-runtime/agents/open-model-provider-adapter.js") as { OpenModelProviderAdapter?: new () => NativeProviderAdapter };
-        if (module.OpenModelProviderAdapter) return new module.OpenModelProviderAdapter();
+        const module = await import("#provider-runtime/agents/open-model-provider-adapter.js");
+        const adapter: NativeProviderAdapter = new module.OpenModelProviderAdapter();
+        return adapter;
       }
       throw new Error(`No supervised native adapter is available for ${provider}.`);
     })();

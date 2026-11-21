@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isBirthEvidence } from "../../../../../shared/process-tree.mjs";
 import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
-import { sameProviderConnectionIdentity, PROCESS_ENDED_DURING_TURN, type ProviderActivityEvent, type ProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderContinuationRef, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderTurnControlResult, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderStreamEvent, type ProviderTerminalPayload, type NativeExecutionObservation, type NativeExecutionSubscription, type ControlProbeResult } from "../provider-adapter.js";
+import { sameProviderConnectionIdentity, PROCESS_ENDED_DURING_TURN, type ProviderActivityEvent, type SupervisedProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderContinuationRef, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderTurnControlResult, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderStreamEvent, type ProviderTerminalPayload, type NativeExecutionObservation, type NativeExecutionSubscription, type ControlProbeResult } from "../provider-adapter.js";
 import { nativeExecutionId } from "../provider-execution-observer.js";
 import { delay, sameProcessBirthIdentity } from "../provider-evidence.js";
 import { exactClaudeStreamTerminal, recoverExactClaudeTurnFromSession, recoverExactClaudeTurnFailureFromSession } from "../claude-room-turn-evidence.js";
@@ -21,7 +21,7 @@ import type { ClaudeRoomTurnTerminal } from "./types.js";
 // forwarded verbatim, while LetAgents MCP effects borrow the daemon's exact
 // generation grant instead of inheriting desktop owner authority.
 
-export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements ProviderAdapter {
+export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements SupervisedProviderAdapter {
   runtimeCustody(workAttemptId: string, providerHandle?: ProviderHandle): "absent" | "owned" | "unknown" {
     const handle = this.handles.get(workAttemptId);
     return this.processCustody.state(workAttemptId, handle === providerHandle ? handle?.child : undefined);

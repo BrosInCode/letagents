@@ -1,7 +1,7 @@
 /** The Open Model provider adapter: room turns, turn control, repair, stop, listeners, permissions and the shared instance. */
 import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
 import { isBirthEvidence } from "../../../../../shared/process-tree.mjs";
-import { PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, synthesizeTerminalPayload, type ProviderActivityEvent, type ProviderAdapter, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "../provider-adapter.js";
+import { PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, synthesizeTerminalPayload, type ProviderActivityEvent, type SupervisedProviderAdapter, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "../provider-adapter.js";
 import { delay, sameProcessBirthIdentity } from "../provider-evidence.js";
 import { OPEN_MODEL_OPENCODE_PROVIDER_ID } from "../opencode-launch-contract.js";
 import { nativeExecutionId } from "../provider-execution-observer.js";
@@ -14,7 +14,7 @@ import { OpenModelHandle } from "./handle.js";
 import { boundedRoomTurnPrompt, classifyTurn, deniedToolCall, roomTurnImageParts, unansweredCompletionReason } from "./turn-results.js";
 import { terminalFromExit } from "./runtime-launch.js";
 
-export class OpenModelProviderAdapter extends OpenModelAdapterLaunch implements ProviderAdapter {
+export class OpenModelProviderAdapter extends OpenModelAdapterLaunch implements SupervisedProviderAdapter {
   /** Only a runtime started with image input for its model takes images. */
   roomTurnImageDelivery(rawHandle: ProviderHandle): RoomTurnImageDelivery {
     try { return this.required(rawHandle).imageInput ? "memory" : null; } catch { return null; }
