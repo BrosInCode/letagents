@@ -17,10 +17,12 @@ import {
   DAEMON_RPC_TIMEOUTS,
 } from "./version.js";
 import {
+  assertPlainWireValue,
   EXACT_NON_EMPTY_STRING_PATTERN,
   exactNonEmptyString,
   jsonRecordSchema,
   jsonValueSchema,
+  looseJsonObject,
   nonNegativeSafeInt,
   positiveSafeInt,
 } from "./wire-boundary.js";
@@ -225,10 +227,10 @@ const recoverAgentRuntimeParamsSchema = z.union([
 // Loose entry input preserves all fields for manifestAdministration's domain
 // validator (and existing legacy test fixtures) while still publishing the
 // manifest entry shape in JSON Schema.
-const manifestPutEntrySchema = z.looseObject({
+const manifestPutEntrySchema = looseJsonObject({
   ...daemonManifestEntrySchema.partial().shape,
   observed_state: z.string().optional(),
-  provider_ref: z.looseObject({
+  provider_ref: looseJsonObject({
     work_attempt_id: z.string().optional(),
     provider_continuation_id: z.string().optional(),
     provider_connection: jsonRecordSchema.nullable().optional(),
@@ -237,13 +239,13 @@ const manifestPutEntrySchema = z.looseObject({
 });
 
 const localBoardMutateParamsSchema = z.union([
-  z.looseObject({
+  looseJsonObject({
     domain: z.literal("desktop"),
     databasePath: z.string(),
     operation: z.string(),
     args: z.array(jsonValueSchema),
   }),
-  z.looseObject({
+  looseJsonObject({
     domain: z.literal("mcp"),
     databasePath: z.string(),
     statePath: z.string(),
@@ -297,7 +299,7 @@ export const DAEMON_RPC_METHODS = {
   }),
 
   "local_board.watch": defineMethod({
-    params: z.looseObject({
+    params: looseJsonObject({
       roomId: z.string().min(1).max(1024),
       generation: z.number().optional(),
       revision: z.number().optional(),
@@ -863,6 +865,57 @@ export function maxRequestBytesForMethod(method: string): number {
   return DAEMON_RPC_METHODS[method].maxRequestBytes ?? DAEMON_CONTROL_MAX_REQUEST_BYTES;
 }
 
+const GENERIC_ZOD_MESSAGE_PATTERN = /^(?:Invalid |Too small:|Too big:|Unrecognized key)/;
+
+function formatParamIssueMessage(method: DaemonRpcMethod, issue: z.core.$ZodIssue): string {
+  const message = issue.message;
+  if (!GENERIC_ZOD_MESSAGE_PATTERN.test(message)) {
+    return message;
+  }
+  if (issue.path.length > 0) {
+    return `${method} ${issue.path.join(".")}: ${message}`;
+  }
+  if (issue.code === "invalid_union" && Array.isArray(issue.errors)) {
+    for (const branchIssues of issue.errors) {
+      const branchFirst = branchIssues[0];
+      if (!branchFirst) continue;
+      if (branchFirst.path.length > 0) {
+        return `${method} ${branchFirst.path.join(".")}: ${branchFirst.message}`;
+      }
+    }
+  }
+  return `${method}: ${message}`;
+}
+
+/**
+ * Zod v4's `z.record` skips own `"__proto__"` keys when building parsed output.
+ * Validate any own `"__proto__"` values explicitly against the plain wire-value
+ * rule so non-JSON payloads cannot hide under `"__proto__"`, while preserving
+ * the raw object for downstream security guards that reject smuggled keys.
+ */
+function assertOwnProtoPropertiesArePlainJson(value: unknown, path: string): void {
+  const seen = new WeakSet<object>();
+  const walk = (candidate: unknown, currentPath: string): void => {
+    if (candidate === null || typeof candidate !== "object" || seen.has(candidate)) return;
+    seen.add(candidate);
+    if (Array.isArray(candidate)) {
+      for (let i = 0; i < candidate.length; i += 1) {
+        walk(candidate[i], `${currentPath}[${i}]`);
+      }
+      return;
+    }
+    for (const key of Object.keys(candidate)) {
+      const descriptor = Object.getOwnPropertyDescriptor(candidate, key);
+      if (!descriptor) continue;
+      if (key === "__proto__") {
+        assertPlainWireValue(descriptor.value, `${currentPath}.__proto__`);
+      }
+      walk(descriptor.value, `${currentPath}.${key}`);
+    }
+  };
+  walk(value, path);
+}
+
 /**
  * Validate and parse raw JSON request params against the single contract.
  * Throws a clean, caller-facing Error when params do not satisfy the method's
@@ -874,7 +927,10 @@ export function parseDaemonRpcParams<M extends DaemonRpcMethod>(
 ): DaemonRpcParsedParams<M> {
   const spec = DAEMON_RPC_METHODS[method];
   const parsed = spec.params.safeParse(rawParams);
-  if (parsed.success) return parsed.data as DaemonRpcParsedParams<M>;
+  if (parsed.success) {
+    assertOwnProtoPropertiesArePlainJson(rawParams, method);
+    return rawParams as DaemonRpcParsedParams<M>;
+  }
 
   const firstIssue = parsed.error.issues[0];
   if (
@@ -888,7 +944,7 @@ export function parseDaemonRpcParams<M extends DaemonRpcMethod>(
     throw new Error(spec.invalidParamsMessage);
   }
   if (firstIssue?.message) {
-    throw new Error(firstIssue.message);
+    throw new Error(formatParamIssueMessage(method, firstIssue));
   }
   throw new Error(`Invalid parameters for ${method}.`);
 }

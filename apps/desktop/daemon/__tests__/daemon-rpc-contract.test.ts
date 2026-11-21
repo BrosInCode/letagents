@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { z } from "zod";
 import {
+  assertPlainWireValue,
+  assertWireBoundarySchema,
   buildDaemonRpcContractDocument,
+  daemonAgentConfigurationViewSchema,
+  daemonAttemptDetailSchema,
   DAEMON_CONTROL_MAX_REQUEST_BYTES,
   DAEMON_IMPLEMENTATION_VERSION,
   DAEMON_LOCAL_BOARD_MAX_FRAME_BYTES,
@@ -19,6 +23,10 @@ import {
   HANDOFF_DRAIN_METHODS,
   HANDOFF_LIFECYCLE_METHODS,
   isDaemonRpcMethod,
+  isPlainWireValue,
+  jsonRecordSchema,
+  jsonValueSchema,
+  looseJsonObject,
   maxRequestBytesForMethod,
   parseDaemonRpcParams,
   resolveDaemonRpcTimeoutMs,
@@ -115,7 +123,7 @@ test("committed rpc-contract.schema.json matches the Zod contract byte-for-byte"
   }
 });
 
-test("cross-process wire boundary rule rejects non-JSON-Schema types", () => {
+test("cross-process wire boundary rule rejects root and nested non-JSON-Schema types, transforms, and refinements", () => {
   const unrepresentableSchemas: Array<[string, z.ZodType]> = [
     ["function", z.function()],
     ["date", z.date()],
@@ -124,16 +132,120 @@ test("cross-process wire boundary rule rejects non-JSON-Schema types", () => {
     ["map", z.map(z.string(), z.string())],
     ["set", z.set(z.string())],
     ["custom", z.custom<object>(() => true)],
+    ["unknown", z.unknown()],
+    ["any", z.any()],
+    ["undefined", z.undefined()],
+    ["void", z.void()],
+    ["nan", z.nan()],
+    ["looseObject (unknown catchall)", z.looseObject({ id: z.string() })],
+    ["default", z.string().default("x")],
+    ["catch", z.string().catch("x")],
+    ["transform", z.string().transform(() => new Date())],
+    ["pipe", z.string().pipe(z.string())],
+    ["preprocess", z.preprocess((value) => value, z.string())],
+    ["refine", z.string().refine((value) => value === "allowed")],
+    ["superRefine", z.object({ id: z.string() }).superRefine(() => {})],
+    ["nested transform in object/array", z.object({ items: z.array(z.string().transform((s) => s.length)) })],
+    ["nested refine in object", z.object({ id: z.string().refine((s) => s.startsWith("a")) })],
+    ["nested superRefine in optional", z.object({ inner: z.object({ a: z.string() }).superRefine(() => {}).optional() })],
+    ["nested date in optional/nullable", z.object({ at: z.date().nullable().optional() })],
+    ["nested function in record", z.record(z.string(), z.function())],
+    ["nested map in union", z.union([z.string(), z.map(z.string(), z.string())])],
+    ["nested set in lazy", z.lazy(() => z.set(z.string()))],
+    ["nested unknown in tuple", z.tuple([z.string(), z.unknown()])],
+    ["nested custom in intersection", z.intersection(z.object({ a: z.string() }), z.object({ b: z.custom<object>(() => true) }))],
   ];
   for (const [label, schema] of unrepresentableSchemas) {
     assert.throws(
+      () => assertWireBoundarySchema(schema),
+      `assertWireBoundarySchema must reject ${label}`,
+    );
+    assert.throws(
       () => toWireJsonSchema(schema),
-      `toWireJsonSchema must reject unrepresentable ${label} schemas`,
+      `toWireJsonSchema must reject ${label}`,
     );
   }
-  const ok = toWireJsonSchema(z.strictObject({ id: z.string(), count: z.number().int().min(0) }));
+
+  const ok = toWireJsonSchema(z.strictObject({
+    id: z.string(),
+    count: z.number().int().min(0),
+    meta: jsonRecordSchema,
+    payload: jsonValueSchema,
+    extra: looseJsonObject({ name: z.string() }),
+  }));
   assert.equal(ok.type, "object");
   assert.equal(ok.additionalProperties, false);
+});
+
+test("jsonValueSchema and jsonRecordSchema enforce plain JSON values recursively", () => {
+  for (const valid of ["hello", 0, 42, -3.5, true, false, null, [], [1, "a", null, { nested: [true] }], { a: 1, b: [null, "ok"] }]) {
+    assert.equal(jsonValueSchema.safeParse(valid).success, true, `expected jsonValueSchema to accept ${JSON.stringify(valid)}`);
+  }
+  assert.equal(jsonRecordSchema.safeParse({ a: 1, nested: { list: [true, null, "x"] } }).success, true);
+
+  class CustomHolder {
+    value = 1;
+  }
+  const abortSignal = new AbortController().signal;
+  const invalidValues: Array<[string, unknown]> = [
+    ["undefined", undefined],
+    ["function", () => {}],
+    ["Date", new Date()],
+    ["BigInt", 1n],
+    ["Symbol", Symbol("wire")],
+    ["Infinity", Infinity],
+    ["-Infinity", -Infinity],
+    ["NaN", NaN],
+    ["Map", new Map([["a", 1]])],
+    ["Set", new Set(["a"])],
+    ["RegExp", /abc/],
+    ["AbortSignal", abortSignal],
+    ["class instance", new CustomHolder()],
+    ["nested Date in array", [1, new Date()]],
+    ["nested function in object", { nested: { callback: () => true } }],
+    ["nested BigInt in object", { count: 2n }],
+    ["nested Infinity in object", { metric: Infinity }],
+    ["nested undefined in object", { missing: undefined }],
+    ["nested AbortSignal in object", { signal: abortSignal }],
+  ];
+  for (const [label, value] of invalidValues) {
+    assert.equal(jsonValueSchema.safeParse(value).success, false, `jsonValueSchema must reject ${label}`);
+    assert.equal(jsonRecordSchema.safeParse({ wrapped: value }).success, false, `jsonRecordSchema must reject nested ${label}`);
+    assert.equal(isPlainWireValue(value), false, `isPlainWireValue must reject ${label}`);
+    assert.throws(() => assertPlainWireValue({ wrapped: value }), `assertPlainWireValue must reject nested ${label}`);
+  }
+  assert.equal(jsonRecordSchema.safeParse(new Date()).success, false);
+  assert.equal(jsonRecordSchema.safeParse(() => {}).success, false);
+  assert.equal(jsonRecordSchema.safeParse(new CustomHolder()).success, false);
+
+  // Runtime wire-value guard also rejects cycles, symbol keys, and getters,
+  // while permitting shared non-cyclic references and null-prototype objects.
+  const shared = { id: "shared" };
+  assert.deepEqual(assertPlainWireValue({ a: shared, b: shared }), { a: shared, b: shared });
+  assert.equal(isPlainWireValue(Object.assign(Object.create(null), { ok: true })), true);
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  assert.throws(() => assertPlainWireValue(cyclic), /circular reference/);
+  assert.throws(() => assertPlainWireValue({ [Symbol("k")]: 1 }), /symbol keys/);
+  const withGetter = {};
+  Object.defineProperty(withGetter, "computed", { enumerable: true, get: () => "x" });
+  assert.throws(() => assertPlainWireValue(withGetter), /accessor/);
+  // Own "__proto__" properties are inspected by descriptor value, not prototype lookup.
+  const ownProtoBad = JSON.parse('{"__proto__":{"nested":1}}') as Record<string, unknown>;
+  Object.defineProperty(ownProtoBad, "__proto__", { enumerable: true, configurable: true, writable: true, value: { bad: new Date() } });
+  assert.throws(() => assertPlainWireValue(ownProtoBad), /Date/);
+  // parseDaemonRpcParams preserves own "__proto__" keys so downstream security checks see them,
+  // while still rejecting non-JSON values hidden under "__proto__".
+  const smuggledEntry = {
+    id: "agent_1",
+    provider_launch_policy: JSON.parse('{"approvalPolicy":"never","__proto__":{"letagentsOwnerIsolation":false}}'),
+  };
+  const parsedPut = parseDaemonRpcParams("manifest.put", { entry: smuggledEntry });
+  assert.equal(Object.hasOwn(parsedPut.entry.provider_launch_policy as object, "__proto__"), true);
+  assert.throws(
+    () => parseDaemonRpcParams("manifest.put", { entry: { id: "agent_1", provider_launch_policy: ownProtoBad } }),
+    /Date/,
+  );
 });
 
 test("contract metadata drives framing limits, version gating, handoff sets, and timeouts", () => {
@@ -244,4 +356,82 @@ test("parseDaemonRpcParams enforces exact validation rules and error messages", 
     }),
     /Execution delegation sync requires a room\./,
   );
+  // Generic Zod validation errors include both the RPC method and the failing field path.
+  assert.throws(
+    () => parseDaemonRpcParams("manifest.control_turn", { room_id: "room_1" }),
+    /manifest\.control_turn id:/,
+  );
+  assert.throws(
+    () => parseDaemonRpcParams("supervisor.install_worker_credential", {}),
+    /supervisor\.install_worker_credential entry_id:/,
+  );
+  assert.throws(
+    () => parseDaemonRpcParams("local_board.mutate", {}),
+    /local_board\.mutate domain:/,
+  );
+  // Validation refusals never echo secret input values.
+  const secretToken = "letagents_secret_token_never_echo_9f8e7d";
+  assert.throws(
+    () => parseDaemonRpcParams("supervisor.install_worker_credential", {
+      entry_id: "agent_1",
+      daemon_generation: 1,
+      worker_token: ` ${secretToken} `,
+    }),
+    (error: Error) => {
+      assert.match(error.message, /supervisor\.install_worker_credential/);
+      assert.equal(error.message.includes(secretToken), false);
+      return true;
+    },
+  );
+});
+
+test("result schemas preserve all daemon output fields on agent configuration and attempt.read", () => {
+  const configParsed = daemonAgentConfigurationViewSchema.parse({
+    entry_id: "agent_1",
+    daemon_generation: 1,
+    provider: "codex",
+    model: null,
+    reasoning_effort: null,
+    charter: "Stay helpful.",
+    permission_profile_id: "full_access",
+    supervised_permission_profiles: [],
+    provider_launch_policy: {},
+    config_revision: 1,
+    runtime_configuration_revision: 1,
+    delivery_mode: "daemon_inbox",
+    live_sharing: "on",
+    home_harness: false,
+    home_harness_pending: false,
+    home_harness_availability: "available",
+    image_input: false,
+    image_input_available: false,
+    share_live_activity: true,
+    live_sharing_availability: "available",
+  });
+  assert.equal(configParsed.delivery_mode, "daemon_inbox");
+  assert.equal(configParsed.live_sharing, "on");
+
+  const attemptParsed = daemonAttemptDetailSchema.parse({
+    entry_id: "agent_1",
+    work_attempt_id: "attempt_1",
+    workspace_path: "/tmp/ws",
+    last_terminal: null,
+    restart_count: 1,
+    execution_generations: [{
+      execution_generation_id: "exec_1",
+      work_attempt_id: "attempt_1",
+      started_at: "2026-11-21T00:00:00.000Z",
+      actor: "daemon",
+      generation: 1,
+      terminal: null,
+    }],
+    checkpoints: [{
+      at: "2026-11-21T00:00:01.000Z",
+      room_cursor: "msg_1",
+      provider_continuation_id: "thread_1",
+    }],
+    activity: [],
+  });
+  assert.equal(attemptParsed.execution_generations.length, 1);
+  assert.equal(attemptParsed.checkpoints.length, 1);
 });

@@ -2906,7 +2906,7 @@ test("a supervised launch is saved running unless the caller asks for a paused r
 
 test("desktop and daemon implementation identities stay in lockstep", async () => {
   const daemonTypes = await readFile(daemonTypesPath, "utf8");
-  assert.match(daemonTypes, /from "#daemon-contract\/index\.js"/);
+  assert.ok(daemonTypes.includes('from "#daemon-contract/index.js"'));
   assert.match(daemonTypes, /\bDAEMON_IMPLEMENTATION_VERSION\b/);
   assert.doesNotMatch(daemonTypes, /DAEMON_IMPLEMENTATION_VERSION\s*=\s*"/);
   assert.equal(SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION, DAEMON_IMPLEMENTATION_VERSION);
@@ -3016,7 +3016,7 @@ test("desktop and daemon agree on the state channel's activity summary limit", a
     join(dirname(fileURLToPath(import.meta.url)), "../../daemon/state-watch-projection.ts"),
     "utf8",
   );
-  assert.match(projection, /from "#daemon-contract\/index\.js"/);
+  assert.ok(projection.includes('from "#daemon-contract/index.js"'));
   assert.match(projection, /export const STATE_WATCH_ACTIVITY_SUMMARY_LIMIT = DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT;/);
   assert.equal(SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT, DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT);
 });

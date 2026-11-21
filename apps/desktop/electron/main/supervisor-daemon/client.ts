@@ -12,13 +12,14 @@ import type {
   DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
 } from "../../ipc-types.js";
+import { jsonValueSchema, type DaemonRpcParams } from "#daemon-contract/index.js";
 import { apiUrl } from "#provider-runtime/paths.js";
 import { supervisedDeliveryModeForProvider } from "../agents/provider-registry.js";
 import { SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT } from "./constants.js";
 import { mapAgentConfiguration, mapAgentInspectorDetail, mapRoomMove } from "./agent-mapping.js";
 import { mapActivity, mapEntry } from "./entry-mapping.js";
 import { supervisorStateWatchAcceptsStatus } from "./state-watch-policy.js";
-import type { DesktopSupervisorStateWatchResult, WireEntry } from "./types.js";
+import type { DesktopSupervisorStateWatchResult } from "./types.js";
 import { nonEmptyString, record, validTurnControlActionId } from "./wire-values.js";
 import { SupervisorDaemonHostApprovalClient } from "./client-host-approvals.js";
 
@@ -206,7 +207,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       throw new Error("A valid supervised agent creation request id is required.");
     }
     const now = this.now().toISOString();
-    const entry: WireEntry = {
+    const entry: DaemonRpcParams<"manifest.put">["entry"] = {
       id: `supervised_${creationRequestId}`,
       room_id: input.roomIdentifier,
       ...(input.localRoomId ? { local_room_id: input.localRoomId } : {}),
@@ -229,9 +230,11 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       // not reinterpret it as a LetAgents permission profile on its way to
       // the daemon. The Codex default remains only for the existing UI that
       // has not supplied an explicit provider policy yet.
-      provider_launch_policy: input.launchPolicy ?? (input.providerId === "codex" && (!input.permissionProfileId || input.permissionProfileId === "full_access")
-        ? { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }
-        : {}),
+      provider_launch_policy: input.launchPolicy !== undefined
+        ? jsonValueSchema.parse(input.launchPolicy)
+        : (input.providerId === "codex" && (!input.permissionProfileId || input.permissionProfileId === "full_access")
+          ? { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }
+          : {}),
       created_by: "desktop",
       created_at: now,
       source_repo_path: input.repoRootPath?.trim() || null,

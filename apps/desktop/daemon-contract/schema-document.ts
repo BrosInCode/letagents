@@ -23,6 +23,8 @@ import {
 } from "./methods.js";
 import {
   canonicalizeJson,
+  jsonRecordSchema,
+  jsonValueSchema,
   toWireJsonSchema,
   WIRE_JSON_SCHEMA_DRAFT,
 } from "./wire-boundary.js";
@@ -56,6 +58,7 @@ import {
   deliveryAttentionSchema,
   deliveryReceiptSchema,
   desiredStateSchema,
+  executionGenerationSchema,
   executionTerminalPayloadSchema,
   hostApprovalCandidateSchema,
   hostApprovalChallengeSchema,
@@ -76,6 +79,7 @@ import {
   runningBackgroundCommandSchema,
   signedHostApprovalRequestSchema,
   supervisedPermissionProfileSchema,
+  workAttemptCheckpointSchema,
   hostApprovalOperationSchemas,
   type HostApprovalSignedOperation,
 } from "./wire-types.js";
@@ -151,6 +155,7 @@ function createWireTypeRegistry() {
     ["DeliveryAttention", deliveryAttentionSchema],
     ["DeliveryReceipt", deliveryReceiptSchema],
     ["DesiredState", desiredStateSchema],
+    ["ExecutionGeneration", executionGenerationSchema],
     ["ExecutionTerminalPayload", executionTerminalPayloadSchema],
     ["HostApprovalCandidate", hostApprovalCandidateSchema],
     ["HostApprovalChallenge", hostApprovalChallengeSchema],
@@ -158,6 +163,8 @@ function createWireTypeRegistry() {
     ["HostApprovalStatus", hostApprovalStatusSchema],
     ["HostToolRule", hostToolRuleSchema],
     ["HostToolScope", hostToolScopeSchema],
+    ["JsonRecord", jsonRecordSchema],
+    ["JsonValue", jsonValueSchema],
     ["LaunchProgressView", launchProgressViewSchema],
     ["NativeRuntimeDeath", nativeRuntimeDeathSchema],
     ["ObservedState", observedStateSchema],
@@ -171,6 +178,7 @@ function createWireTypeRegistry() {
     ["RunningBackgroundCommand", runningBackgroundCommandSchema],
     ["SignedHostApprovalRequest", signedHostApprovalRequestSchema],
     ["SupervisedPermissionProfile", supervisedPermissionProfileSchema],
+    ["WorkAttemptCheckpoint", workAttemptCheckpointSchema],
   ];
   for (const [id, schema] of named) {
     registry.add(schema, { id });

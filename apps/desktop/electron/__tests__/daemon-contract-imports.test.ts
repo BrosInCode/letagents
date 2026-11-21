@@ -65,13 +65,13 @@ test("daemon and Electron share one protocol version, implementation version, an
 
 test("control-request-router and Electron supervisor-daemon derive from the shared contract", () => {
   const router = readFileSync(join(desktopRoot, "daemon/control-request-router.ts"), "utf8");
-  assert.match(router, /from "#daemon-contract\/index\.js"/);
+  assert.ok(router.includes('from "#daemon-contract/index.js"'));
   assert.doesNotMatch(router, /function requiredStringParam\b/);
   assert.doesNotMatch(router, /function positiveIntegerParam\b/);
   assert.doesNotMatch(router, /function desiredStateParam\b/);
 
   const constants = readFileSync(join(desktopRoot, "electron/main/supervisor-daemon/constants.ts"), "utf8");
-  assert.match(constants, /from "#daemon-contract\/index\.js"/);
+  assert.ok(constants.includes('from "#daemon-contract/index.js"'));
   assert.doesNotMatch(constants, /SUPERVISOR_DAEMON_PROTOCOL_VERSION\s*=\s*\d+/);
   assert.doesNotMatch(constants, /SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION\s*=\s*["']/);
 

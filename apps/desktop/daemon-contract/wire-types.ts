@@ -15,6 +15,7 @@ import {
   exactNonEmptyString,
   jsonRecordSchema,
   jsonValueSchema,
+  looseJsonObject,
   nonNegativeSafeInt,
   positiveSafeInt,
 } from "./wire-boundary.js";
@@ -29,7 +30,9 @@ export const daemonRequestEnvelopeSchema = z.object({
   method: z.string(),
   params: jsonValueSchema.optional(),
 });
-export type DaemonRequest = z.infer<typeof daemonRequestEnvelopeSchema>;
+export type DaemonRequest = Omit<z.infer<typeof daemonRequestEnvelopeSchema>, "params"> & {
+  params?: unknown;
+};
 
 export const daemonResponseEnvelopeSchema = z.object({
   version: z.number().int(),
@@ -38,7 +41,9 @@ export const daemonResponseEnvelopeSchema = z.object({
   result: jsonValueSchema.optional(),
   error: z.string().optional(),
 });
-export type DaemonResponse = z.infer<typeof daemonResponseEnvelopeSchema>;
+export type DaemonResponse = Omit<z.infer<typeof daemonResponseEnvelopeSchema>, "result"> & {
+  result?: unknown;
+};
 
 // ---------------------------------------------------------------------------
 // Core lifecycle & liveness enums
@@ -245,7 +250,9 @@ export const daemonActivityEventSchema = z.object({
   payload_redacted: z.boolean(),
   durable_payload_ref: z.string().nullable(),
 });
-export type DaemonActivityEvent = z.infer<typeof daemonActivityEventSchema>;
+export type DaemonActivityEvent = Omit<z.infer<typeof daemonActivityEventSchema>, "payload"> & {
+  payload: unknown;
+};
 
 export const daemonAgentStreamEventSchema = z.object({
   sequence: z.number().int(),
@@ -256,7 +263,9 @@ export const daemonAgentStreamEventSchema = z.object({
   payload: jsonValueSchema,
   latest_key: z.string().optional(),
 });
-export type DaemonAgentStreamEvent = z.infer<typeof daemonAgentStreamEventSchema>;
+export type DaemonAgentStreamEvent = Omit<z.infer<typeof daemonAgentStreamEventSchema>, "payload"> & {
+  payload: unknown;
+};
 
 export const runningBackgroundCommandSchema = z.object({
   task_id: z.string(),
@@ -523,7 +532,13 @@ export const daemonManifestEntrySchema = z.object({
   reconciliation: reconciliationStateSchema.optional(),
   reconciliation_notices: z.array(reconciliationNoticeSchema).optional(),
 });
-export type DaemonManifestEntry = z.infer<typeof daemonManifestEntrySchema>;
+export type DaemonManifestEntry = Omit<
+  z.infer<typeof daemonManifestEntrySchema>,
+  "provider_launch_policy" | "activity"
+> & {
+  provider_launch_policy?: unknown;
+  activity?: DaemonActivityEvent[];
+};
 
 export const daemonManifestEntryViewSchema = daemonManifestEntrySchema.extend({
   provider_progress: z.object({
@@ -548,7 +563,13 @@ export const daemonManifestEntryViewSchema = daemonManifestEntrySchema.extend({
   delivery_attention: deliveryAttentionSchema.nullable().optional(),
   delivery_receipts: z.array(deliveryReceiptSchema).optional(),
 });
-export type DaemonManifestEntryView = z.infer<typeof daemonManifestEntryViewSchema>;
+export type DaemonManifestEntryView = Omit<
+  z.infer<typeof daemonManifestEntryViewSchema>,
+  "provider_launch_policy" | "activity"
+> & {
+  provider_launch_policy?: unknown;
+  activity?: DaemonActivityEvent[];
+};
 
 // ---------------------------------------------------------------------------
 // State watch, stream watch, room move, configuration, attempt, inspector
@@ -635,6 +656,8 @@ export const daemonAgentConfigurationViewSchema = z.object({
   provider_launch_policy: jsonRecordSchema,
   config_revision: positiveSafeInt,
   runtime_configuration_revision: positiveSafeInt,
+  delivery_mode: daemonAgentDeliveryModeSchema.optional(),
+  live_sharing: z.enum(["off", "on", "withdrawing"]).optional(),
   home_harness: z.boolean().optional(),
   home_harness_pending: z.boolean().optional(),
   home_harness_availability: z.enum(["available", "rental", "unsupported", "polling"]).optional(),
@@ -699,16 +722,33 @@ export const daemonPurgeAgentResultSchema = z.union([
   }),
 ]);
 
+export const workAttemptCheckpointSchema = z.object({
+  at: z.string(),
+  room_cursor: z.string().nullable(),
+  provider_continuation_id: z.string().nullable(),
+});
+
+export const executionGenerationSchema = z.object({
+  execution_generation_id: z.string(),
+  work_attempt_id: z.string(),
+  started_at: z.string(),
+  actor: z.string(),
+  generation: nonNegativeSafeInt,
+  terminal: executionTerminalPayloadSchema.nullable(),
+});
+
 export const daemonAttemptDetailSchema = z.object({
   entry_id: z.string(),
   work_attempt_id: z.string().nullable(),
   workspace_path: z.string().nullable(),
   last_terminal: executionTerminalPayloadSchema.nullable(),
   restart_count: nonNegativeSafeInt,
+  execution_generations: z.array(executionGenerationSchema),
+  checkpoints: z.array(workAttemptCheckpointSchema),
   activity: z.array(daemonActivityEventSchema),
 });
 
-export const daemonInspectorDetailSchema = z.looseObject({
+export const daemonInspectorDetailSchema = looseJsonObject({
   availability: z.enum(["available", "pruned", "not_loaded"]),
   entry_id: z.string(),
   room_id: z.string(),

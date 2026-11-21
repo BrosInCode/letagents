@@ -12,5 +12,5 @@
     "rootDir": "daemon-contract"
   },
   "include": ["daemon-contract/**/*.ts"],
-  "exclude": ["daemon-contract/**/__tests__/**"]
+  "exclude": ["daemon-contract/**/__tests__/**", "daemon-contract/generate-schema.ts"]
 }
