@@ -1245,16 +1245,25 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
           scheduleRoomStreamReconciliation(roomIdentifier);
         }
       }
+      // A repair token this read could not close: one that arrived while the
+      // read ran, or the read's own token when its answer did not get through.
+      // A read that began with no token (an explicit refresh) is no
+      // exception: the token it met is newer than the read.
       if (
         roomKey
-        && deliveryRepairToken !== null
         && pendingDeliveryRepairs.has(roomKey)
         && normalizeRoomIdentifier(activeStreamRoom) === roomKey
       ) {
         const pendingToken = pendingDeliveryRepairs.get(roomKey)?.token;
         if (pendingToken !== undefined) {
-          if (pendingToken !== deliveryRepairToken) scheduleRoomStreamReconciliation(roomIdentifier);
-          else schedulePendingDeliveryRepair(roomIdentifier, deliveryRepairToken);
+          if (pendingToken !== deliveryRepairToken) {
+            // With no token of its own, a read that a newer read replaced leaves the token to that read.
+            if (deliveryRepairToken !== null || generation === streamReconcileGeneration) {
+              scheduleRoomStreamReconciliation(roomIdentifier);
+            }
+          } else {
+            schedulePendingDeliveryRepair(roomIdentifier, deliveryRepairToken);
+          }
         }
       }
     }
@@ -1293,14 +1302,16 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   /**
-   * Read the room on screen again after something outside the stream changed
+   * Read the selected room again after something outside the stream changed
    * it (an App Agent action). For the main room `refreshSelectedSnapshot`
    * reads nothing: it shows the room as it is. So the main room takes the
    * full refresh, and every other room its own read.
    */
   async function refreshActiveRoom(): Promise<void> {
     const root = options.rootRoomSnapshot.value;
-    if (selectedRoomReusesRootSnapshot(root)) {
+    // Settings and the Inbox keep the main room behind them: they show the
+    // kept room in the same way, with no read.
+    if (options.activeEntry.value.type !== "room" || selectedRoomReusesRootSnapshot(root)) {
       options.scheduleLiveMetadataRefresh(0);
       return;
     }

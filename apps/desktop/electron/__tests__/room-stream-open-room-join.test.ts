@@ -61,11 +61,13 @@ type JoinAnswer = { status?: number; body?: unknown } | "no answer";
  * The room server as this suite needs it: a stream that sends its handshake
  * and then stays open, and a join route whose answers the test queues.
  */
-function installServer(room: string) {
+function installServer(room: string, options: { eventCursor?: string | null } = {}) {
   const previousFetch = globalThis.fetch;
   const joins: string[] = [];
   const others: string[] = [];
   const answers: JoinAnswer[] = [];
+  /** The `Last-Event-ID` of each stream connection, and a way to end the newest one. */
+  const streams: Array<{ lastEventId: string | null; end: () => void }> = [];
   const encoder = new TextEncoder();
   const routed = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof Request ? input.url : String(input);
@@ -73,9 +75,13 @@ function installServer(room: string) {
     if (url.includes("/messages/stream")) {
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
+          streams.push({
+            lastEventId: new Headers(init?.headers).get("Last-Event-ID"),
+            end: () => { try { controller.close(); } catch { /* already closed */ } },
+          });
           controller.enqueue(encoder.encode(": connected\n\n"));
           controller.enqueue(encoder.encode(
-            `event: room_sync\ndata: ${JSON.stringify({ room_id: room, checkpoint: null, gap: false, event_cursor: null })}\n\n`,
+            `event: room_sync\ndata: ${JSON.stringify({ room_id: room, checkpoint: null, gap: false, event_cursor: options.eventCursor ?? null })}\n\n`,
           ));
           signal?.addEventListener("abort", () => {
             try { controller.error(new DOMException("Aborted", "AbortError")); } catch { /* already closed */ }
@@ -100,6 +106,7 @@ function installServer(room: string) {
   (globalThis as unknown as { fetch: typeof fetch }).fetch = routed;
   return {
     joins,
+    streams,
     /** Every request that is neither the stream nor a join. */
     others,
     answer: (next: JoinAnswer) => { answers.push(next); },
@@ -198,7 +205,7 @@ test("a room that stays open sends the join again when the answer ends, on the s
 test("a changed answer replaces a room read that is still owed: that read may have used the old answer", async (t) => {
   const room = "busy-start";
   const clock = movableClock(t);
-  const server = installServer(room);
+  const server = installServer(room, { eventCursor: "cursor_at_open" });
   try {
     roomInfo.rememberJoinedRoomInfo(room, { room_id: room, name: "Busy start", role: "participant" });
     clock.advance(roomInfo.JOINED_ROOM_INFO_TTL_MS + 1);
@@ -209,6 +216,14 @@ test("a changed answer replaces a room read that is still owed: that read may ha
     await waitUntil(() => repairRequests().length === 2);
     assert.deepEqual(repairRequests().map((event) => event.deliveryRepairToken), [1, 2]);
     assert.deepEqual(server.others, [], "the new request repeats no message repair that was done");
+
+    // The new repair keeps the place in the stream that the old one had reached:
+    // the read that closes it stores the handshake's cursor, and a reconnect continues from there.
+    acknowledgeDesktopRoomStreamGapRepair(room, { token: 1 });
+    acknowledgeDesktopRoomStreamGapRepair(room, { token: 2 });
+    server.streams.at(-1)!.end();
+    await waitUntil(() => server.streams.length === 2, 5_000);
+    assert.equal(server.streams[1]!.lastEventId, "cursor_at_open");
   } finally {
     server.restore();
   }
