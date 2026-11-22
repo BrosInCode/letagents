@@ -194,4 +194,42 @@ html[data-window-chrome="mac"] .desktop-shell[data-sidebar-mode="hidden"]::befor
   content: ""; position: absolute; inset: 0 0 auto; height: 36px; z-index: 80;
   background: var(--bg); -webkit-app-region: drag;
 }
-html[data-window-chrome="mac"] .desktop-onboarding-shell { padding-top: 52px; }
+html[data-window-chrome="mac"] .desktop-onboarding-shell:not([data-cinematic="true"]) { padding-top: 52px; }
+
+.desktop-onboarding-shell[data-cinematic="true"] {
+  padding: 0;
+  background: #0c0e0d;
+}
+.desktop-onboarding-shell[data-cinematic="true"] .first-run-wizard { width: 100%; min-height: 100dvh; }
+.desktop-onboarding-shell[data-cinematic="true"] .welcome-screen { min-height: 100dvh; }
+html[data-window-chrome="mac"] .first-run-wizard { --welcome-brand-top: 42px; }
+
+/* Keep the picker on screen while the real sidebar lays out beneath it. */
+.desktop-onboarding-shell[data-room-arrival] {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+}
+.desktop-onboarding-shell[data-room-arrival="moving"] {
+  clip-path: inset(0 0 0 var(--arrival-sidebar-edge));
+  opacity: 0;
+  transition: opacity 160ms ease-out;
+}
+.desktop-shell[data-picker-arrival] .app-main { animation: none; }
+.desktop-onboarding-shell[data-room-arrival] + .desktop-shell .app-main {
+  opacity: 0;
+}
+.desktop-onboarding-shell[data-room-arrival="moving"] + .desktop-shell .app-main {
+  opacity: 1;
+  transition: opacity 180ms ease-out 160ms;
+}
+
+.first-room-flight {
+  position: fixed;
+  z-index: 1100;
+  pointer-events: none;
+  transform-origin: top left;
+}
+.first-room-flight svg { display: block; width: 100%; height: 100%; }
+[data-first-room-landing],
+[data-room-arrival="moving"] [data-first-room-departure] { opacity: 0; }

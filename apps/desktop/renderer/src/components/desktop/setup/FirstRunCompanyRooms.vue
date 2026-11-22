@@ -1,51 +1,48 @@
 <template>
-  <section class="company-rooms" :aria-label="`${companyName} rooms`" data-testid="first-run-company-rooms">
+  <section class="company-rooms" :aria-label="companyName ? `${companyName} rooms` : 'Your rooms'" data-testid="first-run-company-rooms">
     <div v-if="rooms.length" class="company-rooms-group">
-      <div class="company-rooms-head">
-        <CompanyAvatar :login="companyName" :avatar-url="avatarUrl" size="s" />
-        <span>{{ companyName }} rooms</span>
-        <small>{{ rooms.length }}</small>
+      <label class="company-room-search"><Search aria-hidden="true" /><input v-model="query" type="search" placeholder="Find a room…" aria-label="Search rooms"></label>
+      <div class="company-room-results">
+        <button
+          v-for="room in filteredRooms"
+          :key="room.room_id"
+          class="company-rooms-row"
+          type="button"
+          :aria-pressed="isSelected(room)"
+          :data-room-id="room.room_id"
+          :disabled="busy"
+          :data-testid="`first-run-company-room-${room.room_id}`"
+          @click="chooseRoom(room.room_id, $event)"
+        >
+          <span class="company-rooms-icon" aria-hidden="true">
+            <BookMarked v-if="room.kind === 'repo'" />
+            <Hash v-else />
+          </span>
+          <strong>
+            {{ roomName(room) }}
+            <span>{{ room.local ? "On this device" : room.kind === "repo" ? room.full_name || "Repository" : "Shared room" }}</span>
+          </strong>
+          <span v-if="room.visibility" class="company-rooms-visibility">{{ room.visibility === "private" ? "Private" : "Public" }}</span>
+          <span v-else />
+          <span class="company-rooms-trailing" aria-hidden="true">
+            <ArrowRight class="company-rooms-arrow" />
+            <Check class="company-rooms-check" />
+          </span>
+        </button>
+        <p v-if="!filteredRooms.length" class="company-rooms-empty" role="status">No rooms match your search.</p>
       </div>
-      <label class="company-room-search"><Search aria-hidden="true" /><input v-model="query" type="search" placeholder="Find a room…" aria-label="Search company rooms"></label>
-      <button
-        v-for="room in filteredRooms"
-        :key="room.room_id"
-        class="company-rooms-row"
-        type="button"
-        :aria-pressed="isSelected(room)"
-        :disabled="busy"
-        :data-testid="`first-run-company-room-${room.room_id}`"
-        @click="$emit('choose-room', room.room_id)"
-      >
-        <BookMarked v-if="room.kind === 'repo'" class="company-rooms-icon" aria-hidden="true" />
-        <Hash v-else class="company-rooms-icon" aria-hidden="true" />
-        <strong>
-          {{ roomName(room) }}
-          <span>{{ room.kind === "repo" ? `${companyName} repository` : "Shared room · By invitation" }}</span>
-        </strong>
-        <span v-if="room.visibility" class="company-rooms-visibility">{{ room.visibility === "private" ? "Private" : "Public" }}</span>
-        <span v-else />
-        <Check class="company-rooms-check" aria-hidden="true" />
-      </button>
-      <p v-if="!filteredRooms.length" class="company-rooms-empty" role="status">No rooms match your search.</p>
     </div>
-    <p v-else class="company-rooms-empty">
-      No {{ companyName }} rooms yet. A repo appears here after a {{ companyName }} owner installs the LetAgents GitHub app on it, and you have a role on that repo.
-    </p>
-    <div class="company-rooms-or" aria-hidden="true">or</div>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { BookMarked, Check, Hash, Search } from "@lucide/vue";
-import type { DesktopOrganizationRoom } from "../../../../../electron/ipc-types/organizations.js";
-import CompanyAvatar from "../company/CompanyAvatar.vue";
+import { ArrowRight, BookMarked, Check, Hash, Search } from "@lucide/vue";
+import type { FirstRunRoomChoice } from "./types";
 
 const props = defineProps<{
-  companyName: string;
-  avatarUrl: string | null;
-  rooms: DesktopOrganizationRoom[];
+  companyName: string | null;
+  rooms: FirstRunRoomChoice[];
   selectedRoomIdentifier: string | null;
   busy: boolean;
 }>();
@@ -53,13 +50,18 @@ const props = defineProps<{
 const query = ref("");
 const filteredRooms = computed(() => props.rooms.filter(room => `${roomName(room)} ${room.full_name ?? ""}`.toLowerCase().includes(query.value.trim().toLowerCase())));
 
-defineEmits<{ "choose-room": [roomId: string] }>();
+const emit = defineEmits<{ "choose-room": [roomId: string, icon?: HTMLElement] }>();
 
-function isSelected(room: DesktopOrganizationRoom): boolean {
+function chooseRoom(roomId: string, event: MouseEvent): void {
+  const row = event.currentTarget as HTMLButtonElement | null;
+  emit("choose-room", roomId, row?.querySelector<HTMLElement>(".company-rooms-icon") ?? undefined);
+}
+
+function isSelected(room: FirstRunRoomChoice): boolean {
   return room.room_id.toLowerCase() === props.selectedRoomIdentifier?.toLowerCase();
 }
 
-function roomName(room: DesktopOrganizationRoom): string {
+function roomName(room: FirstRunRoomChoice): string {
   return room.full_name?.split("/")[1] || room.display_name;
 }
 </script>
@@ -77,22 +79,7 @@ function roomName(room: DesktopOrganizationRoom): string {
   background: transparent;
 }
 
-.company-rooms-head {
-  display: flex;
-  gap: 9px;
-  align-items: center;
-  padding: 12px 14px;
-  margin-bottom: 10px;
-  color: var(--setup-text);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.company-rooms-head small {
-  margin-left: auto;
-  color: var(--setup-muted);
-  font-weight: 500;
-}
+.company-room-results { max-height: min(36vh, 360px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 
 .company-rooms-row {
   display: grid;
@@ -110,11 +97,7 @@ function roomName(room: DesktopOrganizationRoom): string {
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background-color 150ms ease;
-}
-
-.company-rooms-head + .company-rooms-row {
-  border-top: 0;
+  transition: background-color 150ms ease, transform 210ms cubic-bezier(.22,.84,.32,1.22);
 }
 
 .company-rooms-row[aria-pressed="true"] {
@@ -124,6 +107,11 @@ function roomName(room: DesktopOrganizationRoom): string {
 .company-rooms-row:disabled {
   cursor: default;
   opacity: 0.6;
+}
+
+.company-rooms-row:has([data-first-room-departure]) {
+  background: var(--setup-surface-muted);
+  opacity: 1;
 }
 
 .company-rooms-row:focus-visible {
@@ -148,10 +136,12 @@ function roomName(room: DesktopOrganizationRoom): string {
 }
 
 .company-rooms-icon {
+  display: block;
   width: 16px;
   height: 16px;
   color: var(--setup-muted-strong);
 }
+.company-rooms-icon svg { display: block; width: 100%; height: 100%; }
 
 .company-rooms-visibility {
   padding: 0;
@@ -159,16 +149,26 @@ function roomName(room: DesktopOrganizationRoom): string {
   font-size: 11.5px;
 }
 
-.company-rooms-check {
+.company-rooms-trailing { display: grid; color: var(--workspace-accent, var(--setup-accent)); }
+.company-rooms-trailing svg {
+  grid-area: 1 / 1;
   width: 18px;
   height: 18px;
+  transition: opacity 170ms ease, transform 240ms cubic-bezier(.22,.84,.32,1.22);
+}
+.company-rooms-check {
   opacity: 0;
-  transition: opacity 150ms ease;
+  transform: scale(.75);
 }
 
 .company-rooms-row[aria-pressed="true"] .company-rooms-check {
   opacity: 1;
+  transform: none;
 }
+.company-rooms-arrow { opacity: .45; }
+.company-rooms-row[aria-pressed="true"] .company-rooms-arrow { opacity: 0; transform: translateX(3px); }
+.company-rooms-row:enabled:not([aria-pressed="true"]):is(:hover, :focus-visible) .company-rooms-arrow { opacity: 1; transform: translateX(3px); }
+.company-rooms-row:enabled:active { transform: scale(.988); transition-duration: 80ms; }
 
 .company-rooms-empty {
   margin: 0;
@@ -207,4 +207,7 @@ function roomName(room: DesktopOrganizationRoom): string {
 .company-room-search input { min-width: 0; width: 100%; border: 0; background: transparent; color: var(--setup-text); font: inherit; font-size: 14px; }
 .company-room-search:focus-within { outline: 2px solid var(--setup-accent); outline-offset: 2px; }
 .company-room-search input:focus { outline: none; }
+@media (prefers-reduced-motion: reduce) {
+  .company-rooms-row, .company-rooms-trailing svg { transform: none !important; transition: none; }
+}
 </style>

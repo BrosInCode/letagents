@@ -1,19 +1,19 @@
 <template>
   <div class="color-palette">
-    <button ref="trigger" class="palette-trigger" type="button" :aria-label="`${label}: ${chatColorName(modelValue)}`"
+    <button ref="trigger" class="palette-trigger" type="button" :aria-label="`${label}: ${currentLabel}`"
       aria-haspopup="dialog" :aria-expanded="open" :aria-controls="id" @click="toggle">
-      <span class="palette-current" :style="{ background: modelValue }" aria-hidden="true" />
-      <span>{{ chatColorName(modelValue) }}</span><span class="palette-chevron" aria-hidden="true">⌄</span>
+      <span class="palette-current" :style="{ background: followsTheme ? (themePreview || modelValue) : modelValue }" aria-hidden="true" />
+      <span>{{ currentLabel }}</span><span class="palette-chevron" aria-hidden="true">⌄</span>
     </button>
     <div :id="id" ref="panel" class="palette-panel" popover="auto" role="dialog" :aria-label="`${label} color`"
       :style="position" @toggle="onToggle" @keydown.esc.stop.prevent="close">
       <header><strong>{{ label }}</strong><button type="button" aria-label="Close color palette" @click="close">×</button></header>
       <div class="palette-grid" role="radiogroup" :aria-label="`${label} preset colors`" @keydown="moveFocus">
         <button v-for="(color, index) in chatColorPresets" :key="color.value" type="button" role="radio"
-          :aria-checked="color.value === modelValue" :aria-label="color.name" :title="color.name"
+          :aria-checked="!followsTheme && color.value === modelValue" :aria-label="color.name" :title="color.name"
           :tabindex="index === focusIndex ? 0 : -1" :data-index="index" :style="{ background: color.value, color: readableChatSurface(color.value).foreground }"
           @focus="focusIndex = index" @click="choose(color.value)">
-          <svg v-if="color.value === modelValue" viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg>
+          <svg v-if="!followsTheme && color.value === modelValue" viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg>
         </button>
       </div>
       <form class="palette-custom" @submit.prevent="applyCustom">
@@ -28,9 +28,10 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, useId, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue';
 import { chatColorName, chatColorPresets, normalizeChatColor, readableChatSurface } from '../chat-colors';
-const props = defineProps<{ modelValue: string; label: string }>();
+const props = defineProps<{ modelValue: string; label: string; followsTheme?: boolean; themePreview?: string }>();
+const currentLabel = computed(() => props.followsTheme ? 'Theme' : chatColorName(props.modelValue));
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>();
 const id = `color-palette-${useId()}`;
 const trigger = ref<HTMLButtonElement | null>(null);
@@ -49,7 +50,7 @@ function positionPanel() {
 }
 async function toggle() {
   if (open.value) { close(); return; }
-  draft.value = props.modelValue; invalid.value = false;
+  draft.value = props.followsTheme ? '' : props.modelValue; invalid.value = false;
   focusIndex.value = Math.max(0, chatColorPresets.findIndex(color => color.value === props.modelValue));
   panel.value?.showPopover();
   await nextTick(); positionPanel();

@@ -516,7 +516,10 @@ function openAt(at: "main" | "where"): void {
   }
 }
 
-defineExpose({ avatarElement: () => identityTrigger.value, close: closeMenu, open: openAt, isOpen: () => open.value || identityOpen.value, focus: () => trigger.value?.focus({ preventScroll: true }) });
+defineExpose({
+  avatarElement: () => identityTrigger.value?.querySelector<HTMLElement>(".agent-identity-avatar") ?? null,
+  close: closeMenu, open: openAt, isOpen: () => open.value || identityOpen.value, focus: () => trigger.value?.focus({ preventScroll: true }),
+});
 </script>
 
 <style scoped>

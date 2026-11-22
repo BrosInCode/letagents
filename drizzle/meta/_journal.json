@@ -1100,6 +1100,13 @@
       "when": 1795015600000,
       "tag": "0156_polled_read_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 157,
+      "version": "7",
+      "when": 1795015700000,
+      "tag": "0157_company_theme",
+      "breakpoints": true
     }
   ]
 }

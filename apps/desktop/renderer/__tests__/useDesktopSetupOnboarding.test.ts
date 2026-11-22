@@ -13,8 +13,6 @@ import type {
   DesktopMcpInstallState,
   DesktopMcpInstallTarget,
   DesktopMcpInstallTargetId,
-  DesktopInviteRoomCreation,
-  DesktopRepoRoomSelection,
   DesktopRoomAccess,
   DesktopRoomSnapshot,
   RepoStatus,
@@ -33,8 +31,6 @@ type OpenRoomSnapshot = (
 interface SetupStateInput {
   authStatus?: DesktopAuthStatus | null;
   mcpInstallState?: DesktopMcpInstallState | null;
-  pickResult?: DesktopRepoRoomSelection;
-  pickError?: Error;
   pinnedRoomIdentifier?: string;
   repoStatus?: RepoStatus | null;
   openRoomSnapshot?: OpenRoomSnapshot;
@@ -44,7 +40,6 @@ interface SetupStateInput {
   mcpWizardStep?: DesktopMcpWizardStep;
   mcpInstallRevealDelayMs?: number;
   roomBridge?: {
-    createInviteRoom?: () => Promise<DesktopInviteRoomCreation>;
     getSnapshot?: (roomIdentifier: string | null) => Promise<DesktopRoomSnapshot>;
   };
   authBridge?: {
@@ -71,92 +66,6 @@ interface SetupStateInput {
     ) => Promise<DesktopAgentProviderSetupResult>;
   };
 }
-
-test("pickRepoRoom reports success and opens the selected repo room", async () => {
-  const opened: Array<{
-    snapshot: DesktopRoomSnapshot;
-    options: { displayName?: string | null; kind?: string | null; rootPath?: string | null; meta?: string | null } | undefined;
-  }> = [];
-  const repoStatus = repoStatusFixture();
-  const state = makeSetupState({
-    pickResult: {
-      canceled: false,
-      repoPath: "/Users/emmy/Projects/letagents",
-      repoStatus,
-      roomIdentifier: "github.com/BrosInCode/letagents",
-      source: "git_remote",
-      snapshot: snapshotFixture("github.com/BrosInCode/letagents", "letagents"),
-      error: null,
-      warning: null,
-    },
-    openRoomSnapshot: (snapshot, options) => opened.push({ snapshot, options }),
-  });
-
-  const didOpen = await withDesktopBridge(state.windowBridge, () => state.onboarding.pickRepoRoom());
-
-  assert.equal(didOpen, true);
-  assert.equal(state.loading.value, false);
-  assert.deepEqual(state.repoStatus.value, repoStatus);
-  assert.equal(opened.length, 1);
-  assert.equal(opened[0]?.snapshot.roomIdentifier, "github.com/BrosInCode/letagents");
-  assert.deepEqual(opened[0]?.options, {
-    displayName: "letagents",
-    kind: "project",
-    rootPath: "/Users/emmy/Projects/letagents",
-    meta: "codex/desktop-codex-room-agents",
-  });
-  assert.equal(state.authFeedback.value, null);
-});
-
-test("pickRepoRoom shows a missing Git as a step to take, not Electron's raw spawn error", async () => {
-  const state = makeSetupState({
-    pickError: new Error("Error invoking remote method 'desktop:repos:pick-room': Error: spawn git ENOENT"),
-  });
-
-  const didOpen = await withDesktopBridge(state.windowBridge, () => state.onboarding.pickRepoRoom());
-
-  assert.equal(didOpen, false);
-  assert.match(state.authFeedback.value ?? "", /^Git is not installed or not found\. Install Git/);
-  assert.doesNotMatch(state.authFeedback.value ?? "", /Error invoking remote method|ENOENT/);
-  assert.equal(state.loading.value, false);
-});
-
-test("pickRepoRoom shows the main process's own message without Electron's prefix", async () => {
-  const message = "Git is not installed or not found. Install Git for Windows from https://git-scm.com/download/win, then try again.";
-  const state = makeSetupState({
-    pickError: new Error(`Error invoking remote method 'desktop:repos:pick-room': Error: ${message}`),
-  });
-
-  await withDesktopBridge(state.windowBridge, () => state.onboarding.pickRepoRoom());
-
-  assert.equal(state.authFeedback.value, message);
-});
-
-test("pickRepoRoom reports false when the picker is canceled", async () => {
-  let openCount = 0;
-  const state = makeSetupState({
-    pickResult: {
-      canceled: true,
-      repoPath: null,
-      repoStatus: null,
-      roomIdentifier: null,
-      source: null,
-      snapshot: null,
-      error: null,
-      warning: null,
-    },
-    openRoomSnapshot: () => {
-      openCount += 1;
-    },
-  });
-
-  const didOpen = await withDesktopBridge(state.windowBridge, () => state.onboarding.pickRepoRoom());
-
-  assert.equal(didOpen, false);
-  assert.equal(openCount, 0);
-  assert.equal(state.loading.value, false);
-  assert.equal(state.repoStatus.value, null);
-});
 
 test("first-run setup shows splash while unresolved and gates incomplete MCP", () => {
   const state = makeSetupState();
@@ -377,7 +286,7 @@ test("an initial room refresh failure releases loading without resetting complet
   }), "unavailable");
 });
 
-test("startFirstRunSetup advances welcome to MCP choose step", () => {
+test("startFirstRunSetup advances from the welcome screen to GitHub", () => {
   const state = makeSetupState({
     firstRunStage: "welcome",
     mcpWizardStep: "done",
@@ -389,7 +298,9 @@ test("startFirstRunSetup advances welcome to MCP choose step", () => {
 
   state.onboarding.startFirstRunSetup();
 
-  assert.equal(state.firstRunStage.value, "mcp");
+  assert.equal(state.firstRunStage.value, "github");
+  state.onboarding.goBackFirstRun();
+  assert.equal(state.firstRunStage.value, "welcome");
   assert.equal(state.mcpWizardStep.value, "choose");
   assert.equal(state.authFeedback.value, null);
   assert.equal(state.mcpInstallFeedback.value, null);
@@ -756,6 +667,7 @@ test("finishFirstRunOnboarding completes room-code setup without reinstalling wi
   const installCalls: DesktopMcpInstallTargetId[][] = [];
   const completedState = mcpInstallStateFixture({ completed: true });
   const state = makeSetupState({
+    authStatus: authStatusFixture(),
     mcpInstallState: mcpInstallStateFixture({ completed: false }),
     pinnedRoomIdentifier: "ABCD-1234",
     repoStatus: null,
@@ -804,6 +716,7 @@ test("a members-only room from an invite code finishes setup, so the main window
     room: null,
   };
   const state = makeSetupState({
+    authStatus: authStatusFixture(),
     pinnedRoomIdentifier: "ABCX-7291",
     repoStatus: null,
     openRoomSnapshot: (snapshot, options) => { opened.push({ snapshot, options }); },
@@ -833,6 +746,7 @@ test("finishFirstRunOnboarding can continue without choosing a room", async () =
   let completed = false;
   let refreshCount = 0;
   const state = makeSetupState({
+    authStatus: authStatusFixture(),
     pinnedRoomIdentifier: "github.com/BrosInCode/letagents",
     refresh: async () => {
       refreshCount += 1;
@@ -853,40 +767,7 @@ test("finishFirstRunOnboarding can continue without choosing a room", async () =
   assert.equal(state.authFeedback.value, null);
 });
 
-test("createFirstRunInviteRoom creates and selects a shareable room", async () => {
-  const opened: Array<{
-    snapshot: DesktopRoomSnapshot;
-    options: { displayName?: string | null; kind?: string | null; rootPath?: string | null; meta?: string | null } | undefined;
-  }> = [];
-  const snapshot = snapshotFixture("room_123", "Room ABCD-1234");
-  const state = makeSetupState({
-    roomBridge: {
-      createInviteRoom: async () => ({
-        roomIdentifier: "room_123",
-        code: "ABCD-1234",
-        snapshot,
-      }),
-    },
-    openRoomSnapshot: (nextSnapshot, options) => opened.push({ snapshot: nextSnapshot, options }),
-  });
-
-  await withDesktopBridge(state.windowBridge, () => state.onboarding.createFirstRunInviteRoom());
-
-  assert.equal(state.onboarding.firstRunRoomSelected.value, true);
-  assert.equal(state.onboarding.firstRunInviteCode.value, "ABCD-1234");
-  assert.equal(state.repoStatus.value, null);
-  assert.deepEqual(opened, [{
-    snapshot,
-    options: {
-      displayName: "Room ABCD-1234",
-      kind: "room",
-      rootPath: null,
-      meta: "ABCD-1234",
-    },
-  }]);
-});
-
-test("room choice survives going back to GitHub and returning", async () => {
+test("room choice survives going back to the theme step and returning", async () => {
   const state = makeSetupState({
     firstRunStage: "room",
     roomBridge: {
@@ -896,6 +777,7 @@ test("room choice survives going back to GitHub and returning", async () => {
 
   await withDesktopBridge(state.windowBridge, () => state.onboarding.joinRoomCode("ABCD-1234"));
   state.onboarding.goBackFirstRun();
+  assert.equal(state.firstRunStage.value, "theme");
   state.onboarding.continueToRoomConfirmation();
 
   assert.equal(state.firstRunStage.value, "room");
@@ -922,36 +804,6 @@ test("joinRoomCode does not select inaccessible room snapshots", async () => {
   assert.equal(openCount, 0);
   assert.equal(state.onboarding.firstRunRoomSelected.value, false);
   assert.equal(state.authFeedback.value, "Room not found.");
-});
-
-test("pickRepoRoom does not select unavailable repo room snapshots", async () => {
-  let openCount = 0;
-  const state = makeSetupState({
-    pickResult: {
-      canceled: false,
-      repoPath: "/Users/emmy/Projects/private",
-      repoStatus: repoStatusFixture(),
-      roomIdentifier: "github.com/BrosInCode/private",
-      source: "git_remote",
-      snapshot: snapshotFixture("github.com/BrosInCode/private", "private", {
-        status: "forbidden",
-        title: "This account cannot open the room",
-        message: "Ask for access to this repository.",
-      }),
-      error: null,
-      warning: null,
-    },
-    openRoomSnapshot: () => {
-      openCount += 1;
-    },
-  });
-
-  const didOpen = await withDesktopBridge(state.windowBridge, () => state.onboarding.pickRepoRoom());
-
-  assert.equal(didOpen, false);
-  assert.equal(openCount, 0);
-  assert.equal(state.onboarding.firstRunRoomSelected.value, false);
-  assert.equal(state.authFeedback.value, "Ask for access to this repository.");
 });
 
 test("auth-required room selection requires GitHub before completion", async () => {
@@ -1070,12 +922,6 @@ function makeSetupState(input: SetupStateInput = {}) {
         auth: input.authBridge ?? {
           getStatus: async () => authStatus.value ?? authStatusFixture(),
         },
-        repos: {
-          pickRoom: async () => {
-            if (input.pickError) throw input.pickError;
-            return input.pickResult ?? canceledPickResult();
-          },
-        },
         room: input.roomBridge ?? {},
         setup: input.setupBridge ?? {},
         workers: input.workersBridge ?? {},
@@ -1109,19 +955,6 @@ function repoStatusFixture(): RepoStatus {
     rootPath: "/Users/emmy/Projects/letagents",
     branch: "codex/desktop-codex-room-agents",
     worktrees: [],
-  };
-}
-
-function canceledPickResult(): DesktopRepoRoomSelection {
-  return {
-    canceled: true,
-    repoPath: null,
-    repoStatus: null,
-    roomIdentifier: null,
-    source: null,
-    snapshot: null,
-    error: null,
-    warning: null,
   };
 }
 

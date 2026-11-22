@@ -1,4 +1,5 @@
 import type { Express, Response } from "express";
+import type { RoomCompanyAppearance } from "../../../../shared/room-themes.mjs";
 
 import {
   type GitRoomBinding,
@@ -10,6 +11,8 @@ import {
 } from "../../http/helpers.js";
 import type { RoomRequestResolver } from "../../rooms/request-room.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+import { getProjectAccessRoomId } from "../../rooms/access-decision.js";
+import { isAppSession } from "../../request/app-session.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
 
@@ -29,6 +32,7 @@ export interface RoomMetadataRouteDeps {
     sessionAccount: AuthenticatedRequest["sessionAccount"]
   ): Promise<RoomRole>;
   getGitRoomBindingForRoom?(roomId: string): Promise<GitRoomBinding | null>;
+  getRoomCompanyAppearance?(roomId: string, accessRoomId: string, repositoryId: string | null): Promise<RoomCompanyAppearance | null>;
   toRoomResponse(
     project: Project,
     options?: {
@@ -59,6 +63,15 @@ export function registerRoomMetadataRoutes(
     }
 
     try {
+      const gitRoomBinding = await deps.getGitRoomBindingForRoom?.(project.id);
+      let companyAppearance: RoomCompanyAppearance | null = null;
+      if (isAppSession(req) && deps.getRoomCompanyAppearance) {
+        const accessRoomId = getProjectAccessRoomId(project);
+        const appearanceBinding = gitRoomBinding ?? (accessRoomId !== project.id
+          ? await deps.getGitRoomBindingForRoom?.(accessRoomId)
+          : null);
+        companyAppearance = await deps.getRoomCompanyAppearance(project.id, accessRoomId, appearanceBinding?.repository_id ?? null);
+      }
       const updated = await deps.updateProjectDisplayName(project.id, display_name);
       if (!updated) {
         res.status(404).json({ error: "Room not found" });
@@ -66,10 +79,8 @@ export function registerRoomMetadataRoutes(
       }
 
       const role = await deps.resolveProjectRole(updated, req.sessionAccount);
-      const gitRoomBinding = deps.getGitRoomBindingForRoom
-        ? await deps.getGitRoomBindingForRoom(updated.id)
-        : undefined;
       res.json({
+        ...(companyAppearance ? { company_appearance: companyAppearance } : {}),
         ...deps.toRoomResponse(updated, {
           role,
           authenticated: Boolean(req.sessionAccount),

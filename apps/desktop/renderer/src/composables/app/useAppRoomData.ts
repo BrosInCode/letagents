@@ -1,9 +1,11 @@
 import { computed, ref, watch } from "vue";
+import type { DesktopRoomSnapshot } from "../../../../electron/ipc-types";
 import { preserveRoomRepoStatistics } from "../../domain/repo-status";
 import { isAuthSnapshotPending } from "../../components/desktop/content/auth-onboarding";
 import { useDesktopAccountRoomSettings } from "../useDesktopAccountRoomSettings";
 import { useDesktopAppData } from "../useDesktopAppData";
 import { useDesktopNewRoomModal } from "../useDesktopNewRoomModal";
+import type { FirstRunWorkspaceReveal } from "../useDesktopSetupOnboarding";
 import { useDesktopRoomLiveSync } from "../useDesktopRoomLiveSync";
 import { settingsEntry } from "../../domain/desktop-navigation";
 import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
@@ -125,7 +127,7 @@ export function useAppRoomManagement(context: unknown) {
     | "useAppRoomData"
     | "useAppSidebarEntries"
     | "useAppState"
-  >;
+  > & { finishFirstRunOnboarding?: (openedRoom?: DesktopRoomSnapshot, reveal?: FirstRunWorkspaceReveal) => Promise<void> };
   const {
     accountRooms, activeEntry, chatStorageSettings, handleRoomRenamed, leaveArchivedRoomIfActive,
     loading, openRoomSnapshot, pushActionToast, recentRootRooms, recentRootRoomsStorageKey,
@@ -193,6 +195,11 @@ export function useAppRoomManagement(context: unknown) {
         entryId,
         sequence: (sidebarRevealRequest.value?.sequence || 0) + 1,
       };
+    },
+    finishOnboarding: (snapshot, dismissModal) => {
+      if (app.firstRunStage.value === "room" && app.mcpInstallState.value?.completed === false) {
+        return app.finishFirstRunOnboarding?.(snapshot, { dismissModal });
+      }
     },
     setRepoStatus: (status) => {
       if (status) repoStatus.value = preserveRoomRepoStatistics(repoStatus.value, status);

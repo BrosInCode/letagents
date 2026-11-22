@@ -224,8 +224,8 @@
     margin-left: 0;
   }
 
-  .desktop-composer {
-    width: calc(100% - 20px);
+  .room-chat-main {
+    --room-composer-width: calc(100% - 20px);
   }
 
   .room-activity-line {

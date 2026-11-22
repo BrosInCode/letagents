@@ -2,6 +2,7 @@
   <article
     class="room-agent-startup"
     :data-state="view.status"
+    :data-just-joined="justJoined || undefined"
     :data-testid="`room-agent-startup-${view.entryId}`"
     :aria-label="`${view.name} start-up`"
   >
@@ -75,6 +76,8 @@ const emit = defineEmits<{
 
 const expanded = ref(false);
 const busy = ref(false);
+const justJoined = ref(false);
+watch(() => props.view.status, status => { justJoined.value = status === "joined"; });
 const detailId = computed(() => `room-agent-startup-${props.view.entryId}-detail`);
 // The ring's circumference (2πr with r = 16). A running stage shows a part of its share.
 const RING = 100.5;
@@ -179,7 +182,9 @@ function run(action: () => void): void {
   opacity: 1;
   transform: none;
   font-size: 11px;
-  animation: room-agent-startup-pop 520ms cubic-bezier(0.34, 1.36, 0.64, 1) both;
+}
+.room-agent-startup[data-just-joined] :is(.room-agent-startup-avatar, .room-agent-startup-portrait) {
+  animation: room-agent-startup-pop 280ms cubic-bezier(0.34, 1.36, 0.64, 1) both;
 }
 .room-agent-startup[data-state="failed"] .arc { stroke: var(--red-text); }
 .room-agent-startup[data-state="cancelled"] .arc { stroke: var(--text-muted); }
@@ -330,7 +335,7 @@ function run(action: () => void): void {
 @keyframes room-agent-startup-spin { to { transform: rotate(360deg); } }
 @keyframes room-agent-startup-sheen { from { background-position: 100% 0; } to { background-position: -150% 0; } }
 @keyframes room-agent-startup-pulse { from { opacity: 0.45; } to { opacity: 1; } }
-@keyframes room-agent-startup-pop { from { opacity: 0; transform: scale(0.6); } }
+@keyframes room-agent-startup-pop { from { transform: translateY(3px) scale(0.92); } to { transform: none; } }
 @keyframes room-agent-startup-rise { from { opacity: 0; transform: translateY(4px); } }
 
 @media (prefers-reduced-motion: reduce) {
@@ -338,7 +343,7 @@ function run(action: () => void): void {
   .room-agent-startup-slot .spin,
   .room-agent-startup-segments i[data-s="now"]::after,
   .room-agent-startup-detail li[data-s="now"] .room-agent-startup-mark::before,
-  .room-agent-startup[data-state="joined"] .room-agent-startup-avatar { animation: none; }
+  .room-agent-startup[data-just-joined] :is(.room-agent-startup-avatar, .room-agent-startup-portrait) { animation: none; }
   .room-agent-startup-slot .spin { display: none; }
   .room-agent-startup-text.is-shimmer { animation: none; background: none; color: var(--text-secondary); }
   .room-agent-startup-slot .arc,
