@@ -538,6 +538,26 @@ test("capture change hints follow fact and receipt commits, survive callback fai
   } finally { f.capture.close(); }
 });
 
+test("a lost last observation that the source reports as a gap suspends capture with no later observation", async () => {
+  for (const reportGap of [false, true]) {
+    let latestSequence = 0;
+    let gap: (() => void) | undefined;
+    const f = fixture("codex_app_server", async (_handle, _listener, onGap) => {
+      gap = onGap;
+      return { sourceId: "source-lost-tail", position: () => ({ firstRetainedSequence: latestSequence + 1, latestSequence }), dispose() {} };
+    });
+    try {
+      await f.install(); await flush();
+      assert.equal(f.diagnostics.includes("source_gap"), false);
+      // The source made observation 1 and could not deliver it. Nothing follows it.
+      latestSequence = 1;
+      if (reportGap) gap!();
+      await flush();
+      assert.equal(f.diagnostics.includes("source_gap"), reportGap, reportGap ? "the gap call wakes capture" : "with no gap call nothing wakes capture");
+    } finally { f.capture.close(); f.db.close(); }
+  }
+});
+
 test("an empty capture source announces admission once, then stays quiet until progress", async () => {
   let hints = 0;
   const f = fixture("codex_app_server", undefined, () => { hints++; });

@@ -8,9 +8,12 @@ import {
   DATA_OPERATIONS,
   PROVIDER_BOUNDARY_SCHEMAS,
   ProviderBoundaryValueError,
+  type ProviderEventEnvelope,
   ProviderRuntimeBoundary,
   StaleProviderRuntimeRefError,
   TRANSITIONAL_OPERATIONS,
+  TRANSPORT_OPERATIONS,
+  providerEventEnvelopeSchema,
   providerRuntimeSnapshotSchema,
   providerTerminalSchema,
 } from "#provider-runtime/agents/provider-runtime-boundary.js";
@@ -118,7 +121,7 @@ test("a stale reference is refused and is never resolved to the newest runtime o
   assert.equal(boundary.inspectIfHeld(first.ref), null);
   await assert.rejects(boundary.stop(first.ref), StaleProviderRuntimeRefError);
   await assert.rejects(boundary.poke(first.ref, "hello"), StaleProviderRuntimeRefError);
-  assert.throws(() => boundary.onExit(first.ref, () => undefined), StaleProviderRuntimeRefError);
+  assert.throws(() => boundary.subscribe(first.ref, "exit", "s-stale"), StaleProviderRuntimeRefError);
   assert.throws(() => boundary.stopIdle(first.ref, () => undefined), StaleProviderRuntimeRefError);
   assert.deepEqual(calls, [], "no provider call for a stale reference");
 
@@ -213,14 +216,30 @@ test("a value that is not plain data does not cross the boundary, in either dire
   await assert.rejects(new ProviderRuntimeBoundary("codex", badHandle.adapter).spawn(SPAWN), ProviderBoundaryValueError);
 });
 
-test("the start hints stay beside the request and reach the adapter", async () => {
+test("the start hints of the adapter arrive as start events with the operation id of the start", async () => {
   let seen: ProviderSpawnRequest | undefined;
-  const { adapter } = fakeAdapter({ spawn: async (request) => { seen = request; return new FakeHandle(request.workAttemptId); } });
+  const { adapter } = fakeAdapter({ spawn: async (request) => {
+    seen = request;
+    request.onNativeStarted?.();
+    request.onProgress?.();
+    return new FakeHandle(request.workAttemptId);
+  } });
   const boundary = new ProviderRuntimeBoundary("codex", adapter);
-  const onProgress = () => undefined;
-  await boundary.spawn(SPAWN, { onProgress });
-  assert.equal(seen?.onProgress, onProgress);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  await boundary.spawn(SPAWN, { startOperationId: "start-1" });
   assert.equal(seen?.launchPolicy, SPAWN.launchPolicy);
+  assert.deepEqual(events, [
+    { kind: "start", operationId: "start-1", order: 1, body: { hint: "native_started" } },
+    { kind: "start", operationId: "start-1", order: 2, body: { hint: "progress" } },
+  ]);
+  for (const event of events) providerEventEnvelopeSchema.parse(jsonRoundTrip(event));
+
+  // With no operation id the adapter gets no hint function.
+  await boundary.spawn(SPAWN);
+  assert.equal(seen?.onProgress, undefined);
+  assert.equal(seen?.onNativeStarted, undefined);
+  await assert.rejects(boundary.spawn(SPAWN, { startOperationId: "x", extra: 1 } as never), ProviderBoundaryValueError);
 });
 
 test("stop and the exact stop return a terminal that meets its schema", async () => {
@@ -243,8 +262,8 @@ test("the boundary reports the optional operations of its adapter as data", () =
 });
 
 test("each public operation of the boundary is listed as a data operation or as a transitional operation", () => {
-  const internal = new Set(["constructor", "has", "inspectIfHeld", "required", "matches", "held", "continuation", "terminal", "installed", "snapshot", "reference", "stopOptions"]);
-  const listed = new Set<string>([...DATA_OPERATIONS, ...Object.keys(TRANSITIONAL_OPERATIONS)]);
+  const internal = new Set(["constructor", "has", "inspectIfHeld", "required", "matches", "held", "continuation", "terminal", "installed", "snapshot", "reference", "stopOptions", "deliver", "startHints", "send"]);
+  const listed = new Set<string>([...DATA_OPERATIONS, ...TRANSPORT_OPERATIONS, ...Object.keys(TRANSITIONAL_OPERATIONS)]);
   const actual = Object.getOwnPropertyNames(ProviderRuntimeBoundary.prototype).filter((name) => !internal.has(name));
   assert.deepEqual(actual.filter((name) => !listed.has(name)), [], "an operation that is in no list");
   assert.deepEqual([...listed].filter((name) => !actual.includes(name)), [], "a listed operation that the boundary does not have");
@@ -435,4 +454,345 @@ test("an input that is declared data is checked before a property is read and be
   // Plain stop options pass.
   await boundary.stop(runtime.ref, { force: true });
   assert.equal(stops, 1);
+});
+
+/** An adapter whose listeners a test can call, as a provider would. */
+function eventAdapter() {
+  const exit: Array<(terminal: ProviderTerminalPayload) => void> = [];
+  const stream: Array<(event: never) => void> = [];
+  const execution: Array<(event: never) => void> = [];
+  const permissions: Array<{ listener: (event: never) => void; signal: AbortSignal }> = [];
+  const retained: unknown[] = [];
+  let disposed = 0;
+  const adapter = fakeAdapter({
+    onExit: (_handle, listener) => { exit.push(listener); return () => { exit.splice(exit.indexOf(listener), 1); }; },
+    onStream: (_handle, listener) => { stream.push(listener as never); return () => { stream.splice(stream.indexOf(listener as never), 1); }; },
+    onExecution: (_handle, listener) => {
+      // As the real observer: the retained history is delivered before the call returns.
+      for (const event of retained) listener(event as never);
+      execution.push(listener as never);
+      return { sourceId: "observer-1", position: () => ({ firstRetainedSequence: 1, latestSequence: retained.length }), dispose: () => { disposed += 1; } };
+    },
+    observePermissions: async (_handle, listener, signal) => { permissions.push({ listener: listener as never, signal }); },
+  }).adapter;
+  return { adapter, exit, stream, execution, permissions, retained, disposedCount: () => disposed };
+}
+
+const STREAM_EVENT = { workAttemptId: "attempt-1", providerContinuationId: "thread-1", observedAt: "2026-11-21T00:00:00.000Z", sequence: 7, provider: "codex", kind: "text_delta", method: "item/agentMessage/delta", payload: { delta: "hi" }, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null };
+
+test("events reach one sink as envelopes: a count for each subscription, one order for the boundary, and the body unchanged", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  assert.throws(() => boundary.connectEventSink(() => undefined), /already has an event sink/);
+  const runtime = await boundary.spawn(SPAWN);
+
+  assert.deepEqual(boundary.subscribe(runtime.ref, "stream", "s-stream"), { subscriptionId: "s-stream" });
+  assert.deepEqual(boundary.subscribe(runtime.ref, "exit", "s-exit"), { subscriptionId: "s-exit" });
+  fake.stream[0]!(STREAM_EVENT as never);
+  fake.stream[0]!({ ...STREAM_EVENT, sequence: 8 } as never);
+  fake.exit[0]!(TERMINAL);
+  fake.stream[0]!({ ...STREAM_EVENT, sequence: 9 } as never); // An adapter can still send a stream event after the exit.
+
+  assert.deepEqual(events.map((event) => [event.kind, "subscriptionId" in event ? event.subscriptionId : null, "seq" in event ? event.seq : null, event.order]), [
+    ["stream", "s-stream", 1, 1], ["stream", "s-stream", 2, 2], ["exit", "s-exit", 1, 3], ["stream", "s-stream", 3, 4],
+  ]);
+  assert.equal(events[0]!.body, STREAM_EVENT, "the body is the adapter's own event");
+  assert.equal((events[1]!.body as { sequence: number }).sequence, 8, "the adapter's own sequence number is kept");
+  assert.equal((events[2] as { final?: true }).final, true);
+  assert.equal((events[3] as { final?: true }).final, undefined);
+  assert.deepEqual((events[0] as { ref: unknown }).ref, runtime.ref);
+  for (const event of events) providerEventEnvelopeSchema.parse(jsonRoundTrip(event));
+
+  // The exit subscription ended with its last event. The stream subscription ends when the daemon ends it.
+  fake.exit[0]?.(TERMINAL);
+  assert.equal(events.length, 4);
+  boundary.unsubscribe("s-stream");
+  boundary.unsubscribe("s-stream");
+  boundary.unsubscribe("never-made");
+  assert.equal(fake.stream.length, 0, "the adapter's listener is removed");
+});
+
+test("a subscription is refused for a stale reference, an id in use, a kind that is not known, and a boundary with no sink", async () => {
+  const fake = eventAdapter();
+  const noSink = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const orphan = await noSink.spawn(SPAWN);
+  assert.throws(() => noSink.subscribe(orphan.ref, "stream", "s-1"), /no event sink/);
+
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  boundary.connectEventSink(() => undefined);
+  const runtime = await boundary.spawn(SPAWN);
+  boundary.subscribe(runtime.ref, "stream", "s-1");
+  assert.throws(() => boundary.subscribe(runtime.ref, "exit", "s-1"), ProviderBoundaryValueError);
+  assert.throws(() => boundary.subscribe(runtime.ref, "activity" as never, "s-2"), ProviderBoundaryValueError);
+  assert.throws(() => boundary.subscribe(runtime.ref, "stream", "" as never), ProviderBoundaryValueError);
+  assert.throws(() => boundary.subscribe({ ...runtime.ref, runtimeId: "made-up" }, "stream", "s-3"), StaleProviderRuntimeRefError);
+  assert.equal(fake.stream.length, 1, "no adapter listener for a refused subscription");
+});
+
+test("an execution subscription gets the retained history under its own id, and its identity and position are data", async () => {
+  const fake = eventAdapter();
+  fake.retained.push({ sourceId: "observer-1", sequence: 1, observedAtMs: 1, fact: { domain: "control", kind: "state_changed", state: "responsive" } });
+  fake.retained.push({ sourceId: "observer-1", sequence: 2, observedAtMs: 2, fact: { domain: "control", kind: "state_changed", state: "degraded" } });
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  const runtime = await boundary.spawn(SPAWN);
+
+  const subscription = boundary.subscribe(runtime.ref, "execution", "s-exec");
+  assert.deepEqual(subscription, { subscriptionId: "s-exec", sourceId: "observer-1" });
+  assert.deepEqual(jsonRoundTrip(subscription), subscription);
+  // The two retained events arrived before `subscribe` returned, with the id that the caller chose.
+  assert.deepEqual(events.map((event) => ["subscriptionId" in event ? event.subscriptionId : null, (event.body as { sequence: number }).sequence]), [["s-exec", 1], ["s-exec", 2]]);
+  assert.deepEqual(boundary.subscriptionPosition("s-exec"), { firstRetainedSequence: 1, latestSequence: 2 });
+
+  boundary.unsubscribe("s-exec");
+  assert.equal(fake.disposedCount(), 1);
+  assert.equal(boundary.subscriptionPosition("s-exec"), null);
+  fake.execution[0]!({ sourceId: "observer-1", sequence: 3 } as never);
+  assert.equal(events.length, 2, "no event after the subscription ended");
+});
+
+test("an event that is not plain data never reaches the daemon as it is: a gap, a protocol-error exit, or an unavailable permission lane", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  const runtime = await boundary.spawn(SPAWN);
+  boundary.subscribe(runtime.ref, "stream", "s-stream");
+  boundary.subscribe(runtime.ref, "exit", "s-exit");
+  boundary.subscribe(runtime.ref, "permissions", "s-perm");
+  await Promise.resolve();
+  events.length = 0;
+
+  // The adapter's call does not throw for any of them.
+  fake.stream[0]!({ ...STREAM_EVENT, payload: { secret: () => "do-not-leak" } } as never);
+  fake.stream[0]!(STREAM_EVENT as never);
+  fake.permissions[0]!.listener({ type: "snapshot", requests: [{ native: new Date(0) }] } as never);
+  fake.exit[0]!({ ...TERMINAL, terminalCause: "vanished", cleanup: () => undefined } as never);
+
+  assert.deepEqual(events.map((event) => [event.kind, "seq" in event ? event.seq : null]), [["gap", 1], ["stream", 2], ["permissions", 2], ["exit", 1]]);
+  assert.deepEqual(events[0]!.body, { dropped: "stream", count: 1 });
+  assert.deepEqual(events[2]!.body, { type: "unavailable" });
+  const terminal = events[3]!.body as ProviderTerminalPayload;
+  assert.equal(terminal.terminalCause, "protocol_error");
+  // Malformed data proves no process death: the replacement carries no witnessed death and no exit code.
+  assert.equal("nativeRuntimeDeath" in terminal, false);
+  assert.deepEqual([terminal.exitCode, terminal.signal], [null, null]);
+  assert.equal(terminal.providerContinuationId, "thread-1");
+  assert.equal((events[3] as { final?: true }).final, true);
+  providerTerminalSchema.parse(jsonRoundTrip(terminal));
+  for (const event of events) {
+    assertPlainWireValue(event);
+    providerEventEnvelopeSchema.parse(jsonRoundTrip(event));
+    assert.doesNotMatch(JSON.stringify(event), /do-not-leak/);
+  }
+});
+
+test("a permission subscription reports the end of the adapter's call as data, stays open, and ends with an abort inside the adapter", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  const runtime = await boundary.spawn(SPAWN);
+  boundary.subscribe(runtime.ref, "permissions", "s-perm");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(events.map((event) => event.body), [{ type: "settled", outcome: "ended" }]);
+  fake.permissions[0]!.listener({ type: "snapshot", connectionId: "socket-1", requests: [] } as never);
+  assert.equal(events.length, 2, "the listener still works after the adapter's promise settled");
+  assert.equal(fake.permissions[0]!.signal.aborted, false);
+  boundary.unsubscribe("s-perm");
+  assert.equal(fake.permissions[0]!.signal.aborted, true);
+  fake.permissions[0]!.listener({ type: "degraded" } as never);
+  assert.equal(events.length, 2);
+});
+
+test("through the router: each exit listener of a replaced runtime still gets the exit, and an error of one listener stays out of the adapter", async () => {
+  const { adapter, exit } = recordingAdapter();
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const first = await router.spawn({ ...SPAWN, provider: "codex" });
+  const seen: string[] = [];
+  await router.onExit(first, () => { throw new Error("listener failed"); });
+  const stopListening = await router.onExit(first, (terminal) => { seen.push(terminal.terminalCause); });
+  await router.spawn({ ...SPAWN, provider: "codex" });
+  // The router's own exit watch runs first and forgets the replaced runtime; the two daemon listeners come after it.
+  // The first of them throws: the adapter's call does not throw, and the second still gets the exit.
+  exit(0);
+  assert.deepEqual(seen, ["stopped"]);
+  stopListening();
+});
+
+test("through the router: a stream event after the exit of a replaced runtime still reaches its listener, and a dropped one arrives as a fault", async () => {
+  const streamListeners = new Map<ProviderHandle, (event: never) => void>();
+  const base = recordingAdapter();
+  const adapter = { ...base.adapter, onStream: (handle: ProviderHandle, listener: (event: never) => void) => { streamListeners.set(handle, listener); return () => { streamListeners.delete(handle); }; } } as unknown as SupervisedProviderAdapter;
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const first = await router.spawn({ ...SPAWN, provider: "codex" });
+  const seen: Array<{ kind: string; method: string; sequence: number }> = [];
+  const stop = await router.onStream(first, (event) => { seen.push({ kind: event.kind, method: event.method, sequence: event.sequence }); });
+  await router.spawn({ ...SPAWN, provider: "codex" });
+  base.exit(0); // The first runtime is replaced and has exited: the boundary forgets it here.
+  await assert.rejects(router.poke(first, "x"), STALE);
+
+  const emit = streamListeners.get(base.handles[0]!)!;
+  emit(STREAM_EVENT as never);
+  emit({ ...STREAM_EVENT, payload: { callback: () => undefined } } as never);
+  assert.deepEqual(seen, [
+    { kind: "text_delta", method: "item/agentMessage/delta", sequence: 7 },
+    { kind: "error", method: "boundary/event_dropped", sequence: 0 },
+  ]);
+  stop();
+  emit?.(STREAM_EVENT as never);
+  assert.equal(seen.length, 2);
+  assert.equal(streamListeners.size, 0, "the dispose removed the adapter's listener");
+});
+
+test("an execution subscription keeps its identity and position with an empty history, a dropped observation shows in the position, and an unsubscribe inside the replay stops it", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => {
+    events.push(event);
+    // The daemon ends the subscription while the adapter replays its history.
+    if ("subscriptionId" in event && event.subscriptionId === "s-replay") boundary.unsubscribe("s-replay");
+  });
+  const runtime = await boundary.spawn(SPAWN);
+
+  assert.deepEqual(boundary.subscribe(runtime.ref, "execution", "s-empty"), { subscriptionId: "s-empty", sourceId: "observer-1" });
+  assert.deepEqual(boundary.subscriptionPosition("s-empty"), { firstRetainedSequence: 1, latestSequence: 0 });
+  assert.equal(events.length, 0);
+
+  // A dropped last observation: nothing follows it, and the position still counts it. The capture compares its
+  // stored position with this value, so the difference is its source gap.
+  fake.retained.push({ sourceId: "observer-1", sequence: 1, fact: { domain: "control", kind: "state_changed", state: "responsive" } });
+  fake.execution[0]!({ sourceId: "observer-1", sequence: 1, fact: { hook: () => undefined } } as never);
+  assert.deepEqual(events.map((event) => [event.kind, event.body]), [["gap", { dropped: "execution", count: 1 }]]);
+  assert.deepEqual(boundary.subscriptionPosition("s-empty"), { firstRetainedSequence: 1, latestSequence: 1 });
+
+  events.length = 0;
+  fake.retained.push({ sourceId: "observer-1", sequence: 2, fact: { domain: "control", kind: "state_changed", state: "degraded" } });
+  fake.retained.push({ sourceId: "observer-1", sequence: 3, fact: { domain: "control", kind: "state_changed", state: "responsive" } });
+  boundary.subscribe(runtime.ref, "execution", "s-replay");
+  assert.equal(events.filter((event) => "subscriptionId" in event && event.subscriptionId === "s-replay").length, 1, "one event, then the unsubscribe");
+  assert.equal(boundary.subscriptionPosition("s-replay"), null);
+  assert.equal(fake.disposedCount(), 1, "the adapter's subscription of the ended replay is disposed");
+});
+
+test("a sink that throws does not throw into the adapter and makes no further event", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  let calls = 0;
+  boundary.connectEventSink(() => { calls += 1; throw new Error("sink failed"); });
+  const runtime = await boundary.spawn(SPAWN);
+  boundary.subscribe(runtime.ref, "stream", "s-stream");
+  boundary.subscribe(runtime.ref, "exit", "s-exit");
+  fake.stream[0]!(STREAM_EVENT as never);
+  fake.exit[0]!(TERMINAL);
+  assert.equal(calls, 2);
+});
+
+test("through the router: start hints reach the daemon's two functions, also after the start", async () => {
+  let hints: Pick<ProviderSpawnRequest, "onProgress" | "onNativeStarted"> = {};
+  const { adapter } = fakeAdapter({ spawn: async (request) => { hints = request; request.onNativeStarted?.(); return new FakeHandle(request.workAttemptId); } });
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const seen: string[] = [];
+  await router.spawn({ ...SPAWN, provider: "codex", onProgress: () => seen.push("progress"), onNativeStarted: () => seen.push("native") });
+  assert.deepEqual(seen, ["native"]);
+  hints.onProgress?.();
+  assert.deepEqual(seen, ["native", "progress"]);
+});
+
+test("a callback of an ended subscription delivers nothing under a new subscription that uses the same id", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  const first = await boundary.spawn(SPAWN);
+  boundary.subscribe(first.ref, "exit", "s-same");
+  const oldCallback = fake.exit[0]!;
+  boundary.unsubscribe("s-same");
+  boundary.release(first.ref);
+  const second = await boundary.spawn(SPAWN);
+  boundary.subscribe(second.ref, "exit", "s-same");
+
+  oldCallback(TERMINAL); // A late call from the first runtime.
+  assert.deepEqual(events, [], "nothing arrives under the second runtime's reference");
+  fake.exit.at(-1)!({ ...TERMINAL, terminalCause: "killed" });
+  assert.deepEqual(events.map((event) => [(event as { ref: { runtimeId: string } }).ref.runtimeId, (event.body as ProviderTerminalPayload).terminalCause]), [[second.ref.runtimeId, "killed"]]);
+});
+
+test("a subscription whose adapter result is not valid leaves no adapter subscription behind", async () => {
+  let disposed = 0;
+  const { adapter } = fakeAdapter({ onExecution: () => ({ sourceId: (() => "x") as never, position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose: () => { disposed += 1; } }) });
+  const boundary = new ProviderRuntimeBoundary("codex", adapter);
+  boundary.connectEventSink(() => undefined);
+  const runtime = await boundary.spawn(SPAWN);
+  assert.throws(() => boundary.subscribe(runtime.ref, "execution", "s-bad"), ProviderBoundaryValueError);
+  assert.equal(disposed, 1);
+  assert.equal(boundary.subscriptionPosition("s-bad"), null);
+});
+
+test("a permission event that is not a known event becomes unavailable, also when it is plain data", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  const runtime = await boundary.spawn(SPAWN);
+  boundary.subscribe(runtime.ref, "permissions", "s-perm");
+  await Promise.resolve();
+  await Promise.resolve();
+  events.length = 0;
+  for (const body of [null, "snapshot", 7, [], {}, { type: "made_up" }, { type: 3 }]) fake.permissions[0]!.listener(body as never);
+  assert.deepEqual(events.map((event) => event.body), Array.from({ length: 7 }, () => ({ type: "unavailable" })));
+  // A known event with a field that the daemon cannot read is the same case.
+  const malformed = [{ type: "snapshot", connectionId: "socket", requests: null }, { type: "snapshot", connectionId: "socket" },
+    { type: "snapshot", connectionId: "socket", requests: [null] }, { type: "snapshot", connectionId: 7, requests: [] },
+    { type: "request_closed", request: null }, { type: "request_closed" }, { type: "settled", outcome: "made_up" }];
+  events.length = 0;
+  for (const body of malformed) fake.permissions[0]!.listener(body as never);
+  assert.deepEqual(events.map((event) => event.body), malformed.map(() => ({ type: "unavailable" })));
+  const request = { id: 1, method: "item/commandExecution/requestApproval", connectionId: "socket-1", params: {} };
+  const snapshot = { type: "snapshot", connectionId: "socket-1", requests: [request] };
+  fake.permissions[0]!.listener(snapshot as never);
+  assert.equal(events.at(-1)!.body, snapshot, "a known event is the adapter's own object");
+  assert.equal((events.at(-1)!.body as typeof snapshot).requests[0], request, "and its request is the adapter's own object");
+});
+
+test("through the router: aborting a permission observation settles its promise, also when the adapter's call is still open or the signal is aborted already", async () => {
+  const signals: AbortSignal[] = [];
+  // As the real adapters: the observation call stays open until the abort.
+  const { adapter } = fakeAdapter({ observePermissions: (_handle, _listener, signal) => { signals.push(signal); return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })); } });
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ ...SPAWN, provider: "codex" });
+
+  const controller = new AbortController();
+  let settled = "pending";
+  const observation = router.observePermissions(handle, () => undefined, controller.signal).then(() => { settled = "resolved"; }, () => { settled = "rejected"; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, "pending");
+  controller.abort();
+  await observation;
+  assert.equal(settled, "resolved");
+  assert.equal(signals[0]!.aborted, true, "the abort reached the adapter");
+
+  const already = new AbortController();
+  already.abort();
+  await router.observePermissions(handle, () => undefined, already.signal);
+});
+
+test("through the router: a dropped execution observation calls the consumer's gap function", async () => {
+  const fake = eventAdapter();
+  const router = new ProviderActionPortRouter({ codex: async () => fake.adapter });
+  const handle = await router.spawn({ ...SPAWN, provider: "codex" });
+  const received: unknown[] = [];
+  let gaps = 0;
+  const subscription = await router.onExecution(handle, (event) => received.push(event), () => { gaps += 1; });
+  fake.retained.push({ sourceId: "observer-1", sequence: 1 });
+  fake.execution[0]!({ sourceId: "observer-1", sequence: 1, fact: { hook: () => undefined } } as never);
+  assert.deepEqual([received.length, gaps], [0, 1]);
+  assert.equal(subscription.position().latestSequence, 1);
+  subscription.dispose();
+  assert.equal(subscription.position().latestSequence, 1, "the last position stays the answer after the dispose");
 });

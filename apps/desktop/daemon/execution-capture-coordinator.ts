@@ -126,7 +126,14 @@ export class ExecutionCaptureCoordinator {
     this.lanes.set(agentId, lane);
     let pending: Promise<NativeExecutionSubscription>;
     try {
-      pending = Promise.resolve(this.options.provider.onExecution(handle, event => this.enqueue(lane, event)));
+      // A lost observation takes the same path as an observation that cannot be queued: the lane is marked and
+      // scheduled, and the drain reports the source gap. This also covers a lost last observation, which no later
+      // observation would reveal.
+      pending = Promise.resolve(this.options.provider.onExecution(handle, event => this.enqueue(lane, event), () => {
+        if (!this.current(lane) || lane.detached || lane.suspended) return;
+        lane.overflow = true;
+        this.schedule(lane);
+      }));
     } catch {
       lane.subscriptionFailed = true;
       if (this.current(lane)) {
