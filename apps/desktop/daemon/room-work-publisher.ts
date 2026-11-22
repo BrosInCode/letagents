@@ -1,13 +1,42 @@
 import { readableContributionText } from "../../../shared/contribution-text.mjs";
 import { hasReviewableRoomContribution } from "../../../shared/room-agent-work.mjs";
+import type { WorkspaceReviewPage } from "../../../shared/workspace-review.mjs";
 import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-workspace-store.js";
 import { captureRecordedRemoteTips, captureWorkspaceHead, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
 import { WorkspaceCapture } from "./workspace-capture.js";
 import type { DatabaseSync } from "node:sqlite";
 import { publishRoomWork, reportGroupedNoReply, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
-import { PENDING_PEER_REPORT_SQL, resolvePeerReceipt } from "./queued-peer-deliveries.js";
+import {
+  completeEffectInTransaction,
+  EffectClaimRefusedError,
+  EffectExecutor,
+  EffectFenceError,
+  failEffect,
+  getEffectByIdempotencyKey,
+  hasInterruptedRoomWorkEffects,
+  listActiveRoomWorkEffectsForAgent,
+  parseRoomWorkGroupedNoReplyEffectPayload,
+  parseRoomWorkPublishEffectPayload,
+  pruneTerminalRoomWorkEffectsInTransaction,
+  recoverInterruptedEffectsOnStartup,
+  rescheduleEffectForRetry,
+  retireObsoleteRoomWorkEffects,
+  ROOM_WORK_EFFECT_MAX_ATTEMPTS,
+  ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+  ROOM_WORK_PUBLISH_EFFECT_KIND,
+  roomWorkGroupedNoReplyIdempotencyKey,
+  roomWorkPublishIdempotencyKey,
+  supersedeRoomWorkPublishEffects,
+  withFencedEffectTransaction,
+  type EffectHandler,
+  type EffectRecord,
+  type RoomWorkGroupedNoReplyEffectPayload,
+  type RoomWorkPublishEffectPayload,
+} from "./effect-journal/index.js";
+import { PENDING_PEER_REPORT_SQL, resolvePeerReceipt, type PeerReceiptResult } from "./queued-peer-deliveries.js";
 import { ExecutionShadowStore } from "./execution-shadow-store.js";
 import { RoomWorkPublicationStore, type RoomWorkOrigin, type RoomWorkPublication } from "./room-work-publication-store.js";
+import { DaemonFenceLostError } from "./singleton.js";
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import type { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { currentWorkerPublicationAuthority, sameWorkerPublicationOrigin } from "./worker-publication-authority.js";
@@ -23,6 +52,10 @@ type Options = {
   assertCurrent(): Promise<void>;
   /** Synchronous generation fence check run inside every write transaction before COMMIT. */
   assertWriteFence?(): void;
+  /** Shared process-wide effect executor; standalone tests create an internal executor if omitted. */
+  effectExecutor?: EffectExecutor;
+  /** Whether `RoomWorkPublisher.attach` arms the initial 0ms flush timer immediately (default `true`). */
+  startImmediately?: boolean;
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
   reportGroupedNoReply?: typeof reportGroupedNoReply;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict" | `remote_unanswered: ${string}`): void;
@@ -32,6 +65,24 @@ type Options = {
   askRemote?(remote: string): Promise<string[] | null>;
 };
 type Row = Record<string, string | number | null>;
+type PublicationAuthority = NonNullable<ReturnType<typeof currentWorkerPublicationAuthority>>;
+type PendingPublishSettlement = {
+  attemptCount: number;
+  record: RoomWorkPublication;
+  reviewPage: WorkspaceReviewPage | null;
+  result: RoomWorkPublishResult;
+};
+type PendingGroupedSettlement = {
+  attemptCount: number;
+  inboxItemId: string;
+  result: PeerReceiptResult;
+};
+class RoomWorkSettlementStorageError extends Error {
+  constructor(cause: unknown) {
+    super("Room-work publication settlement storage write failed.", { cause });
+    this.name = "RoomWorkSettlementStorageError";
+  }
+}
 const COALESCE_MS = 1_000;
 const RETRY_MS = 30_000;
 /** How many receipt-derived `failed` summaries one pass stages. */
@@ -87,9 +138,14 @@ export class RoomWorkPublisher {
   private readonly store: RoomWorkPublicationStore;
   private readonly capture: ExecutionShadowStore;
   private readonly workspaces: RoomWorkspaceStore;
+  private readonly executor: EffectExecutor;
+  private readonly ownsExecutor: boolean;
+  private recoveredOwnedExecutor = false;
   private readonly stamps = new Map<string, Map<string, string>>();
-  private readonly attemptedAt = new Map<string, number>();
   private readonly stagingAttemptedAt = new Map<string, number>();
+  private readonly pendingDispatchAuthority = new Map<string, PublicationAuthority>();
+  private readonly pendingPublishSettlements = new Map<string, PendingPublishSettlement>();
+  private readonly pendingGroupedSettlements = new Map<string, PendingGroupedSettlement>();
   /** The commit each open turn started on, and what the remotes held then. Like the delivery's own baseline, neither outlives this process. */
   private readonly turnStarts = new Map<string, { head: string; remoteTips: Promise<string[] | null> }>();
   /** One set of answers for all agents and turns of this daemon. It does not outlive this process either. */
@@ -110,14 +166,32 @@ export class RoomWorkPublisher {
 
   static attach(database: DatabaseSync, options: Options): RoomWorkPublisher {
     const publisher = new RoomWorkPublisher(database, options);
-    publisher.schedule(0);
+    if (options.startImmediately !== false) publisher.start();
     return publisher;
+  }
+
+  /** Arms the initial background flush timer (called after `EffectExecutor.recoverOnStartup()`). */
+  start(): void {
+    if (this.unavailable()) return;
+    this.schedule(0);
   }
 
   constructor(private readonly database: DatabaseSync, private readonly options: Options) {
     this.store = new RoomWorkPublicationStore(database, options.assertWriteFence);
     this.capture = new ExecutionShadowStore(database, { assertWriteFence: options.assertWriteFence });
     this.workspaces = new RoomWorkspaceStore(database, options.assertWriteFence);
+    this.ownsExecutor = !options.effectExecutor;
+    this.executor = options.effectExecutor ?? new EffectExecutor({
+      getDatabase: () => this.database,
+      currentDaemonGeneration: () => this.options.daemonGeneration(),
+      assertCurrent: () => this.options.assertCurrent(),
+      assertWriteFence: () => { this.options.assertWriteFence?.(); },
+      isClosing: () => this.closed || this.options.isClosing(),
+      nowMs: () => this.now(),
+      nowIso: () => this.nowIso(),
+    });
+    this.executor.registerHandler(ROOM_WORK_PUBLISH_EFFECT_KIND, this.createPublishEffectHandler());
+    this.executor.registerHandler(ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND, this.createGroupedNoReplyEffectHandler());
   }
 
   /** Called before the worker-authenticated poll, never after delayed native capture. */
@@ -247,16 +321,25 @@ export class RoomWorkPublisher {
     this.closed = true;
     this.workspaceCapture.close();
     this.cancellation.abort();
+    if (this.ownsExecutor) this.executor.fence();
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduled = null;
     this.scheduledFor = Infinity;
     this.changedAgents.clear();
     this.settledAgents.clear();
-    this.stamps.clear(); this.attemptedAt.clear(); this.stagingAttemptedAt.clear(); this.turnStarts.clear(); this.remoteAnswers.clear();
+    this.stamps.clear();
+    this.stagingAttemptedAt.clear();
+    this.pendingDispatchAuthority.clear();
+    this.pendingPublishSettlements.clear();
+    this.pendingGroupedSettlements.clear();
+    this.turnStarts.clear();
+    this.remoteAnswers.clear();
   }
 
-  private unavailable(): boolean { return this.closed || this.options.isClosing(); }
+  private unavailable(): boolean { return this.closed || this.options.isClosing() || this.executor.isFenced; }
   private now(): number { return this.options.now?.() ?? Date.now(); }
+  private nowIso(): string { return new Date(this.now()).toISOString(); }
+  private writeFence = (): void => { this.options.assertWriteFence?.(); };
   private report(code: Parameters<NonNullable<Options["diagnostic"]>>[0]): void {
     try { if (this.options.diagnostic) this.options.diagnostic(code); else console.warn(`[room_work_publication] ${code}`); } catch { /* optional diagnostics */ }
   }
@@ -392,9 +475,509 @@ export class RoomWorkPublisher {
     return eligible.length > 4;
   }
 
+  private createPublishEffectHandler(): EffectHandler {
+    return {
+      retryable: true,
+      autoPump: false,
+      defaultMaxAttempts: ROOM_WORK_EFFECT_MAX_ATTEMPTS,
+      backoff: { baseDelayMs: RETRY_MS, maxDelayMs: RETRY_MS, factor: 1 },
+      authorizeClaim: (_database, effect) => {
+        const payload = parseRoomWorkPublishEffectPayload(effect.payload);
+        if (!payload) return "Room work publication effect payload is invalid.";
+        const record = this.store.get(effect.agent_id, payload.room_id, payload.source_message_id);
+        if (!record || record.state !== "open" || !record.summary || record.attemptId !== payload.attempt_id) {
+          return "Room work publication is no longer open.";
+        }
+        if (record.revision !== payload.revision || record.digest !== payload.digest) {
+          return "Room work publication revision was superseded.";
+        }
+        if (payload.review_page_index === null) {
+          if (record.acknowledgedRevision >= payload.revision) {
+            return "Room work publication revision is already acknowledged.";
+          }
+          return null;
+        }
+        const pendingPage = this.pendingReviewPage(record);
+        if (!pendingPage
+          || pendingPage.index !== payload.review_page_index
+          || pendingPage.total !== payload.review_page_total
+          || pendingPage.digest !== payload.review_page_digest) {
+          return "Room work review page is no longer pending.";
+        }
+        return null;
+      },
+      execute: async (claimed, context) => {
+        const payload = parseRoomWorkPublishEffectPayload(claimed.payload);
+        if (!payload) {
+          return { status: "failed", error: "Room work publication effect payload is invalid." };
+        }
+        const record = this.store.get(claimed.agent_id, payload.room_id, payload.source_message_id);
+        if (!record || record.state !== "open" || !record.summary || record.attemptId !== payload.attempt_id
+          || record.revision !== payload.revision || record.digest !== payload.digest) {
+          return { status: "failed", error: "publication_superseded_before_dispatch" };
+        }
+        const reviewPage = payload.review_page_index !== null ? this.pendingReviewPage(record) : null;
+        if (payload.review_page_index !== null && (!reviewPage
+          || reviewPage.index !== payload.review_page_index
+          || reviewPage.total !== payload.review_page_total
+          || reviewPage.digest !== payload.review_page_digest)) {
+          return { status: "failed", error: "publication_review_page_superseded_before_dispatch" };
+        }
+        const expected = this.pendingDispatchAuthority.get(claimed.id);
+        const current = this.authority(record.agentId);
+        if (this.unavailable() || context.signal.aborted
+          || !current || !this.sameOrigin(current.origin, record)
+          || (expected && (current.grant !== expected.grant || current.worker !== expected.worker))) {
+          return { status: "retry", error: "authority_unavailable", retryAfterMs: 0 };
+        }
+        const signal = AbortSignal.any([context.signal, this.cancellation.signal]);
+        let result: RoomWorkPublishResult;
+        try {
+          result = await (this.options.publish ?? publishRoomWork)({
+            apiOrigin: record.apiOrigin,
+            grantId: current.grant.grantId,
+            supervisorGrant: current.grant.supervisorGrant,
+            grantGeneration: current.grant.grantGeneration,
+            sessionId: current.worker.agentSessionId,
+            roomId: record.roomId,
+            sourceMessageId: record.sourceMessageId,
+            agentKey: record.agentKey,
+            revision: record.revision,
+            summary: record.summary,
+            ...(reviewPage ? { reviewPage } : {}),
+            signal,
+          });
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (this.unavailable() || signal.aborted) {
+            return { status: "retry", error: "publication_cancelled_on_close", retryAfterMs: 0 };
+          }
+          // Never persist raw provider/HTTP exception text into SQLite `effects.last_error`.
+          this.report("publication_unavailable");
+          return { status: "retry", error: "publication_unavailable" };
+        }
+        try {
+          await context.assertCurrent();
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (!this.unavailable()) this.report("authority_unavailable");
+          return { status: "retry", error: "authority_unavailable", retryAfterMs: 0 };
+        }
+        if (this.unavailable() || signal.aborted) {
+          return { status: "retry", error: "publication_cancelled_on_close", retryAfterMs: 0 };
+        }
+        this.pendingPublishSettlements.set(claimed.id, {
+          attemptCount: claimed.attempt_count,
+          record,
+          reviewPage,
+          result,
+        });
+        return {
+          status: "completed",
+          outcome: {
+            status: result,
+            revision: record.revision,
+            ...(reviewPage ? { review_page_index: reviewPage.index } : {}),
+          },
+        };
+      },
+      settle: async (claimed, executionResult, defaultSettle) => {
+        const pending = this.pendingPublishSettlements.get(claimed.id);
+        this.pendingPublishSettlements.delete(claimed.id);
+        if (executionResult.status !== "completed") {
+          return this.runDefaultSettle(defaultSettle);
+        }
+        if (this.unavailable() || !pending || pending.attemptCount !== claimed.attempt_count) {
+          return this.rescheduleCancelledEffect(claimed, "publication_cancelled_on_close");
+        }
+        try {
+          const settled = withFencedEffectTransaction(this.database, this.writeFence, () => {
+            if (pending.result === "acknowledged") {
+              this.store.acknowledgeInTransaction(pending.record);
+              if (pending.reviewPage) {
+                this.workspaces.acknowledgePage(
+                  pending.record.agentId,
+                  pending.record.roomId,
+                  pending.record.sourceMessageId,
+                  pending.reviewPage,
+                );
+              }
+            } else {
+              this.store.stopInTransaction(pending.record, pending.result);
+            }
+            const completed = completeEffectInTransaction(this.database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            });
+            pruneTerminalRoomWorkEffectsInTransaction(this.database, claimed.agent_id);
+            return completed;
+          });
+          if (pending.result === "conflict") this.report("publication_conflict");
+          return settled;
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          return this.handleSettlementStorageFailure(claimed, error);
+        }
+      },
+    };
+  }
+
+  private createGroupedNoReplyEffectHandler(): EffectHandler {
+    return {
+      retryable: true,
+      autoPump: false,
+      defaultMaxAttempts: ROOM_WORK_EFFECT_MAX_ATTEMPTS,
+      backoff: { baseDelayMs: RETRY_MS, maxDelayMs: RETRY_MS, factor: 1 },
+      authorizeClaim: (database, effect) => {
+        const payload = parseRoomWorkGroupedNoReplyEffectPayload(effect.payload);
+        if (!payload) return "Grouped room-work receipt payload is invalid.";
+        const stillPending = Boolean(database.prepare(`
+          SELECT 1 FROM inbox_items i
+          WHERE i.inbox_item_id = ? AND i.agent_id = ? AND i.room_id = ?
+            AND i.source_message_id = ? AND i.state = 'acknowledged_no_reply'
+            AND ${PENDING_PEER_REPORT_SQL}
+        `).get(payload.inbox_item_id, effect.agent_id, payload.room_id, payload.source_message_id));
+        if (!stillPending) return "Grouped room-work receipt is already resolved.";
+        return null;
+      },
+      execute: async (claimed, context) => {
+        const payload = parseRoomWorkGroupedNoReplyEffectPayload(claimed.payload);
+        if (!payload) {
+          return { status: "failed", error: "Grouped room-work receipt payload is invalid." };
+        }
+        const pin = this.store.get(claimed.agent_id, payload.room_id, payload.source_message_id);
+        const expected = this.pendingDispatchAuthority.get(claimed.id);
+        const current = this.authority(claimed.agent_id);
+        if (this.unavailable() || context.signal.aborted
+          || !pin || !current || !this.sameOrigin(current.origin, pin)
+          || (expected && (current.grant !== expected.grant || current.worker !== expected.worker))) {
+          return { status: "retry", error: "authority_unavailable", retryAfterMs: 0 };
+        }
+        const signal = AbortSignal.any([context.signal, this.cancellation.signal]);
+        let result: PeerReceiptResult;
+        try {
+          result = await (this.options.reportGroupedNoReply ?? reportGroupedNoReply)({
+            apiUrl: pin.apiOrigin,
+            roomId: pin.roomId,
+            sourceMessageId: pin.sourceMessageId,
+            bearer: current.worker.bearer,
+            signal,
+          });
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (this.unavailable() || signal.aborted) {
+            return { status: "retry", error: "publication_cancelled_on_close", retryAfterMs: 0 };
+          }
+          this.report("publication_unavailable");
+          return { status: "retry", error: "publication_unavailable" };
+        }
+        try {
+          await context.assertCurrent();
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (!this.unavailable()) this.report("authority_unavailable");
+          return { status: "retry", error: "authority_unavailable", retryAfterMs: 0 };
+        }
+        const after = this.authority(claimed.agent_id);
+        if (this.unavailable() || signal.aborted || after?.grant !== current.grant || after?.worker !== current.worker) {
+          return { status: "retry", error: "authority_changed_during_grouped_report", retryAfterMs: 0 };
+        }
+        this.pendingGroupedSettlements.set(claimed.id, {
+          attemptCount: claimed.attempt_count,
+          inboxItemId: payload.inbox_item_id,
+          result,
+        });
+        return {
+          status: "completed",
+          outcome: { status: result, inbox_item_id: payload.inbox_item_id },
+        };
+      },
+      settle: async (claimed, executionResult, defaultSettle) => {
+        const pending = this.pendingGroupedSettlements.get(claimed.id);
+        this.pendingGroupedSettlements.delete(claimed.id);
+        if (executionResult.status !== "completed") {
+          return this.runDefaultSettle(defaultSettle);
+        }
+        if (this.unavailable() || !pending || pending.attemptCount !== claimed.attempt_count) {
+          return this.rescheduleCancelledEffect(claimed, "publication_cancelled_on_close");
+        }
+        try {
+          return withFencedEffectTransaction(this.database, this.writeFence, () => {
+            resolvePeerReceipt(this.database, pending.inboxItemId, pending.result, this.nowIso());
+            const completed = completeEffectInTransaction(this.database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            });
+            pruneTerminalRoomWorkEffectsInTransaction(this.database, claimed.agent_id);
+            return completed;
+          });
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          return this.handleSettlementStorageFailure(claimed, error);
+        }
+      },
+    };
+  }
+
+  private runDefaultSettle(defaultSettle: () => EffectRecord): EffectRecord {
+    try {
+      return defaultSettle();
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      if (error instanceof EffectFenceError) throw error;
+      if (!this.unavailable()) this.report("storage_unavailable");
+      throw new RoomWorkSettlementStorageError(error);
+    }
+  }
+
+  private handleSettlementStorageFailure(claimed: EffectRecord, error: unknown): EffectRecord {
+    if (this.unavailable()) throw error;
+    if (error instanceof EffectFenceError) throw error;
+    this.report("storage_unavailable");
+    try {
+      return this.rescheduleExecutingEffect(claimed, this.now() + RETRY_MS, "settlement_write_failed");
+    } catch (retryError) {
+      if (retryError instanceof DaemonFenceLostError) throw retryError;
+      throw new RoomWorkSettlementStorageError(error);
+    }
+  }
+
+  private rescheduleExecutingEffect(effect: EffectRecord, nextAttemptAtMs: number, error: string): EffectRecord {
+    if (effect.attempt_count < effect.max_attempts) {
+      return rescheduleEffectForRetry(this.database, this.writeFence, {
+        id: effect.id,
+        expectedEpoch: effect.epoch,
+        expectedAttemptCount: effect.attempt_count,
+        nextAttemptAtMs: Math.max(0, nextAttemptAtMs),
+        error,
+        nowIso: this.nowIso(),
+      });
+    }
+    return failEffect(this.database, this.writeFence, {
+      id: effect.id,
+      expectedEpoch: effect.epoch,
+      expectedAttemptCount: effect.attempt_count,
+      error,
+      nowIso: this.nowIso(),
+    });
+  }
+
+  private rescheduleCancelledEffect(claimed: EffectRecord, error: string): EffectRecord {
+    return this.rescheduleExecutingEffect(claimed, this.now(), error);
+  }
+
+  /**
+   * Recovers an orphaned `executing` room-work effect whose execution promise
+   * is no longer active in this process (for example after a failed SQLite
+   * settlement write left the row `executing`). Never touches genuinely active
+   * in-flight executions or future-epoch rows.
+   */
+  private recoverInactiveExecutingEffect(effect: EffectRecord, now: number): EffectRecord {
+    if (effect.state !== "executing") return effect;
+    if (this.executor.isEffectActive(effect.id)) return effect;
+    if (effect.attempt_count < 1 || effect.epoch > this.options.daemonGeneration()) return effect;
+    const updatedAtMs = Date.parse(effect.updated_at);
+    const baseMs = Number.isFinite(updatedAtMs) ? Math.min(updatedAtMs, now) : now;
+    try {
+      return this.rescheduleExecutingEffect(effect, baseMs + RETRY_MS, "recovered_inactive_executing_effect");
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      if (!this.unavailable()) this.report("storage_unavailable");
+      return effect;
+    }
+  }
+
+  /**
+   * Recovers orphaned/inactive `executing` room-work rows for `agentId` back
+   * to `prepared` (for example before purge preparation), while leaving any
+   * genuinely active in-flight execution untouched in `executing` so purge
+   * cannot commit out from under live HTTP work.
+   */
+  recoverInactiveExecutingForAgent(agentId: string): number {
+    if (this.unavailable()) return 0;
+    const now = this.now();
+    let recovered = 0;
+    for (const kind of [ROOM_WORK_PUBLISH_EFFECT_KIND, ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND] as const) {
+      for (const effect of listActiveRoomWorkEffectsForAgent(this.database, agentId, kind)) {
+        if (effect.state !== "executing") continue;
+        const next = this.recoverInactiveExecutingEffect(effect, now);
+        if (next.state !== "executing") recovered += 1;
+      }
+    }
+    return recovered;
+  }
+
+  private durableAgentRoomId(agentId: string): string | null {
+    try {
+      const row = this.database.prepare("SELECT room_id FROM agents WHERE agent_id=?").get(agentId) as Row | undefined;
+      return row && typeof row.room_id === "string" ? row.room_id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private hasNonTerminalRoomMove(agentId: string): boolean {
+    try {
+      return Boolean(this.database.prepare(`
+        SELECT 1 FROM agent_room_moves
+        WHERE agent_id = ? AND phase NOT IN ('active', 'failed')
+        LIMIT 1
+      `).get(agentId));
+    } catch (error) {
+      if (error instanceof Error && /no such table/i.test(error.message)) {
+        return false;
+      }
+      // Fail closed on unexpected storage errors so compensatable moves never drop retries.
+      return true;
+    }
+  }
+
+  private isGroupedReceiptStillPending(agentId: string, payload: RoomWorkGroupedNoReplyEffectPayload): boolean {
+    return Boolean(this.database.prepare(`
+      SELECT 1 FROM inbox_items i
+      WHERE i.inbox_item_id = ? AND i.agent_id = ? AND i.room_id = ?
+        AND i.source_message_id = ? AND i.state = 'acknowledged_no_reply'
+        AND ${PENDING_PEER_REPORT_SQL}
+    `).get(payload.inbox_item_id, agentId, payload.room_id, payload.source_message_id));
+  }
+
+  /**
+   * Recovers inactive `executing` room-work rows for `agentId` and retires
+   * durably obsolete `prepared` rows across both room-work kinds. Temporary
+   * missing authority (e.g. stopped agent, expired grant, or handoff while the
+   * agent still belongs to the same room) and non-terminal room moves (whose
+   * compensation can restore the source room and authority) preserve `prepared`
+   * rows and their retry deadlines so valid retries survive.
+   */
+  private reconcileActiveEffectsForAgent(agentId: string, now: number): EffectRecord[] {
+    const recoveredPublish = listActiveRoomWorkEffectsForAgent(
+      this.database,
+      agentId,
+      ROOM_WORK_PUBLISH_EFFECT_KIND,
+    ).map((effect) => (effect.state === "executing"
+      ? this.recoverInactiveExecutingEffect(effect, now)
+      : effect));
+    const recoveredGrouped = listActiveRoomWorkEffectsForAgent(
+      this.database,
+      agentId,
+      ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+    ).map((effect) => (effect.state === "executing"
+      ? this.recoverInactiveExecutingEffect(effect, now)
+      : effect));
+
+    const currentGeneration = this.options.daemonGeneration();
+    const roomMoveInProgress = this.hasNonTerminalRoomMove(agentId);
+    const durableRoomId = this.durableAgentRoomId(agentId);
+    const authority = this.authority(agentId);
+    const retirements: Array<{ id: string; error: string; requireNoPendingRoomMove?: boolean }> = [];
+
+    for (const effect of recoveredPublish) {
+      if (effect.state !== "prepared" || effect.epoch > currentGeneration) continue;
+      const payload = parseRoomWorkPublishEffectPayload(effect.payload);
+      if (!payload) {
+        retirements.push({ id: effect.id, error: "invalid_room_work_publish_payload" });
+        continue;
+      }
+      const record = this.store.get(agentId, payload.room_id, payload.source_message_id);
+      if (!record) {
+        retirements.push({ id: effect.id, error: "publication_record_missing" });
+        continue;
+      }
+      if (record.state !== "open") {
+        retirements.push({ id: effect.id, error: "publication_closed" });
+        continue;
+      }
+      if (!record.summary) {
+        retirements.push({ id: effect.id, error: "publication_summary_missing" });
+        continue;
+      }
+      if (record.attemptId !== null && record.attemptId !== payload.attempt_id) {
+        retirements.push({ id: effect.id, error: "publication_attempt_superseded" });
+        continue;
+      }
+      if (!roomMoveInProgress) {
+        if (durableRoomId !== null && durableRoomId !== payload.room_id) {
+          retirements.push({ id: effect.id, error: "room_moved", requireNoPendingRoomMove: true });
+          continue;
+        }
+        if (authority !== null && !this.sameOrigin(authority.origin, record)) {
+          retirements.push({ id: effect.id, error: "room_origin_superseded", requireNoPendingRoomMove: true });
+          continue;
+        }
+      }
+      if (payload.review_page_index === null) {
+        if (record.acknowledgedRevision >= payload.revision) {
+          retirements.push({ id: effect.id, error: "publication_already_acknowledged" });
+        }
+      } else {
+        const pendingPage = this.pendingReviewPage(record);
+        if (!pendingPage || pendingPage.index > payload.review_page_index) {
+          retirements.push({ id: effect.id, error: "review_page_already_acknowledged" });
+        }
+      }
+    }
+
+    for (const effect of recoveredGrouped) {
+      if (effect.state !== "prepared" || effect.epoch > currentGeneration) continue;
+      const payload = parseRoomWorkGroupedNoReplyEffectPayload(effect.payload);
+      if (!payload) {
+        retirements.push({ id: effect.id, error: "invalid_room_work_grouped_payload" });
+        continue;
+      }
+      if (!this.isGroupedReceiptStillPending(agentId, payload)) {
+        retirements.push({ id: effect.id, error: "grouped_receipt_already_resolved" });
+        continue;
+      }
+      const pin = this.store.get(agentId, payload.room_id, payload.source_message_id);
+      if (!pin) {
+        retirements.push({ id: effect.id, error: "grouped_receipt_pin_missing" });
+        continue;
+      }
+      if (!roomMoveInProgress) {
+        if (durableRoomId !== null && durableRoomId !== payload.room_id) {
+          retirements.push({ id: effect.id, error: "room_moved", requireNoPendingRoomMove: true });
+          continue;
+        }
+        if (authority !== null && !this.sameOrigin(authority.origin, pin)) {
+          retirements.push({ id: effect.id, error: "room_origin_superseded", requireNoPendingRoomMove: true });
+        }
+      }
+    }
+
+    let retiredIds = new Set<string>();
+    if (retirements.length > 0) {
+      try {
+        retiredIds = new Set(retireObsoleteRoomWorkEffects(this.database, this.writeFence, {
+          agentId,
+          expectedEpoch: currentGeneration,
+          retirements,
+          nowIso: this.nowIso(),
+        }));
+      } catch (error) {
+        if (error instanceof DaemonFenceLostError) throw error;
+        if (error instanceof EffectFenceError) {
+          if (!this.unavailable()) throw error;
+        } else if (!this.unavailable()) {
+          this.report("storage_unavailable");
+        }
+      }
+    }
+
+    return recoveredPublish.filter((effect) =>
+      !retiredIds.has(effect.id) && (effect.state === "prepared" || effect.state === "executing"),
+    );
+  }
+
   private pendingGroupedReports(agentId: string) {
     const authority = this.authority(agentId);
     if (!authority) return [];
+    const now = this.now();
     // Filter the current Room before limiting: unavailable old-room custody
     // never starves reports for the worker's actual current Room.
     const rows = this.database.prepare(`SELECT i.inbox_item_id,i.source_message_id FROM inbox_items i
@@ -402,11 +985,41 @@ export class RoomWorkPublisher {
       ORDER BY i.fifo_sequence`).all(agentId, authority.origin.roomId);
     return rows.flatMap(row => {
       const inboxItemId = String(row.inbox_item_id);
-      const prior = this.attemptedAt.get(`peer:${inboxItemId}`);
-      if (prior !== undefined && this.now() - prior < RETRY_MS) return [];
-      const pin = this.store.get(agentId, authority.origin.roomId, String(row.source_message_id));
-      return pin && this.sameOrigin(authority.origin, pin) ? [{ inboxItemId, pin, authority }] : [];
-    });
+      const sourceMessageId = String(row.source_message_id);
+      const pin = this.store.get(agentId, authority.origin.roomId, sourceMessageId);
+      if (!pin || !this.sameOrigin(authority.origin, pin)) return [];
+      const idempotencyKey = roomWorkGroupedNoReplyIdempotencyKey({
+        roomId: pin.roomId,
+        sourceMessageId: pin.sourceMessageId,
+        inboxItemId,
+      });
+      let existing = getEffectByIdempotencyKey(
+        this.database,
+        agentId,
+        ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+        idempotencyKey,
+      );
+      if (existing?.state === "executing") {
+        existing = this.recoverInactiveExecutingEffect(existing, now);
+      }
+      if (existing) {
+        if (existing.state !== "prepared") return [];
+        if (existing.next_attempt_at_ms !== null && existing.next_attempt_at_ms > now) return [];
+      }
+      const payload: RoomWorkGroupedNoReplyEffectPayload = {
+        room_id: pin.roomId,
+        source_message_id: pin.sourceMessageId,
+        inbox_item_id: inboxItemId,
+      };
+      return [{
+        inboxItemId,
+        pin,
+        authority,
+        idempotencyKey,
+        payload,
+        sortAt: existing?.next_attempt_at_ms ?? -Infinity,
+      }];
+    }).sort((a, b) => a.sortAt - b.sortAt);
   }
 
   /** Separable from the timer for deterministic real-store tests. No caller awaits this to run an agent. */
@@ -418,11 +1031,29 @@ export class RoomWorkPublisher {
     try {
       await this.options.assertCurrent();
       if (this.unavailable()) return;
+      if (this.ownsExecutor && !this.recoveredOwnedExecutor) {
+        if (hasInterruptedRoomWorkEffects(this.database)) {
+          recoverInterruptedEffectsOnStartup(this.database, this.writeFence, {
+            daemonGeneration: this.options.daemonGeneration(),
+            nowMs: this.now(),
+            nowIso: this.nowIso(),
+          });
+        }
+        this.recoveredOwnedExecutor = true;
+      }
       // Give changed agents the next pass, alternating with the recovery sweep
       // so continuous live output cannot starve missed hints or retry work.
-      // Still only one agent (at most 10k pins/facts) per pass.
-      const nextAgent = () => this.database.prepare(`SELECT agent_id FROM room_work_publications
-        WHERE state='open' AND agent_id>? ORDER BY agent_id LIMIT 1`).get(this.scanAfter);
+      // Still only one agent (at most 10k pins/facts) per pass. Include agents
+      // with active room-work journal rows so obsolescence cleanup reaches
+      // closed or externally acknowledged sources too.
+      const nextAgent = () => this.database.prepare(`SELECT agent_id FROM (
+          SELECT agent_id FROM room_work_publications WHERE state='open'
+          UNION
+          SELECT agent_id FROM effects
+          WHERE kind IN (?, ?) AND state IN ('prepared', 'executing')
+        )
+        WHERE agent_id>? ORDER BY agent_id LIMIT 1`)
+        .get(ROOM_WORK_PUBLISH_EFFECT_KIND, ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND, this.scanAfter);
       const changedAgent = this.settledAgents.values().next().value ?? this.changedAgents.values().next().value;
       let agentId: string;
       if (changedAgent && !this.sweepNext) {
@@ -445,66 +1076,181 @@ export class RoomWorkPublisher {
       try { more = await this.stageChanged(agentId) || more; }
       catch { this.report("storage_unavailable"); }
       if (this.unavailable()) return;
+      const now = this.now();
+      const activePublish = this.reconcileActiveEffectsForAgent(agentId, now);
+      if (this.unavailable()) return;
       const grouped = this.pendingGroupedReports(agentId);
-      const pending = this.store.list(agentId)
-        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision || this.pendingReviewPage(record)))
-        .sort((a, b) => (this.attemptedAt.get(key(a)) ?? -Infinity) - (this.attemptedAt.get(key(b)) ?? -Infinity));
-      const eligible: Array<{ record: RoomWorkPublication; authority: NonNullable<ReturnType<RoomWorkPublisher["authority"]>> }> = [];
-      for (const record of pending) {
-        const prior = this.attemptedAt.get(key(record));
-        if (prior !== undefined && this.now() - prior < RETRY_MS) continue;
-        const authority = this.authority(record.agentId);
-        if (authority && this.sameOrigin(authority.origin, record)) eligible.push({ record, authority });
+      const activeBySource = new Map<string, EffectRecord[]>();
+      for (const effect of activePublish) {
+        const parsed = parseRoomWorkPublishEffectPayload(effect.payload);
+        if (!parsed) continue;
+        const sourceKey = `${parsed.room_id}\0${parsed.source_message_id}`;
+        const bucket = activeBySource.get(sourceKey);
+        if (bucket) bucket.push(effect);
+        else activeBySource.set(sourceKey, [effect]);
       }
+      const pending = this.store.list(agentId)
+        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision || this.pendingReviewPage(record)));
+      const eligible: Array<{
+        record: RoomWorkPublication;
+        reviewPage: WorkspaceReviewPage | null;
+        authority: PublicationAuthority;
+        idempotencyKey: string;
+        payload: RoomWorkPublishEffectPayload;
+        sortAt: number;
+      }> = [];
+      for (const record of pending) {
+        if (!record.attemptId || !record.digest) continue;
+        const reviewPage = this.pendingReviewPage(record);
+        const idempotencyKey = roomWorkPublishIdempotencyKey({
+          roomId: record.roomId,
+          sourceMessageId: record.sourceMessageId,
+          revision: record.revision,
+          digest: record.digest,
+          reviewPageIndex: reviewPage?.index ?? null,
+          reviewPageDigest: reviewPage?.digest ?? null,
+        });
+        const payload: RoomWorkPublishEffectPayload = {
+          room_id: record.roomId,
+          source_message_id: record.sourceMessageId,
+          attempt_id: record.attemptId,
+          revision: record.revision,
+          digest: record.digest,
+          review_page_index: reviewPage ? reviewPage.index : null,
+          review_page_total: reviewPage ? reviewPage.total : null,
+          review_page_digest: reviewPage ? reviewPage.digest : null,
+        };
+        const sourceKey = `${record.roomId}\0${record.sourceMessageId}`;
+        const activeForSource = activeBySource.get(sourceKey) ?? [];
+        if (activeForSource.some(effect => effect.state === "executing")) continue;
+        const stalePrepared = activeForSource.filter(
+          effect => effect.state === "prepared" && effect.idempotency_key !== idempotencyKey,
+        );
+        let existing: EffectRecord | null;
+        if (stalePrepared.length > 0) {
+          try {
+            existing = supersedeRoomWorkPublishEffects(this.database, this.writeFence, {
+              staleEffectIds: stalePrepared.map(effect => effect.id),
+              replacement: {
+                agent_id: record.agentId,
+                idempotency_key: idempotencyKey,
+                epoch: this.options.daemonGeneration(),
+                payload,
+              },
+              nowIso: this.nowIso(),
+            }).effect;
+          } catch (error) {
+            if (error instanceof DaemonFenceLostError) throw error;
+            if (error instanceof EffectFenceError) {
+              if (this.unavailable()) return;
+              throw error;
+            }
+            if (!this.unavailable()) this.report("storage_unavailable");
+            continue;
+          }
+        } else {
+          existing = getEffectByIdempotencyKey(
+            this.database,
+            record.agentId,
+            ROOM_WORK_PUBLISH_EFFECT_KIND,
+            idempotencyKey,
+          );
+        }
+        if (existing) {
+          if (existing.state !== "prepared") continue;
+          if (existing.next_attempt_at_ms !== null && existing.next_attempt_at_ms > now) continue;
+        }
+        const authority = this.authority(record.agentId);
+        if (authority && this.sameOrigin(authority.origin, record)) {
+          eligible.push({
+            record,
+            reviewPage,
+            authority,
+            idempotencyKey,
+            payload,
+            sortAt: existing?.next_attempt_at_ms ?? -Infinity,
+          });
+        }
+      }
+      eligible.sort((a, b) => a.sortAt - b.sortAt);
       const uploadLimit = grouped.length ? 3 : 4;
       more = eligible.length > uploadLimit || more;
-      for (const { record, authority } of completionFirst(eligible,
+      for (const { record, reviewPage, authority, idempotencyKey, payload } of completionFirst(eligible,
         ({ record }) => record.revision > record.acknowledgedRevision && terminalState(record.summary?.recorded_state)).slice(0, uploadLimit)) {
         await this.options.assertCurrent();
         const current = this.authority(record.agentId);
         if (this.unavailable() || current?.grant !== authority.grant || current?.worker !== authority.worker) continue;
-        this.attemptedAt.set(key(record), this.now());
+        let effectId: string | null = null;
         try {
-          const reviewPage = this.pendingReviewPage(record);
-          const result = await (this.options.publish ?? publishRoomWork)({ apiOrigin: record.apiOrigin,
-            grantId: authority.grant.grantId, supervisorGrant: authority.grant.supervisorGrant,
-            grantGeneration: authority.grant.grantGeneration, sessionId: authority.worker.agentSessionId,
-            roomId: record.roomId, sourceMessageId: record.sourceMessageId, agentKey: record.agentKey,
-            revision: record.revision, summary: record.summary!, ...(reviewPage ? { reviewPage } : {}), signal: this.cancellation.signal });
-          await this.options.assertCurrent();
-          if (this.unavailable()) return;
-          if (result === "acknowledged") {
-            this.store.acknowledge(record);
-            if (reviewPage) {
-              this.workspaces.acknowledgePage(record.agentId, record.roomId, record.sourceMessageId, reviewPage);
-              more = more || !!this.pendingReviewPage(record);
-            }
-            this.attemptedAt.delete(key(record));
+          const prepared = await this.executor.prepare({
+            agent_id: record.agentId,
+            kind: ROOM_WORK_PUBLISH_EFFECT_KIND,
+            idempotency_key: idempotencyKey,
+            payload,
+            retryable: true,
+            max_attempts: ROOM_WORK_EFFECT_MAX_ATTEMPTS,
+          });
+          if (prepared.effect.state !== "prepared") continue;
+          if (prepared.effect.next_attempt_at_ms !== null && prepared.effect.next_attempt_at_ms > this.now()) continue;
+          effectId = prepared.effect.id;
+          this.pendingDispatchAuthority.set(effectId, current);
+          const settled = await this.executor.runEffect(effectId);
+          if (settled.state === "completed" && reviewPage) {
+            more = more || !!this.pendingReviewPage(record);
           }
-          else {
-            this.store.stop(record, result);
-            if (result === "conflict") this.report("publication_conflict");
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (error instanceof EffectClaimRefusedError) continue;
+          if (error instanceof RoomWorkSettlementStorageError) continue;
+          if (error instanceof EffectFenceError) {
+            if (this.unavailable()) return;
+            throw error;
           }
-        } catch { if (!this.unavailable()) this.report("publication_unavailable"); }
+          if (!this.unavailable()) this.report("publication_unavailable");
+        } finally {
+          if (effectId) {
+            this.pendingDispatchAuthority.delete(effectId);
+            this.pendingPublishSettlements.delete(effectId);
+          }
+        }
       }
       // Grouped deliveries have no native attempt or RoomWork summary. Spend
       // at most one remaining slot after ordinary completion uploads.
       more = grouped.length > 1 || more;
-      for (const { inboxItemId, pin, authority } of grouped.slice(0, 1)) {
+      for (const { authority, idempotencyKey, payload } of grouped.slice(0, 1)) {
         await this.options.assertCurrent();
         const current = this.authority(agentId);
         if (this.unavailable() || current?.grant !== authority.grant || current?.worker !== authority.worker) continue;
-        const reportKey = `peer:${inboxItemId}`;
-        this.attemptedAt.set(reportKey, this.now());
+        let effectId: string | null = null;
         try {
-          const result = await (this.options.reportGroupedNoReply ?? reportGroupedNoReply)({ apiUrl: pin.apiOrigin,
-            roomId: pin.roomId, sourceMessageId: pin.sourceMessageId, bearer: current.worker.bearer, signal: this.cancellation.signal });
-          await this.options.assertCurrent();
-          const after = this.authority(agentId);
-          if (this.unavailable() || after?.grant !== current.grant || after?.worker !== current.worker) continue;
-          resolvePeerReceipt(this.database, inboxItemId, result, new Date(this.now()).toISOString());
-          this.attemptedAt.delete(reportKey);
-        } catch { if (!this.unavailable()) this.report("publication_unavailable"); }
+          const prepared = await this.executor.prepare({
+            agent_id: agentId,
+            kind: ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+            idempotency_key: idempotencyKey,
+            payload,
+            retryable: true,
+            max_attempts: ROOM_WORK_EFFECT_MAX_ATTEMPTS,
+          });
+          if (prepared.effect.state !== "prepared") continue;
+          if (prepared.effect.next_attempt_at_ms !== null && prepared.effect.next_attempt_at_ms > this.now()) continue;
+          effectId = prepared.effect.id;
+          this.pendingDispatchAuthority.set(effectId, current);
+          await this.executor.runEffect(effectId);
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (error instanceof EffectClaimRefusedError) continue;
+          if (error instanceof RoomWorkSettlementStorageError) continue;
+          if (error instanceof EffectFenceError) {
+            if (this.unavailable()) return;
+            throw error;
+          }
+          if (!this.unavailable()) this.report("publication_unavailable");
+        } finally {
+          if (effectId) {
+            this.pendingDispatchAuthority.delete(effectId);
+            this.pendingGroupedSettlements.delete(effectId);
+          }
+        }
       }
     } catch { failed = true; if (!this.unavailable()) this.report("authority_unavailable"); }
     finally {

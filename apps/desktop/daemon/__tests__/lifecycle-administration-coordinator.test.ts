@@ -422,6 +422,7 @@ function harness() {
 
   return {
     subject: new LifecycleAdministrationCoordinator(ports),
+    ports,
     events,
     attempts,
     recoveryRefusals,
@@ -880,4 +881,22 @@ test("workspace recovery reports an orphan whose ephemeral attempt cleanup throw
     error: cleanupError,
   }]);
   assert.deepEqual(h.orphanRetainedSets, [[orphan]]);
+});
+
+test("purgeAgent reconciles inactive room-work executions before preparePurge", async () => {
+  const h = harness();
+  h.setEntry(entry({ desired_state: "stopped", observed_state: "stopped", room_id: "local-room", local_room_id: "local-room" }));
+  const order: string[] = [];
+  const originalPrepare = h.ports.store.preparePurge;
+  h.ports.store.preparePurge = async (expectedVersion, input) => {
+    order.push(`prepare:${input.agentId}`);
+    return originalPrepare(expectedVersion, input);
+  };
+  h.ports.reconcileRoomWorkForPurge = (entryId) => {
+    order.push(`reconcile-room-work:${entryId}`);
+  };
+
+  const result = await h.subject.purgeAgent("agent-1", 7, null, true);
+  assert.deepEqual(result, { outcome: "purged" });
+  assert.deepEqual(order, ["reconcile-room-work:agent-1", "prepare:agent-1"]);
 });

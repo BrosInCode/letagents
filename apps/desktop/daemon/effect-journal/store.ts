@@ -393,6 +393,42 @@ export function claimEffectForExecution(
   return outcome.claimed!;
 }
 
+/**
+ * Settles an `executing` effect as `completed` inside an already-open fenced
+ * SQLite transaction so domain receipts and effect settlement commit atomically.
+ */
+export function completeEffectInTransaction(
+  database: DatabaseSync,
+  input: {
+    id: string;
+    expectedEpoch: number;
+    expectedAttemptCount: number;
+    outcome?: unknown;
+    nowIso?: string;
+  },
+): EffectRecord {
+  if (!database.isTransaction) {
+    throw new EffectFenceError("completeEffectInTransaction requires an active fenced SQLite transaction.");
+  }
+  const expectedEpoch = assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
+  const expectedAttemptCount = assertPositiveEpoch(input.expectedAttemptCount, "expectedAttemptCount");
+  const outcomeJson = serializeEffectOutcome(input.outcome);
+  const nowIso = input.nowIso ?? new Date().toISOString();
+  const result = database.prepare(`
+    UPDATE ${TABLE}
+    SET state = 'completed',
+        outcome = ?,
+        last_error = NULL,
+        next_attempt_at_ms = NULL,
+        updated_at = ?
+    WHERE id = ? AND state = 'executing' AND epoch = ? AND attempt_count = ?
+  `).run(outcomeJson, nowIso, input.id, expectedEpoch, expectedAttemptCount);
+  if (Number(result.changes) !== 1) {
+    throw describeSettleFenceError(database, input.id, "completed", expectedEpoch, expectedAttemptCount);
+  }
+  return rowToEffectRecord(database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row);
+}
+
 /** Settles an `executing` effect as `completed` under its exact `(epoch, attempt_count)` lease. */
 export function completeEffect(
   database: DatabaseSync,
@@ -405,25 +441,76 @@ export function completeEffect(
     nowIso?: string;
   },
 ): EffectRecord {
+  return withFencedEffectTransaction(database, assertWriteFence, () =>
+    completeEffectInTransaction(database, input),
+  );
+}
+
+/**
+ * Settles an `executing` effect as `failed` under its exact `(epoch, attempt_count)` lease,
+ * or cancels a `prepared` effect before dispatch when `expectedAttemptCount` is omitted,
+ * inside an already-open fenced SQLite transaction.
+ */
+export function failEffectInTransaction(
+  database: DatabaseSync,
+  input: {
+    id: string;
+    expectedEpoch: number;
+    expectedAttemptCount?: number;
+    error: string;
+    outcome?: unknown;
+    nowIso?: string;
+  },
+): EffectRecord {
+  if (!database.isTransaction) {
+    throw new EffectFenceError("failEffectInTransaction requires an active fenced SQLite transaction.");
+  }
   const expectedEpoch = assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
-  const expectedAttemptCount = assertPositiveEpoch(input.expectedAttemptCount, "expectedAttemptCount");
+  const errorText = truncateEffectError(input.error);
   const outcomeJson = serializeEffectOutcome(input.outcome);
   const nowIso = input.nowIso ?? new Date().toISOString();
-  return withFencedEffectTransaction(database, assertWriteFence, () => {
+  if (input.expectedAttemptCount !== undefined) {
+    const attemptCount = assertPositiveEpoch(input.expectedAttemptCount, "expectedAttemptCount");
     const result = database.prepare(`
       UPDATE ${TABLE}
-      SET state = 'completed',
+      SET state = 'failed',
           outcome = ?,
-          last_error = NULL,
+          last_error = ?,
           next_attempt_at_ms = NULL,
           updated_at = ?
       WHERE id = ? AND state = 'executing' AND epoch = ? AND attempt_count = ?
-    `).run(outcomeJson, nowIso, input.id, expectedEpoch, expectedAttemptCount);
+    `).run(outcomeJson, errorText, nowIso, input.id, expectedEpoch, attemptCount);
     if (Number(result.changes) !== 1) {
-      throw describeSettleFenceError(database, input.id, "completed", expectedEpoch, expectedAttemptCount);
+      throw describeSettleFenceError(database, input.id, "failed", expectedEpoch, attemptCount);
     }
     return rowToEffectRecord(database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row);
-  });
+  }
+
+  const row = database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row | undefined;
+  if (!row) throw new EffectFenceError(`Unknown effect ${input.id}.`);
+  const current = rowToEffectRecord(row);
+  if (current.state !== "prepared") {
+    throw new EffectFenceError(`Effect ${input.id} cannot be cancelled from state ${current.state}.`);
+  }
+  if (current.epoch > expectedEpoch) {
+    throw new EffectFenceError(
+      `Stale daemon generation ${expectedEpoch} cannot fail effect ${input.id} owned by epoch ${current.epoch}.`,
+    );
+  }
+  const result = database.prepare(`
+    UPDATE ${TABLE}
+    SET state = 'failed',
+        epoch = ?,
+        outcome = ?,
+        last_error = ?,
+        next_attempt_at_ms = NULL,
+        updated_at = ?
+    WHERE id = ? AND state = 'prepared' AND epoch = ?
+  `).run(expectedEpoch, outcomeJson, errorText, nowIso, input.id, current.epoch);
+  if (Number(result.changes) !== 1) {
+    throw new EffectFenceError(`Effect ${input.id} lost its pre-dispatch fail fence.`);
+  }
+  return rowToEffectRecord(database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row);
 }
 
 /**
@@ -442,54 +529,9 @@ export function failEffect(
     nowIso?: string;
   },
 ): EffectRecord {
-  const expectedEpoch = assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
-  const errorText = truncateEffectError(input.error);
-  const outcomeJson = serializeEffectOutcome(input.outcome);
-  const nowIso = input.nowIso ?? new Date().toISOString();
-  return withFencedEffectTransaction(database, assertWriteFence, () => {
-    if (input.expectedAttemptCount !== undefined) {
-      const attemptCount = assertPositiveEpoch(input.expectedAttemptCount, "expectedAttemptCount");
-      const result = database.prepare(`
-        UPDATE ${TABLE}
-        SET state = 'failed',
-            outcome = ?,
-            last_error = ?,
-            next_attempt_at_ms = NULL,
-            updated_at = ?
-        WHERE id = ? AND state = 'executing' AND epoch = ? AND attempt_count = ?
-      `).run(outcomeJson, errorText, nowIso, input.id, expectedEpoch, attemptCount);
-      if (Number(result.changes) !== 1) {
-        throw describeSettleFenceError(database, input.id, "failed", expectedEpoch, attemptCount);
-      }
-      return rowToEffectRecord(database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row);
-    }
-
-    const row = database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row | undefined;
-    if (!row) throw new EffectFenceError(`Unknown effect ${input.id}.`);
-    const current = rowToEffectRecord(row);
-    if (current.state !== "prepared") {
-      throw new EffectFenceError(`Effect ${input.id} cannot be cancelled from state ${current.state}.`);
-    }
-    if (current.epoch > expectedEpoch) {
-      throw new EffectFenceError(
-        `Stale daemon generation ${expectedEpoch} cannot fail effect ${input.id} owned by epoch ${current.epoch}.`,
-      );
-    }
-    const result = database.prepare(`
-      UPDATE ${TABLE}
-      SET state = 'failed',
-          epoch = ?,
-          outcome = ?,
-          last_error = ?,
-          next_attempt_at_ms = NULL,
-          updated_at = ?
-      WHERE id = ? AND state = 'prepared' AND epoch = ?
-    `).run(expectedEpoch, outcomeJson, errorText, nowIso, input.id, current.epoch);
-    if (Number(result.changes) !== 1) {
-      throw new EffectFenceError(`Effect ${input.id} lost its pre-dispatch fail fence.`);
-    }
-    return rowToEffectRecord(database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row);
-  });
+  return withFencedEffectTransaction(database, assertWriteFence, () =>
+    failEffectInTransaction(database, input),
+  );
 }
 
 /** Transitions an `executing` effect back to `prepared` with a retry backoff deadline. */
@@ -966,6 +1008,42 @@ export function deleteEffectsForAgentInTransaction(database: DatabaseSync, agent
     throw new EffectFenceError("deleteEffectsForAgentInTransaction requires an active fenced SQLite transaction.");
   }
   const result = database.prepare(`DELETE FROM ${TABLE} WHERE agent_id = ?`).run(agentId);
+  return Number(result.changes);
+}
+
+/**
+ * Retains only the newest `maxRetained` terminal (`completed` / `failed`) rows
+ * for `agentId` across `kinds` inside an active fenced transaction. Never
+ * touches `prepared`, `executing`, or `uncertain` rows.
+ */
+export function pruneTerminalEffectsByKindsInTransaction(
+  database: DatabaseSync,
+  agentId: string,
+  kinds: readonly string[],
+  maxRetained: number,
+): number {
+  if (!database.isTransaction) {
+    throw new EffectFenceError("pruneTerminalEffectsByKindsInTransaction requires an active fenced SQLite transaction.");
+  }
+  if (kinds.length === 0) return 0;
+  if (!Number.isSafeInteger(maxRetained) || maxRetained < 0) {
+    throw new EffectValidationError("maxRetained must be a non-negative safe integer.");
+  }
+  const placeholders = kinds.map(() => "?").join(", ");
+  const result = database.prepare(`
+    DELETE FROM ${TABLE}
+    WHERE agent_id = ?
+      AND kind IN (${placeholders})
+      AND state IN ('completed', 'failed')
+      AND id NOT IN (
+        SELECT id FROM ${TABLE}
+        WHERE agent_id = ?
+          AND kind IN (${placeholders})
+          AND state IN ('completed', 'failed')
+        ORDER BY updated_at DESC, rowid DESC
+        LIMIT ?
+      )
+  `).run(agentId, ...kinds, agentId, ...kinds, maxRetained);
   return Number(result.changes);
 }
 

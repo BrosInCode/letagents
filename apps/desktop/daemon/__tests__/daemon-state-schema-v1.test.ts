@@ -399,7 +399,8 @@ test("SupervisorDaemon owns one shared SQLite connection across all stores and p
         workerBindings: { database: DatabaseSync | null };
         supervisedInbox: { database: DatabaseSync | null };
         executionCapture: { database: DatabaseSync } | null;
-        roomWorkPublisher: { database: DatabaseSync } | null;
+        roomWorkPublisher: { database: DatabaseSync; executor: unknown } | null;
+        effectExecutor: { hasHandler(kind: string): boolean } | null;
         executionDelegations: { approvalPublisher?: { database: DatabaseSync } | null };
       };
       shared = internals.stateDatabase?.connection;
@@ -410,6 +411,9 @@ test("SupervisorDaemon owns one shared SQLite connection across all stores and p
       assert.equal(internals.supervisedInbox.database, shared, "SupervisedAgentInboxStore must share the single connection");
       assert.equal(internals.executionCapture?.database, shared, "ExecutionCaptureCoordinator must share the single connection");
       assert.equal(internals.roomWorkPublisher?.database, shared, "RoomWorkPublisher must share the single connection");
+      assert.equal(internals.roomWorkPublisher?.executor, internals.effectExecutor, "RoomWorkPublisher must share the daemon EffectExecutor");
+      assert.equal(internals.effectExecutor?.hasHandler("room_work_publish"), true, "daemon EffectExecutor must register room_work_publish");
+      assert.equal(internals.effectExecutor?.hasHandler("room_work_grouped_no_reply"), true, "daemon EffectExecutor must register room_work_grouped_no_reply");
       assert.equal(internals.executionDelegations.approvalPublisher?.database, shared, "ExecutionApprovalPublisher must share the single connection");
     } finally {
       await daemon.stop().catch(() => undefined);
