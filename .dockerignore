@@ -10,3 +10,5 @@ data/
 src/web/node_modules
 src/api/pdf-text/node_modules
 src/web/dist
+spikes/rust-daemon/target
+spikes/rust-daemon/.run
