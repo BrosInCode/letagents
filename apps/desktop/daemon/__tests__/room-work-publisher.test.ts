@@ -8,6 +8,17 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { DaemonStateSchema } from "../daemon-state-database.js";
+import {
+  EffectClaimRefusedError,
+  EffectExecutor,
+  ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+  ROOM_WORK_PUBLISH_EFFECT_KIND,
+  ROOM_WORK_RETAINED_TERMINAL_EFFECTS_PER_AGENT,
+  getEffect,
+  listEffectsForAgent,
+  roomWorkGroupedNoReplyIdempotencyKey,
+  roomWorkPublishIdempotencyKey,
+} from "../effect-journal/index.js";
 import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import { parseExecutionFact } from "../execution-protocol.js";
 import { RoomWorkPublicationStore } from "../room-work-publication-store.js";
@@ -436,21 +447,28 @@ test("failed deliveries behind any number of answered ones are all published fro
 
 test("network retry survives restart and coalesces newer evidence into a stable revision", async t => {
   const f = await fixture(t); f.captureMessage();
+  let now = Date.parse("2026-08-31T00:00:00Z");
+  f.options.now = () => now;
   f.options.publish = async input => { f.sent.push(input); throw new Error("offline PRIVATE_ERROR"); };
   await f.publisher.flush();
   assert.equal(f.row().acknowledgedRevision, 0);
   const original = f.row(); f.restart();
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1, "durable retry backoff survives restart without hammering offline API");
+  now = Date.parse("2026-08-31T00:00:30Z");
   await f.publisher.flush();
   assert.equal(f.sent[1].revision, original.revision); assert.equal(f.row().digest, original.digest);
   f.operation(1); f.operation(1, { kind: "completed", outcome: "failed" });
   await f.publisher.flush();
   assert.equal(f.sent.length, 2, "failed upload keeps backoff even if local evidence changes");
   assert.equal(f.row().revision, 2);
-  f.options.now = () => Date.parse("2026-08-31T00:01:00Z");
+  now = Date.parse("2026-08-31T00:01:00Z");
   f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
   await f.publisher.flush();
   assert.equal(f.sent[2].revision, 2); assert.equal(f.row().acknowledgedRevision, 2);
   assert.doesNotMatch(JSON.stringify(f.diagnostics), /PRIVATE|offline/);
+  const effectRows = f.db.prepare("SELECT payload, outcome, last_error FROM effects").all();
+  assert.doesNotMatch(JSON.stringify(effectRows), /PRIVATE|offline/, "effects journal never retains secrets or raw provider errors");
 });
 
 test("late ACK cannot acknowledge a newer revision; a clear stops the whole identity across restart", async t => {
@@ -1480,4 +1498,299 @@ test("ordinary completed work uploads before an awaited grouped receipt and each
     assert.equal(f.row(1).acknowledgedRevision, f.row(1).revision);
   } finally { release(); await flushing; }
   assert.equal(pendingGrouped(f.db).length, 1, "only one grouped report was attempted in this pass");
+});
+
+test("lost-response crash recovery replays room-work and grouped effects under exact idempotency keys via EffectExecutor", async t => {
+  const f = await fixture(t);
+  const nowMs = Date.parse("2026-10-02T00:00:00Z");
+  const child = await settledPeerGroup(f);
+  f.captureMessage(1);
+  f.fact(1, { state: "terminal", turnOutcome: "completed" });
+  f.receipts.stage(f.row(1), f.summary(1));
+  const staged = f.row(1);
+
+  const publishKey = roomWorkPublishIdempotencyKey({
+    roomId: staged.roomId,
+    sourceMessageId: staged.sourceMessageId,
+    revision: staged.revision,
+    digest: staged.digest!,
+  });
+  const groupedKey = roomWorkGroupedNoReplyIdempotencyKey({
+    roomId: "room",
+    sourceMessageId: "msg_11",
+    inboxItemId: child.inbox_item_id,
+  });
+
+  // Simulate predecessor daemon (generation 1) crashing mid-HTTP after claiming both rows.
+  f.db.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 1, 'executing', ?, NULL, 1, 1, 1000000, NULL, NULL, ?, ?)
+  `).run(
+    "eff-crash-publish",
+    "agent",
+    ROOM_WORK_PUBLISH_EFFECT_KIND,
+    publishKey,
+    JSON.stringify({
+      attempt_id: staged.attemptId,
+      digest: staged.digest,
+      review_page_digest: null,
+      review_page_index: null,
+      review_page_total: null,
+      revision: staged.revision,
+      room_id: staged.roomId,
+      source_message_id: staged.sourceMessageId,
+    }),
+    "2026-10-02T00:00:00.000Z",
+    "2026-10-02T00:00:00.000Z",
+  );
+  f.db.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 1, 'executing', ?, NULL, 1, 1, 1000000, NULL, NULL, ?, ?)
+  `).run(
+    "eff-crash-grouped",
+    "agent",
+    ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+    groupedKey,
+    JSON.stringify({
+      inbox_item_id: child.inbox_item_id,
+      room_id: "room",
+      source_message_id: "msg_11",
+    }),
+    "2026-10-02T00:00:00.000Z",
+    "2026-10-02T00:00:00.000Z",
+  );
+
+  // Successor generation 2 attaches RoomWorkPublisher to the shared EffectExecutor and runs startup recovery.
+  let closing = false;
+  const executor = new EffectExecutor({
+    getDatabase: () => f.db,
+    currentDaemonGeneration: () => 2,
+    assertCurrent: async () => {},
+    assertWriteFence: () => {},
+    isClosing: () => closing,
+    nowMs: () => nowMs,
+  });
+  f.custody.installHostGrant({ ...f.grant, daemonGeneration: 2 });
+  f.custody.installWorkerAuthorization({ ...f.worker, daemonGeneration: 2 });
+  const groupedSent: string[] = [];
+  const successor = new RoomWorkPublisher(f.db, {
+    ...f.options,
+    daemonGeneration: () => 2,
+    isClosing: () => closing,
+    now: () => nowMs,
+    effectExecutor: executor,
+    reportGroupedNoReply: async (input) => {
+      groupedSent.push(`${input.roomId}/${input.sourceMessageId}`);
+      return "no_reply";
+    },
+  });
+  t.after(() => { closing = true; successor.close(); executor.fence(); });
+
+  const recovery = await executor.recoverOnStartup();
+  assert.deepEqual(recovery.requeuedIds.sort(), ["eff-crash-grouped", "eff-crash-publish"]);
+  assert.equal(getEffect(f.db, "eff-crash-publish")?.state, "prepared");
+  assert.equal(getEffect(f.db, "eff-crash-publish")?.epoch, 2);
+  assert.equal(getEffect(f.db, "eff-crash-grouped")?.state, "prepared");
+
+  await successor.flush();
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0]!.revision, staged.revision);
+  assert.equal(f.row(1).acknowledgedRevision, staged.revision);
+  assert.deepEqual(groupedSent, ["room/msg_11"]);
+  assert.deepEqual(pendingGrouped(f.db), []);
+
+  // Exact same effect rows were reused (attempt_count incremented to 2, no duplicate rows).
+  const completedPublish = getEffect(f.db, "eff-crash-publish")!;
+  const completedGrouped = getEffect(f.db, "eff-crash-grouped")!;
+  assert.equal(completedPublish.state, "completed");
+  assert.equal(completedPublish.attempt_count, 2);
+  assert.equal(completedGrouped.state, "completed");
+  assert.equal(completedGrouped.attempt_count, 2);
+  assert.equal(listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND }).length, 1);
+  assert.equal(listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND }).length, 1);
+
+  // Subsequent flushes suppress duplicates completely.
+  await successor.flush();
+  assert.equal(f.sent.length, 1);
+  assert.equal(groupedSent.length, 1);
+});
+
+test("duplicate suppression shares in-flight effects and refuses stale or already-acknowledged claims", async t => {
+  const f = await fixture(t);
+  let closing = false;
+  const executor = new EffectExecutor({
+    getDatabase: () => f.db,
+    currentDaemonGeneration: () => 1,
+    assertCurrent: async () => {},
+    assertWriteFence: () => {},
+    isClosing: () => closing,
+    nowMs: () => Date.parse("2026-10-02T00:00:00Z"),
+  });
+  let started!: () => void;
+  let release!: (result: RoomWorkPublishResult) => void;
+  const inFlight = new Promise<void>(resolve => { started = resolve; });
+  const publisher = new RoomWorkPublisher(f.db, {
+    ...f.options,
+    isClosing: () => closing,
+    effectExecutor: executor,
+    publish: async (input) => {
+      f.sent.push(input);
+      started();
+      return new Promise<RoomWorkPublishResult>(resolve => { release = resolve; });
+    },
+  });
+  t.after(() => { closing = true; publisher.close(); executor.fence(); });
+
+  f.captureMessage(1);
+  const flushing = publisher.flush();
+  await inFlight;
+  const [activeEffect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND });
+  assert.ok(activeEffect);
+  assert.equal(activeEffect.state, "executing");
+
+  // Direct concurrent runEffect shares the single in-flight promise (no duplicate HTTP).
+  const shared = executor.runEffect(activeEffect.id);
+  release("acknowledged");
+  const [settled] = await Promise.all([shared, flushing]);
+  assert.equal(settled.state, "completed");
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.row(1).acknowledgedRevision, 1);
+
+  // Seed a stale prepared effect for an already-acknowledged revision and confirm authorizeClaim refuses it with zero HTTP.
+  const stale = await executor.prepare({
+    agent_id: "agent",
+    kind: ROOM_WORK_PUBLISH_EFFECT_KIND,
+    idempotency_key: "rw:v1:stale-manual-probe",
+    payload: activeEffect.payload,
+    retryable: true,
+    max_attempts: 1_000_000,
+  });
+  await assert.rejects(() => executor.runEffect(stale.effect.id), EffectClaimRefusedError);
+  assert.equal(getEffect(f.db, stale.effect.id)?.state, "failed");
+  assert.equal(f.sent.length, 1);
+});
+
+test("EffectExecutor handoff fenceAndDrain aborts in-flight room-work uploads without late receipts and lets a successor finish", async t => {
+  const f = await fixture(t);
+  let generation = 1;
+  let closing = false;
+  const nowMs = Date.parse("2026-10-02T00:00:00Z");
+  const executor1 = new EffectExecutor({
+    getDatabase: () => f.db,
+    currentDaemonGeneration: () => generation,
+    assertCurrent: async () => {},
+    assertWriteFence: () => {},
+    isClosing: () => closing,
+    nowMs: () => nowMs,
+  });
+  let started!: () => void;
+  let release!: (result: RoomWorkPublishResult) => void;
+  let observedSignal: AbortSignal | null = null;
+  const inFlight = new Promise<void>(resolve => { started = resolve; });
+  const publisher1 = new RoomWorkPublisher(f.db, {
+    ...f.options,
+    daemonGeneration: () => generation,
+    isClosing: () => closing,
+    now: () => nowMs,
+    effectExecutor: executor1,
+    publish: async (input) => {
+      f.sent.push(input);
+      observedSignal = input.signal;
+      started();
+      return new Promise<RoomWorkPublishResult>(resolve => { release = resolve; });
+    },
+  });
+  t.after(() => { closing = true; publisher1.close(); executor1.fence(); });
+
+  f.captureMessage(1);
+  const flushing = publisher1.flush();
+  await inFlight;
+  assert.equal(f.sent.length, 1);
+
+  // Handoff fenceAndDrain aborts the HTTP signal and waits for the in-flight execution to settle cleanly.
+  const draining = executor1.fenceAndDrain();
+  assert.equal(observedSignal!.aborted, true, "handoff fence aborts in-flight room-work HTTP");
+  release("acknowledged");
+  await Promise.all([draining, flushing]);
+
+  assert.equal(f.row(1).acknowledgedRevision, 0, "late receipt after handoff abort is never acknowledged");
+  const [requeued] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND });
+  assert.equal(requeued?.state, "prepared", "aborted upload returns cleanly to prepared for successor recovery");
+  // Further flushes on fenced executor are ignored without sending HTTP.
+  await publisher1.flush();
+  assert.equal(f.sent.length, 1);
+  publisher1.close();
+
+  // Successor generation 2 completes the exact prepared effect cleanly.
+  generation = 2;
+  f.custody.installHostGrant({ ...f.grant, daemonGeneration: 2 });
+  f.custody.installWorkerAuthorization({ ...f.worker, daemonGeneration: 2 });
+  const executor2 = new EffectExecutor({
+    getDatabase: () => f.db,
+    currentDaemonGeneration: () => generation,
+    assertCurrent: async () => {},
+    assertWriteFence: () => {},
+    isClosing: () => closing,
+    nowMs: () => nowMs,
+  });
+  const publisher2 = new RoomWorkPublisher(f.db, {
+    ...f.options,
+    daemonGeneration: () => generation,
+    isClosing: () => closing,
+    now: () => nowMs,
+    effectExecutor: executor2,
+    publish: async (input) => { f.sent.push(input); return "acknowledged"; },
+  });
+  t.after(() => { publisher2.close(); executor2.fence(); });
+
+  await executor2.recoverOnStartup();
+  await publisher2.flush();
+  assert.equal(f.sent.length, 2);
+  assert.equal(f.row(1).acknowledgedRevision, 1);
+  assert.equal(getEffect(f.db, requeued!.id)?.state, "completed");
+  assert.equal(getEffect(f.db, requeued!.id)?.epoch, 2);
+  // Secret custody: zero bearers or tokens in the effects table.
+  const allEffects = JSON.stringify(f.db.prepare("SELECT payload, outcome, last_error FROM effects").all());
+  assert.doesNotMatch(allEffects, /PRIVATE_HOST_BEARER|PRIVATE_WORKER_BEARER|PRIVATE_SESSION_TOKEN/);
+});
+
+test("terminal room-work effects stay bounded per agent while preserving active effects and immutable provenance", async t => {
+  const f = await fixture(t);
+  const seedCount = ROOM_WORK_RETAINED_TERMINAL_EFFECTS_PER_AGENT + 20;
+  f.db.exec("BEGIN IMMEDIATE");
+  const insert = f.db.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES (?, 'agent', ?, ?, 1, 'completed', '{"seeded":true}', '{"status":"acknowledged"}', 1, 1, 1000000, NULL, NULL, ?, ?)
+  `);
+  for (let i = 0; i < seedCount; i += 1) {
+    const ts = new Date(Date.parse("2026-08-01T00:00:00Z") + i * 1000).toISOString();
+    insert.run(`eff-old-${i}`, ROOM_WORK_PUBLISH_EFFECT_KIND, `rw:v1:seed-${i}`, ts, ts);
+  }
+  // Also seed one active prepared row that must NEVER be pruned.
+  f.db.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES ('eff-active-keep', 'agent', ?, 'rw:v1:keep-active', 1, 'prepared', '{"keep":true}', NULL, 1, 0, 1000000, NULL, NULL, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')
+  `).run(ROOM_WORK_PUBLISH_EFFECT_KIND);
+  f.db.exec("COMMIT");
+
+  f.captureMessage(1);
+  await f.publisher.flush();
+  assert.equal(f.row(1).acknowledgedRevision, 1);
+
+  const terminalCount = Number((f.db.prepare(`
+    SELECT COUNT(*) AS n FROM effects
+    WHERE agent_id = 'agent' AND kind IN (?, ?) AND state IN ('completed', 'failed')
+  `).get(ROOM_WORK_PUBLISH_EFFECT_KIND, ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND) as { n: number }).n);
+  assert.equal(terminalCount, ROOM_WORK_RETAINED_TERMINAL_EFFECTS_PER_AGENT);
+  assert.equal(getEffect(f.db, "eff-active-keep")?.state, "prepared", "active prepared effects are never pruned");
+  assert.equal(getEffect(f.db, "eff-old-0"), null, "oldest terminal room-work effects are pruned");
+  assert.equal(f.row(1).acknowledgedRevision, 1, "room_work_publications provenance remains intact");
 });

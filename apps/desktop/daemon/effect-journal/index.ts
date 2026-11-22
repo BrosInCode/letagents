@@ -67,6 +67,7 @@ export {
   nextScheduledPreparedEffectAtMs,
   listUncertainEffects,
   claimEffectForExecution,
+  completeEffectInTransaction,
   completeEffect,
   failEffect,
   rescheduleEffectForRetry,
@@ -75,7 +76,24 @@ export {
   resolveUncertainEffect,
   recoverInterruptedEffectsOnStartup,
   deleteEffectsForAgentInTransaction,
+  pruneTerminalEffectsByKindsInTransaction,
 } from "./store.js";
+export {
+  ROOM_WORK_PUBLISH_EFFECT_KIND,
+  ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+  ROOM_WORK_EFFECT_KINDS,
+  ROOM_WORK_EFFECT_MAX_ATTEMPTS,
+  ROOM_WORK_RETAINED_TERMINAL_EFFECTS_PER_AGENT,
+  roomWorkPublishIdempotencyKey,
+  roomWorkGroupedNoReplyIdempotencyKey,
+  parseRoomWorkPublishEffectPayload,
+  parseRoomWorkGroupedNoReplyEffectPayload,
+  listActiveRoomWorkEffectsForAgent,
+  hasInterruptedRoomWorkEffects,
+  pruneTerminalRoomWorkEffectsInTransaction,
+  type RoomWorkPublishEffectPayload,
+  type RoomWorkGroupedNoReplyEffectPayload,
+} from "./room-work.js";
 export {
   EffectExecutor,
   computeEffectBackoffMs,

@@ -55,12 +55,26 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     if (this.maintenance) { await this.socket.start(); return; }
     if (!this.handoffScheduled && this.stateDatabase) {
       const database = this.stateDatabase.connection;
+      this.effectExecutor = new EffectExecutor({
+        getDatabase: () => this.stateDatabase?.connection ?? null,
+        currentDaemonGeneration: () => this.singleton.currentGeneration,
+        assertCurrent: () => this.singleton.assertCurrent(),
+        assertWriteFence: writeFence,
+        isClosing: () => this.handoffScheduled,
+        notifyStateChanged: () => this.notifyStateChanged(),
+        nowMs: () => this.nowMs(),
+      });
+      this.effectExecutor.registerHandler(
+        BOUNDED_MCP_EFFECT_KIND,
+        this.boundedEffects.createExecutorHandler(),
+      );
       this.roomWorkPublisher = RoomWorkPublisher.attach(database, {
         workspaceLocation: (id) => this.durability.getAttempt(id).then(({ workspace_path: path, workspace_identity }) =>
           ({ path, revision: workspace_identity.resolved_revision, remote: recordedRemote(workspace_identity) })),
         custody: this.workerRuntimeCustody, daemonGeneration: () => this.singleton.currentGeneration,
         isClosing: () => this.handoffScheduled, assertCurrent: () => this.singleton.assertCurrent(),
         assertWriteFence: writeFence,
+        effectExecutor: this.effectExecutor,
       });
       this.executionCapture = ExecutionCaptureCoordinator.attach(database, this.providerPort, {
         currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
@@ -77,19 +91,6 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
         },
         recordStopped: (agentId) => this.providerExecution?.noteRecordStopped(agentId),
       });
-      this.effectExecutor = new EffectExecutor({
-        getDatabase: () => this.stateDatabase?.connection ?? null,
-        currentDaemonGeneration: () => this.singleton.currentGeneration,
-        assertCurrent: () => this.singleton.assertCurrent(),
-        assertWriteFence: writeFence,
-        isClosing: () => this.handoffScheduled,
-        notifyStateChanged: () => this.notifyStateChanged(),
-        nowMs: () => this.nowMs(),
-      });
-      this.effectExecutor.registerHandler(
-        BOUNDED_MCP_EFFECT_KIND,
-        this.boundedEffects.createExecutorHandler(),
-      );
       this.executionDelegations.start();
     }
     const effectRecovery = await this.effectExecutor?.recoverOnStartup();
