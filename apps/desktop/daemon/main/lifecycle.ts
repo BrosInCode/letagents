@@ -90,6 +90,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
         BOUNDED_MCP_EFFECT_KIND,
         this.boundedEffects.createExecutorHandler(),
       );
+      this.roomMoves.attachEffectExecutor(this.effectExecutor, database, writeFence);
       this.executionDelegations.start();
     }
     const effectRecovery = await this.effectExecutor?.recoverOnStartup();

@@ -122,6 +122,11 @@ export class EffectExecutor {
     return this.handlers.has(kind);
   }
 
+  /** Returns whether `effectId` currently has an in-flight execution or reconciliation promise in this process. */
+  isEffectActive(effectId: string): boolean {
+    return this.activeById.has(effectId);
+  }
+
   get isFenced(): boolean {
     return this.fenced || this.options.isClosing();
   }

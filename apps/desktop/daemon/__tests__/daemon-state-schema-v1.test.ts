@@ -27,6 +27,11 @@ import {
   validateDaemonStateShape,
 } from "../daemon-state-database.js";
 import { WorkDurabilityStore } from "../durability-store.js";
+import {
+  ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+  ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+  ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
+} from "../effect-journal/index.js";
 import { ExecutionApprovalPublicationStore } from "../execution-approval-publication-store.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import { SupervisorDaemon } from "../main.js";
@@ -399,6 +404,8 @@ test("SupervisorDaemon owns one shared SQLite connection across all stores and p
         supervisedInbox: { database: DatabaseSync | null };
         executionCapture: { database: DatabaseSync } | null;
         roomWorkPublisher: { database: DatabaseSync } | null;
+        effectExecutor: { hasHandler(kind: string): boolean } | null;
+        roomMoves: { effectExecutor: unknown; effectDatabase: DatabaseSync | null };
         executionDelegations: { approvalPublisher?: { database: DatabaseSync } | null };
       };
       shared = internals.stateDatabase?.connection;
@@ -410,6 +417,11 @@ test("SupervisorDaemon owns one shared SQLite connection across all stores and p
       assert.equal(internals.executionCapture?.database, shared, "ExecutionCaptureCoordinator must share the single connection");
       assert.equal(internals.roomWorkPublisher?.database, shared, "RoomWorkPublisher must share the single connection");
       assert.equal(internals.executionDelegations.approvalPublisher?.database, shared, "ExecutionApprovalPublisher must share the single connection");
+      assert.equal(internals.roomMoves.effectDatabase, shared, "RoomMoveCoordinator must share the single connection");
+      assert.equal(internals.roomMoves.effectExecutor, internals.effectExecutor, "RoomMoveCoordinator must share the process-wide EffectExecutor");
+      assert.equal(internals.effectExecutor?.hasHandler(ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND), true);
+      assert.equal(internals.effectExecutor?.hasHandler(ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND), true);
+      assert.equal(internals.effectExecutor?.hasHandler(ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND), true);
     } finally {
       await daemon.stop().catch(() => undefined);
     }

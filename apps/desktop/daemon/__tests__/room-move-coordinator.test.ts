@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { SupervisorGrantRequestError } from "../cloud-http.js";
+import {
+  applyEffectJournalSchema,
+  EffectClaimRefusedError,
+  EffectExecutor,
+  getEffect,
+  listEffectsForAgent,
+  ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+  ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+  ROOM_MOVE_RETAINED_TERMINAL_EFFECTS_PER_AGENT,
+  ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
+  roomMoveBootstrapTailIdempotencyKey,
+  roomMoveJoinDestinationIdempotencyKey,
+  roomMoveRollbackSourceIdempotencyKey,
+} from "../effect-journal/index.js";
 import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import {
   RoomMoveCoordinator,
@@ -144,6 +159,8 @@ function effect(overrides: Partial<SupervisedEffectRecord> = {}): SupervisedEffe
 
 type Harness = {
   coordinator: RoomMoveCoordinator;
+  effectDb: DatabaseSync;
+  executor: EffectExecutor;
   events: string[];
   custody: WorkerRuntimeCustody;
   gate: EntryConcurrencyGate;
@@ -155,12 +172,15 @@ type Harness = {
   setBinding: (binding: WorkerSessionBinding | null) => void;
   setCredential: (credential: string | null) => void;
   setHandoff: (handoff: boolean) => void;
+  setAssertCurrent: (fn: () => Promise<void>) => void;
   setJoinRoom: (joinRoom: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["joinRoom"]>) => void;
   setLatest: (latest: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["latest"]>) => void;
   setActivatingTurn: (item: SupervisedInboxItem, failure: "failed" | "interrupted" | null) => void;
 };
 
 function harness(): Harness {
+  const effectDb = new DatabaseSync(":memory:");
+  applyEffectJournalSchema(effectDb);
   const events: string[] = [];
   let currentMove: DaemonRoomMoveRecord | null = roomMove();
   let pendingMoves: DaemonRoomMoveRecord[] | null = null;
@@ -168,6 +188,7 @@ function harness(): Harness {
   let currentBinding: WorkerSessionBinding | null = workerBinding();
   let credential: string | null = "worker-secret";
   let handoff = false;
+  let assertCurrentFn: () => Promise<void> = async () => { events.push("authority:assert"); };
   let joinRoom: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["joinRoom"]> = async (input) => {
     events.push(`http:join:${input.roomId}`);
     return { roomId: input.roomId };
@@ -322,7 +343,7 @@ function harness(): Harness {
     authority: {
       currentGeneration: () => GENERATION,
       isHandoffScheduled: () => handoff,
-      assertCurrent: async () => { events.push("authority:assert"); },
+      assertCurrent: async () => assertCurrentFn(),
       ownsDaemonGeneration: async (expected) => {
         events.push(`authority:owns:${expected}`);
         return !handoff && expected === GENERATION;
@@ -353,8 +374,22 @@ function harness(): Harness {
     externalEffectSignal: () => new AbortController().signal,
   };
 
+  const executor = new EffectExecutor({
+    getDatabase: () => effectDb,
+    currentDaemonGeneration: () => GENERATION,
+    assertCurrent: async () => assertCurrentFn(),
+    assertWriteFence: () => {},
+    isClosing: () => handoff,
+    nowMs: () => Date.parse(NOW_ISO),
+    nowIso: () => NOW_ISO,
+  });
+  const coordinator = new RoomMoveCoordinator(ports);
+  coordinator.attachEffectExecutor(executor, effectDb, () => {});
+
   return {
-    coordinator: new RoomMoveCoordinator(ports),
+    coordinator,
+    effectDb,
+    executor,
     events,
     custody,
     gate,
@@ -366,6 +401,7 @@ function harness(): Harness {
     setBinding(binding) { currentBinding = binding; },
     setCredential(next) { credential = next; },
     setHandoff(next) { handoff = next; },
+    setAssertCurrent(fn) { assertCurrentFn = fn; },
     setJoinRoom(next) { joinRoom = next; },
     setLatest(next) { latest = next; },
     setActivatingTurn(item, failure) {
@@ -770,4 +806,400 @@ test("status and current discovery preserve exact agent and generation fences", 
     entryId: "agent-1",
     daemonGeneration: GENERATION,
   }), /More than one nonterminal room move exists/);
+});
+
+test("EffectExecutor replays interrupted room-move HTTP effects on startup and deduplicates completed outcomes across crashes", async () => {
+  const h = harness();
+  const move = roomMove({ phase: "joining_destination" });
+  h.setMove(move);
+
+  const joinKey = roomMoveJoinDestinationIdempotencyKey({
+    operationId: move.operation_id,
+    destinationRoomId: move.destination_room_id,
+  });
+  // Seed an interrupted predecessor generation executing row for destination join.
+  h.effectDb.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES (?, 'agent-1', ?, ?, ?, 'executing', ?, NULL, 1, 1, 1000000, NULL, NULL, ?, ?)
+  `).run(
+    "eff-rm-crash-join",
+    ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+    joinKey,
+    GENERATION - 1,
+    JSON.stringify({
+      destination_room_id: move.destination_room_id,
+      execution_generation_id: move.execution_generation_id,
+      operation_id: move.operation_id,
+      source_room_id: move.source_room_id,
+      work_attempt_id: move.work_attempt_id,
+    }),
+    NOW_ISO,
+    NOW_ISO,
+  );
+
+  const recovery = await h.executor.recoverOnStartup();
+  assert.deepEqual(recovery.requeuedIds, ["eff-rm-crash-join"]);
+  assert.equal(getEffect(h.effectDb, "eff-rm-crash-join")?.state, "prepared");
+  assert.equal(getEffect(h.effectDb, "eff-rm-crash-join")?.epoch, GENERATION);
+
+  let joinCalls = 0;
+  h.setJoinRoom(async (input) => {
+    joinCalls += 1;
+    h.events.push(`http:join:${input.roomId}`);
+    return { roomId: "canonical-destination" };
+  });
+
+  const rotating = await h.coordinator.reconcile(move);
+  assert.equal(rotating.phase, "rotating_credentials");
+  assert.equal(joinCalls, 1);
+  const completedJoin = getEffect(h.effectDb, "eff-rm-crash-join")!;
+  assert.equal(completedJoin.state, "completed");
+  assert.equal(completedJoin.attempt_count, 2);
+  assert.equal(listEffectsForAgent(h.effectDb, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND }).length, 1);
+
+  // Re-reconciling a crash-reverted `joining_destination` phase reuses the durable outcome with ZERO duplicate HTTP.
+  h.setMove(roomMove({ phase: "joining_destination" }));
+  h.setEntry(entry("source-room"));
+  const deduped = await h.coordinator.reconcile(roomMove({ phase: "joining_destination" }));
+  assert.equal(deduped.phase, "rotating_credentials");
+  assert.equal(deduped.remote_room_id, "canonical-destination");
+  assert.equal(joinCalls, 1, "completed room_move_join_destination effect prevents duplicate joinRoom HTTP on crash replay");
+
+  // Tail bootstrap also deduplicates and never persists raw room message text or credentials.
+  let latestCalls = 0;
+  h.setLatest(async () => {
+    latestCalls += 1;
+    return { messages: [{ id: "msg_91", text: "PRIVATE_ROOM_MESSAGE_BODY" }] };
+  });
+  h.setMove(roomMove({
+    phase: "bootstrapping_destination_tail",
+    remote_room_id: "canonical-destination",
+    source_credentials_revoked: true,
+  }));
+  h.setEntry(entry("canonical-destination"));
+  h.setBinding(workerBinding("canonical-destination"));
+  const active = await h.coordinator.reconcile(h.getMove()!);
+  assert.equal(active.phase, "active");
+  assert.equal(active.destination_cursor, "msg_91");
+  assert.equal(latestCalls, 1);
+
+  h.setMove(roomMove({
+    phase: "bootstrapping_destination_tail",
+    remote_room_id: "canonical-destination",
+    source_credentials_revoked: true,
+  }));
+  const dedupedTail = await h.coordinator.reconcile(h.getMove()!);
+  assert.equal(dedupedTail.phase, "active");
+  assert.equal(dedupedTail.destination_cursor, "msg_91");
+  assert.equal(latestCalls, 1, "completed room_move_bootstrap_tail effect prevents duplicate latest() HTTP on crash replay");
+
+  const allEffectsJson = JSON.stringify(h.effectDb.prepare("SELECT payload, outcome, last_error FROM effects").all());
+  assert.doesNotMatch(allEffectsJson, /worker-secret|PRIVATE_ROOM_MESSAGE_BODY/);
+});
+
+test("handoff scheduled during EffectExecutor's final pre-settlement await never commits a stale room-move receipt", async () => {
+  const h = harness();
+  const move = roomMove({ phase: "joining_destination" });
+  h.setMove(move);
+
+  let joinReturned = false;
+  let intercepted = false;
+  h.setJoinRoom(async (input) => {
+    h.events.push(`http:join:${input.roomId}`);
+    joinReturned = true;
+    return { roomId: "canonical-destination" };
+  });
+  let assertCountAfterJoin = 0;
+  h.setAssertCurrent(async () => {
+    h.events.push("authority:assert");
+    if (joinReturned) {
+      assertCountAfterJoin += 1;
+      // Call 1 after join is execute()'s own post-HTTP assertExternalAuthority();
+      // Call 2 is EffectExecutor's pre-settlement await assertAuthority().
+      if (assertCountAfterJoin === 2) {
+        intercepted = true;
+        h.setHandoff(true);
+      }
+    }
+  });
+
+  const result = await h.coordinator.reconcile(move);
+  assert.equal(intercepted, true, "must intercept EffectExecutor's final pre-settlement assertAuthority await");
+  assert.equal(result, move, "fenced reconciliation returns the captured snapshot");
+  assert.equal(h.getMove()?.phase, "joining_destination");
+  const [effectRow] = listEffectsForAgent(h.effectDb, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND });
+  assert.equal(effectRow?.state, "executing", "handoff before settlement never commits completed");
+
+  // Planned handoff inside execute() must throw EffectFenceError without calling EffectExecutor.fence({ abortInFlight: true })
+  // and aborting unrelated in-flight bounded external effects draining during retireForHandoff().
+  const shared = harness();
+  const sharedMove = roomMove({ phase: "joining_destination" });
+  shared.setMove(sharedMove);
+  let otherSignalAborted = false;
+  let releaseOther!: () => void;
+  shared.executor.registerHandler("test_unrelated_bounded_effect", {
+    retryable: false,
+    autoPump: false,
+    execute: async (_claimed, context) => {
+      context.signal.addEventListener("abort", () => { otherSignalAborted = true; });
+      await new Promise<void>((resolve) => { releaseOther = resolve; });
+      return { status: "completed", outcome: { ok: true } };
+    },
+  });
+  const otherPrepared = await shared.executor.prepare({
+    agent_id: "agent-other",
+    kind: "test_unrelated_bounded_effect",
+    idempotency_key: "other-1",
+    payload: { ok: true },
+    retryable: false,
+  });
+  const otherRunning = shared.executor.runEffect(otherPrepared.effect.id);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  shared.setJoinRoom(async () => {
+    shared.setHandoff(true);
+    return { roomId: "canonical-destination" };
+  });
+  assert.equal(await shared.coordinator.reconcile(sharedMove), sharedMove);
+  assert.equal(otherSignalAborted, false, "room-move handoff fencing must not abort unrelated in-flight effects");
+  releaseOther();
+  assert.equal((await otherRunning).state, "completed");
+
+  // Saga phase moving out of joining_destination during EffectExecutor's final pre-settlement await
+  // settles the stale room-move effect atomically as failed (without authoritative_rejection or a zombie prepared row).
+  const phaseLost = harness();
+  const phaseMove = roomMove({ phase: "joining_destination" });
+  phaseLost.setMove(phaseMove);
+  phaseLost.effectDb.exec(`
+    CREATE TABLE agent_room_moves (
+      operation_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      phase TEXT NOT NULL,
+      work_attempt_id TEXT,
+      execution_generation_id TEXT
+    );
+    INSERT INTO agent_room_moves (operation_id, agent_id, phase, work_attempt_id, execution_generation_id)
+    VALUES ('move-1', 'agent-1', 'joining_destination', 'attempt-1', 'execution-1');
+  `);
+  let phaseJoinDone = false;
+  let phaseAssertsAfterJoin = 0;
+  phaseLost.setJoinRoom(async () => {
+    phaseJoinDone = true;
+    return { roomId: "canonical-destination" };
+  });
+  phaseLost.setAssertCurrent(async () => {
+    if (phaseJoinDone) {
+      phaseAssertsAfterJoin += 1;
+      if (phaseAssertsAfterJoin === 2) {
+        phaseLost.effectDb.prepare("UPDATE agent_room_moves SET phase = 'rollback_required' WHERE operation_id = 'move-1'").run();
+      }
+    }
+  });
+  const afterPhaseLoss = await phaseLost.coordinator.reconcile(phaseMove);
+  assert.equal(afterPhaseLoss.phase, "joining_destination", "must not misclassify phase loss as authoritative HTTP 403 rejection");
+  const [phaseLostEffect] = listEffectsForAgent(phaseLost.effectDb, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND });
+  assert.equal(phaseLostEffect?.state, "failed");
+  assert.equal(phaseLostEffect?.outcome, null);
+  assert.match(phaseLostEffect?.last_error ?? "", /rollback_required/);
+});
+
+test("failed room-move settlement writes recover without restart (Layer 1 + Layer 2) while fencing live in-flight and future-epoch rows", async () => {
+  // Layer 1: completion-only SQLite write failure reschedules executing -> prepared.
+  const l1 = harness();
+  l1.setMove(roomMove({ phase: "joining_destination" }));
+  let l1Calls = 0;
+  l1.setJoinRoom(async () => { l1Calls += 1; return { roomId: "canonical-destination" }; });
+  l1.effectDb.exec(`
+    CREATE TRIGGER fail_rm_join_complete
+    BEFORE UPDATE OF state ON effects
+    WHEN NEW.kind = '${ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND}' AND NEW.state = 'completed'
+    BEGIN SELECT RAISE(ABORT, 'simulated_rm_complete_failure'); END;
+  `);
+  const first = await l1.coordinator.reconcile(roomMove({ phase: "joining_destination" }));
+  assert.equal(l1Calls, 1);
+  assert.equal(first.phase, "joining_destination");
+  const [l1Effect] = listEffectsForAgent(l1.effectDb, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND });
+  assert.equal(l1Effect?.state, "prepared");
+  assert.equal(l1Effect?.last_error, "settlement_write_failed");
+
+  l1.effectDb.exec("DROP TRIGGER fail_rm_join_complete;");
+  const recoveredL1 = await l1.coordinator.reconcile(first);
+  assert.equal(l1Calls, 2);
+  assert.equal(recoveredL1.phase, "rotating_credentials");
+  assert.equal(getEffect(l1.effectDb, l1Effect!.id)?.state, "completed");
+
+  // Layer 2: full update outage leaves row executing, next reconcile recovers without restart.
+  const l2 = harness();
+  l2.setMove(roomMove({ phase: "rollback_required", remote_room_id: "canonical-destination" }));
+  l2.setEntry(entry("canonical-destination"));
+  l2.setBinding(workerBinding("canonical-destination"));
+  let l2Calls = 0;
+  l2.setJoinRoom(async () => { l2Calls += 1; return { roomId: "source-room" }; });
+  l2.effectDb.exec(`
+    CREATE TRIGGER fail_rm_rollback_all_updates
+    BEFORE UPDATE ON effects
+    WHEN OLD.kind = '${ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND}' AND OLD.state = 'executing'
+    BEGIN SELECT RAISE(ABORT, 'simulated_rm_outage'); END;
+  `);
+  const stuckRollback = await l2.coordinator.reconcile(l2.getMove()!);
+  assert.equal(l2Calls, 1);
+  assert.equal(stuckRollback.phase, "rollback_required");
+  const [stuckEffect] = listEffectsForAgent(l2.effectDb, "agent-1", { kind: ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND });
+  assert.equal(stuckEffect?.state, "executing");
+
+  l2.effectDb.exec("DROP TRIGGER fail_rm_rollback_all_updates;");
+  const recoveredL2 = await l2.coordinator.reconcile(stuckRollback);
+  assert.equal(l2Calls, 2);
+  assert.equal(recoveredL2.phase, "failed");
+  assert.equal(getEffect(l2.effectDb, stuckEffect!.id)?.state, "completed");
+
+  // Live in-flight executing row (isEffectActive === true) is joined rather than rescheduled or duplicated.
+  const live = harness();
+  const liveMove = roomMove({ phase: "joining_destination" });
+  live.setMove(liveMove);
+  let liveCalls = 0;
+  let releaseLiveJoin!: (value: { roomId: string }) => void;
+  let markLiveJoinStarted!: () => void;
+  const liveJoinStarted = new Promise<void>((resolve) => { markLiveJoinStarted = resolve; });
+  live.setJoinRoom(async () => {
+    liveCalls += 1;
+    markLiveJoinStarted();
+    return new Promise<{ roomId: string }>((resolve) => { releaseLiveJoin = resolve; });
+  });
+  const prePrepared = await live.executor.prepare({
+    agent_id: "agent-1",
+    kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+    idempotency_key: roomMoveJoinDestinationIdempotencyKey({
+      operationId: liveMove.operation_id,
+      destinationRoomId: liveMove.destination_room_id,
+    }),
+    payload: {
+      operation_id: liveMove.operation_id,
+      source_room_id: liveMove.source_room_id,
+      destination_room_id: liveMove.destination_room_id,
+      work_attempt_id: liveMove.work_attempt_id,
+      execution_generation_id: liveMove.execution_generation_id,
+    },
+    retryable: true,
+    max_attempts: 1_000_000,
+  });
+  const directRun = live.executor.runEffect(prePrepared.effect.id);
+  await liveJoinStarted;
+  assert.equal(live.executor.isEffectActive(prePrepared.effect.id), true);
+  const reconciledWhileActive = live.coordinator.reconcile(liveMove);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(liveCalls, 1, "reconcile joins live in-flight executing effect without rescheduling or duplicating HTTP");
+  releaseLiveJoin({ roomId: "canonical-destination" });
+  assert.equal((await directRun).state, "completed");
+  assert.equal((await reconciledWhileActive).phase, "rotating_credentials");
+  assert.equal(liveCalls, 1);
+
+  // Future-epoch executing row is refused fail-closed without replaying HTTP.
+  const future = harness();
+  const futureMove = roomMove({ phase: "joining_destination" });
+  future.setMove(futureMove);
+  let futureCalls = 0;
+  future.setJoinRoom(async () => { futureCalls += 1; return { roomId: "canonical-destination" }; });
+  future.effectDb.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES ('eff-future-rm', 'agent-1', ?, ?, ?, 'executing', ?, NULL, 1, 1, 1000000, NULL, NULL, ?, ?)
+  `).run(
+    ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+    roomMoveJoinDestinationIdempotencyKey({ operationId: futureMove.operation_id, destinationRoomId: futureMove.destination_room_id }),
+    GENERATION + 5,
+    JSON.stringify({
+      destination_room_id: futureMove.destination_room_id,
+      execution_generation_id: futureMove.execution_generation_id,
+      operation_id: futureMove.operation_id,
+      source_room_id: futureMove.source_room_id,
+      work_attempt_id: futureMove.work_attempt_id,
+    }),
+    NOW_ISO,
+    NOW_ISO,
+  );
+  const fenced = await future.coordinator.reconcile(futureMove);
+  assert.equal(futureCalls, 0, "stale generation never replays a future-epoch executing room-move effect");
+  assert.equal(fenced.phase, "joining_destination");
+  assert.equal(getEffect(future.effectDb, "eff-future-rm")?.state, "executing");
+});
+
+test("authorizeClaim refuses stale saga phases against agent_room_moves and terminal room-move effects stay bounded", async () => {
+  const h = harness();
+  h.effectDb.exec(`
+    CREATE TABLE agent_room_moves (
+      operation_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      phase TEXT NOT NULL,
+      work_attempt_id TEXT,
+      execution_generation_id TEXT
+    );
+    INSERT INTO agent_room_moves (operation_id, agent_id, phase, work_attempt_id, execution_generation_id)
+    VALUES ('move-terminal', 'agent-1', 'failed', 'attempt-1', 'execution-1');
+  `);
+  let calls = 0;
+  h.setJoinRoom(async () => { calls += 1; return { roomId: "canonical-destination" }; });
+
+  const prepared = await h.executor.prepare({
+    agent_id: "agent-1",
+    kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+    idempotency_key: roomMoveJoinDestinationIdempotencyKey({
+      operationId: "move-terminal",
+      destinationRoomId: "destination-alias",
+    }),
+    payload: {
+      operation_id: "move-terminal",
+      source_room_id: "source-room",
+      destination_room_id: "destination-alias",
+      work_attempt_id: "attempt-1",
+      execution_generation_id: "execution-1",
+    },
+    retryable: true,
+    max_attempts: 1_000_000,
+  });
+  await assert.rejects(() => h.executor.runEffect(prepared.effect.id), EffectClaimRefusedError);
+  assert.equal(calls, 0);
+  assert.equal(getEffect(h.effectDb, prepared.effect.id)?.state, "failed");
+
+  // Seed >512 terminal room-move effects plus one active prepared row and confirm pruning keeps exact cap.
+  const seedCount = ROOM_MOVE_RETAINED_TERMINAL_EFFECTS_PER_AGENT + 20;
+  h.effectDb.exec("BEGIN IMMEDIATE");
+  const insert = h.effectDb.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES (?, 'agent-1', ?, ?, ?, 'completed', '{"seeded":true}', '{"remote_room_id":"r"}', 1, 1, 1000000, NULL, NULL, ?, ?)
+  `);
+  for (let i = 0; i < seedCount; i += 1) {
+    const ts = new Date(Date.parse("2026-08-01T00:00:00Z") + i * 1000).toISOString();
+    insert.run(`eff-rm-old-${i}`, ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND, `rmj:v1:seed-${i}`, GENERATION, ts, ts);
+  }
+  h.effectDb.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES ('eff-rm-active-keep', 'agent-1', ?, 'rmj:v1:keep-active', ?, 'prepared', '{"keep":true}', NULL, 1, 0, 1000000, NULL, NULL, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')
+  `).run(ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND, GENERATION);
+  h.effectDb.prepare(`
+    INSERT INTO agent_room_moves (operation_id, agent_id, phase, work_attempt_id, execution_generation_id)
+    VALUES ('move-1', 'agent-1', 'joining_destination', 'attempt-1', 'execution-1')
+  `).run();
+  h.effectDb.exec("COMMIT");
+
+  h.setMove(roomMove({ phase: "joining_destination" }));
+  const completed = await h.coordinator.reconcile(roomMove({ phase: "joining_destination" }));
+  assert.equal(completed.phase, "rotating_credentials");
+  assert.equal(getEffect(h.effectDb, "eff-rm-active-keep")?.state, "prepared");
+  assert.equal(getEffect(h.effectDb, "eff-rm-old-0"), null);
+  const terminalCount = Number((h.effectDb.prepare(`
+    SELECT COUNT(*) AS n FROM effects
+    WHERE agent_id = 'agent-1' AND kind IN (?, ?, ?) AND state IN ('completed', 'failed')
+  `).get(
+    ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+    ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
+    ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+  ) as { n: number }).n);
+  assert.equal(terminalCount, ROOM_MOVE_RETAINED_TERMINAL_EFFECTS_PER_AGENT);
 });
