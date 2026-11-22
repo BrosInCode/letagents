@@ -1,5 +1,6 @@
 /** Starting, stopping and handing off the supervisor daemon. */
 import { openDaemonMaintenance, registerDaemonBoardAccess } from "../maintenance-service.js";
+import { EffectExecutor } from "../effect-journal/index.js";
 import { restoreLocalRoomAuthorities } from "../local-room-runtime.js";
 import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import { withProtectedStateUpgrade, type StateRecoveryBootstrap } from "../state-recovery-key.js";
@@ -76,8 +77,18 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
         },
         recordStopped: (agentId) => this.providerExecution?.noteRecordStopped(agentId),
       });
+      this.effectExecutor = new EffectExecutor({
+        getDatabase: () => this.stateDatabase?.connection ?? null,
+        currentDaemonGeneration: () => this.singleton.currentGeneration,
+        assertCurrent: () => this.singleton.assertCurrent(),
+        assertWriteFence: writeFence,
+        isClosing: () => this.handoffScheduled,
+        notifyStateChanged: () => this.notifyStateChanged(),
+        nowMs: () => this.nowMs(),
+      });
       this.executionDelegations.start();
     }
+    await this.effectExecutor?.recoverOnStartup();
     await this.supervisedInbox.normalizeInterruptedEffects();
     await this.runtimeRecovery.recoverTurnControls();
     await this.roomMoves.reconcilePrepared();
@@ -116,11 +127,12 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
       () => this.convergencePacer.close(), () => this.providerTerminals.close(), () => this.hostApprovals.close(),
       () => this.liveRoomShare.dispose(),
       () => { executionDelegationDrain = this.executionDelegations.fenceAndDrain(); },
-      () => this.roomWorkPublisher?.close(), () => this.executionCapture?.close(), () => this.supervisedDelivery?.fence(),
+      () => this.roomWorkPublisher?.close(), () => this.executionCapture?.close(), () => this.effectExecutor?.fence(), () => this.supervisedDelivery?.fence(),
       () => this.wakeRoomMoveReconciliationWaiters(), () => this.notifyStateChanged(), () => this.workerRuntimeCustody.destroyAllCredentials(),
       () => executionDelegationDrain,
       () => this.supervisedDelivery?.fenceAndDrain(),
       () => this.fenceAndDrainRoomMoveReconciliations(),
+      () => this.effectExecutor?.fenceAndDrain(),
       () => this.boundedEffects.drainJournalReservations(),
       () => this.providerExecution?.clearRecoveryTimers(),
       () => this.providerReconciliation?.disposeAll(),
@@ -157,6 +169,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     if (this.replyAttachmentSweep) clearInterval(this.replyAttachmentSweep);
     this.workerRuntimeCustody.destroyAllCredentials();
     this.convergencePacer.close();
+    this.effectExecutor?.fence();
     this.wakeRoomMoveReconciliationWaiters();
     const failures: unknown[] = [...this.handoffCleanupFailures];
     try { await this.activityWrites.close(); } catch (error) { failures.push(error); }
@@ -171,6 +184,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     // native provider dispatch begins its exact returned identity must be
     // persisted before the shared stores are closed for successor attach.
     await this.providerExecution?.drainDispatches();
+    try { await this.effectExecutor?.fenceAndDrain(); } catch (error) { failures.push(error); }
     await this.boundedEffects.drainJournalReservations();
     captureSync(() => this.providerStreams.detachAll());
     // Complete every local cleanup step even if one fails. The process-level
@@ -204,6 +218,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     // edge. No claimed FIFO item may observe the public fence before its
     // controller is aborted and its cleanup owner is established.
     this.supervisedDelivery?.fence();
+    this.effectExecutor?.fence();
     this.wakeRoomMoveReconciliationWaiters();
     this.notifyStateChanged();
     // A bootstrap that already read tail N must commit N before lock/socket
@@ -221,6 +236,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     // the acknowledgement can authorize Electron to replace this daemon.
     this.workerRuntimeCustody.destroyOwnerCredentials();
     await this.providerExecution?.drainDispatches();
+    await this.effectExecutor?.fenceAndDrain();
     await this.boundedEffects.drainJournalReservations();
     await this.boundedEffects.drainExternalExecutions();
     await this.providerTerminals.drainAndClose(() => {

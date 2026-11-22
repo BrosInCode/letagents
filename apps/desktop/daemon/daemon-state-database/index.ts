@@ -13,6 +13,8 @@ export {
   DaemonStateSchema,
   DAEMON_STATE_MIGRATIONS,
   applySchemaV1,
+  applySchemaCurrent,
+  migrateV1ToV2,
   runNumberedMigrations,
   validateDaemonStateShape,
   type SchemaMigration,

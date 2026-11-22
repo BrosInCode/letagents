@@ -77,15 +77,17 @@ async function waitForExit(child: ChildProcess, timeoutMs = 5_000): Promise<bool
   });
 }
 
-test("fresh schema v1 enforces application_id, user_version=1001, downgrade-safe table layout, and 1:1 shape checks", async () => {
+test("fresh current schema enforces application_id, user_version=1002, downgrade-safe table layout, and 1:1 shape checks", async () => {
   const env = await tempDir("letagents-schema-v1-");
   const dbPath = join(env.root, "daemon-state.sqlite");
   try {
-    assert.equal(DAEMON_STATE_SCHEMA_VERSION, 1);
+    assert.equal(DAEMON_STATE_SCHEMA_VERSION, 2);
     assert.equal(DAEMON_STATE_USER_VERSION_OFFSET, 1000);
-    assert.equal(DAEMON_STATE_USER_VERSION, 1001);
+    assert.equal(DAEMON_STATE_USER_VERSION, 1002);
     assert.equal(toSqliteUserVersion(1), 1001);
     assert.equal(fromSqliteUserVersion(1001), 1);
+    assert.equal(toSqliteUserVersion(2), 1002);
+    assert.equal(fromSqliteUserVersion(1002), 2);
 
     const stateDb = await DaemonStateDatabase.open(dbPath);
     try {
@@ -108,7 +110,7 @@ test("fresh schema v1 enforces application_id, user_version=1001, downgrade-safe
       // the disk, and omitting `manifest_metadata` guarantees no legacy path can
       // mistake a schema v1 file for a pre-v1 manifest database.
       assert.equal(tables.has("manifest_metadata"), false, "manifest_metadata must not exist in schema v1");
-      for (const expected of ["agents", "runs", "inbox_items", "effects", "effect_tombstones", "execution_facts", "daemon_maintenance_state"]) {
+      for (const expected of ["agents", "runs", "inbox_items", "effects", "effect_tombstones", "effect_journal", "execution_facts", "daemon_maintenance_state"]) {
         assert.equal(tables.has(expected), true, `expected domain table ${expected}`);
       }
       for (const obsolete of [
@@ -257,7 +259,7 @@ test("legacy DB move-aside stops only exact-birth legacy processes, preserves le
 
 test("unknown/future modern DBs (application_id=LAD1) and foreign DBs fail closed without modifying or moving aside", async () => {
   const cases = [
-    { name: "future modern v2 (user_version=1002)", appId: DAEMON_STATE_APPLICATION_ID, userVersion: DAEMON_STATE_USER_VERSION + 1, table: true, pattern: /Unsupported daemon state schema version/i },
+    { name: "future modern v3 (user_version=1003)", appId: DAEMON_STATE_APPLICATION_ID, userVersion: DAEMON_STATE_USER_VERSION + 1, table: true, pattern: /Unsupported daemon state schema version/i },
     { name: "offset boundary (user_version=1000)", appId: DAEMON_STATE_APPLICATION_ID, userVersion: DAEMON_STATE_USER_VERSION_OFFSET, table: true, pattern: /Unsupported daemon state schema version/i },
     { name: "pre-offset modern collision (user_version=1)", appId: DAEMON_STATE_APPLICATION_ID, userVersion: 1, table: true, pattern: /Unsupported daemon state schema version/i },
     { name: "modern application_id with user_version=0 and tables", appId: DAEMON_STATE_APPLICATION_ID, userVersion: 0, table: true, pattern: /Unsupported daemon state schema version/i },
@@ -288,7 +290,7 @@ test("unknown/future modern DBs (application_id=LAD1) and foreign DBs fail close
   }
 });
 
-test("runNumberedMigrations applies future v1->v2 migrations atomically inside a transaction and rolls back on failure", () => {
+test("runNumberedMigrations applies future v2->v3 migrations atomically inside a transaction and rolls back on failure", () => {
   const db = new DatabaseSync(":memory:");
   try {
     db.exec("PRAGMA foreign_keys = ON");
@@ -298,9 +300,9 @@ test("runNumberedMigrations applies future v1->v2 migrations atomically inside a
     assert.throws(() => {
       db.exec("BEGIN IMMEDIATE");
       try {
-        runNumberedMigrations(db, 1, 2, {
-          1(conn) {
-            conn.exec("CREATE TABLE synthetic_v2 (id TEXT PRIMARY KEY)");
+        runNumberedMigrations(db, 2, 3, {
+          2(conn) {
+            conn.exec("CREATE TABLE synthetic_v3 (id TEXT PRIMARY KEY)");
             throw new Error("simulated migration failure");
           },
         });
@@ -311,17 +313,17 @@ test("runNumberedMigrations applies future v1->v2 migrations atomically inside a
       }
     }, /simulated migration failure/);
     assert.equal(Number(db.prepare("PRAGMA user_version").get()?.user_version), DAEMON_STATE_USER_VERSION);
-    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='synthetic_v2'").get(), undefined);
+    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='synthetic_v3'").get(), undefined);
 
     db.exec("BEGIN IMMEDIATE");
-    runNumberedMigrations(db, 1, 2, {
-      1(conn) {
-        conn.exec("CREATE TABLE synthetic_v2 (id TEXT PRIMARY KEY); INSERT INTO synthetic_v2 VALUES ('ok');");
+    runNumberedMigrations(db, 2, 3, {
+      2(conn) {
+        conn.exec("CREATE TABLE synthetic_v3 (id TEXT PRIMARY KEY); INSERT INTO synthetic_v3 VALUES ('ok');");
       },
     });
     db.exec("COMMIT");
-    assert.equal(Number(db.prepare("PRAGMA user_version").get()?.user_version), toSqliteUserVersion(2));
-    assert.equal(db.prepare("SELECT id FROM synthetic_v2").get()?.id, "ok");
+    assert.equal(Number(db.prepare("PRAGMA user_version").get()?.user_version), toSqliteUserVersion(3));
+    assert.equal(db.prepare("SELECT id FROM synthetic_v3").get()?.id, "ok");
   } finally {
     db.close();
   }
