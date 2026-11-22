@@ -80,6 +80,7 @@ export interface SupervisorGrantHttp {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; sessionId: string;
     /** The agent starts again in the same room; the server keeps the turn it shared there. */
     restarting?: boolean;
+    signal?: AbortSignal;
   }): Promise<void>;
   renewHostGrant?(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
@@ -819,7 +820,7 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
       method: "POST",
       headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
       body: JSON.stringify({ generation: input.grantGeneration, ...(input.restarting ? { restarting: true } : {}) }),
-      signal: boundedCloudSignal(),
+      signal: boundedCloudSignal(input.signal),
     });
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session end");
   },

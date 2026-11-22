@@ -400,6 +400,8 @@ test("SupervisorDaemon owns one shared SQLite connection across all stores and p
         executionCapture: { database: DatabaseSync } | null;
         roomWorkPublisher: { database: DatabaseSync } | null;
         executionDelegations: { approvalPublisher?: { database: DatabaseSync } | null };
+        effectExecutor: { hasHandler?: (kind: string) => boolean; handlers?: Map<string, unknown> } | null;
+        runtimeRecovery: { effectDatabase?: DatabaseSync | null; effectExecutor?: unknown };
       };
       shared = internals.stateDatabase?.connection;
       assert.ok(shared && shared.isOpen, "daemon must own an open shared connection");
@@ -410,6 +412,9 @@ test("SupervisorDaemon owns one shared SQLite connection across all stores and p
       assert.equal(internals.executionCapture?.database, shared, "ExecutionCaptureCoordinator must share the single connection");
       assert.equal(internals.roomWorkPublisher?.database, shared, "RoomWorkPublisher must share the single connection");
       assert.equal(internals.executionDelegations.approvalPublisher?.database, shared, "ExecutionApprovalPublisher must share the single connection");
+      assert.equal(internals.runtimeRecovery.effectDatabase, shared, "RuntimeRecoveryCoordinator must share the single connection");
+      assert.equal(internals.runtimeRecovery.effectExecutor, internals.effectExecutor, "RuntimeRecoveryCoordinator must share the process-wide EffectExecutor");
+      assert.equal(internals.effectExecutor?.handlers?.has("runtime_recovery_end_worker_session"), true);
     } finally {
       await daemon.stop().catch(() => undefined);
     }

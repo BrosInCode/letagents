@@ -67,7 +67,9 @@ export {
   nextScheduledPreparedEffectAtMs,
   listUncertainEffects,
   claimEffectForExecution,
+  completeEffectInTransaction,
   completeEffect,
+  failEffectInTransaction,
   failEffect,
   rescheduleEffectForRetry,
   markEffectUncertain,
@@ -75,7 +77,23 @@ export {
   resolveUncertainEffect,
   recoverInterruptedEffectsOnStartup,
   deleteEffectsForAgentInTransaction,
+  pruneTerminalEffectsByKindsInTransaction,
 } from "./store.js";
+export {
+  RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+  RUNTIME_RECOVERY_EFFECT_KINDS,
+  RUNTIME_RECOVERY_EFFECT_MAX_ATTEMPTS,
+  RUNTIME_RECOVERY_RETAINED_TERMINAL_EFFECTS_PER_AGENT,
+  RUNTIME_RECOVERY_EFFECT_RETRY_DELAY_MS,
+  RUNTIME_RECOVERY_EFFECT_MAX_RETRY_DELAY_MS,
+  RUNTIME_RECOVERY_EFFECT_BACKOFF,
+  classifyRuntimeRecoveryEffectError,
+  runtimeRecoveryEndWorkerSessionIdempotencyKey,
+  parseRuntimeRecoveryEndWorkerSessionPayload,
+  checkRuntimeRecoveryPhaseInTransaction,
+  pruneTerminalRuntimeRecoveryEffectsInTransaction,
+  type RuntimeRecoveryEndWorkerSessionEffectPayload,
+} from "./runtime-recovery.js";
 export {
   EffectExecutor,
   computeEffectBackoffMs,

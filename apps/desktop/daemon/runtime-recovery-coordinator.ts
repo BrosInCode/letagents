@@ -1,7 +1,33 @@
+import type { DatabaseSync } from "node:sqlite";
 import { ownerSetupRef } from "./provider-configuration.js";
 import type { SupervisorGrantHttp } from "./cloud-http.js";
+import { schedulerErrorDetail } from "./daemon-error-policy.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
+import {
+  checkRuntimeRecoveryPhaseInTransaction,
+  classifyRuntimeRecoveryEffectError,
+  completeEffectInTransaction,
+  computeEffectBackoffMs,
+  EffectExecutor,
+  EffectFenceError,
+  failEffect,
+  failEffectInTransaction,
+  getEffectByIdempotencyKey,
+  parseRuntimeRecoveryEndWorkerSessionPayload,
+  pruneTerminalRuntimeRecoveryEffectsInTransaction,
+  rescheduleEffectForRetry,
+  RUNTIME_RECOVERY_EFFECT_BACKOFF,
+  RUNTIME_RECOVERY_EFFECT_MAX_ATTEMPTS,
+  RUNTIME_RECOVERY_EFFECT_RETRY_DELAY_MS,
+  RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+  runtimeRecoveryEndWorkerSessionIdempotencyKey,
+  withFencedEffectTransaction,
+  type EffectHandler,
+  type EffectRecord,
+  type RuntimeRecoveryEndWorkerSessionEffectPayload,
+} from "./effect-journal/index.js";
 import type { ManifestStore } from "./manifest-store.js";
+import { DaemonFenceLostError } from "./singleton.js";
 import {
   sameProviderActionConnectionSnapshot,
   validatedNativeRuntimeDeath,
@@ -71,13 +97,38 @@ export type RuntimeRecoveryCoordinatorOptions = {
   nowMs: () => number;
 };
 
+type RuntimeRecoveryHostGrant = NonNullable<ReturnType<WorkerAuthorityCoordinator["currentHostGrant"]>>;
+
+class RuntimeRecoveryCustodyChangedError extends Error {
+  constructor() {
+    super("Host grant custody changed before worker session retirement settled.");
+    this.name = "RuntimeRecoveryCustodyChangedError";
+  }
+}
+
+class RuntimeRecoverySettlementStorageError extends Error {
+  constructor(cause: unknown) {
+    super("Runtime-recovery effect settlement storage write failed.", { cause });
+    this.name = "RuntimeRecoverySettlementStorageError";
+  }
+}
+
 /**
  * Owns restart recovery for turn-control journals and explicit replacement of
- * provider runtimes that are durably proven terminal.
+ * provider runtimes that are durably proven terminal. Outbound cloud
+ * `endWorkerSession` calls during restart recovery execute through the shared
+ * `EffectExecutor` + `effects` journal; OS-process death proof (`stopRef` /
+ * `stop` / `attach`) remains directly fenced on live host observations.
  */
 export class RuntimeRecoveryCoordinator {
   /** Entries whose exit recording an owner's recovery has taken over, until that recovery ends. */
   private readonly exitHolds = new Map<string, () => void>();
+  private effectExecutor: EffectExecutor | null = null;
+  private effectDatabase: DatabaseSync | null = null;
+  private effectWriteFence: () => void = () => {};
+  private readonly pendingDispatchContext = new Map<string, RuntimeRecoveryHostGrant>();
+  private readonly pendingSettlementGrant = new Map<string, RuntimeRecoveryHostGrant>();
+  private readonly lastSanitizedDiagnostic = new Map<string, string>();
   private readonly store: ManifestStore;
   private readonly durability: WorkDurabilityStore;
   private readonly inbox: SupervisedAgentInboxStore;
@@ -120,6 +171,21 @@ export class RuntimeRecoveryCoordinator {
     this.requestConvergence = options.requestConvergence;
     this.entryWithDerivedLiveness = options.entryWithDerivedLiveness;
     this.nowMs = options.nowMs;
+  }
+
+  /** Attaches the shared process-wide EffectExecutor and registers the runtime-recovery session-end handler. */
+  attachEffectExecutor(
+    executor: EffectExecutor,
+    database: DatabaseSync,
+    assertWriteFence: () => void = () => {},
+  ): void {
+    this.effectExecutor = executor;
+    this.effectDatabase = database;
+    this.effectWriteFence = assertWriteFence;
+    executor.registerHandler(
+      RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+      this.createEndWorkerSessionHandler(),
+    );
   }
 
   async recoverTurnControls(): Promise<void> {
@@ -476,7 +542,14 @@ export class RuntimeRecoveryCoordinator {
       if (sessionId) {
         const grant = this.workerAuthority.currentHostGrant(current);
         if (!grant || !this.supervisorGrantHttp.endWorkerSession) throw new Error("Desktop credentials are needed to finish recovery. Reconnect the desktop and retry.");
-        await this.endWorkerSessionForRestart(grant, sessionId);
+        await this.endWorkerSessionForRestart({
+          agentId: entryId,
+          roomId: record.room_id,
+          operationId: record.operation_id,
+          executionGenerationId: record.execution_generation_id,
+          sessionId,
+          grant,
+        });
       }
       await assertAuthority();
       if (binding) await this.bindings.unbind(entryId, binding.agent_session_id, binding.execution_generation_id);
@@ -499,18 +572,349 @@ export class RuntimeRecoveryCoordinator {
   }
 
   /** Recovery starts the agent again in the same room, so the room keeps the turn it shared. */
-  private async endWorkerSessionForRestart(
-    grant: NonNullable<ReturnType<WorkerAuthorityCoordinator["currentHostGrant"]>>,
-    sessionId: string,
-  ): Promise<void> {
-    await this.supervisorGrantHttp.endWorkerSession!({
-      apiUrl: grant.apiUrl,
-      grantId: grant.grantId,
-      supervisorGrant: grant.supervisorGrant,
-      grantGeneration: grant.grantGeneration,
-      sessionId,
+  private async endWorkerSessionForRestart(input: {
+    agentId: string;
+    roomId: string;
+    operationId: string | null;
+    executionGenerationId: string | null;
+    sessionId: string;
+    grant: RuntimeRecoveryHostGrant;
+  }): Promise<void> {
+    const payload: RuntimeRecoveryEndWorkerSessionEffectPayload = {
+      operation_id: input.operationId,
+      room_id: input.roomId,
+      execution_generation_id: input.executionGenerationId,
+      session_id: input.sessionId,
       restarting: true,
+    };
+    const idempotencyKey = runtimeRecoveryEndWorkerSessionIdempotencyKey({
+      operationId: input.operationId,
+      roomId: input.roomId,
+      executionGenerationId: input.executionGenerationId,
+      sessionId: input.sessionId,
     });
+    const { effect: settled, diagnostic, backedOff } = await this.runEndWorkerSessionEffect({
+      agentId: input.agentId,
+      idempotencyKey,
+      payload,
+      grant: input.grant,
+    });
+    if (settled.state === "completed") return;
+    if (backedOff) {
+      const retryDelayMs = settled.next_attempt_at_ms !== null
+        ? Math.max(1, settled.next_attempt_at_ms - this.nowMs())
+        : RUNTIME_RECOVERY_EFFECT_RETRY_DELAY_MS;
+      throw new Error(`Worker session retirement is backing off for ${retryDelayMs}ms before retry.`);
+    }
+    if (settled.last_error === "grant_authority_changed") {
+      throw new Error("Host grant custody changed before worker session retirement settled.");
+    }
+    throw new Error(
+      diagnostic
+        ?? `Worker session retirement did not complete (${settled.last_error ?? "transport_error"}).`,
+    );
+  }
+
+  private nowIso(): string {
+    return new Date(this.nowMs()).toISOString();
+  }
+
+  private requireEffectHost(): { executor: EffectExecutor; database: DatabaseSync } {
+    if (!this.effectExecutor || !this.effectDatabase || !this.effectDatabase.isOpen) {
+      throw new EffectFenceError("Runtime-recovery effect executor is unavailable.");
+    }
+    return { executor: this.effectExecutor, database: this.effectDatabase };
+  }
+
+  private recordSanitizedDiagnostic(effectId: string, error: unknown): void {
+    if (!this.pendingDispatchContext.has(effectId)) return;
+    this.lastSanitizedDiagnostic.set(
+      effectId,
+      typeof error === "string" ? error : schedulerErrorDetail(error),
+    );
+  }
+
+  private matchesDispatchGrant(
+    agentId: string,
+    roomId: string,
+    expectedGrant: RuntimeRecoveryHostGrant,
+  ): boolean {
+    const current = this.runtimeCustody.currentHostGrant(
+      { entryId: agentId, roomId },
+      this.authority.currentDaemonGeneration(),
+      this.authority.isHandoffScheduled(),
+    );
+    return current === expectedGrant;
+  }
+
+  private async assertExternalAuthority(): Promise<void> {
+    if (this.authority.isHandoffScheduled()) {
+      throw new EffectFenceError("Supervisor handoff fenced a stale runtime-recovery effect.");
+    }
+    await this.authority.assertCurrent();
+    if (this.authority.isHandoffScheduled()) {
+      throw new EffectFenceError("Supervisor handoff fenced a stale runtime-recovery effect.");
+    }
+  }
+
+  private createEndWorkerSessionHandler(): EffectHandler {
+    return {
+      retryable: true,
+      autoPump: false,
+      defaultMaxAttempts: RUNTIME_RECOVERY_EFFECT_MAX_ATTEMPTS,
+      backoff: RUNTIME_RECOVERY_EFFECT_BACKOFF,
+      authorizeClaim: (database, effect) => {
+        const payload = parseRuntimeRecoveryEndWorkerSessionPayload(effect.payload);
+        if (!payload) return "invalid_payload";
+        return checkRuntimeRecoveryPhaseInTransaction(database, {
+          operationId: payload.operation_id,
+          agentId: effect.agent_id,
+          executionGenerationId: payload.execution_generation_id,
+        });
+      },
+      execute: async (claimed, context) => {
+        const payload = parseRuntimeRecoveryEndWorkerSessionPayload(claimed.payload);
+        if (!payload) {
+          return { status: "failed", error: "invalid_payload" };
+        }
+        let grant: RuntimeRecoveryHostGrant | null;
+        try {
+          const cached = this.pendingDispatchContext.get(claimed.id);
+          grant = cached ?? this.runtimeCustody.currentHostGrant(
+            { entryId: claimed.agent_id, roomId: payload.room_id },
+            this.authority.currentDaemonGeneration(),
+            this.authority.isHandoffScheduled(),
+          );
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+          this.recordSanitizedDiagnostic(claimed.id, error);
+          return { status: "retry", error: "grant_resolution_failed" };
+        }
+        if (!grant) {
+          this.recordSanitizedDiagnostic(
+            claimed.id,
+            "Desktop credentials are needed to finish recovery. Reconnect the desktop and retry.",
+          );
+          return { status: "retry", error: "grant_unavailable" };
+        }
+        try {
+          if (!this.supervisorGrantHttp.endWorkerSession) {
+            this.recordSanitizedDiagnostic(claimed.id, "Worker session retirement transport is unavailable.");
+            return { status: "retry", error: "transport_unavailable" };
+          }
+          await this.assertExternalAuthority();
+          if (!this.matchesDispatchGrant(claimed.agent_id, payload.room_id, grant)) {
+            this.recordSanitizedDiagnostic(claimed.id, "Host grant custody changed before worker session retirement.");
+            return { status: "retry", error: "grant_authority_changed" };
+          }
+          this.pendingSettlementGrant.set(claimed.id, grant);
+          await this.supervisorGrantHttp.endWorkerSession({
+            apiUrl: grant.apiUrl,
+            grantId: grant.grantId,
+            supervisorGrant: grant.supervisorGrant,
+            grantGeneration: grant.grantGeneration,
+            sessionId: payload.session_id,
+            restarting: true,
+            signal: context.signal,
+          });
+          await this.assertExternalAuthority();
+          return {
+            status: "completed",
+            outcome: { session_id: payload.session_id, restarting: true },
+          };
+        } catch (error) {
+          this.pendingSettlementGrant.delete(claimed.id);
+          if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+          this.recordSanitizedDiagnostic(claimed.id, error);
+          return { status: "retry", error: classifyRuntimeRecoveryEffectError(error) };
+        }
+      },
+      settle: async (claimed, executionResult, defaultSettle) => {
+        try {
+          const payload = parseRuntimeRecoveryEndWorkerSessionPayload(claimed.payload);
+          const expectedGrant = this.pendingSettlementGrant.get(claimed.id) ?? null;
+          return this.settleEndWorkerSessionEffect(
+            claimed,
+            executionResult,
+            defaultSettle,
+            payload,
+            expectedGrant,
+          );
+        } finally {
+          this.pendingSettlementGrant.delete(claimed.id);
+        }
+      },
+    };
+  }
+
+  private settleEndWorkerSessionEffect(
+    claimed: EffectRecord,
+    executionResult: Parameters<NonNullable<EffectHandler["settle"]>>[1],
+    defaultSettle: () => EffectRecord,
+    payload: RuntimeRecoveryEndWorkerSessionEffectPayload | null,
+    expectedGrant: RuntimeRecoveryHostGrant | null,
+  ): EffectRecord {
+    if (this.authority.isHandoffScheduled()) {
+      throw new EffectFenceError("Supervisor handoff fenced a stale runtime-recovery effect settlement.");
+    }
+    const { database } = this.requireEffectHost();
+    if (executionResult.status === "retry" || executionResult.status === "uncertain") {
+      try {
+        return defaultSettle();
+      } catch (error) {
+        if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+        throw new RuntimeRecoverySettlementStorageError(error);
+      }
+    }
+    if (executionResult.status === "completed" && payload && expectedGrant
+      && !this.matchesDispatchGrant(claimed.agent_id, payload.room_id, expectedGrant)) {
+      return this.rescheduleExecutingEffectSafe(claimed, "grant_authority_changed");
+    }
+    try {
+      return withFencedEffectTransaction(database, this.effectWriteFence, () => {
+        if (this.authority.isHandoffScheduled()) {
+          throw new EffectFenceError("Supervisor handoff fenced a stale runtime-recovery effect settlement.");
+        }
+        const phaseRefusal = payload
+          ? checkRuntimeRecoveryPhaseInTransaction(database, {
+              operationId: payload.operation_id,
+              agentId: claimed.agent_id,
+              executionGenerationId: payload.execution_generation_id,
+            })
+          : null;
+        if (phaseRefusal !== null) {
+          const failed = failEffectInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            error: phaseRefusal,
+            nowIso: this.nowIso(),
+          });
+          pruneTerminalRuntimeRecoveryEffectsInTransaction(database, claimed.agent_id);
+          return failed;
+        }
+        if (executionResult.status === "completed" && payload && expectedGrant
+          && !this.matchesDispatchGrant(claimed.agent_id, payload.room_id, expectedGrant)) {
+          throw new RuntimeRecoveryCustodyChangedError();
+        }
+        const settled = executionResult.status === "completed"
+          ? completeEffectInTransaction(database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            })
+          : failEffectInTransaction(database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              error: executionResult.error,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            });
+        pruneTerminalRuntimeRecoveryEffectsInTransaction(database, claimed.agent_id);
+        return settled;
+      });
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+      if (error instanceof RuntimeRecoveryCustodyChangedError) {
+        return this.rescheduleExecutingEffectSafe(claimed, "grant_authority_changed");
+      }
+      return this.rescheduleExecutingEffectSafe(claimed, "settlement_write_failed", error);
+    }
+  }
+
+  private rescheduleExecutingEffectSafe(
+    claimed: EffectRecord,
+    errorCode: string,
+    originalError?: unknown,
+  ): EffectRecord {
+    const { database } = this.requireEffectHost();
+    try {
+      if (claimed.attempt_count < claimed.max_attempts) {
+        const retryDelayMs = computeEffectBackoffMs(
+          Math.max(1, claimed.attempt_count),
+          RUNTIME_RECOVERY_EFFECT_BACKOFF,
+        );
+        return rescheduleEffectForRetry(database, this.effectWriteFence, {
+          id: claimed.id,
+          expectedEpoch: claimed.epoch,
+          expectedAttemptCount: claimed.attempt_count,
+          nextAttemptAtMs: Math.max(0, this.nowMs()) + retryDelayMs,
+          error: errorCode,
+          nowIso: this.nowIso(),
+        });
+      }
+      return failEffect(database, this.effectWriteFence, {
+        id: claimed.id,
+        expectedEpoch: claimed.epoch,
+        expectedAttemptCount: claimed.attempt_count,
+        error: errorCode,
+        nowIso: this.nowIso(),
+      });
+    } catch (retryError) {
+      if (retryError instanceof DaemonFenceLostError || retryError instanceof EffectFenceError) throw retryError;
+      throw new RuntimeRecoverySettlementStorageError(originalError ?? retryError);
+    }
+  }
+
+  private async runEndWorkerSessionEffect(input: {
+    agentId: string;
+    idempotencyKey: string;
+    payload: RuntimeRecoveryEndWorkerSessionEffectPayload;
+    grant: RuntimeRecoveryHostGrant;
+  }): Promise<{ effect: EffectRecord; diagnostic: string | null; backedOff: boolean }> {
+    const { executor, database } = this.requireEffectHost();
+    const existing = getEffectByIdempotencyKey(
+      database,
+      input.agentId,
+      RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+      input.idempotencyKey,
+    );
+    if (existing?.state === "executing") {
+      if (executor.isEffectActive(existing.id)) {
+        const activeSettled = await executor.runEffect(existing.id);
+        return { effect: activeSettled, diagnostic: null, backedOff: false };
+      }
+      if (existing.epoch > this.authority.currentDaemonGeneration()) {
+        throw new EffectFenceError(
+          `Runtime-recovery effect ${existing.id} belongs to future daemon generation ${existing.epoch}.`,
+        );
+      }
+      if (existing.attempt_count >= 1) {
+        const recovered = this.rescheduleExecutingEffectSafe(existing, "recovered_inactive_executing_effect");
+        return { effect: recovered, diagnostic: null, backedOff: true };
+      }
+    }
+    const prepared = await executor.prepare({
+      agent_id: input.agentId,
+      kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+      idempotency_key: input.idempotencyKey,
+      payload: input.payload,
+      retryable: true,
+      max_attempts: RUNTIME_RECOVERY_EFFECT_MAX_ATTEMPTS,
+    });
+    if (prepared.effect.state === "completed" || prepared.effect.state === "failed") {
+      return { effect: prepared.effect, diagnostic: null, backedOff: false };
+    }
+    if (prepared.effect.state === "prepared"
+      && prepared.effect.next_attempt_at_ms !== null
+      && prepared.effect.next_attempt_at_ms > this.nowMs()) {
+      return { effect: prepared.effect, diagnostic: null, backedOff: true };
+    }
+    const effectId = prepared.effect.id;
+    this.pendingDispatchContext.set(effectId, input.grant);
+    this.lastSanitizedDiagnostic.delete(effectId);
+    try {
+      const settled = await executor.runEffect(effectId);
+      const diagnostic = this.lastSanitizedDiagnostic.get(effectId) ?? null;
+      return { effect: settled, diagnostic, backedOff: false };
+    } finally {
+      this.pendingDispatchContext.delete(effectId);
+      this.pendingSettlementGrant.delete(effectId);
+      this.lastSanitizedDiagnostic.delete(effectId);
+    }
   }
 
   private async recoverAgentRuntimeExclusive(entryId: string, daemonGeneration: number) {
@@ -670,7 +1074,14 @@ export class RuntimeRecoveryCoordinator {
         if (!grant || !this.supervisorGrantHttp.endWorkerSession) {
           throw new Error("Desktop credentials are required before this provider can be safely recovered.");
         }
-        await this.endWorkerSessionForRestart(grant, retainedSessionId);
+        await this.endWorkerSessionForRestart({
+          agentId: entryId,
+          roomId: entry.room_id,
+          operationId: null,
+          executionGenerationId: ref?.execution_generation_id ?? null,
+          sessionId: retainedSessionId,
+          grant,
+        });
         if (stoppedCursorLane && interruptedDelivery && ref && binding
           && binding.entry_id === entryId && binding.room_id === entry.room_id
           && binding.work_attempt_id === ref.work_attempt_id
