@@ -88,6 +88,7 @@ export type LifecycleAdministrationPorts = {
   provider?: Pick<ProviderActionPort, "stopRef">;
   runtimeCustody: LifecycleAdministrationRuntimeCustody;
   deleteAgentStream(entryId: string): unknown;
+  reconcileRoomWorkForPurge?(entryId: string): void;
   ephemeralProvisioner: {
     garbageCollectOrphans(retainedAttemptIds: ReadonlySet<string>): Promise<string[]>;
   };
@@ -324,6 +325,7 @@ export class LifecycleAdministrationCoordinator {
             error: "Purge requires no live provider or bounded delivery turn.",
           };
         }
+        this.ports.reconcileRoomWorkForPurge?.(entryId);
         if (!purge) {
           try {
             const externalRevokeRequired = await this.requiresHostGrant(entry);

@@ -20,6 +20,7 @@ import {
   pruneTerminalRoomWorkEffectsInTransaction,
   recoverInterruptedEffectsOnStartup,
   rescheduleEffectForRetry,
+  retireObsoleteRoomWorkEffects,
   ROOM_WORK_EFFECT_MAX_ATTEMPTS,
   ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
   ROOM_WORK_PUBLISH_EFFECT_KIND,
@@ -53,6 +54,8 @@ type Options = {
   assertWriteFence?(): void;
   /** Shared process-wide effect executor; standalone tests create an internal executor if omitted. */
   effectExecutor?: EffectExecutor;
+  /** Whether `RoomWorkPublisher.attach` arms the initial 0ms flush timer immediately (default `true`). */
+  startImmediately?: boolean;
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
   reportGroupedNoReply?: typeof reportGroupedNoReply;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict" | `remote_unanswered: ${string}`): void;
@@ -163,8 +166,14 @@ export class RoomWorkPublisher {
 
   static attach(database: DatabaseSync, options: Options): RoomWorkPublisher {
     const publisher = new RoomWorkPublisher(database, options);
-    publisher.schedule(0);
+    if (options.startImmediately !== false) publisher.start();
     return publisher;
+  }
+
+  /** Arms the initial background flush timer (called after `EffectExecutor.recoverOnStartup()`). */
+  start(): void {
+    if (this.unavailable()) return;
+    this.schedule(0);
   }
 
   constructor(private readonly database: DatabaseSync, private readonly options: Options) {
@@ -784,6 +793,165 @@ export class RoomWorkPublisher {
     }
   }
 
+  /**
+   * Recovers orphaned/inactive `executing` room-work rows for `agentId` back
+   * to `prepared` (for example before purge preparation), while leaving any
+   * genuinely active in-flight execution untouched in `executing` so purge
+   * cannot commit out from under live HTTP work.
+   */
+  recoverInactiveExecutingForAgent(agentId: string): number {
+    if (this.unavailable()) return 0;
+    const now = this.now();
+    let recovered = 0;
+    for (const kind of [ROOM_WORK_PUBLISH_EFFECT_KIND, ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND] as const) {
+      for (const effect of listActiveRoomWorkEffectsForAgent(this.database, agentId, kind)) {
+        if (effect.state !== "executing") continue;
+        const next = this.recoverInactiveExecutingEffect(effect, now);
+        if (next.state !== "executing") recovered += 1;
+      }
+    }
+    return recovered;
+  }
+
+  private durableAgentRoomId(agentId: string): string | null {
+    try {
+      const row = this.database.prepare("SELECT room_id FROM agents WHERE agent_id=?").get(agentId) as Row | undefined;
+      return row && typeof row.room_id === "string" ? row.room_id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private isGroupedReceiptStillPending(agentId: string, payload: RoomWorkGroupedNoReplyEffectPayload): boolean {
+    return Boolean(this.database.prepare(`
+      SELECT 1 FROM inbox_items i
+      WHERE i.inbox_item_id = ? AND i.agent_id = ? AND i.room_id = ?
+        AND i.source_message_id = ? AND i.state = 'acknowledged_no_reply'
+        AND ${PENDING_PEER_REPORT_SQL}
+    `).get(payload.inbox_item_id, agentId, payload.room_id, payload.source_message_id));
+  }
+
+  /**
+   * Recovers inactive `executing` room-work rows for `agentId` and retires
+   * durably obsolete `prepared` rows across both room-work kinds. Temporary
+   * missing authority (e.g. stopped agent, expired grant, or handoff while the
+   * agent still belongs to the same room) preserves `prepared` rows and their
+   * retry deadlines so valid stop/start or handoff retries survive.
+   */
+  private reconcileActiveEffectsForAgent(agentId: string, now: number): EffectRecord[] {
+    const recoveredPublish = listActiveRoomWorkEffectsForAgent(
+      this.database,
+      agentId,
+      ROOM_WORK_PUBLISH_EFFECT_KIND,
+    ).map((effect) => (effect.state === "executing"
+      ? this.recoverInactiveExecutingEffect(effect, now)
+      : effect));
+    const recoveredGrouped = listActiveRoomWorkEffectsForAgent(
+      this.database,
+      agentId,
+      ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+    ).map((effect) => (effect.state === "executing"
+      ? this.recoverInactiveExecutingEffect(effect, now)
+      : effect));
+
+    const currentGeneration = this.options.daemonGeneration();
+    const durableRoomId = this.durableAgentRoomId(agentId);
+    const authority = this.authority(agentId);
+    const retirements: Array<{ id: string; error: string }> = [];
+
+    for (const effect of recoveredPublish) {
+      if (effect.state !== "prepared" || effect.epoch > currentGeneration) continue;
+      const payload = parseRoomWorkPublishEffectPayload(effect.payload);
+      if (!payload) {
+        retirements.push({ id: effect.id, error: "invalid_room_work_publish_payload" });
+        continue;
+      }
+      const record = this.store.get(agentId, payload.room_id, payload.source_message_id);
+      if (!record) {
+        retirements.push({ id: effect.id, error: "publication_record_missing" });
+        continue;
+      }
+      if (record.state !== "open") {
+        retirements.push({ id: effect.id, error: "publication_closed" });
+        continue;
+      }
+      if (!record.summary) {
+        retirements.push({ id: effect.id, error: "publication_summary_missing" });
+        continue;
+      }
+      if (record.attemptId !== null && record.attemptId !== payload.attempt_id) {
+        retirements.push({ id: effect.id, error: "publication_attempt_superseded" });
+        continue;
+      }
+      if (durableRoomId !== null && durableRoomId !== payload.room_id) {
+        retirements.push({ id: effect.id, error: "room_moved" });
+        continue;
+      }
+      if (authority !== null && !this.sameOrigin(authority.origin, record)) {
+        retirements.push({ id: effect.id, error: "room_origin_superseded" });
+        continue;
+      }
+      if (payload.review_page_index === null) {
+        if (record.acknowledgedRevision >= payload.revision) {
+          retirements.push({ id: effect.id, error: "publication_already_acknowledged" });
+        }
+      } else {
+        const pendingPage = this.pendingReviewPage(record);
+        if (!pendingPage || pendingPage.index > payload.review_page_index) {
+          retirements.push({ id: effect.id, error: "review_page_already_acknowledged" });
+        }
+      }
+    }
+
+    for (const effect of recoveredGrouped) {
+      if (effect.state !== "prepared" || effect.epoch > currentGeneration) continue;
+      const payload = parseRoomWorkGroupedNoReplyEffectPayload(effect.payload);
+      if (!payload) {
+        retirements.push({ id: effect.id, error: "invalid_room_work_grouped_payload" });
+        continue;
+      }
+      if (!this.isGroupedReceiptStillPending(agentId, payload)) {
+        retirements.push({ id: effect.id, error: "grouped_receipt_already_resolved" });
+        continue;
+      }
+      const pin = this.store.get(agentId, payload.room_id, payload.source_message_id);
+      if (!pin) {
+        retirements.push({ id: effect.id, error: "grouped_receipt_pin_missing" });
+        continue;
+      }
+      if (durableRoomId !== null && durableRoomId !== payload.room_id) {
+        retirements.push({ id: effect.id, error: "room_moved" });
+        continue;
+      }
+      if (authority !== null && !this.sameOrigin(authority.origin, pin)) {
+        retirements.push({ id: effect.id, error: "room_origin_superseded" });
+      }
+    }
+
+    let retiredIds = new Set<string>();
+    if (retirements.length > 0) {
+      try {
+        retiredIds = new Set(retireObsoleteRoomWorkEffects(this.database, this.writeFence, {
+          agentId,
+          expectedEpoch: currentGeneration,
+          retirements,
+          nowIso: this.nowIso(),
+        }));
+      } catch (error) {
+        if (error instanceof DaemonFenceLostError) throw error;
+        if (error instanceof EffectFenceError) {
+          if (!this.unavailable()) throw error;
+        } else if (!this.unavailable()) {
+          this.report("storage_unavailable");
+        }
+      }
+    }
+
+    return recoveredPublish.filter((effect) =>
+      !retiredIds.has(effect.id) && (effect.state === "prepared" || effect.state === "executing"),
+    );
+  }
+
   private pendingGroupedReports(agentId: string) {
     const authority = this.authority(agentId);
     if (!authority) return [];
@@ -853,9 +1021,17 @@ export class RoomWorkPublisher {
       }
       // Give changed agents the next pass, alternating with the recovery sweep
       // so continuous live output cannot starve missed hints or retry work.
-      // Still only one agent (at most 10k pins/facts) per pass.
-      const nextAgent = () => this.database.prepare(`SELECT agent_id FROM room_work_publications
-        WHERE state='open' AND agent_id>? ORDER BY agent_id LIMIT 1`).get(this.scanAfter);
+      // Still only one agent (at most 10k pins/facts) per pass. Include agents
+      // with active room-work journal rows so obsolescence cleanup reaches
+      // closed or externally acknowledged sources too.
+      const nextAgent = () => this.database.prepare(`SELECT agent_id FROM (
+          SELECT agent_id FROM room_work_publications WHERE state='open'
+          UNION
+          SELECT agent_id FROM effects
+          WHERE kind IN (?, ?) AND state IN ('prepared', 'executing')
+        )
+        WHERE agent_id>? ORDER BY agent_id LIMIT 1`)
+        .get(ROOM_WORK_PUBLISH_EFFECT_KIND, ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND, this.scanAfter);
       const changedAgent = this.settledAgents.values().next().value ?? this.changedAgents.values().next().value;
       let agentId: string;
       if (changedAgent && !this.sweepNext) {
@@ -879,18 +1055,11 @@ export class RoomWorkPublisher {
       catch { this.report("storage_unavailable"); }
       if (this.unavailable()) return;
       const now = this.now();
+      const activePublish = this.reconcileActiveEffectsForAgent(agentId, now);
+      if (this.unavailable()) return;
       const grouped = this.pendingGroupedReports(agentId);
-      const activePublish = listActiveRoomWorkEffectsForAgent(
-        this.database,
-        agentId,
-        ROOM_WORK_PUBLISH_EFFECT_KIND,
-      );
       const activeBySource = new Map<string, EffectRecord[]>();
-      for (const rawEffect of activePublish) {
-        const effect = rawEffect.state === "executing"
-          ? this.recoverInactiveExecutingEffect(rawEffect, now)
-          : rawEffect;
-        if (effect.state !== "prepared" && effect.state !== "executing") continue;
+      for (const effect of activePublish) {
         const parsed = parseRoomWorkPublishEffectPayload(effect.payload);
         if (!parsed) continue;
         const sourceKey = `${parsed.room_id}\0${parsed.source_message_id}`;

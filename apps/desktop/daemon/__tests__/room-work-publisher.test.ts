@@ -29,7 +29,7 @@ import { captureRecordedRemoteTips } from "../../../../shared/workspace-turn-cap
 import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
+import { PENDING_PEER_REPORT_SQL, resolvePeerReceipt } from "../queued-peer-deliveries.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 /**
@@ -1761,6 +1761,19 @@ test("EffectExecutor handoff fenceAndDrain aborts in-flight room-work uploads wi
 
 test("terminal room-work effects stay bounded per agent while preserving active effects and immutable provenance", async t => {
   const f = await fixture(t);
+  f.captureMessage(1);
+  f.fact(1, { state: "terminal", turnOutcome: "completed" });
+  f.captureMessage(2);
+  f.receipts.stage(f.row(2), f.summary(2));
+  const staged2 = f.row(2);
+  const keepKey = roomWorkPublishIdempotencyKey({
+    roomId: staged2.roomId,
+    sourceMessageId: staged2.sourceMessageId,
+    revision: staged2.revision,
+    digest: staged2.digest!,
+  });
+  const now = Date.parse("2026-10-02T00:00:00Z");
+  f.options.now = () => now;
   const seedCount = ROOM_WORK_RETAINED_TERMINAL_EFFECTS_PER_AGENT + 20;
   f.db.exec("BEGIN IMMEDIATE");
   const insert = f.db.prepare(`
@@ -1773,16 +1786,29 @@ test("terminal room-work effects stay bounded per agent while preserving active 
     const ts = new Date(Date.parse("2026-08-01T00:00:00Z") + i * 1000).toISOString();
     insert.run(`eff-old-${i}`, ROOM_WORK_PUBLISH_EFFECT_KIND, `rw:v1:seed-${i}`, ts, ts);
   }
-  // Also seed one active prepared row that must NEVER be pruned.
+  // Also seed one genuinely active pending prepared row (waiting on backoff) that must NEVER be pruned.
   f.db.prepare(`
     INSERT INTO effects (
       id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
       retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
-    ) VALUES ('eff-active-keep', 'agent', ?, 'rw:v1:keep-active', 1, 'prepared', '{"keep":true}', NULL, 1, 0, 1000000, NULL, NULL, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')
-  `).run(ROOM_WORK_PUBLISH_EFFECT_KIND);
+    ) VALUES ('eff-active-keep', 'agent', ?, ?, 1, 'prepared', ?, NULL, 1, 1, 1000000, ?, 'publication_unavailable', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')
+  `).run(
+    ROOM_WORK_PUBLISH_EFFECT_KIND,
+    keepKey,
+    JSON.stringify({
+      attempt_id: staged2.attemptId,
+      digest: staged2.digest,
+      review_page_digest: null,
+      review_page_index: null,
+      review_page_total: null,
+      revision: staged2.revision,
+      room_id: staged2.roomId,
+      source_message_id: staged2.sourceMessageId,
+    }),
+    now + 30_000,
+  );
   f.db.exec("COMMIT");
 
-  f.captureMessage(1);
   await f.publisher.flush();
   assert.equal(f.row(1).acknowledgedRevision, 1);
 
@@ -2197,6 +2223,214 @@ test("supersedeRoomWorkPublishEffects reuses an already-prepared replacement wit
   assert.equal(result.created, false);
   assert.equal(result.effect.id, "eff-existing-rev2");
   assert.equal(result.effect.state, "prepared");
+  assert.equal(result.effect.next_attempt_at_ms, null, "reused prepared replacement stays unchanged without violating immutability");
   assert.equal(getEffect(f.db, "eff-stale-rev1")?.state, "failed");
   assert.equal(getEffect(f.db, "eff-stale-rev1")?.last_error, "superseded_by_newer_revision");
+});
+
+test("downgrade/reupgrade and closed publications retire stranded prepared room-work rows with zero duplicate upload", async t => {
+  const f = await fixture(t);
+  let now = Date.parse("2026-10-02T00:00:00Z");
+  f.options.now = () => now;
+  f.options.publish = async input => { f.sent.push(input); throw new Error("503 unavailable"); };
+  f.captureMessage(1);
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1);
+  const [rev1Effect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["prepared"] });
+  assert.ok(rev1Effect);
+
+  // Simulate rollback to .16: legacy build uploads and acknowledges rev 1 directly,
+  // leaving the newer build's prepared effect row stranded in `effects`.
+  f.receipts.acknowledge(f.row(1));
+  assert.equal(f.row(1).acknowledgedRevision, 1);
+
+  // Reupgrade to .17: next flush must send ZERO duplicate HTTP and retire the stranded row.
+  f.restart();
+  f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
+  now += 40_000;
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1, "reupgrade after legacy acknowledgement must not duplicate the upload");
+  const retired = getEffect(f.db, rev1Effect.id)!;
+  assert.equal(retired.state, "failed");
+  assert.equal(retired.last_error, "publication_already_acknowledged");
+  assert.deepEqual(
+    listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["prepared", "executing"] }),
+    [],
+    "no stranded active room-work journal row remains after downgrade/reupgrade",
+  );
+
+  // Also cover an agent with ZERO remaining open publications (e.g. externally stopped/conflict):
+  // the sweep must still discover the agent via `effects` and retire its stranded row.
+  f.fact(1, { state: "terminal", turnOutcome: "completed" });
+  f.options.publish = async input => { f.sent.push(input); throw new Error("503 unavailable"); };
+  f.captureMessage(2);
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 2);
+  const [rev2Effect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["prepared"] });
+  assert.ok(rev2Effect);
+  f.receipts.stop(f.row(1), "conflict");
+  f.receipts.stop(f.row(2), "conflict");
+  assert.equal(
+    Number((f.db.prepare("SELECT COUNT(*) AS n FROM room_work_publications WHERE agent_id='agent' AND state='open'").get() as { n: number }).n),
+    0,
+  );
+  f.restart();
+  await f.publisher.flush();
+  assert.equal(getEffect(f.db, rev2Effect.id)?.state, "failed");
+  assert.equal(getEffect(f.db, rev2Effect.id)?.last_error, "publication_closed");
+  assert.deepEqual(
+    listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["prepared", "executing"] }),
+    [],
+  );
+});
+
+test("externally resolved grouped receipt retires stranded prepared room_work_grouped_no_reply row", async t => {
+  const f = await fixture(t);
+  let now = Date.parse("2026-10-02T00:00:00Z");
+  f.options.now = () => now;
+  const child = await settledPeerGroup(f);
+  let calls = 0;
+  f.options.reportGroupedNoReply = async () => { calls += 1; throw new Error("503 unavailable"); };
+  await f.publisher.flush();
+  assert.equal(calls, 1);
+  const [groupedEffect] = listEffectsForAgent(f.db, "agent", {
+    kind: ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+    states: ["prepared"],
+  });
+  assert.ok(groupedEffect);
+
+  // Another path resolves the grouped receipt directly, leaving the prepared effect obsolete.
+  resolvePeerReceipt(f.db, child.inbox_item_id, "no_reply", "2026-10-02T00:00:05.000Z");
+  f.options.reportGroupedNoReply = async () => { calls += 1; return "no_reply"; };
+  now += 5_000;
+  await f.publisher.flush();
+  assert.equal(calls, 1, "resolved grouped receipt must not be reported again");
+  assert.equal(getEffect(f.db, groupedEffect.id)?.state, "failed");
+  assert.equal(getEffect(f.db, groupedEffect.id)?.last_error, "grouped_receipt_already_resolved");
+  assert.deepEqual(
+    listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND, states: ["prepared", "executing"] }),
+    [],
+  );
+});
+
+test("temporary missing authority preserves retries while room move retires old-room prepared effects", async t => {
+  const f = await fixture(t);
+  let now = Date.parse("2026-10-02T00:00:00Z");
+  const deadline = now + 30_000;
+  f.options.now = () => now;
+  f.captureMessage(1);
+  await settledPeerGroup(f);
+  let groupedCalls = 0;
+  f.options.publish = async input => { f.sent.push(input); throw new Error("503 unavailable"); };
+  f.options.reportGroupedNoReply = async () => { groupedCalls += 1; throw new Error("503 unavailable"); };
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1);
+  assert.equal(groupedCalls, 1);
+  const [pubEffect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["prepared"] });
+  const [grpEffect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND, states: ["prepared"] });
+  assert.ok(pubEffect && grpEffect);
+  assert.equal(pubEffect.next_attempt_at_ms, deadline);
+  assert.equal(grpEffect.next_attempt_at_ms, deadline);
+
+  // Temporary missing authority (stopped agent / restart / handoff) must preserve prepared rows and deadlines.
+  f.custody.deleteHostGrant("agent");
+  f.custody.deleteWorkerAuthorization("agent");
+  now += 5_000;
+  await f.publisher.flush();
+  assert.equal(getEffect(f.db, pubEffect.id)?.state, "prepared");
+  assert.equal(getEffect(f.db, pubEffect.id)?.next_attempt_at_ms, deadline);
+  assert.equal(getEffect(f.db, grpEffect.id)?.state, "prepared");
+  assert.equal(getEffect(f.db, grpEffect.id)?.next_attempt_at_ms, deadline);
+
+  // Restoring authority for the same room lets both retries succeed on schedule.
+  f.custody.installHostGrant(f.grant);
+  f.custody.installWorkerAuthorization(f.worker);
+  f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
+  f.options.reportGroupedNoReply = async () => { groupedCalls += 1; return "no_reply"; };
+  now = deadline;
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 2);
+  assert.equal(groupedCalls, 2);
+  assert.equal(getEffect(f.db, pubEffect.id)?.state, "completed");
+  assert.equal(getEffect(f.db, grpEffect.id)?.state, "completed");
+
+  // Durable room move (live matching grant + worker authority in room-2) retires old-room prepared rows.
+  f.fact(1, { state: "terminal", turnOutcome: "completed" });
+  f.options.publish = async input => { f.sent.push(input); throw new Error("503 unavailable"); };
+  f.options.reportGroupedNoReply = async () => { groupedCalls += 1; throw new Error("503 unavailable"); };
+  f.captureMessage(2);
+  await settledPeerGroup(f, "room", 20);
+  await f.publisher.flush();
+  const [pubMoved] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["prepared"] });
+  const [grpMoved] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND, states: ["prepared"] });
+  assert.ok(pubMoved && grpMoved);
+
+  f.custody.installHostGrant({ ...f.grant, roomId: "room-2" });
+  f.custody.installWorkerAuthorization({
+    ...f.worker,
+    roomId: "room-2",
+    agentSession: { ...f.worker.agentSession!, room_id: "room-2" },
+  });
+  await f.publisher.flush();
+  assert.equal(getEffect(f.db, pubMoved.id)?.state, "failed");
+  assert.equal(getEffect(f.db, pubMoved.id)?.last_error, "room_origin_superseded");
+  assert.equal(getEffect(f.db, grpMoved.id)?.state, "failed");
+  assert.equal(getEffect(f.db, grpMoved.id)?.last_error, "room_origin_superseded");
+});
+
+test("recoverInactiveExecutingForAgent protects genuinely active uploads while recovering orphaned executing rows", async t => {
+  const f = await fixture(t);
+  let closing = false;
+  const nowMs = Date.parse("2026-10-02T00:00:00Z");
+  const executor = new EffectExecutor({
+    getDatabase: () => f.db,
+    currentDaemonGeneration: () => 1,
+    assertCurrent: async () => {},
+    assertWriteFence: () => {},
+    isClosing: () => closing,
+    nowMs: () => nowMs,
+  });
+  let started!: () => void;
+  let release!: (result: RoomWorkPublishResult) => void;
+  const inFlight = new Promise<void>(resolve => { started = resolve; });
+  const publisher = new RoomWorkPublisher(f.db, {
+    ...f.options,
+    isClosing: () => closing,
+    now: () => nowMs,
+    effectExecutor: executor,
+    publish: async (input) => {
+      f.sent.push(input);
+      started();
+      return new Promise<RoomWorkPublishResult>(resolve => { release = resolve; });
+    },
+  });
+  t.after(() => { closing = true; publisher.close(); executor.fence(); });
+
+  f.captureMessage(1);
+  const flushing = publisher.flush();
+  await inFlight;
+  const [liveEffect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["executing"] });
+  assert.ok(liveEffect);
+
+  // Also seed an orphaned inactive `executing` grouped row (no in-flight promise in executor).
+  f.db.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES ('eff-orphan-grouped', 'agent', ?, 'rwg:v1:orphan', 1, 'executing', ?, NULL, 1, 1, 1000000, NULL, NULL, ?, ?)
+  `).run(
+    ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+    JSON.stringify({ inbox_item_id: "inbox-orphan", room_id: "room", source_message_id: "msg_99" }),
+    "2026-10-02T00:00:00.000Z",
+    "2026-10-02T00:00:00.000Z",
+  );
+
+  const recovered = publisher.recoverInactiveExecutingForAgent("agent");
+  assert.equal(recovered, 1, "only the orphaned executing row is recovered");
+  assert.equal(getEffect(f.db, liveEffect.id)?.state, "executing", "genuinely active in-flight execution stays protected");
+  assert.equal(getEffect(f.db, "eff-orphan-grouped")?.state, "prepared", "orphaned executing row recovers to prepared");
+
+  release("acknowledged");
+  await flushing;
+  assert.equal(getEffect(f.db, liveEffect.id)?.state, "completed");
 });

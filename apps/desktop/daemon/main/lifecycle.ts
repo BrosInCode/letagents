@@ -76,6 +76,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
         isClosing: () => this.handoffScheduled, assertCurrent: () => this.singleton.assertCurrent(),
         assertWriteFence: writeFence,
         effectExecutor: this.effectExecutor,
+        startImmediately: false,
       });
       this.executionCapture = ExecutionCaptureCoordinator.attach(database, this.providerPort, {
         currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
@@ -95,6 +96,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
       this.executionDelegations.start();
     }
     const effectRecovery = await this.effectExecutor?.recoverOnStartup();
+    this.roomWorkPublisher?.start();
     if (effectRecovery && effectRecovery.uncertainAgentIds.length > 0) {
       await this.supervisedInbox.pruneAgentsAfterEffectRecovery(effectRecovery.uncertainAgentIds);
     }

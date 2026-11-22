@@ -187,11 +187,13 @@ export function pruneTerminalRoomWorkEffectsInTransaction(
 
 /**
  * Atomically retires superseded `prepared` room-work publish effects for a
- * source and admits (or reuses) the replacement effect carrying the maximum
+ * source and admits a newly created replacement effect carrying the maximum
  * inherited retry deadline (`next_attempt_at_ms`) inside one fenced write
- * transaction. If replacement admission fails for any reason, SQLite rolls back
- * the entire transaction so the superseded `prepared` row(s) and their retry
- * deadline remain intact.
+ * transaction. If a replacement row for that exact idempotency key already
+ * exists, it is returned unchanged so immutable `prepared` rows are never
+ * updated in place. If replacement admission fails for any reason, SQLite rolls
+ * back the entire transaction so the superseded `prepared` row(s) and their
+ * retry deadline remain intact.
  */
 export function supersedeRoomWorkPublishEffects(
   database: DatabaseSync,
@@ -248,5 +250,130 @@ export function supersedeRoomWorkPublishEffects(
       },
       nowIso,
     );
+  });
+}
+
+/**
+ * Retires `prepared` room-work effects (`room_work_publish` and
+ * `room_work_grouped_no_reply`) for `agentId` inside an active fenced SQLite
+ * transaction. Never touches `executing` rows (so genuinely active in-flight
+ * uploads remain protected) and fails closed on rows owned by a newer epoch.
+ */
+export function retireRoomWorkEffectsInTransaction(
+  database: DatabaseSync,
+  input: {
+    agentId: string;
+    expectedEpoch: number;
+    error: string;
+    roomId?: string;
+    nowIso?: string;
+  },
+): number {
+  if (!database.isTransaction) {
+    throw new EffectFenceError("retireRoomWorkEffectsInTransaction requires an active fenced SQLite transaction.");
+  }
+  const epoch = assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
+  const nowIso = input.nowIso ?? new Date().toISOString();
+  const rows = (input.roomId !== undefined
+    ? database.prepare(`
+        SELECT id FROM ${EFFECT_JOURNAL_TABLE}
+        WHERE agent_id = ?
+          AND kind IN (?, ?)
+          AND state = 'prepared'
+          AND json_extract(payload, '$.room_id') = ?
+        ORDER BY created_at ASC, id ASC
+      `).all(input.agentId, ROOM_WORK_PUBLISH_EFFECT_KIND, ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND, input.roomId)
+    : database.prepare(`
+        SELECT id FROM ${EFFECT_JOURNAL_TABLE}
+        WHERE agent_id = ?
+          AND kind IN (?, ?)
+          AND state = 'prepared'
+        ORDER BY created_at ASC, id ASC
+      `).all(input.agentId, ROOM_WORK_PUBLISH_EFFECT_KIND, ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND)) as Array<{ id: string }>;
+  for (const row of rows) {
+    failEffectInTransaction(database, {
+      id: String(row.id),
+      expectedEpoch: epoch,
+      error: input.error,
+      nowIso,
+    });
+  }
+  if (rows.length > 0) {
+    pruneTerminalRoomWorkEffectsInTransaction(database, input.agentId);
+  }
+  return rows.length;
+}
+
+/**
+ * Retires `prepared` room-work effects for a fully stopped agent inside the
+ * purge preparation/commit transaction before `assertPurgePreconditions` runs.
+ * Genuinely active `executing` rows and all non-room-work effects remain
+ * untouched and continue to block purge; if any purge precondition fails,
+ * SQLite rolls back these retirements atomically.
+ */
+export function retireRoomWorkEffectsForPurgeInTransaction(
+  database: DatabaseSync,
+  input: {
+    agentId: string;
+    expectedEpoch: number;
+    nowIso?: string;
+  },
+): number {
+  if (!database.isTransaction) {
+    throw new EffectFenceError("retireRoomWorkEffectsForPurgeInTransaction requires an active fenced SQLite transaction.");
+  }
+  const lifecycle = database.prepare("SELECT desired_state, observed_state FROM agents WHERE agent_id = ?")
+    .get(input.agentId) as { desired_state?: string; observed_state?: string } | undefined;
+  if (!lifecycle
+    || lifecycle.desired_state !== "stopped"
+    || !["absent", "stopped", "failed"].includes(String(lifecycle.observed_state))) {
+    return 0;
+  }
+  return retireRoomWorkEffectsInTransaction(database, {
+    agentId: input.agentId,
+    expectedEpoch: input.expectedEpoch,
+    error: "agent_purged",
+    nowIso: input.nowIso,
+  });
+}
+
+/**
+ * Atomically retires specific durably obsolete `prepared` room-work effects for
+ * `agentId` under the daemon write fence and bounds retained terminal rows.
+ * Rows that already transitioned out of `prepared` are skipped safely, while
+ * future-epoch rows fail closed.
+ */
+export function retireObsoleteRoomWorkEffects(
+  database: DatabaseSync,
+  assertWriteFence: () => void,
+  input: {
+    agentId: string;
+    expectedEpoch: number;
+    retirements: ReadonlyArray<{ id: string; error: string }>;
+    nowIso?: string;
+  },
+): string[] {
+  if (input.retirements.length === 0) return [];
+  const epoch = assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
+  const nowIso = input.nowIso ?? new Date().toISOString();
+  return withFencedEffectTransaction(database, assertWriteFence, () => {
+    const retiredIds: string[] = [];
+    for (const item of input.retirements) {
+      const current = getEffect(database, item.id);
+      if (!current || current.agent_id !== input.agentId) continue;
+      if (current.kind !== ROOM_WORK_PUBLISH_EFFECT_KIND && current.kind !== ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND) continue;
+      if (current.state !== "prepared") continue;
+      failEffectInTransaction(database, {
+        id: current.id,
+        expectedEpoch: epoch,
+        error: item.error,
+        nowIso,
+      });
+      retiredIds.push(current.id);
+    }
+    if (retiredIds.length > 0) {
+      pruneTerminalRoomWorkEffectsInTransaction(database, input.agentId);
+    }
+    return retiredIds;
   });
 }
