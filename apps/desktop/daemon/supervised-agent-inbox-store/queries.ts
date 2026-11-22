@@ -1,6 +1,7 @@
 import { normalizeRoomGif, type RoomGif } from "../../../../shared/room-expressions.mjs";
 import { validRecordedReplyAttachments, type RecordedReplyAttachment } from "../../../../shared/message-attachments.mjs";
 import { DatabaseSync } from "node:sqlite";
+import { deleteEffectsForAgentInTransaction } from "../effect-journal/store.js";
 import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import type { PreparedRoomContext, MessageIntervention } from "../../shared/message-outcome.js";
 import { inspectorPreparedRoomContext } from "../prepared-room-context.js";
@@ -359,6 +360,7 @@ export abstract class InboxQueryStore extends InboxTaskContinuationStore {
   async removeAgent(agentId: string): Promise<void> {
     await this.exclusive(async (database) => this.transaction(database, () => {
       run(database.prepare("DELETE FROM effects WHERE agent_id=?"), agentId);
+      deleteEffectsForAgentInTransaction(database, agentId);
       run(database.prepare("DELETE FROM effect_tombstones WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM provider_continuation_repairs WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_observed_messages WHERE agent_id=?"), agentId);
