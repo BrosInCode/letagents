@@ -380,7 +380,7 @@ test("attachment notes quote the file name as data and leave out unknown facts",
 });
 
 test("included images are numbered from 1 and skip files that are not images", () => {
-  const image = (data: number) => ({ mimeType: "image/jpeg" as const, data: new Uint8Array([data]) });
+  const image = (data: number) => ({ mimeType: "image/jpeg" as const, base64: Buffer.from([data]).toString("base64") });
   const attachments = [
     attachment({ index: 1, fileName: "a.txt", mimeType: "text/plain", status: "not_image" }),
     attachment({ index: 2, fileName: "b.jpg", mimeType: "image/jpeg", status: "image", image: image(2) }),
@@ -394,8 +394,8 @@ test("included images are numbered from 1 and skip files that are not images", (
     '- Attachment 4: "d.jpg" (image/jpeg, 100 bytes). Included after this text as image 2.',
   ]);
   assert.deepEqual(includedRoomTurnImages(attachments), [
-    { number: 1, fileName: "b.jpg", mimeType: "image/jpeg", data: new Uint8Array([2]) },
-    { number: 2, fileName: "d.jpg", mimeType: "image/jpeg", data: new Uint8Array([4]) },
+    { number: 1, fileName: "b.jpg", mimeType: "image/jpeg", base64: Buffer.from([2]).toString("base64") },
+    { number: 2, fileName: "d.jpg", mimeType: "image/jpeg", base64: Buffer.from([4]).toString("base64") },
   ]);
   assert.deepEqual(includedRoomTurnImages(undefined), []);
   assert.deepEqual(includedRoomTurnImages([]), []);

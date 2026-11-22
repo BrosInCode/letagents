@@ -212,22 +212,26 @@ test("the durable mark is answered on the same stack, before the adapter's next 
   assert.equal((thrown as Error).message, refused.message);
 });
 
-test("a detach before the durable mark aborts the adapter's preparation; after it the native turn is not cancelled", async () => {
-  // Before the mark: the detach aborts the adapter's own signal, and a step that waits is refused.
+test("a detach before the durable mark aborts the adapter's preparation; the daemon still decides the dispatch step", async () => {
+  // Before the mark: the detach aborts the adapter's own signal. The dispatch step still reaches the daemon, and the
+  // daemon's function refuses it, as its callback did before; the adapter then dispatches nothing.
   const controller = new AbortController();
+  const lost = new Error("authority lost");
   let abortedBeforeMark = false;
   let dispatchRefused: unknown;
+  let dispatched = false;
   const { router, handle } = await routed(fakeAdapter(async (_handle, _request, options) => {
     options!.detachSignal!.addEventListener("abort", () => { abortedBeforeMark = true; }, { once: true });
-    try { await options!.beforeNativeDispatch!(); } catch (error) { dispatchRefused = error; }
+    try { await options!.beforeNativeDispatch!(); dispatched = true; } catch (error) { dispatchRefused = error; }
     return REPLY;
   }));
   await router.runRoomTurn(handle, REQUEST, {
-    beforeNativeDispatch: () => { controller.abort(); return new Promise<void>(() => undefined); },
+    beforeNativeDispatch: async () => { controller.abort(); throw lost; },
     detachSignal: controller.signal,
   });
   assert.equal(abortedBeforeMark, true);
-  assert.ok(dispatchRefused instanceof Error && /detached/.test(dispatchRefused.message), "the waiting step is refused, so nothing is dispatched");
+  assert.equal(dispatched, false);
+  assert.equal((dispatchRefused as Error).message, lost.message);
 
   // After the mark: an adapter that unlinks its preparation detach at the mark keeps its native turn.
   const later = new AbortController();
@@ -247,6 +251,75 @@ test("a detach before the durable mark aborts the adapter's preparation; after i
   released();
   assert.deepEqual(await turn, REPLY);
   assert.equal(cancelled, false);
+});
+
+test("an admitted turn whose native start answers after a detach still records its exact turn id", async () => {
+  // Codex and Open Model start the native turn first and checkpoint its id when the provider answers. A handoff can
+  // detach in that time; the daemon's own function decides (it lets an admitted turn finish during retirement).
+  const detach = new AbortController();
+  let ack!: () => void;
+  const nativeAck = new Promise<void>((resolve) => { ack = resolve; });
+  const recorded: string[] = [];
+  const { router, handle } = await routed(fakeAdapter(async (_handle, _request, options) => {
+    await options!.beforeNativeDispatch!();
+    await nativeAck;
+    await options!.checkpointTurnStarted!("late-turn");
+    options!.markDurableTurnStarted!();
+    await options!.checkpointProviderState!({ providerContinuationId: "thread-2", providerConnection: CONNECTION });
+    await options!.checkpointTerminalResult!(REPLY);
+    return REPLY;
+  }));
+  const turn = router.runRoomTurn(handle, REQUEST, {
+    beforeNativeDispatch: async () => { recorded.push("dispatch"); },
+    checkpointTurnStarted: async (turnId) => { recorded.push(`started:${turnId}`); },
+    markDurableTurnStarted: () => { recorded.push("durable"); },
+    checkpointProviderState: async (state) => { recorded.push(`state:${state.providerContinuationId}`); },
+    checkpointTerminalResult: async () => { recorded.push("terminal"); },
+    detachSignal: detach.signal,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  detach.abort();
+  ack();
+  assert.deepEqual(await turn, REPLY);
+  assert.deepEqual(recorded, ["dispatch", "started:late-turn", "durable", "state:thread-2", "terminal"]);
+});
+
+test("a detach while the daemon's checkpoint runs does not end the turn before the checkpoint", async () => {
+  const detach = new AbortController();
+  let finishCheckpoint!: () => void;
+  const paused = new Promise<void>((resolve) => { finishCheckpoint = resolve; });
+  let checkpointStarted!: () => void;
+  const started = new Promise<void>((resolve) => { checkpointStarted = resolve; });
+  let checkpointFinished = false;
+  let turnEnded = false;
+  const { router, handle } = await routed(fakeAdapter(async (_handle, _request, options) => {
+    await options!.checkpointTurnStarted!("turn-1");
+    return REPLY;
+  }));
+  const turn = router.runRoomTurn(handle, REQUEST, {
+    checkpointTurnStarted: async () => { checkpointStarted(); await paused; checkpointFinished = true; },
+    detachSignal: detach.signal,
+  }).finally(() => { turnEnded = true; });
+  await started;
+  detach.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(turnEnded, false, "the turn is joined to its checkpoint");
+  finishCheckpoint();
+  assert.deepEqual(await turn, REPLY);
+  assert.equal(checkpointFinished, true);
+});
+
+test("operations of step 4d-3a keep their rule: a detach refuses the step that waits", async () => {
+  const boundary = new ProviderRuntimeBoundary("cursor", {
+    ...fakeAdapter(async () => REPLY),
+    controlExactTurn: async (_handle: ProviderHandle, options: { checkpointTargetTurn: (turnId: string) => Promise<void> }) => {
+      await options.checkpointTargetTurn("turn-1");
+      return { outcome: "interrupted" };
+    },
+  } as unknown as SupervisedProviderAdapter);
+  boundary.connectEventSink((event) => { if (event.kind === "step") queueMicrotask(() => boundary.detachOperation(event.operationId)); });
+  const runtime = await boundary.spawn({ ...SPAWN });
+  await assert.rejects(boundary.controlExactTurn(runtime.ref, { operationId: "op-1" }), /detached/);
 });
 
 test("a daemon error that refuses a step is the same object when the adapter passes it on", async () => {

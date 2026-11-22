@@ -477,6 +477,12 @@ type OpenOperation = {
   /** The step that waits now. */
   open: { seq: number; sync: boolean; answer?: ProviderStepAnswer; closed?: true; settle?: (answer: ProviderStepAnswer) => void } | null;
   detach: AbortController;
+  /**
+   * A detach refuses the steps of this operation: a step that waits, and each later step. A room turn sets this to
+   * false: its detach ends only the adapter's own signal, and its steps still reach the daemon, which decides each one
+   * (an admitted turn must still record its recovery key while a handoff drains the daemon).
+   */
+  detachRefusesSteps: boolean;
   /** The errors that this boundary threw into the adapter for a refused step, by step. */
   refusals: WeakMap<object, number>;
 };
@@ -852,6 +858,10 @@ export class ProviderRuntimeBoundary {
   /**
    * Run one room turn. The adapter gets a function only for each step that `options.steps` names; for another step
    * it sees none, as when the daemon left a callback out before. An adapter decides on that presence.
+   *
+   * A detach ends the adapter's own signal and nothing else: the steps still reach the daemon, as the callbacks did
+   * before. The daemon decides each step. An admitted turn whose native start answers after a detach must still
+   * record its exact turn id, and a checkpoint that runs when the detach comes is joined, not cut off.
    */
   async runRoomTurn(ref: ProviderRuntimeRef, request: ProviderRoomTurnRequest, options: ProviderRoomTurnBoundaryOptions): Promise<ProviderRoomTurnResult> {
     const handle = this.held(ref);
@@ -873,7 +883,7 @@ export class ProviderRuntimeBoundary {
         } : {}),
         ...(steps.has("mark_durable_turn_started") ? { markDurableTurnStarted: () => { this.check(operation, "mark_durable_turn_started", null); } } : {}),
         detachSignal: record.detach.signal,
-      })));
+      })), false);
   }
 
   /** Recover one persisted native turn. The steps work as for `runRoomTurn`. */
@@ -884,7 +894,7 @@ export class ProviderRuntimeBoundary {
     const run = this.required("recoverRoomTurn");
     const steps = new Set<string>(options.steps);
     return this.operation("recoverRoomTurn", ref, options.operationId, options.detached === true, async (operation, record) => this.roomTurnResult("recoverRoomTurn",
-      await run(handle, request, { ...this.roomTurnSteps(operation, steps), detachSignal: record.detach.signal })));
+      await run(handle, request, { ...this.roomTurnSteps(operation, steps), detachSignal: record.detach.signal })), false);
   }
 
   /** The functions of the steps that a turn and its recovery share. */
@@ -1015,18 +1025,21 @@ export class ProviderRuntimeBoundary {
     if (!record) return;
     record.detach.abort();
     const open = record.open;
-    if (open && !open.sync && open.answer === undefined) {
+    if (record.detachRefusesSteps && open && !open.sync && open.answer === undefined) {
       open.answer = this.refusal("the operation was detached");
       open.settle?.(open.answer);
     }
   }
 
   /** Run one operation that has steps. An error leaves as its data form, built again as an error. */
-  private async operation<T>(name: string, ref: ProviderRuntimeRef, operationId: string, detached: boolean, run: (operationId: string, record: OpenOperation) => Promise<T>): Promise<T> {
+  private async operation<T>(
+    name: string, ref: ProviderRuntimeRef, operationId: string, detached: boolean,
+    run: (operationId: string, record: OpenOperation) => Promise<T>, detachRefusesSteps = true,
+  ): Promise<T> {
     if (this.openOperations.has(operationId)) throw new ProviderBoundaryValueError(name, "the operation id is in use");
     const record: OpenOperation = {
       ref: { provider: ref.provider, workAttemptId: ref.workAttemptId, runtimeId: ref.runtimeId },
-      seq: 0, open: null, detach: new AbortController(), refusals: new WeakMap(),
+      seq: 0, open: null, detach: new AbortController(), detachRefusesSteps, refusals: new WeakMap(),
     };
     if (detached) record.detach.abort();
     this.openOperations.set(operationId, record);
@@ -1049,7 +1062,7 @@ export class ProviderRuntimeBoundary {
   private async step(operationId: string, step: ProviderStepName, body: unknown): Promise<unknown> {
     const { record, open } = this.openStep(operationId, step, body, false);
     const answered = new Promise<ProviderStepAnswer>((resolve) => { open.settle = resolve; });
-    if (record.detach.signal.aborted) open.answer = this.refusal("the operation was detached");
+    if (record.detach.signal.aborted && record.detachRefusesSteps) open.answer = this.refusal("the operation was detached");
     else if (!this.sendStep(operationId, record, step, open, body)) open.answer = this.refusal("the event sink did not take the step");
     const answer = open.answer ?? await answered;
     record.open = null;
@@ -1062,7 +1075,7 @@ export class ProviderRuntimeBoundary {
    */
   private check(operationId: string, step: ProviderStepName, body: unknown): void {
     const { record, open } = this.openStep(operationId, step, body, true);
-    const delivered = !record.detach.signal.aborted && this.sendStep(operationId, record, step, open, body);
+    const delivered = !(record.detach.signal.aborted && record.detachRefusesSteps) && this.sendStep(operationId, record, step, open, body);
     const answer = delivered && open.answer ? open.answer : this.refusal(delivered ? "the check got no answer" : "the event sink did not take the check");
     // A later answer finds no open step.
     record.open = null;
