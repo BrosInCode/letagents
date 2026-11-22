@@ -961,7 +961,9 @@ export class ProviderRuntimeBoundary {
     if (!entry || !handle || entry.runtimeId !== ref.runtimeId || entry.authority.split("\n")[0] !== this.connectionKey(handle)) {
       throw Object.assign(new Error("The permission request of this token is not open on this runtime."), { outcome: "not_dispatched" });
     }
-    return entry.request as ProviderNativePermissionRequest;
+    // Codex matches its request by object identity. The other providers match by value, and they get a copy, as
+    // they did before there were tokens: an adapter must not depend on the identity of what the boundary holds.
+    return (this.provider === "codex" ? entry.request : structuredClone(entry.request)) as ProviderNativePermissionRequest;
   }
 
   /** The identity of the native process and connection of a runtime, as one text. */

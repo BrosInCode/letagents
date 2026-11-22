@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type {
   ProviderActionAttachment,
   ProviderActionAttachTerminal,
@@ -149,6 +150,12 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   private readonly stepHandlers = new Map<string, (event: StepEnvelope) => void>();
   /** The token of each permission request that an event named. The request itself stays with the boundary. */
   private readonly permissionTokens = new WeakMap<object, string>();
+  /**
+   * The requests of the latest snapshot of each runtime, with their tokens. The daemon can hold an older, equal
+   * request of a provider that lists its requests again. That request is answered under the token of the latest
+   * snapshot, and under no token when the lane is not read.
+   */
+  private readonly observedPermissions = new Map<string, Array<{ request: object; token: string }>>();
 
   constructor(
     private readonly adapterLoaders: Readonly<Record<string, ProviderAdapterLoader>> = {},
@@ -347,8 +354,12 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const boundary = await this.boundary(remembered.provider);
     if (signal.aborted) return;
     if (!current() || !["codex", "open-model", "claude-code"].includes(remembered.provider) || !boundary.has("observePermissions")) { notify({ type: "unavailable" }); return; }
+    const runtimeId = remembered.runtime.runtimeId;
+    signal.addEventListener("abort", () => { this.observedPermissions.delete(runtimeId); }, { once: true });
     await this.observeNativePermissions(boundary, remembered.runtime, signal, (event, tokens) => {
       if (signal.aborted) return;
+      // Only a snapshot that the daemon accepts names requests that can be answered.
+      if (event.type !== "request_closed") this.observedPermissions.delete(runtimeId);
       if (!current()) { notify({ type: "unavailable" }); return; }
       if (event.type === "request_closed") {
         if (remembered.provider === "codex" && "method" in event.request)
@@ -376,6 +387,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
           : { provider: "open-model", native: structuredClone(native as OpenCodeNativePermissionRequest) });
       // The daemon keeps the request for its own reading. For the boundary, the token is the name of the request.
       requests.forEach((request, index) => { if (tokens[index]) this.permissionTokens.set(request.native, tokens[index]!); });
+      this.observedPermissions.set(runtimeId, requests.flatMap((request, index) => tokens[index] ? [{ request: request.native, token: tokens[index]! }] : []));
       notify({ type: "snapshot", requests, connectionId });
     });
   }
@@ -422,7 +434,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         if (request.native.method === "mcpServer/elicitation/request") {
           const boundary = await this.boundary(remembered.provider);
           if (!current() || !boundary.has("inspectPermissionMcpToolCall")) return { outcome: "correlation_unproven" };
-          const proposal = await boundary.inspectPermissionMcpToolCall(remembered.runtime, this.named(request.native));
+          const proposal = await boundary.inspectPermissionMcpToolCall(remembered.runtime, this.named(remembered.runtime, request.native));
           if (!current() || !proposal || proposal.threadId !== continuation
             || typeof proposal.turnId !== "string" || !proposal.turnId.trim() || proposal.turnId.length > 512) {
             return { outcome: "correlation_unproven" };
@@ -441,13 +453,13 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         if (kind === "network") {
           const boundary = await this.boundary(remembered.provider);
           if (!current() || !boundary.has("inspectPermissionProfile")) return { outcome: "correlation_unproven" };
-          const profile = await boundary.inspectPermissionProfile(remembered.runtime, this.named(request.native));
+          const profile = await boundary.inspectPermissionProfile(remembered.runtime, this.named(remembered.runtime, request.native));
           if (!current() || !profile) return { outcome: "correlation_unproven" };
         }
         if (kind === "file_change") {
           const boundary = await this.boundary(remembered.provider);
           if (!current() || !boundary.has("inspectPermissionFileChanges")) return { outcome: "correlation_unproven" };
-          const fileChanges = await boundary.inspectPermissionFileChanges(remembered.runtime, this.named(request.native));
+          const fileChanges = await boundary.inspectPermissionFileChanges(remembered.runtime, this.named(remembered.runtime, request.native));
           if (!current() || !fileChanges?.length) return { outcome: "correlation_unproven" };
           return { outcome: "correlated", providerContinuationId: continuation!, providerTurnId: params.turnId, kind, fileChanges };
         }
@@ -473,8 +485,8 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       if (!current() || request.provider !== remembered.provider) throw Object.assign(new Error("Permission provider binding changed."), { outcome: "not_dispatched" });
     };
     assertCurrent();
-    const token = this.permissionTokens.get(request.native);
-    const native = token ? { token } : request.provider === "codex" ? request.native : structuredClone(request.native);
+    const named = this.named(remembered.runtime, request.native);
+    const native = "token" in named ? named : request.provider === "codex" ? request.native : structuredClone(request.native);
     const boundary = await this.boundary(remembered.provider);
     assertCurrent();
     if (!boundary.has("replyPermission") || typeof options?.beforeNativeDispatch !== "function") throw Object.assign(new Error("Permission dispatch is unsupported."), { outcome: "not_dispatched" });
@@ -767,9 +779,17 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     }
   }
 
-  /** The name of a permission request for the boundary: its token when an event gave one, else the request. */
-  private named<T extends object>(request: T): T | ProviderPermissionToken {
-    const token = this.permissionTokens.get(request);
+  /**
+   * The name of a permission request for the boundary. A request of the latest snapshot has that snapshot's token.
+   * For a provider that lists its requests again, an equal request of the latest snapshot gives its token to the
+   * older object that the daemon still holds; Codex requests are matched by object only. A request that the latest
+   * snapshot does not have keeps the token that it got, which the boundary refuses when its authority has ended.
+   */
+  private named<T extends object>(runtime: ProviderRuntimeRef, request: T): T | ProviderPermissionToken {
+    const latest = this.observedPermissions.get(runtime.runtimeId) ?? [];
+    const observed = latest.find((entry) => entry.request === request)
+      ?? (runtime.provider === "codex" ? undefined : latest.find((entry) => isDeepStrictEqual(entry.request, request)));
+    const token = observed?.token ?? this.permissionTokens.get(request);
     return token ? { token } : request;
   }
 
