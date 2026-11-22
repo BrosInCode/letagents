@@ -450,7 +450,11 @@
   color: #6ee7b7;
 }
 
-.room-message-delivery-receipts li:is([data-state="acknowledged_failed"], [data-state="result_recovery"], [data-state="queued_behind_retry"], [data-follow-up="scheduled"]) > .room-message-delivery-indicator {
+.room-message-delivery-receipts li[data-state="acknowledged_failed"] > .room-message-delivery-indicator {
+  color: var(--amber-text);
+}
+
+.room-message-delivery-receipts li:is([data-state="result_recovery"], [data-state="queued_behind_retry"], [data-follow-up="scheduled"]) > .room-message-delivery-indicator {
   color: #fcd34d;
 }
 
