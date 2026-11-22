@@ -746,9 +746,18 @@ test("a permission event that is not a known event becomes unavailable, also whe
   events.length = 0;
   for (const body of [null, "snapshot", 7, [], {}, { type: "made_up" }, { type: 3 }]) fake.permissions[0]!.listener(body as never);
   assert.deepEqual(events.map((event) => event.body), Array.from({ length: 7 }, () => ({ type: "unavailable" })));
-  const snapshot = { type: "snapshot", connectionId: "socket-1", requests: [] };
+  // A known event with a field that the daemon cannot read is the same case.
+  const malformed = [{ type: "snapshot", connectionId: "socket", requests: null }, { type: "snapshot", connectionId: "socket" },
+    { type: "snapshot", connectionId: "socket", requests: [null] }, { type: "snapshot", connectionId: 7, requests: [] },
+    { type: "request_closed", request: null }, { type: "request_closed" }, { type: "settled", outcome: "made_up" }];
+  events.length = 0;
+  for (const body of malformed) fake.permissions[0]!.listener(body as never);
+  assert.deepEqual(events.map((event) => event.body), malformed.map(() => ({ type: "unavailable" })));
+  const request = { id: 1, method: "item/commandExecution/requestApproval", connectionId: "socket-1", params: {} };
+  const snapshot = { type: "snapshot", connectionId: "socket-1", requests: [request] };
   fake.permissions[0]!.listener(snapshot as never);
   assert.equal(events.at(-1)!.body, snapshot, "a known event is the adapter's own object");
+  assert.equal((events.at(-1)!.body as typeof snapshot).requests[0], request, "and its request is the adapter's own object");
 });
 
 test("through the router: aborting a permission observation settles its promise, also when the adapter's call is still open or the signal is aborted already", async () => {

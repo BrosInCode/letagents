@@ -176,6 +176,11 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
     get permissionChanges() { return permissionChanges; },
     get broker() { return broker; },
     reinstall() { broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation"); emit(); },
+    /** A new broker whose permission observation is the given one, for example a real router's. */
+    observeThrough(observe: ProviderActionPort["observePermissions"]) {
+      (provider as { observePermissions: unknown }).observePermissions = observe;
+      broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation");
+    },
     async close() { broker.close(); db.close(); await inbox.close(); await store.close(); await removeTestDirectory(root); } };
 }
 
@@ -183,6 +188,40 @@ function idleInstallation(f: Awaited<ReturnType<typeof fixture>>) {
   return { entryId: "agent", handle: f.handle, executionGenerationId: "generation",
     providerConnection: f.handle.providerConnection! };
 }
+
+test("through the real router: a known permission event with unreadable fields invalidates a reserved idle lane", async () => {
+  const f = await fixture();
+  try {
+    let native!: Parameters<NonNullable<NativeProviderAdapter["observePermissions"]>>[1];
+    const adapter = { id: "codex",
+      capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: true }),
+      spawn: async (request: { workAttemptId: string }) => ({ workAttemptId: request.workAttemptId, pid: 4311, providerContinuationId: "continuation",
+        providerConnection: f.handle.providerConnection, observedState: () => "idle" }),
+      onExit: () => () => undefined, onStream: () => () => undefined,
+      observePermissions: async (_handle: unknown, listener: typeof native) => { native = listener; } } as unknown as NativeProviderAdapter;
+    const router = new ProviderActionPortRouter({ codex: async () => adapter });
+    const routed = await router.spawn({ provider: "codex", workAttemptId: "routed", roomId: "room", cwd: f.workspace, launchPolicy: {} });
+    f.observeThrough((_handle, listener, signal) => router.observePermissions(routed, listener, signal));
+    for (let turn = 0; turn < 50 && !native; turn += 1) await new Promise(resolve => setImmediate(resolve));
+    assert.ok(native, "the broker's observation reached the adapter through the router");
+    const exact = idleInstallation(f);
+    const healthy = { type: "snapshot" as const, connectionId: "connection", requests: [] };
+    const malformed = [{ type: "snapshot", connectionId: "connection", requests: null }, { type: "snapshot", connectionId: "connection" },
+      { type: "snapshot", connectionId: "connection", requests: [null] }, { type: "request_closed", request: null }, { type: "made_up" }];
+    for (const event of malformed) {
+      native(healthy);
+      const reservation = f.broker.reserveIdle(exact);
+      assert.ok(reservation, `a healthy empty lane before ${JSON.stringify(event)}`);
+      reservation.assertCurrent();
+      const changes = f.permissionChanges;
+      native(event as never);
+      assert.throws(reservation.assertCurrent, /permissions changed/, JSON.stringify(event));
+      assert.equal(f.permissionChanges, changes + 1, `one change notice for ${JSON.stringify(event)}`);
+      assert.equal(f.broker.reserveIdle(exact), null);
+      reservation.release();
+    }
+  } finally { await f.close(); }
+});
 
 test("idle permission reservation requires a healthy empty exact lane and cannot revive after activity", async () => {
   const f = await fixture();

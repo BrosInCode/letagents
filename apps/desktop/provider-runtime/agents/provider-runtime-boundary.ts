@@ -260,6 +260,23 @@ const GUARD = { allowUndefinedProperties: true } as const;
 /** The adapter's permission events, and the one event that reports the end of the adapter's observation call. */
 const PERMISSION_EVENT_TYPES = new Set(["snapshot", "request_closed", "degraded", "unavailable", "settled"]);
 
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * True when a plain permission event has the fields that the daemon reads from it. The check reads the event; it
+ * makes no copy, so a valid request stays the adapter's own object.
+ */
+function knownPermissionEvent(body: unknown): boolean {
+  if (!isRecord(body) || typeof body.type !== "string" || !PERMISSION_EVENT_TYPES.has(body.type)) return false;
+  if (body.type === "snapshot") {
+    return (body.connectionId === undefined || typeof body.connectionId === "string")
+      && Array.isArray(body.requests) && body.requests.every(isRecord);
+  }
+  if (body.type === "request_closed") return isRecord(body.request);
+  if (body.type === "settled") return body.outcome === "ended" || body.outcome === "failed";
+  return true;
+}
+
 function guarded<T>(operation: string, part: string, value: T): T {
   try {
     assertPlainWireValue(value, { ...GUARD, path: `${operation}.${part}` });
@@ -644,9 +661,8 @@ export class ProviderRuntimeBoundary {
       last = true;
     } else if (record.kind === "permissions") {
       // A permission event must not vanish: the daemon then shows no prompt. For an event that is not plain data,
-      // or that is not one of the known events, it learns that the lane cannot be read.
-      const type = plain && typeof body === "object" && body !== null && !Array.isArray(body) ? (body as { type?: unknown }).type : undefined;
-      if (typeof type !== "string" || !PERMISSION_EVENT_TYPES.has(type)) safe = { type: "unavailable" };
+      // or that is not one of the known events with the fields that the daemon reads, it learns that the lane cannot be read.
+      if (!plain || !knownPermissionEvent(body)) safe = { type: "unavailable" };
     } else if (!plain) {
       this.send({ kind: "gap", ...base, seq: ++record.seq, order: ++this.order, body: { dropped: record.kind as "stream" | "execution", count: 1 } });
       return;
