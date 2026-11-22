@@ -91,8 +91,13 @@ export {
   parseExecutionApprovalCloseEffectPayload,
   listActiveExecutionApprovalEffectsForAgent,
   hasInterruptedExecutionApprovalEffects,
+  hasPendingRoomMoveForAgent,
   pruneTerminalExecutionApprovalEffectsInTransaction,
   cancelPreparedExecutionApprovalEffectsInTransaction,
+  retireExecutionApprovalEffectsForRoomMoveInTransaction,
+  retireExecutionApprovalEffectsForPurgeInTransaction,
+  retireObsoleteExecutionApprovalEffects,
+  type ExecutionApprovalPublicationIdentity,
   type ExecutionApprovalPublishEffectPayload,
   type ExecutionApprovalCloseEffectPayload,
 } from "./execution-approval.js";

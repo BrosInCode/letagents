@@ -19,6 +19,7 @@ import {
   failEffect,
   getEffectByIdempotencyKey,
   hasInterruptedExecutionApprovalEffects,
+  hasPendingRoomMoveForAgent,
   listActiveExecutionApprovalEffectsForAgent,
   parseExecutionApprovalCloseEffectPayload,
   parseExecutionApprovalPublishEffectPayload,
@@ -26,10 +27,12 @@ import {
   pruneTerminalExecutionApprovalEffectsInTransaction,
   recoverInterruptedEffectsOnStartup,
   rescheduleEffectForRetry,
+  retireObsoleteExecutionApprovalEffects,
   withFencedEffectTransaction,
   type EffectHandler,
   type EffectRecord,
   type ExecutionApprovalCloseEffectPayload,
+  type ExecutionApprovalPublicationIdentity,
   type ExecutionApprovalPublishEffectPayload,
 } from "./effect-journal/index.js";
 import {
@@ -72,6 +75,8 @@ export type ExecutionApprovalPublisherOptions = {
   assertWriteFence?(): void;
   /** Shared process-wide effect executor; standalone tests create an internal executor if omitted. */
   effectExecutor?: EffectExecutor;
+  /** When false, `attach()` registers effect handlers without arming the flush timer until `start()` runs. */
+  startImmediately?: boolean;
   publish?(input: ExecutionApprovalPublicationHttpInput): Promise<ExecutionApprovalPublicationHttpResult>;
   closePublication?(input: ExecutionApprovalPublicationCloseHttpInput): Promise<ExecutionApprovalPublicationCloseHttpResult>;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict"): void;
@@ -206,17 +211,19 @@ export class ExecutionApprovalPublisher {
   private readonly pendingCloseSettlements = new Map<string, PendingCloseSettlement>();
   private scheduled: NodeJS.Timeout | null = null;
   private scheduledFor = Infinity;
+  private started: boolean;
   private running = false;
   private closed = false;
   private scanAfter = "";
 
   static attach(database: DatabaseSync, options: ExecutionApprovalPublisherOptions): ExecutionApprovalPublisher {
     const publisher = new ExecutionApprovalPublisher(database, options);
-    publisher.schedule(0);
+    if (options.startImmediately !== false) publisher.schedule(0);
     return publisher;
   }
 
   constructor(private readonly database: DatabaseSync, private readonly options: ExecutionApprovalPublisherOptions) {
+    this.started = options.startImmediately !== false;
     this.store = new ExecutionApprovalPublicationStore(database, options.assertWriteFence);
     this.ownsExecutor = !options.effectExecutor;
     this.executor = options.effectExecutor ?? new EffectExecutor({
@@ -230,6 +237,32 @@ export class ExecutionApprovalPublisher {
     });
     this.executor.registerHandler(EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND, this.createPublishEffectHandler());
     this.executor.registerHandler(EXECUTION_APPROVAL_CLOSE_EFFECT_KIND, this.createCloseEffectHandler());
+  }
+
+  /** Arm the background publisher loop after daemon startup recovery completes. */
+  start(): void {
+    if (this.unavailable()) return;
+    if (this.started) return;
+    this.started = true;
+    this.schedule(0);
+  }
+
+  /**
+   * Recovers orphaned/inactive `executing` approval-publication effects for
+   * `agentId` back to `prepared` (for example before purge preparation), while
+   * leaving any genuinely active in-flight execution untouched in `executing`
+   * so purge cannot commit out from under live HTTP work.
+   */
+  recoverInactiveExecutingForAgent(agentId: string): number {
+    if (this.unavailable()) return 0;
+    const now = this.now();
+    let recovered = 0;
+    for (const effect of listActiveExecutionApprovalEffectsForAgent(this.database, agentId)) {
+      if (effect.state !== "executing") continue;
+      const next = this.recoverInactiveExecutingEffect(effect, now);
+      if (next.state !== "executing") recovered += 1;
+    }
+    return recovered;
   }
 
   /** Post-observation hint only; native inspection and SQLite work run on the coalesced lane. */
@@ -269,9 +302,18 @@ export class ExecutionApprovalPublisher {
     catch { /* diagnostics are optional */ }
   }
 
-  private terminalize(record: ExecutionApprovalPublicationRecord, state: "conflict" | "expired" | "invalid"): void {
+  private terminalize(
+    record: ExecutionApprovalPublicationRecord,
+    state: "conflict" | "expired" | "invalid",
+    options?: { requireNoPendingRoomMove?: boolean; effectError?: string },
+  ): void {
     const recordKey = key(record);
+    let skipped = false;
     withFencedEffectTransaction(this.database, this.writeFence, () => {
+      if (options?.requireNoPendingRoomMove && hasPendingRoomMoveForAgent(this.database, record.agentId)) {
+        skipped = true;
+        return;
+      }
       if (state === "conflict") this.store.conflictInTransaction(record);
       else if (state === "expired") this.store.expireInTransaction(record);
       else this.store.invalidateInTransaction(record);
@@ -282,18 +324,22 @@ export class ExecutionApprovalPublisher {
         cancelPreparedExecutionApprovalEffectsInTransaction(this.database, {
           effectIds: matchingEffectIds,
           expectedEpoch: this.options.daemonGeneration(),
-          error: `publication_${state}`,
+          error: options?.effectError ?? `publication_${state}`,
           nowIso: this.nowIso(),
         });
       }
       pruneTerminalExecutionApprovalEffectsInTransaction(this.database, record.agentId);
     });
-    this.acknowledgedCheckAt.delete(recordKey);
+    if (!skipped) this.acknowledgedCheckAt.delete(recordKey);
   }
 
-  private tryTerminalize(record: ExecutionApprovalPublicationRecord, state: "conflict" | "expired" | "invalid"): void {
+  private tryTerminalize(
+    record: ExecutionApprovalPublicationRecord,
+    state: "conflict" | "expired" | "invalid",
+    options?: { requireNoPendingRoomMove?: boolean; effectError?: string },
+  ): void {
     try {
-      this.terminalize(record, state);
+      this.terminalize(record, state, options);
     } catch (error) {
       if (error instanceof DaemonFenceLostError) throw error;
       if (error instanceof EffectFenceError) {
@@ -305,7 +351,7 @@ export class ExecutionApprovalPublisher {
   }
 
   private schedule(delay: number): void {
-    if (this.unavailable()) return;
+    if (!this.started || this.unavailable()) return;
     const due = Date.now() + delay;
     if (this.scheduled && this.scheduledFor <= due) return;
     if (this.scheduled) clearTimeout(this.scheduled);
@@ -801,11 +847,174 @@ export class ExecutionApprovalPublisher {
     }
   }
 
+  private durableAgentRoomId(agentId: string): string | null {
+    try {
+      const row = this.database.prepare("SELECT room_id FROM agents WHERE agent_id=?").get(agentId) as
+        | { room_id?: unknown }
+        | undefined;
+      return row && typeof row.room_id === "string" ? row.room_id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private hasNonTerminalRoomMove(agentId: string): boolean {
+    try {
+      return hasPendingRoomMoveForAgent(this.database, agentId);
+    } catch {
+      // Fail closed on unexpected storage errors so compensatable moves never drop retries.
+      return true;
+    }
+  }
+
+  private nextOpenAgentAfter(after: string): string | null {
+    const row = this.database.prepare(`
+      SELECT agent_id FROM (
+        SELECT agent_id FROM execution_approval_publications
+        WHERE state IN ('open','attempted','acknowledged','closing')
+        UNION
+        SELECT agent_id FROM effects
+        WHERE kind IN (?, ?) AND state IN ('prepared', 'executing')
+      )
+      WHERE agent_id > ? ORDER BY agent_id LIMIT 1
+    `).get(EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND, EXECUTION_APPROVAL_CLOSE_EFFECT_KIND, after) as
+      | { agent_id?: unknown }
+      | undefined;
+    return row && typeof row.agent_id === "string" ? row.agent_id : null;
+  }
+
   private nextOpenAgent(): string | null {
-    let next = this.store.nextOpenAgent(this.scanAfter);
-    if (!next) { this.scanAfter = ""; next = this.store.nextOpenAgent(""); }
+    let next = this.nextOpenAgentAfter(this.scanAfter);
+    if (!next) { this.scanAfter = ""; next = this.nextOpenAgentAfter(""); }
     if (next) this.scanAfter = next;
     return next;
+  }
+
+  /**
+   * Recovers inactive `executing` approval effects for `agentId` and retires
+   * durably obsolete `prepared` rows across both approval effect kinds.
+   * Temporary missing authority (stopped agent, expired grant, or handoff in
+   * the same room) and non-terminal room moves (whose compensation can restore
+   * the source room and authority) preserve `prepared` rows and deadlines.
+   */
+  private reconcileActiveEffectsForAgent(agentId: string, now: number): EffectRecord[] {
+    const recovered = listActiveExecutionApprovalEffectsForAgent(this.database, agentId).map((rawEffect) =>
+      rawEffect.state === "executing"
+        ? this.recoverInactiveExecutingEffect(rawEffect, now)
+        : rawEffect);
+    const currentGeneration = this.options.daemonGeneration();
+    const roomMoveInProgress = this.hasNonTerminalRoomMove(agentId);
+    const durableRoomId = this.durableAgentRoomId(agentId);
+    const retirements: Array<{
+      id: string;
+      error: string;
+      requireNoPendingRoomMove?: boolean;
+      invalidatePublication?: ExecutionApprovalPublicationIdentity;
+    }> = [];
+
+    for (const effect of recovered) {
+      if (effect.state !== "prepared" || effect.epoch > currentGeneration) continue;
+      if (effect.kind === EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND) {
+        const payload = parseExecutionApprovalPublishEffectPayload(effect.payload);
+        if (!payload) {
+          retirements.push({ id: effect.id, error: "invalid_execution_approval_payload" });
+          continue;
+        }
+        const identity: ExecutionApprovalPublicationIdentity = {
+          roomId: payload.room_id,
+          delegationInstanceId: payload.delegation_instance_id,
+          delegationRevision: payload.delegation_revision,
+          requestId: payload.request_id,
+          requestVersion: payload.request_version,
+        };
+        const record = this.store.getByIdentity({ agentId, ...identity });
+        if (!record) {
+          retirements.push({ id: effect.id, error: "publication_record_missing" });
+          continue;
+        }
+        if (record.state === "closed" || record.state === "conflict" || record.state === "expired" || record.state === "invalid") {
+          retirements.push({ id: effect.id, error: `publication_${record.state}` });
+          continue;
+        }
+        if (record.state === "acknowledged" || record.state === "closing") {
+          retirements.push({ id: effect.id, error: "publication_already_acknowledged" });
+          continue;
+        }
+        if (record.projectionSha256 !== payload.projection_sha256) {
+          retirements.push({ id: effect.id, error: "publication_projection_superseded" });
+          continue;
+        }
+        if (!roomMoveInProgress && durableRoomId !== null && durableRoomId !== payload.room_id) {
+          retirements.push({
+            id: effect.id,
+            error: "room_moved",
+            requireNoPendingRoomMove: true,
+            invalidatePublication: identity,
+          });
+        }
+        continue;
+      }
+      if (effect.kind === EXECUTION_APPROVAL_CLOSE_EFFECT_KIND) {
+        const payload = parseExecutionApprovalCloseEffectPayload(effect.payload);
+        if (!payload) {
+          retirements.push({ id: effect.id, error: "invalid_execution_approval_payload" });
+          continue;
+        }
+        const identity: ExecutionApprovalPublicationIdentity = {
+          roomId: payload.room_id,
+          delegationInstanceId: payload.delegation_instance_id,
+          delegationRevision: payload.delegation_revision,
+          requestId: payload.request_id,
+          requestVersion: payload.request_version,
+        };
+        const record = this.store.getByIdentity({ agentId, ...identity });
+        if (!record) {
+          retirements.push({ id: effect.id, error: "publication_record_missing" });
+          continue;
+        }
+        if (record.state === "closed" || record.state === "conflict" || record.state === "expired" || record.state === "invalid") {
+          retirements.push({ id: effect.id, error: `publication_${record.state}` });
+          continue;
+        }
+        if (record.state !== "closing"
+          || record.publicationId !== payload.publication_id
+          || record.publicationDigest !== payload.publication_digest) {
+          retirements.push({ id: effect.id, error: "publication_close_superseded" });
+          continue;
+        }
+        if (!roomMoveInProgress && durableRoomId !== null && durableRoomId !== payload.room_id) {
+          retirements.push({
+            id: effect.id,
+            error: "room_moved",
+            requireNoPendingRoomMove: true,
+            invalidatePublication: identity,
+          });
+        }
+      }
+    }
+
+    let retiredIds = new Set<string>();
+    if (retirements.length > 0) {
+      try {
+        retiredIds = new Set(retireObsoleteExecutionApprovalEffects(this.database, this.writeFence, {
+          agentId,
+          expectedEpoch: currentGeneration,
+          retirements,
+          nowIso: this.nowIso(),
+        }));
+      } catch (error) {
+        if (error instanceof DaemonFenceLostError) throw error;
+        if (error instanceof EffectFenceError) {
+          if (!this.unavailable()) throw error;
+        } else if (!this.unavailable()) {
+          this.report("storage_unavailable");
+        }
+      }
+    }
+
+    return recovered.filter((effect) =>
+      !retiredIds.has(effect.id) && (effect.state === "prepared" || effect.state === "executing"),
+    );
   }
 
   /** Deterministic seam for focused real-store tests. No caller awaits this to run an agent. */
@@ -850,15 +1059,12 @@ export class ExecutionApprovalPublisher {
       if (this.unavailable()) return;
       const agentId = this.nextOpenAgent();
       if (!agentId) return;
-      more = this.store.nextOpenAgent(agentId) !== null || more;
+      more = this.nextOpenAgentAfter(agentId) !== null || more;
       const now = this.now();
-      const activeEffects = listActiveExecutionApprovalEffectsForAgent(this.database, agentId);
+      const activeEffects = this.reconcileActiveEffectsForAgent(agentId, now);
+      if (this.unavailable()) return;
       const activeByRecordKey = new Map<string, EffectRecord[]>();
-      for (const rawEffect of activeEffects) {
-        const effect = rawEffect.state === "executing"
-          ? this.recoverInactiveExecutingEffect(rawEffect, now)
-          : rawEffect;
-        if (effect.state !== "prepared" && effect.state !== "executing") continue;
+      for (const effect of activeEffects) {
         const identityKey = effectIdentityKey(effect);
         if (!identityKey) continue;
         const bucket = activeByRecordKey.get(identityKey);
@@ -928,16 +1134,23 @@ export class ExecutionApprovalPublisher {
       eligible.sort((left, right) => PENDING_PRIORITY[left.record.state] - PENDING_PRIORITY[right.record.state]
         || left.sortAt - right.sortAt);
       more = eligible.length > MAX_UPLOADS_PER_PASS || more;
+      const roomMoveInProgress = this.hasNonTerminalRoomMove(agentId);
+      const durableRoomId = this.durableAgentRoomId(agentId);
       for (const { record } of eligible.slice(0, MAX_UPLOADS_PER_PASS)) {
         if (record.expiresAtMs <= this.now()) {
           this.tryTerminalize(record, "expired");
+          continue;
+        }
+        if (!roomMoveInProgress && durableRoomId !== null && durableRoomId !== record.roomId) {
+          this.tryTerminalize(record, "invalid", { requireNoPendingRoomMove: true, effectError: "room_moved" });
           continue;
         }
         const authority = this.currentAuthority(record.agentId);
         if (!authority) continue;
         if (!sameWorkerPublicationOrigin(authority.origin, record)
           || authority.worker.workAttemptId !== record.workAttemptId) {
-          this.tryTerminalize(record, "invalid");
+          if (this.hasNonTerminalRoomMove(record.agentId)) continue;
+          this.tryTerminalize(record, "invalid", { requireNoPendingRoomMove: true });
           continue;
         }
         let effectId: string | null = null;

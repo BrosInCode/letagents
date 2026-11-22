@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 
+import { DaemonStateSchema } from "../daemon-state-database.js";
 import type { DelegatableApprovalAdmission } from "../host-approval-broker.js";
 import {
   applyEffectJournalSchema,
@@ -16,11 +20,20 @@ import {
   getEffect,
   listActiveExecutionApprovalEffectsForAgent,
   listEffectsForAgent,
+  retireObsoleteExecutionApprovalEffects,
 } from "../effect-journal/index.js";
+import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import { applyExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
 import { ExecutionApprovalPublisher } from "../execution-approval-publisher.js";
 import { ExecutionDelegationJournalError, type LocalExecutionDelegation } from "../execution-delegation-journal.js";
+import { LifecycleAdministrationCoordinator } from "../lifecycle-administration-coordinator.js";
+import { ManifestStore } from "../manifest-store.js";
+import { RoomMoveCoordinator } from "../room-move-coordinator.js";
+import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import { WorkerBindingStore } from "../worker-binding-store.js";
 import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { seedBoundedMcpEffectRow } from "./helpers/bounded-effect-seed.js";
 
 const sha = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 const now = Date.parse("2026-08-31T00:00:20.000Z");
@@ -902,11 +915,47 @@ test("terminal approval effects stay bounded per agent and local terminalize can
     insert.run(`eff-appr-old-${i}`, EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND, `eap:v1:seed-${i}`, ts, ts);
   }
   f.database.prepare(`
+    INSERT INTO execution_approval_publications (
+      agent_id, room_id, api_origin, agent_key, agent_instance_id, host_id, installation_id, source_session_id,
+      source_message_id, inbox_item_id, work_attempt_id, delegation_instance_id, delegation_revision,
+      delegation_scope_sha256, approver_account_id, request_id, request_version, request_sha256,
+      execution_generation_id, runtime_generation_id, turn_id, provider_continuation_id, provider_turn_id,
+      connection_id, native_request_id_type, native_request_id, projection_sha256, produced_at_ms, expires_at_ms,
+      state, publication_id, publication_digest, published_at_ms, closed_at_ms
+    ) VALUES (
+      'agent', 'room', 'https://letagents.test', 'owner/agent', 'daemon:agent', 'host', 'installation', 'session',
+      'msg_1', 'inbox', 'attempt', 'delegation-keep', 1,
+      ?, 'approver', 'request-keep', 1, ?,
+      'execution', 'runtime', 'turn', 'continuation', 'provider-turn',
+      'connection', 'number', '7', ?, ?, ?,
+      'attempted', NULL, NULL, NULL, NULL
+    )
+  `).run(sha("scope-keep"), sha("request-keep"), projectionSha256, now - 500, now + 600_000);
+  f.database.prepare(`
     INSERT INTO effects (
       id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
       retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
-    ) VALUES ('eff-appr-active-keep', 'agent', ?, 'eap:v1:keep-active', 1, 'prepared', '{"keep":true}', NULL, 1, 0, 1000000, NULL, NULL, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')
-  `).run(EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND);
+    ) VALUES ('eff-appr-active-keep', 'agent', ?, ?, 1, 'prepared', ?, NULL, 1, 1, 1000000, ?, 'publication_unavailable', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')
+  `).run(
+    EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND,
+    executionApprovalPublishIdempotencyKey({
+      roomId: "room",
+      delegationInstanceId: "delegation-keep",
+      delegationRevision: 1,
+      requestId: "request-keep",
+      requestVersion: 1,
+      projectionSha256,
+    }),
+    JSON.stringify({
+      room_id: "room",
+      delegation_instance_id: "delegation-keep",
+      delegation_revision: 1,
+      request_id: "request-keep",
+      request_version: 1,
+      projection_sha256: projectionSha256,
+    }),
+    now + 500_000,
+  );
   f.database.exec("COMMIT");
 
   // Fail once so delegation-1 has a prepared effect, then expire it locally with a rollback check first.
@@ -929,7 +978,7 @@ test("terminal approval effects stay bounded per agent and local terminalize can
   `);
   await f.publisher.flush();
   assert.equal(
-    f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state,
+    f.database.prepare("SELECT state FROM execution_approval_publications WHERE request_id='request'").get()!.state,
     "attempted",
     "domain expiry rolls back when atomic effect cancellation fails",
   );
@@ -938,7 +987,7 @@ test("terminal approval effects stay bounded per agent and local terminalize can
   // Drop trigger: expiry commits atomically, cancels the prepared effect, and prunes terminal rows to the cap.
   f.database.exec("DROP TRIGGER fail_cancel_on_expire;");
   await f.publisher.flush();
-  assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, "expired");
+  assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications WHERE request_id='request'").get()!.state, "expired");
   assert.equal(getEffect(f.database, activeBefore[0]!.id)?.state, "failed");
   assert.equal(getEffect(f.database, "eff-appr-active-keep")?.state, "prepared", "unrelated active prepared effect is never pruned");
   assert.equal(getEffect(f.database, "eff-appr-old-0"), null, "oldest terminal approval effects are pruned");
@@ -1136,4 +1185,612 @@ test("dispatch custody removed or replaced during EffectExecutor's final pre-set
     assert.equal(sawClosePreSettle, true);
     assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, "closed");
   });
+});
+
+async function fullLifecycleFixture(t: TestContext, options?: { startImmediately?: boolean }) {
+  const dir = await mkdtemp(join(tmpdir(), "approval-lifecycle-"));
+  const dbPath = join(dir, "daemon-state.sqlite");
+  const database = new DatabaseSync(dbPath);
+  database.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL");
+  new DaemonStateSchema().createSchema(database);
+
+  const manifestStore = new ManifestStore(dbPath);
+  manifestStore.attachDatabase(database);
+  const inboxStore = new SupervisedAgentInboxStore(dbPath);
+  inboxStore.attachDatabase(database);
+  const bindingStore = new WorkerBindingStore(dbPath, undefined, dbPath);
+  bindingStore.attachDatabase(database);
+
+  const custody = new WorkerRuntimeCustody();
+  const grant: InstalledHostGrant = {
+    entryId: "agent", roomId: "room", agentKey: "owner/agent", grantId: "grant",
+    supervisorGrant: "PRIVATE_GRANT", grantGeneration: 1, apiUrl: "https://letagents.test", daemonGeneration: 1,
+    hostId: "host", installationId: "installation", ownerAccountId: "owner", scopeKey: "owner",
+    expiresAt: new Date(now + 180_000).toISOString(),
+  };
+  const worker: CachedWorkerAuthorization = {
+    entryId: "agent", roomId: "room", agentKey: "owner/agent",
+    workAttemptId: "attempt", grantId: "grant", grantGeneration: 1, daemonGeneration: 1,
+    apiUrl: grant.apiUrl, agentSessionId: "session", bearer: "PRIVATE_WORKER", bearerId: "bearer",
+    expiresAt: null, mintedAtMs: now - 1_000,
+    agentSession: {
+      session_id: "session", session_token: "PRIVATE_SESSION", room_id: "room", session_kind: "worker",
+      runtime: "codex", actor_label: "Agent", agent_key: "owner/agent", agent_instance_id: "daemon:agent",
+      display_name: "Agent", owner_label: "Owner", ide_label: "Desktop", created_at: "2026-08-31",
+      updated_at: "2026-08-31", last_seen_at: "2026-08-31", ended_at: null,
+    },
+  };
+  custody.installHostGrant(grant);
+  custody.installWorkerAuthorization(worker);
+
+  let currentNow = now;
+  let closing = false;
+  let delegations: LocalExecutionDelegation[] = [delegation(1)];
+  let admissions: DelegatableApprovalAdmission[] = [admission()];
+  const approvalsByRequest = new Map<string, ReturnType<typeof admission>["approval"]>([
+    ["request", admission().approval],
+  ]);
+  const projectionsByRequest = new Map<string, ReturnType<typeof admission>["projection"]>([
+    ["request", admission().projection],
+  ]);
+  const sent: unknown[] = [];
+  const closed: unknown[] = [];
+
+  const executor = new EffectExecutor({
+    getDatabase: () => database,
+    currentDaemonGeneration: () => 1,
+    assertCurrent: async () => {},
+    assertWriteFence: () => {},
+    isClosing: () => closing,
+    nowMs: () => currentNow,
+    nowIso: () => new Date(currentNow).toISOString(),
+  });
+
+  const publisherOptions: ConstructorParameters<typeof ExecutionApprovalPublisher>[1] = {
+    custody,
+    approvals: { admitDelegatable: async () => admissions },
+    entries: {
+      getExecutionApproval: async (expected: { requestId: string }) => approvalsByRequest.get(expected.requestId) ?? null,
+      listExecutionDelegationsForApprovalPublication: async () => delegations,
+      readExecutionApprovalProjection: async (expected: { requestId: string }) => projectionsByRequest.get(expected.requestId) ?? null,
+    },
+    inbox: { get: async () => ({ inbox_item_id: "inbox", agent_id: "agent", room_id: "room", source_message_id: "msg_1" }) },
+    authority: { validateExecutionDelegation: async () => delegations[0] ?? delegation(1) },
+    daemonGeneration: () => 1,
+    isClosing: () => closing,
+    assertCurrent: async () => {},
+    assertWriteFence: () => {},
+    effectExecutor: executor,
+    startImmediately: options?.startImmediately ?? false,
+    now: () => currentNow,
+    publish: async (input) => {
+      sent.push(input);
+      return { status: "acknowledged" as const, publicationId: "publication", publicationDigest: sha("publication"), publishedAtMs: now - 10_000 };
+    },
+    closePublication: async (input) => {
+      closed.push(input);
+      return { status: "closed" as const, closedAtMs: currentNow };
+    },
+    diagnostic: () => {},
+  };
+  const publisher = ExecutionApprovalPublisher.attach(database, publisherOptions);
+
+  t.after(async () => {
+    publisher.close();
+    await manifestStore.close().catch(() => undefined);
+    database.close();
+    await removeTestDirectory(dir);
+  });
+
+  return {
+    dbPath,
+    database,
+    manifestStore,
+    inboxStore,
+    bindingStore,
+    custody,
+    grant,
+    worker,
+    executor,
+    publisher,
+    publisherOptions,
+    sent,
+    closed,
+    approvalsByRequest,
+    projectionsByRequest,
+    getNow: () => currentNow,
+    setNow: (value: number) => { currentNow = value; },
+    setClosing: (value: boolean) => { closing = value; },
+    setDelegations: (value: LocalExecutionDelegation[]) => { delegations = value; },
+    setAdmissions: (value: DelegatableApprovalAdmission[]) => { admissions = value; },
+  };
+}
+
+test("real LifecycleAdministrationCoordinator purge retires refused approval publish and close retries, respects blockers and live executions, and prevents later uploads", async t => {
+  for (const mode of ["publish", "close"] as const) {
+    await t.test(`refused ${mode} -> stop -> retire -> purge -> 0 later uploads`, async t => {
+      const f = await fullLifecycleFixture(t);
+      await f.manifestStore.write([{
+        id: "agent",
+        room_id: "room",
+        display_name: "Agent",
+        provider: "codex",
+        model: null,
+        charter: "Handle approvals.",
+        desired_state: "running",
+        observed_state: "idle",
+        condition: "none",
+        permission_profile_id: null,
+        delivery_mode: "daemon_inbox",
+        created_by: "user-1",
+        created_at: new Date(now).toISOString(),
+        last_worker_binding: {
+          agent_session_id: "session",
+          work_attempt_id: "attempt",
+          execution_generation_id: "execution",
+          updated_at: new Date(now).toISOString(),
+        },
+      }]);
+
+      const gate = new EntryConcurrencyGate({ isHandoffScheduled: () => false });
+      const lifecycle = new LifecycleAdministrationCoordinator({
+        store: f.manifestStore,
+        bindings: f.bindingStore,
+        durability: {
+          getAttempt: async () => { throw new Error("unused"); },
+          listAttempts: async () => [],
+          recordTerminal: async () => {},
+          releaseTerminalExecutionFence: async () => {},
+          concludeAttempt: async () => { throw new Error("unused"); },
+          garbageCollectEphemeralAttempt: async () => false,
+        },
+        authority: {
+          currentDaemonGeneration: () => 1,
+          assertCurrent: async () => {},
+          fenceCommit: async (commit) => { await commit(); },
+          serializeManifestMutation: async (operation) => operation(),
+        },
+        beginLifecycle: (entryId) => gate.beginLifecycle(entryId),
+        serializeEntry: async (_entryId, operation) => operation(),
+        setDesiredStateExclusive: async (entryId, desiredState) => {
+          const loaded = await f.manifestStore.getEntryWithVersion(entryId);
+          assert.ok(loaded);
+          return (await f.manifestStore.replaceEntry(loaded.version, { ...loaded.entry, desired_state: desiredState, observed_state: "stopped" })).entry;
+        },
+        updateManifestEntry: async (entryId, update) => {
+          const loaded = await f.manifestStore.getEntryWithVersion(entryId);
+          assert.ok(loaded);
+          return (await f.manifestStore.replaceEntry(loaded.version, update(loaded.entry))).entry;
+        },
+        entryWithDerivedLiveness: async (e) => ({ ...e, liveness: "stopped", inbox_summary: null, room_move: null } as never),
+        stopDelivery: async () => {},
+        hasLiveHandle: () => false,
+        runtimeCustody: f.custody,
+        deleteAgentStream: () => {},
+        reconcileApprovalPublicationsForPurge: (entryId) => { f.publisher.recoverInactiveExecutingForAgent(entryId); },
+        ephemeralProvisioner: { garbageCollectOrphans: async () => [] },
+        nowMs: () => f.getNow(),
+      });
+
+      let releaseInFlight!: () => void;
+      let inFlightStarted!: () => void;
+      const inFlightRunning = new Promise<void>(resolve => { inFlightStarted = resolve; });
+      const inFlightGate = new Promise<void>(resolve => { releaseInFlight = resolve; });
+
+      if (mode === "publish") {
+        f.publisherOptions.publish = async (input) => {
+          f.sent.push(input);
+          if (f.sent.length === 1) throw new Error("503 unavailable");
+          inFlightStarted();
+          await inFlightGate;
+          throw new Error("503 unavailable");
+        };
+        f.publisher.changed("agent");
+        await f.publisher.flush();
+        assert.equal(f.sent.length, 1);
+      } else {
+        f.publisher.changed("agent");
+        await f.publisher.flush();
+        assert.equal(f.sent.length, 1);
+        assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, "acknowledged");
+        const resolvedApproval = {
+          ...admission().approval,
+          request: { ...admission().approval.request, state: "superseded" as const },
+        };
+        f.approvalsByRequest.set("request", resolvedApproval);
+        f.publisherOptions.closePublication = async (input) => {
+          f.closed.push(input);
+          if (f.closed.length === 1) throw new Error("503 unavailable");
+          inFlightStarted();
+          await inFlightGate;
+          throw new Error("503 unavailable");
+        };
+        await f.publisher.flush();
+        assert.equal(f.closed.length, 1);
+      }
+
+      const kind = mode === "publish" ? EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND : EXECUTION_APPROVAL_CLOSE_EFFECT_KIND;
+      const expectedPubState = mode === "publish" ? "attempted" : "closing";
+      const [effect] = listEffectsForAgent(f.database, "agent", { kind, states: ["prepared"] });
+      assert.ok(effect);
+      const deadline = effect.next_attempt_at_ms!;
+      assert.equal(deadline, now + 30_000);
+      assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, expectedPubState);
+
+      // 1. Stop + temporary missing authority preserves prepared retry and exact deadline across flush().
+      const loadedRunning = await f.manifestStore.getEntryWithVersion("agent");
+      assert.ok(loadedRunning);
+      await f.manifestStore.replaceEntry(loadedRunning.version, {
+        ...loadedRunning.entry,
+        desired_state: "stopped",
+        observed_state: "stopped",
+      });
+      f.custody.deleteHostGrant("agent");
+      f.custody.deleteWorkerAuthorization("agent");
+      f.setNow(now + 10_000);
+      await f.publisher.flush();
+      assert.equal(getEffect(f.database, effect.id)?.state, "prepared", "missing authority must preserve retry");
+      assert.equal(getEffect(f.database, effect.id)?.next_attempt_at_ms, deadline);
+      assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, expectedPubState);
+
+      // 2. Unrelated prepared blocker blocks purge and rolls back approval effect + publication changes.
+      seedBoundedMcpEffectRow(f.database, {
+        id: "eff-unrelated-block",
+        agent_id: "agent",
+        room_id: "room",
+        execution_generation_id: "gen-1",
+        provider_turn_id: "turn-1",
+        mcp_request_id: "req-mcp-1",
+        tool_name: "send_message",
+        request: {},
+        mutation: true,
+        state: "prepared",
+        created_at: new Date(now).toISOString(),
+        updated_at: new Date(now).toISOString(),
+      });
+      const blockedByMcp = await lifecycle.purgeAgent("agent", 1, "session", false);
+      assert.equal(blockedByMcp.outcome, "invalid");
+      assert.match(blockedByMcp.error, /blocker/);
+      assert.equal(getEffect(f.database, effect.id)?.state, "prepared", "failed purge must roll back approval retirement");
+      assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, expectedPubState);
+      f.database.prepare("DELETE FROM effects WHERE id='eff-unrelated-block'").run();
+
+      // 3. Genuinely active in-flight executing upload strictly blocks purge even with reconcileApprovalPublicationsForPurge.
+      f.custody.installHostGrant(f.grant);
+      f.custody.installWorkerAuthorization(f.worker);
+      f.setNow(deadline);
+      const flushInFlight = f.publisher.flush();
+      await inFlightRunning;
+      assert.equal(getEffect(f.database, effect.id)?.state, "executing");
+      assert.equal(f.executor.isEffectActive(effect.id), true);
+
+      const blockedByActive = await lifecycle.purgeAgent("agent", 1, "session", false);
+      assert.equal(blockedByActive.outcome, "invalid");
+      assert.match(blockedByActive.error, /blocker/);
+      assert.equal(getEffect(f.database, effect.id)?.state, "executing", "active executing upload must remain executing");
+      assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, expectedPubState);
+
+      // Let the in-flight attempt fail with 503 -> returns to prepared with a new +30s retry deadline.
+      releaseInFlight();
+      await flushInFlight;
+      assert.equal(getEffect(f.database, effect.id)?.state, "prepared");
+      const callsBeforePurge = mode === "publish" ? f.sent.length : f.closed.length;
+
+      // 4. Authorized stop/retire/purge retires prepared effect, terminalizes+deletes publication, and succeeds.
+      f.custody.deleteHostGrant("agent");
+      f.custody.deleteWorkerAuthorization("agent");
+      const purged = await lifecycle.purgeAgent("agent", 1, "session", false);
+      assert.deepEqual(purged, { outcome: "purged" });
+      assert.equal(await f.manifestStore.getEntry("agent"), undefined);
+      assert.equal(Number((f.database.prepare("SELECT COUNT(*) AS n FROM effects WHERE agent_id='agent'").get() as { n: number }).n), 0);
+      assert.equal(Number((f.database.prepare("SELECT COUNT(*) AS n FROM execution_approval_publications WHERE agent_id='agent'").get() as { n: number }).n), 0);
+
+      // 5. After purge, even if authority were re-installed and clock advances past retry deadline, 0 later uploads happen.
+      f.custody.installHostGrant(f.grant);
+      f.custody.installWorkerAuthorization(f.worker);
+      f.publisherOptions.publish = async (input) => { f.sent.push(input); return { status: "acknowledged", publicationId: "p2", publicationDigest: sha("p2"), publishedAtMs: f.getNow() }; };
+      f.publisherOptions.closePublication = async (input) => { f.closed.push(input); return { status: "closed", closedAtMs: f.getNow() }; };
+      f.setNow(deadline + 60_000);
+      await f.publisher.flush();
+      assert.equal(mode === "publish" ? f.sent.length : f.closed.length, callsBeforePurge, "purged agent must never upload again");
+    });
+  }
+});
+
+test("real RoomMoveCoordinator rollback preserves approval publish and close retries across intermediate boundaries while terminal active move retires them", async t => {
+  const f = await fullLifecycleFixture(t);
+  await f.manifestStore.write([{
+    id: "agent",
+    room_id: "room",
+    display_name: "Agent",
+    provider: "codex",
+    model: null,
+    charter: "Handle approvals.",
+    desired_state: "running",
+    observed_state: "working",
+    condition: "none",
+    permission_profile_id: null,
+    delivery_mode: "daemon_inbox",
+    created_by: "user-1",
+    created_at: new Date(now).toISOString(),
+    work_attempt_id: "attempt",
+    provider_ref: {
+      work_attempt_id: "attempt",
+      provider_continuation_id: "continuation",
+      provider_connection: null,
+      execution_generation_id: "execution",
+    },
+    last_worker_binding: {
+      agent_session_id: "session",
+      work_attempt_id: "attempt",
+      execution_generation_id: "execution",
+      updated_at: new Date(now).toISOString(),
+    },
+  }]);
+  await f.bindingStore.bind({
+    entry_id: "agent",
+    room_id: "room",
+    work_attempt_id: "attempt",
+    execution_generation_id: "execution",
+    agent_session_id: "session",
+    api_url: f.grant.apiUrl,
+    agent_session_token: "source-bearer",
+  });
+
+  const gate = new EntryConcurrencyGate({ isHandoffScheduled: () => false });
+  const coordinator = new RoomMoveCoordinator({
+    store: f.manifestStore,
+    inbox: f.inboxStore,
+    bindings: f.bindingStore,
+    runtimeCustody: f.custody,
+    deliveryHttp: {
+      joinRoom: async ({ roomId }) => ({ roomId }),
+      latest: async () => ({ messages: [{ id: "msg_99" }] }),
+    },
+    authority: {
+      currentGeneration: () => 1,
+      isHandoffScheduled: () => false,
+      assertCurrent: async () => {},
+      ownsDaemonGeneration: async (gen) => gen === 1,
+      fenceCommit: async (commit) => { await commit(); },
+    },
+    entryConcurrency: gate,
+    serializeEntry: async (_entryId, operation) => operation(),
+    updateManifestEntry: async (entryId, update) => {
+      const loaded = await f.manifestStore.getEntryWithVersion(entryId);
+      assert.ok(loaded);
+      return (await f.manifestStore.replaceEntry(loaded.version, update(loaded.entry))).entry;
+    },
+    currentHandle: () => ({
+      workAttemptId: "attempt",
+      providerContinuationId: "continuation",
+      providerConnection: null,
+      executionGenerationId: "execution",
+    } as never),
+    pauseIngress: () => {},
+    restartDelivery: async () => {},
+    scheduleRecovery: () => {},
+    nowIso: () => new Date(f.getNow()).toISOString(),
+  });
+
+  // Seed two approvals: req-1 reaches closing+503 retry, req-2 reaches attempted+503 retry.
+  const adm1 = admission();
+  const adm2Base = admission();
+  const adm2: DelegatableApprovalAdmission = {
+    ...adm2Base,
+    approval: {
+      ...adm2Base.approval,
+      request: { ...adm2Base.approval.request, requestId: "request-2", requestSha256: sha("request-2") },
+    },
+    projection: { ...adm2Base.projection, requestId: "request-2", requestSha256: sha("request-2") },
+  };
+  f.approvalsByRequest.set("request", adm1.approval);
+  f.projectionsByRequest.set("request", adm1.projection);
+  f.approvalsByRequest.set("request-2", adm2.approval);
+  f.projectionsByRequest.set("request-2", adm2.projection);
+
+  // Publish request-1 successfully first so it becomes acknowledged, then resolve it so close enters retry.
+  f.setAdmissions([adm1]);
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1);
+
+  f.approvalsByRequest.set("request", {
+    ...adm1.approval,
+    request: { ...adm1.approval.request, state: "superseded" as const },
+  });
+  f.setAdmissions([adm2]);
+  f.publisherOptions.publish = async (input) => { f.sent.push(input); throw new Error("503 unavailable"); };
+  f.publisherOptions.closePublication = async (input) => { f.closed.push(input); throw new Error("503 unavailable"); };
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 2);
+  assert.equal(f.closed.length, 1);
+
+  const [pubEffect] = listEffectsForAgent(f.database, "agent", { kind: EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND, states: ["prepared"] });
+  const [closeEffect] = listEffectsForAgent(f.database, "agent", { kind: EXECUTION_APPROVAL_CLOSE_EFFECT_KIND, states: ["prepared"] });
+  assert.ok(pubEffect && closeEffect);
+  const deadline = now + 30_000;
+  assert.equal(pubEffect.next_attempt_at_ms, deadline);
+  assert.equal(closeEffect.next_attempt_at_ms, deadline);
+
+  // Boundary 1: rotating_credentials (agents.room_id='room-2') + missing custody -> both retries & publications survive.
+  const preparedMove = await coordinator.prepareInspector({
+    entryId: "agent", destinationRoomId: "room-2", requestId: "ap-rb-1", daemonGeneration: 1,
+  });
+  const rotatingMove = await coordinator.commitInspector({
+    operationId: preparedMove.operation_id, entryId: "agent", daemonGeneration: 1,
+  });
+  assert.equal(rotatingMove.phase, "rotating_credentials");
+  assert.equal((await f.manifestStore.getEntry("agent"))?.room_id, "room-2");
+  f.custody.deleteHostGrant("agent");
+  f.custody.deleteWorkerAuthorization("agent");
+  f.setNow(now + 2_000);
+  await f.publisher.flush();
+  assert.equal(getEffect(f.database, pubEffect.id)?.state, "prepared");
+  assert.equal(getEffect(f.database, pubEffect.id)?.next_attempt_at_ms, deadline);
+  assert.equal(getEffect(f.database, closeEffect.id)?.state, "prepared");
+  assert.equal(getEffect(f.database, closeEffect.id)?.next_attempt_at_ms, deadline);
+
+  // Direct atomic-guard test: retireObsoleteExecutionApprovalEffects skips requireNoPendingRoomMove while move is non-terminal.
+  const skippedAtomic = retireObsoleteExecutionApprovalEffects(f.database, () => {}, {
+    agentId: "agent",
+    expectedEpoch: 1,
+    retirements: [
+      { id: pubEffect.id, error: "room_moved", requireNoPendingRoomMove: true },
+      { id: closeEffect.id, error: "room_moved", requireNoPendingRoomMove: true },
+    ],
+    nowIso: new Date(f.getNow()).toISOString(),
+  });
+  assert.deepEqual(skippedAtomic, []);
+  assert.equal(getEffect(f.database, pubEffect.id)?.state, "prepared");
+  assert.equal(getEffect(f.database, closeEffect.id)?.state, "prepared");
+
+  // Boundary 2: rollback_required restores agents.room_id='room' while destination custody is still live -> both survive.
+  const rollbackMove = await coordinator.rollbackInspector({
+    operationId: rotatingMove.operation_id, entryId: "agent", daemonGeneration: 1, detail: "destination mint failed",
+  });
+  assert.equal(rollbackMove.phase, "rollback_required");
+  assert.equal((await f.manifestStore.getEntry("agent"))?.room_id, "room");
+  f.custody.installHostGrant({ ...f.grant, roomId: "room-2" });
+  f.custody.installWorkerAuthorization({
+    ...f.worker,
+    roomId: "room-2",
+    agentSession: { ...f.worker.agentSession!, room_id: "room-2" },
+  });
+  f.setNow(now + 4_000);
+  await f.publisher.flush();
+  assert.equal(getEffect(f.database, pubEffect.id)?.state, "prepared", "publish retry survives rollback_required with live dest custody");
+  assert.equal(getEffect(f.database, closeEffect.id)?.state, "prepared", "close retry survives rollback_required with live dest custody");
+  assert.equal(
+    (f.database.prepare("SELECT state FROM execution_approval_publications WHERE request_id='request-2'").get() as { state: string }).state,
+    "attempted",
+  );
+  assert.equal(
+    (f.database.prepare("SELECT state FROM execution_approval_publications WHERE request_id='request'").get() as { state: string }).state,
+    "closing",
+  );
+
+  // Compensation completes (`failed`) -> restore source custody -> both publish and close succeed at deadline!
+  const failedMove = await coordinator.commitInspector({
+    operationId: rollbackMove.operation_id, entryId: "agent", daemonGeneration: 1,
+  });
+  assert.equal(failedMove.phase, "failed");
+  f.custody.installHostGrant(f.grant);
+  f.custody.installWorkerAuthorization(f.worker);
+  f.publisherOptions.publish = async (input) => {
+    f.sent.push(input);
+    return { status: "acknowledged", publicationId: "pub-2", publicationDigest: sha("pub-2"), publishedAtMs: f.getNow() };
+  };
+  f.publisherOptions.closePublication = async (input) => {
+    f.closed.push(input);
+    return { status: "closed", closedAtMs: f.getNow() };
+  };
+  f.setNow(deadline);
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 3, "publish retry succeeds after room-move rollback");
+  assert.equal(f.closed.length, 2, "close retry succeeds after room-move rollback");
+  assert.equal(getEffect(f.database, pubEffect.id)?.state, "completed");
+  assert.equal(getEffect(f.database, closeEffect.id)?.state, "completed");
+  assert.equal(
+    (f.database.prepare("SELECT state FROM execution_approval_publications WHERE request_id='request-2'").get() as { state: string }).state,
+    "acknowledged",
+  );
+  assert.equal(
+    (f.database.prepare("SELECT state FROM execution_approval_publications WHERE request_id='request'").get() as { state: string }).state,
+    "closed",
+  );
+
+  // Terminal `active` room move atomically retires source-room approval retries and invalidates source-room publications.
+  f.approvalsByRequest.set("request-2", {
+    ...adm2.approval,
+    request: { ...adm2.approval.request, state: "superseded" as const },
+  });
+  f.publisherOptions.closePublication = async (input) => { f.closed.push(input); throw new Error("503 unavailable"); };
+  await f.publisher.flush();
+  const [closeMove2] = listEffectsForAgent(f.database, "agent", { kind: EXECUTION_APPROVAL_CLOSE_EFFECT_KIND, states: ["prepared"] });
+  assert.ok(closeMove2);
+
+  const okPrepared = await coordinator.prepareInspector({
+    entryId: "agent", destinationRoomId: "room-2", requestId: "ap-ok-1", daemonGeneration: 1,
+  });
+  const okRotating = await coordinator.commitInspector({
+    operationId: okPrepared.operation_id, entryId: "agent", daemonGeneration: 1,
+  });
+  await coordinator.acknowledgeSourceRevocation({
+    operationId: okRotating.operation_id, entryId: "agent", daemonGeneration: 1, sourceAgentSessionId: "session",
+  });
+  f.custody.installHostGrant({ ...f.grant, roomId: "room-2" });
+  await f.bindingStore.bind({
+    entry_id: "agent",
+    room_id: "room-2",
+    work_attempt_id: "attempt",
+    execution_generation_id: "execution",
+    agent_session_id: "session-dest",
+    api_url: f.grant.apiUrl,
+    agent_session_token: "dest-bearer",
+  });
+  const activeMove = await coordinator.commitInspector({
+    operationId: okRotating.operation_id, entryId: "agent", daemonGeneration: 1,
+  });
+  assert.equal(activeMove.phase, "active");
+  assert.equal(getEffect(f.database, closeMove2.id)?.state, "failed");
+  assert.equal(getEffect(f.database, closeMove2.id)?.last_error, "room_moved");
+  assert.equal(
+    (f.database.prepare("SELECT state FROM execution_approval_publications WHERE request_id='request-2'").get() as { state: string }).state,
+    "invalid",
+  );
+});
+
+test("downgrade/reupgrade stranded prepared approval effects, recoverInactiveExecutingForAgent, and startImmediately=false", async t => {
+  const f = await fullLifecycleFixture(t, { startImmediately: false });
+  assert.equal((f.publisher as unknown as { scheduled: unknown }).scheduled, null, "startImmediately=false must not arm timer before start()");
+
+  // 1. Seed a publication that an older build (.17) already closed directly while a prepared effect stayed in effects.
+  f.setDelegations([delegation(1)]);
+  f.publisherOptions.publish = async (input) => { f.sent.push(input); throw new Error("503 unavailable"); };
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1);
+  const [pubEffect] = listEffectsForAgent(f.database, "agent", { kind: EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND, states: ["prepared"] });
+  assert.ok(pubEffect);
+
+  // Older build acknowledges and closes the publication row without touching effects.
+  f.database.prepare(`
+    UPDATE execution_approval_publications
+    SET state='acknowledged', publication_id='pub-old', publication_digest=?, published_at_ms=?
+    WHERE agent_id='agent' AND request_id='request'
+  `).run(sha("pub-old"), now + 100);
+  f.database.prepare("UPDATE execution_approval_publications SET state='closing' WHERE agent_id='agent' AND request_id='request'").run();
+  f.database.prepare("UPDATE execution_approval_publications SET state='closed', closed_at_ms=? WHERE agent_id='agent' AND request_id='request'").run(now + 200);
+
+  // Even though no open execution_approval_publications rows remain, flush() discovers 'agent' via effects UNION and retires the stranded row with 0 HTTP calls.
+  f.publisherOptions.publish = async (input) => { f.sent.push(input); return { status: "acknowledged", publicationId: "dup", publicationDigest: sha("dup"), publishedAtMs: now }; };
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1, "downgrade/reupgrade must not send a duplicate upload");
+  assert.equal(getEffect(f.database, pubEffect.id)?.state, "failed");
+  assert.equal(getEffect(f.database, pubEffect.id)?.last_error, "publication_closed");
+
+  // 2. recoverInactiveExecutingForAgent recovers an orphaned executing row while leaving genuinely active executing rows untouched.
+  f.database.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES ('eff-orphan-exec', 'agent', ?, 'eap:v1:orphan-exec', 1, 'executing', ?, NULL, 1, 1, 1000000, NULL, NULL, ?, ?)
+  `).run(
+    EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND,
+    JSON.stringify({
+      room_id: "room", delegation_instance_id: "delegation-1", delegation_revision: 1,
+      request_id: "request", request_version: 1, projection_sha256: projectionSha256,
+    }),
+    new Date(now).toISOString(),
+    new Date(now).toISOString(),
+  );
+  assert.equal(f.publisher.recoverInactiveExecutingForAgent("agent"), 1);
+  assert.equal(getEffect(f.database, "eff-orphan-exec")?.state, "prepared");
+  assert.equal(getEffect(f.database, "eff-orphan-exec")?.last_error, "recovered_inactive_executing_effect");
+
+  // 3. start() arms the timer once startup recovery completes.
+  f.publisher.start();
+  assert.notEqual((f.publisher as unknown as { scheduled: unknown }).scheduled, null);
 });

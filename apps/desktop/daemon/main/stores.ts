@@ -213,6 +213,7 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       runtimeCustody: this.workerRuntimeCustody,
       deleteAgentStream: (entryId) => { this.agentStreamRegistry.delete(entryId); this.liveRoomShare.forget(entryId); },
       reconcileRoomWorkForPurge: (entryId) => { this.roomWorkPublisher?.recoverInactiveExecutingForAgent(entryId); },
+      reconcileApprovalPublicationsForPurge: (entryId) => { this.executionDelegations?.recoverInactiveApprovalPublicationsForPurge(entryId); },
       ephemeralProvisioner: this.ephemeralProvisioner,
       nowMs: () => this.nowMs(),
     });

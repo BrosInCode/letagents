@@ -93,10 +93,11 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
         },
         recordStopped: (agentId) => this.providerExecution?.noteRecordStopped(agentId),
       });
-      this.executionDelegations.start();
+      this.executionDelegations.attachApprovalPublisher();
     }
     const effectRecovery = await this.effectExecutor?.recoverOnStartup();
     this.roomWorkPublisher?.start();
+    this.executionDelegations.start();
     if (effectRecovery && effectRecovery.uncertainAgentIds.length > 0) {
       await this.supervisedInbox.pruneAgentsAfterEffectRecovery(effectRecovery.uncertainAgentIds);
     }

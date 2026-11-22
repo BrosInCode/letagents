@@ -10,6 +10,8 @@ import {
   BOUNDED_MCP_EFFECT_KIND,
   completePreparedEffectAtomicallyInTransaction,
   failPreparedJoinRoomEffectInTransaction,
+  retireExecutionApprovalEffectsForPurgeInTransaction,
+  retireExecutionApprovalEffectsForRoomMoveInTransaction,
   retireRoomWorkEffectsForPurgeInTransaction,
   retireRoomWorkEffectsInTransaction,
   rowToBoundedMcpEffect,
@@ -171,6 +173,13 @@ export const roomMovesAndPurges = storeMethods({
               error: "room_moved",
               nowIso: updatedAt,
             });
+            retireExecutionApprovalEffectsForRoomMoveInTransaction(database, {
+              agentId: input.agentId,
+              expectedEpoch: updated.daemon_generation,
+              roomId: updated.source_room_id,
+              error: "room_moved",
+              nowIso: updatedAt,
+            });
           }
           if (input.to === "active" || input.to === "failed") {
             // Reaching a terminal room-move phase releases the compensation rows
@@ -224,6 +233,11 @@ export const roomMovesAndPurges = storeMethods({
         const now = new Date().toISOString();
         this.settleGivenAgentInboxForPurge(database, input.agentId, now);
         retireRoomWorkEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
+        retireExecutionApprovalEffectsForPurgeInTransaction(database, {
           agentId: input.agentId,
           expectedEpoch: input.daemonGeneration,
           nowIso: now,
@@ -436,12 +450,18 @@ export const roomMovesAndPurges = storeMethods({
             expectedEpoch: input.daemonGeneration,
             nowIso: commitNow,
           });
+          retireExecutionApprovalEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
           const attachment = this.assertPurgePreconditions(database, input.agentId);
           if (attachment.attachedWorkAttemptId !== purge.attached_work_attempt_id || attachment.preservedWorkspacePath !== purge.preserved_workspace_path) {
             throw new ManifestConflictError("Purge target attachment changed after preparation.");
           }
           for (const [table, column] of [
-            ["effects", "agent_id"], ["effect_tombstones", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
+            ["effects", "agent_id"], ["effect_tombstones", "agent_id"], ["execution_approval_publications", "agent_id"],
+            ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
             ["supervised_agent_ingress_cursors", "agent_id"], ["supervised_agent_history_boundaries", "agent_id"], ["supervised_agent_pruned_sources", "agent_id"],
             ["supervised_worker_mint_states", "agent_id"], ["supervised_worker_sessions", "agent_id"], ["inbox_items", "agent_id"], ["worker_binding_publications", "entry_id"],
             ["worker_generation_verifications", "entry_id"], ["worker_binding_watermarks", "entry_id"], ["worker_session_bindings", "entry_id"],
