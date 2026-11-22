@@ -543,3 +543,48 @@ test("notifyImmediate bypasses coalescing and delivers rpc_effects deltas withou
   const full = await watch.watch({ afterDaemonGeneration: 4, afterSequence: 0, waitMs: 0, changedOnly: false });
   assert.deepEqual(full.rpc_effects, [settledEffect]);
 });
+
+test("rpc_effects eviction advances tracked history boundary so changedOnly subscribers receive a full snapshot", async () => {
+  let evictionVersion = 0;
+  let effects: import("#daemon-contract/index.js").DaemonRpcEffectView[] = [{
+    effect_id: "rpc:rpc_retire_agent:1",
+    agent_id: "a",
+    kind: "rpc_retire_agent",
+    daemon_generation: 4,
+    state: "executing",
+    updated_at: "2026-11-22T00:00:00.000Z",
+  }];
+  const watch = new DaemonStateWatch({
+    currentGeneration: () => 4,
+    isHandoffScheduled: () => false,
+    assertCurrent: async () => undefined,
+    entries: async () => [view("a", 1)],
+    rpcEffects: () => effects.map((effect) => ({ ...effect })),
+    rpcEffectEvictionVersion: () => evictionVersion,
+  });
+
+  const initial = await watch.watch({ afterDaemonGeneration: 0, afterSequence: 0, waitMs: 0, changedOnly: true });
+  assert.equal("complete" in initial, false, "initial snapshot is complete");
+
+  // Evict effect #1 and replace it with a newer settled effect #257.
+  evictionVersion = 1;
+  effects = [{
+    effect_id: "rpc:rpc_retire_agent:257",
+    agent_id: "a",
+    kind: "rpc_retire_agent",
+    daemon_generation: 4,
+    state: "completed",
+    result: { outcome: "retired" },
+    updated_at: "2026-11-22T00:00:05.000Z",
+  }];
+  watch.notifyImmediate();
+
+  const afterEviction = await watch.watch({
+    afterDaemonGeneration: 4,
+    afterSequence: initial.sequence,
+    waitMs: 0,
+    changedOnly: true,
+  });
+  assert.equal("complete" in afterEviction, false, "eviction forces a full snapshot so clients can detect missing effect ids");
+  assert.deepEqual(afterEviction.rpc_effects?.map((item) => item.effect_id), ["rpc:rpc_retire_agent:257"]);
+});

@@ -5664,6 +5664,47 @@
       },
       "versionAgnostic": false
     },
+    "supervisor.get_rpc_effect": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": true,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "effect_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "effect_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/DaemonRpcEffectView"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
     "supervisor.host_approval_challenge": {
       "handoffDrainAllowed": true,
       "handoffLifecycle": false,

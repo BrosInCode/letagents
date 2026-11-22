@@ -98,7 +98,7 @@ test("committed rpc-contract.schema.json matches the Zod contract byte-for-byte"
   assert.equal(doc.contract.implementationVersion, DAEMON_IMPLEMENTATION_VERSION);
   assert.equal(doc.contract.stateActivitySummaryLimit, DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT);
   assert.deepEqual(Object.keys(doc.methods).sort(), [...DAEMON_RPC_METHOD_NAMES]);
-  assert.equal(DAEMON_RPC_METHOD_NAMES.length, 48);
+  assert.equal(DAEMON_RPC_METHOD_NAMES.length, 49);
 
   // Every internal $ref must resolve cleanly inside $defs so a non-TS consumer
   // (for example a Rust code generator) never encounters a dangling reference.
@@ -376,7 +376,7 @@ test("contract metadata drives framing limits, version gating, handoff sets, and
   assert.deepEqual([...VERSION_AGNOSTIC_METHODS], ["daemon.negotiate"]);
   assert.deepEqual(
     [...HANDOFF_LIFECYCLE_METHODS].sort(),
-    ["daemon.negotiate", "daemon.prepare_handoff", "daemon.status", "manifest.watch_state"],
+    ["daemon.negotiate", "daemon.prepare_handoff", "daemon.status", "manifest.watch_state", "supervisor.get_rpc_effect"],
   );
   assert.ok(HANDOFF_DRAIN_METHODS.has("supervisor.execute_bounded_tool"));
   assert.equal(HANDOFF_DRAIN_METHODS.has("manifest.put"), false);

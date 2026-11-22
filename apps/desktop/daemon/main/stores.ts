@@ -160,6 +160,7 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       ...daemonAuthority, coalesceMs: STATE_WATCH_NOTIFICATION_COALESCE_MS,
       entries: async () => this.readModel.entriesWithDerivedLiveness((await this.store.loadForStateWatch()).entries, { reuseUnchangedInboxInputs: true }),
       rpcEffects: (generation) => this.asyncRpcEffects.listForGeneration(generation),
+      rpcEffectEvictionVersion: (generation) => this.asyncRpcEffects.evictionVersion(generation),
     });
     this.agentStreamRegistry = new AgentStreamRegistry({
       isHandoffScheduled: () => this.handoffScheduled,

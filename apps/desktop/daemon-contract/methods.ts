@@ -42,6 +42,7 @@ import {
   daemonRecoverAgentRuntimeResultSchema,
   daemonRetireAgentResultSchema,
   daemonRoomMoveRecordSchema,
+  daemonRpcEffectViewSchema,
   daemonStateWatchResultSchema,
   daemonStatusSchema,
   daemonTurnControlResultSchema,
@@ -603,6 +604,18 @@ export const DAEMON_RPC_METHODS = {
     timeout: FIXED_DEFAULT,
     handoffDrainAllowed: true,
     invalidParamsMessage: "Room-move status requires exact typed coordinates.",
+  }),
+
+  "supervisor.get_rpc_effect": defineMethod({
+    params: z.object({
+      effect_id: exactNonEmptyString,
+      daemon_generation: positiveSafeInt,
+    }),
+    result: daemonRpcEffectViewSchema.nullable(),
+    timeout: FIXED_DEFAULT,
+    handoffLifecycle: true,
+    handoffDrainAllowed: true,
+    invalidParamsMessage: "Async RPC effect lookup requires an exact effect_id and daemon_generation.",
   }),
 
   "supervisor.host_approval_challenge": defineMethod({

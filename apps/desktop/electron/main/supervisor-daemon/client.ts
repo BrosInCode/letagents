@@ -41,6 +41,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     resolve: (view: DaemonRpcEffectView) => void;
     reject: (error: Error) => void;
   }>();
+  private readonly probingRpcEffects = new Set<string>();
   private rpcEffectWatchLoop: {
     generation: number;
     controller: AbortController;
@@ -144,9 +145,10 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     ) {
       throw new Error("Supervisor daemon returned an invalid state snapshot.");
     }
-    this.observeRpcEffects(value.daemon_generation, value.rpc_effects);
+    const isCompleteSnapshot = !("complete" in value) || value.complete !== false;
+    this.observeRpcEffects(value.daemon_generation, value.rpc_effects, isCompleteSnapshot);
     const entries = value.entries.map((entry) => mapEntry(entry, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT));
-    if (!("complete" in value) || value.complete !== false) {
+    if (isCompleteSnapshot) {
       return { complete: true, daemonGeneration: value.daemon_generation, sequence: value.sequence, entries };
     }
     const ids = (list: unknown): string[] | null =>
@@ -214,7 +216,15 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
         resolve,
         reject,
       });
+      const watchAlreadyRunning = Boolean(
+        this.rpcEffectWatchLoop
+        && this.rpcEffectWatchLoop.generation === daemonGeneration
+        && !this.rpcEffectWatchLoop.controller.signal.aborted,
+      );
       this.ensureRpcEffectWatch(daemonGeneration);
+      if (watchAlreadyRunning && !this.probingRpcEffects.has(effectId)) {
+        void this.probeMissingRpcEffect(effectId, daemonGeneration);
+      }
     });
   }
 
@@ -240,8 +250,10 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
   private observeRpcEffects(
     daemonGeneration: number,
     effects: readonly DaemonRpcEffectView[] | undefined,
+    isCompleteSnapshot: boolean,
   ): void {
     this.rejectStaleRpcEffectWaiters(daemonGeneration, true);
+    const presentIds = isCompleteSnapshot ? new Set<string>() : null;
     if (Array.isArray(effects) && effects.length > 0) {
       let byId = this.observedRpcEffects.get(daemonGeneration);
       if (!byId) {
@@ -261,6 +273,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       }
       for (const effect of effects) {
         if (!effect || typeof effect.effect_id !== "string" || effect.daemon_generation !== daemonGeneration) continue;
+        presentIds?.add(effect.effect_id);
         const previous = byId.get(effect.effect_id);
         byId.set(effect.effect_id, effect);
         const terminal = effect.state === "completed" || effect.state === "failed" || effect.state === "uncertain";
@@ -282,10 +295,67 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
         }
       }
     }
+    if (presentIds) {
+      for (const [effectId, waiter] of this.rpcEffectWaiters) {
+        if (
+          waiter.generation === daemonGeneration
+          && !presentIds.has(effectId)
+          && !this.probingRpcEffects.has(effectId)
+        ) {
+          void this.probeMissingRpcEffect(effectId, daemonGeneration);
+        }
+      }
+    }
     if (this.rpcEffectWaiters.size === 0 && this.rpcEffectWatchLoop) {
       const loop = this.rpcEffectWatchLoop;
       this.rpcEffectWatchLoop = null;
       loop.controller.abort();
+    }
+  }
+
+  /**
+   * Durable lookup fallback when a complete state-watch snapshot omits an
+   * awaited `effect_id` (for example after watch-cache eviction past 256
+   * settled effects). Prevents silent hangs while keeping zero overhead on the
+   * normal state-watch fast path.
+   */
+  private async probeMissingRpcEffect(effectId: string, daemonGeneration: number): Promise<void> {
+    this.probingRpcEffects.add(effectId);
+    try {
+      const durable = await this.call("supervisor.get_rpc_effect", {
+        effect_id: effectId,
+        daemon_generation: daemonGeneration,
+      });
+      const waiter = this.rpcEffectWaiters.get(effectId);
+      if (!waiter || waiter.generation !== daemonGeneration) return;
+      if (!durable) {
+        this.rpcEffectWaiters.delete(effectId);
+        this.invalidateReadyStatus();
+        waiter.reject(
+          new Error(`Supervisor daemon has no record of async RPC effect ${effectId} for generation ${daemonGeneration}.`),
+        );
+        if (this.rpcEffectWaiters.size === 0 && this.rpcEffectWatchLoop) {
+          const loop = this.rpcEffectWatchLoop;
+          this.rpcEffectWatchLoop = null;
+          loop.controller.abort();
+        }
+        return;
+      }
+      this.observeRpcEffects(daemonGeneration, [durable], false);
+    } catch (error) {
+      const waiter = this.rpcEffectWaiters.get(effectId);
+      if (waiter && waiter.generation === daemonGeneration) {
+        this.rpcEffectWaiters.delete(effectId);
+        this.invalidateReadyStatus();
+        waiter.reject(error instanceof Error ? error : new Error(String(error)));
+        if (this.rpcEffectWaiters.size === 0 && this.rpcEffectWatchLoop) {
+          const loop = this.rpcEffectWatchLoop;
+          this.rpcEffectWatchLoop = null;
+          loop.controller.abort();
+        }
+      }
+    } finally {
+      this.probingRpcEffects.delete(effectId);
     }
   }
 

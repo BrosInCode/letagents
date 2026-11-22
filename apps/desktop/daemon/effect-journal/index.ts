@@ -85,6 +85,7 @@ export {
   ASYNC_RPC_EFFECT_KINDS,
   MAX_RETAINED_SETTLED_RPC_EFFECTS,
   AsyncRpcEffectCoordinator,
+  AsyncRpcPreExecutionRefusalError,
   isAsyncRpcEffectKind,
   type AsyncRpcEffectCoordinatorOptions,
 } from "./rpc-effects.js";

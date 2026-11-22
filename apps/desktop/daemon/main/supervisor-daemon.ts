@@ -211,6 +211,7 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       getAgentInspectorDetail: this.getAgentInspectorDetail.bind(this),
       getCurrentInspectorRoomMove: (input) => this.roomMoves.getCurrentInspector(input),
       getInspectorRoomMove: (input) => this.roomMoves.getInspector(input),
+      getRpcEffect: (effectId, daemonGeneration) => this.asyncRpcEffects.getForGeneration(effectId, daemonGeneration),
       installHostGrant: (input) => this.asyncRpcEffects.submitInstallHostGrant(input, () => this.userAction(
         input.credential_only ? input.entry_id : null,
         () => this.executionDelegations.installHostGrant(input),

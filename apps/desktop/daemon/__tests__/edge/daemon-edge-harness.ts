@@ -1025,13 +1025,26 @@ export class EdgeDaemonClient {
         );
       }
       const match = snapshot.rpc_effects?.find((effect) => effect.effect_id === response.effect_id);
-      if (match) {
-        if (match.state === "completed") return match.result as T;
-        if (match.state === "failed" || match.state === "uncertain") {
+      const isCompleteSnapshot = snapshot.complete !== false;
+      const resolvedEffect = match
+        ?? (isCompleteSnapshot
+          ? await this.request<DaemonRpcEffectView | null>("supervisor.get_rpc_effect", {
+            effect_id: response.effect_id,
+            daemon_generation: response.daemon_generation,
+          }, { timeoutMs: 5_000 })
+          : null);
+      if (resolvedEffect) {
+        if (resolvedEffect.state === "completed") return resolvedEffect.result as T;
+        if (resolvedEffect.state === "failed" || resolvedEffect.state === "uncertain") {
           throw new Error(
-            match.error || `Daemon RPC effect ${method} (${response.effect_id}) ended in state ${match.state}.`,
+            resolvedEffect.error
+              || `Daemon RPC effect ${method} (${response.effect_id}) ended in state ${resolvedEffect.state}.`,
           );
         }
+      } else if (isCompleteSnapshot) {
+        throw new Error(
+          `Supervisor daemon has no record of async RPC effect ${response.effect_id} for generation ${response.daemon_generation}.`,
+        );
       }
       const noProgress = !initial && snapshot.daemon_generation === afterGen && snapshot.sequence === afterSeq;
       afterGen = snapshot.daemon_generation;

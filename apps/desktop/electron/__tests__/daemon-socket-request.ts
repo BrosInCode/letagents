@@ -93,17 +93,32 @@ export async function daemonSocketRequest(
     const match = snapshot.rpc_effects?.find(
       (effect: DaemonRpcEffectView) => effect.effect_id === accepted.effect_id,
     );
-    if (match) {
-      if (match.state === "completed") {
-        return { ok: true, result: match.result, version: reply.version };
+    const resolvedEffect: DaemonRpcEffectView | null = match
+      ?? (!("complete" in snapshot) || snapshot.complete !== false
+        ? await daemonRawSocketRequest(
+          socketPath,
+          "supervisor.get_rpc_effect",
+          { effect_id: accepted.effect_id, daemon_generation: accepted.daemon_generation },
+          version,
+        ).then((lookup) => (lookup.ok ? (lookup.result as DaemonRpcEffectView | null) : null))
+        : null);
+    if (resolvedEffect) {
+      if (resolvedEffect.state === "completed") {
+        return { ok: true, result: resolvedEffect.result, version: reply.version };
       }
-      if (match.state === "failed" || match.state === "uncertain") {
+      if (resolvedEffect.state === "failed" || resolvedEffect.state === "uncertain") {
         return {
           ok: false,
-          error: match.error ?? `Daemon RPC effect ${method} ended in state ${match.state}.`,
+          error: resolvedEffect.error ?? `Daemon RPC effect ${method} ended in state ${resolvedEffect.state}.`,
           version: reply.version,
         };
       }
+    } else if (!("complete" in snapshot) || snapshot.complete !== false) {
+      return {
+        ok: false,
+        error: `Supervisor daemon has no record of async RPC effect ${accepted.effect_id} for generation ${accepted.daemon_generation}.`,
+        version: reply.version,
+      };
     }
     const noProgress = !initial && snapshot.daemon_generation === afterGen && snapshot.sequence === afterSeq;
     afterGen = snapshot.daemon_generation;

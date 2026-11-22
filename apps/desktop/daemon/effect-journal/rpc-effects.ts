@@ -1,18 +1,22 @@
 /**
  * Asynchronous RPC effect coordinator backed by the unified `effects` journal
- * and `EffectExecutor`, publishing outcomes through `DaemonStateWatch`.
+ * and `EffectExecutor`, publishing outcomes through `DaemonStateWatch` and
+ * supporting durable lookup (`supervisor.get_rpc_effect`) after watch-cache
+ * eviction.
  *
  * Long-running control-socket RPCs (`apply_agent_configuration`,
  * `recover_agent_runtime`, `bootstrap_room_ingress`, `install_host_grant`,
  * `retire_agent`) prepare an effect under the current daemon generation, start
  * execution immediately on `EffectExecutor`, and return `{ effect_id,
  * daemon_generation }` within the short default socket timeout. Outcomes arrive
- * over `manifest.watch_state` (`rpc_effects`).
+ * over `manifest.watch_state` (`rpc_effects`), and any caller whose accepted
+ * `effect_id` was evicted from the bounded watch cache recovers its durable
+ * outcome via `supervisor.get_rpc_effect`.
  *
  * Security invariant: bearer secrets (such as `supervisor_grant` on
  * `supervisor.install_host_grant`) NEVER enter `effects.payload`, SQLite, or
  * `manifest.watch_state`. They reside strictly in process memory for the active
- * invocation and are deleted in `finally` and on `dispose()`.
+ * invocation and are deleted upon dequeue and on `dispose()`.
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -28,6 +32,7 @@ import { projectStateWatchEntries } from "../state-watch-projection.js";
 import type { EffectExecutor } from "./executor.js";
 import {
   EffectFenceError,
+  EffectValidationError,
   MAX_EFFECT_AGENT_ID_LENGTH,
   MAX_EFFECT_OUTCOME_BYTES,
   truncateEffectError,
@@ -48,6 +53,22 @@ export const MAX_RETAINED_SETTLED_RPC_EFFECTS = 256;
 
 const INVALID_AGENT_PLACEHOLDER = "__invalid_entry__";
 
+/**
+ * Explicit error marker for provable pre-execution/domain refusals where no
+ * external side effect was started. Unmarked throws after execution begins
+ * fail closed as `uncertain` so callers never receive a false `failed` claim.
+ */
+export class AsyncRpcPreExecutionRefusalError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "AsyncRpcPreExecutionRefusalError";
+  }
+}
+
+function isTerminalEffectState(state: EffectRecord["state"]): boolean {
+  return state === "completed" || state === "failed" || state === "uncertain";
+}
+
 function sanitizeEffectAgentId(raw: string): string {
   if (
     typeof raw === "string"
@@ -63,6 +84,11 @@ function sanitizeEffectAgentId(raw: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatUncertainExecutionError(detail: string): string {
+  if (/uncertain|verify (?:external )?state/i.test(detail)) return detail;
+  return `${detail} (Outcome is uncertain; verify external state before repeating it.)`;
 }
 
 async function raceWithAbortSignal<T>(
@@ -127,10 +153,17 @@ function effectRecordToView(effect: EffectRecord): DaemonRpcEffectView {
 
 type PendingRpcInvocation = {
   run: (signal: AbortSignal) => Promise<unknown>;
+  isPreExecutionRefusal?: (error: unknown) => boolean;
+};
+
+type ExecutionProgress = {
+  phase: "pending" | "executing" | "completed_in_memory" | "failed_in_memory" | "uncertain_in_memory";
+  executionError?: string;
 };
 
 export type AsyncRpcEffectCoordinatorOptions = {
   getExecutor: () => EffectExecutor | null;
+  getEffect?: (effectId: string) => EffectRecord | null;
   notifyImmediate: () => void;
   nowIso?: () => string;
   maxRetainedSettled?: number;
@@ -138,8 +171,10 @@ export type AsyncRpcEffectCoordinatorOptions = {
 
 export class AsyncRpcEffectCoordinator {
   private readonly pending = new Map<string, PendingRpcInvocation>();
+  private readonly progressById = new Map<string, ExecutionProgress>();
   private readonly viewsByGeneration = new Map<number, Map<string, DaemonRpcEffectView>>();
   private readonly settledOrderByGeneration = new Map<number, string[]>();
+  private readonly evictionVersionByGeneration = new Map<number, number>();
   private readonly maxRetainedSettled: number;
   private disposed = false;
 
@@ -156,37 +191,68 @@ export class AsyncRpcEffectCoordinator {
       execute: async (claimed, ctx) => {
         const invocation = this.pending.get(claimed.id);
         this.pending.delete(claimed.id);
+        const progress = this.progressById.get(claimed.id) ?? { phase: "executing" as const };
+        progress.phase = "executing";
+        this.progressById.set(claimed.id, progress);
         if (!invocation) {
+          const detail = "The RPC effect invocation is no longer resident in this daemon generation.";
+          progress.phase = "failed_in_memory";
+          progress.executionError = detail;
           return {
             status: "failed",
-            error: "The RPC effect invocation is no longer resident in this daemon generation.",
+            error: detail,
           };
         }
         try {
           const raced = await raceWithAbortSignal(invocation.run(ctx.signal), ctx.signal);
           if (raced.aborted) {
+            const detail = "Daemon stopped or handed off while this operation was in flight.";
+            progress.phase = "uncertain_in_memory";
+            progress.executionError = detail;
             return {
               status: "uncertain",
-              error: "Daemon stopped or handed off while this operation was in flight.",
+              error: detail,
             };
           }
+          progress.phase = "completed_in_memory";
           return {
             status: "completed",
             outcome: boundOutcomeForJournal(raced.value),
           };
         } catch (error) {
           if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) {
+            progress.phase = "uncertain_in_memory";
+            progress.executionError = errorMessage(error);
             throw error;
           }
           if (ctx.signal.aborted) {
+            const detail = "Daemon stopped or handed off while this operation was in flight.";
+            progress.phase = "uncertain_in_memory";
+            progress.executionError = detail;
             return {
               status: "uncertain",
-              error: "Daemon stopped or handed off while this operation was in flight.",
+              error: detail,
             };
           }
+          const rawDetail = errorMessage(error);
+          if (
+            error instanceof AsyncRpcPreExecutionRefusalError
+            || error instanceof EffectValidationError
+            || invocation.isPreExecutionRefusal?.(error) === true
+          ) {
+            progress.phase = "failed_in_memory";
+            progress.executionError = rawDetail;
+            return {
+              status: "failed",
+              error: rawDetail,
+            };
+          }
+          const detail = formatUncertainExecutionError(rawDetail);
+          progress.phase = "uncertain_in_memory";
+          progress.executionError = detail;
           return {
-            status: "failed",
-            error: errorMessage(error),
+            status: "uncertain",
+            error: detail,
           };
         } finally {
           // Immediately clear any in-memory invocation closure (including any
@@ -194,8 +260,9 @@ export class AsyncRpcEffectCoordinator {
           this.pending.delete(claimed.id);
         }
       },
-      settle: async (_claimed, _result, defaultSettle) => {
+      settle: async (claimed, _result, defaultSettle) => {
         const settled = defaultSettle();
+        this.progressById.delete(claimed.id);
         this.recordView(effectRecordToView(settled));
         this.options.notifyImmediate();
         return settled;
@@ -216,6 +283,7 @@ export class AsyncRpcEffectCoordinator {
     agentId: string;
     payload: Record<string, unknown>;
     run: (signal: AbortSignal) => Promise<TResult>;
+    isPreExecutionRefusal?: (error: unknown) => boolean;
   }): Promise<DaemonAsyncRpcAccepted> {
     if (this.disposed) {
       throw new EffectFenceError("Supervisor daemon is shutting down.");
@@ -226,7 +294,11 @@ export class AsyncRpcEffectCoordinator {
     }
     const effectId = `rpc:${input.kind}:${randomUUID()}`;
     const safeAgentId = sanitizeEffectAgentId(input.agentId);
-    this.pending.set(effectId, { run: input.run });
+    this.pending.set(effectId, {
+      run: input.run,
+      ...(input.isPreExecutionRefusal ? { isPreExecutionRefusal: input.isPreExecutionRefusal } : {}),
+    });
+    this.progressById.set(effectId, { phase: "pending" });
     let prepared: EffectRecord;
     try {
       prepared = (await executor.prepare({
@@ -240,11 +312,13 @@ export class AsyncRpcEffectCoordinator {
       })).effect;
     } catch (error) {
       this.pending.delete(effectId);
+      this.progressById.delete(effectId);
       throw error;
     }
     this.recordView(effectRecordToView(prepared));
     void executor.runEffect(prepared.id).then(
       (settled) => {
+        this.progressById.delete(settled.id);
         const existing = this.viewsByGeneration.get(settled.epoch)?.get(settled.id);
         if (!existing || existing.state !== settled.state) {
           this.recordView(effectRecordToView(settled));
@@ -253,14 +327,62 @@ export class AsyncRpcEffectCoordinator {
       },
       (error) => {
         this.pending.delete(prepared.id);
+        const progress = this.progressById.get(prepared.id);
+        this.progressById.delete(prepared.id);
+        const durable = this.safeGetDurableEffect(prepared.id);
+        if (durable && isTerminalEffectState(durable.state)) {
+          this.recordView(effectRecordToView(durable));
+          this.options.notifyImmediate();
+          return;
+        }
+        const rejectionDetail = errorMessage(error);
+        const nowIso = this.options.nowIso?.() ?? new Date().toISOString();
+        const started = (progress !== undefined && progress.phase !== "pending")
+          || (durable !== null && (durable.state === "executing" || durable.attempt_count >= 1));
+        if (!started) {
+          this.recordView({
+            effect_id: prepared.id,
+            agent_id: prepared.agent_id,
+            kind: prepared.kind as DaemonAsyncRpcEffectKind,
+            daemon_generation: prepared.epoch,
+            state: "failed",
+            error: truncateEffectError(
+              `Operation did not start before error (not recorded in effect journal): ${rejectionDetail}`,
+            ),
+            updated_at: nowIso,
+          });
+          this.options.notifyImmediate();
+          return;
+        }
+        if (progress?.phase === "failed_in_memory") {
+          const base = progress.executionError ?? rejectionDetail;
+          this.recordView({
+            effect_id: prepared.id,
+            agent_id: prepared.agent_id,
+            kind: prepared.kind as DaemonAsyncRpcEffectKind,
+            daemon_generation: prepared.epoch,
+            state: "failed",
+            error: truncateEffectError(
+              `${base} (Failure receipt could not be recorded in the effect journal: ${rejectionDetail}.)`,
+            ),
+            updated_at: nowIso,
+          });
+          this.options.notifyImmediate();
+          return;
+        }
+        const uncertainError = progress?.phase === "completed_in_memory"
+          ? `Action completed in memory, but its receipt could not be recorded in the effect journal (${rejectionDetail}); verify external state before repeating it.`
+          : progress?.phase === "uncertain_in_memory"
+            ? `${progress.executionError ?? rejectionDetail} (Outcome is uncertain and could not be recorded in the effect journal: ${rejectionDetail}; verify external state before repeating it.)`
+            : `Outcome is uncertain: execution started, but its receipt could not be recorded in the effect journal (${rejectionDetail}); verify external state before repeating it.`;
         this.recordView({
           effect_id: prepared.id,
           agent_id: prepared.agent_id,
           kind: prepared.kind as DaemonAsyncRpcEffectKind,
           daemon_generation: prepared.epoch,
-          state: "failed",
-          error: truncateEffectError(errorMessage(error)),
-          updated_at: this.options.nowIso?.() ?? new Date().toISOString(),
+          state: "uncertain",
+          error: truncateEffectError(uncertainError),
+          updated_at: nowIso,
         });
         this.options.notifyImmediate();
       },
@@ -385,10 +507,44 @@ export class AsyncRpcEffectCoordinator {
     return [...map.values()].map((view) => ({ ...view }));
   }
 
+  /**
+   * Monotonic counter incremented whenever settled RPC effects are evicted from
+   * `listForGeneration(generation)`. `DaemonStateWatch` uses this to force a
+   * full snapshot for delta subscribers that straddled an eviction.
+   */
+  evictionVersion(generation: number): number {
+    return this.evictionVersionByGeneration.get(generation) ?? 0;
+  }
+
+  /**
+   * Bounded, durable lookup for an accepted async RPC effect in `generation`.
+   * Checks the live in-memory projection first (preserving unrecorded
+   * uncertainty views when a journal write fails), then falls back to the
+   * durable SQLite `effects` table after watch-cache eviction.
+   */
+  getForGeneration(effectId: string, generation: number): DaemonRpcEffectView | null {
+    const inMemory = this.viewsByGeneration.get(generation)?.get(effectId);
+    if (inMemory) return { ...inMemory };
+    const durable = this.safeGetDurableEffect(effectId);
+    if (!durable || !isAsyncRpcEffectKind(durable.kind) || durable.epoch !== generation) {
+      return null;
+    }
+    return effectRecordToView(durable);
+  }
+
   /** Wipes all queued in-memory invocations (and any secret closures) on shutdown/handoff. */
   dispose(): void {
     this.disposed = true;
     this.pending.clear();
+  }
+
+  private safeGetDurableEffect(effectId: string): EffectRecord | null {
+    try {
+      if (this.options.getEffect) return this.options.getEffect(effectId);
+      return this.options.getExecutor()?.getEffect(effectId) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   private recordView(view: DaemonRpcEffectView): void {
@@ -400,6 +556,7 @@ export class AsyncRpcEffectCoordinator {
         if (oldGeneration < generation) {
           this.viewsByGeneration.delete(oldGeneration);
           this.settledOrderByGeneration.delete(oldGeneration);
+          this.evictionVersionByGeneration.delete(oldGeneration);
         }
       }
       byId = new Map();
@@ -408,9 +565,8 @@ export class AsyncRpcEffectCoordinator {
     const previous = byId.get(view.effect_id);
     byId.set(view.effect_id, view);
 
-    const terminal = view.state === "completed" || view.state === "failed" || view.state === "uncertain";
-    const wasTerminal = previous !== undefined
-      && (previous.state === "completed" || previous.state === "failed" || previous.state === "uncertain");
+    const terminal = isTerminalEffectState(view.state);
+    const wasTerminal = previous !== undefined && isTerminalEffectState(previous.state);
     if (terminal && !wasTerminal) {
       let settledOrder = this.settledOrderByGeneration.get(generation);
       if (!settledOrder) {
@@ -420,7 +576,13 @@ export class AsyncRpcEffectCoordinator {
       settledOrder.push(view.effect_id);
       while (settledOrder.length > this.maxRetainedSettled) {
         const evicted = settledOrder.shift();
-        if (evicted) byId.delete(evicted);
+        if (evicted) {
+          byId.delete(evicted);
+          this.evictionVersionByGeneration.set(
+            generation,
+            (this.evictionVersionByGeneration.get(generation) ?? 0) + 1,
+          );
+        }
       }
     }
   }

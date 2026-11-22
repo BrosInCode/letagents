@@ -11,12 +11,20 @@ import {
 import { DaemonStateDatabase } from "../daemon-state-database.js";
 import {
   AsyncRpcEffectCoordinator,
+  AsyncRpcPreExecutionRefusalError,
   EffectExecutor,
+  MAX_RETAINED_SETTLED_RPC_EFFECTS,
   getEffect,
   prepareEffect,
   claimEffectForExecution,
 } from "../effect-journal/index.js";
+import { DaemonStateWatch } from "../daemon-state-watch.js";
+import { DaemonControlSocket } from "../control-socket.js";
 import { MAX_EFFECT_OUTCOME_BYTES } from "../effect-journal/types.js";
+import {
+  DAEMON_IMPLEMENTATION_VERSION,
+  DAEMON_PROTOCOL_VERSION,
+} from "#daemon-contract/index.js";
 import { SupervisorDaemonClient, supervisorDaemonSpawnEnvironment } from "../../electron/main/supervisor-daemon.js";
 import {
   SupervisorDaemon,
@@ -561,6 +569,324 @@ test("SupervisorDaemonClient succeeds over a real daemon when async RPC executio
     );
   } finally {
     await daemon.stop().catch(() => undefined);
+    if (previousAllow === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousAllow;
+    if (previousRuntimeFp === undefined) delete process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+    else process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = previousRuntimeFp;
+    if (previousCompatFp === undefined) delete process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+    else process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT = previousCompatFp;
+    await env.cleanup();
+  }
+});
+
+test("post-action throws settle as uncertain while explicit pre-execution refusals settle as failed", async () => {
+  const env = await fixture();
+  const dbPath = join(env.root, "daemon-state.sqlite");
+  const stateDb = await DaemonStateDatabase.open(dbPath);
+  const noopFence = () => {};
+  let notifyResolvers: Array<() => void> = [];
+  const waitForNotify = () => new Promise<void>((resolve) => { notifyResolvers.push(resolve); });
+  try {
+    const executor = new EffectExecutor({
+      getDatabase: () => stateDb.connection,
+      currentDaemonGeneration: () => 5,
+      assertCurrent: async () => undefined,
+      assertWriteFence: noopFence,
+      isClosing: () => false,
+    });
+    const coordinator = new AsyncRpcEffectCoordinator({
+      getExecutor: () => executor,
+      notifyImmediate: () => {
+        const pending = notifyResolvers;
+        notifyResolvers = [];
+        for (const resolve of pending) resolve();
+      },
+    });
+    coordinator.registerHandlers(executor);
+
+    // 1. Simulated external action followed by response-loss throw -> durable row AND watch view are `uncertain`.
+    let externalActions = 0;
+    const firstNotified = waitForNotify();
+    const uncertainAccepted = await coordinator.submitRetireAgent(
+      { entryId: "agent-throw", daemonGeneration: 5, hasRevokedAgentSessionId: true, grantRevokedWithoutWorkerSession: false },
+      async () => {
+        externalActions += 1;
+        throw new Error("socket closed before response arrived");
+      },
+    );
+    await within(firstNotified, "post-action throw settles", 2_000);
+    assert.equal(externalActions, 1);
+    const durableUncertain = getEffect(stateDb.connection, uncertainAccepted.effect_id);
+    assert.equal(durableUncertain?.state, "uncertain");
+    assert.match(durableUncertain?.last_error ?? "", /socket closed before response arrived/i);
+    assert.match(durableUncertain?.last_error ?? "", /verify external state before repeating/i);
+    const viewUncertain = coordinator.getForGeneration(uncertainAccepted.effect_id, 5);
+    assert.equal(viewUncertain?.state, "uncertain");
+    assert.match(viewUncertain?.error ?? "", /verify external state before repeating/i);
+
+    // 2. Explicit pre-execution refusal -> durable row AND watch view are `failed`.
+    const secondNotified = waitForNotify();
+    const refusedAccepted = await coordinator.submitRetireAgent(
+      { entryId: "agent-refused", daemonGeneration: 5, hasRevokedAgentSessionId: false, grantRevokedWithoutWorkerSession: false },
+      async () => {
+        throw new AsyncRpcPreExecutionRefusalError("entry cannot retire while active turn is running");
+      },
+    );
+    await within(secondNotified, "pre-execution refusal settles", 2_000);
+    const durableRefused = getEffect(stateDb.connection, refusedAccepted.effect_id);
+    assert.equal(durableRefused?.state, "failed");
+    assert.equal(durableRefused?.last_error, "entry cannot retire while active turn is running");
+    assert.equal(coordinator.getForGeneration(refusedAccepted.effect_id, 5)?.state, "failed");
+
+    await executor.fenceAndDrain();
+  } finally {
+    stateDb.close();
+    await env.cleanup();
+  }
+});
+
+test("failed completion or uncertain journal settlement publishes uncertain with unrecorded-receipt guidance, never failed", async () => {
+  const env = await fixture();
+  const dbPath = join(env.root, "daemon-state.sqlite");
+  const stateDb = await DaemonStateDatabase.open(dbPath);
+  const noopFence = () => {};
+  let notifyResolvers: Array<() => void> = [];
+  const waitForNotify = () => new Promise<void>((resolve) => { notifyResolvers.push(resolve); });
+  try {
+    stateDb.connection.exec(`
+      CREATE TRIGGER reject_completed_update
+      BEFORE UPDATE ON effects
+      WHEN NEW.state = 'completed'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected completion write failure');
+      END;
+      CREATE TRIGGER reject_uncertain_update
+      BEFORE UPDATE ON effects
+      WHEN NEW.state = 'uncertain'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected uncertain write failure');
+      END;
+    `);
+    const executor = new EffectExecutor({
+      getDatabase: () => stateDb.connection,
+      currentDaemonGeneration: () => 6,
+      assertCurrent: async () => undefined,
+      assertWriteFence: noopFence,
+      isClosing: () => false,
+    });
+    const coordinator = new AsyncRpcEffectCoordinator({
+      getExecutor: () => executor,
+      notifyImmediate: () => {
+        const pending = notifyResolvers;
+        notifyResolvers = [];
+        for (const resolve of pending) resolve();
+      },
+    });
+    coordinator.registerHandlers(executor);
+
+    // Case A: action succeeds in memory, completion write rejected by SQLite trigger.
+    let retirementCalls = 0;
+    const completedWriteRejected = waitForNotify();
+    const acceptedA = await coordinator.submitRetireAgent(
+      { entryId: "agent-write-fail-1", daemonGeneration: 6, hasRevokedAgentSessionId: true, grantRevokedWithoutWorkerSession: false },
+      async () => {
+        retirementCalls += 1;
+        return { outcome: "retired" as const };
+      },
+    );
+    await within(completedWriteRejected, "failed completion settlement notifies watch", 2_000);
+    assert.equal(retirementCalls, 1);
+    assert.equal(getEffect(stateDb.connection, acceptedA.effect_id)?.state, "executing");
+    const viewA = coordinator.getForGeneration(acceptedA.effect_id, 6);
+    assert.equal(viewA?.state, "uncertain", "must never fabricate confirmed failure after action completed");
+    assert.match(viewA?.error ?? "", /injected completion write failure/);
+    assert.match(viewA?.error ?? "", /could not be recorded in the effect journal/i);
+    assert.match(viewA?.error ?? "", /verify external state before repeating/i);
+
+    // Case B: post-action throw AND uncertain settlement write also rejected by SQLite trigger.
+    const uncertainWriteRejected = waitForNotify();
+    const acceptedB = await coordinator.submitRetireAgent(
+      { entryId: "agent-write-fail-2", daemonGeneration: 6, hasRevokedAgentSessionId: true, grantRevokedWithoutWorkerSession: false },
+      async () => {
+        throw new Error("remote confirmation timed out");
+      },
+    );
+    await within(uncertainWriteRejected, "failed uncertain settlement notifies watch", 2_000);
+    assert.equal(getEffect(stateDb.connection, acceptedB.effect_id)?.state, "executing");
+    const viewB = coordinator.getForGeneration(acceptedB.effect_id, 6);
+    assert.equal(viewB?.state, "uncertain");
+    assert.match(viewB?.error ?? "", /remote confirmation timed out/);
+    assert.match(viewB?.error ?? "", /injected uncertain write failure/);
+    assert.match(viewB?.error ?? "", /could not be recorded in the effect journal/i);
+    assert.match(viewB?.error ?? "", /verify external state before repeating/i);
+
+    await executor.fenceAndDrain();
+  } finally {
+    stateDb.close();
+    await env.cleanup();
+  }
+});
+
+test("SupervisorDaemonClient recovers accepted async RPC result from SQLite after 257 completions evict it from the watch cache", async () => {
+  const env = await fixture();
+  const previousAllow = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  const previousRuntimeFp = process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+  const previousCompatFp = process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+  const spawnEnv = supervisorDaemonSpawnEnvironment();
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = spawnEnv.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+  process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT = spawnEnv.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+
+  const dbPath = join(env.root, "daemon-state.sqlite");
+  const endpoint = testDaemonEndpoint(env.root);
+  const stateDb = await DaemonStateDatabase.open(dbPath);
+  const noopFence = () => {};
+  const generation = 9;
+  let settledCount = 0;
+  let resolveAllSettled!: () => void;
+  const allSettled = new Promise<void>((resolve) => { resolveAllSettled = resolve; });
+  const totalEffects = MAX_RETAINED_SETTLED_RPC_EFFECTS + 1;
+
+  const executor = new EffectExecutor({
+    getDatabase: () => stateDb.connection,
+    currentDaemonGeneration: () => generation,
+    assertCurrent: async () => undefined,
+    assertWriteFence: noopFence,
+    isClosing: () => false,
+  });
+  let stateWatch!: DaemonStateWatch;
+  const coordinator = new AsyncRpcEffectCoordinator({
+    getExecutor: () => executor,
+    notifyImmediate: () => {
+      settledCount += 1;
+      stateWatch?.notifyImmediate();
+      if (settledCount >= totalEffects) resolveAllSettled();
+    },
+  });
+  stateWatch = new DaemonStateWatch({
+    currentGeneration: () => generation,
+    isHandoffScheduled: () => false,
+    assertCurrent: async () => undefined,
+    entries: async () => [],
+    rpcEffects: (gen) => coordinator.listForGeneration(gen),
+    rpcEffectEvictionVersion: (gen) => coordinator.evictionVersion(gen),
+  });
+  coordinator.registerHandlers(executor);
+
+  let firstAccepted!: { effect_id: string; daemon_generation: number };
+  let lookupCalls = 0;
+  let replayFirstNext = false;
+  let returnUnknownNext = false;
+  const socket = new DaemonControlSocket(
+    endpoint.socketPath,
+    async (request) => {
+      if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
+        return {
+          healthy: true,
+          protocol_version: DAEMON_PROTOCOL_VERSION,
+          implementation_version: DAEMON_IMPLEMENTATION_VERSION,
+          runtime_environment_fingerprint: spawnEnv.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT,
+          compatibility_fingerprint: spawnEnv.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT,
+          capabilities: {
+            agent_lifecycle_v1: true,
+            agent_state_subscription_v1: true,
+            async_rpc_effects_v1: true,
+          },
+          generation,
+          pid: process.pid,
+          started_at: "2026-11-22T00:00:00.000Z",
+        };
+      }
+      if (request.method === "manifest.watch_state") {
+        const params = (request.params ?? {}) as {
+          after_daemon_generation?: number;
+          after_sequence?: number;
+          wait_ms?: number;
+          changed_only?: boolean;
+        };
+        return stateWatch.watch({
+          afterDaemonGeneration: params.after_daemon_generation ?? 0,
+          afterSequence: params.after_sequence ?? 0,
+          waitMs: params.wait_ms ?? 5_000,
+          changedOnly: params.changed_only === true,
+        });
+      }
+      if (request.method === "supervisor.get_rpc_effect") {
+        lookupCalls += 1;
+        const params = request.params as { effect_id: string; daemon_generation: number };
+        return coordinator.getForGeneration(params.effect_id, params.daemon_generation);
+      }
+      if (request.method === "supervisor.retire_agent") {
+        if (returnUnknownNext) {
+          returnUnknownNext = false;
+          return { effect_id: "rpc:rpc_retire_agent:never-existed", daemon_generation: generation };
+        }
+        if (replayFirstNext) {
+          replayFirstNext = false;
+          return firstAccepted;
+        }
+        return coordinator.submitRetireAgent(
+          { entryId: "agent-live", daemonGeneration: generation, hasRevokedAgentSessionId: true, grantRevokedWithoutWorkerSession: false },
+          async () => ({ outcome: "retired" as const }),
+        );
+      }
+      throw new Error(`Unexpected test method: ${request.method}`);
+    },
+    undefined,
+    undefined,
+    { peerProofPath: endpoint.peerProofPath ?? null },
+  );
+
+  try {
+    await socket.start();
+
+    // Complete 257 effects through the real coordinator/executor so #1 is evicted from the 256-entry watch cache.
+    firstAccepted = await coordinator.submitRetireAgent(
+      { entryId: "agent-0", daemonGeneration: generation, hasRevokedAgentSessionId: false, grantRevokedWithoutWorkerSession: false },
+      async () => ({ outcome: "revocation_required" as const, revocation_kind: "grant_only" as const }),
+    );
+    for (let i = 1; i < totalEffects; i += 1) {
+      await coordinator.submitRetireAgent(
+        { entryId: `agent-${i}`, daemonGeneration: generation, hasRevokedAgentSessionId: true, grantRevokedWithoutWorkerSession: false },
+        async () => ({ outcome: "retired" as const }),
+      );
+    }
+    await within(allSettled, "257 async RPC effects settle", 10_000);
+
+    // Prove #1 is durably completed in SQLite yet evicted from the bounded 256-item watch cache.
+    const watchList = coordinator.listForGeneration(generation);
+    assert.equal(watchList.length, MAX_RETAINED_SETTLED_RPC_EFFECTS);
+    assert.equal(watchList.some((item) => item.effect_id === firstAccepted.effect_id), false);
+    assert.equal(getEffect(stateDb.connection, firstAccepted.effect_id)?.state, "completed");
+
+    // Delayed SupervisorDaemonClient awaits #1's acknowledgement and recovers it via supervisor.get_rpc_effect.
+    const client = new SupervisorDaemonClient({
+      stateDir: env.root,
+      socketPath: endpoint.socketPath,
+      peerProofPath: endpoint.peerProofPath,
+      requestTimeoutMs: process.platform === "win32" ? 2_000 : 1_000,
+      spawnDaemon: () => { throw new Error("must reuse running test socket"); },
+    });
+    replayFirstNext = true;
+    const recovered = await within(
+      client.retireAgent("agent-0", generation),
+      "delayed client recovers evicted effect #1 without generation change",
+      3_000,
+    );
+    assert.deepEqual(recovered, { outcome: "revocation_required", revocationKind: "grant_only" });
+    assert.equal(lookupCalls, 1, "durable lookup fires once for the evicted effect");
+
+    // Truly unknown effect id fails promptly instead of hanging forever.
+    returnUnknownNext = true;
+    await assert.rejects(
+      () => within(client.retireAgent("agent-missing", generation), "unknown effect fails promptly", 3_000),
+      /no record of async RPC effect/,
+    );
+    await executor.fenceAndDrain();
+  } finally {
+    stateWatch.close();
+    await socket.stop().catch(() => undefined);
+    stateDb.close();
     if (previousAllow === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
     else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousAllow;
     if (previousRuntimeFp === undefined) delete process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;

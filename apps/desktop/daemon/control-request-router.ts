@@ -78,6 +78,7 @@ export interface DaemonControlOperations {
   rollbackInspectorRoomMove(input: RoomMoveIdentity & { detail: string }): unknown;
   getInspectorRoomMove(input: RoomMoveIdentity): unknown;
   getCurrentInspectorRoomMove(input: { entryId: string; daemonGeneration: number }): unknown;
+  getRpcEffect(effectId: string, daemonGeneration: number): unknown;
   recoverAgentRuntime(entryId: string, daemonGeneration: number, recovery?: import("./runtime-recovery-coordinator.js").AgentRuntimeRecoveryRequest): unknown;
   retireAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null, grantRevokedWithoutWorkerSession: boolean): unknown;
   purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null, grantRevokedWithoutWorkerSession: boolean): unknown;
@@ -355,6 +356,10 @@ export function createDaemonControlRequestHandler(
       entryId: params.entry_id,
       daemonGeneration: params.daemon_generation,
     }),
+    "supervisor.get_rpc_effect": (params) => operations.getRpcEffect(
+      params.effect_id,
+      params.daemon_generation,
+    ),
     "supervisor.get_current_room_move": (params) => operations.getCurrentInspectorRoomMove({
       entryId: params.entry_id,
       daemonGeneration: params.daemon_generation,

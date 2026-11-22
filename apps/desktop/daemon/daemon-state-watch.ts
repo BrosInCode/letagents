@@ -32,6 +32,8 @@ export interface DaemonStateWatchDependencies {
   entries: () => Promise<DaemonManifestEntryView[]>;
   /** Current-generation asynchronous RPC effect views delivered via state watch. */
   rpcEffects?: (generation: number) => DaemonRpcEffectView[];
+  /** Monotonic eviction version for `rpcEffects`; bumps force a full snapshot on delta subscribers. */
+  rpcEffectEvictionVersion?: (generation: number) => number;
   /** Omitted (or 0) wakes waiters synchronously with the sequence bump. */
   coalesceMs?: number;
   setTimeout?: typeof setTimeout;
@@ -91,6 +93,7 @@ type TrackedViews = {
   removedAt: Map<string, number>;
   effectViews: Map<string, DaemonRpcEffectView>;
   effectChangedAt: Map<string, number>;
+  rpcEffectEvictionVersion: number;
 };
 
 export class DaemonStateWatch {
@@ -258,9 +261,19 @@ export class DaemonStateWatch {
       const before = previous?.effectViews.get(effect.effect_id);
       if (!before || !isDeepStrictEqual(before, effect)) changedEffects.add(effect.effect_id);
     }
+    const rpcEffectEvictionVersion = this.dependencies.rpcEffectEvictionVersion?.(snapshot.daemon_generation) ?? 0;
+    let rpcEffectEvicted = previous !== null && rpcEffectEvictionVersion !== previous.rpcEffectEvictionVersion;
+    if (!rpcEffectEvicted && previous) {
+      for (const id of previous.effectViews.keys()) {
+        if (!effectViews.has(id)) {
+          rpcEffectEvicted = true;
+          break;
+        }
+      }
+    }
     const removed: string[] = [];
     if (previous) for (const id of previous.views.keys()) if (!views.has(id)) removed.push(id);
-    if (previous && snapshot.sequence <= previous.sequence && (changed.size > 0 || removed.length > 0 || changedEffects.size > 0)) {
+    if (previous && snapshot.sequence <= previous.sequence && (changed.size > 0 || removed.length > 0 || changedEffects.size > 0 || rpcEffectEvicted)) {
       this.sequence += 1;
       snapshot.sequence = this.sequence;
       this.releaseWaiters();
@@ -282,6 +295,9 @@ export class DaemonStateWatch {
     for (const id of removed) removedAt.set(id, snapshot.sequence);
     for (const id of views.keys()) removedAt.delete(id);
     let since = previous?.since ?? snapshot.sequence;
+    if (rpcEffectEvicted) {
+      since = Math.max(since, snapshot.sequence);
+    }
     while (removedAt.size > STATE_WATCH_REMEMBERED_REMOVALS) {
       // Maps iterate in insertion order and a removal is re-inserted when it
       // recurs, so the first entry is the oldest. Forgetting it means a cursor
@@ -299,6 +315,7 @@ export class DaemonStateWatch {
       removedAt,
       effectViews,
       effectChangedAt,
+      rpcEffectEvictionVersion,
     };
   }
 
