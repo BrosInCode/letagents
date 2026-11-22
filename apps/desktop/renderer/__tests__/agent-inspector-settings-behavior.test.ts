@@ -6,7 +6,8 @@ import { parse, compileScript, compileTemplate } from "@vue/compiler-sfc";
 import * as Vue from "vue";
 import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
 import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
-import { projectAgentInspector, type AgentInspectorProjection } from "../src/domain/agent-inspector";
+import { projectAgentInspector, type AgentInspectorActionState, type AgentInspectorProjection } from "../src/domain/agent-inspector";
+import { useAgentInspectorConfigurationApply } from "../src/components/desktop/content/room-shell/useAgentInspectorConfigurationApply";
 import { configurationDraft, IMAGE_INPUT_DESCRIPTION, IMAGE_INPUT_TITLE } from "../src/domain/agent-inspector-settings";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../src/domain/agent-inspector-settings";
 import { roomShellSource } from "./room-shell-source";
@@ -845,6 +846,47 @@ test("Settings apply uses exact authority fences and explicit reload recovers an
   assert.match(apply, /if \(!options\.operationIdentityCurrent\(operation\)\) return;/);
   assert.match(apply, /options\.recoverGeneration\(operation, snapshot\.preservedDraft\)/);
   assert.match(apply, /settleConfigurationAlreadyApplied/);
+});
+
+test("a reload after the restart deadline confirms the exact applied revision once", async ({ mock }) => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const waiting = { ...configuration, runtimeConfigurationRevision: configuration.configRevision - 1 };
+  const projection = { entryId: configuration.entryId, roomId: "room_a" };
+  const resource = Vue.shallowRef<AgentInspectorConfigurationResource>({ ...readyResource, configuration: waiting });
+  const action = Vue.shallowRef<AgentInspectorActionState | null>(null);
+  const operation = { operationId: "apply", entryId: configuration.entryId, daemonGeneration: configuration.daemonGeneration };
+  const appliedRevisions: number[] = [];
+  const bridge = window.letagentsDesktop;
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    applyAgentConfiguration: async () => ({ outcome: "restarting" }),
+    getAgentConfiguration: async () => waiting,
+  } } });
+  const scope = Vue.effectScope();
+  try {
+    const apply = scope.run(() => useAgentInspectorConfigurationApply({
+      selectedProjection: Vue.shallowRef(projection), configurationResource: resource, actionState: action,
+      refreshSupervisorStatus: async () => ({ generation: operation.daemonGeneration }),
+      selectionCurrent: (entryId, roomId) => entryId === projection.entryId && roomId === projection.roomId,
+      beginOperation: () => operation, operationIdentityCurrent: () => true, operationCurrent: () => true,
+      recoverGeneration: async () => undefined,
+      onApplied: (confirmed) => appliedRevisions.push(confirmed.configRevision),
+    }))!;
+    await apply.applyAgentInspectorSettings();
+    mock.timers.tick(45_001);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(action.value?.status, "error");
+    resource.value = { ...readyResource, configuration: { ...configuration, daemonGeneration: configuration.daemonGeneration + 1 } };
+    await nextTick();
+    assert.deepEqual(appliedRevisions, []);
+    resource.value = readyResource;
+    await nextTick();
+    resource.value = { ...readyResource, configuration: { ...configuration } };
+    await nextTick();
+    assert.deepEqual(appliedRevisions, [configuration.configRevision]);
+  } finally {
+    scope.stop();
+    Object.assign(window, { letagentsDesktop: bridge });
+  }
 });
 
 test("overflow Escape stops propagation, closes, and returns focus; outside and focus-out also dismiss", async () => {

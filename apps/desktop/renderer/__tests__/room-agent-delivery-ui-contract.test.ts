@@ -315,8 +315,8 @@ describe("durable room delivery UI contracts", () => {
       source("src/components/desktop/content/room-chat/RoomThreadPanel.vue"),
       source("src/components/desktop/content/room-shell/useDesktopRoomMessages.ts"),
     ]);
-    assert.match(chat, /threadRevealTargetId\.value = messageId/);
-    assert.match(chat, /openThread\(destination\.threadRootId, false\)/);
+    assert.match(chat, /openThread\(destination\.threadRootId, false, messageId\)/);
+    assert.match(chat, /revealMessageId: string \| null = null\): void \{[\s\S]*?threadRevealTargetId\.value = revealMessageId/);
     assert.doesNotMatch(chat, /pendingThreadRevealId/);
     assert.match(panel, /revealMessageId/);
     assert.match(panel, /jumpToThreadMessageReference\(messageId\)/);
