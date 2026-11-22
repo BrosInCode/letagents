@@ -12,7 +12,7 @@ import type { DaemonAuthority } from "../daemon-authority.js";
 import type { DaemonReadModel } from "../daemon-read-model.js";
 import type { DaemonStateWatch } from "../daemon-state-watch.js";
 import type { DaemonStateDatabase } from "../daemon-state-database.js";
-import type { EffectExecutor } from "../effect-journal/index.js";
+import type { AsyncRpcEffectCoordinator, EffectExecutor } from "../effect-journal/index.js";
 import type { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import type { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
 import type { DesiredStateCoordinator } from "../desired-state-coordinator.js";
@@ -119,6 +119,7 @@ export abstract class SupervisorDaemonState {
   protected abstract readonly runtimeRecovery: RuntimeRecoveryCoordinator;
   protected abstract readonly runtimeConfigurationApply: RuntimeConfigurationApplyCoordinator;
   protected abstract readonly boundedEffects: BoundedEffectCoordinator;
+  protected abstract readonly asyncRpcEffects: AsyncRpcEffectCoordinator;
   protected abstract readonly socket: DaemonControlSocket;
   protected abstract readonly stateWatch: DaemonStateWatch;
   protected abstract readonly entryConcurrency: EntryConcurrencyGate;

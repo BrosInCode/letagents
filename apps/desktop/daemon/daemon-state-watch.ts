@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import type { DaemonRpcEffectView } from "#daemon-contract/index.js";
 import { projectStateWatchEntries } from "./state-watch-projection.js";
 import type { DaemonManifestEntryView } from "./types.js";
 
@@ -29,6 +30,10 @@ export interface DaemonStateWatchDependencies {
   isHandoffScheduled: () => boolean;
   assertCurrent: () => Promise<void>;
   entries: () => Promise<DaemonManifestEntryView[]>;
+  /** Current-generation asynchronous RPC effect views delivered via state watch. */
+  rpcEffects?: (generation: number) => DaemonRpcEffectView[];
+  /** Monotonic eviction version for `rpcEffects`; bumps force a full snapshot on delta subscribers. */
+  rpcEffectEvictionVersion?: (generation: number) => number;
   /** Omitted (or 0) wakes waiters synchronously with the sequence bump. */
   coalesceMs?: number;
   setTimeout?: typeof setTimeout;
@@ -52,6 +57,7 @@ export interface DaemonStateWatchSnapshot {
   daemon_generation: number;
   sequence: number;
   entries: DaemonManifestEntryView[];
+  rpc_effects?: DaemonRpcEffectView[];
 }
 
 /**
@@ -66,6 +72,7 @@ export interface DaemonStateWatchChanges {
   entries: DaemonManifestEntryView[];
   removed_entry_ids: string[];
   entry_order: string[];
+  rpc_effects?: DaemonRpcEffectView[];
 }
 
 export type DaemonStateWatchResult = DaemonStateWatchSnapshot | DaemonStateWatchChanges;
@@ -84,6 +91,9 @@ type TrackedViews = {
   views: Map<string, DaemonManifestEntryView>;
   changedAt: Map<string, number>;
   removedAt: Map<string, number>;
+  effectViews: Map<string, DaemonRpcEffectView>;
+  effectChangedAt: Map<string, number>;
+  rpcEffectEvictionVersion: number;
 };
 
 export class DaemonStateWatch {
@@ -124,6 +134,12 @@ export class DaemonStateWatch {
     const promise = new Promise<void>((resolve) => { finish = resolve; });
     const timer = this.scheduleTimeout(() => this.releaseWaiters(), this.coalesceMs);
     this.coalescing = { timer, promise, finish };
+  }
+
+  /** Wakes state-watch waiters without coalesce delay (used for async RPC effect settlement). */
+  notifyImmediate(): void {
+    this.sequence += 1;
+    this.releaseWaiters();
   }
 
   close(): void {
@@ -202,6 +218,9 @@ export class DaemonStateWatch {
     const after = input.afterSequence;
     const removed: string[] = [];
     for (const [id, sequence] of tracked.removedAt) if (sequence > after) removed.push(id);
+    const changedRpcEffects = (snapshot.rpc_effects ?? []).filter(
+      (effect) => (tracked.effectChangedAt.get(effect.effect_id) ?? Number.POSITIVE_INFINITY) > after,
+    );
     return {
       daemon_generation: snapshot.daemon_generation,
       sequence: snapshot.sequence,
@@ -209,6 +228,7 @@ export class DaemonStateWatch {
       entries: snapshot.entries.filter((entry) => (tracked.changedAt.get(entry.id) ?? Number.POSITIVE_INFINITY) > after),
       removed_entry_ids: removed,
       entry_order: snapshot.entries.map((entry) => entry.id),
+      ...(changedRpcEffects.length > 0 ? { rpc_effects: changedRpcEffects } : {}),
     };
   }
 
@@ -234,9 +254,26 @@ export class DaemonStateWatch {
       const before = previous?.views.get(entry.id);
       if (!before || !isDeepStrictEqual(before, entry)) changed.add(entry.id);
     }
+    const effectViews = new Map<string, DaemonRpcEffectView>();
+    const changedEffects = new Set<string>();
+    for (const effect of snapshot.rpc_effects ?? []) {
+      effectViews.set(effect.effect_id, effect);
+      const before = previous?.effectViews.get(effect.effect_id);
+      if (!before || !isDeepStrictEqual(before, effect)) changedEffects.add(effect.effect_id);
+    }
+    const rpcEffectEvictionVersion = this.dependencies.rpcEffectEvictionVersion?.(snapshot.daemon_generation) ?? 0;
+    let rpcEffectEvicted = previous !== null && rpcEffectEvictionVersion !== previous.rpcEffectEvictionVersion;
+    if (!rpcEffectEvicted && previous) {
+      for (const id of previous.effectViews.keys()) {
+        if (!effectViews.has(id)) {
+          rpcEffectEvicted = true;
+          break;
+        }
+      }
+    }
     const removed: string[] = [];
     if (previous) for (const id of previous.views.keys()) if (!views.has(id)) removed.push(id);
-    if (previous && snapshot.sequence <= previous.sequence && (changed.size > 0 || removed.length > 0)) {
+    if (previous && snapshot.sequence <= previous.sequence && (changed.size > 0 || removed.length > 0 || changedEffects.size > 0 || rpcEffectEvicted)) {
       this.sequence += 1;
       snapshot.sequence = this.sequence;
       this.releaseWaiters();
@@ -245,10 +282,22 @@ export class DaemonStateWatch {
     for (const entry of snapshot.entries) {
       changedAt.set(entry.id, changed.has(entry.id) ? snapshot.sequence : previous!.changedAt.get(entry.id) ?? snapshot.sequence);
     }
+    const effectChangedAt = new Map<string, number>();
+    for (const effect of snapshot.rpc_effects ?? []) {
+      effectChangedAt.set(
+        effect.effect_id,
+        changedEffects.has(effect.effect_id)
+          ? snapshot.sequence
+          : previous?.effectChangedAt.get(effect.effect_id) ?? snapshot.sequence,
+      );
+    }
     const removedAt = new Map<string, number>(previous?.removedAt ?? []);
     for (const id of removed) removedAt.set(id, snapshot.sequence);
     for (const id of views.keys()) removedAt.delete(id);
     let since = previous?.since ?? snapshot.sequence;
+    if (rpcEffectEvicted) {
+      since = Math.max(since, snapshot.sequence);
+    }
     while (removedAt.size > STATE_WATCH_REMEMBERED_REMOVALS) {
       // Maps iterate in insertion order and a removal is re-inserted when it
       // recurs, so the first entry is the oldest. Forgetting it means a cursor
@@ -257,7 +306,17 @@ export class DaemonStateWatch {
       removedAt.delete(id);
       since = Math.max(since, sequence);
     }
-    this.tracked = { generation: snapshot.daemon_generation, sequence: snapshot.sequence, since, views, changedAt, removedAt };
+    this.tracked = {
+      generation: snapshot.daemon_generation,
+      sequence: snapshot.sequence,
+      since,
+      views,
+      changedAt,
+      removedAt,
+      effectViews,
+      effectChangedAt,
+      rpcEffectEvictionVersion,
+    };
   }
 
   private async snapshot(coalesce: boolean): Promise<DaemonStateWatchSnapshot> {
@@ -279,11 +338,14 @@ export class DaemonStateWatch {
         generation,
         sequence,
         promise: Promise.resolve().then(async () => {
+          const entries = projectStateWatchEntries(await this.dependencies.entries());
+          const rpcEffects = this.dependencies.rpcEffects?.(generation) ?? [];
           const snapshot: DaemonStateWatchSnapshot = {
             daemon_generation: generation,
             sequence,
             // Full history belongs to manifest.list and per-agent inspection.
-            entries: projectStateWatchEntries(await this.dependencies.entries()),
+            entries,
+            ...(rpcEffects.length > 0 ? { rpc_effects: rpcEffects } : {}),
           };
           this.track(snapshot);
           return snapshot;

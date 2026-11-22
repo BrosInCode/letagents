@@ -19,7 +19,8 @@ import type {
   ProviderActionTerminal,
 } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";
-import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
+import type { DaemonManifestEntry } from "../types.js";
+import { daemonSocketRequest } from "../../electron/__tests__/daemon-socket-request.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 import {
@@ -95,19 +96,7 @@ async function eventually(predicate: () => Promise<boolean>, label: string, time
 }
 
 async function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
-  return new Promise((resolve, reject) => {
-    const socket = connectDaemon(socketPath);
-    let body = "";
-    socket.setEncoding("utf8");
-    socket.once("error", reject);
-    socket.on("data", (chunk) => {
-      body += chunk;
-      if (!body.includes("\n")) return;
-      socket.end();
-      resolve(JSON.parse(body.slice(0, body.indexOf("\n"))));
-    });
-    socket.once("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "router-test", method, params })}\n`));
-  });
+  return daemonSocketRequest(socketPath, method, params);
 }
 
 type FakeProvider = "codex" | "claude-code" | "open-model";
