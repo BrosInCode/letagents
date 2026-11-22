@@ -129,6 +129,11 @@ export class EffectExecutor {
     return getEffect(database, effectId);
   }
 
+  /** True while `effectId` has an active in-flight `runEffect` or `reconcileUncertain` execution. */
+  isEffectActive(effectId: string): boolean {
+    return this.activeById.has(effectId);
+  }
+
   get isFenced(): boolean {
     return this.fenced || this.options.isClosing();
   }

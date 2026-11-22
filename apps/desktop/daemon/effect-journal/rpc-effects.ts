@@ -174,6 +174,8 @@ export class AsyncRpcEffectCoordinator {
   private readonly progressById = new Map<string, ExecutionProgress>();
   private readonly viewsByGeneration = new Map<number, Map<string, DaemonRpcEffectView>>();
   private readonly settledOrderByGeneration = new Map<number, string[]>();
+  private readonly unrecordedTerminalByGeneration = new Map<number, Map<string, DaemonRpcEffectView>>();
+  private readonly unrecordedOrderByGeneration = new Map<number, string[]>();
   private readonly evictionVersionByGeneration = new Map<number, number>();
   private readonly maxRetainedSettled: number;
   private disposed = false;
@@ -340,7 +342,7 @@ export class AsyncRpcEffectCoordinator {
         const started = (progress !== undefined && progress.phase !== "pending")
           || (durable !== null && (durable.state === "executing" || durable.attempt_count >= 1));
         if (!started) {
-          this.recordView({
+          this.recordUnrecordedTerminalView({
             effect_id: prepared.id,
             agent_id: prepared.agent_id,
             kind: prepared.kind as DaemonAsyncRpcEffectKind,
@@ -356,7 +358,7 @@ export class AsyncRpcEffectCoordinator {
         }
         if (progress?.phase === "failed_in_memory") {
           const base = progress.executionError ?? rejectionDetail;
-          this.recordView({
+          this.recordUnrecordedTerminalView({
             effect_id: prepared.id,
             agent_id: prepared.agent_id,
             kind: prepared.kind as DaemonAsyncRpcEffectKind,
@@ -375,7 +377,7 @@ export class AsyncRpcEffectCoordinator {
           : progress?.phase === "uncertain_in_memory"
             ? `${progress.executionError ?? rejectionDetail} (Outcome is uncertain and could not be recorded in the effect journal: ${rejectionDetail}; verify external state before repeating it.)`
             : `Outcome is uncertain: execution started, but its receipt could not be recorded in the effect journal (${rejectionDetail}); verify external state before repeating it.`;
-        this.recordView({
+        this.recordUnrecordedTerminalView({
           effect_id: prepared.id,
           agent_id: prepared.agent_id,
           kind: prepared.kind as DaemonAsyncRpcEffectKind,
@@ -518,16 +520,44 @@ export class AsyncRpcEffectCoordinator {
 
   /**
    * Bounded, durable lookup for an accepted async RPC effect in `generation`.
-   * Checks the live in-memory projection first (preserving unrecorded
-   * uncertainty views when a journal write fails), then falls back to the
-   * durable SQLite `effects` table after watch-cache eviction.
+   * Checks the live in-memory projection and unrecorded-terminal map first
+   * (preserving exact unrecorded uncertainty/failure guidance even after watch
+   * cache eviction), then falls back to the durable SQLite `effects` table. If
+   * SQLite still holds a non-terminal row (`prepared`/`executing`) with no
+   * remaining active execution in this generation, synthesizes a truthful
+   * terminal `uncertain`/`failed` view instead of advertising indefinite work.
    */
   getForGeneration(effectId: string, generation: number): DaemonRpcEffectView | null {
     const inMemory = this.viewsByGeneration.get(generation)?.get(effectId);
     if (inMemory) return { ...inMemory };
+    const unrecorded = this.unrecordedTerminalByGeneration.get(generation)?.get(effectId);
+    if (unrecorded) return { ...unrecorded };
     const durable = this.safeGetDurableEffect(effectId);
     if (!durable || !isAsyncRpcEffectKind(durable.kind) || durable.epoch !== generation) {
       return null;
+    }
+    if (!isTerminalEffectState(durable.state) && !this.isEffectActiveInMemory(effectId)) {
+      const started = durable.state === "executing" || durable.attempt_count >= 1;
+      if (started) {
+        return {
+          effect_id: durable.id,
+          agent_id: durable.agent_id,
+          kind: durable.kind,
+          daemon_generation: durable.epoch,
+          state: "uncertain",
+          error: "Outcome is uncertain: execution ended in this daemon generation, but its receipt could not be recorded in the effect journal; verify external state before repeating it.",
+          updated_at: durable.updated_at,
+        };
+      }
+      return {
+        effect_id: durable.id,
+        agent_id: durable.agent_id,
+        kind: durable.kind,
+        daemon_generation: durable.epoch,
+        state: "failed",
+        error: "Operation did not start in this daemon generation and no failure receipt was recorded in the effect journal.",
+        updated_at: durable.updated_at,
+      };
     }
     return effectRecordToView(durable);
   }
@@ -538,12 +568,48 @@ export class AsyncRpcEffectCoordinator {
     this.pending.clear();
   }
 
+  private isEffectActiveInMemory(effectId: string): boolean {
+    return this.pending.has(effectId)
+      || this.progressById.has(effectId)
+      || this.options.getExecutor()?.isEffectActive(effectId) === true;
+  }
+
   private safeGetDurableEffect(effectId: string): EffectRecord | null {
     try {
       if (this.options.getEffect) return this.options.getEffect(effectId);
       return this.options.getExecutor()?.getEffect(effectId) ?? null;
     } catch {
       return null;
+    }
+  }
+
+  private recordUnrecordedTerminalView(view: DaemonRpcEffectView): void {
+    this.recordView(view);
+    const generation = view.daemon_generation;
+    let byId = this.unrecordedTerminalByGeneration.get(generation);
+    if (!byId) {
+      for (const oldGeneration of this.unrecordedTerminalByGeneration.keys()) {
+        if (oldGeneration < generation) {
+          this.unrecordedTerminalByGeneration.delete(oldGeneration);
+          this.unrecordedOrderByGeneration.delete(oldGeneration);
+        }
+      }
+      byId = new Map();
+      this.unrecordedTerminalByGeneration.set(generation, byId);
+    }
+    const alreadyPresent = byId.has(view.effect_id);
+    byId.set(view.effect_id, view);
+    if (!alreadyPresent) {
+      let order = this.unrecordedOrderByGeneration.get(generation);
+      if (!order) {
+        order = [];
+        this.unrecordedOrderByGeneration.set(generation, order);
+      }
+      order.push(view.effect_id);
+      while (order.length > this.maxRetainedSettled) {
+        const evicted = order.shift();
+        if (evicted) byId.delete(evicted);
+      }
     }
   }
 
@@ -556,6 +622,8 @@ export class AsyncRpcEffectCoordinator {
         if (oldGeneration < generation) {
           this.viewsByGeneration.delete(oldGeneration);
           this.settledOrderByGeneration.delete(oldGeneration);
+          this.unrecordedTerminalByGeneration.delete(oldGeneration);
+          this.unrecordedOrderByGeneration.delete(oldGeneration);
           this.evictionVersionByGeneration.delete(oldGeneration);
         }
       }

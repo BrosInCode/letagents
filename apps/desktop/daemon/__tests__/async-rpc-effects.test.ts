@@ -896,3 +896,205 @@ test("SupervisorDaemonClient recovers accepted async RPC result from SQLite afte
     await env.cleanup();
   }
 });
+
+test("unrecorded terminal outcomes remain recoverable after watch-cache eviction and even after unrecorded-cache overflow", async () => {
+  const env = await fixture();
+  const previousAllow = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  const previousRuntimeFp = process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+  const previousCompatFp = process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+  const spawnEnv = supervisorDaemonSpawnEnvironment();
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = spawnEnv.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+  process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT = spawnEnv.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+
+  const dbPath = join(env.root, "daemon-state.sqlite");
+  const endpoint = testDaemonEndpoint(env.root);
+  const stateDb = await DaemonStateDatabase.open(dbPath);
+  const noopFence = () => {};
+  const generation = 10;
+  let settledCount = 0;
+  let resolveFirstSettled!: () => void;
+  const firstSettled = new Promise<void>((resolve) => { resolveFirstSettled = resolve; });
+  let resolveAllSettled!: () => void;
+  const allSettled = new Promise<void>((resolve) => { resolveAllSettled = resolve; });
+  const totalEffects = MAX_RETAINED_SETTLED_RPC_EFFECTS + 1;
+
+  // Reject completion/uncertain SQLite updates only for the targeted effect agent.
+  stateDb.connection.exec(`
+    CREATE TRIGGER reject_target_settlement
+    BEFORE UPDATE ON effects
+    WHEN OLD.agent_id = 'agent-unrecorded-evicted' AND NEW.state IN ('completed', 'uncertain')
+    BEGIN
+      SELECT RAISE(ABORT, 'injected target completion write failure');
+    END;
+  `);
+
+  const executor = new EffectExecutor({
+    getDatabase: () => stateDb.connection,
+    currentDaemonGeneration: () => generation,
+    assertCurrent: async () => undefined,
+    assertWriteFence: noopFence,
+    isClosing: () => false,
+  });
+  let stateWatch!: DaemonStateWatch;
+  const coordinator = new AsyncRpcEffectCoordinator({
+    getExecutor: () => executor,
+    notifyImmediate: () => {
+      settledCount += 1;
+      stateWatch?.notifyImmediate();
+      if (settledCount === 1) resolveFirstSettled();
+      if (settledCount >= totalEffects) resolveAllSettled();
+    },
+  });
+  stateWatch = new DaemonStateWatch({
+    currentGeneration: () => generation,
+    isHandoffScheduled: () => false,
+    assertCurrent: async () => undefined,
+    entries: async () => [],
+    rpcEffects: (gen) => coordinator.listForGeneration(gen),
+    rpcEffectEvictionVersion: (gen) => coordinator.evictionVersion(gen),
+  });
+  coordinator.registerHandlers(executor);
+
+  let failedWriteAccepted!: { effect_id: string; daemon_generation: number };
+  let lookupCalls = 0;
+  const socket = new DaemonControlSocket(
+    endpoint.socketPath,
+    async (request) => {
+      if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
+        return {
+          healthy: true,
+          protocol_version: DAEMON_PROTOCOL_VERSION,
+          implementation_version: DAEMON_IMPLEMENTATION_VERSION,
+          runtime_environment_fingerprint: spawnEnv.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT,
+          compatibility_fingerprint: spawnEnv.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT,
+          capabilities: {
+            agent_lifecycle_v1: true,
+            agent_state_subscription_v1: true,
+            async_rpc_effects_v1: true,
+          },
+          generation,
+          pid: process.pid,
+          started_at: "2026-11-22T00:00:00.000Z",
+        };
+      }
+      if (request.method === "manifest.watch_state") {
+        const params = (request.params ?? {}) as {
+          after_daemon_generation?: number;
+          after_sequence?: number;
+          wait_ms?: number;
+          changed_only?: boolean;
+        };
+        return stateWatch.watch({
+          afterDaemonGeneration: params.after_daemon_generation ?? 0,
+          afterSequence: params.after_sequence ?? 0,
+          waitMs: params.wait_ms ?? 5_000,
+          changedOnly: params.changed_only === true,
+        });
+      }
+      if (request.method === "supervisor.get_rpc_effect") {
+        lookupCalls += 1;
+        const params = request.params as { effect_id: string; daemon_generation: number };
+        return coordinator.getForGeneration(params.effect_id, params.daemon_generation);
+      }
+      if (request.method === "supervisor.retire_agent") {
+        return failedWriteAccepted;
+      }
+      throw new Error(`Unexpected test method: ${request.method}`);
+    },
+    undefined,
+    undefined,
+    { peerProofPath: endpoint.peerProofPath ?? null },
+  );
+
+  try {
+    await socket.start();
+
+    let externalRuns = 0;
+    failedWriteAccepted = await coordinator.submitRetireAgent(
+      { entryId: "agent-unrecorded-evicted", daemonGeneration: generation, hasRevokedAgentSessionId: true, grantRevokedWithoutWorkerSession: false },
+      async () => {
+        externalRuns += 1;
+        return { outcome: "retired" as const };
+      },
+    );
+    await within(firstSettled, "unrecorded effect #1 settles before subsequent 256 completions", 2_000);
+    assert.equal(coordinator.getForGeneration(failedWriteAccepted.effect_id, generation)?.state, "uncertain");
+
+    for (let i = 1; i < totalEffects; i += 1) {
+      await coordinator.submitRetireAgent(
+        { entryId: `agent-ok-${i}`, daemonGeneration: generation, hasRevokedAgentSessionId: true, grantRevokedWithoutWorkerSession: false },
+        async () => ({ outcome: "retired" as const }),
+      );
+    }
+    await within(allSettled, "1 unrecorded + 256 completed effects settle", 10_000);
+    assert.equal(externalRuns, 1);
+
+    // SQLite still holds `executing`, and watch cache evicted the unrecorded view.
+    assert.equal(getEffect(stateDb.connection, failedWriteAccepted.effect_id)?.state, "executing");
+    const watchList = coordinator.listForGeneration(generation);
+    assert.equal(watchList.length, MAX_RETAINED_SETTLED_RPC_EFFECTS);
+    assert.equal(watchList.some((item) => item.effect_id === failedWriteAccepted.effect_id), false);
+
+    // Delayed SupervisorDaemonClient settles immediately with truthful uncertainty guidance (never hangs).
+    const client = new SupervisorDaemonClient({
+      stateDir: env.root,
+      socketPath: endpoint.socketPath,
+      peerProofPath: endpoint.peerProofPath,
+      requestTimeoutMs: process.platform === "win32" ? 2_000 : 1_000,
+      spawnDaemon: () => { throw new Error("must reuse running test socket"); },
+    });
+    await assert.rejects(
+      () => within(
+        client.retireAgent("agent-unrecorded-evicted", generation),
+        "delayed client settles unrecorded evicted outcome without hanging",
+        3_000,
+      ),
+      /injected target completion write failure.*verify external state before repeating/i,
+    );
+    assert.equal(lookupCalls, 1);
+
+    // Layer 2 proof: even if BOTH in-memory caches overflow (small limit = 1) or an unstarted
+    // prepared row has no active execution in this generation, getForGeneration never returns
+    // stale `executing`/`prepared`.
+    const smallCoordinator = new AsyncRpcEffectCoordinator({
+      getExecutor: () => executor,
+      notifyImmediate: () => undefined,
+      maxRetainedSettled: 1,
+    });
+    // Directly insert an orphaned unstarted prepared row in the same generation with no active run.
+    const orphanPrepared = prepareEffect(stateDb.connection, noopFence, {
+      id: "rpc:rpc_retire_agent:orphan-pre-exec-same-gen",
+      agent_id: "agent-pre-exec-fail",
+      kind: "rpc_retire_agent",
+      idempotency_key: "rpc:rpc_retire_agent:orphan-pre-exec-same-gen",
+      epoch: generation,
+      payload: { method: "supervisor.retire_agent", entry_id: "agent-pre-exec-fail", daemon_generation: generation },
+      retryable: false,
+      max_attempts: 1,
+    }, "2026-11-22T00:00:00.000Z").effect;
+
+    // `smallCoordinator` has empty in-memory caches; both rows live only in SQLite with no active execution.
+    const synthesizedUncertain = smallCoordinator.getForGeneration(failedWriteAccepted.effect_id, generation);
+    assert.equal(synthesizedUncertain?.state, "uncertain");
+    assert.match(synthesizedUncertain?.error ?? "", /could not be recorded in the effect journal/i);
+    assert.match(synthesizedUncertain?.error ?? "", /verify external state before repeating/i);
+
+    const synthesizedPreExecFailed = smallCoordinator.getForGeneration(orphanPrepared.id, generation);
+    assert.equal(synthesizedPreExecFailed?.state, "failed");
+    assert.match(synthesizedPreExecFailed?.error ?? "", /did not start.*no failure receipt was recorded/i);
+
+    await executor.fenceAndDrain();
+  } finally {
+    stateWatch.close();
+    await socket.stop().catch(() => undefined);
+    stateDb.close();
+    if (previousAllow === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousAllow;
+    if (previousRuntimeFp === undefined) delete process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+    else process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = previousRuntimeFp;
+    if (previousCompatFp === undefined) delete process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+    else process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT = previousCompatFp;
+    await env.cleanup();
+  }
+});
