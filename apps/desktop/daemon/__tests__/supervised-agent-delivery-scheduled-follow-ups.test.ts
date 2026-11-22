@@ -6,6 +6,7 @@ import test from "node:test";
 import { followUpOrigin, FOLLOW_UP_REASONS, FOLLOW_UP_UNCERTAIN_RESOLVED_DETAIL, NO_REPLY_FOLLOW_UP_DETAIL, OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL, OWNERSHIP_UNVERIFIED_DETAIL, parseTaskContinuation, taskFailurePolicy } from "../task-continuity.js";
 import { projectDeliveryReceipts } from "../manifest-view-projection.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
+import { seedBoundedMcpEffectRow } from "./helpers/bounded-effect-seed.js";
 import {
   agent,
   deferred,
@@ -485,10 +486,18 @@ test("a series that ends on an action with an uncertain result says so on the ro
     const first = (await retry.scheduled())!;
     // The follow-up's turn starts an action that changes something outside, and fails before the action's result is known.
     const db = new DatabaseSync(retry.path);
-    db.prepare(`INSERT INTO effects
-      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-      VALUES ('effect',?,?,?,'turn-2','request','publish_room_artifact','{}',1,'executing',NULL,NULL,?,?)`)
-      .run(agent.agentId, agent.roomId, "generation-1", new Date().toISOString(), new Date().toISOString());
+    seedBoundedMcpEffectRow(db, {
+      id: "effect",
+      agent_id: agent.agentId,
+      room_id: agent.roomId,
+      execution_generation_id: "generation-1",
+      provider_turn_id: "turn-2",
+      mcp_request_id: "request",
+      tool_name: "publish_room_artifact",
+      request: {},
+      mutation: true,
+      state: "executing",
+    });
     db.close();
     await retry.delivery().retry(retry.claude, first.source_message_id);
     await waitForAsync(async () => (await retry.view())[1]!.state === "acknowledged_failed");
@@ -727,10 +736,18 @@ test("a follow-up that finds an action with an uncertain result before it starts
     await retry.say("1", 1);
     // While the follow-up waits, an action of the failed turn is found to have an uncertain result.
     const db = new DatabaseSync(retry.path);
-    db.prepare(`INSERT INTO effects
-      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-      VALUES ('effect',?,?,?,'turn-1','request','publish_room_artifact','{}',1,'uncertain',NULL,NULL,?,?)`)
-      .run(agent.agentId, agent.roomId, "generation-1", new Date().toISOString(), new Date().toISOString());
+    seedBoundedMcpEffectRow(db, {
+      id: "effect",
+      agent_id: agent.agentId,
+      room_id: agent.roomId,
+      execution_generation_id: "generation-1",
+      provider_turn_id: "turn-1",
+      mcp_request_id: "request",
+      tool_name: "publish_room_artifact",
+      request: {},
+      mutation: true,
+      state: "uncertain",
+    });
     db.close();
     await retry.delivery().retry(retry.claude, (await retry.scheduled())!.source_message_id);
     await waitForAsync(async () => (await retry.view())[1]!.state === "acknowledged_no_reply");
@@ -749,7 +766,19 @@ test("a follow-up that finds an action with an uncertain result before it starts
     assert.equal(message!.error, retry.fault.error, "the failed message keeps the provider's own words");
     // A failed action is a result too.
     const db2 = new DatabaseSync(retry.path);
-    db2.prepare("UPDATE effects SET state='uncertain' WHERE effect_id='effect'").run();
+    db2.prepare("DELETE FROM effects WHERE id='effect'").run();
+    seedBoundedMcpEffectRow(db2, {
+      id: "effect",
+      agent_id: agent.agentId,
+      room_id: agent.roomId,
+      execution_generation_id: "generation-1",
+      provider_turn_id: "turn-1",
+      mcp_request_id: "request",
+      tool_name: "publish_room_artifact",
+      request: {},
+      mutation: true,
+      state: "uncertain",
+    });
     db2.close();
     assert.equal((await retry.view())[1]!.follow_up!.reason, "uncertain_action", "uncertain again: the reason is again the one that keeps the note");
     await retry.store().completeEffect({ effect_id: "effect", error: "The tool failed." });
@@ -757,9 +786,21 @@ test("a follow-up that finds an action with an uncertain result before it starts
     // An action that is still executing is not a result either, and neither is one that is kept as a tombstone, which is how an uncertain
     // action is kept when many are: the daemon asks the live table and the compact one.
     const db4 = new DatabaseSync(retry.path);
-    db4.prepare("UPDATE effects SET state='executing' WHERE effect_id='effect'").run();
+    db4.prepare("DELETE FROM effects WHERE id='effect'").run();
+    seedBoundedMcpEffectRow(db4, {
+      id: "effect",
+      agent_id: agent.agentId,
+      room_id: agent.roomId,
+      execution_generation_id: "generation-1",
+      provider_turn_id: "turn-1",
+      mcp_request_id: "request",
+      tool_name: "publish_room_artifact",
+      request: {},
+      mutation: true,
+      state: "executing",
+    });
     assert.equal((await retry.view())[1]!.follow_up!.reason, "uncertain_action", "executing");
-    db4.prepare("UPDATE effects SET state='completed' WHERE effect_id='effect'").run();
+    db4.prepare("UPDATE effects SET state='completed',last_error=NULL WHERE id='effect'").run();
     assert.equal((await retry.view())[1]!.follow_up!.reason, "uncertain_resolved", "completed, and no tombstone");
     db4.prepare(`INSERT INTO effect_tombstones
       (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_sha256,request_bytes,mutation,state,result_json,error,created_at,updated_at)
@@ -865,10 +906,18 @@ test("an owner who used Retry on a follow-up many times is still told on the roo
     // The ninth runs, and an action that it started has an uncertain result. No other follow-up is made, and the reason
     // is on the message the series began with, however far back that is.
     const db = new DatabaseSync(retry.path);
-    db.prepare(`INSERT INTO effects
-      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-      VALUES ('effect',?,?,?,?,'request','publish_room_artifact','{}',1,'executing',NULL,NULL,?,?)`)
-      .run(agent.agentId, agent.roomId, "generation-1", `turn-${retry.sources.length + 1}`, new Date().toISOString(), new Date().toISOString());
+    seedBoundedMcpEffectRow(db, {
+      id: "effect",
+      agent_id: agent.agentId,
+      room_id: agent.roomId,
+      execution_generation_id: "generation-1",
+      provider_turn_id: `turn-${retry.sources.length + 1}`,
+      mcp_request_id: "request",
+      tool_name: "publish_room_artifact",
+      request: {},
+      mutation: true,
+      state: "executing",
+    });
     db.close();
     await retry.delivery().retry(retry.claude, (await blockedHead())!.source_message_id);
     await waitForAsync(async () => !(await blockedHead()));

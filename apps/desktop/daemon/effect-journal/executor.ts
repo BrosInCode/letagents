@@ -25,6 +25,7 @@ import {
   resolveUncertainEffect,
 } from "./store.js";
 import {
+  EffectClaimRefusedError,
   EffectFenceError,
   EffectValidationError,
   type EffectBackoffPolicy,
@@ -103,6 +104,9 @@ export class EffectExecutor {
     if (typeof handler.retryable !== "boolean") {
       throw new EffectValidationError(`Effect handler for kind ${kind} must explicitly declare retryable: boolean.`);
     }
+    if (handler.autoPump !== undefined && typeof handler.autoPump !== "boolean") {
+      throw new EffectValidationError(`Effect handler for kind ${kind} must use a boolean autoPump option when provided.`);
+    }
     if (handler.defaultMaxAttempts !== undefined) {
       if (!Number.isSafeInteger(handler.defaultMaxAttempts) || handler.defaultMaxAttempts < 1) {
         throw new EffectValidationError(`Effect handler for kind ${kind} must use a positive safe integer defaultMaxAttempts.`);
@@ -171,7 +175,8 @@ export class EffectExecutor {
     input: Omit<PrepareEffectInput, "epoch"> & { epoch?: number },
   ): Promise<PrepareEffectResult> {
     const prepared = await this.prepare(input);
-    if (prepared.effect.state === "prepared" && this.handlers.has(prepared.effect.kind)) {
+    const handler = this.handlers.get(prepared.effect.kind);
+    if (prepared.effect.state === "prepared" && handler && handler.autoPump !== false) {
       this.schedulePump(0);
     }
     return prepared;
@@ -179,7 +184,7 @@ export class EffectExecutor {
 
   /**
    * Runs startup crash recovery for interrupted effects, then schedules the
-   * pump for any runnable `prepared` effects whose kind has a registered handler.
+   * pump for any runnable `prepared` effects whose kind enables `autoPump`.
    */
   async recoverOnStartup(): Promise<EffectStartupRecoveryReport> {
     this.assertNotFenced();
@@ -195,10 +200,13 @@ export class EffectExecutor {
       nowIso: this.nowIso(),
       nonRetryableKinds,
     }));
-    if (report.requeuedIds.length > 0 || report.uncertainIds.length > 0 || report.fencedFutureEpochIds.length > 0) {
+    if (report.requeuedIds.length > 0
+      || report.uncertainIds.length > 0
+      || report.fencedFutureEpochIds.length > 0
+      || report.fencedOrphanPreparedIds.length > 0) {
       this.options.notifyStateChanged?.();
     }
-    if (this.handlers.size > 0 && report.preparedIds.length > 0) {
+    if (this.autoPumpKinds().length > 0 && report.preparedIds.length > 0) {
       this.scheduleNextPump();
     }
     return report;
@@ -240,9 +248,9 @@ export class EffectExecutor {
     return settled;
   }
 
-  /** Drains all currently due `prepared` effects for registered kinds. */
+  /** Drains all currently due `prepared` effects for registered auto-pumped kinds. */
   async pumpNow(): Promise<void> {
-    if (this.isFenced || this.handlers.size === 0) return;
+    if (this.isFenced || this.autoPumpKinds().length === 0) return;
     if (this.activePump) {
       this.pumpAgain = true;
       await this.activePump;
@@ -258,7 +266,8 @@ export class EffectExecutor {
           if (!database || !database.isOpen) break;
           const maxEpoch = this.safeCurrentGeneration();
           if (maxEpoch === null) break;
-          const kinds = [...this.handlers.keys()];
+          const kinds = this.autoPumpKinds();
+          if (kinds.length === 0) break;
           const runnable = listDuePreparedEffects(database, this.nowMs(), kinds, 64, {
             excludeIds: [...this.activeById.keys()],
             maxEpoch,
@@ -301,21 +310,28 @@ export class EffectExecutor {
 
   /**
    * Synchronous handoff/shutdown edge: prevents any new effect admission,
-   * clears retry timers, and aborts the cancellation signal for in-flight work.
+   * clears retry timers, and (by default) aborts the cancellation signal for
+   * in-flight work. Pass `{ abortInFlight: false }` during graceful
+   * `prepare_handoff` so admitted on-demand tool executions can finish draining
+   * before final shutdown fencing aborts remaining work.
    */
-  fence(): void {
-    if (this.fenced) return;
-    this.fenced = true;
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-      this.timerDueMs = Infinity;
+  fence(options?: { abortInFlight?: boolean }): void {
+    const abortInFlight = options?.abortInFlight ?? true;
+    if (!this.fenced) {
+      this.fenced = true;
+      if (this.timer) {
+        clearTimeout(this.timer);
+        this.timer = null;
+        this.timerDueMs = Infinity;
+      }
+      if (this.immediate) {
+        clearImmediate(this.immediate);
+        this.immediate = null;
+      }
     }
-    if (this.immediate) {
-      clearImmediate(this.immediate);
-      this.immediate = null;
+    if (abortInFlight && !this.abortController.signal.aborted) {
+      this.abortController.abort(new EffectFenceError("Effect executor fenced for shutdown or handoff."));
     }
-    this.abortController.abort(new EffectFenceError("Effect executor fenced for shutdown or handoff."));
   }
 
   /** Fences new work synchronously and waits for all admitted executions to settle. */
@@ -399,13 +415,22 @@ export class EffectExecutor {
     return execution;
   }
 
+  private autoPumpKinds(): string[] {
+    const kinds: string[] = [];
+    for (const [kind, handler] of this.handlers) {
+      if (handler.autoPump !== false) kinds.push(kind);
+    }
+    return kinds;
+  }
+
   private scheduleNextPump(): void {
-    if (this.isFenced || this.handlers.size === 0) return;
+    const kinds = this.autoPumpKinds();
+    if (this.isFenced || kinds.length === 0) return;
     const database = this.options.getDatabase();
     if (!database || !database.isOpen) return;
     const maxEpoch = this.safeCurrentGeneration();
     if (maxEpoch === null) return;
-    const dueMs = nextScheduledPreparedEffectAtMs(database, [...this.handlers.keys()], {
+    const dueMs = nextScheduledPreparedEffectAtMs(database, kinds, {
       excludeIds: [...this.activeById.keys()],
       maxEpoch,
     });
@@ -460,10 +485,10 @@ export class EffectExecutor {
       throw new EffectValidationError(`No effect handler registered for kind ${initial.kind}.`);
     }
 
-    // Enforce the current handler's at-most-once policy before dispatching any
-    // previously attempted retry row (e.g., if policy tightened across builds
-    // or handler registration occurred after startup recovery).
-    if (!handler.retryable && initial.attempt_count >= 1) {
+    // Enforce at-most-once policy before dispatching any previously attempted
+    // retry row (e.g., if policy tightened across builds or handler registration
+    // occurred after startup recovery).
+    if ((!handler.retryable || !initial.retryable) && initial.attempt_count >= 1) {
       const quarantined = this.runFencedWrite(() => quarantinePreparedRetryAsUncertain(
         database,
         this.options.assertWriteFence,
@@ -478,12 +503,21 @@ export class EffectExecutor {
       return quarantined;
     }
 
-    const claimed = this.runFencedWrite(() => claimEffectForExecution(database, this.options.assertWriteFence, {
-      id: effectId,
-      daemonGeneration: this.options.currentDaemonGeneration(),
-      nowMs: this.nowMs(),
-      nowIso: this.nowIso(),
-    }));
+    let claimed: EffectRecord;
+    try {
+      claimed = this.runFencedWrite(() => claimEffectForExecution(database, this.options.assertWriteFence, {
+        id: effectId,
+        daemonGeneration: this.options.currentDaemonGeneration(),
+        nowMs: this.nowMs(),
+        nowIso: this.nowIso(),
+        authorizeClaim: handler.authorizeClaim,
+      }));
+    } catch (error) {
+      if (error instanceof EffectClaimRefusedError) {
+        this.options.notifyStateChanged?.();
+      }
+      throw error;
+    }
     this.options.notifyStateChanged?.();
 
     let result: EffectExecutionResult;
@@ -509,7 +543,10 @@ export class EffectExecutor {
     // admitted before `fenceAndDrain()` can durably record its receipt before the
     // daemon releases the lock and closes SQLite.
     await this.assertAuthority();
-    const settled = this.runFencedWrite(() => this.settleExecutionResult(claimed, handler, result));
+    const defaultSettle = () => this.runFencedWrite(() => this.settleExecutionResult(claimed, handler, result));
+    const settled = handler.settle
+      ? await handler.settle(claimed, result, defaultSettle)
+      : defaultSettle();
     this.options.notifyStateChanged?.();
     if (!this.isFenced) this.scheduleNextPump();
     return settled;

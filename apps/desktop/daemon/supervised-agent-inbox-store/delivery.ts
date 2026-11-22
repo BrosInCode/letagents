@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { BOUNDED_MCP_EFFECT_KIND } from "../effect-journal/index.js";
 import { pendingRuntimeRecovery } from "../runtime-recovery-journal.js";
 import { prepareRoomContext } from "../prepared-room-context.js";
 import { FOLLOW_UP_ENDED } from "../task-continuity.js";
@@ -247,12 +248,15 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
         } else if (resetTurnId !== undefined) {
           const executionGenerationId = String(binding!.origin_execution_generation_id);
           const effect = database.prepare(`SELECT 1 FROM effects
-            WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
+            WHERE agent_id=? AND kind=?
+              AND json_extract(payload,'$.room_id')=?
+              AND json_extract(payload,'$.execution_generation_id')=?
+              AND json_extract(payload,'$.provider_turn_id')=?
             UNION ALL
             SELECT 1 FROM effect_tombstones
             WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
             LIMIT 1`).get(
-            item.agent_id, item.room_id, executionGenerationId, resetTurnId,
+            item.agent_id, BOUNDED_MCP_EFFECT_KIND, item.room_id, executionGenerationId, resetTurnId,
             item.agent_id, item.room_id, executionGenerationId, resetTurnId,
           );
           if (terminal || effect || item.outcome) {
@@ -560,7 +564,8 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
     await this.exclusive(async (database) => this.transaction(database, () => {
       const scope = agentId ? " AND agent_id=?" : "";
       const affected = database.prepare(`SELECT DISTINCT agent_id FROM effects
-        WHERE state='executing' AND tool_name<>'join_room'${scope}`).all(
+        WHERE kind=? AND state='executing' AND json_extract(payload,'$.tool_name')<>'join_room'${scope}`).all(
+        BOUNDED_MCP_EFFECT_KIND,
         ...(agentId ? [agentId] : []) as never[],
       ) as Row[];
       this.normalizeInterruptedEffectsInTransaction(database, agentId, this.now());

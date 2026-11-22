@@ -77,17 +77,19 @@ async function waitForExit(child: ChildProcess, timeoutMs = 5_000): Promise<bool
   });
 }
 
-test("fresh current schema enforces application_id, user_version=1002, downgrade-safe table layout, and 1:1 shape checks", async () => {
+test("fresh current schema enforces application_id, user_version=1003, downgrade-safe table layout, and 1:1 shape checks", async () => {
   const env = await tempDir("letagents-schema-v1-");
   const dbPath = join(env.root, "daemon-state.sqlite");
   try {
-    assert.equal(DAEMON_STATE_SCHEMA_VERSION, 2);
+    assert.equal(DAEMON_STATE_SCHEMA_VERSION, 3);
     assert.equal(DAEMON_STATE_USER_VERSION_OFFSET, 1000);
-    assert.equal(DAEMON_STATE_USER_VERSION, 1002);
+    assert.equal(DAEMON_STATE_USER_VERSION, 1003);
     assert.equal(toSqliteUserVersion(1), 1001);
     assert.equal(fromSqliteUserVersion(1001), 1);
     assert.equal(toSqliteUserVersion(2), 1002);
     assert.equal(fromSqliteUserVersion(1002), 2);
+    assert.equal(toSqliteUserVersion(3), 1003);
+    assert.equal(fromSqliteUserVersion(1003), 3);
 
     const stateDb = await DaemonStateDatabase.open(dbPath);
     try {
@@ -110,9 +112,10 @@ test("fresh current schema enforces application_id, user_version=1002, downgrade
       // the disk, and omitting `manifest_metadata` guarantees no legacy path can
       // mistake a schema v1 file for a pre-v1 manifest database.
       assert.equal(tables.has("manifest_metadata"), false, "manifest_metadata must not exist in schema v1");
-      for (const expected of ["agents", "runs", "inbox_items", "effects", "effect_tombstones", "effect_journal", "execution_facts", "daemon_maintenance_state"]) {
+      for (const expected of ["agents", "runs", "inbox_items", "effects", "effect_tombstones", "execution_facts", "daemon_maintenance_state"]) {
         assert.equal(tables.has(expected), true, `expected domain table ${expected}`);
       }
+      assert.equal(tables.has("effect_journal"), false, "staging effect_journal table is promoted to effects in schema v3");
       for (const obsolete of [
         "execution_lifecycle_effects",
         "agent_identities",

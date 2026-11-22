@@ -38,7 +38,7 @@ import {
   validateDaemonStateShape,
 } from "../daemon-state-database.js";
 import { normalizeSchemaSql } from "../daemon-state-database/shared.js";
-import { applyEffectJournalSchema, prepareEffect } from "../effect-journal/index.js";
+import { applyEffectJournalSchemaV2, prepareEffect } from "../effect-journal/index.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { SupervisorDaemon } from "../main.js";
 import { cloneStateDatabaseForCompaction, prepareStateRecoveryBackup } from "../state-recovery-backup.js";
@@ -309,17 +309,17 @@ test("populated v1 fixture upgrades cleanly to v2 via withProtectedStateUpgrade,
 
       const db = upgradedDb.connection;
       assert.equal(Number(db.prepare("PRAGMA application_id").get()?.application_id), DAEMON_STATE_APPLICATION_ID);
-      assert.equal(Number(db.prepare("PRAGMA user_version").get()?.user_version), toSqliteUserVersion(2));
+      assert.equal(Number(db.prepare("PRAGMA user_version").get()?.user_version), DAEMON_STATE_USER_VERSION);
 
       // Verify every single v1 table (including ON DELETE CASCADE children) preserved its exact row count,
       // `daemon_maintenance_state` gained the 1 backup-retention bookkeeping row from withProtectedStateUpgrade,
-      // and the newly added v2 `effect_journal` table starts empty.
+      // and legacy `effects` migrated cleanly into the unified v3 `effects` table (no `effect_journal` staging table left).
       const upgradedCounts = readAllTableRowCounts(db);
       assert.deepEqual(upgradedCounts, {
         ...seeded.tableRowCounts,
         daemon_maintenance_state: 1,
-        effect_journal: 0,
       });
+      assert.equal(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='effect_journal'").get(), undefined);
 
       // Verify all seeded v1 rows were preserved verbatim.
       const agents = db.prepare("SELECT agent_id, sort_order, version, display_name, room_id, last_turn_control_sequence FROM agents ORDER BY sort_order").all() as Array<Record<string, unknown>>;
@@ -336,9 +336,10 @@ test("populated v1 fixture upgrades cleanly to v2 via withProtectedStateUpgrade,
       assert.equal(inbox.state, "pending");
       assert.equal(inbox.source_message_id, "msg_42");
 
-      const legacyEffect = db.prepare("SELECT effect_id, state, tool_name FROM effects WHERE effect_id=?").get(seeded.legacyEffectId) as Record<string, unknown>;
-      assert.equal(legacyEffect.state, "prepared");
-      assert.equal(legacyEffect.tool_name, "send_message");
+      const migratedEffect = db.prepare("SELECT id, kind, state, payload FROM effects WHERE id=?").get(seeded.legacyEffectId) as Record<string, unknown>;
+      assert.equal(migratedEffect.kind, "bounded_mcp_effect");
+      assert.equal(migratedEffect.state, "prepared");
+      assert.equal((JSON.parse(String(migratedEffect.payload)) as { tool_name: string }).tool_name, "send_message");
 
       const tombstone = db.prepare("SELECT effect_id, state FROM effect_tombstones WHERE effect_id=?").get(seeded.tombstoneId) as Record<string, unknown>;
       assert.equal(tombstone.state, "completed");
@@ -353,7 +354,7 @@ test("populated v1 fixture upgrades cleanly to v2 via withProtectedStateUpgrade,
       assert.equal(roomMove.phase, "prepared");
       assert.equal(roomMove.destination_room_id, "room_gamma");
 
-      // Verify effect_journal is operational and moves agent_state_versions.inbox_version on write.
+      // Verify unified `effects` is operational and moves agent_state_versions.inbox_version on write.
       const beforeInboxVersion = Number(
         (db.prepare("SELECT inbox_version FROM agent_state_versions WHERE agent_id='agent_beta'").get() as { inbox_version?: number } | undefined)?.inbox_version ?? 0,
       );
@@ -362,7 +363,7 @@ test("populated v1 fixture upgrades cleanly to v2 via withProtectedStateUpgrade,
         kind: "probe_external",
         idempotency_key: "k-1",
         epoch: 1,
-        payload: { hello: "v2" },
+        payload: { hello: "v3" },
       });
       assert.equal(prepared.created, true);
       const afterInboxVersion = Number(
@@ -370,11 +371,11 @@ test("populated v1 fixture upgrades cleanly to v2 via withProtectedStateUpgrade,
       );
       assert.equal(afterInboxVersion, beforeInboxVersion + 1);
 
-      // Verify compaction clone works cleanly on populated v2 databases containing effect_journal rows and triggers.
+      // Verify compaction clone works cleanly on populated databases containing unified `effects` rows and triggers.
       const cloned = cloneStateDatabaseForCompaction(db);
       try {
         validateDaemonStateShape(cloned);
-        assert.equal(Number(cloned.prepare("SELECT COUNT(*) AS n FROM effect_journal").get()?.n), 1);
+        assert.equal(Number(cloned.prepare("SELECT COUNT(*) AS n FROM effects").get()?.n), 2);
       } finally {
         cloned.close();
       }
@@ -440,7 +441,7 @@ test("v1 -> v2 migration rolls back atomically on in-process failure and succeed
         try {
           runNumberedMigrations(failingDb, 1, 2, {
             1(connection) {
-              applyEffectJournalSchema(connection);
+              applyEffectJournalSchemaV2(connection);
               throw new Error("injected v1->v2 migration failure");
             },
           });
@@ -460,10 +461,10 @@ test("v1 -> v2 migration rolls back atomically on in-process failure and succeed
       failingDb.close();
     }
 
-    // Retrying real migration succeeds and validates 1:1 against fresh v2.
+    // Retrying real migration succeeds and validates 1:1 against fresh current schema.
     const retried = await DaemonStateDatabase.open(dbPath);
     try {
-      assert.equal(Number(retried.connection.prepare("PRAGMA user_version").get()?.user_version), toSqliteUserVersion(2));
+      assert.equal(Number(retried.connection.prepare("PRAGMA user_version").get()?.user_version), DAEMON_STATE_USER_VERSION);
       validateDaemonStateShape(retried.connection);
       assert.equal(Number(retried.connection.prepare("SELECT COUNT(*) AS n FROM agents").get()?.n), seeded.agentIds.length);
     } finally {
@@ -481,11 +482,11 @@ test("real SIGKILL mid-migration rolls back v1 -> v2 atomically and retrying ope
     const seeded = seedPopulatedV1Database(dbPath);
     const script = `
       import { DatabaseSync } from "node:sqlite";
-      const { applyEffectJournalSchema } = await import(process.env.EFFECT_SCHEMA_URL);
+      const { applyEffectJournalSchemaV2 } = await import(process.env.EFFECT_SCHEMA_URL);
       const db = new DatabaseSync(process.env.DB_PATH);
       db.exec("PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;");
       db.exec("BEGIN IMMEDIATE");
-      applyEffectJournalSchema(db);
+      applyEffectJournalSchemaV2(db);
       db.exec("PRAGMA user_version = 1002");
       process.stdout.write("MID_MIGRATION_READY\\n");
       setInterval(() => {}, 60_000);
@@ -530,10 +531,10 @@ test("real SIGKILL mid-migration rolls back v1 -> v2 atomically and retrying ope
       afterCrash.close();
     }
 
-    // Reopening via DaemonStateDatabase.open retries v1 -> v2 cleanly.
+    // Reopening via DaemonStateDatabase.open retries cleanly to current schema.
     const recovered = await DaemonStateDatabase.open(dbPath);
     try {
-      assert.equal(Number(recovered.connection.prepare("PRAGMA user_version").get()?.user_version), toSqliteUserVersion(2));
+      assert.equal(Number(recovered.connection.prepare("PRAGMA user_version").get()?.user_version), DAEMON_STATE_USER_VERSION);
       validateDaemonStateShape(recovered.connection);
       assert.equal(Number(recovered.connection.prepare("SELECT COUNT(*) AS n FROM agents").get()?.n), seeded.agentIds.length);
     } finally {
@@ -577,11 +578,11 @@ test("older v1 gate and backup gate refuse a v2 database without modifying or mo
     );
     assert.equal(keyRequested, false, "v1 backup gate must fail closed before requesting a recovery key");
 
-    // 2. Older v1 version gate check: schemaVersion (2) > v1 max (1) fails closed and never moves aside.
+    // 2. Older v1 version gate check: current schema version > v1 max (1) fails closed and never moves aside.
     const probe = new DatabaseSync(dbPath, { readOnly: true });
     try {
       assert.equal(Number(probe.prepare("PRAGMA application_id").get()?.application_id), DAEMON_STATE_APPLICATION_ID);
-      assert.equal(Number(probe.prepare("PRAGMA user_version").get()?.user_version), toSqliteUserVersion(2));
+      assert.equal(Number(probe.prepare("PRAGMA user_version").get()?.user_version), DAEMON_STATE_USER_VERSION);
     } finally {
       probe.close();
     }

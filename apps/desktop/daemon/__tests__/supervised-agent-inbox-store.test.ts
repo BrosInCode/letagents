@@ -13,6 +13,7 @@ import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import { RETAINED_TERMINAL_TIMELINE_EVENTS, RETAINED_TERMINAL_CONTINUATION_REPAIRS, settleCapturedExecutionAttempts } from "../supervised-agent-history-retention.js";
 import type { DaemonManifestEntry } from "../types.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { seedBoundedMcpEffectRow } from "./helpers/bounded-effect-seed.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt",
@@ -1340,9 +1341,9 @@ test("failed receipts retain bounded history without hiding uncertain partial mu
     assert.equal((await store.receipts("native")).length, 200);
     const database = new DatabaseSync(env.database);
     try {
-      assert.equal(database.prepare("SELECT state FROM effects WHERE mcp_request_id='partial-mutation'").get()?.state, "executing");
+      assert.equal(database.prepare("SELECT state FROM effects WHERE kind='bounded_mcp_effect' AND json_extract(payload,'$.mcp_request_id')='partial-mutation'").get()?.state, "executing");
       await store.normalizeStartupRecovery("native");
-      assert.equal(database.prepare("SELECT state FROM effects WHERE mcp_request_id='partial-mutation'").get()?.state, "uncertain");
+      assert.equal(database.prepare("SELECT state FROM effects WHERE kind='bounded_mcp_effect' AND json_extract(payload,'$.mcp_request_id')='partial-mutation'").get()?.state, "uncertain");
       assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_terminal_results").get()?.n, 200);
       assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_publications").get()?.n, 0);
     } finally { database.close(); }
@@ -1940,7 +1941,7 @@ test("effect recovery redrives reads, quarantines mutations, and accepts a late 
 
     const inspection = new DatabaseSync(env.database);
     try {
-      const state = (effectId: string) => (inspection.prepare("SELECT state FROM effects WHERE effect_id=?").get(effectId) as { state: string }).state;
+      const state = (effectId: string) => (inspection.prepare("SELECT state FROM effects WHERE id=?").get(effectId) as { state: string }).state;
       assert.equal(state(restartReadEffect.effect.effect_id), "prepared");
       assert.equal(state(restartMutationEffect.effect.effect_id), "uncertain");
     } finally { inspection.close(); }
@@ -1988,8 +1989,10 @@ test("33 active-turn uncertain mutations retain exact replay and late-completion
       assert.equal((compacted.prepare("SELECT COUNT(*) AS count FROM effect_tombstones WHERE agent_id=?")
         .get(base.agent_id) as { count: number }).count, 1, "request 1 retains a compact durable identity");
       assert.equal((compacted.prepare(`SELECT COUNT(*) AS count FROM (
-          SELECT effect_id FROM effects
-          WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+          SELECT id AS effect_id FROM effects
+          WHERE agent_id=? AND kind='bounded_mcp_effect'
+            AND json_extract(payload,'$.execution_generation_id')=?
+            AND json_extract(payload,'$.provider_turn_id')=?
           UNION ALL
           SELECT effect_id FROM effect_tombstones
           WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
@@ -1998,7 +2001,7 @@ test("33 active-turn uncertain mutations retain exact replay and late-completion
         base.agent_id, base.execution_generation_id, base.provider_turn_id,
       ) as { count: number }).count, requests.length,
       "compaction preserves the same identities counted by bounded per-turn effect admission");
-      assert.equal(compacted.prepare("SELECT 1 FROM effects WHERE effect_id=?").get(effects[0]!.effect_id), undefined);
+      assert.equal(compacted.prepare("SELECT 1 FROM effects WHERE id=?").get(effects[0]!.effect_id), undefined);
     } finally { compacted.close(); }
 
     const firstReplay = await store.prepareEffect(requests[0]!);
@@ -2172,9 +2175,14 @@ test("effect journal bounds per-turn rows and payload bytes without stranding co
       reason: "not_json_serializable",
       serialized_bytes: null,
     });
-    await assert.rejects(() => store.stagePreparedEffectResult(
-      effects[6]!.effect_id, { text: "r".repeat(257 * 1024) },
-    ), /prepared result exceeds the 262144-byte durable limit/i);
+    const checkPreparedOutcome = new DatabaseSync(env.database);
+    try {
+      assert.throws(
+        () => checkPreparedOutcome.prepare("UPDATE effects SET outcome='{\"staged\":true}' WHERE id=?").run(effects[6]!.effect_id),
+        /CHECK constraint failed|invalid/i,
+        "unified effects schema forbids storing an outcome on a prepared effect",
+      );
+    } finally { checkPreparedOutcome.close(); }
 
     await store.markEffectExecuting({ effect_id: effects[7]!.effect_id, ...base });
     const failed = await store.completeEffect({
@@ -2734,8 +2742,23 @@ test("structured room-turn completion is an atomic durable singleton across conc
     // upgrade: the request is durable but its old two-phase callback did not
     // checkpoint completion. Reopen must finish it locally, never quarantine.
     const legacy = new DatabaseSync(env.database);
-    legacy.prepare("UPDATE effects SET state='executing',result_json=NULL WHERE effect_id=?")
-      .run(concurrent[0]!.effect.effect_id);
+    const completedId = concurrent[0]!.effect.effect_id;
+    legacy.prepare("DELETE FROM effects WHERE id=?").run(completedId);
+    seedBoundedMcpEffectRow(legacy, {
+      id: completedId,
+      agent_id: authority.agent_id,
+      room_id: authority.room_id,
+      execution_generation_id: authority.execution_generation_id,
+      provider_turn_id: authority.provider_turn_id,
+      mcp_request_id: concurrent[0]!.effect.mcp_request_id,
+      tool_name: "complete_room_turn",
+      request: completion,
+      mutation: true,
+      state: "executing",
+      retryable: true,
+      max_attempts: 8,
+      attempt_count: 1,
+    });
     legacy.close();
 
     const reopened = new SupervisedAgentInboxStore(env.database);
@@ -2799,13 +2822,23 @@ test("room-turn completion waits until every already-executing effect has durabl
     }), /cannot complete while an earlier effect is still executing/i,
     "completion cannot claim to be the last action while an earlier effect is across its execution boundary");
     const legacy = new DatabaseSync(env.database);
-    legacy.prepare(`INSERT INTO effects
-      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-      VALUES ('legacy-completion',?,?,?,?,?,'complete_room_turn',?,1,'executing',NULL,NULL,?,?)`).run(
-      authority.agent_id, authority.room_id, authority.execution_generation_id, authority.provider_turn_id,
-      "legacy-completion-request", JSON.stringify({ outcome: "no_reply" }),
-      "2026-08-05T13:12:00.000Z", "2026-08-05T13:12:00.000Z",
-    );
+    seedBoundedMcpEffectRow(legacy, {
+      id: "legacy-completion",
+      agent_id: authority.agent_id,
+      room_id: authority.room_id,
+      execution_generation_id: authority.execution_generation_id,
+      provider_turn_id: authority.provider_turn_id,
+      mcp_request_id: "legacy-completion-request",
+      tool_name: "complete_room_turn",
+      request: { outcome: "no_reply" },
+      mutation: true,
+      state: "executing",
+      retryable: true,
+      max_attempts: 8,
+      attempt_count: 1,
+      created_at: "2026-08-05T13:12:00.000Z",
+      updated_at: "2026-08-05T13:12:00.000Z",
+    });
     legacy.close();
     await assert.rejects(store.prepareEffect({
       ...authority, mcp_request_id: "legacy-completion-request", tool_name: "complete_room_turn",
@@ -3263,16 +3296,40 @@ test("settled child history converges on migration and settlement, retaining exa
     store = new SupervisedAgentInboxStore(env.database);
     assert.equal((await store.latestContinuationRepair("large-history"))!.phase, "probing");
     database.prepare("UPDATE provider_continuation_repairs SET phase='committed' WHERE repair_id=?").run(`${failed!.inbox_item_id}:repair:99`);
-    database.prepare(`INSERT INTO effects
-      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-      VALUES ('generation-pin','large-history','room','generation','native:3','request','send_message','{}',1,'executing',NULL,NULL,?,?)`)
-      .run("2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
+    seedBoundedMcpEffectRow(database, {
+      id: "generation-pin",
+      agent_id: "large-history",
+      room_id: "room",
+      execution_generation_id: "generation",
+      provider_turn_id: "native:3",
+      mcp_request_id: "request",
+      tool_name: "send_message",
+      request: {},
+      mutation: true,
+      state: "executing",
+      created_at: "2026-09-01T00:00:00.000Z",
+      updated_at: "2026-09-01T00:00:00.000Z",
+    });
     await store.pruneHistory("large-history");
     assert.equal(database.prepare("SELECT COUNT(*) AS n FROM provider_continuation_repairs WHERE inbox_item_id=?").get(failed!.inbox_item_id)!.n, 100);
-    database.exec("UPDATE effects SET execution_generation_id='unrelated-generation' WHERE effect_id='generation-pin'");
+    database.prepare("DELETE FROM effects WHERE id='generation-pin'").run();
+    seedBoundedMcpEffectRow(database, {
+      id: "generation-pin",
+      agent_id: "large-history",
+      room_id: "room",
+      execution_generation_id: "unrelated-generation",
+      provider_turn_id: "native:3",
+      mcp_request_id: "request",
+      tool_name: "send_message",
+      request: {},
+      mutation: true,
+      state: "executing",
+      created_at: "2026-09-01T00:00:00.000Z",
+      updated_at: "2026-09-01T00:00:00.000Z",
+    });
     await store.pruneHistory("large-history");
     assertBounded(failed!.inbox_item_id);
-    assert.equal(database.prepare("SELECT state FROM effects WHERE effect_id='generation-pin'").get()!.state, "executing",
+    assert.equal(database.prepare("SELECT state FROM effects WHERE id='generation-pin'").get()!.state, "executing",
       "unrelated generation authority is preserved without pinning this receipt's history");
     assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(failed!.inbox_item_id), failureEvidence);
     assert.equal((await store.get(failed!.inbox_item_id))!.state, "acknowledged_failed");

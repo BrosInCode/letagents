@@ -6,6 +6,7 @@
  * A method name may be defined in only one module; store.ts throws on a duplicate.
  */
 import { randomUUID } from "node:crypto";
+import { failPreparedBoundedEffectsForTurnControlInTransaction } from "../effect-journal/index.js";
 import { sameProviderActionConnectionSnapshot } from "../provider-action-port.js";
 import { pruneSupervisedAgentHistory, readDurableNativeFailure, settleSupervisedTerminalItem } from "../supervised-agent-history-retention.js";
 import { projectDaemonManifestEntry } from "../manifest-entry-projection.js";
@@ -110,10 +111,13 @@ export const turnControl = storeMethods({
       // This transaction is the Stop/correction admission edge. Whichever
       // journal wins first owns the turn: effects not yet authorized to run
       // are failed here, while already-executing effects remain completable.
-      run(database.prepare(`UPDATE effects
-        SET state='failed',error='The exact room turn was fenced by human turn control before this effect was authorized.',updated_at=?
-        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND state='prepared' AND tool_name<>'join_room'`),
-      input.recordedAt, input.agentId, String(turnBinding.origin_execution_generation_id), input.expectedProviderTurnId);
+      failPreparedBoundedEffectsForTurnControlInTransaction(database, {
+        agentId: input.agentId,
+        executionGenerationId: String(turnBinding.origin_execution_generation_id),
+        providerTurnId: input.expectedProviderTurnId,
+        error: "The exact room turn was fenced by human turn control before this effect was authorized.",
+        updatedAt: input.recordedAt,
+      });
       const retryingExactAction = existing?.action_id === input.actionId;
       const terminalOrPublishing = Boolean(readDurableNativeFailure(database, input.expectedInboxItemId))
         || ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linkedState ?? "");

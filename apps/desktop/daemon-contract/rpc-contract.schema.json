@@ -3550,7 +3550,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": {
     "defaultMaxRequestBytes": 65536,
-    "implementationVersion": "2.0.284-modern.12",
+    "implementationVersion": "2.0.284-modern.13",
     "localBoardMaxFrameBytes": 16777216,
     "protocolVersion": 3,
     "stateActivitySummaryLimit": 16,

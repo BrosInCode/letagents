@@ -3,7 +3,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 
 /** ASCII 'LAD1' (LetAgents Daemon schema lineage v1+). Legacy v1-v52 DBs have application_id = 0. */
 export const DAEMON_STATE_APPLICATION_ID = 0x4c414431;
-export const DAEMON_STATE_SCHEMA_VERSION = 2;
+export const DAEMON_STATE_SCHEMA_VERSION = 3;
 export const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 /**
  * Offset added to logical schema version when stored in SQLite's PRAGMA user_version.
@@ -65,7 +65,6 @@ export const agentStateVersionSources: readonly AgentStateVersionSource[] = [
   { table: "supervised_agent_provider_turn_bindings", key: "agent_id", scope: "inbox" },
   { table: "effects", key: "agent_id", scope: "inbox" },
   { table: "effect_tombstones", key: "agent_id", scope: "inbox" },
-  { table: "effect_journal", key: "agent_id", scope: "inbox" },
   { table: "provider_continuation_repairs", key: "agent_id", scope: "inbox" },
   { table: "supervised_agent_ingress_health", key: "agent_id", scope: "inbox" },
   { table: "agents", key: "agent_id", scope: "manifest" },

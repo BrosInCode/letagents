@@ -1,6 +1,6 @@
 /** Starting, stopping and handing off the supervisor daemon. */
 import { openDaemonMaintenance, registerDaemonBoardAccess } from "../maintenance-service.js";
-import { EffectExecutor } from "../effect-journal/index.js";
+import { BOUNDED_MCP_EFFECT_KIND, EffectExecutor } from "../effect-journal/index.js";
 import { restoreLocalRoomAuthorities } from "../local-room-runtime.js";
 import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import { withProtectedStateUpgrade, type StateRecoveryBootstrap } from "../state-recovery-key.js";
@@ -86,10 +86,16 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
         notifyStateChanged: () => this.notifyStateChanged(),
         nowMs: () => this.nowMs(),
       });
+      this.effectExecutor.registerHandler(
+        BOUNDED_MCP_EFFECT_KIND,
+        this.boundedEffects.createExecutorHandler(),
+      );
       this.executionDelegations.start();
     }
-    await this.effectExecutor?.recoverOnStartup();
-    await this.supervisedInbox.normalizeInterruptedEffects();
+    const effectRecovery = await this.effectExecutor?.recoverOnStartup();
+    if (effectRecovery && effectRecovery.uncertainAgentIds.length > 0) {
+      await this.supervisedInbox.pruneAgentsAfterEffectRecovery(effectRecovery.uncertainAgentIds);
+    }
     await this.runtimeRecovery.recoverTurnControls();
     await this.roomMoves.reconcilePrepared();
     await this.lifecycleAdministration.recoverPreparedPurges();
@@ -218,7 +224,9 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     // edge. No claimed FIFO item may observe the public fence before its
     // controller is aborted and its cleanup owner is established.
     this.supervisedDelivery?.fence();
-    this.effectExecutor?.fence();
+    // Stop admitting new effects immediately without aborting already-admitted
+    // bounded external tool calls before `drainExternalExecutions()` completes.
+    this.effectExecutor?.fence({ abortInFlight: false });
     this.wakeRoomMoveReconciliationWaiters();
     this.notifyStateChanged();
     // A bootstrap that already read tail N must commit N before lock/socket
@@ -236,9 +244,9 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     // the acknowledgement can authorize Electron to replace this daemon.
     this.workerRuntimeCustody.destroyOwnerCredentials();
     await this.providerExecution?.drainDispatches();
+    await this.boundedEffects.drainExternalExecutions();
     await this.effectExecutor?.fenceAndDrain();
     await this.boundedEffects.drainJournalReservations();
-    await this.boundedEffects.drainExternalExecutions();
     await this.providerTerminals.drainAndClose(() => {
       try { this.providerStreams.detachAll(); } catch (error) { this.handoffCleanupFailures.push(error); }
     });
