@@ -7,7 +7,7 @@ import { isOwnerPrivate, ownerPrivatePlatform, protectOwnerPrivate, windowsToolP
 import { isBirthEvidence, signalTree, signalTreeOutcome, windowsProcessInfo, type TreeSignalOutcome } from "../../../../shared/process-tree.mjs";
 import { renameWithRetryAsync } from "../../../../shared/rename-retry.mjs";
 import { processBirthState, sameProcessBirthIdentity } from "../process-identity.js";
-import { DaemonStateSchema } from "./schema.js";
+import { DaemonStateSchema, validateDaemonStateShapeForVersion } from "./schema.js";
 import { SCHEMA_VERSION, type Row } from "./shared.js";
 import { assertDaemonStateVersionSupported, inspectDaemonStateDatabase } from "./version-gate.js";
 
@@ -545,6 +545,13 @@ export async function moveAsideLegacyDaemonStateDatabase(
       database.exec("PRAGMA busy_timeout = 5000");
       inspection = inspectDaemonStateDatabase(database);
       if (inspection.kind === "legacy") legacyRuntimes = readLegacyLiveRuntimes(database);
+      else if (
+        inspection.kind === "modern"
+        && inspection.schemaVersion >= 1
+        && inspection.schemaVersion < SCHEMA_VERSION
+      ) {
+        validateDaemonStateShapeForVersion(database, inspection.schemaVersion);
+      }
       break;
     } catch (error) {
       if (attempt === 7 || !isSqliteBusyOrLocked(error)) throw error;

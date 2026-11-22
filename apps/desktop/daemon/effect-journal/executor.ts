@@ -122,6 +122,18 @@ export class EffectExecutor {
     return this.handlers.has(kind);
   }
 
+  /** Reads a durable effect row from the executor's attached database, if open. */
+  getEffect(effectId: string): EffectRecord | null {
+    const database = this.options.getDatabase();
+    if (!database || !database.isOpen) return null;
+    return getEffect(database, effectId);
+  }
+
+  /** True while `effectId` has an active in-flight `runEffect` or `reconcileUncertain` execution. */
+  isEffectActive(effectId: string): boolean {
+    return this.activeById.has(effectId);
+  }
+
   get isFenced(): boolean {
     return this.fenced || this.options.isClosing();
   }

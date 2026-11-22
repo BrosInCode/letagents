@@ -141,6 +141,7 @@ export const daemonCapabilitiesSchema = z.object({
   agent_runtime_recovery_v2: z.boolean(),
   agent_state_subscription_v1: z.boolean(),
   agent_activity_stream_v1: z.boolean(),
+  async_rpc_effects_v1: z.boolean().optional(),
 });
 export type DaemonCapabilities = z.infer<typeof daemonCapabilitiesSchema>;
 
@@ -575,10 +576,67 @@ export type DaemonManifestEntryView = Omit<
 // State watch, stream watch, room move, configuration, attempt, inspector
 // ---------------------------------------------------------------------------
 
+export const DAEMON_ASYNC_RPC_EFFECT_KINDS = [
+  "rpc_apply_agent_configuration",
+  "rpc_recover_agent_runtime",
+  "rpc_bootstrap_room_ingress",
+  "rpc_install_host_grant",
+  "rpc_retire_agent",
+] as const;
+
+export const daemonAsyncRpcEffectKindSchema = z.enum(DAEMON_ASYNC_RPC_EFFECT_KINDS);
+export type DaemonAsyncRpcEffectKind = z.infer<typeof daemonAsyncRpcEffectKindSchema>;
+
+export const daemonAsyncRpcAcceptedSchema = z.object({
+  effect_id: exactNonEmptyString,
+  daemon_generation: positiveSafeInt,
+});
+export type DaemonAsyncRpcAccepted = z.infer<typeof daemonAsyncRpcAcceptedSchema>;
+
+export const daemonRpcEffectStateSchema = z.enum([
+  "prepared",
+  "executing",
+  "completed",
+  "failed",
+  "uncertain",
+]);
+export type DaemonRpcEffectState = z.infer<typeof daemonRpcEffectStateSchema>;
+
+export const daemonRpcEffectViewSchema = z.object({
+  effect_id: exactNonEmptyString,
+  agent_id: exactNonEmptyString,
+  kind: daemonAsyncRpcEffectKindSchema,
+  daemon_generation: positiveSafeInt,
+  state: daemonRpcEffectStateSchema,
+  result: jsonValueSchema.nullable().optional(),
+  error: z.string().nullable().optional(),
+  updated_at: z.string(),
+});
+export type DaemonRpcEffectView = z.infer<typeof daemonRpcEffectViewSchema>;
+
+export const daemonBootstrapRoomIngressResultSchema = z.object({
+  status: z.enum(["bootstrapped", "existing", "stale"]),
+  last_observed_message_id: z.string().nullable(),
+});
+export type DaemonBootstrapRoomIngressResult = z.infer<typeof daemonBootstrapRoomIngressResultSchema>;
+
+export const daemonInstallHostGrantResultSchema = z.object({
+  status: z.enum(["installed", "stale", "provider_unavailable"]),
+  agent_session_id: z.string().optional(),
+});
+export type DaemonInstallHostGrantResult = z.infer<typeof daemonInstallHostGrantResultSchema>;
+
+export const daemonRecoverAgentRuntimeResultSchema = z.object({
+  outcome: z.literal("recovering"),
+  entry: daemonManifestEntryViewSchema,
+});
+export type DaemonRecoverAgentRuntimeResult = z.infer<typeof daemonRecoverAgentRuntimeResultSchema>;
+
 export const daemonStateWatchSnapshotSchema = z.object({
   daemon_generation: positiveSafeInt,
   sequence: positiveSafeInt,
   entries: z.array(daemonManifestEntryViewSchema),
+  rpc_effects: z.array(daemonRpcEffectViewSchema).optional(),
 });
 
 export const daemonStateWatchChangesSchema = z.object({
@@ -588,6 +646,7 @@ export const daemonStateWatchChangesSchema = z.object({
   entries: z.array(daemonManifestEntryViewSchema),
   removed_entry_ids: z.array(z.string()),
   entry_order: z.array(z.string()),
+  rpc_effects: z.array(daemonRpcEffectViewSchema).optional(),
 });
 
 export const daemonStateWatchResultSchema = z.union([
