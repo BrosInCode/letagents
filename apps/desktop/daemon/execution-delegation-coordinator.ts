@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { EffectExecutor } from "./effect-journal/index.js";
 import type { ExecutionDelegationDecisionCoordinatorOptions } from "./execution-delegation-decision-coordinator.js";
 import { ExecutionDelegationDecisionCoordinator } from "./execution-delegation-decision-coordinator.js";
 import type { ExecutionDelegationSyncOptions } from "./execution-delegation-sync-coordinator.js";
@@ -9,8 +10,9 @@ import {
 } from "./execution-approval-publisher.js";
 import type { InstallHostGrantInput, WorkerAuthorityCoordinator } from "./worker-authority-coordinator.js";
 
-type ApprovalPublicationOptions = Omit<ExecutionApprovalPublisherOptions, "approvals" | "entries" | "authority"> & {
+type ApprovalPublicationOptions = Omit<ExecutionApprovalPublisherOptions, "approvals" | "entries" | "authority" | "effectExecutor"> & {
   database: () => DatabaseSync | null;
+  effectExecutor?: () => EffectExecutor | null;
 };
 
 type Options = {
@@ -75,9 +77,10 @@ export class ExecutionDelegationCoordinator {
     if (this.fenced || !options || this.approvalPublisher !== undefined) return;
     const database = options.database();
     if (!database) return;
-    const { database: _database, ...publisherOptions } = options;
+    const { database: _database, effectExecutor, ...publisherOptions } = options;
     this.approvalPublisher = ExecutionApprovalPublisher.attach(database, {
       ...publisherOptions,
+      effectExecutor: effectExecutor?.() ?? undefined,
       approvals: this.options.approvals,
       entries: this.options.entries,
       authority: this.options.authority,

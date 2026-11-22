@@ -6,6 +6,33 @@ import {
   type ExecutionApprovalPublicationInput,
 } from "../../../shared/execution-approval-publication.mjs";
 import {
+  cancelPreparedExecutionApprovalEffectsInTransaction,
+  completeEffectInTransaction,
+  EffectClaimRefusedError,
+  EffectExecutor,
+  EffectFenceError,
+  EXECUTION_APPROVAL_CLOSE_EFFECT_KIND,
+  EXECUTION_APPROVAL_EFFECT_MAX_ATTEMPTS,
+  EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND,
+  executionApprovalCloseIdempotencyKey,
+  executionApprovalPublishIdempotencyKey,
+  failEffect,
+  getEffectByIdempotencyKey,
+  hasInterruptedExecutionApprovalEffects,
+  listActiveExecutionApprovalEffectsForAgent,
+  parseExecutionApprovalCloseEffectPayload,
+  parseExecutionApprovalPublishEffectPayload,
+  prepareEffectInTransaction,
+  pruneTerminalExecutionApprovalEffectsInTransaction,
+  recoverInterruptedEffectsOnStartup,
+  rescheduleEffectForRetry,
+  withFencedEffectTransaction,
+  type EffectHandler,
+  type EffectRecord,
+  type ExecutionApprovalCloseEffectPayload,
+  type ExecutionApprovalPublishEffectPayload,
+} from "./effect-journal/index.js";
+import {
   ExecutionApprovalPublicationStore,
   publicationPinFrom,
   type ExecutionApprovalPublicationRecord,
@@ -22,6 +49,7 @@ import type { DelegatableApprovalAdmission } from "./host-approval-broker.js";
 import type { ExecutionApprovalRecord } from "./execution-approval-journal.js";
 import { ExecutionDelegationJournalError } from "./execution-delegation-journal.js";
 import type { ManifestStore } from "./manifest-store.js";
+import { DaemonFenceLostError } from "./singleton.js";
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import type { ValidateInstalledExecutionDelegationInput } from "./worker-authority-coordinator.js";
 import {
@@ -42,11 +70,32 @@ export type ExecutionApprovalPublisherOptions = {
   assertCurrent(): Promise<void>;
   /** Synchronous generation fence check run inside every write transaction before COMMIT. */
   assertWriteFence?(): void;
+  /** Shared process-wide effect executor; standalone tests create an internal executor if omitted. */
+  effectExecutor?: EffectExecutor;
   publish?(input: ExecutionApprovalPublicationHttpInput): Promise<ExecutionApprovalPublicationHttpResult>;
   closePublication?(input: ExecutionApprovalPublicationCloseHttpInput): Promise<ExecutionApprovalPublicationCloseHttpResult>;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict"): void;
   now?(): number;
 };
+
+type PublicationAuthority = NonNullable<ReturnType<typeof currentWorkerPublicationAuthority>>;
+type PendingPublishSettlement = {
+  attemptCount: number;
+  record: ExecutionApprovalPublicationRecord;
+  result: ExecutionApprovalPublicationHttpResult;
+};
+type PendingCloseSettlement = {
+  attemptCount: number;
+  record: ExecutionApprovalPublicationRecord;
+  result: ExecutionApprovalPublicationCloseHttpResult;
+};
+
+class ApprovalSettlementStorageError extends Error {
+  constructor(cause: unknown) {
+    super("Execution approval publication settlement storage write failed.", { cause });
+    this.name = "ApprovalSettlementStorageError";
+  }
+}
 
 const COALESCE_MS = 1_000;
 const RETRY_MS = 30_000;
@@ -56,10 +105,61 @@ const PENDING_PRIORITY: Record<ExecutionApprovalPublicationRecord["state"], numb
   attempted: 0, closing: 1, open: 2, acknowledged: 3,
   closed: 4, conflict: 4, expired: 4, invalid: 4,
 };
-const key = (record: ExecutionApprovalPublicationRecord) => JSON.stringify([
-  record.agentId, record.roomId, record.delegationInstanceId, record.delegationRevision,
-  record.expected.requestId, record.expected.requestVersion,
-]);
+
+function recordIdentityKey(identity: {
+  agentId: string;
+  roomId: string;
+  delegationInstanceId: string;
+  delegationRevision: number;
+  requestId: string;
+  requestVersion: number;
+}): string {
+  return JSON.stringify([
+    identity.agentId,
+    identity.roomId,
+    identity.delegationInstanceId,
+    identity.delegationRevision,
+    identity.requestId,
+    identity.requestVersion,
+  ]);
+}
+
+const key = (record: ExecutionApprovalPublicationRecord) => recordIdentityKey({
+  agentId: record.agentId,
+  roomId: record.roomId,
+  delegationInstanceId: record.delegationInstanceId,
+  delegationRevision: record.delegationRevision,
+  requestId: record.expected.requestId,
+  requestVersion: record.expected.requestVersion,
+});
+
+function effectIdentityKey(effect: EffectRecord): string | null {
+  if (effect.kind === EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND) {
+    const parsed = parseExecutionApprovalPublishEffectPayload(effect.payload);
+    if (!parsed) return null;
+    return recordIdentityKey({
+      agentId: effect.agent_id,
+      roomId: parsed.room_id,
+      delegationInstanceId: parsed.delegation_instance_id,
+      delegationRevision: parsed.delegation_revision,
+      requestId: parsed.request_id,
+      requestVersion: parsed.request_version,
+    });
+  }
+  if (effect.kind === EXECUTION_APPROVAL_CLOSE_EFFECT_KIND) {
+    const parsed = parseExecutionApprovalCloseEffectPayload(effect.payload);
+    if (!parsed) return null;
+    return recordIdentityKey({
+      agentId: effect.agent_id,
+      roomId: parsed.room_id,
+      delegationInstanceId: parsed.delegation_instance_id,
+      delegationRevision: parsed.delegation_revision,
+      requestId: parsed.request_id,
+      requestVersion: parsed.request_version,
+    });
+  }
+  return null;
+}
 
 function publication(record: ExecutionApprovalPublicationRecord, projectionJson: string): ExecutionApprovalPublicationInput {
   const value = parseExecutionApprovalPublicationInput({
@@ -83,10 +183,18 @@ function publication(record: ExecutionApprovalPublicationRecord, projectionJson:
 /** Optional, bounded approval-evidence publication. It owns no provider or credential recovery. */
 export class ExecutionApprovalPublisher {
   private readonly store: ExecutionApprovalPublicationStore;
+  private readonly executor: EffectExecutor;
+  private readonly ownsExecutor: boolean;
+  private recoveredOwnedExecutor = false;
   private readonly cancellation = new AbortController();
   private readonly pendingAgents = new Set<string>();
   private readonly admissionRetryAt = new Map<string, number>();
-  private readonly attemptedAt = new Map<string, number>();
+  /** Local recheck throttle for still-open `acknowledged` pins waiting on local decision; outbound HTTP retry backoff lives durably in `effects`. */
+  private readonly acknowledgedCheckAt = new Map<string, number>();
+  private readonly pendingDispatchAuthority = new Map<string, PublicationAuthority>();
+  private readonly pendingPublishProjection = new Map<string, { projectionSha256: string; json: string }>();
+  private readonly pendingPublishSettlements = new Map<string, PendingPublishSettlement>();
+  private readonly pendingCloseSettlements = new Map<string, PendingCloseSettlement>();
   private scheduled: NodeJS.Timeout | null = null;
   private scheduledFor = Infinity;
   private running = false;
@@ -101,6 +209,18 @@ export class ExecutionApprovalPublisher {
 
   constructor(private readonly database: DatabaseSync, private readonly options: ExecutionApprovalPublisherOptions) {
     this.store = new ExecutionApprovalPublicationStore(database, options.assertWriteFence);
+    this.ownsExecutor = !options.effectExecutor;
+    this.executor = options.effectExecutor ?? new EffectExecutor({
+      getDatabase: () => this.database,
+      currentDaemonGeneration: () => this.options.daemonGeneration(),
+      assertCurrent: () => this.options.assertCurrent(),
+      assertWriteFence: () => { this.options.assertWriteFence?.(); },
+      isClosing: () => this.closed || this.options.isClosing(),
+      nowMs: () => this.now(),
+      nowIso: () => this.nowIso(),
+    });
+    this.executor.registerHandler(EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND, this.createPublishEffectHandler());
+    this.executor.registerHandler(EXECUTION_APPROVAL_CLOSE_EFFECT_KIND, this.createCloseEffectHandler());
   }
 
   /** Post-observation hint only; native inspection and SQLite work run on the coalesced lane. */
@@ -118,26 +238,63 @@ export class ExecutionApprovalPublisher {
     if (this.closed) return;
     this.closed = true;
     this.cancellation.abort();
+    if (this.ownsExecutor) this.executor.fence();
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduled = null;
     this.scheduledFor = Infinity;
     this.pendingAgents.clear();
     this.admissionRetryAt.clear();
-    this.attemptedAt.clear();
+    this.acknowledgedCheckAt.clear();
+    this.pendingDispatchAuthority.clear();
+    this.pendingPublishProjection.clear();
+    this.pendingPublishSettlements.clear();
+    this.pendingCloseSettlements.clear();
   }
 
-  private unavailable(): boolean { return this.closed || this.options.isClosing(); }
+  private unavailable(): boolean { return this.closed || this.options.isClosing() || this.executor.isFenced; }
   private now(): number { return this.options.now?.() ?? Date.now(); }
+  private nowIso(): string { return new Date(this.now()).toISOString(); }
+  private writeFence = (): void => { this.options.assertWriteFence?.(); };
   private report(code: Parameters<NonNullable<ExecutionApprovalPublisherOptions["diagnostic"]>>[0]): void {
     try { if (this.options.diagnostic) this.options.diagnostic(code); else console.warn(`[execution_approval_publication] ${code}`); }
     catch { /* diagnostics are optional */ }
   }
+
   private terminalize(record: ExecutionApprovalPublicationRecord, state: "conflict" | "expired" | "invalid"): void {
-    if (state === "conflict") this.store.conflict(record);
-    else if (state === "expired") this.store.expire(record);
-    else this.store.invalidate(record);
-    this.attemptedAt.delete(key(record));
+    const recordKey = key(record);
+    withFencedEffectTransaction(this.database, this.writeFence, () => {
+      if (state === "conflict") this.store.conflictInTransaction(record);
+      else if (state === "expired") this.store.expireInTransaction(record);
+      else this.store.invalidateInTransaction(record);
+      const matchingEffectIds = listActiveExecutionApprovalEffectsForAgent(this.database, record.agentId)
+        .filter(effect => effectIdentityKey(effect) === recordKey)
+        .map(effect => effect.id);
+      if (matchingEffectIds.length > 0) {
+        cancelPreparedExecutionApprovalEffectsInTransaction(this.database, {
+          effectIds: matchingEffectIds,
+          expectedEpoch: this.options.daemonGeneration(),
+          error: `publication_${state}`,
+          nowIso: this.nowIso(),
+        });
+      }
+      pruneTerminalExecutionApprovalEffectsInTransaction(this.database, record.agentId);
+    });
+    this.acknowledgedCheckAt.delete(recordKey);
   }
+
+  private tryTerminalize(record: ExecutionApprovalPublicationRecord, state: "conflict" | "expired" | "invalid"): void {
+    try {
+      this.terminalize(record, state);
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      if (error instanceof EffectFenceError) {
+        if (this.unavailable()) return;
+        throw error;
+      }
+      if (!this.unavailable()) this.report("storage_unavailable");
+    }
+  }
+
   private schedule(delay: number): void {
     if (this.unavailable()) return;
     const due = Date.now() + delay;
@@ -151,6 +308,7 @@ export class ExecutionApprovalPublisher {
     }, delay);
     this.scheduled.unref();
   }
+
   private currentAuthority(agentId: string) {
     if (this.unavailable()) return null;
     const current = currentWorkerPublicationAuthority(
@@ -160,6 +318,370 @@ export class ExecutionApprovalPublisher {
       this.now(),
     );
     return current?.grant.ownerAccountId && current.grant.scopeKey === "owner" ? current : null;
+  }
+
+  private createPublishEffectHandler(): EffectHandler {
+    return {
+      retryable: true,
+      autoPump: false,
+      defaultMaxAttempts: EXECUTION_APPROVAL_EFFECT_MAX_ATTEMPTS,
+      backoff: { baseDelayMs: RETRY_MS, maxDelayMs: RETRY_MS, factor: 1 },
+      authorizeClaim: (_database, effect) => {
+        const payload = parseExecutionApprovalPublishEffectPayload(effect.payload);
+        if (!payload) return "Execution approval publication effect payload is invalid.";
+        const record = this.store.getByIdentity({
+          agentId: effect.agent_id,
+          roomId: payload.room_id,
+          delegationInstanceId: payload.delegation_instance_id,
+          delegationRevision: payload.delegation_revision,
+          requestId: payload.request_id,
+          requestVersion: payload.request_version,
+        });
+        if (!record || record.state !== "attempted" || record.projectionSha256 !== payload.projection_sha256) {
+          return "Execution approval publication is no longer pending.";
+        }
+        if (record.expiresAtMs <= this.now()) {
+          return "Execution approval publication has expired.";
+        }
+        return null;
+      },
+      execute: async (claimed, context) => {
+        const payload = parseExecutionApprovalPublishEffectPayload(claimed.payload);
+        if (!payload) {
+          return { status: "failed", error: "Execution approval publication effect payload is invalid." };
+        }
+        const record = this.store.getByIdentity({
+          agentId: claimed.agent_id,
+          roomId: payload.room_id,
+          delegationInstanceId: payload.delegation_instance_id,
+          delegationRevision: payload.delegation_revision,
+          requestId: payload.request_id,
+          requestVersion: payload.request_version,
+        });
+        if (!record || record.state !== "attempted" || record.projectionSha256 !== payload.projection_sha256) {
+          return { status: "failed", error: "publication_superseded_before_dispatch" };
+        }
+        const expected = this.pendingDispatchAuthority.get(claimed.id);
+        const current = this.currentAuthority(record.agentId);
+        if (this.unavailable() || context.signal.aborted
+          || !current || !sameWorkerPublicationOrigin(current.origin, record)
+          || current.worker.workAttemptId !== record.workAttemptId
+          || (expected && (current.grant !== expected.grant || current.worker !== expected.worker))) {
+          return { status: "retry", error: "authority_unavailable", retryAfterMs: 0 };
+        }
+        let projectionJson = this.pendingPublishProjection.get(claimed.id)?.projectionSha256 === record.projectionSha256
+          ? this.pendingPublishProjection.get(claimed.id)!.json
+          : null;
+        if (projectionJson === null) {
+          try {
+            const loaded = await this.options.entries.readExecutionApprovalProjection(record.expected);
+            if (!loaded || loaded.sha256 !== record.projectionSha256 || loaded.producedAtMs !== record.producedAtMs) {
+              return { status: "failed", error: "publication_projection_invalid" };
+            }
+            projectionJson = loaded.json;
+          } catch (error) {
+            if (error instanceof DaemonFenceLostError) throw error;
+            if (!this.unavailable()) this.report("publication_unavailable");
+            return { status: "retry", error: "publication_unavailable" };
+          }
+        }
+        const signal = AbortSignal.any([context.signal, this.cancellation.signal]);
+        let result: ExecutionApprovalPublicationHttpResult;
+        try {
+          result = await (this.options.publish ?? publishExecutionApproval)({
+            apiOrigin: record.apiOrigin,
+            grantId: current.grant.grantId,
+            supervisorGrant: current.grant.supervisorGrant,
+            grantGeneration: current.grant.grantGeneration,
+            sessionId: current.worker.agentSessionId,
+            agentKey: record.agentKey,
+            signal,
+            publication: publication(record, projectionJson),
+          });
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (this.unavailable() || signal.aborted) {
+            return { status: "retry", error: "publication_cancelled_on_close", retryAfterMs: 0 };
+          }
+          // Never persist raw provider/HTTP exception text or tokens in `effects.last_error`.
+          this.report("publication_unavailable");
+          return { status: "retry", error: "publication_unavailable" };
+        }
+        try {
+          await context.assertCurrent();
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (!this.unavailable()) this.report("authority_unavailable");
+          return { status: "retry", error: "authority_unavailable", retryAfterMs: 0 };
+        }
+        const after = this.currentAuthority(record.agentId);
+        if (this.unavailable() || signal.aborted || after?.grant !== current.grant || after?.worker !== current.worker) {
+          return { status: "retry", error: "publication_cancelled_on_close", retryAfterMs: 0 };
+        }
+        this.pendingPublishSettlements.set(claimed.id, {
+          attemptCount: claimed.attempt_count,
+          record,
+          result,
+        });
+        const outcome = result.status === "acknowledged"
+          ? {
+              status: "acknowledged" as const,
+              publication_id: result.publicationId,
+              publication_digest: result.publicationDigest,
+            }
+          : result.status === "terminal"
+            ? { status: "terminal" as const, reason: result.reason }
+            : { status: "conflict" as const };
+        return { status: "completed", outcome };
+      },
+      settle: async (claimed, executionResult, defaultSettle) => {
+        const pending = this.pendingPublishSettlements.get(claimed.id);
+        this.pendingPublishSettlements.delete(claimed.id);
+        if (executionResult.status !== "completed") {
+          return this.runDefaultSettle(defaultSettle);
+        }
+        if (this.unavailable() || !pending || pending.attemptCount !== claimed.attempt_count) {
+          return this.rescheduleCancelledEffect(claimed, "publication_cancelled_on_close");
+        }
+        try {
+          const settled = withFencedEffectTransaction(this.database, this.writeFence, () => {
+            if (pending.result.status === "conflict") {
+              this.store.conflictInTransaction(pending.record);
+            } else if (pending.result.status === "terminal") {
+              if (pending.result.reason === "expired") this.store.expireInTransaction(pending.record);
+              else this.store.invalidateInTransaction(pending.record);
+            } else {
+              if (!this.store.acknowledgeInTransaction(pending.record, pending.result)) {
+                throw new Error("Execution approval publication receipt was not journaled.");
+              }
+            }
+            const completed = completeEffectInTransaction(this.database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            });
+            pruneTerminalExecutionApprovalEffectsInTransaction(this.database, claimed.agent_id);
+            return completed;
+          });
+          this.acknowledgedCheckAt.delete(key(pending.record));
+          if (pending.result.status === "conflict") this.report("publication_conflict");
+          return settled;
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          return this.handleSettlementStorageFailure(claimed, error);
+        }
+      },
+    };
+  }
+
+  private createCloseEffectHandler(): EffectHandler {
+    return {
+      retryable: true,
+      autoPump: false,
+      defaultMaxAttempts: EXECUTION_APPROVAL_EFFECT_MAX_ATTEMPTS,
+      backoff: { baseDelayMs: RETRY_MS, maxDelayMs: RETRY_MS, factor: 1 },
+      authorizeClaim: (_database, effect) => {
+        const payload = parseExecutionApprovalCloseEffectPayload(effect.payload);
+        if (!payload) return "Execution approval close effect payload is invalid.";
+        const record = this.store.getByIdentity({
+          agentId: effect.agent_id,
+          roomId: payload.room_id,
+          delegationInstanceId: payload.delegation_instance_id,
+          delegationRevision: payload.delegation_revision,
+          requestId: payload.request_id,
+          requestVersion: payload.request_version,
+        });
+        if (!record || record.state !== "closing"
+          || record.publicationId !== payload.publication_id
+          || record.publicationDigest !== payload.publication_digest) {
+          return "Execution approval publication closure is no longer pending.";
+        }
+        if (record.expiresAtMs <= this.now()) {
+          return "Execution approval publication has expired.";
+        }
+        return null;
+      },
+      execute: async (claimed, context) => {
+        const payload = parseExecutionApprovalCloseEffectPayload(claimed.payload);
+        if (!payload) {
+          return { status: "failed", error: "Execution approval close effect payload is invalid." };
+        }
+        const record = this.store.getByIdentity({
+          agentId: claimed.agent_id,
+          roomId: payload.room_id,
+          delegationInstanceId: payload.delegation_instance_id,
+          delegationRevision: payload.delegation_revision,
+          requestId: payload.request_id,
+          requestVersion: payload.request_version,
+        });
+        if (!record || record.state !== "closing"
+          || record.publicationId !== payload.publication_id
+          || record.publicationDigest !== payload.publication_digest) {
+          return { status: "failed", error: "publication_close_superseded_before_dispatch" };
+        }
+        const expected = this.pendingDispatchAuthority.get(claimed.id);
+        const current = this.currentAuthority(record.agentId);
+        if (this.unavailable() || context.signal.aborted
+          || !current || !sameWorkerPublicationOrigin(current.origin, record)
+          || current.worker.workAttemptId !== record.workAttemptId
+          || (expected && (current.grant !== expected.grant || current.worker !== expected.worker))) {
+          return { status: "retry", error: "authority_unavailable", retryAfterMs: 0 };
+        }
+        const signal = AbortSignal.any([context.signal, this.cancellation.signal]);
+        let result: ExecutionApprovalPublicationCloseHttpResult;
+        try {
+          result = await (this.options.closePublication ?? closeExecutionApprovalPublication)({
+            apiOrigin: record.apiOrigin,
+            grantId: current.grant.grantId,
+            supervisorGrant: current.grant.supervisorGrant,
+            grantGeneration: current.grant.grantGeneration,
+            sessionId: current.worker.agentSessionId,
+            agentKey: record.agentKey,
+            signal,
+            publicationId: payload.publication_id,
+            publicationDigest: payload.publication_digest,
+          });
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (this.unavailable() || signal.aborted) {
+            return { status: "retry", error: "publication_cancelled_on_close", retryAfterMs: 0 };
+          }
+          this.report("publication_unavailable");
+          return { status: "retry", error: "publication_unavailable" };
+        }
+        try {
+          await context.assertCurrent();
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (!this.unavailable()) this.report("authority_unavailable");
+          return { status: "retry", error: "authority_unavailable", retryAfterMs: 0 };
+        }
+        const after = this.currentAuthority(record.agentId);
+        if (this.unavailable() || signal.aborted || after?.grant !== current.grant || after?.worker !== current.worker) {
+          return { status: "retry", error: "publication_cancelled_on_close", retryAfterMs: 0 };
+        }
+        this.pendingCloseSettlements.set(claimed.id, {
+          attemptCount: claimed.attempt_count,
+          record,
+          result,
+        });
+        const outcome = result.status === "closed"
+          ? { status: "closed" as const, closed_at_ms: result.closedAtMs }
+          : result.status === "terminal"
+            ? { status: "terminal" as const, reason: result.reason }
+            : { status: "conflict" as const };
+        return { status: "completed", outcome };
+      },
+      settle: async (claimed, executionResult, defaultSettle) => {
+        const pending = this.pendingCloseSettlements.get(claimed.id);
+        this.pendingCloseSettlements.delete(claimed.id);
+        if (executionResult.status !== "completed") {
+          return this.runDefaultSettle(defaultSettle);
+        }
+        if (this.unavailable() || !pending || pending.attemptCount !== claimed.attempt_count) {
+          return this.rescheduleCancelledEffect(claimed, "publication_cancelled_on_close");
+        }
+        try {
+          const settled = withFencedEffectTransaction(this.database, this.writeFence, () => {
+            if (pending.result.status === "conflict") {
+              this.store.conflictInTransaction(pending.record);
+            } else if (pending.result.status === "terminal") {
+              if (pending.result.reason === "expired") this.store.expireInTransaction(pending.record);
+              else this.store.invalidateInTransaction(pending.record);
+            } else {
+              if (!this.store.acknowledgeCloseInTransaction(pending.record, pending.result.closedAtMs)) {
+                throw new Error("Execution approval publication closure was not journaled.");
+              }
+            }
+            const completed = completeEffectInTransaction(this.database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            });
+            pruneTerminalExecutionApprovalEffectsInTransaction(this.database, claimed.agent_id);
+            return completed;
+          });
+          this.acknowledgedCheckAt.delete(key(pending.record));
+          if (pending.result.status === "conflict") this.report("publication_conflict");
+          return settled;
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          return this.handleSettlementStorageFailure(claimed, error);
+        }
+      },
+    };
+  }
+
+  private runDefaultSettle(defaultSettle: () => EffectRecord): EffectRecord {
+    try {
+      return defaultSettle();
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      if (error instanceof EffectFenceError) throw error;
+      if (!this.unavailable()) this.report("storage_unavailable");
+      throw new ApprovalSettlementStorageError(error);
+    }
+  }
+
+  private handleSettlementStorageFailure(claimed: EffectRecord, error: unknown): EffectRecord {
+    if (this.unavailable()) throw error;
+    if (error instanceof EffectFenceError) throw error;
+    this.report("storage_unavailable");
+    try {
+      return this.rescheduleExecutingEffect(claimed, this.now() + RETRY_MS, "settlement_write_failed");
+    } catch (retryError) {
+      if (retryError instanceof DaemonFenceLostError) throw retryError;
+      throw new ApprovalSettlementStorageError(error);
+    }
+  }
+
+  private rescheduleExecutingEffect(effect: EffectRecord, nextAttemptAtMs: number, error: string): EffectRecord {
+    if (effect.attempt_count < effect.max_attempts) {
+      return rescheduleEffectForRetry(this.database, this.writeFence, {
+        id: effect.id,
+        expectedEpoch: effect.epoch,
+        expectedAttemptCount: effect.attempt_count,
+        nextAttemptAtMs: Math.max(0, nextAttemptAtMs),
+        error,
+        nowIso: this.nowIso(),
+      });
+    }
+    return failEffect(this.database, this.writeFence, {
+      id: effect.id,
+      expectedEpoch: effect.epoch,
+      expectedAttemptCount: effect.attempt_count,
+      error,
+      nowIso: this.nowIso(),
+    });
+  }
+
+  private rescheduleCancelledEffect(claimed: EffectRecord, error: string): EffectRecord {
+    return this.rescheduleExecutingEffect(claimed, this.now(), error);
+  }
+
+  /**
+   * Recovers an orphaned `executing` approval-publication effect whose
+   * execution promise is no longer active in this process (for example after a
+   * failed SQLite settlement write left the row `executing`). Never touches
+   * genuinely active in-flight executions or future-epoch rows.
+   */
+  private recoverInactiveExecutingEffect(effect: EffectRecord, now: number): EffectRecord {
+    if (effect.state !== "executing") return effect;
+    if (this.executor.isEffectActive(effect.id)) return effect;
+    if (effect.attempt_count < 1 || effect.epoch > this.options.daemonGeneration()) return effect;
+    const updatedAtMs = Date.parse(effect.updated_at);
+    const baseMs = Number.isFinite(updatedAtMs) ? Math.min(updatedAtMs, now) : now;
+    try {
+      return this.rescheduleExecutingEffect(effect, baseMs + RETRY_MS, "recovered_inactive_executing_effect");
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      if (!this.unavailable()) this.report("storage_unavailable");
+      return effect;
+    }
   }
 
   private async admit(agentId: string): Promise<void> {
@@ -240,6 +762,16 @@ export class ExecutionApprovalPublisher {
     try {
       await this.options.assertCurrent();
       if (this.unavailable()) return;
+      if (this.ownsExecutor && !this.recoveredOwnedExecutor) {
+        if (hasInterruptedExecutionApprovalEffects(this.database)) {
+          recoverInterruptedEffectsOnStartup(this.database, this.writeFence, {
+            daemonGeneration: this.options.daemonGeneration(),
+            nowMs: this.now(),
+            nowIso: this.nowIso(),
+          });
+        }
+        this.recoveredOwnedExecutor = true;
+      }
       const admissionAgent = [...this.pendingAgents]
         .filter(agentId => (this.admissionRetryAt.get(agentId) ?? -Infinity) <= this.now())
         .sort()[0];
@@ -264,24 +796,96 @@ export class ExecutionApprovalPublisher {
       const agentId = this.nextOpenAgent();
       if (!agentId) return;
       more = this.store.nextOpenAgent(agentId) !== null || more;
-      const pending = this.store.listOpen(agentId).filter(record => {
-        const prior = this.attemptedAt.get(key(record));
-        return prior === undefined || this.now() - prior >= RETRY_MS;
-      }).sort((left, right) => PENDING_PRIORITY[left.state] - PENDING_PRIORITY[right.state]
-        || (this.attemptedAt.get(key(left)) ?? -Infinity) - (this.attemptedAt.get(key(right)) ?? -Infinity));
-      more = pending.length > MAX_UPLOADS_PER_PASS || more;
-      for (const record of pending.slice(0, MAX_UPLOADS_PER_PASS)) {
+      const now = this.now();
+      const activeEffects = listActiveExecutionApprovalEffectsForAgent(this.database, agentId);
+      const activeByRecordKey = new Map<string, EffectRecord[]>();
+      for (const rawEffect of activeEffects) {
+        const effect = rawEffect.state === "executing"
+          ? this.recoverInactiveExecutingEffect(rawEffect, now)
+          : rawEffect;
+        if (effect.state !== "prepared" && effect.state !== "executing") continue;
+        const identityKey = effectIdentityKey(effect);
+        if (!identityKey) continue;
+        const bucket = activeByRecordKey.get(identityKey);
+        if (bucket) bucket.push(effect);
+        else activeByRecordKey.set(identityKey, [effect]);
+      }
+      const eligible: Array<{ record: ExecutionApprovalPublicationRecord; sortAt: number }> = [];
+      for (const record of this.store.listOpen(agentId)) {
+        const recordKey = key(record);
+        const effectsForRecord = activeByRecordKey.get(recordKey) ?? [];
+        if (effectsForRecord.some(effect => effect.state === "executing")) continue;
+        if (record.expiresAtMs <= now) {
+          eligible.push({ record, sortAt: -Infinity });
+          continue;
+        }
+        if (record.state === "acknowledged") {
+          const checkedAt = this.acknowledgedCheckAt.get(recordKey);
+          if (checkedAt !== undefined && now - checkedAt < RETRY_MS) continue;
+          eligible.push({ record, sortAt: checkedAt ?? -Infinity });
+          continue;
+        }
+        if (record.state === "open" || record.state === "attempted") {
+          const publishKey = executionApprovalPublishIdempotencyKey({
+            roomId: record.roomId,
+            delegationInstanceId: record.delegationInstanceId,
+            delegationRevision: record.delegationRevision,
+            requestId: record.expected.requestId,
+            requestVersion: record.expected.requestVersion,
+            projectionSha256: record.projectionSha256,
+          });
+          const existing = getEffectByIdempotencyKey(
+            this.database,
+            record.agentId,
+            EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND,
+            publishKey,
+          );
+          if (existing) {
+            if (existing.state !== "prepared") continue;
+            if (existing.next_attempt_at_ms !== null && existing.next_attempt_at_ms > now) continue;
+          }
+          eligible.push({ record, sortAt: existing?.next_attempt_at_ms ?? -Infinity });
+          continue;
+        }
+        if (record.state === "closing" && record.publicationId && record.publicationDigest) {
+          const closeKey = executionApprovalCloseIdempotencyKey({
+            roomId: record.roomId,
+            delegationInstanceId: record.delegationInstanceId,
+            delegationRevision: record.delegationRevision,
+            requestId: record.expected.requestId,
+            requestVersion: record.expected.requestVersion,
+            publicationId: record.publicationId,
+            publicationDigest: record.publicationDigest,
+          });
+          const existing = getEffectByIdempotencyKey(
+            this.database,
+            record.agentId,
+            EXECUTION_APPROVAL_CLOSE_EFFECT_KIND,
+            closeKey,
+          );
+          if (existing) {
+            if (existing.state !== "prepared") continue;
+            if (existing.next_attempt_at_ms !== null && existing.next_attempt_at_ms > now) continue;
+          }
+          eligible.push({ record, sortAt: existing?.next_attempt_at_ms ?? -Infinity });
+        }
+      }
+      eligible.sort((left, right) => PENDING_PRIORITY[left.record.state] - PENDING_PRIORITY[right.record.state]
+        || left.sortAt - right.sortAt);
+      more = eligible.length > MAX_UPLOADS_PER_PASS || more;
+      for (const { record } of eligible.slice(0, MAX_UPLOADS_PER_PASS)) {
         if (record.expiresAtMs <= this.now()) {
-          try { this.terminalize(record, "expired"); } catch { this.report("storage_unavailable"); }
+          this.tryTerminalize(record, "expired");
           continue;
         }
         const authority = this.currentAuthority(record.agentId);
         if (!authority) continue;
         if (!sameWorkerPublicationOrigin(authority.origin, record)
           || authority.worker.workAttemptId !== record.workAttemptId) {
-          try { this.terminalize(record, "invalid"); } catch { this.report("storage_unavailable"); }
+          this.tryTerminalize(record, "invalid");
           continue;
         }
+        let effectId: string | null = null;
         try {
           const inbox = await this.options.inbox.get(record.inboxItemId);
           const projection = await this.options.entries.readExecutionApprovalProjection(record.expected);
@@ -297,8 +901,8 @@ export class ExecutionApprovalPublisher {
               const stillCurrent = this.currentAuthority(record.agentId);
               if (error instanceof ExecutionDelegationJournalError
                 && stillCurrent?.grant === authority.grant && stillCurrent.worker === authority.worker) {
-                if (["expired", "terminal"].includes(error.code)) this.terminalize(record, "expired");
-                else if (error.code === "revision_conflict") this.terminalize(record, "invalid");
+                if (["expired", "terminal"].includes(error.code)) this.tryTerminalize(record, "expired");
+                else if (error.code === "revision_conflict") this.tryTerminalize(record, "invalid");
                 else throw error;
                 continue;
               }
@@ -315,79 +919,164 @@ export class ExecutionApprovalPublisher {
             || inbox.room_id !== record.roomId || inbox.source_message_id !== record.sourceMessageId
             || !projection || projection.sha256 !== record.projectionSha256
             || projection.producedAtMs !== record.producedAtMs) {
-            this.terminalize(record, "invalid");
+            this.tryTerminalize(record, "invalid");
             continue;
           }
           if (record.state === "open" && (!approval
             || approval.request.state !== "requested" || approval.decision)) {
-            this.terminalize(record, "invalid");
+            this.tryTerminalize(record, "invalid");
             continue;
           }
-          const httpAuthority = { apiOrigin: record.apiOrigin, grantId: authority.grant.grantId,
-            supervisorGrant: authority.grant.supervisorGrant, grantGeneration: authority.grant.grantGeneration,
-            sessionId: authority.worker.agentSessionId, agentKey: record.agentKey, signal: this.cancellation.signal };
           if (record.state === "acknowledged" || record.state === "closing") {
             if (record.state === "acknowledged") {
               if (!approval) throw new Error("Acknowledged execution approval publication lost its local request.");
               if (approval.request.state === "requested" && !approval.decision) {
-                this.attemptedAt.set(key(record), this.now());
+                this.acknowledgedCheckAt.set(key(record), this.now());
                 continue;
               }
             }
             if (!record.publicationId || !record.publicationDigest) {
               throw new Error("Acknowledged execution approval publication lost its exact receipt.");
             }
-            let closing = record;
-            if (record.state === "acknowledged") {
-              try { closing = this.store.beginClose(record); }
-              catch { this.report("storage_unavailable"); continue; }
-            }
-            this.attemptedAt.set(key(closing), this.now());
-            const result = await (this.options.closePublication ?? closeExecutionApprovalPublication)({
-              ...httpAuthority, publicationId: closing.publicationId!, publicationDigest: closing.publicationDigest!,
+            const closePayload: ExecutionApprovalCloseEffectPayload = {
+              room_id: record.roomId,
+              delegation_instance_id: record.delegationInstanceId,
+              delegation_revision: record.delegationRevision,
+              request_id: record.expected.requestId,
+              request_version: record.expected.requestVersion,
+              publication_id: record.publicationId,
+              publication_digest: record.publicationDigest,
+            };
+            const closeKey = executionApprovalCloseIdempotencyKey({
+              roomId: record.roomId,
+              delegationInstanceId: record.delegationInstanceId,
+              delegationRevision: record.delegationRevision,
+              requestId: record.expected.requestId,
+              requestVersion: record.expected.requestVersion,
+              publicationId: record.publicationId,
+              publicationDigest: record.publicationDigest,
             });
-            await this.options.assertCurrent();
-            const after = this.currentAuthority(record.agentId);
-            if (this.unavailable() || after?.grant !== authority.grant || after?.worker !== authority.worker) return;
-            if (result.status === "conflict") {
-              this.terminalize(closing, "conflict");
-              this.report("publication_conflict");
-            } else if (result.status === "terminal") {
-              this.terminalize(closing, result.reason === "expired" ? "expired" : "invalid");
-            } else {
-              if (!this.store.acknowledgeClose(closing, result.closedAtMs)) {
-                throw new Error("Execution approval publication closure was not journaled.");
+            let preparedClose: EffectRecord;
+            if (record.state === "acknowledged") {
+              try {
+                preparedClose = withFencedEffectTransaction(this.database, this.writeFence, () => {
+                  this.store.beginCloseInTransaction(record);
+                  return prepareEffectInTransaction(this.database, {
+                    agent_id: record.agentId,
+                    kind: EXECUTION_APPROVAL_CLOSE_EFFECT_KIND,
+                    idempotency_key: closeKey,
+                    epoch: this.options.daemonGeneration(),
+                    payload: closePayload,
+                    retryable: true,
+                    max_attempts: EXECUTION_APPROVAL_EFFECT_MAX_ATTEMPTS,
+                  }, this.nowIso()).effect;
+                });
+                this.acknowledgedCheckAt.delete(key(record));
+              } catch (error) {
+                if (error instanceof DaemonFenceLostError) throw error;
+                if (error instanceof EffectFenceError) {
+                  if (this.unavailable()) return;
+                  throw error;
+                }
+                this.report("storage_unavailable");
+                continue;
               }
-              this.attemptedAt.delete(key(closing));
+            } else {
+              preparedClose = (await this.executor.prepare({
+                agent_id: record.agentId,
+                kind: EXECUTION_APPROVAL_CLOSE_EFFECT_KIND,
+                idempotency_key: closeKey,
+                payload: closePayload,
+                retryable: true,
+                max_attempts: EXECUTION_APPROVAL_EFFECT_MAX_ATTEMPTS,
+              })).effect;
             }
+            if (preparedClose.state !== "prepared") continue;
+            if (preparedClose.next_attempt_at_ms !== null && preparedClose.next_attempt_at_ms > this.now()) continue;
+            effectId = preparedClose.id;
+            this.pendingDispatchAuthority.set(effectId, current);
+            await this.executor.runEffect(effectId);
             continue;
           }
-          let dispatch = record;
-          if (record.state === "open") {
-            try { dispatch = this.store.markAttempted(record); }
-            catch { this.report("storage_unavailable"); continue; }
-          }
-          this.attemptedAt.set(key(dispatch), this.now());
-          const result = await (this.options.publish ?? publishExecutionApproval)({
-            ...httpAuthority, publication: publication(dispatch, projection.json),
+          const publishPayload: ExecutionApprovalPublishEffectPayload = {
+            room_id: record.roomId,
+            delegation_instance_id: record.delegationInstanceId,
+            delegation_revision: record.delegationRevision,
+            request_id: record.expected.requestId,
+            request_version: record.expected.requestVersion,
+            projection_sha256: record.projectionSha256,
+          };
+          const publishKey = executionApprovalPublishIdempotencyKey({
+            roomId: record.roomId,
+            delegationInstanceId: record.delegationInstanceId,
+            delegationRevision: record.delegationRevision,
+            requestId: record.expected.requestId,
+            requestVersion: record.expected.requestVersion,
+            projectionSha256: record.projectionSha256,
           });
-          await this.options.assertCurrent();
-          const after = this.currentAuthority(record.agentId);
-          if (this.unavailable() || after?.grant !== authority.grant || after?.worker !== authority.worker) return;
-          if (result.status === "conflict") {
-            this.terminalize(record, "conflict");
-            this.report("publication_conflict");
-          } else if (result.status === "terminal") {
-            this.terminalize(record, result.reason === "expired" ? "expired" : "invalid");
-          } else {
-            if (!this.store.acknowledge(dispatch, result)) {
-              throw new Error("Execution approval publication receipt was not journaled.");
+          let preparedPublish: EffectRecord;
+          if (record.state === "open") {
+            try {
+              preparedPublish = withFencedEffectTransaction(this.database, this.writeFence, () => {
+                this.store.markAttemptedInTransaction(record);
+                return prepareEffectInTransaction(this.database, {
+                  agent_id: record.agentId,
+                  kind: EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND,
+                  idempotency_key: publishKey,
+                  epoch: this.options.daemonGeneration(),
+                  payload: publishPayload,
+                  retryable: true,
+                  max_attempts: EXECUTION_APPROVAL_EFFECT_MAX_ATTEMPTS,
+                }, this.nowIso()).effect;
+              });
+            } catch (error) {
+              if (error instanceof DaemonFenceLostError) throw error;
+              if (error instanceof EffectFenceError) {
+                if (this.unavailable()) return;
+                throw error;
+              }
+              this.report("storage_unavailable");
+              continue;
             }
-            this.attemptedAt.delete(key(record));
+          } else {
+            preparedPublish = (await this.executor.prepare({
+              agent_id: record.agentId,
+              kind: EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND,
+              idempotency_key: publishKey,
+              payload: publishPayload,
+              retryable: true,
+              max_attempts: EXECUTION_APPROVAL_EFFECT_MAX_ATTEMPTS,
+            })).effect;
+          }
+          if (preparedPublish.state !== "prepared") continue;
+          if (preparedPublish.next_attempt_at_ms !== null && preparedPublish.next_attempt_at_ms > this.now()) continue;
+          effectId = preparedPublish.id;
+          this.pendingDispatchAuthority.set(effectId, current);
+          this.pendingPublishProjection.set(effectId, {
+            projectionSha256: projection.sha256,
+            json: projection.json,
+          });
+          const settled = await this.executor.runEffect(effectId);
+          if (settled.state === "completed"
+            && (settled.outcome as { status?: unknown } | null)?.status === "acknowledged") {
             more = true;
           }
-        } catch {
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          if (error instanceof EffectClaimRefusedError) continue;
+          if (error instanceof ApprovalSettlementStorageError) continue;
+          if (error instanceof EffectFenceError) {
+            if (this.unavailable()) return;
+            throw error;
+          }
           if (!this.unavailable()) this.report("publication_unavailable");
+        } finally {
+          if (effectId) {
+            this.pendingDispatchAuthority.delete(effectId);
+            this.pendingPublishProjection.delete(effectId);
+            this.pendingPublishSettlements.delete(effectId);
+            this.pendingCloseSettlements.delete(effectId);
+          }
         }
       }
     } catch {
