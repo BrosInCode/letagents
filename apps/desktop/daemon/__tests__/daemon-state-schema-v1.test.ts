@@ -28,6 +28,10 @@ import {
   validateDaemonStateShape,
 } from "../daemon-state-database.js";
 import { WorkDurabilityStore } from "../durability-store.js";
+import {
+  EXECUTION_APPROVAL_CLOSE_EFFECT_KIND,
+  EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND,
+} from "../effect-journal/index.js";
 import { ExecutionApprovalPublicationStore } from "../execution-approval-publication-store.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import { SupervisorDaemon } from "../main.js";
@@ -401,7 +405,7 @@ test("SupervisorDaemon owns one shared SQLite connection across all stores and p
         executionCapture: { database: DatabaseSync } | null;
         roomWorkPublisher: { database: DatabaseSync; executor: unknown } | null;
         effectExecutor: { hasHandler(kind: string): boolean } | null;
-        executionDelegations: { approvalPublisher?: { database: DatabaseSync } | null };
+        executionDelegations: { approvalPublisher?: { database: DatabaseSync; executor: unknown } | null };
       };
       shared = internals.stateDatabase?.connection;
       assert.ok(shared && shared.isOpen, "daemon must own an open shared connection");
@@ -415,6 +419,13 @@ test("SupervisorDaemon owns one shared SQLite connection across all stores and p
       assert.equal(internals.effectExecutor?.hasHandler("room_work_publish"), true, "daemon EffectExecutor must register room_work_publish");
       assert.equal(internals.effectExecutor?.hasHandler("room_work_grouped_no_reply"), true, "daemon EffectExecutor must register room_work_grouped_no_reply");
       assert.equal(internals.executionDelegations.approvalPublisher?.database, shared, "ExecutionApprovalPublisher must share the single connection");
+      assert.equal(
+        internals.executionDelegations.approvalPublisher?.executor,
+        internals.effectExecutor,
+        "ExecutionApprovalPublisher must share the process-wide EffectExecutor",
+      );
+      assert.equal(internals.effectExecutor?.hasHandler(EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND), true);
+      assert.equal(internals.effectExecutor?.hasHandler(EXECUTION_APPROVAL_CLOSE_EFFECT_KIND), true);
     } finally {
       await daemon.stop().catch(() => undefined);
     }

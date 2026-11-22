@@ -89,6 +89,7 @@ export type LifecycleAdministrationPorts = {
   runtimeCustody: LifecycleAdministrationRuntimeCustody;
   deleteAgentStream(entryId: string): unknown;
   reconcileRoomWorkForPurge?(entryId: string): void;
+  reconcileApprovalPublicationsForPurge?(entryId: string): void;
   ephemeralProvisioner: {
     garbageCollectOrphans(retainedAttemptIds: ReadonlySet<string>): Promise<string[]>;
   };
@@ -326,6 +327,7 @@ export class LifecycleAdministrationCoordinator {
           };
         }
         this.ports.reconcileRoomWorkForPurge?.(entryId);
+        this.ports.reconcileApprovalPublicationsForPurge?.(entryId);
         if (!purge) {
           try {
             const externalRevokeRequired = await this.requiresHostGrant(entry);

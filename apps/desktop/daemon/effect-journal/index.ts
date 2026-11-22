@@ -80,6 +80,28 @@ export {
   pruneTerminalEffectsByKindsInTransaction,
 } from "./store.js";
 export {
+  EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND,
+  EXECUTION_APPROVAL_CLOSE_EFFECT_KIND,
+  EXECUTION_APPROVAL_EFFECT_KINDS,
+  EXECUTION_APPROVAL_EFFECT_MAX_ATTEMPTS,
+  EXECUTION_APPROVAL_RETAINED_TERMINAL_EFFECTS_PER_AGENT,
+  executionApprovalPublishIdempotencyKey,
+  executionApprovalCloseIdempotencyKey,
+  parseExecutionApprovalPublishEffectPayload,
+  parseExecutionApprovalCloseEffectPayload,
+  listActiveExecutionApprovalEffectsForAgent,
+  hasInterruptedExecutionApprovalEffects,
+  hasPendingRoomMoveForAgent,
+  pruneTerminalExecutionApprovalEffectsInTransaction,
+  cancelPreparedExecutionApprovalEffectsInTransaction,
+  retireExecutionApprovalEffectsForRoomMoveInTransaction,
+  retireExecutionApprovalEffectsForPurgeInTransaction,
+  retireObsoleteExecutionApprovalEffects,
+  type ExecutionApprovalPublicationIdentity,
+  type ExecutionApprovalPublishEffectPayload,
+  type ExecutionApprovalCloseEffectPayload,
+} from "./execution-approval.js";
+export {
   ROOM_WORK_PUBLISH_EFFECT_KIND,
   ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
   ROOM_WORK_EFFECT_KINDS,
