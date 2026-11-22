@@ -99,9 +99,12 @@ export type MoveAsideLegacyOptions = {
   signalProcessTree?: typeof signalTree;
   signalProcessTreeOutcome?: typeof signalTreeOutcome;
   renameFile?: (from: string, to: string) => Promise<void>;
+  lstatFile?: typeof lstat;
   graceMs?: number;
   killWaitMs?: number;
 };
+
+export type OpenDaemonStateDatabaseOptions = Pick<MoveAsideLegacyOptions, "lstatFile">;
 
 const FILETIME_UNIX_EPOCH_MS = 11_644_473_600_000n;
 const MAX_FILETIME = (1n << 64n) - 1n;
@@ -500,19 +503,34 @@ export async function moveAsideLegacyDaemonStateDatabase(
   path: string,
   options: MoveAsideLegacyOptions = {},
 ): Promise<string | null> {
-  const info = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+  const statFile = options.lstatFile ?? lstat;
+  let info = await statFile(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
     throw error;
   });
   if (!info) {
-    const strandedWal = await lstat(`${path}-wal`).catch((error: NodeJS.ErrnoException) => {
+    const strandedWal = await statFile(`${path}-wal`).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
-    if (strandedWal && (!strandedWal.isFile() || strandedWal.isSymbolicLink() || strandedWal.size > 0)) {
-      throw new Error("Refusing to initialize a fresh daemon database while an orphaned non-empty -wal file exists.");
+    if (strandedWal) {
+      if (!strandedWal.isFile() || strandedWal.isSymbolicLink()) {
+        throw new Error("Refusing to initialize a fresh daemon database while an orphaned non-empty -wal file exists.");
+      }
+      if (strandedWal.size > 0) {
+        // Re-check the main database file before refusing: a concurrent fresh
+        // opener may have created the main file and its active -wal between
+        // our initial lstat(path) and lstat(`${path}-wal`).
+        info = await statFile(path).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
+        if (!info) {
+          throw new Error("Refusing to initialize a fresh daemon database while an orphaned non-empty -wal file exists.");
+        }
+      }
     }
-    return null;
+    if (!info) return null;
   }
   if (!info.isFile() || info.isSymbolicLink()) {
     throw new Error("Daemon state path must be a regular file.");
@@ -562,7 +580,7 @@ export async function moveAsideLegacyDaemonStateDatabase(
   try {
     for (const suffix of [".recovery.enc", ".recovery.enc.pending"]) {
       const sidecar = `${path}${suffix}`;
-      const sidecarInfo = await lstat(sidecar).catch((error: NodeJS.ErrnoException) => {
+      const sidecarInfo = await statFile(sidecar).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return null;
         throw error;
       });
@@ -583,7 +601,7 @@ export async function moveAsideLegacyDaemonStateDatabase(
   // after checkpoint + close; `destination` already holds all committed pages.
   for (const suffix of ["-wal", "-shm"]) {
     const sidecar = `${path}${suffix}`;
-    const sidecarInfo = await lstat(sidecar).catch((error: NodeJS.ErrnoException) => {
+    const sidecarInfo = await statFile(sidecar).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
@@ -602,11 +620,12 @@ export async function moveAsideLegacyDaemonStateDatabase(
 export async function openDaemonStateDatabase(
   path: string,
   initializeSchema: (database: DatabaseSync) => void | Promise<void> = (opened) => new DaemonStateSchema().createSchema(opened),
+  options?: OpenDaemonStateDatabaseOptions,
 ): Promise<DatabaseSync> {
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await protectOwnerPrivate(directory, "directory");
-  await moveAsideLegacyDaemonStateDatabase(path);
+  await moveAsideLegacyDaemonStateDatabase(path, options);
   await ensureOwnerPrivateFilesOnWindows(path);
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -654,8 +673,9 @@ export class DaemonStateDatabase {
   static async open(
     path: string,
     initializeSchema?: (database: DatabaseSync) => void | Promise<void>,
+    options?: OpenDaemonStateDatabaseOptions,
   ): Promise<DaemonStateDatabase> {
-    const connection = await openDaemonStateDatabase(path, initializeSchema);
+    const connection = await openDaemonStateDatabase(path, initializeSchema, options);
     return new DaemonStateDatabase(path, connection);
   }
 
