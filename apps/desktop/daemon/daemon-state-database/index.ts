@@ -30,5 +30,6 @@ export {
   parseWindowsBirthFiletime,
   parseWindowsCimDateTimeToFiletimeUtc,
   type MoveAsideLegacyOptions,
+  type OpenDaemonStateDatabaseOptions,
   type PosixBirthReadResult,
 } from "./connection.js";
