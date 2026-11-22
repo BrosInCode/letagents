@@ -2,14 +2,19 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { SupervisorGrantRequestError } from "../cloud-http.js";
+import {
+  productionSupervisedDeliveryHttp,
+  SupervisorGrantRequestError,
+} from "../cloud-http.js";
 import {
   applyEffectJournalSchema,
   EffectClaimRefusedError,
   EffectExecutor,
+  EffectFenceError,
   getEffect,
   listEffectsForAgent,
   ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+  ROOM_MOVE_EFFECT_RETRY_DELAY_MS,
   ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
   ROOM_MOVE_RETAINED_TERMINAL_EFFECTS_PER_AGENT,
   ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
@@ -171,10 +176,13 @@ type Harness = {
   getEntry: () => DaemonManifestEntry | undefined;
   setBinding: (binding: WorkerSessionBinding | null) => void;
   setCredential: (credential: string | null) => void;
+  setCredentialFor: (fn: (binding: WorkerSessionBinding) => Promise<string | null>) => void;
   setHandoff: (handoff: boolean) => void;
   setAssertCurrent: (fn: () => Promise<void>) => void;
   setJoinRoom: (joinRoom: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["joinRoom"]>) => void;
   setLatest: (latest: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["latest"]>) => void;
+  nowMs: () => number;
+  advanceNow: (deltaMs: number) => void;
   setActivatingTurn: (item: SupervisedInboxItem, failure: "failed" | "interrupted" | null) => void;
 };
 
@@ -182,11 +190,13 @@ function harness(): Harness {
   const effectDb = new DatabaseSync(":memory:");
   applyEffectJournalSchema(effectDb);
   const events: string[] = [];
+  let currentNowMs = Date.parse(NOW_ISO);
   let currentMove: DaemonRoomMoveRecord | null = roomMove();
   let pendingMoves: DaemonRoomMoveRecord[] | null = null;
   let currentEntry: DaemonManifestEntry | undefined = entry();
   let currentBinding: WorkerSessionBinding | null = workerBinding();
   let credential: string | null = "worker-secret";
+  let credentialForFn: ((binding: WorkerSessionBinding) => Promise<string | null>) | null = null;
   let handoff = false;
   let assertCurrentFn: () => Promise<void> = async () => { events.push("authority:assert"); };
   let joinRoom: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["joinRoom"]> = async (input) => {
@@ -325,8 +335,9 @@ function harness(): Harness {
         events.push(`bindings:get:${agentId}`);
         return currentBinding;
       },
-      async credentialFor() {
+      async credentialFor(binding) {
         events.push("bindings:credential");
+        if (credentialForFn) return credentialForFn(binding);
         return credential;
       },
       async unbind(agentId) {
@@ -370,7 +381,8 @@ function harness(): Harness {
     pauseIngress: (agentId) => { events.push(`delivery:pause:${agentId}`); },
     restartDelivery: async (agentId) => { events.push(`delivery:restart:${agentId}`); },
     scheduleRecovery: (agentId, delayMs) => { events.push(`recovery:${agentId}:${delayMs}`); },
-    nowIso: () => NOW_ISO,
+    nowMs: () => currentNowMs,
+    nowIso: () => new Date(currentNowMs).toISOString(),
     externalEffectSignal: () => new AbortController().signal,
   };
 
@@ -380,8 +392,8 @@ function harness(): Harness {
     assertCurrent: async () => assertCurrentFn(),
     assertWriteFence: () => {},
     isClosing: () => handoff,
-    nowMs: () => Date.parse(NOW_ISO),
-    nowIso: () => NOW_ISO,
+    nowMs: () => currentNowMs,
+    nowIso: () => new Date(currentNowMs).toISOString(),
   });
   const coordinator = new RoomMoveCoordinator(ports);
   coordinator.attachEffectExecutor(executor, effectDb, () => {});
@@ -400,10 +412,13 @@ function harness(): Harness {
     getEntry() { return currentEntry; },
     setBinding(binding) { currentBinding = binding; },
     setCredential(next) { credential = next; },
+    setCredentialFor(fn) { credentialForFn = fn; },
     setHandoff(next) { handoff = next; },
     setAssertCurrent(fn) { assertCurrentFn = fn; },
     setJoinRoom(next) { joinRoom = next; },
     setLatest(next) { latest = next; },
+    nowMs() { return currentNowMs; },
+    advanceNow(deltaMs) { currentNowMs += deltaMs; },
     setActivatingTurn(item, failure) {
       items.set(item.inbox_item_id, item);
       effects.set("effect-1", effect());
@@ -1001,11 +1016,11 @@ test("handoff scheduled during EffectExecutor's final pre-settlement await never
   const [phaseLostEffect] = listEffectsForAgent(phaseLost.effectDb, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND });
   assert.equal(phaseLostEffect?.state, "failed");
   assert.equal(phaseLostEffect?.outcome, null);
-  assert.match(phaseLostEffect?.last_error ?? "", /rollback_required/);
+  assert.equal(phaseLostEffect?.last_error, "saga_phase_disallowed");
 });
 
 test("failed room-move settlement writes recover without restart (Layer 1 + Layer 2) while fencing live in-flight and future-epoch rows", async () => {
-  // Layer 1: completion-only SQLite write failure reschedules executing -> prepared.
+  // Layer 1: completion-only SQLite write failure reschedules executing -> prepared with durable nonzero backoff.
   const l1 = harness();
   l1.setMove(roomMove({ phase: "joining_destination" }));
   let l1Calls = 0;
@@ -1022,14 +1037,21 @@ test("failed room-move settlement writes recover without restart (Layer 1 + Laye
   const [l1Effect] = listEffectsForAgent(l1.effectDb, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND });
   assert.equal(l1Effect?.state, "prepared");
   assert.equal(l1Effect?.last_error, "settlement_write_failed");
+  assert.equal(l1Effect?.next_attempt_at_ms, l1.nowMs() + ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
 
   l1.effectDb.exec("DROP TRIGGER fail_rm_join_complete;");
+  // Immediate reconcile before backoff deadline must NOT replay HTTP.
+  const backedOffL1 = await l1.coordinator.reconcile(first);
+  assert.equal(l1Calls, 1);
+  assert.equal(backedOffL1.phase, "joining_destination");
+
+  l1.advanceNow(ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
   const recoveredL1 = await l1.coordinator.reconcile(first);
   assert.equal(l1Calls, 2);
   assert.equal(recoveredL1.phase, "rotating_credentials");
   assert.equal(getEffect(l1.effectDb, l1Effect!.id)?.state, "completed");
 
-  // Layer 2: full update outage leaves row executing, next reconcile recovers without restart.
+  // Layer 2: full update outage leaves row executing; recovery reschedules with durable nonzero backoff and succeeds once due.
   const l2 = harness();
   l2.setMove(roomMove({ phase: "rollback_required", remote_room_id: "canonical-destination" }));
   l2.setEntry(entry("canonical-destination"));
@@ -1049,7 +1071,16 @@ test("failed room-move settlement writes recover without restart (Layer 1 + Laye
   assert.equal(stuckEffect?.state, "executing");
 
   l2.effectDb.exec("DROP TRIGGER fail_rm_rollback_all_updates;");
-  const recoveredL2 = await l2.coordinator.reconcile(stuckRollback);
+  const recoveredBackoffL2 = await l2.coordinator.reconcile(stuckRollback);
+  assert.equal(l2Calls, 1, "Layer 2 recovery enforces durable nonzero backoff before replaying HTTP");
+  assert.equal(recoveredBackoffL2.phase, "rollback_required");
+  const requeuedL2 = getEffect(l2.effectDb, stuckEffect!.id);
+  assert.equal(requeuedL2?.state, "prepared");
+  assert.equal(requeuedL2?.last_error, "recovered_inactive_executing_effect");
+  assert.equal(requeuedL2?.next_attempt_at_ms, l2.nowMs() + ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
+
+  l2.advanceNow(ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
+  const recoveredL2 = await l2.coordinator.reconcile(recoveredBackoffL2);
   assert.equal(l2Calls, 2);
   assert.equal(recoveredL2.phase, "failed");
   assert.equal(getEffect(l2.effectDb, stuckEffect!.id)?.state, "completed");
@@ -1202,4 +1233,230 @@ test("authorizeClaim refuses stale saga phases against agent_room_moves and term
     ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
   ) as { n: number }).n);
   assert.equal(terminalCount, ROOM_MOVE_RETAINED_TERMINAL_EFFECTS_PER_AGENT);
+});
+
+test("retry HTTP rejection after settlement failure, lost response, or crash escalates to rollback_required instead of claiming pre-membership failure", async () => {
+  // Case 1: Settlement-write failure loses a committed remote join receipt; retry returns HTTP 403.
+  const settledLoss = harness();
+  settledLoss.setMove(roomMove({ phase: "joining_destination" }));
+  let remoteRoom = "source-room";
+  let joinAttempt = 0;
+  settledLoss.setJoinRoom(async (input) => {
+    if (input.roomId === "destination-alias") {
+      joinAttempt += 1;
+      if (joinAttempt === 1) {
+        remoteRoom = "canonical-destination";
+        return { roomId: "canonical-destination" };
+      }
+      throw new SupervisorGrantRequestError(403, "join room");
+    }
+    remoteRoom = input.roomId;
+    return { roomId: input.roomId };
+  });
+  settledLoss.effectDb.exec(`
+    CREATE TRIGGER fail_rm_join_receipt_then_403
+    BEFORE UPDATE OF state ON effects
+    WHEN NEW.kind = '${ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND}' AND NEW.state = 'completed'
+    BEGIN SELECT RAISE(ABORT, 'simulated_settlement_write_failure'); END;
+  `);
+  const afterSettlementFail = await settledLoss.coordinator.reconcile(roomMove({ phase: "joining_destination" }));
+  assert.equal(remoteRoom, "canonical-destination");
+  assert.equal(afterSettlementFail.phase, "joining_destination");
+
+  settledLoss.effectDb.exec("DROP TRIGGER fail_rm_join_receipt_then_403;");
+  settledLoss.advanceNow(ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
+  const afterRetry403 = await settledLoss.coordinator.reconcile(afterSettlementFail);
+  assert.equal(afterRetry403.phase, "rollback_required", "retry 403 after prior attempt must require source compensation");
+  assert.equal(settledLoss.events.includes("delivery:restart:agent-1"), false, "source delivery must not restart while remote room is diverged");
+  const [failedJoinEffect] = listEffectsForAgent(settledLoss.effectDb, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND });
+  assert.equal(failedJoinEffect?.state, "failed");
+  assert.equal(failedJoinEffect?.last_error, "http_403");
+  assert.deepEqual(failedJoinEffect?.outcome, { authoritative_rejection: false, ambiguous_prior_attempt: true });
+
+  // Next reconciliation runs rollback compensation, restores remote membership to source-room, and only then marks failed.
+  const compensated = await settledLoss.coordinator.reconcile(afterRetry403);
+  assert.equal(remoteRoom, "source-room", "source compensation restores remote membership before terminalizing");
+  assert.equal(compensated.phase, "failed");
+  assert.equal(settledLoss.events.at(-1), "delivery:restart:agent-1");
+
+  // Case 2: If rollback compensation itself cannot restore remote membership, saga stays rollback_required (truthful uncertainty).
+  const uncertain = harness();
+  uncertain.setMove(roomMove({ phase: "joining_destination" }));
+  let uncertainRemote = "source-room";
+  let uncertainAttempt = 0;
+  uncertain.setJoinRoom(async (input) => {
+    if (input.roomId === "destination-alias") {
+      uncertainAttempt += 1;
+      if (uncertainAttempt === 1) {
+        uncertainRemote = "canonical-destination";
+        throw new Error("connection reset after server commit");
+      }
+      throw new SupervisorGrantRequestError(403, "join room");
+    }
+    throw new SupervisorGrantRequestError(403, "source rollback denied");
+  });
+  const lostResponse = await uncertain.coordinator.reconcile(roomMove({ phase: "joining_destination" }));
+  assert.equal(lostResponse.phase, "joining_destination");
+  uncertain.advanceNow(ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
+  const needsRollback = await uncertain.coordinator.reconcile(lostResponse);
+  assert.equal(needsRollback.phase, "rollback_required");
+  const stillUncertain = await uncertain.coordinator.reconcile(needsRollback);
+  assert.equal(stillUncertain.phase, "rollback_required", "failed rollback keeps truthful uncertainty instead of falsely marking failed");
+  assert.equal(uncertainRemote, "canonical-destination");
+  assert.equal(uncertain.events.includes("delivery:restart:agent-1"), false);
+
+  // Case 3: Interrupted predecessor executing row recovered at startup, then retry returns HTTP 403 -> rollback_required.
+  const crash = harness();
+  const crashMove = roomMove({ phase: "joining_destination" });
+  crash.setMove(crashMove);
+  crash.effectDb.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES ('eff-crash-prior', 'agent-1', ?, ?, ?, 'executing', ?, NULL, 1, 1, 1000000, NULL, NULL, ?, ?)
+  `).run(
+    ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+    roomMoveJoinDestinationIdempotencyKey({ operationId: crashMove.operation_id, destinationRoomId: crashMove.destination_room_id }),
+    GENERATION - 1,
+    JSON.stringify({
+      destination_room_id: crashMove.destination_room_id,
+      execution_generation_id: crashMove.execution_generation_id,
+      operation_id: crashMove.operation_id,
+      source_room_id: crashMove.source_room_id,
+      work_attempt_id: crashMove.work_attempt_id,
+    }),
+    NOW_ISO,
+    NOW_ISO,
+  );
+  await crash.executor.recoverOnStartup();
+  crash.setJoinRoom(async () => { throw new SupervisorGrantRequestError(403, "join room"); });
+  const crashRetry = await crash.coordinator.reconcile(crashMove);
+  assert.equal(crashRetry.phase, "rollback_required");
+  assert.equal(crash.events.includes("delivery:restart:agent-1"), false);
+
+  // Control: first-attempt HTTP 403 still fails immediately without changing remote membership.
+  const firstAttemptControl = harness();
+  firstAttemptControl.setMove(roomMove({ phase: "joining_destination" }));
+  firstAttemptControl.setJoinRoom(async () => { throw new SupervisorGrantRequestError(403, "join room"); });
+  const controlFailed = await firstAttemptControl.coordinator.reconcile(roomMove({ phase: "joining_destination" }));
+  assert.equal(controlFailed.phase, "failed");
+  assert.match(controlFailed.error ?? "", /authoritatively rejected before local membership changed/);
+  assert.equal(firstAttemptControl.events.at(-1), "delivery:restart:agent-1");
+});
+
+test("effects journal stores only bounded allowlisted error codes on malformed JSON, raw transport errors, and dispatch-context failures", async () => {
+  // 1. Real productionSupervisedDeliveryHttp.latest with malformed JSON body PRIVATE_ROOM_BODY.
+  const tailHarness = harness();
+  tailHarness.setMove(roomMove({
+    phase: "bootstrapping_destination_tail",
+    remote_room_id: "canonical-destination",
+    source_credentials_revoked: true,
+  }));
+  tailHarness.setEntry(entry("canonical-destination"));
+  tailHarness.setBinding(workerBinding("canonical-destination"));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("PRIVATE_ROOM_BODY", {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  })) as typeof fetch;
+  try {
+    tailHarness.setLatest((input) => productionSupervisedDeliveryHttp.latest!(input));
+    const afterMalformed = await tailHarness.coordinator.reconcile(tailHarness.getMove()!);
+    assert.equal(afterMalformed.phase, "bootstrapping_destination_tail");
+    const [tailEffect] = listEffectsForAgent(tailHarness.effectDb, "agent-1", { kind: ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND });
+    assert.equal(tailEffect?.state, "prepared");
+    assert.equal(tailEffect?.last_error, "invalid_json_response");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  // 2. Thrown transport error carrying raw server text on joinRoom & rollback.
+  const transportHarness = harness();
+  transportHarness.setMove(roomMove({ phase: "joining_destination" }));
+  transportHarness.setJoinRoom(async () => {
+    throw new Error("raw server response: PRIVATE_TRANSPORT_SNIPPET");
+  });
+  await transportHarness.coordinator.reconcile(transportHarness.getMove()!);
+  const [joinEffect] = listEffectsForAgent(transportHarness.effectDb, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND });
+  assert.equal(joinEffect?.last_error, "transport_error");
+
+  // 3. Failure thrown while resolving dispatch context during direct executor.runEffect().
+  const dispatchHarness = harness();
+  dispatchHarness.setCredentialFor(async () => {
+    throw new Error("keychain fault containing RAW_CREDENTIAL_EXCERPT");
+  });
+  const preparedDispatch = await dispatchHarness.executor.prepare({
+    agent_id: "agent-1",
+    kind: ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
+    idempotency_key: roomMoveRollbackSourceIdempotencyKey({
+      operationId: "move-dispatch-err",
+      sourceRoomId: "source-room",
+    }),
+    payload: {
+      operation_id: "move-dispatch-err",
+      source_room_id: "source-room",
+      destination_room_id: "destination-alias",
+      work_attempt_id: "attempt-1",
+      execution_generation_id: "execution-1",
+    },
+    retryable: true,
+    max_attempts: 1_000_000,
+  });
+  const afterDispatchFailure = await dispatchHarness.executor.runEffect(preparedDispatch.effect.id);
+  assert.equal(afterDispatchFailure.state, "prepared");
+  assert.equal(afterDispatchFailure.last_error, "dispatch_context_resolution_failed");
+
+  const dumped = JSON.stringify([
+    ...tailHarness.effectDb.prepare("SELECT payload, outcome, last_error FROM effects").all(),
+    ...transportHarness.effectDb.prepare("SELECT payload, outcome, last_error FROM effects").all(),
+    ...dispatchHarness.effectDb.prepare("SELECT payload, outcome, last_error FROM effects").all(),
+  ]);
+  assert.doesNotMatch(dumped, /PRIVATE_ROOM_BODY|PRIVATE_TRANSPORT_SNIPPET|RAW_CREDENTIAL_EXCERPT|worker-secret/);
+});
+
+test("durable EffectExecutor retry backoff blocks immediate replay across direct calls and restart until the clock advances", async () => {
+  const h = harness();
+  const move = roomMove({ phase: "joining_destination" });
+  h.setMove(move);
+  let calls = 0;
+  h.setJoinRoom(async () => {
+    calls += 1;
+    if (calls === 1) throw new Error("transient network outage");
+    return { roomId: "canonical-destination" };
+  });
+
+  const t0 = h.nowMs();
+  const first = await h.coordinator.reconcile(move);
+  assert.equal(calls, 1);
+  assert.equal(first.phase, "joining_destination");
+  assert.equal(h.events.includes(`recovery:agent-1:${ROOM_MOVE_EFFECT_RETRY_DELAY_MS}`), true);
+  const [eff] = listEffectsForAgent(h.effectDb, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND });
+  assert.equal(eff?.state, "prepared");
+  assert.equal(eff?.next_attempt_at_ms, t0 + ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
+  assert.equal(eff?.last_error, "transport_error");
+
+  // Direct reconcile at unchanged clock t0 must NOT replay HTTP.
+  await h.coordinator.reconcile(first);
+  assert.equal(calls, 1, "direct reconcile before durable deadline must not replay HTTP");
+
+  // Direct executor.runEffect at unchanged clock t0 is also fenced by SQLite claimEffectForExecution.
+  await assert.rejects(() => h.executor.runEffect(eff!.id), EffectFenceError);
+  assert.equal(calls, 1);
+
+  // Simulated restart (startup recovery + reconcile at unchanged clock t0) preserves the durable deadline.
+  await h.executor.recoverOnStartup();
+  assert.equal(getEffect(h.effectDb, eff!.id)?.next_attempt_at_ms, t0 + ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
+  await h.coordinator.reconcile(first);
+  assert.equal(calls, 1, "startup recovery + reconcile before durable deadline must not replay HTTP");
+
+  // Advancing clock to 1ms before deadline still blocks; advancing to exact deadline executes attempt 2.
+  h.advanceNow(ROOM_MOVE_EFFECT_RETRY_DELAY_MS - 1);
+  await h.coordinator.reconcile(first);
+  assert.equal(calls, 1);
+
+  h.advanceNow(1);
+  const second = await h.coordinator.reconcile(first);
+  assert.equal(calls, 2);
+  assert.equal(second.phase, "rotating_credentials");
+  assert.equal(getEffect(h.effectDb, eff!.id)?.state, "completed");
 });

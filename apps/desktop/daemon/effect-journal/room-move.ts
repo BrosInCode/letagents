@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { pruneTerminalEffectsByKindsInTransaction } from "./store.js";
+import type { EffectBackoffPolicy } from "./types.js";
 
 export const ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND = "room_move_join_destination" as const;
 export const ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND = "room_move_rollback_source" as const;
@@ -29,6 +30,40 @@ export const ROOM_MOVE_EFFECT_KINDS = [
 
 export const ROOM_MOVE_EFFECT_MAX_ATTEMPTS = 1_000_000;
 export const ROOM_MOVE_RETAINED_TERMINAL_EFFECTS_PER_AGENT = 512;
+export const ROOM_MOVE_EFFECT_RETRY_DELAY_MS = 1_000;
+export const ROOM_MOVE_EFFECT_MAX_RETRY_DELAY_MS = 15_000;
+export const ROOM_MOVE_EFFECT_BACKOFF: EffectBackoffPolicy = {
+  baseDelayMs: ROOM_MOVE_EFFECT_RETRY_DELAY_MS,
+  maxDelayMs: ROOM_MOVE_EFFECT_MAX_RETRY_DELAY_MS,
+  factor: 2,
+};
+
+const TAIL_READ_HTTP_STATUS_RE = /^Supervised room tail read failed with HTTP ([1-5]\d{2})\.$/;
+
+/**
+ * Classifies a room-move transport/parser failure into a strictly allowlisted,
+ * bounded error code suitable for durable storage in `effects.last_error`.
+ * Arbitrary `Error.message`, `cause`, or server response fragments (such as
+ * malformed JSON bodies) are never persisted into the `effects` journal.
+ */
+export function classifyRoomMoveEffectError(error: unknown): string {
+  if (error && typeof error === "object" && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) {
+      return `http_${status}`;
+    }
+  }
+  if (error instanceof SyntaxError) {
+    return "invalid_json_response";
+  }
+  if (error instanceof Error) {
+    const tailStatus = TAIL_READ_HTTP_STATUS_RE.exec(error.message);
+    if (tailStatus) return `http_${tailStatus[1]}`;
+    if (error.name === "TimeoutError") return "request_timeout";
+    if (error.name === "AbortError") return "request_aborted";
+  }
+  return "transport_error";
+}
 
 export type RoomMoveJoinDestinationEffectPayload = {
   operation_id: string;
@@ -178,10 +213,10 @@ export function checkRoomMoveSagaPhaseInTransaction(
     FROM agent_room_moves
     WHERE operation_id = ?
   `).get(input.operationId) as Record<string, unknown> | undefined;
-  if (!row) return "Room move operation no longer exists.";
-  if (String(row.agent_id) !== input.agentId) return "Room move agent identity mismatch.";
+  if (!row) return "saga_missing";
+  if (String(row.agent_id) !== input.agentId) return "saga_agent_mismatch";
   if (!input.allowedPhases.includes(String(row.phase))) {
-    return `Room move operation is in phase ${String(row.phase)} and no longer allows this sub-action.`;
+    return "saga_phase_disallowed";
   }
   const storedWorkAttempt = row.work_attempt_id === null || row.work_attempt_id === undefined
     ? null
@@ -190,7 +225,7 @@ export function checkRoomMoveSagaPhaseInTransaction(
     ? null
     : String(row.execution_generation_id);
   if (storedWorkAttempt !== input.workAttemptId || storedExecutionGen !== input.executionGenerationId) {
-    return "Room move runtime coordinates no longer match.";
+    return "saga_runtime_mismatch";
   }
   return null;
 }
