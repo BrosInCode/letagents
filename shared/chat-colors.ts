@@ -63,6 +63,8 @@ export function readableChatSurface(value: string) {
       start: `rgb(${start.join(' ')})`, end: `rgb(${end.join(' ')})`, foreground,
       hover: `rgb(255 255 255 / ${hover})`,
       code: darkText ? 'rgb(255 255 255 / .12)' : 'rgb(0 0 0 / .10)',
+      inlineCodeBackground: darkText ? '#D3DCE9' : '#3B3E47',
+      inlineCodeForeground: darkText ? '#1E2633' : '#F5F7FA',
     };
   }
   // A flat solid color always has >= 4.5:1 contrast against black or white.
@@ -73,5 +75,6 @@ export function chatBubbleStyle(value: string): Record<string, string> {
   const color = normalizeChatColor(value) ?? defaultChatColors.self;
   const surface = readableChatSurface(color);
   return { '--chat-bubble': color, '--chat-bubble-start': surface.start, '--chat-bubble-end': surface.end,
-    '--chat-foreground': surface.foreground, '--chat-hover': surface.hover, '--chat-code': surface.code };
+    '--chat-foreground': surface.foreground, '--chat-hover': surface.hover, '--chat-code': surface.code,
+    '--chat-inline-code-background': surface.inlineCodeBackground, '--chat-inline-code-foreground': surface.inlineCodeForeground };
 }

@@ -38,7 +38,7 @@ export function useRoomShellInspectorActions(context: unknown) {
     agentInspectorProviders, agentInspectorRequestState, agentInspectorWorkResource,
     agentInspectorWorkSourceMessageId, personActions, props, selectedAgentDetailRequest,
     selectedAgentDetailRequestVersion, selectedAgentDetailTarget, supervisorStatus,
-    supervisorSyncState,
+    supervisorSyncState, roomChatView,
   } = context as RoomShellContextOf<"inputs" | "useRoomShellState">;
   const app = context as RoomShellContextOf<
       "useRoomShellAgentProjections"
@@ -94,11 +94,12 @@ export function useRoomShellInspectorActions(context: unknown) {
   }
 
   function openAgentDetailRequest(request: AgentInspectorRequest): void {
+    roomChatView.value?.cancelModelRecoverySwitch();
     agentInspectorInitialTab.value = inspectorInitialTab(request.target);
     selectedAgentDetailRequestVersion.value += 1;
     selectedAgentDetailRequest.value = request; personActions.value?.close();
     agentInspectorActionState.value = null;
-    app.releaseAgentCorrectionRequest({ restoreComposerText: true });
+    app.releaseAgentCorrectionRequest();
     agentInspectorRequestState.agentInspectorWorkRequestToken += 1;
     agentInspectorBackgroundRefresh.reset();
     agentInspectorDetailRequest.reset();
@@ -128,11 +129,12 @@ export function useRoomShellInspectorActions(context: unknown) {
   }
 
   function closeAgentDetail(): void {
+    roomChatView.value?.cancelModelRecoverySwitch();
     agentInspectorMessageIdentityRequestToken += 1;
     selectedAgentDetailRequestVersion.value += 1;
     selectedAgentDetailRequest.value = null;
     agentInspectorActionState.value = null;
-    app.releaseAgentCorrectionRequest({ restoreComposerText: true });
+    app.releaseAgentCorrectionRequest();
     agentInspectorRequestState.agentInspectorWorkRequestToken += 1;
     agentInspectorBackgroundRefresh.reset();
     agentInspectorDetailRequest.reset();
@@ -254,11 +256,11 @@ export function useRoomShellAgentProjections(context: unknown) {
   const {
     agentInspectorActionState, agentInspectorConfigurationResource, agentInspectorOperationCurrent,
     agentInspectorOperationIdentityCurrent, agentInspectorSettingsSelectionCurrent,
-    agentInspectorWorkResource, beginAgentInspectorOperation, continuationRepairAvailable,
+    agentInspectorWorkResource, beginAgentInspectorOperation, closeAgentDetail, continuationRepairAvailable,
     deliveryRetryAvailable, deliveryRetryingKeys, openAgentDetailRequest, props,
     recoverAgentInspectorSettingsGeneration, refreshSupervisorStatus, revealWakeMessage,
     roomDeliverySkipAvailable, roomIdentifierRef, selectedAgentDetailTarget, supervisorEntries,
-    supervisorEntriesState, supervisorStatus,
+    supervisorEntriesState, supervisorStatus, roomChatView,
   } = context as RoomShellContextOf<
       "inputs"
     | "useRoomShellInspectorActions"
@@ -298,7 +300,6 @@ export function useRoomShellAgentProjections(context: unknown) {
     correctionRequest: agentInspectorCorrectionRequest,
     correctableAgents,
     openCorrectionOrInspector: openAgentCorrectionOrInspector,
-    openCorrectionFromComposer: openAgentCorrectionFromComposer,
     releaseCorrection: releaseAgentCorrectionRequest,
   } = useAgentCorrectionHandoff({
     roomIdentifier: () => props.room.identifier,
@@ -325,6 +326,9 @@ export function useRoomShellAgentProjections(context: unknown) {
     operationIdentityCurrent: agentInspectorOperationIdentityCurrent,
     operationCurrent: agentInspectorOperationCurrent,
     recoverGeneration: recoverAgentInspectorSettingsGeneration,
+    onApplied: ({ entryId, provider, model }) => {
+      if (roomChatView.value?.finishModelRecovery(entryId, provider, model)) closeAgentDetail();
+    },
   });
   const selectedAgentInspectorActionState = computed(() => {
     const target = selectedAgentDetailTarget.value;
@@ -347,7 +351,7 @@ export function useRoomShellAgentProjections(context: unknown) {
   const deliveryReceiptsByMessage = computed(() => roomMessageDeliveryReceipts(supervisorEntries.value));
   return {
     agentPauseRequests, roomWakeRules, agentInspectorProjections, agentInspectorCorrectionRequest,
-    correctableAgents, openAgentCorrectionOrInspector, openAgentCorrectionFromComposer,
+    correctableAgents, openAgentCorrectionOrInspector,
     releaseAgentCorrectionRequest, selectedAgentDetailProjection, applyAgentInspectorSettings,
     selectedAgentInspectorActionState, selectedAgentInspectorWorkArtifacts,
     deliveryReceiptsByMessage,

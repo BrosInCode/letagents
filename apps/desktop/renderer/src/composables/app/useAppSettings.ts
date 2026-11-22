@@ -307,9 +307,8 @@ export function useAppSetupOnboarding(context: unknown) {
     completeMcpOnboarding,
     continueMcpOnboarding,
     continueToRoomConfirmation,
-    createFirstRunInviteRoom,
     finishFirstRunOnboarding,
-    firstRunInviteCode,
+    firstRunFinished,
     firstRunRoomSelected,
     firstRunFeedback,
     goBackFirstRun,
@@ -317,7 +316,6 @@ export function useAppSetupOnboarding(context: unknown) {
     installSelectedMcpTargets,
     joinRoomCode,
     loadFirstRunSetup,
-    pickRepoRoom,
     selectAllMcpTargets,
     selectMcpTarget,
     setupApiAvailable,
@@ -345,9 +343,9 @@ export function useAppSetupOnboarding(context: unknown) {
   Object.assign(app, { showFirstRunGate });
   return {
     clearMcpTargetSelection, completeMcpOnboarding, continueMcpOnboarding,
-    continueToRoomConfirmation, createFirstRunInviteRoom, finishFirstRunOnboarding,
-    firstRunInviteCode, firstRunRoomSelected, firstRunFeedback, goBackFirstRun,
-    goBackMcpOnboarding, installSelectedMcpTargets, joinRoomCode, loadFirstRunSetup, pickRepoRoom,
+    continueToRoomConfirmation, finishFirstRunOnboarding, firstRunFinished,
+    firstRunRoomSelected, firstRunFeedback, goBackFirstRun,
+    goBackMcpOnboarding, installSelectedMcpTargets, joinRoomCode, loadFirstRunSetup,
     selectAllMcpTargets, selectMcpTarget, setupApiAvailable, showFirstRunGate, showFirstRunSplash,
     visibleMcpInstallState, startFirstRunSetup,
   };

@@ -60,7 +60,12 @@ export function useDesktopRoomGitHubEvents(options: {
   );
   provideRoomMessageLinkPreviews(useRoomMessageLinkPreviews(
     computed(() => options.localGitRoom.value ? "" : options.room.value.identifier),
-    computed(() => options.room.value.gitRoom?.repository.fullName || githubRepository.value),
+    computed(() => {
+      const room = options.room.value;
+      const gitRoomRepository = room.gitRoom?.host.toLowerCase() === "github.com" ? room.gitRoom.repository.fullName : null;
+      return gitRoomRepository || githubRepository.value
+        || (room.kind === "focus" ? repoRepositoryFromRoomIdentifier(room.parentRoomId ?? "") : null);
+    }),
   ));
   providePullRequestDiffContext({
     room: computed(() => options.room.value.identifier),

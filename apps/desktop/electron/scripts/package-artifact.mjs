@@ -414,6 +414,7 @@ const required = [
     "shared/paced-queue.mjs",
     "shared/permission-review.mjs",
     "shared/room-expressions.mjs",
+    "shared/room-themes.mjs",
     "shared/room-turn-no-reply.mjs",
     "shared/room-typing.mjs",
     "shared/routing-aliases.mjs",

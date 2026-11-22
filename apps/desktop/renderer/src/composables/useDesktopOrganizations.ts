@@ -1,4 +1,5 @@
-import { computed, ref, watch, type Ref } from "vue";
+import type { RoomCompanyAppearance, RoomThemeId } from "../../../../../shared/room-themes.mjs";
+import { computed, reactive, ref, watch, type Ref } from "vue";
 import type { DesktopAuthStatus } from "../../../electron/ipc-types/auth.js";
 import type {
   DesktopGitHubAccessReason,
@@ -9,6 +10,7 @@ import type {
   DesktopOrganizationSsoBlock,
 } from "../../../electron/ipc-types/organizations.js";
 import { desktopIpc } from "../ipc/index.js";
+import { newestCompanyAppearance } from "../domain/company-navigation.js";
 
 /** Where the list of the person's GitHub organizations stands. */
 export type CompanyListStatus = "idle" | "loading" | "ready" | "github_access_required" | "unavailable";
@@ -20,6 +22,7 @@ export const COMPANY_REFRESH_INTERVAL_MS = 60_000;
 
 export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
   const organizations = ref<DesktopOrganization[]>([]);
+  const knownRoomAppearances = reactive(new Map<string, RoomCompanyAppearance>());
   const invitations = ref<DesktopOrganizationInvitation[]>([]);
   const ssoRequired = ref<DesktopOrganizationSsoBlock[]>([]);
   const status = ref<CompanyListStatus>("idle");
@@ -111,7 +114,13 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
         else status.value = "unavailable";
         return;
       }
-      organizations.value = result.organizations;
+      const cached = new Map(organizations.value.map(org => [org.github_org_id, org]));
+      organizations.value = result.organizations.map(org => {
+        const current = cached.get(org.github_org_id);
+        return current && (current.theme_revision ?? 0) > (org.theme_revision ?? 0)
+          ? { ...org, theme_id: current.theme_id, theme_revision: current.theme_revision }
+          : org;
+      });
       invitations.value = result.invitations;
       ssoRequired.value = result.ssoRequired;
       status.value = "ready";
@@ -179,6 +188,33 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
     }
   }
 
+  async function changeTheme(id: string, theme: RoomThemeId | null): Promise<void> {
+    const owner = accountKey.value;
+    const saved = await desktopIpc.organizations.setTheme(id, theme);
+    if (owner !== accountKey.value) return;
+    organizations.value = organizations.value.map(org =>
+      org.github_org_id === id && saved.themeRevision > (org.theme_revision ?? 0)
+        ? { ...org, theme_id: saved.theme, theme_revision: saved.themeRevision }
+        : org);
+  }
+
+  function rememberRoomAppearance(appearance: RoomCompanyAppearance | null | undefined): void {
+    if (!accountKey.value || !appearance) return;
+    const previous = knownRoomAppearances.get(appearance.id);
+    if (!previous || (appearance.themeRevision ?? 0) > (previous.themeRevision ?? 0)) {
+      knownRoomAppearances.set(appearance.id, appearance);
+    }
+  }
+
+  function resolveRoomAppearance(appearance: RoomCompanyAppearance): RoomCompanyAppearance {
+    const verified = organizations.value.find(org => org.github_org_id === appearance.id);
+    const current = newestCompanyAppearance(appearance, verified);
+    const remembered = knownRoomAppearances.get(appearance.id);
+    return remembered && (remembered.themeRevision ?? 0) > (current.themeRevision ?? 0)
+      ? { ...current, theme: remembered.theme, themeRevision: remembered.themeRevision }
+      : current;
+  }
+
   /** List a room just created in the selected company at once, before the next check with GitHub. */
   function rememberCreatedRoom(room: { roomIdentifier: string; displayName: string; organizationId: string }): void {
     if (room.organizationId !== selectedId.value) return;
@@ -196,6 +232,7 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
   watch(accountKey, () => {
     listGeneration += 1;
     selectionGeneration += 1;
+    knownRoomAppearances.clear();
     organizations.value = [];
     invitations.value = [];
     ssoRequired.value = [];
@@ -216,7 +253,8 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
   return {
     organizations, invitations, ssoRequired, status, accessReason, rooms, roomsStatus,
     selectedId, selected, activeId, joiningId, busy, error, hasChoices,
-    refresh, refreshIfStale, choose, openOnGitHub, rememberCreatedRoom,
+    refresh, refreshIfStale, choose, changeTheme, openOnGitHub, rememberCreatedRoom,
+    rememberRoomAppearance, resolveRoomAppearance,
   };
 }
 

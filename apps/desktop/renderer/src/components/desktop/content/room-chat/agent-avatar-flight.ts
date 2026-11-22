@@ -1,7 +1,8 @@
 export interface AgentAvatarFlightSource { element: HTMLElement; rect: DOMRect }
 
 export function captureAgentAvatarSource(element: HTMLElement | null): AgentAvatarFlightSource | null {
-  if (!element || typeof element.getBoundingClientRect !== "function") return null;
+  if (!element || typeof element.getBoundingClientRect !== "function"
+    || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return null;
   const rect = element.getBoundingClientRect();
   if (!rect.width || !rect.height) return null;
   const copy = element.cloneNode(true) as HTMLElement;
@@ -18,9 +19,9 @@ export function captureAgentAvatarSource(element: HTMLElement | null): AgentAvat
 }
 
 /** A presentation-only handoff. It never advances or waits on agent lifecycle state. */
-export function flyAgentAvatar(source: AgentAvatarFlightSource | null, destination: HTMLElement | null): void {
+export function flyAgentAvatar(source: AgentAvatarFlightSource | null, destination: HTMLElement | null, hideDestination = false): Animation | undefined {
   if (!source || !destination || typeof document === "undefined"
-    || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    || document.hidden || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
   const from = source.rect;
   const to = destination.getBoundingClientRect();
   if (!from.width || !from.height || !to.width || !to.height || to.bottom < 0 || to.top > window.innerHeight) return;
@@ -30,6 +31,7 @@ export function flyAgentAvatar(source: AgentAvatarFlightSource | null, destinati
     element.removeAttribute("id"); element.removeAttribute("data-testid"); element.removeAttribute("tabindex");
   }
   ghost.setAttribute("aria-hidden", "true");
+  ghost.dataset.agentAvatarFlight = "";
   ghost.inert = true;
   Object.assign(ghost.style, {
     position: "fixed", left: `${from.left}px`, top: `${from.top}px`, width: `${from.width}px`, height: `${from.height}px`,
@@ -45,7 +47,14 @@ export function flyAgentAvatar(source: AgentAvatarFlightSource | null, destinati
     { offset: 0, transform: "translate(0, 0) scale(1) rotate(0deg)", opacity: 1 },
     { offset: 0.38, transform: `translate(${dx * 0.4}px, ${dy * 0.4 - arc}px) scale(${Math.max(scale, 0.72)}) rotate(-14deg)`, opacity: 1 },
     { offset: 0.86, transform: `translate(${dx}px, ${dy - 6}px) scale(${scale * 1.1}) rotate(5deg)`, opacity: 1 },
-    { offset: 1, transform: `translate(${dx}px, ${dy}px) scale(${scale}) rotate(0deg)`, opacity: 0 },
-  ], { duration: 650, easing: "cubic-bezier(.22,.75,.2,1)", fill: "forwards" });
-  void flight.finished.catch(() => undefined).finally(() => ghost.remove());
+    { offset: 1, transform: `translate(${dx}px, ${dy}px) scale(${scale}) rotate(0deg)`, opacity: hideDestination ? 1 : 0 },
+  ], { duration: hideDestination ? 480 : 650, easing: "cubic-bezier(.22,.75,.2,1)", fill: "forwards" });
+  const destinationOpacity = destination.style.opacity;
+  if (hideDestination) destination.style.opacity = "0";
+  const settle = () => {
+    if (hideDestination) destination.style.opacity = destinationOpacity;
+    ghost.remove();
+  };
+  void flight.finished.then(settle, settle);
+  return flight;
 }

@@ -1,227 +1,91 @@
 <template>
-  <section class="first-run-wizard surface-page" :data-stage="stage" :data-company-flow="stage === 'organization' || (stage === 'room' && Boolean(companyName))" data-testid="first-run-wizard">
-    <Transition name="first-run-shell">
-      <article v-if="stage === 'welcome'" key="welcome" class="first-run-welcome" data-testid="first-run-welcome">
-        <div class="first-run-welcome-brand">
-          <span class="first-run-welcome-mark" aria-hidden="true">
-            <LetAgentsLogoMark />
-          </span>
-          <h1>LetAgents</h1>
-        </div>
-        <button
-          class="primary-button"
-          type="button"
-          :disabled="busy"
-          data-testid="first-run-start-setup"
-          @click="$emit('start-setup')"
-        >
-          Set up LetAgents
-        </button>
-        <Transition name="first-run-feedback">
-          <p v-if="feedback" class="mcp-feedback" data-testid="first-run-feedback">{{ feedback }}</p>
-        </Transition>
-      </article>
+  <section class="first-run-wizard" :data-stage="stage" data-testid="first-run-wizard">
+    <FirstRunWelcome v-if="stage === 'welcome' || stage === 'github'" :leaving="stage === 'github'"
+      :busy="busy" :feedback="feedback" @start="emit('start-setup')" @settle="handoffActive = false" />
+    <Transition name="first-run-shell" @after-enter="focusHeading">
+      <article v-if="stage !== 'welcome'" ref="card" key="setup" class="onboarding-card" :data-step="stage" :data-handoff="handoffActive" data-testid="first-run-card">
+        <span class="setup-brand"><LetAgentsLogoMark aria-hidden="true" />LetAgents</span>
+        <Transition name="setup-step" mode="out-in" @after-enter="focusHeading">
+          <div :key="stage" class="onboarding-content">
+            <header v-if="stage !== 'github'" class="onboarding-heading">
+              <h1 tabindex="-1">{{ headline }}</h1>
+              <p v-if="description">{{ description }}</p>
+            </header>
 
-      <article
-        v-else
-        key="wizard"
-        class="mcp-wizard-card first-run-card"
-        :data-motion-direction="motionDirection"
-        :data-mcp-step="stage === 'mcp' ? mcpWizardStep : null"
-        data-testid="first-run-card"
-      >
-        <div class="first-run-hero-row" data-testid="first-run-hero">
-          <header class="mcp-wizard-header first-run-header" data-testid="first-run-header">
-            <p class="hero-kicker">LetAgents setup</p>
-            <SetupWizardProgress :current-step="stage" :steps="progressSteps" />
-            <div class="first-run-heading-viewport">
-              <Transition :name="stageTransitionName" mode="out-in">
-                <div :key="navigationKey" class="first-run-heading-motion">
-                  <h1>{{ headline }}</h1>
-                  <p>{{ copy }}</p>
-                </div>
-              </Transition>
-            </div>
-          </header>
-        </div>
+            <FirstRunGithubStep v-if="stage === 'github'" :auth-status="authStatus" :busy="authBusy" :setup-busy="busy"
+              @start-auth="emit('start-auth')" @back="emit('back')" @continue="emit('continue-to-room')"
+              @cancel-auth="emit('cancel-auth')" @open-verification="emit('open-verification', $event)"
+              @poll-auth="emit('poll-auth')" @sign-out="emit('sign-out')" />
 
-        <div class="first-run-stage-viewport">
-          <Transition :name="stageTransitionName" mode="out-in">
-            <div :key="navigationKey" class="first-run-stage-motion">
-              <div v-if="stage === 'mcp'" class="first-run-stage" data-testid="first-run-stage-mcp">
-                <McpHarnessChoiceStep
-                  v-if="mcpWizardStep === 'choose'"
-                  :targets="mcpState.targets"
-                  :selected-target-ids="selectedMcpTargetIds"
-                  @select-target="$emit('select-target', $event)"
-                  @select-all="$emit('select-all-targets')"
-                  @clear-selection="$emit('clear-target-selection')"
-                />
+            <FirstRunOrganizationStep v-else-if="stage === 'organization' && companyStep"
+              v-model:pick="companyPick" :status="companyStep.status" :access-reason="companyStep.accessReason"
+              :organizations="companyStep.organizations" :invitations="companyStep.invitations"
+              :sso-required="companyStep.ssoRequired" :error="companyStep.error" :invited-id="invitedCompanyId ?? null"
+              @retry="emit('retry-organizations')" @open-github="emit('open-company-github', $event)" />
 
-                <McpInstallConfirmStep
-                  v-else
-                  :targets="selectedMcpTargets"
-                  :show-result="mcpWizardStep === 'done' || Boolean(feedback)"
-                />
-              </div>
-
-              <FirstRunGithubStep
-                v-else-if="stage === 'github'"
-                :auth-status="authStatus"
-                :busy="authBusy"
-                @cancel-auth="$emit('cancel-auth')"
-                @open-verification="$emit('open-verification', $event)"
-                @poll-auth="$emit('poll-auth')"
-                @sign-out="$emit('sign-out')"
-              />
-
-              <FirstRunOrganizationStep
-                v-else-if="stage === 'organization' && companyStep"
-                v-model:pick="companyPick"
-                :status="companyStep.status"
-                :access-reason="companyStep.accessReason"
-                :organizations="companyStep.organizations"
-                :invitations="companyStep.invitations"
-                :sso-required="companyStep.ssoRequired"
-                :error="companyStep.error"
-                :invited-id="invitedCompanyId ?? null"
-                @retry="$emit('retry-organizations')"
-                @open-github="$emit('open-company-github', $event)"
-              />
-
-              <div v-else class="first-run-room-stage">
-                <FirstRunCompanyRooms
-                  v-if="companyName"
-                  :company-name="companyName"
-                  :avatar-url="companyAvatarUrl ?? null"
-                  :rooms="companyRooms || []"
-                  :selected-room-identifier="selectedRoomIdentifier"
-                  :busy="busy"
-                  @choose-room="$emit('join-room-code', $event)"
-                />
-              <FirstRunRoomStep
-                :selected-room-name="selectedRoomName"
-                :selected-room-identifier="selectedCompanyRoom ? null : selectedRoomIdentifier"
-                :selected-room-access-status="selectedRoomAccessStatus"
-                :room-needs-github-access="roomNeedsGithubAccess"
-                :created-invite-code="createdInviteCode"
-                :busy="busy"
-                :feedback="feedback"
-                @pick-repo="$emit('pick-repo')"
-                @create-room="$emit('create-room')"
-                @join-room-code="$emit('join-room-code', $event)"
-              />
+            <div v-else-if="stage === 'theme'" :aria-busy="savingCompanyTheme">
+              <RoomThemePicker label="Room theme" :model-value="roomTheme?.personal.value ?? null"
+                :inherited="roomTheme?.company.value?.theme" :company="companyName" :disabled="savingCompanyTheme"
+                preview @update:model-value="roomTheme?.choose($event)" />
+              <label v-if="canShareTheme" class="first-run-share-theme">
+                <input v-model="shareTheme" type="checkbox" :disabled="savingCompanyTheme || !roomTheme?.personal.value">
+                Use this as {{ companyName }}’s default
+              </label>
+              <div v-if="themeSaveFailed" class="theme-save-feedback">
+                <p class="onboarding-feedback" role="alert">Couldn’t save the company default.</p>
+                <button v-if="canShareTheme" type="button" class="onboarding-quiet" :disabled="busy || savingCompanyTheme"
+                  data-testid="first-run-theme-retry" @click="continueTheme(true)">Retry save</button>
               </div>
             </div>
-          </Transition>
-        </div>
 
-        <div class="first-run-actions-viewport">
-          <Transition name="first-run-action" mode="out-in">
-            <div :key="actionKey" class="mcp-wizard-actions" data-testid="first-run-actions">
-              <button
-                v-if="showBack && !(stage === 'github' && authStatus?.pendingDeviceAuth)"
-                class="ghost-button"
-                type="button"
-                :disabled="busy"
-                data-testid="first-run-back"
-                @click="$emit('back')"
-              >
-                Back
+            <template v-else-if="stage === 'room'">
+              <FirstRunCompanyRooms v-if="rooms.length"
+                :company-name="companyName ?? null" :rooms="rooms"
+                :selected-room-identifier="selectedRoomIdentifier" :busy="busy"
+                @choose-room="(id, icon) => emit('choose-room', id, icon)" />
+              <div class="onboarding-room-actions" aria-label="Open another room">
+                <button type="button" :disabled="busy" data-testid="room-choice-create" @click="emit('new-room', 'create')">
+                  <Plus aria-hidden="true" /><span>New room</span><ArrowRight aria-hidden="true" />
+                </button>
+                <button type="button" :disabled="busy" data-testid="room-choice-join" @click="emit('new-room', 'join')">
+                  <KeyRound aria-hidden="true" /><span>Join with an invite</span><ArrowRight aria-hidden="true" />
+                </button>
+                <button type="button" :disabled="busy" data-testid="room-choice-pick-repo" @click="emit('new-room', 'project')">
+                  <FolderGit2 aria-hidden="true" /><span>Open a repository</span><ArrowRight aria-hidden="true" />
+                </button>
+              </div>
+            </template>
+
+            <p v-if="feedback" class="onboarding-feedback" role="status" data-testid="first-run-feedback">{{ feedback }}</p>
+
+            <footer v-if="stage !== 'github'" class="onboarding-actions">
+              <button class="onboarding-quiet"
+                :disabled="busy || savingCompanyTheme" type="button" data-testid="first-run-back" @click="emit('back')">
+                <ArrowLeft aria-hidden="true" /> Back
               </button>
-
-              <button
-                v-if="stage === 'mcp' && mcpWizardStep === 'choose'"
-                class="primary-button"
-                type="button"
-                :disabled="!selectedMcpTargetIds.length || busy"
-                data-testid="first-run-mcp-continue"
-                @click="$emit('continue-mcp')"
-              >
-                Continue
-              </button>
-
-              <button
-                v-else-if="stage === 'mcp' && mcpWizardStep === 'install'"
-                class="primary-button"
-                type="button"
-                :disabled="!selectedMcpTargetIds.length || busy || !canInstall"
-                data-testid="first-run-mcp-install"
-                @click="$emit('install-targets')"
-              >
-                {{ installButtonLabel }}
-              </button>
-
-              <button
-                v-else-if="stage === 'mcp'"
-                class="primary-button"
-                type="button"
-                :disabled="busy"
-                data-testid="first-run-to-github"
-                @click="$emit('continue-to-github')"
-              >
-                Continue
-              </button>
-
-              <button
-                v-if="stage === 'github' && !authStatus?.authenticated && !authStatus?.pendingDeviceAuth"
-                class="primary-button"
-                type="button"
-                :disabled="authBusy"
-                data-testid="first-run-auth-start"
-                @click="$emit('start-auth')"
-              >
-                {{ authBusy ? "Opening GitHub..." : "Sign in with GitHub" }}
-              </button>
-
-              <button
-                v-if="stage === 'github' && authStatus?.authenticated"
-                class="primary-button"
-                type="button"
-                :disabled="busy"
-                data-testid="first-run-to-room"
-                @click="$emit('continue-to-room')"
-              >
-                Continue
-              </button>
-
-              <template v-else-if="stage === 'organization' && companyStep">
-                <button
-                  v-if="companyStep.status === 'github_access_required'"
-                  class="ghost-button"
-                  type="button"
-                  data-testid="first-run-company-skip"
-                  @click="$emit('choose-organization', null)"
-                >
+              <template v-if="stage === 'organization' && companyStep">
+                <button v-if="companyStep.status === 'github_access_required'" class="onboarding-quiet" type="button"
+                  :disabled="busy" data-testid="first-run-company-skip" @click="emit('choose-organization', null)">
                   Skip for now
                 </button>
-                <button
-                  class="primary-button"
-                  type="button"
-                  :disabled="companyAction.disabled"
-                  data-testid="first-run-company-continue"
-                  @click="runCompanyAction"
-                >
-                  {{ companyAction.label }}
+                <button class="primary-button onboarding-primary" type="button" :disabled="companyAction.disabled || busy"
+                  data-testid="first-run-company-continue" @click="runCompanyAction">
+                  {{ companyAction.label }} <ArrowRight aria-hidden="true" />
                 </button>
               </template>
-
-              <button
-                v-else-if="stage === 'room'"
-                class="primary-button"
-                type="button"
-                :disabled="busy"
-                data-testid="first-run-open-room"
-                @click="roomNeedsGithubAccess ? $emit('connect-room-auth') : $emit('finish')"
-              >
-                {{ roomActionLabel }}
+              <button v-else-if="stage === 'theme'" class="primary-button onboarding-primary" type="button" :disabled="busy || savingCompanyTheme"
+                data-testid="first-run-theme-continue" @click="continueTheme(!themeSaveFailed)">
+                {{ savingCompanyTheme ? "Saving…" : themeSaveFailed ? "Continue with my theme" : "Continue" }} <ArrowRight aria-hidden="true" />
               </button>
-            </div>
-          </Transition>
-        </div>
-
-        <Transition name="first-run-feedback">
-          <p v-if="showFeedback" class="mcp-feedback" data-testid="first-run-feedback">{{ feedback }}</p>
+              <button v-else-if="stage === 'room' && (roomNeedsGithubAccess || !selectedRoomIdentifier)"
+                :class="roomNeedsGithubAccess ? 'primary-button onboarding-primary' : 'onboarding-quiet'"
+                type="button" :disabled="busy" :data-testid="roomNeedsGithubAccess ? 'first-run-room-connect-github' : 'first-run-room-skip'"
+                @click="roomNeedsGithubAccess ? emit('connect-room-auth') : emit('finish')">
+                {{ roomNeedsGithubAccess ? "Connect GitHub" : "Skip for now" }}
+                <ArrowRight aria-hidden="true" />
+              </button>
+            </footer>
+          </div>
         </Transition>
       </article>
     </Transition>
@@ -229,234 +93,206 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import type {
-  DesktopAuthStatus,
-  DesktopMcpInstallState,
-  DesktopMcpInstallTargetId,
-  DesktopRoomAccess,
-} from "../../../../../electron/ipc-types";
-import FirstRunCompanyRooms from "./FirstRunCompanyRooms.vue";
-import FirstRunOrganizationStep from "./FirstRunOrganizationStep.vue";
-import type {
-  DesktopOrganizationGitHubPage,
-  DesktopOrganizationRoom,
-} from "../../../../../electron/ipc-types/organizations.js";
-import FirstRunGithubStep from "./FirstRunGithubStep.vue";
-import FirstRunRoomStep from "./FirstRunRoomStep.vue";
+import { computed, nextTick, ref, watch } from "vue";
+import { ArrowLeft, ArrowRight, FolderGit2, KeyRound, Plus } from "@lucide/vue";
+import RoomThemePicker from "../../../../../../../shared/ui/RoomThemePicker.vue";
+import { useRoomTheme } from "../../../../../../../shared/ui/room-theme";
+import type { RoomThemeId } from "../../../../../../../shared/room-themes.mjs";
+import type { DesktopAuthStatus } from "../../../../../electron/ipc-types";
+import type { DesktopOrganizationGitHubPage } from "../../../../../electron/ipc-types/organizations";
 import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
-import McpHarnessChoiceStep from "./McpHarnessChoiceStep.vue";
-import McpInstallConfirmStep from "./McpInstallConfirmStep.vue";
-import SetupWizardProgress from "./SetupWizardProgress.vue";
-import type { DesktopMcpWizardStep, FirstRunCompanyStepState, FirstRunWizardStage } from "./types";
+import FirstRunCompanyRooms from "./FirstRunCompanyRooms.vue";
+import FirstRunGithubStep from "./FirstRunGithubStep.vue";
+import FirstRunOrganizationStep from "./FirstRunOrganizationStep.vue";
+import FirstRunWelcome from "./FirstRunWelcome.vue";
+import type { FirstRunCompanyStepState, FirstRunRoomChoice, FirstRunWizardStage } from "./types";
 
 const props = defineProps<{
+  stage: FirstRunWizardStage;
   companyStep?: FirstRunCompanyStepState | null;
-  /** The organization of a company link that is open during setup. */
   invitedCompanyId?: string | null;
   companyName?: string | null;
-  companyAvatarUrl?: string | null;
-  companyRooms?: DesktopOrganizationRoom[];
-  stage: FirstRunWizardStage;
-  mcpState: DesktopMcpInstallState;
-  selectedMcpTargetIds: DesktopMcpInstallTargetId[];
-  mcpWizardStep: DesktopMcpWizardStep;
+  rooms: FirstRunRoomChoice[];
+  saveCompanyTheme?: (id: string, theme: RoomThemeId) => Promise<void>;
   authStatus: DesktopAuthStatus | null;
   busy: boolean;
   authBusy: boolean;
-  canInstall: boolean;
   feedback: string | null;
-  roomSelected: boolean;
-  createdInviteCode: string | null;
-  selectedRoomName: string | null;
   selectedRoomIdentifier: string | null;
-  selectedRoomAccessStatus: DesktopRoomAccess["status"] | null;
   roomNeedsGithubAccess: boolean;
 }>();
-
 const emit = defineEmits<{
-  "select-target": [targetId: DesktopMcpInstallTargetId];
-  "select-all-targets": [];
-  "clear-target-selection": [];
-  "continue-mcp": [];
   "start-setup": [];
-  "install-targets": [];
-  "continue-to-github": [];
   "start-auth": [];
   "cancel-auth": [];
   "open-verification": [url: string];
   "poll-auth": [];
   "sign-out": [];
   "continue-to-room": [];
+  "continue-theme": [];
   "choose-organization": [id: string | null];
   "retry-organizations": [];
   "open-company-github": [page: DesktopOrganizationGitHubPage];
   "connect-room-auth": [];
-  "pick-repo": [];
-  "create-room": [];
-  "join-room-code": [roomCode: string];
+  "new-room": [mode: "create" | "join" | "project"];
+  "choose-room": [id: string, icon?: HTMLElement];
   back: [];
   finish: [];
 }>();
 
-const selectedMcpTargets = computed(() => {
-  return props.mcpState.targets.filter((target) => props.selectedMcpTargetIds.includes(target.id));
+const card = ref<HTMLElement | null>(null);
+const handoffActive = ref(false);
+watch(() => props.stage, (stage, previous) => {
+  handoffActive.value = previous === "welcome" && stage === "github";
+  if (stage === "github") void nextTick(focusHeading);
 });
-
-const installButtonLabel = computed(() => {
-  if (props.busy) return "Installing...";
-  if (props.feedback && selectedMcpTargets.value.some((target) => target.status !== "installed")) {
-    return "Retry";
-  }
-  return "Install MCP";
-});
-
-/** The company room that is selected on the room step, if the selected room is one. */
-const selectedCompanyRoom = computed(() => {
-  const selected = props.selectedRoomIdentifier?.toLowerCase();
-  if (!selected) return null;
-  return props.companyRooms?.find((room) => room.room_id.toLowerCase() === selected) ?? null;
-});
-
-const roomActionLabel = computed(() => {
-  if (!props.roomSelected) return "Continue";
-  if (props.roomNeedsGithubAccess) return "Connect GitHub";
-  if (selectedCompanyRoom.value) return `Open ${selectedCompanyRoom.value.full_name ?? selectedCompanyRoom.value.display_name}`;
-  return "Open room";
-});
-
-/** The chosen company row: "all", or a GitHub organization ID. */
-const companyPick = ref("all");
-watch(
-  () => props.stage === "organization",
-  (onCompanyStep) => {
-    if (onCompanyStep) companyPick.value = props.companyStep?.selectedId ?? "all";
-  },
-  { immediate: true },
-);
-
-/** The main button of the company step names what will happen. */
-const companyAction = computed<{ label: string; disabled: boolean }>(() => {
-  const step = props.companyStep;
-  if (!step || step.status === "idle" || step.status === "loading") return { label: "Continue", disabled: true };
-  if (step.status === "github_access_required") {
-    return { label: step.accessReason === "signin" ? "Reconnect on GitHub" : "Allow on GitHub", disabled: false };
-  }
-  if (step.status === "unavailable") return { label: "Continue with all rooms", disabled: false };
-  const org = step.organizations.find((item) => item.github_org_id === companyPick.value);
-  if (step.joiningId) {
-    const joining = step.organizations.find((item) => item.github_org_id === step.joiningId);
-    return { label: joining && !joining.setup ? "Setting up…" : "Joining…", disabled: true };
-  }
-  if (!org || org.joined) return { label: "Continue", disabled: false };
-  if (org.setup) return { label: `Join ${org.login}`, disabled: false };
-  if (org.role === "owner") return { label: `Set up ${org.login}`, disabled: false };
-  return { label: "Continue", disabled: true };
-});
-
-function runCompanyAction(): void {
-  const status = props.companyStep?.status;
-  if (status === "github_access_required") {
-    emit("open-company-github", { kind: "allow" });
-    return;
-  }
-  emit("choose-organization", status === "ready" && companyPick.value !== "all" ? companyPick.value : null);
+function focusHeading() {
+  card.value?.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
 }
-
-const navigationKey = computed(() => {
-  if (props.stage !== "mcp") return props.stage;
-  if (props.mcpWizardStep !== "choose") return "mcp-install";
-  return `mcp-${props.mcpWizardStep}`;
-});
-
-const motionDirection = ref<"forward" | "back">("forward");
-
-watch(
-  navigationKey,
-  (next, previous) => {
-    motionDirection.value = navigationRank(next) >= navigationRank(previous) ? "forward" : "back";
-  },
-  { flush: "sync" },
-);
-
-const stageTransitionName = computed(() => `first-run-${motionDirection.value}`);
-
-const actionKey = computed(() => {
-  if (props.stage === "github") {
-    if (props.authStatus?.authenticated) return "github-connected";
-    if (props.authStatus?.pendingDeviceAuth) return "github-pending";
-    return "github-start";
-  }
-  if (props.stage === "room") {
-    return props.roomSelected ? "room-selected" : "room-empty";
-  }
-  if (props.stage === "organization") return `organization-${props.companyStep?.status ?? "idle"}`;
-  return navigationKey.value;
-});
 
 const headline = computed(() => {
-  if (props.stage === "github") return "Repositories are rooms.";
   if (props.stage === "organization") return "Where will you work?";
-  if (props.stage === "room") return props.companyName ? "Pick your first room." : "Open your first room.";
-  if (props.mcpWizardStep === "install") return "Connect your agents.";
-  if (props.mcpWizardStep === "done") return "MCP installed.";
-  return "Where do your agents live?";
+  if (props.stage === "theme") return "Pick your theme.";
+  return "Find your first room.";
 });
 
-const copy = computed(() => {
-  if (props.stage === "organization") {
-    return "Bring your company’s rooms together, or keep all your rooms in view.";
-  }
-  if (props.stage === "github") {
-    return props.authStatus?.authenticated
-      ? "GitHub connected. Choose where you’ll work next."
-      : "Sign in with GitHub to open your repositories as rooms.";
-  }
-  if (props.stage === "room") {
-    if (props.companyName && props.companyRooms?.length) {
-      return `The ${props.companyName} rooms you can open.`;
+const description = computed(() => {
+  if (props.stage === "organization") return "See all your rooms or focus on a company.";
+  if (props.stage === "theme") return props.companyName && roomTheme?.company.value?.theme
+    ? `Use ${props.companyName}’s theme or choose your own.` : "Choose how your rooms look.";
+  return "You can switch rooms anytime.";
+});
+
+const companyPick = ref("all");
+watch(() => props.stage, stage => {
+  if (stage === "organization") companyPick.value = props.companyStep?.selectedId ?? "all";
+}, { immediate: true });
+
+const selectedCompany = computed(() => props.companyStep?.organizations.find(org => org.github_org_id === companyPick.value));
+const companyAction = computed(() => {
+  const step = props.companyStep;
+  if (!step || step.status === "idle" || step.status === "loading") return { label: "Continue", disabled: true };
+  if (step.status === "github_access_required") return { label: "Open GitHub", disabled: false };
+  if (step.status === "unavailable") return { label: "Continue with all rooms", disabled: false };
+  const selected = selectedCompany.value;
+  if (step.joiningId) return { label: "Opening…", disabled: true };
+  if (!selected) return { label: "Continue", disabled: companyPick.value !== "all" };
+  if (selected.joined) return { label: "Continue", disabled: false };
+  if (selected.setup) return { label: `Join ${selected.login}`, disabled: false };
+  return { label: `Set up ${selected.login}`, disabled: selected.role !== "owner" };
+});
+
+function runCompanyAction() {
+  if (props.companyStep?.status === "github_access_required") emit("open-company-github", { kind: "allow" });
+  else if (props.companyStep?.status === "unavailable") emit("choose-organization", null);
+  else emit("choose-organization", selectedCompany.value?.github_org_id ?? null);
+}
+
+const roomTheme = useRoomTheme();
+const canShareTheme = computed(() => Boolean(props.saveCompanyTheme && roomTheme?.company.value && !roomTheme.company.value.theme));
+const shareTheme = ref(false);
+const savingCompanyTheme = ref(false);
+const themeSaveFailed = ref(false);
+
+watch([() => roomTheme?.company.value?.id, () => props.stage], () => {
+  shareTheme.value = false;
+  themeSaveFailed.value = false;
+});
+watch([shareTheme, () => roomTheme?.personal.value], () => { themeSaveFailed.value = false; });
+
+async function continueTheme(saveSharedDefault: boolean) {
+  if (props.busy || savingCompanyTheme.value) return;
+  const company = roomTheme?.company.value;
+  const theme = roomTheme?.personal.value;
+  if (saveSharedDefault && shareTheme.value && canShareTheme.value && company && theme && props.saveCompanyTheme) {
+    savingCompanyTheme.value = true;
+    themeSaveFailed.value = false;
+    try {
+      await props.saveCompanyTheme(company.id, theme);
+      if (props.stage !== "theme" || roomTheme.company.value?.id !== company.id) return;
+      if (roomTheme.personal.value === theme && roomTheme.company.value.theme === theme) roomTheme.choose(null);
+    } catch {
+      if (props.stage === "theme" && roomTheme.company.value?.id === company.id) themeSaveFailed.value = true;
+      return;
+    } finally {
+      savingCompanyTheme.value = false;
     }
-    return "Start now, or continue and choose one from the sidebar later.";
   }
-  if (props.mcpWizardStep === "install") {
-    return "We'll add the LetAgents MCP to these apps so their agents can talk in shared rooms.";
-  }
-  if (props.mcpWizardStep === "done") {
-    return "Restart your agent apps, then continue.";
-  }
-  return "We'll install the LetAgents MCP in the apps you select.";
-});
-
-const showFeedback = computed(() => {
-  return Boolean(
-    props.feedback
-    && props.stage !== "room"
-    && !(props.stage === "mcp" && props.mcpWizardStep === "done"),
-  );
-});
-
-const progressSteps = computed<Array<{ id: FirstRunWizardStage; step: string; label: string; complete: boolean }>>(() => [
-  { id: "mcp", step: "1", label: "MCP", complete: props.stage !== "mcp" },
-  { id: "github", step: "2", label: "GitHub", complete: props.stage === "organization" || props.stage === "room" },
-  { id: "organization", step: "3", label: "Company", complete: props.stage === "room" },
-  { id: "room", step: "4", label: "Room", complete: false },
-]);
-
-const showBack = computed(() => {
-  if (props.stage === "welcome") return false;
-  return props.stage !== "mcp" || props.mcpWizardStep !== "choose";
-});
-
-function navigationRank(key: string): number {
-  const ranks: Record<string, number> = {
-    welcome: 0,
-    "mcp-choose": 1,
-    "mcp-install": 2,
-    "mcp-done": 3,
-    github: 4,
-    organization: 5,
-    room: 6,
-  };
-  return ranks[key] ?? 0;
+  emit("continue-theme");
 }
 </script>
+
+<style scoped>
+.first-run-wizard { position: relative; }
+.onboarding-card {
+  grid-area: 1 / 1;
+  position: relative;
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  min-height: calc(100dvh - 56px);
+  padding: 72px clamp(22px, 5vw, 76px) 50px;
+  background: radial-gradient(ellipse at center, color-mix(in srgb, var(--workspace-accent, var(--setup-accent)) 7%, transparent), transparent 66%);
+}
+.setup-brand { position: absolute; top: 16px; left: clamp(22px, 5vw, 76px); display: flex; align-items: center; gap: 8px; font-weight: 620; }
+.setup-brand svg { width: 23px; height: 23px; }
+.onboarding-content { display: grid; gap: 24px; width: min(100%, 580px); margin: 0 auto; }
+[data-step="theme"] .onboarding-content { width: min(100%, 760px); gap: 28px; }
+[data-step="github"] {
+  z-index: 1;
+  min-height: 100dvh;
+  padding: 88px clamp(24px, 6vw, 104px) 48px;
+  background: transparent;
+  --onboarding-accent: #a8dec7;
+}
+[data-step="github"] .setup-brand { top: var(--welcome-brand-top, 16px); left: clamp(16px, 4vw, 56px); min-height: 36px; font-weight: 640; }
+[data-step="github"] .setup-brand svg { width: 24px; height: 24px; }
+[data-step="github"] .onboarding-content { width: min(100%, 382px); gap: 14px; }
+[data-step="github"].first-run-shell-enter-active,
+[data-step="github"].first-run-shell-leave-active { transition: none; }
+[data-step="github"].first-run-shell-enter-from,
+[data-step="github"].first-run-shell-leave-to { opacity: 1; transform: none; }
+.onboarding-heading h1 { margin: 0; font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-size: clamp(38px, 6vw, 66px); font-weight: 500; line-height: 1.04; letter-spacing: -.045em; }
+.onboarding-heading h1:focus { outline: none; }
+.onboarding-heading p, .onboarding-feedback { margin: 9px 0 0; color: var(--setup-muted); line-height: 1.5; }
+.theme-save-feedback { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin-top: 9px; }
+.theme-save-feedback .onboarding-feedback { margin: 0; }
+.theme-save-feedback button { padding: 4px 6px; color: var(--setup-text); }
+.onboarding-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: center; }
+.onboarding-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 12px; min-height: 43px; }
+.onboarding-quiet svg, .onboarding-room-actions svg { width: 16px; height: 16px; color: var(--workspace-accent, var(--setup-accent)); }
+.onboarding-quiet { border: 0; border-radius: 8px; background: transparent; color: var(--setup-muted); font: inherit; cursor: pointer; }
+.onboarding-room-actions { display: grid; gap: 4px; }
+.onboarding-room-actions button { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; min-height: 48px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: var(--setup-text); text-align: left; font: inherit; cursor: pointer; }
+.onboarding-room-actions button:hover, .onboarding-quiet:hover { background: var(--setup-surface-muted); }
+.onboarding-room-actions button { transition: background-color 150ms ease, transform 230ms var(--first-run-motion-ease); }
+.onboarding-room-actions button svg:last-child { opacity: .55; transition: transform 230ms var(--first-run-motion-ease), opacity 150ms ease; }
+.onboarding-room-actions button:enabled:is(:hover, :focus-visible) svg:last-child { opacity: 1; transform: translateX(4px); }
+.onboarding-room-actions button:enabled:active { transform: scale(.985); transition-duration: 80ms; }
+[data-step="theme"] :deep(.theme-swatch) { transition: transform 230ms cubic-bezier(.22,.84,.32,1.22); }
+[data-step="theme"] :deep(.theme-choice:has(input:enabled):is(:hover, :focus-within) .theme-swatch) { transform: translateY(-2px); }
+[data-step="theme"] :deep(.theme-choice:has(input:enabled):active .theme-swatch) { transform: scale(.95); transition-duration: 80ms; }
+[data-step="theme"] :deep(.theme-swatch i) { animation: theme-selection-in 230ms cubic-bezier(.22,.84,.32,1.22) both; }
+[data-step="theme"] :deep(.room-theme-preview),
+[data-step="theme"] :deep(.preview-sidebar),
+[data-step="theme"] :deep(.preview-sidebar span),
+[data-step="theme"] :deep(.preview-room header),
+[data-step="theme"] :deep(.preview-room header span),
+[data-step="theme"] :deep(.preview-composer),
+[data-step="theme"] :deep(.preview-composer i) { transition: background-color 260ms ease, border-color 260ms ease, color 260ms ease; }
+@keyframes theme-selection-in { from { opacity: 0; transform: rotate(-45deg) scale(.55); } }
+.onboarding-card button:focus-visible { outline: 2px solid var(--onboarding-accent, var(--workspace-accent, var(--setup-accent))); outline-offset: 3px; }
+.onboarding-card button:disabled { opacity: .58; cursor: default; }
+.setup-step-enter-active { transition: opacity 200ms ease, transform 240ms var(--first-run-motion-ease); }
+.setup-step-leave-active { transition: opacity 120ms ease; }
+.setup-step-enter-from { opacity: 0; transform: translateY(7px); }
+.setup-step-leave-to { opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .setup-step-enter-active, .setup-step-leave-active { transition: none; }
+  .setup-step-enter-from { transform: none; }
+  .onboarding-room-actions button, .onboarding-room-actions button svg:last-child,
+  [data-step="theme"] :deep(.theme-swatch), [data-step="theme"] :deep(.theme-swatch i) { transition: none !important; animation: none !important; }
+  .onboarding-room-actions button:active, .onboarding-room-actions button svg:last-child,
+  [data-step="theme"] :deep(.theme-choice .theme-swatch) { transform: none !important; }
+}
+</style>

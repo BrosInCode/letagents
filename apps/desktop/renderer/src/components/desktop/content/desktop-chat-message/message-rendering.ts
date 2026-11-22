@@ -1,6 +1,7 @@
 import { renderMarkdown } from "../../../../../../../../shared/ui/markdown/markdown";
 import { formatDate } from "../../../../domain/formatters";
 import { linkRenderedMessageReferences } from "../../../../../../../../shared/ui/markdown/references";
+import { normalizePreviewRepository } from "../../../../../../../../shared/message-link-previews.mjs";
 
 export { isAmbientSystemMessage, stripStatusPrefix } from "../../../../../../../../shared/ui/room-messages";
 export { linkRenderedMessageReferences, mayContainMessageReference } from "../../../../../../../../shared/ui/markdown/references";
@@ -29,6 +30,68 @@ export function renderMessageText(
   const rendered = renderMarkdown(value, { block: true, onLink });
   const linked = linkRenderedMessageReferences(rendered, messageReferenceIds, taskReferenceIds);
   return highlightRenderedMessage(linked, highlightQuery);
+}
+
+const gitHubReference = /\b(?:pr|pull request)\s*#([1-9]\d*)\b|\brun(?:\s+id)?[\s:]+#?([1-9]\d{6,})\b|(?<![\w/#@.-])(?:([\w.-]+\/[\w.-]+)@)?([a-f\d]{7,40})(?![\w/@-]|\.[\w.])/gi;
+const runLabel = /\brun(?:\s+id)?\s*:?\s*$/i;
+const pullRequestLabel = /\b(?:pr|pull request)\s*$/i;
+const commitLabel = /\b(?:sha|commit|head|base)\s*[:=]?\s*$/i;
+
+/** Link shorthand in escaped Markdown, including standalone refs in inline code. */
+export function linkRenderedGitHubReferences(html: string, roomRepository: string | null): string {
+  if (!/[a-f\d]{7,}|#\d/i.test(html)) return html;
+  const repository = normalizePreviewRepository(roomRepository);
+  if (!repository && !html.includes("@")) return html;
+  const tokens = html.split(/(<code>[^<]*<\/code>|<[^>]+>)/g);
+  let protectedTag: string | null = null;
+  return tokens.map((token, index) => {
+    if (protectedTag) {
+      if (token === '</' + protectedTag + '>') protectedTag = null;
+      return token;
+    }
+    const precedingText = tokens[index - 1]?.slice(-32) ?? "";
+    if (token.startsWith("<code>") && token.endsWith("</code>")) {
+      const code = token.slice(6, -7);
+      let linked: string;
+      if (repository && runLabel.test(precedingText) && /^#?[1-9]\d{6,}$/.test(code)) {
+        linked = gitHubAnchor(repository, 'actions/runs', code.replace(/^#/, ""), code);
+      } else if (repository && pullRequestLabel.test(precedingText) && /^#[1-9]\d*$/.test(code)) {
+        linked = gitHubAnchor(repository, 'pull', code.slice(1), code);
+      } else {
+        const match = code.matchAll(gitHubReference).next().value;
+        linked = match?.[0] === code
+          ? linkGitHubReference(match[0], match[1], match[2], match[3], match[4], repository, precedingText)
+          : code;
+      }
+      return '<code>' + linked + '</code>';
+    }
+    if (token.startsWith("<")) {
+      protectedTag = /^<(a|button|pre|code)(?:\s|>)/.exec(token)?.[1] ?? null;
+      return token;
+    }
+    return token.replace(gitHubReference, (label, pull, run, explicitRepository, sha, offset: number) =>
+      linkGitHubReference(label, pull, run, explicitRepository, sha, repository, token.slice(Math.max(0, offset - 32), offset)));
+  }).join("");
+}
+
+function linkGitHubReference(
+  label: string, pull: string | undefined, run: string | undefined, explicitRepository: string | undefined,
+  sha: string | undefined, repository: string | null, precedingText: string,
+): string {
+  const target = explicitRepository ? normalizePreviewRepository(explicitRepository) : repository;
+  if (!target) return label;
+  if (pull) return gitHubAnchor(target, 'pull', pull, label);
+  if (run) return gitHubAnchor(target, 'actions/runs', run, label);
+  if (sha && (sha.length === 40 || explicitRepository || commitLabel.test(precedingText) || /[a-f]/i.test(sha) && /\d/.test(sha))) {
+    return gitHubAnchor(target, 'commit', sha, label);
+  }
+  return label;
+}
+
+function gitHubAnchor(repository: string, kind: "pull" | "actions/runs" | "commit", id: string, label: string): string {
+  if (repository.split("/").some((part) => part === "." || part === "..")) return label;
+  // The repository and id have already been constrained to GitHub path characters.
+  return '<a href="https://github.com/' + repository + '/' + kind + '/' + id + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
 }
 
 // One query is highlighted across every mounted message, so the compiled

@@ -146,8 +146,10 @@ test("the daemon's runtime check shows only to a launch that really waited for i
 test("joining waits for the room bind, reading the room waits for the first output, then it has joined", () => {
   const launched = progress(LAUNCHED, null);
   const joining = agentStartupView(entry({ launchProgress: launched }), context, T0 + 3_000);
+  assert.equal(joining.canCancel, true);
   assert.equal(joining.line, "Joining #letagents…");
   const reading = agentStartupView(entry({ launchProgress: launched, readyReachedAt: at(3_500) }), context, T0 + 4_000);
+  assert.equal(reading.canCancel, false);
   assert.equal(reading.line, "Reading the room…");
   const joined = agentStartupView(entry({ launchProgress: { ...launched, firstOutputAt: at(4_900) }, readyReachedAt: at(3_500) },
   ), { ...context, effort: "High" }, T0 + 6_000);
@@ -222,11 +224,17 @@ test("try again resumes from the failed stage until the daemon's next launch rep
   assert.equal(later.status, "failed", "a failure after the retry is news");
 });
 
-test("cancel shows at once and keeps the first message", () => {
-  const view = agentStartupView(entry({ launchProgress: progress([], "prepare") }), { ...context, cancelRequested: true }, T0);
-  assert.equal(view.status, "cancelled");
-  assert.equal(view.line, "Cancelled. Your first message is still in the room.");
-  assert.equal(agentStartupView(entry({ desiredState: "stopped" }), context, T0).status, "cancelled");
+test("launch cancellation is available from preparation and confirmed by the supervisor", () => {
+  const preparing = entry({ launchProgress: progress([], "prepare") });
+  assert.equal(agentStartupView(preparing, context, T0).canCancel, true);
+  const pending = agentStartupView(preparing, { ...context, cancelRequested: true }, T0);
+  assert.equal(pending.status, "cancelling");
+  assert.equal(pending.line, "Cancelling launch…");
+  assert.equal(pending.canCancel, false);
+  const cancelled = agentStartupView({ ...preparing, desiredState: "stopped" }, context, T0);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.line, "Launch cancelled.");
+  assert.equal(cancelled.canCancel, false);
 });
 
 test("rows start for never-ready agents, keep their anchor and leave with their entry", () => {
@@ -260,13 +268,13 @@ test("the row sits under its first message, or at the agent's start time", () =>
     actorLabel: null, agentIdentity: null, threadRootId: id, threadReplyToId: null, thread: null, replyTo: null,
   });
   const messages = [message("m1", at(0)), message("m2", at(0)), message("m3", at(5_000))];
-  const anchored = buildMessageTimelineEntries(messages, [], [], [{ entryId: "a", anchorMessageId: "m1", startedAt: at(1_000) }]);
+  const anchored = buildMessageTimelineEntries(messages, [], [{ entryId: "a", anchorMessageId: "m1", startedAt: at(1_000) }]);
   assert.deepEqual(anchored.filter((item) => item.type !== "date").map((item) => item.id), ["m1", "agent-startup:a", "m2", "m3"],
     "right under its first message, even when the next message has the same time");
-  const two = buildMessageTimelineEntries(messages, [], [], [
+  const two = buildMessageTimelineEntries(messages, [], [
     { entryId: "a", anchorMessageId: "m1", startedAt: at(1_000) }, { entryId: "b", anchorMessageId: "m1", startedAt: at(1_000) }]);
   assert.deepEqual(two.filter((item) => item.type !== "date").map((item) => item.id), ["m1", "agent-startup:a", "agent-startup:b", "m2", "m3"]);
-  const timed = buildMessageTimelineEntries(messages, [], [], [{ entryId: "a", anchorMessageId: "gone", startedAt: at(1_000) }]);
+  const timed = buildMessageTimelineEntries(messages, [], [{ entryId: "a", anchorMessageId: "gone", startedAt: at(1_000) }]);
   assert.deepEqual(timed.filter((item) => item.type !== "date").map((item) => item.id), ["m1", "m2", "agent-startup:a", "m3"]);
   assert.equal(timed.find((item) => item.type === "agent-startup")?.type === "agent-startup"
     && timed.find((item) => item.type === "agent-startup")!.id, "agent-startup:a");

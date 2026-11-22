@@ -30,7 +30,7 @@ import { thisComputerLabel } from "./supervised-agents-support";
 
 export type AgentStartupStageKey = "prepare" | "runtime" | "slot" | "process" | "bootstrap" | "join" | "context";
 export type AgentStartupStageState = "pending" | "now" | "done" | "failed";
-export type AgentStartupStatus = "running" | "joined" | "failed" | "cancelled";
+export type AgentStartupStatus = "running" | "joined" | "failed" | "cancelling" | "cancelled";
 export type AgentStartupAction = "sign_in" | "install" | "retry";
 
 export interface AgentStartupStage {
@@ -48,6 +48,7 @@ export interface AgentStartupView {
   initials: string;
   providerLabel: string;
   status: AgentStartupStatus;
+  canCancel: boolean;
   stages: AgentStartupStage[];
   /** One line under the name. */
   line: string;
@@ -312,8 +313,10 @@ export function agentStartupView(entry: Entry, context: AgentStartupContext, now
 
   let status: AgentStartupStatus = allDone ? "joined" : "running";
   let failure: AgentStartupView["failure"] = null;
-  if (entry.desiredState === "stopped" || context.cancelRequested) {
+  if (entry.desiredState === "stopped") {
     status = allDone ? "joined" : "cancelled";
+  } else if (context.cancelRequested) {
+    status = "cancelling";
   } else if (!allDone && progress?.state === "failed" && progress.failure && !staleFailure) {
     const failedKey = stageForLaunchPhase(progress.failure.phase, entry.provider);
     const index = stages.findIndex((stage) => stage.key === failedKey);
@@ -351,8 +354,10 @@ export function agentStartupView(entry: Entry, context: AgentStartupContext, now
     line = parts.join(" · ");
   } else if (status === "failed") {
     line = `Could not start: ${failure!.reason}`;
+  } else if (status === "cancelling") {
+    line = "Cancelling launch…";
   } else if (status === "cancelled") {
-    line = "Cancelled. Your first message is still in the room.";
+    line = "Launch cancelled.";
   } else {
     const stage = stages[currentIndex]!;
     const note = stage.key === "slot" ? slotNote(entry.launchProgress?.slotAhead ?? null) : null;
@@ -367,6 +372,8 @@ export function agentStartupView(entry: Entry, context: AgentStartupContext, now
     initials: avatarInitials(name),
     providerLabel: agentRuntimeLabel(entry.provider),
     status,
+    canCancel: entry.desiredState === "running" && entry.readyReachedAt == null && !manifest.ready
+      && (status === "running" || status === "failed"),
     stages,
     line,
     fraction: stages.length ? done / stages.length : 0,
@@ -435,7 +442,10 @@ export function reduceAgentStartups(state: AgentStartupState, event: AgentStartu
   switch (event.type) {
     case "entries": {
       const present = new Map(event.entries.map((entry) => [entry.id, entry]));
-      const rows = state.rows.filter((row) => present.has(row.entryId));
+      const rows = state.rows.filter((row) => present.has(row.entryId)).map((row) =>
+        row.cancelRequested && present.get(row.entryId)?.desiredState === "stopped"
+          ? { ...row, cancelRequested: false }
+          : row);
       const pendingAnchors = { ...state.pendingAnchors };
       for (const entry of event.entries) {
         if (rows.some((row) => row.entryId === entry.id) || !startsRow(entry, event.nowMs)) continue;
@@ -457,7 +467,7 @@ export function reduceAgentStartups(state: AgentStartupState, event: AgentStartu
     }
     case "retry":
       return { ...state, rows: state.rows.map((row) => row.entryId === event.entryId
-        ? { ...row, retryRequestedAtMs: event.nowMs, cancelRequested: false } : row) };
+        ? { ...row, retryRequestedAtMs: event.nowMs } : row) };
     case "cancel":
       return { ...state, rows: state.rows.map((row) => row.entryId === event.entryId ? { ...row, cancelRequested: true } : row) };
     case "cancel_failed":

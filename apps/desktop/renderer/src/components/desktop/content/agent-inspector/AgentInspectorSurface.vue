@@ -36,8 +36,15 @@
       </div>
     </header>
 
+    <ClaudeLimitNotice
+      v-if="limitNotice && selectedTab !== 'diagnostics'"
+      class="agent-inspector-limit"
+      :notice="limitNotice"
+      :can-switch="Boolean(limitNotice.modelFamily) && !hasSwitchedFromLimit && selectedTab !== 'settings' && projection.overallState !== 'retired'"
+      @switch-model="selectTab('settings')"
+    ><button v-if="selectedTab !== 'work'" type="button" @click="selectTab('work')">View work</button></ClaudeLimitNotice>
     <AgentInspectorSignal
-      v-if="selectedTab !== 'diagnostics'"
+      v-else-if="selectedTab !== 'diagnostics'"
       :label="signal.label" :detail="signal.detail" :state="signal.state" :tone="signal.tone" :moving="signal.moving"
     >
       <template #actions>
@@ -105,14 +112,14 @@
         @retry="emit('work-retry')" @select-source="emit('work-source-select', $event)" @reveal="emit('reveal-message', $event)"
       />
       <AgentInspectorWorkspace v-else-if="selectedTab === 'workspace'" id="agent-inspector-workspace-panel" role="tabpanel" aria-labelledby="agent-inspector-workspace-tab"
-        :work="roomAgentWork ?? []" :agent-key="projection.entry.agentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" :request-version="requestVersion" />
+        :work="roomAgentWork ?? []" :agent-key="projection.entry.agentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" :request-version="requestVersion" :file-path="workspaceFilePath" />
       <AgentInspectorSettings
         v-else-if="selectedTab === 'settings'" id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
         :entry-id="projection.entryId" :display-name="projection.displayName" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
         :delivery-mode="projection.entry.deliveryMode" :permission-pending="projection.entry.permissionPending === true"
         :resource="settingsResource" :move="roomMoveResource" :move-available="roomMoveAvailable" :providers="providers" :destinations="destinations"
         :busy="actionState?.status === 'running'" :apply-pending="actionState?.kind === 'apply_settings' && actionState.status === 'success' && configurationHasRuntimeLag(settingsResource.configuration)" :conflict="settingsConflict"
-        @patch="emit('settings-patch', $event)" @save="emit('settings-save', $event)" @apply="emit('settings-apply')" @reload="emit('settings-reload')"
+        @patch="emit('settings-patch', $event)" @save="(overwrite, restart) => emit('settings-save', overwrite, restart)" @apply="emit('settings-apply')" @reload="emit('settings-reload')"
         @prepare-move="emit('room-move-prepare', $event)" @commit-move="emit('room-move-commit')"
         @retire="emit('retire')" @purge="emit('purge')"
       />
@@ -141,6 +148,10 @@ import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspec
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import { savedModelLabel } from "../../../../domain/claude-model-labels";
+import ClaudeLimitNotice from "./ClaudeLimitNotice.vue";
+import { claudeLimitNotice, isFableModel, isFableUsageWindow } from "../../../../domain/claude-usage-limit";
+import { latestFailedAgentMessage } from "../../../../domain/room-message-receipts";
+import { formatDate } from "../../../../domain/formatters";
 import type { DesktopAgentProvider, DesktopAgentStreamEvent, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
 import { configurationHasRuntimeLag, permissionPendingBadge } from "../../../../domain/agent-inspector-settings";
 import { homeHarnessBadge } from "../../../../domain/agent-home-harness";
@@ -167,10 +178,11 @@ const props = defineProps<{
   roomDisplayName?: string;
   daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
   refreshDiagnostics?: () => Promise<boolean>;
-  initialTab?: "overview" | "live" | "work" | "workspace" | "diagnostics";
+  initialTab?: InspectorTab;
   roomAgentWork?: import("../../../../../../electron/ipc-types").DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
+  workspaceFilePath?: string;
   requestVersion?: number;
   actionState: AgentInspectorActionState | null;
   compact: boolean;
@@ -197,7 +209,7 @@ const emit = defineEmits<{
   "reveal-message": [canonicalMessageId: string];
   "settings-selected": [];
   "settings-patch": [patch: Partial<import("../../../../domain/agent-inspector-settings").AgentInspectorConfigurationDraft>];
-  "settings-save": [overwrite: boolean];
+  "settings-save": [overwrite: boolean, restart?: boolean];
   "settings-apply": [];
   "settings-reload": [];
   "room-move-prepare": [destination: string];
@@ -221,6 +233,24 @@ const providerModelLabel = computed(() => [
 // While the agent waits to try again, its time is read against a clock that moves, not against the last state push.
 const retryClock = useSecondClock(() => Boolean(agentScheduledRetry(props.projection.entry.deliveryReceipts)));
 const signal = computed(() => agentInspectorSignal(props.projection, retryClock.value));
+const limitNotice = computed(() => {
+  const { provider, entry } = props.projection;
+  if (!["claude-code", "claude"].includes(provider) || signal.value.state === "stale") return null;
+  if (signal.value.state !== "message_failed" && signal.value.state !== "needs_attention") return null;
+  const notice = claudeLimitNotice(latestFailedAgentMessage(entry)?.error, provider) ?? claudeLimitNotice(entry.lastError, provider);
+  if (!notice || notice.modelFamily !== "fable") return notice;
+  if (hasSwitchedFromLimit.value) return { ...notice, detail: "The last request reached this limit. Ask again to try it with the new model." };
+  if (notice.reset) return notice;
+  const window = props.workResource.detail?.usage?.account.windows.find((item) => isFableUsageWindow(item.id));
+  const resetAt = window?.resetsAt;
+  return resetAt && Date.parse(resetAt) > Date.now()
+    ? { ...notice, reset: formatDate("weekdayHourMinute", new Date(resetAt)) } : notice;
+});
+const hasSwitchedFromLimit = computed(() => {
+  const saved = props.settingsResource.configuration;
+  return Boolean(saved && saved.entryId === props.projection.entryId && !configurationHasRuntimeLag(saved)
+    && saved.model && !isFableModel(saved.model) && claudeLimitNotice(latestFailedAgentMessage(props.projection.entry)?.error, props.projection.provider)?.modelFamily === "fable");
+});
 const recoveryKinds = new Set(["resume", "recover", "reconnect", "retry_delivery", "recovery_options"]);
 const recoveryActions = computed(() => props.projection.actions.filter(action => action.available && recoveryKinds.has(action.kind)));
 const headerActions = computed(() => props.projection.actions.filter(action => !recoveryKinds.has(action.kind)));
@@ -286,6 +316,7 @@ function applyInitialTab(): void {
   if (effects.emitLiveSelected) {
     emit("live-selected");
   }
+  if (selectedTab.value === "settings") emit("settings-selected");
 }
 
 onMounted(() => {

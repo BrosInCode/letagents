@@ -9,6 +9,7 @@ export interface AgentModalTarget {
   workSourceMessageId?: string;
   /** Optional exact room contribution to open in Workspace. */
   workspaceSourceMessageId?: string;
+  workspaceFilePath?: string;
   /** Exact room message whose participant affordance opened the Inspector. */
   messageId: string | null;
   /** Exact publisher idempotency identity for the selected room message. */
@@ -23,7 +24,7 @@ export interface AgentModalTarget {
   agentKey: string | null;
   agentSessionId: string | null;
   /** Desired initial section to activate when opening the inspector. */
-  initialTab?: "overview" | "live" | "work" | "workspace";
+  initialTab?: "overview" | "live" | "work" | "workspace" | "settings" | "diagnostics";
 }
 
 export type AgentInspectorRequest =

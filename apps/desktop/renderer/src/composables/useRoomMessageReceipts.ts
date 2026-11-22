@@ -1,6 +1,6 @@
 import { computed, inject, onScopeDispose, provide, reactive, shallowRef, watch, type ComputedRef, type InjectionKey, type Ref } from "vue";
 
-import type { DesktopMessageReceipt } from "../../../electron/ipc-types";
+import type { DesktopMessageReceipt, DesktopRoomMessage } from "../../../electron/ipc-types";
 import { normalizeRoomIdentifier } from "../domain/sidebar-rooms";
 import { desktopIpc } from "../ipc/index";
 
@@ -31,11 +31,21 @@ export interface RoomReceiptOpenRequest {
   threadRootId: string | null;
 }
 
+export interface RoomMessageModelRecoveryAction {
+  blocked?: boolean;
+  modelLabel?: string;
+  retrying?: boolean;
+  retryError?: boolean;
+  disabled?: boolean;
+  activate(): void;
+}
+
 export interface RoomMessageReceiptContext {
   /** False in a room kept on this computer and against a main process that predates receipts. */
   available: ComputedRef<boolean>;
   /** Undefined while it loads; null when the server has no receipt for this message. */
   receiptFor(messageId: string): DesktopMessageReceipt | null | undefined;
+  modelRecoveryFor?(message: DesktopRoomMessage, agentId: string): RoomMessageModelRecoveryAction | null;
   /** A rendered own message registers itself; the returned function unregisters it. */
   track(messageId: string): () => void;
   open(request: RoomReceiptOpenRequest): void;

@@ -28,7 +28,7 @@ export interface ComposerAgentLaunchHost {
   /** Presentation only, after an exact saved entry exists. Never means ready. */
   agentSaved?: (entry: DesktopSupervisorManifestEntry, source?: AgentAvatarFlightSource | null) => void;
   /** Opens the existing agent inspector, including its current launch/recovery state. */
-  openAgent?: (entryId: string) => void;
+  openAgent?: (entryId: string, initialTab?: "settings" | "diagnostics") => void;
   /** Opens the recorded outcome of this agent's private first message. */
   openFirstMessageWork?: (entryId: string) => void;
 }

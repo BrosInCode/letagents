@@ -66,7 +66,9 @@ test("metadata update response includes Git Room binding when present", async ()
   const binding = {
     room_id: project.id,
     repository_full_name: "brosincode/letagents",
+    repository_id: "123",
   };
+  const companyAppearance = { id: "42", name: "BrosInCode", theme: "violet", themeRevision: 3 };
 
   registerRoomMetadataRoutes(app as never, {
     ...createDeps(),
@@ -81,6 +83,12 @@ test("metadata update response includes Git Room binding when present", async ()
     resolveProjectRole: async () => "admin",
     getGitRoomBindingForRoom: async (roomId) =>
       roomId === project.id ? binding as never : null,
+    getRoomCompanyAppearance: async (roomId, accessRoomId, repositoryId) => {
+      assert.equal(roomId, project.id);
+      assert.equal(accessRoomId, project.id);
+      assert.equal(repositoryId, binding.repository_id);
+      return companyAppearance;
+    },
     toRoomResponse: (_project, options) => ({
       id: updatedProject.id,
       role: options?.role,
@@ -90,20 +98,22 @@ test("metadata update response includes Git Room binding when present", async ()
   } as never);
 
   assert.ok(handler);
-  await handler(
-    {
-      params: { 0: project.id },
-      body: { display_name: "LetAgents" },
-      sessionAccount: { account_id: "acct_1" },
-    },
-    response as never
-  );
-
-  assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.body, {
+  const request = {
+    params: { 0: project.id },
+    body: { display_name: "LetAgents" },
+    sessionAccount: { account_id: "acct_1" },
+  };
+  const originalMetadata = {
     id: project.id,
     role: "admin",
     authenticated: true,
     gitRoomBinding: binding,
-  });
+  };
+  await handler(request, response);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, originalMetadata);
+
+  await handler({ ...request, authKind: "session" }, response);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, { ...originalMetadata, company_appearance: companyAppearance });
 });
