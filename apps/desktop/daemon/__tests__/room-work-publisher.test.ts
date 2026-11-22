@@ -27,6 +27,10 @@ import { RoomWorkPublisher } from "../room-work-publisher.js";
 import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "../cloud-http.js";
 import { captureRecordedRemoteTips } from "../../../../shared/workspace-turn-capture.mjs";
 import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
+import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
+import { ManifestStore } from "../manifest-store.js";
+import { RoomMoveCoordinator } from "../room-move-coordinator.js";
+import { WorkerBindingStore } from "../worker-binding-store.js";
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { PENDING_PEER_REPORT_SQL, resolvePeerReceipt } from "../queued-peer-deliveries.js";
@@ -2433,4 +2437,253 @@ test("recoverInactiveExecutingForAgent protects genuinely active uploads while r
   release("acknowledged");
   await flushing;
   assert.equal(getEffect(f.db, liveEffect.id)?.state, "completed");
+});
+
+test("real RoomMoveCoordinator rollback preserves source-room retries across intermediate boundaries while terminal active move retires them", async t => {
+  const f = await fixture(t);
+  let now = Date.parse("2026-10-02T00:00:00Z");
+  const deadline = now + 30_000;
+  f.options.now = () => now;
+
+  const manifestStore = new ManifestStore(f.path);
+  manifestStore.attachDatabase(f.db);
+  const inboxStore = new SupervisedAgentInboxStore(f.path);
+  inboxStore.attachDatabase(f.db);
+  const bindingStore = new WorkerBindingStore(f.path, undefined, f.path);
+  bindingStore.attachDatabase(f.db);
+
+  await manifestStore.write([{
+    id: "agent",
+    room_id: "room",
+    display_name: "Agent",
+    provider: "codex",
+    model: null,
+    charter: "Handle room work.",
+    desired_state: "running",
+    observed_state: "working",
+    condition: "none",
+    permission_profile_id: null,
+    delivery_mode: "daemon_inbox",
+    created_by: "user-1",
+    created_at: "2026-10-02T00:00:00.000Z",
+    work_attempt_id: "workspace",
+    provider_ref: {
+      work_attempt_id: "workspace",
+      provider_continuation_id: "conversation",
+      provider_connection: null,
+      execution_generation_id: "generation",
+    },
+    last_worker_binding: {
+      agent_session_id: "session",
+      work_attempt_id: "workspace",
+      execution_generation_id: "generation",
+      updated_at: "2026-10-02T00:00:00.000Z",
+    },
+  }]);
+  await bindingStore.bind({
+    entry_id: "agent",
+    room_id: "room",
+    work_attempt_id: "workspace",
+    execution_generation_id: "generation",
+    agent_session_id: "session",
+    api_url: f.grant.apiUrl,
+    agent_session_token: "source-bearer",
+  });
+
+  const gate = new EntryConcurrencyGate({ isHandoffScheduled: () => false });
+  const coordinator = new RoomMoveCoordinator({
+    store: manifestStore,
+    inbox: inboxStore,
+    bindings: bindingStore,
+    runtimeCustody: f.custody,
+    deliveryHttp: {
+      joinRoom: async ({ roomId }) => ({ roomId }),
+      latest: async () => ({ messages: [{ id: "msg_99" }] }),
+    },
+    authority: {
+      currentGeneration: () => 1,
+      isHandoffScheduled: () => false,
+      assertCurrent: async () => {},
+      ownsDaemonGeneration: async (gen) => gen === 1,
+      fenceCommit: async (commit) => { await commit(); },
+    },
+    entryConcurrency: gate,
+    serializeEntry: async (_entryId, operation) => operation(),
+    updateManifestEntry: async (entryId, update) => {
+      const loaded = await manifestStore.getEntryWithVersion(entryId);
+      assert.ok(loaded);
+      const saved = await manifestStore.replaceEntry(loaded.version, update(loaded.entry));
+      return saved.entry;
+    },
+    currentHandle: () => ({
+      workAttemptId: "workspace",
+      providerContinuationId: "conversation",
+      providerConnection: null,
+      executionGenerationId: "generation",
+    } as never),
+    pauseIngress: () => {},
+    restartDelivery: async () => {},
+    scheduleRecovery: () => {},
+    nowIso: () => new Date(now).toISOString(),
+  });
+
+  // 1. Fail both summary upload and grouped peer report at t=0 -> both prepared with 30s backoff.
+  f.captureMessage(1);
+  await settledPeerGroup(f, "room", 10);
+  let groupedCalls = 0;
+  f.options.publish = async input => { f.sent.push(input); throw new Error("503 unavailable"); };
+  f.options.reportGroupedNoReply = async () => { groupedCalls += 1; throw new Error("503 unavailable"); };
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1);
+  assert.equal(groupedCalls, 1);
+  const [pubEffect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["prepared"] });
+  const [grpEffect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND, states: ["prepared"] });
+  assert.ok(pubEffect && grpEffect);
+  assert.equal(pubEffect.next_attempt_at_ms, deadline);
+  assert.equal(grpEffect.next_attempt_at_ms, deadline);
+
+  // 2. Boundary 1: destination membership committed (`rotating_credentials`, agents.room_id='room-2') + missing authority.
+  const preparedMove = await coordinator.prepareInspector({
+    entryId: "agent",
+    destinationRoomId: "room-2",
+    requestId: "rb-1",
+    daemonGeneration: 1,
+  });
+  const rotatingMove = await coordinator.commitInspector({
+    operationId: preparedMove.operation_id,
+    entryId: "agent",
+    daemonGeneration: 1,
+  });
+  assert.equal(rotatingMove.phase, "rotating_credentials");
+  assert.equal((await manifestStore.getEntry("agent"))?.room_id, "room-2");
+  f.custody.deleteHostGrant("agent");
+  f.custody.deleteWorkerAuthorization("agent");
+  now += 2_000;
+  await f.publisher.flush();
+  assert.equal(getEffect(f.db, pubEffect.id)?.state, "prepared", "summary retry survives rotating_credentials with destination room_id");
+  assert.equal(getEffect(f.db, pubEffect.id)?.next_attempt_at_ms, deadline);
+  assert.equal(getEffect(f.db, grpEffect.id)?.state, "prepared", "grouped retry survives rotating_credentials with destination room_id");
+  assert.equal(getEffect(f.db, grpEffect.id)?.next_attempt_at_ms, deadline);
+
+  // 3. Boundary 2: rollback_required restores source agents.room_id='room' while destination custody is still live.
+  const rollbackMove = await coordinator.rollbackInspector({
+    operationId: rotatingMove.operation_id,
+    entryId: "agent",
+    daemonGeneration: 1,
+    detail: "destination mint failed",
+  });
+  assert.equal(rollbackMove.phase, "rollback_required");
+  assert.equal((await manifestStore.getEntry("agent"))?.room_id, "room");
+  f.custody.installHostGrant({ ...f.grant, roomId: "room-2" });
+  f.custody.installWorkerAuthorization({
+    ...f.worker,
+    roomId: "room-2",
+    agentSession: { ...f.worker.agentSession!, room_id: "room-2" },
+  });
+  now += 2_000;
+  await f.publisher.flush();
+  assert.equal(getEffect(f.db, pubEffect.id)?.state, "prepared", "summary retry survives rollback_required before destination custody clears");
+  assert.equal(getEffect(f.db, pubEffect.id)?.next_attempt_at_ms, deadline);
+  assert.equal(getEffect(f.db, grpEffect.id)?.state, "prepared", "grouped retry survives rollback_required before destination custody clears");
+  assert.equal(getEffect(f.db, grpEffect.id)?.next_attempt_at_ms, deadline);
+
+  // 4. Complete compensation rollback -> move becomes failed, source custody restored, both retries succeed at deadline.
+  const failedMove = await coordinator.commitInspector({
+    operationId: rollbackMove.operation_id,
+    entryId: "agent",
+    daemonGeneration: 1,
+  });
+  assert.equal(failedMove.phase, "failed");
+  assert.equal((await manifestStore.getEntry("agent"))?.room_id, "room");
+  f.custody.installHostGrant(f.grant);
+  f.custody.installWorkerAuthorization(f.worker);
+  f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
+  f.options.reportGroupedNoReply = async () => { groupedCalls += 1; return "no_reply"; };
+  now = deadline;
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 2, "summary retries and succeeds after room-move rollback");
+  assert.equal(f.row(1).acknowledgedRevision, 1);
+  assert.equal(groupedCalls, 2, "grouped receipt retries and succeeds after room-move rollback");
+  assert.deepEqual(pendingGrouped(f.db), []);
+  assert.equal(getEffect(f.db, pubEffect.id)?.state, "completed");
+  assert.equal(getEffect(f.db, grpEffect.id)?.state, "completed");
+
+  // 5. Successful terminal room move (`active`) retires source-room prepared rows atomically,
+  // and durable agents.room_id mismatch retires any later stray source-room row even without live authority.
+  f.fact(1, { state: "terminal", turnOutcome: "completed" });
+  f.captureMessage(2);
+  await settledPeerGroup(f, "room", 20);
+  f.options.publish = async input => { f.sent.push(input); throw new Error("503 unavailable"); };
+  f.options.reportGroupedNoReply = async () => { groupedCalls += 1; throw new Error("503 unavailable"); };
+  await f.publisher.flush();
+  const [pubMove2] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["prepared"] });
+  const [grpMove2] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND, states: ["prepared"] });
+  assert.ok(pubMove2 && grpMove2);
+
+  const okPrepared = await coordinator.prepareInspector({
+    entryId: "agent",
+    destinationRoomId: "room-2",
+    requestId: "ok-1",
+    daemonGeneration: 1,
+  });
+  const okRotating = await coordinator.commitInspector({
+    operationId: okPrepared.operation_id,
+    entryId: "agent",
+    daemonGeneration: 1,
+  });
+  assert.equal(okRotating.phase, "rotating_credentials");
+  await coordinator.acknowledgeSourceRevocation({
+    operationId: okRotating.operation_id,
+    entryId: "agent",
+    daemonGeneration: 1,
+    sourceAgentSessionId: "session",
+  });
+  f.custody.installHostGrant({ ...f.grant, roomId: "room-2" });
+  await bindingStore.bind({
+    entry_id: "agent",
+    room_id: "room-2",
+    work_attempt_id: "workspace",
+    execution_generation_id: "generation",
+    agent_session_id: "session-dest",
+    api_url: f.grant.apiUrl,
+    agent_session_token: "dest-bearer",
+  });
+  const activeMove = await coordinator.commitInspector({
+    operationId: okRotating.operation_id,
+    entryId: "agent",
+    daemonGeneration: 1,
+  });
+  assert.equal(activeMove.phase, "active");
+  assert.equal(getEffect(f.db, pubMove2.id)?.state, "failed");
+  assert.equal(getEffect(f.db, pubMove2.id)?.last_error, "room_moved");
+  assert.equal(getEffect(f.db, grpMove2.id)?.state, "failed");
+  assert.equal(getEffect(f.db, grpMove2.id)?.last_error, "room_moved");
+
+  // Stray old-room prepared row after terminal active move is retired by durable agents.room_id even with missing custody.
+  f.db.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES ('eff-stray-old-room', 'agent', ?, 'rw:v1:stray-old-room', 1, 'prepared', ?, NULL, 1, 1, 1000000, ?, 'publication_unavailable', ?, ?)
+  `).run(
+    ROOM_WORK_PUBLISH_EFFECT_KIND,
+    JSON.stringify({
+      attempt_id: f.row(2).attemptId,
+      digest: f.row(2).digest,
+      review_page_digest: null,
+      review_page_index: null,
+      review_page_total: null,
+      revision: f.row(2).revision,
+      room_id: "room",
+      source_message_id: "msg_2",
+    }),
+    now + 30_000,
+    new Date(now).toISOString(),
+    new Date(now).toISOString(),
+  );
+  f.custody.deleteHostGrant("agent");
+  f.custody.deleteWorkerAuthorization("agent");
+  await f.publisher.flush();
+  assert.equal(getEffect(f.db, "eff-stray-old-room")?.state, "failed");
+  assert.equal(getEffect(f.db, "eff-stray-old-room")?.last_error, "room_moved");
 });

@@ -341,7 +341,9 @@ export function retireRoomWorkEffectsForPurgeInTransaction(
  * Atomically retires specific durably obsolete `prepared` room-work effects for
  * `agentId` under the daemon write fence and bounds retained terminal rows.
  * Rows that already transitioned out of `prepared` are skipped safely, while
- * future-epoch rows fail closed.
+ * future-epoch rows fail closed. Items marked `requireNoPendingRoomMove` are
+ * skipped atomically inside the transaction if a non-terminal room move exists
+ * for `agentId` so compensatable moves never drop source-room retries.
  */
 export function retireObsoleteRoomWorkEffects(
   database: DatabaseSync,
@@ -349,7 +351,7 @@ export function retireObsoleteRoomWorkEffects(
   input: {
     agentId: string;
     expectedEpoch: number;
-    retirements: ReadonlyArray<{ id: string; error: string }>;
+    retirements: ReadonlyArray<{ id: string; error: string; requireNoPendingRoomMove?: boolean }>;
     nowIso?: string;
   },
 ): string[] {
@@ -357,8 +359,26 @@ export function retireObsoleteRoomWorkEffects(
   const epoch = assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
   const nowIso = input.nowIso ?? new Date().toISOString();
   return withFencedEffectTransaction(database, assertWriteFence, () => {
+    const needsRoomMoveCheck = input.retirements.some((item) => item.requireNoPendingRoomMove);
+    let hasPendingRoomMove = false;
+    if (needsRoomMoveCheck) {
+      try {
+        hasPendingRoomMove = Boolean(database.prepare(`
+          SELECT 1 FROM agent_room_moves
+          WHERE agent_id = ? AND phase NOT IN ('active', 'failed')
+          LIMIT 1
+        `).get(input.agentId));
+      } catch (error) {
+        if (error instanceof Error && /no such table/i.test(error.message)) {
+          hasPendingRoomMove = false;
+        } else {
+          throw error;
+        }
+      }
+    }
     const retiredIds: string[] = [];
     for (const item of input.retirements) {
+      if (item.requireNoPendingRoomMove && hasPendingRoomMove) continue;
       const current = getEffect(database, item.id);
       if (!current || current.agent_id !== input.agentId) continue;
       if (current.kind !== ROOM_WORK_PUBLISH_EFFECT_KIND && current.kind !== ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND) continue;

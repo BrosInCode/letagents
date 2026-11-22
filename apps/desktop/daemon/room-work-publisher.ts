@@ -822,6 +822,22 @@ export class RoomWorkPublisher {
     }
   }
 
+  private hasNonTerminalRoomMove(agentId: string): boolean {
+    try {
+      return Boolean(this.database.prepare(`
+        SELECT 1 FROM agent_room_moves
+        WHERE agent_id = ? AND phase NOT IN ('active', 'failed')
+        LIMIT 1
+      `).get(agentId));
+    } catch (error) {
+      if (error instanceof Error && /no such table/i.test(error.message)) {
+        return false;
+      }
+      // Fail closed on unexpected storage errors so compensatable moves never drop retries.
+      return true;
+    }
+  }
+
   private isGroupedReceiptStillPending(agentId: string, payload: RoomWorkGroupedNoReplyEffectPayload): boolean {
     return Boolean(this.database.prepare(`
       SELECT 1 FROM inbox_items i
@@ -835,8 +851,9 @@ export class RoomWorkPublisher {
    * Recovers inactive `executing` room-work rows for `agentId` and retires
    * durably obsolete `prepared` rows across both room-work kinds. Temporary
    * missing authority (e.g. stopped agent, expired grant, or handoff while the
-   * agent still belongs to the same room) preserves `prepared` rows and their
-   * retry deadlines so valid stop/start or handoff retries survive.
+   * agent still belongs to the same room) and non-terminal room moves (whose
+   * compensation can restore the source room and authority) preserve `prepared`
+   * rows and their retry deadlines so valid retries survive.
    */
   private reconcileActiveEffectsForAgent(agentId: string, now: number): EffectRecord[] {
     const recoveredPublish = listActiveRoomWorkEffectsForAgent(
@@ -855,9 +872,10 @@ export class RoomWorkPublisher {
       : effect));
 
     const currentGeneration = this.options.daemonGeneration();
+    const roomMoveInProgress = this.hasNonTerminalRoomMove(agentId);
     const durableRoomId = this.durableAgentRoomId(agentId);
     const authority = this.authority(agentId);
-    const retirements: Array<{ id: string; error: string }> = [];
+    const retirements: Array<{ id: string; error: string; requireNoPendingRoomMove?: boolean }> = [];
 
     for (const effect of recoveredPublish) {
       if (effect.state !== "prepared" || effect.epoch > currentGeneration) continue;
@@ -883,13 +901,15 @@ export class RoomWorkPublisher {
         retirements.push({ id: effect.id, error: "publication_attempt_superseded" });
         continue;
       }
-      if (durableRoomId !== null && durableRoomId !== payload.room_id) {
-        retirements.push({ id: effect.id, error: "room_moved" });
-        continue;
-      }
-      if (authority !== null && !this.sameOrigin(authority.origin, record)) {
-        retirements.push({ id: effect.id, error: "room_origin_superseded" });
-        continue;
+      if (!roomMoveInProgress) {
+        if (durableRoomId !== null && durableRoomId !== payload.room_id) {
+          retirements.push({ id: effect.id, error: "room_moved", requireNoPendingRoomMove: true });
+          continue;
+        }
+        if (authority !== null && !this.sameOrigin(authority.origin, record)) {
+          retirements.push({ id: effect.id, error: "room_origin_superseded", requireNoPendingRoomMove: true });
+          continue;
+        }
       }
       if (payload.review_page_index === null) {
         if (record.acknowledgedRevision >= payload.revision) {
@@ -919,12 +939,14 @@ export class RoomWorkPublisher {
         retirements.push({ id: effect.id, error: "grouped_receipt_pin_missing" });
         continue;
       }
-      if (durableRoomId !== null && durableRoomId !== payload.room_id) {
-        retirements.push({ id: effect.id, error: "room_moved" });
-        continue;
-      }
-      if (authority !== null && !this.sameOrigin(authority.origin, pin)) {
-        retirements.push({ id: effect.id, error: "room_origin_superseded" });
+      if (!roomMoveInProgress) {
+        if (durableRoomId !== null && durableRoomId !== payload.room_id) {
+          retirements.push({ id: effect.id, error: "room_moved", requireNoPendingRoomMove: true });
+          continue;
+        }
+        if (authority !== null && !this.sameOrigin(authority.origin, pin)) {
+          retirements.push({ id: effect.id, error: "room_origin_superseded", requireNoPendingRoomMove: true });
+        }
       }
     }
 
