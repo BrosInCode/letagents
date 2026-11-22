@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { BOUNDED_MCP_EFFECT_KIND } from "../effect-journal/index.js";
 import { FOLLOW_UP_ENDED, followUpOrigin, parseClaudeApiFailure, parseTaskContinuation, type ClaudeApiFailure, type ContinuityTask, type FollowUpKind, type TaskContinuation } from "../task-continuity.js";
 import { readDurableNativeFailure } from "../supervised-agent-history-retention.js";
 import type { SupervisedInboxItem, SupervisedInboxItemMetadata, Row } from "./types.js";
@@ -157,9 +158,18 @@ export abstract class InboxTaskContinuationStore extends InboxIngressStore {
     // A turn that is kept without its binding cannot be matched to its actions. It is taken as uncertain: no follow-up is made for it, and
     // a note about it stays. A projection must never throw for it.
     if (!binding) return true;
-    return ["effects", "effect_tombstones"].some((table) => Boolean(database.prepare(`SELECT 1 FROM ${table}
+    const hasLive = Boolean(database.prepare(`SELECT 1 FROM effects
+      WHERE agent_id=? AND kind=?
+        AND json_extract(payload,'$.room_id')=?
+        AND json_extract(payload,'$.execution_generation_id')=?
+        AND json_extract(payload,'$.provider_turn_id')=?
+        AND json_extract(payload,'$.mutation')=1
+        AND state IN ('executing','uncertain') LIMIT 1`)
+      .get(parent.agent_id, BOUNDED_MCP_EFFECT_KIND, parent.room_id, binding.origin_execution_generation_id as string, parent.provider_turn_id));
+    if (hasLive) return true;
+    return Boolean(database.prepare(`SELECT 1 FROM effect_tombstones
       WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=? AND mutation=1 AND state IN ('executing','uncertain') LIMIT 1`)
-      .get(parent.agent_id, parent.room_id, binding.origin_execution_generation_id as string, parent.provider_turn_id)));
+      .get(parent.agent_id, parent.room_id, binding.origin_execution_generation_id as string, parent.provider_turn_id));
   }
 
   async taskContinuationHasUncertainEffects(inboxItemId: string): Promise<boolean> {

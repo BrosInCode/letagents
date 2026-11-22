@@ -539,8 +539,14 @@ test("repeated Stop commits settle prepared effects and retain exactly bounded p
         // invariant: a prepared effect survives behind an already-dispatched
         // control journal. Completion must settle it in the same transaction.
         const predecessor = new DatabaseSync(env.databasePath);
-        predecessor.prepare("UPDATE effects SET state='prepared',error=NULL WHERE effect_id=?")
-          .run(effectId);
+        const failedRow = predecessor.prepare("SELECT * FROM effects WHERE id=?").get(effectId) as Record<string, unknown>;
+        predecessor.prepare("DELETE FROM effects WHERE id=?").run(effectId);
+        predecessor.prepare(`INSERT INTO effects
+          (id,agent_id,kind,idempotency_key,epoch,state,payload,outcome,retryable,attempt_count,max_attempts,next_attempt_at_ms,last_error,created_at,updated_at)
+          VALUES (?,?,?,?,?,'prepared',?,NULL,?,0,?,NULL,NULL,?,?)`).run(
+          failedRow.id, failedRow.agent_id, failedRow.kind, failedRow.idempotency_key, failedRow.epoch,
+          failedRow.payload, failedRow.retryable, failedRow.max_attempts, failedRow.created_at, failedRow.updated_at,
+        );
         predecessor.close();
       }
 
@@ -583,7 +589,7 @@ test("repeated Stop commits settle prepared effects and retain exactly bounded p
       "the oldest unpinned Stop receipt is pruned");
     assert.ok(inspection.prepare("SELECT 1 FROM inbox_items WHERE inbox_item_id=?").get(currentInboxItemId),
       "the current completed control keeps its exact target inside the fixed budget");
-    assert.equal((inspection.prepare("SELECT state FROM effects WHERE effect_id=?").get(predecessorEffectId) as { state: string }).state, "failed",
+    assert.equal((inspection.prepare("SELECT state FROM effects WHERE id=?").get(predecessorEffectId) as { state: string }).state, "failed",
       "commit-time terminalization settles predecessor prepared effects atomically");
     assert.deepEqual(inspection.prepare("PRAGMA foreign_key_check").all(), []);
     inspection.close();

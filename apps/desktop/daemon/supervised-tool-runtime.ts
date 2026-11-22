@@ -26,6 +26,8 @@ export type ExecuteDaemonToolInput = {
   toolName: string;
   input: unknown;
   requestId: string;
+  effectId?: string;
+  signal?: AbortSignal;
   roomId: string;
   apiUrl: string;
   bearer: string;

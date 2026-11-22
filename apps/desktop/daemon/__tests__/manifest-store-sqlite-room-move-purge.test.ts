@@ -8,6 +8,7 @@ import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
+import { seedBoundedMcpEffectRow } from "./helpers/bounded-effect-seed.js";
 import {
   TEST_PROVIDER_TURN_AUTHORITY,
   IMAGE_INPUT_UPDATE,
@@ -210,9 +211,9 @@ test("terminal mediated room-move edges atomically settle their exact join effec
       const readEffect = () => {
         const database = new DatabaseSync(env.databasePath);
         try {
-          const row = database.prepare("SELECT state,result_json,error FROM effects WHERE effect_id=?")
-            .get(prepared.effect.effect_id) as { state: string; result_json: string | null; error: string | null };
-          return { state: row.state, result: row.result_json ? JSON.parse(row.result_json) as unknown : null, error: row.error };
+          const row = database.prepare("SELECT state,outcome,last_error FROM effects WHERE id=?")
+            .get(prepared.effect.effect_id) as { state: string; outcome: string | null; last_error: string | null };
+          return { state: row.state, result: row.outcome ? JSON.parse(row.outcome) as unknown : null, error: row.last_error };
         } finally { database.close(); }
       };
       const priorPhase = terminal === "active" ? "bootstrapping_destination_tail" : "rollback_required";
@@ -229,7 +230,7 @@ test("terminal mediated room-move edges atomically settle their exact join effec
       try {
         inspection.exec(`CREATE TRIGGER reject_atomic_${terminal}_effect
           BEFORE UPDATE OF state ON effects
-          WHEN OLD.effect_id='${prepared.effect.effect_id}' AND OLD.state='prepared'
+          WHEN OLD.id='${prepared.effect.effect_id}' AND OLD.state='prepared'
           BEGIN SELECT RAISE(ABORT,'injected terminal effect failure'); END`);
       } finally { inspection.close(); }
 
@@ -322,7 +323,7 @@ test("lifecycle replacement atomically cancels only the exact pre-join mediated 
     const effectState = () => {
       const database = new DatabaseSync(env.databasePath);
       try {
-        return (database.prepare("SELECT state FROM effects WHERE effect_id=?")
+        return (database.prepare("SELECT state FROM effects WHERE id=?")
           .get(prepared.effect.effect_id) as { state: string }).state;
       } finally { database.close(); }
     };
@@ -340,7 +341,7 @@ test("lifecycle replacement atomically cancels only the exact pre-join mediated 
     try {
       inspection.exec(`CREATE TRIGGER reject_prejoin_effect_failure
         BEFORE UPDATE OF state ON effects
-        WHEN OLD.effect_id='${prepared.effect.effect_id}' AND OLD.state='prepared' AND NEW.state='failed'
+        WHEN OLD.id='${prepared.effect.effect_id}' AND OLD.state='prepared' AND NEW.state='failed'
         BEGIN SELECT RAISE(ABORT,'injected effect rollback'); END`);
     } finally { inspection.close(); }
 
@@ -357,10 +358,19 @@ test("lifecycle replacement atomically cancels only the exact pre-join mediated 
     assert.equal((await inbox.providerTurnBinding(item.inbox_item_id))?.provider_turn_id, "move-lifecycle-turn");
 
     const corrupt = new DatabaseSync(env.databasePath);
+    let savedRow!: Record<string, unknown>;
     try {
       corrupt.exec("DROP TRIGGER reject_prejoin_effect_failure");
-      corrupt.prepare("UPDATE effects SET room_id=? WHERE effect_id=?")
-        .run("wrong-source-room", prepared.effect.effect_id);
+      savedRow = corrupt.prepare("SELECT * FROM effects WHERE id=?").get(prepared.effect.effect_id) as Record<string, unknown>;
+      const tamperedPayload = JSON.stringify({ ...(JSON.parse(String(savedRow.payload)) as Record<string, unknown>), room_id: "wrong-source-room" });
+      corrupt.prepare("DELETE FROM effects WHERE id=?").run(prepared.effect.effect_id);
+      corrupt.prepare(`INSERT INTO effects
+        (id,agent_id,kind,idempotency_key,epoch,state,payload,outcome,retryable,attempt_count,max_attempts,next_attempt_at_ms,last_error,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        savedRow.id, savedRow.agent_id, savedRow.kind, savedRow.idempotency_key, savedRow.epoch,
+        savedRow.state, tamperedPayload, savedRow.outcome, savedRow.retryable, savedRow.attempt_count,
+        savedRow.max_attempts, savedRow.next_attempt_at_ms, savedRow.last_error, savedRow.created_at, savedRow.updated_at,
+      );
     } finally { corrupt.close(); }
     await assert.rejects(() => store.replaceEntry(1, paused, undefined, {
       agentId: moving.id,
@@ -371,8 +381,14 @@ test("lifecycle replacement atomically cancels only the exact pre-join mediated 
 
     const repair = new DatabaseSync(env.databasePath);
     try {
-      repair.prepare("UPDATE effects SET room_id=? WHERE effect_id=?")
-        .run(moving.room_id, prepared.effect.effect_id);
+      repair.prepare("DELETE FROM effects WHERE id=?").run(prepared.effect.effect_id);
+      repair.prepare(`INSERT INTO effects
+        (id,agent_id,kind,idempotency_key,epoch,state,payload,outcome,retryable,attempt_count,max_attempts,next_attempt_at_ms,last_error,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        savedRow.id, savedRow.agent_id, savedRow.kind, savedRow.idempotency_key, savedRow.epoch,
+        savedRow.state, savedRow.payload, savedRow.outcome, savedRow.retryable, savedRow.attempt_count,
+        savedRow.max_attempts, savedRow.next_attempt_at_ms, savedRow.last_error, savedRow.created_at, savedRow.updated_at,
+      );
     } finally { repair.close(); }
     const committed = await store.replaceEntry(1, paused, undefined, {
       agentId: moving.id,
@@ -518,14 +534,21 @@ test("purge proves preconditions and deletes local agent rows atomically without
     await inbox.close();
     const beforePurge = new DatabaseSync(env.databasePath);
     assert.equal(Number((beforePurge.prepare("SELECT last_turn_control_sequence FROM agents WHERE agent_id=?").get(stopped.id) as { last_turn_control_sequence: number }).last_turn_control_sequence), 1);
-    beforePurge.prepare(`INSERT INTO effects
-      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
-       tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,1,'uncertain',NULL,?,?,?)`).run(
-      "uncertain-before-purge", stopped.id, stopped.room_id, executionId, "retired-turn",
-      "retired-request", "send_message", "{}", "May already have completed; verify external state.",
-      "2026-08-05T12:00:00.000Z", "2026-08-05T12:00:00.000Z",
-    );
+    seedBoundedMcpEffectRow(beforePurge, {
+      id: "uncertain-before-purge",
+      agent_id: stopped.id,
+      room_id: stopped.room_id,
+      execution_generation_id: executionId,
+      provider_turn_id: "retired-turn",
+      mcp_request_id: "retired-request",
+      tool_name: "send_message",
+      request: {},
+      mutation: true,
+      state: "uncertain",
+      error: "May already have completed; verify external state.",
+      created_at: "2026-08-05T12:00:00.000Z",
+      updated_at: "2026-08-05T12:00:00.000Z",
+    });
     beforePurge.prepare(`INSERT INTO effect_tombstones
       (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
        tool_name,request_sha256,request_bytes,mutation,state,result_json,error,created_at,updated_at)

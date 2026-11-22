@@ -1,7 +1,7 @@
 import { normalizeRoomGif, type RoomGif } from "../../../../shared/room-expressions.mjs";
 import { validRecordedReplyAttachments, type RecordedReplyAttachment } from "../../../../shared/message-attachments.mjs";
 import { DatabaseSync } from "node:sqlite";
-import { deleteEffectsForAgentInTransaction } from "../effect-journal/store.js";
+import { BOUNDED_MCP_EFFECT_KIND, deleteEffectsForAgentInTransaction, rowToBoundedMcpEffect } from "../effect-journal/index.js";
 import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import type { PreparedRoomContext, MessageIntervention } from "../../shared/message-outcome.js";
 import { inspectorPreparedRoomContext } from "../prepared-room-context.js";
@@ -74,38 +74,46 @@ export abstract class InboxQueryStore extends InboxTaskContinuationStore {
       FROM inbox_items i
       JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
         AND b.agent_id=i.agent_id AND b.room_id=i.room_id AND b.provider_turn_id=i.provider_turn_id
-      JOIN effects e ON e.agent_id=b.agent_id AND e.room_id=b.room_id
-        AND e.execution_generation_id=b.origin_execution_generation_id AND e.provider_turn_id=b.provider_turn_id
+      JOIN effects e ON e.agent_id=b.agent_id AND e.kind=?
+        AND json_extract(e.payload,'$.room_id')=b.room_id
+        AND json_extract(e.payload,'$.execution_generation_id')=b.origin_execution_generation_id
+        AND json_extract(e.payload,'$.provider_turn_id')=b.provider_turn_id
       WHERE i.inbox_item_id=? AND (
-        (e.state='completed' AND e.tool_name='set_reply_thread') OR
-        (e.state IN ('prepared','failed') AND e.tool_name IN ('send_message','send_thread_message')
-          AND json_extract(e.request_json,'$.thread_parent_id')=i.source_message_id))
-      LIMIT 1`).get(inboxItemId)));
+        (e.state='completed' AND json_extract(e.payload,'$.tool_name')='set_reply_thread') OR
+        (e.state IN ('prepared','failed') AND json_extract(e.payload,'$.tool_name') IN ('send_message','send_thread_message')
+          AND json_extract(e.payload,'$.request.thread_parent_id')=i.source_message_id))
+      LIMIT 1`).get(BOUNDED_MCP_EFFECT_KIND, inboxItemId)));
   }
   /** The last GIF choice for this exact bound turn, never a previous attempt. */
   async replyGif(inboxItemId: string): Promise<RoomGif | null> {
     return this.read(async (database) => {
-      const row = database.prepare(`SELECT e.request_json FROM inbox_items i
+      const row = database.prepare(`SELECT e.payload FROM inbox_items i
         JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
           AND b.agent_id=i.agent_id AND b.room_id=i.room_id AND b.provider_turn_id=i.provider_turn_id
-        JOIN effects e ON e.agent_id=b.agent_id AND e.room_id=b.room_id
-          AND e.execution_generation_id=b.origin_execution_generation_id AND e.provider_turn_id=b.provider_turn_id
-        WHERE i.inbox_item_id=? AND e.state='completed' AND e.tool_name='set_reply_gif'
-        ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1`).get(inboxItemId) as Row | undefined;
-      return row ? normalizeRoomGif(JSON.parse(String(row.request_json)).gif) : null;
+        JOIN effects e ON e.agent_id=b.agent_id AND e.kind=?
+          AND json_extract(e.payload,'$.room_id')=b.room_id
+          AND json_extract(e.payload,'$.execution_generation_id')=b.origin_execution_generation_id
+          AND json_extract(e.payload,'$.provider_turn_id')=b.provider_turn_id
+        WHERE i.inbox_item_id=? AND e.state='completed' AND json_extract(e.payload,'$.tool_name')='set_reply_gif'
+        ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1`).get(BOUNDED_MCP_EFFECT_KIND, inboxItemId) as Row | undefined;
+      if (!row) return null;
+      const payload = JSON.parse(String(row.payload)) as { request?: { gif?: unknown } };
+      return normalizeRoomGif(payload.request?.gif);
     });
   }
   /** The last attachment choice for this exact bound turn; files:null clears an earlier one. */
   async replyAttachments(inboxItemId: string): Promise<RecordedReplyAttachment[]> {
     return this.read(async (database) => {
-      const row = database.prepare(`SELECT e.request_json FROM inbox_items i
+      const row = database.prepare(`SELECT e.payload FROM inbox_items i
         JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
           AND b.agent_id=i.agent_id AND b.room_id=i.room_id AND b.provider_turn_id=i.provider_turn_id
-        JOIN effects e ON e.agent_id=b.agent_id AND e.room_id=b.room_id
-          AND e.execution_generation_id=b.origin_execution_generation_id AND e.provider_turn_id=b.provider_turn_id
-        WHERE i.inbox_item_id=? AND e.state='completed' AND e.tool_name='set_reply_attachments'
-        ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1`).get(inboxItemId) as Row | undefined;
-      const request = row ? JSON.parse(String(row.request_json)) as unknown : null;
+        JOIN effects e ON e.agent_id=b.agent_id AND e.kind=?
+          AND json_extract(e.payload,'$.room_id')=b.room_id
+          AND json_extract(e.payload,'$.execution_generation_id')=b.origin_execution_generation_id
+          AND json_extract(e.payload,'$.provider_turn_id')=b.provider_turn_id
+        WHERE i.inbox_item_id=? AND e.state='completed' AND json_extract(e.payload,'$.tool_name')='set_reply_attachments'
+        ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1`).get(BOUNDED_MCP_EFFECT_KIND, inboxItemId) as Row | undefined;
+      const request = row ? (JSON.parse(String(row.payload)) as { request?: unknown }).request ?? null : null;
       return validRecordedReplyAttachments(request) ? request.files ?? [] : [];
     });
   }
@@ -189,16 +197,19 @@ export abstract class InboxQueryStore extends InboxTaskContinuationStore {
       const items = (database.prepare(`SELECT i.inbox_item_id,i.source_message_id,i.source_message_json,i.state,i.attempt_count,i.updated_at,i.outcome,i.provider_turn_id,i.last_error,i.failure_code,i.terminal_reason,p.canonical_message_id
         FROM inbox_items i LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
         WHERE i.agent_id=? AND i.room_id=? ORDER BY i.fifo_sequence DESC LIMIT 50`).all(agentId, roomId) as Row[]).map(rowToInspectorItem);
-      const uncertainEffects = (database.prepare(`SELECT effect_id,tool_name,mcp_request_id,error,created_at,updated_at
-        FROM effects WHERE agent_id=? AND state='uncertain'
-        ORDER BY updated_at DESC,effect_id DESC LIMIT ?`).all(agentId, RETAINED_UNCERTAIN_EFFECTS_PER_AGENT) as Row[]).map((effect) => ({
-        effect_id: String(effect.effect_id),
-        tool_name: String(effect.tool_name),
-        mcp_request_id: String(effect.mcp_request_id),
-        error: effect.error === null ? "The mutating tool outcome is uncertain." : String(effect.error),
-        created_at: String(effect.created_at),
-        updated_at: String(effect.updated_at),
-      }));
+      const uncertainEffects = (database.prepare(`SELECT *
+        FROM effects WHERE agent_id=? AND kind=? AND state='uncertain'
+        ORDER BY updated_at DESC,id DESC LIMIT ?`).all(agentId, BOUNDED_MCP_EFFECT_KIND, RETAINED_UNCERTAIN_EFFECTS_PER_AGENT) as Row[]).map((row) => {
+        const effect = rowToBoundedMcpEffect(row);
+        return {
+          effect_id: effect.effect_id,
+          tool_name: effect.tool_name,
+          mcp_request_id: effect.mcp_request_id,
+          error: effect.error === null ? "The mutating tool outcome is uncertain." : effect.error,
+          created_at: effect.created_at,
+          updated_at: effect.updated_at,
+        };
+      });
       const row = sourceMessageId ? database.prepare("SELECT * FROM inbox_items WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId) as Row | undefined : undefined;
       const history = boundary ? boundaryToDetail(boundary) : null;
       if (!row) {
@@ -359,7 +370,6 @@ export abstract class InboxQueryStore extends InboxTaskContinuationStore {
   /** Remove all daemon-owned delivery history for an agent being discarded. */
   async removeAgent(agentId: string): Promise<void> {
     await this.exclusive(async (database) => this.transaction(database, () => {
-      run(database.prepare("DELETE FROM effects WHERE agent_id=?"), agentId);
       deleteEffectsForAgentInTransaction(database, agentId);
       run(database.prepare("DELETE FROM effect_tombstones WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM provider_continuation_repairs WHERE agent_id=?"), agentId);

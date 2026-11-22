@@ -121,7 +121,7 @@ test("a native reply winning Stop preserves its intercepted thread choice across
         recordedAt: new Date().toISOString(),
       });
       const db = new DatabaseSync(env.databasePath);
-      try { assert.equal(db.prepare("SELECT state FROM effects WHERE effect_id=?").get(prepared.effect.effect_id)?.state, toolName === "set_reply_thread" ? "completed" : "failed"); }
+      try { assert.equal(db.prepare("SELECT state FROM effects WHERE id=?").get(prepared.effect.effect_id)?.state, toolName === "set_reply_thread" ? "completed" : "failed"); }
       finally { db.close(); }
       await inbox.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: controlled.id,
         execution_generation_id: "run_1", provider_turn_id: "turn-A", outcome: "reply", text: "final answer", evidence: "stream",

@@ -19,6 +19,7 @@ import type { ProviderActionPort } from "../provider-action-port.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import type { RuntimeRecoveryCoordinator } from "../runtime-recovery-coordinator.js";
 import type { ProcessIdentity } from "../process-identity.js";
+import { seedBoundedMcpEffectRow } from "./helpers/bounded-effect-seed.js";
 import {
   SupervisorDaemon,
   appendNativeActivity,
@@ -129,9 +130,20 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
       }
       beforeDb.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES('pending_old',?,?,?,?,'saved-conversation','retried-turn')")
         .run(id, entry.room_id, attempt.work_attempt_id, execution.execution_generation_id);
-      beforeDb.prepare(`INSERT INTO effects(effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,created_at,updated_at)
-        VALUES('effect',?,?,?,'turn','request','send_message','{}',1,'executing',?,?)`)
-        .run(id, entry.room_id, execution.execution_generation_id, at, at);
+      seedBoundedMcpEffectRow(beforeDb, {
+        id: "effect",
+        agent_id: id,
+        room_id: entry.room_id,
+        execution_generation_id: execution.execution_generation_id,
+        provider_turn_id: "turn",
+        mcp_request_id: "request",
+        tool_name: "send_message",
+        request: {},
+        mutation: true,
+        state: "executing",
+        created_at: at,
+        updated_at: at,
+      });
       const shadow = new ExecutionShadowStore(beforeDb);
       shadow.registerRuntime({ agentId: id, executionGenerationId: execution.execution_generation_id, runtimeGenerationId: runtimeId,
         provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 });
@@ -262,7 +274,7 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
       assert.equal(afterDb.prepare("SELECT state FROM inbox_items WHERE inbox_item_id='inbox'").get()!.state,
         mode === "resume" ? "awaiting_result" : "cancelled_by_user",
         "a saved answer remains publishable; an unreadable result cannot block or replay in the fresh conversation");
-      assert.equal(afterDb.prepare("SELECT state FROM effects WHERE effect_id='effect'").get()!.state, "uncertain");
+      assert.equal(afterDb.prepare("SELECT state FROM effects WHERE id='effect'").get()!.state, "uncertain");
       assert.equal(afterDb.prepare("SELECT state FROM inbox_items WHERE inbox_item_id='pending_old'").get()!.state, "cancelled_by_user",
         "an unresolved old turn returned to pending by a retry must not follow the replacement conversation");
       assert.equal(afterDb.prepare("SELECT state FROM inbox_items WHERE inbox_item_id='pending_new'").get()!.state, "pending",

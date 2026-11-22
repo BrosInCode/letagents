@@ -8,6 +8,7 @@ import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { createDaemonMaintenance, clearDaemonMaintenance, daemonMaintenancePath, readDaemonMaintenance } from "../../../../shared/daemon-maintenance.mjs";
+import { seedBoundedMcpEffectRow } from "./helpers/bounded-effect-seed.js";
 import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
@@ -39,8 +40,20 @@ test("maintenance cold boot preserves all durable rows and refuses work until ex
       (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,created_at,updated_at)
       VALUES('inbox','agent','room','message','{}','{}',1,'awaiting_result',1,'action','reply','ambiguous-turn',NULL,?,?)`).run(entry.created_at, entry.created_at);
     seed.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES('inbox','agent','room','original-attempt','original-execution','saved-continuation','ambiguous-turn')").run();
-    seed.prepare(`INSERT INTO effects(effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,created_at,updated_at)
-      VALUES('effect','agent','room','original-execution','ambiguous-turn','request','send_message','{}',1,'executing',?,?)`).run(entry.created_at, entry.created_at);
+    seedBoundedMcpEffectRow(seed, {
+      id: "effect",
+      agent_id: "agent",
+      room_id: "room",
+      execution_generation_id: "original-execution",
+      provider_turn_id: "ambiguous-turn",
+      mcp_request_id: "request",
+      tool_name: "send_message",
+      request: {},
+      mutation: true,
+      state: "executing",
+      created_at: entry.created_at,
+      updated_at: entry.created_at,
+    });
   } finally { seed.close(); }
   const before = snapshot(paths.manifestPath);
   const hold = await createDaemonMaintenance(daemonMaintenancePath(root));
@@ -88,7 +101,7 @@ test("maintenance cold boot preserves all durable rows and refuses work until ex
       await resumed.start(); const status = await request(paths.socketPath, "daemon.negotiate");
       assert.equal(status.result.maintenance_hold_id, null); assert.equal(status.result.capabilities.agent_lifecycle_v1, true);
       const db = new DatabaseSync(paths.manifestPath, { readOnly: true });
-      try { assert.equal((db.prepare("SELECT state FROM effects WHERE effect_id='effect'").get() as {state: string}).state, "uncertain", "only normal resume applies existing interrupted-effect normalization"); }
+      try { assert.equal((db.prepare("SELECT state FROM effects WHERE id='effect'").get() as {state: string}).state, "uncertain", "only normal resume applies existing interrupted-effect normalization"); }
       finally { db.close(); }
     } finally { await resumed.stop(); }
     assert.equal(await readFile(savedFile, "utf8"), "user work");

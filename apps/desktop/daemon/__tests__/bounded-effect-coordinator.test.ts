@@ -2,6 +2,10 @@ import "../../electron/__tests__/isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../../shared/codex-read-only-room-tools.mjs";
 import { API_AGENT_READ_TOOLS } from "../../../../shared/api-agent-tools.mjs";
 import {
@@ -14,8 +18,19 @@ import {
   type ExecuteBoundedToolInput,
   type PrepareBoundedEffectInput,
 } from "../bounded-effect-coordinator.js";
-import { structuredRoomTurnCompletion, type SupervisedEffectRecord } from "../supervised-agent-inbox-store.js";
+import { DaemonStateDatabase } from "../daemon-state-database.js";
+import {
+  BOUNDED_MCP_EFFECT_KIND,
+  EffectExecutor,
+  getEffect,
+} from "../effect-journal/index.js";
+import {
+  SupervisedAgentInboxStore,
+  structuredRoomTurnCompletion,
+  type SupervisedEffectRecord,
+} from "../supervised-agent-inbox-store.js";
 import type { DaemonToolAgentSession, SupervisedToolRuntime } from "../supervised-tool-runtime.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 function deferred<T = void>(): {
   promise: Promise<T>;
@@ -512,6 +527,7 @@ test("execute classifies before preparation, revalidates authority, executes, th
     toolName: "read_messages",
     input: { limit: 1 },
     requestId: "request-a",
+    effectId: "effect-a",
     roomId: "room-a",
     apiUrl: "https://letagents.test",
     bearer: "bearer-a",
@@ -572,6 +588,7 @@ test("execution failure attempts admitted journal settlement but preserves the o
     effect_id: "effect-a",
     result: undefined,
     error: "external execution failed",
+    uncertain: true,
     expected: {
       agent_id: "agent-a",
       work_attempt_id: "attempt-a",
@@ -935,4 +952,296 @@ test("a room tool call that was prepared before its owner saved Read-only is not
   assert.equal(allowed.events.includes("runtime:execute"), true);
   const unchanged = harness();
   assert.equal((await unchanged.subject.execute(executeInput(roomToolCall("update_task")))).state, "completed");
+});
+
+test("fail-closed mutation error classification requires dispatch-stage proof and returns uncertain instruction on the first call", async () => {
+  // Unmarked errors — including arbitrary HTTP 4xx (such as a post-commit presence 403)
+  // and unmarked ZodError — MUST fail closed to `uncertain` and return the uncertain
+  // instruction on the FIRST call so a caller cannot blindly retry with a fresh request id.
+  const uncertainErrors: unknown[] = [
+    new Error("fetch failed"),
+    Object.assign(new Error("HTTP 502 Bad Gateway"), { status: 502 }),
+    Object.assign(new Error("HTTP 500 Internal Server Error"), { status: 500 }),
+    Object.assign(new Error("Request timed out"), { code: "ETIMEDOUT" }),
+    Object.assign(new Error("Post-commit presence 403"), { status: 403 }),
+    Object.assign(new Error("Arbitrary unmarked 400"), { status: 400 }),
+    Object.assign(new Error("Unmarked post-commit ZodError"), { name: "ZodError" }),
+  ];
+  for (const thrown of uncertainErrors) {
+    const state = harness({
+      runtimeMutation: true,
+      execute: async () => { throw thrown; },
+    });
+    const first = await state.subject.execute(executeInput()) as {
+      state: string;
+      result: { structuredContent: Record<string, unknown> };
+    };
+    assert.equal(state.capturedCompletion?.uncertain, true, `expected uncertain for ${String(thrown)}`);
+    assert.equal(first.state, "completed");
+    assert.equal(first.result.structuredContent.code, "SUPERVISED_EFFECT_OUTCOME_UNCERTAIN");
+    assert.equal(first.result.structuredContent.effect_id, "effect-a");
+    assert.equal(first.result.structuredContent.detail, (thrown as Error).message);
+  }
+
+  // Only explicit dispatch-stage proofs settle as definite `failed` and reject.
+  const definiteFailureErrors: unknown[] = [
+    Object.assign(new Error("reply_to and thread_parent_id must match"), { beforeExternalDispatch: true }),
+    Object.assign(new Error("Input schema invalid"), { name: "ZodError", beforeExternalDispatch: true }),
+    Object.assign(new Error("POST /messages rejected 403"), { status: 403, mutationRejectedBeforeCommit: true }),
+  ];
+  for (const thrown of definiteFailureErrors) {
+    const state = harness({
+      runtimeMutation: true,
+      execute: async () => { throw thrown; },
+    });
+    await assert.rejects(state.subject.execute(executeInput()), (error) => error === thrown);
+    assert.equal(state.capturedCompletion?.uncertain, undefined, `expected definite failed (not uncertain) for ${String(thrown)}`);
+  }
+
+  // Read-only errors never mark uncertain and always reject on failure.
+  const readError = new Error("HTTP 503 Service Unavailable");
+  const readState = harness({
+    runtimeMutation: false,
+    execute: async () => { throw readError; },
+  });
+  await assert.rejects(
+    readState.subject.execute(executeInput({ toolName: "read_messages", input: { limit: 1 } })),
+    (error) => error === readError,
+  );
+  assert.equal(readState.capturedCompletion?.uncertain, undefined);
+
+  // Durable effectId is passed in BOTH cloud and local execution paths.
+  const cloud = harness({ apiUrl: "https://letagents.test" });
+  await cloud.subject.execute(executeInput());
+  assert.equal(cloud.capturedExecution?.effectId, "effect-a");
+
+  const local = harness({ apiUrl: "letagents-local://rooms" });
+  await local.subject.execute(executeInput());
+  assert.equal(local.capturedExecution?.effectId, "effect-a");
+  assert.equal(local.capturedExecution?.requestId, "effect-a");
+});
+
+test("real EffectExecutor bounded handler returns uncertain on first post-commit 403 and detaches stalled tools cleanly on fenceAndDrain", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-bounded-executor-"));
+  const dbPath = join(root, "state.sqlite");
+  const stateDb = await DaemonStateDatabase.open(dbPath);
+  const inbox = new SupervisedAgentInboxStore(dbPath);
+  inbox.attachDatabase(stateDb.connection);
+  const executor = new EffectExecutor({
+    getDatabase: () => stateDb.connection,
+    assertCurrent: async () => {},
+    assertWriteFence: () => {},
+    currentDaemonGeneration: () => 1,
+    isClosing: () => false,
+  });
+
+  try {
+    // Seed an active agent and provider turn binding in SQLite so real authorizeClaim and completeEffect succeed.
+    stateDb.connection.prepare(`
+      INSERT INTO agents (
+        agent_id, sort_order, version, created_by, created_at, display_name,
+        room_id, provider, charter, desired_state, observed_state,
+        deployment_id, run_id, work_attempt_id, provider_work_attempt_id,
+        provider_continuation_id, provider_execution_generation_id, condition
+      ) VALUES ('agent-exec', 1, 1, 'owner', '2026-08-14T00:00:00.000Z', 'Exec',
+                'room-exec', 'codex', 'test', 'running', 'working',
+                'dep-exec', 'gen-exec', 'attempt-exec', 'attempt-exec',
+                'cont-exec', 'gen-exec', 'none')
+    `).run();
+    const [item] = await inbox.ingestPoll({
+      agent_id: "agent-exec",
+      room_id: "room-exec",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "go" }, activation: {} }],
+    });
+    assert(item);
+    await inbox.transition(item.inbox_item_id, "dispatching");
+    await inbox.checkpointTurnStarted(item.inbox_item_id, "turn-exec", {
+      work_attempt_id: "attempt-exec",
+      origin_execution_generation_id: "gen-exec",
+      provider_continuation_id: "cont-exec",
+    });
+
+    const stalledMutation = deferred<void>();
+    const mutationStarted = deferred<void>();
+    const stalledRead = deferred<void>();
+    const readStarted = deferred<void>();
+    let mutationSignalObserved = false;
+    let readSignalObserved = false;
+
+    const runtime: SupervisedToolRuntime = {
+      supervisedToolIsMutation: (toolName) => toolName !== "read_messages",
+      executeDaemonTool: async (input) => {
+        if (input.requestId === "req-post-commit-403") {
+          throw Object.assign(new Error("POST /presence returned 403 after POST /messages 200"), { status: 403 });
+        }
+        if (input.requestId === "req-stalled-mutation") {
+          mutationSignalObserved = input.signal instanceof AbortSignal;
+          mutationStarted.resolve();
+          await stalledMutation.promise;
+        }
+        if (input.requestId === "req-stalled-read") {
+          readSignalObserved = input.signal instanceof AbortSignal;
+          readStarted.resolve();
+          await stalledRead.promise;
+        }
+        return { liveResult: { ok: true }, durableResult: { ok: true } };
+      },
+    };
+
+    const sessionForExec: DaemonToolAgentSession = {
+      session_id: "sess-exec",
+      session_token: "tok-exec",
+      room_id: "room-exec",
+      session_kind: "worker",
+      runtime: "codex",
+      actor_label: "Exec | EmmyMay's agent | Codex",
+      agent_key: "emmymay/exec",
+      agent_instance_id: "daemon:agent-exec",
+      display_name: "Exec",
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+      created_at: "2026-08-14T00:00:00.000Z",
+      updated_at: "2026-08-14T00:00:00.000Z",
+      last_seen_at: "2026-08-14T00:00:00.000Z",
+      ended_at: null,
+    };
+
+    const coordinator = new BoundedEffectCoordinator({
+      authority: {
+        assertCurrent: async () => {},
+        currentGeneration: () => 1,
+        fenceCommit: async (commit) => { await commit(); },
+        fenceAdmittedTransitionCommit: async (commit) => { await commit(); },
+      },
+      context: {
+        exactActive: async () => ({
+          entry: { id: "agent-exec", room_id: "room-exec", provider: "codex", work_attempt_id: "attempt-exec", workspace_path: "/tmp" },
+          agent: {
+            agentId: "agent-exec",
+            roomId: "room-exec",
+            workAttemptId: "attempt-exec",
+            executionGenerationId: "gen-exec",
+            providerContinuationId: "cont-exec",
+            agentSessionId: "sess-exec",
+            bearer: "bearer-exec",
+            apiUrl: "https://letagents.test",
+          },
+          binding: { credential_ref: "cred-exec" },
+          active: {
+            inboxItemId: item.inbox_item_id,
+            sourceMessageId: "1",
+          },
+          inbox: {
+            inbox_item_id: item.inbox_item_id,
+            source_message_id: "1",
+            provider_turn_id: "turn-exec",
+          },
+          providerTurnBinding: {
+            origin_execution_generation_id: "gen-exec",
+            provider_continuation_id: "cont-exec",
+          },
+        }),
+      },
+      entries: {
+        get: async () => ({ id: "agent-exec", room_id: "room-exec", provider: "codex", work_attempt_id: "attempt-exec" }),
+      },
+      authorizations: {
+        get: () => ({
+          agentSessionId: "sess-exec",
+          bearer: "bearer-exec",
+          bearerId: "cred-exec",
+          agentKey: "emmymay/exec",
+          roomId: "room-exec",
+          agentSession: sessionForExec,
+        }),
+      },
+      runtime: { load: async () => runtime },
+      journal: {
+        prepare: (input, fence) => inbox.prepareEffect(input, fence),
+        markExecuting: (input, fence) => inbox.markEffectExecuting(input, fence),
+        authorizeClaimInTransaction: (database, record, auth) => inbox.authorizeBoundedEffectClaimInTransaction(database, record, auth),
+        complete: (input, fence) => inbox.completeEffect(input, fence),
+      },
+      roomMoves: {
+        prepare: async () => { throw new Error("unused"); },
+      },
+      executionCompletion: {
+        complete: (input, admitted) => coordinator.completeOnce(input, admitted),
+      },
+      completionParser: {
+        structuredRoomTurnCompletion,
+      },
+      executor: () => executor,
+      getEffect: (effectId) => getEffect(stateDb.connection, effectId),
+    });
+
+    executor.registerHandler(BOUNDED_MCP_EFFECT_KIND, coordinator.createExecutorHandler());
+
+    // 1. Unmarked post-commit HTTP 403 settles to `uncertain` and returns uncertain instruction on FIRST call.
+    const postCommit403 = await coordinator.execute({
+      entryId: "agent-exec",
+      workAttemptId: "attempt-exec",
+      executionGenerationId: "gen-exec",
+      daemonGeneration: 1,
+      providerTurnId: "turn-exec",
+      mcpRequestId: "req-post-commit-403",
+      toolName: "send_message",
+      input: { reply_to: "other-msg", text: "committed then presence 403" },
+    }) as { state: string; result: { structuredContent: Record<string, unknown> } };
+    assert.equal(postCommit403.state, "completed");
+    assert.equal(postCommit403.result.structuredContent.code, "SUPERVISED_EFFECT_OUTCOME_UNCERTAIN");
+    const effectId403 = String(postCommit403.result.structuredContent.effect_id);
+    assert.equal(getEffect(stateDb.connection, effectId403)?.state, "uncertain");
+
+    // 2. Stalled external mutation + stalled read during shutdown: fenceAndDrain resolves promptly,
+    //    passes AbortSignal, settles mutation conservatively as `uncertain`, and requeues read as `prepared`.
+    const pendingMutation = coordinator.execute({
+      entryId: "agent-exec",
+      workAttemptId: "attempt-exec",
+      executionGenerationId: "gen-exec",
+      daemonGeneration: 1,
+      providerTurnId: "turn-exec",
+      mcpRequestId: "req-stalled-mutation",
+      toolName: "post_status",
+      input: { status: "stalled" },
+    });
+    const pendingRead = coordinator.execute({
+      entryId: "agent-exec",
+      workAttemptId: "attempt-exec",
+      executionGenerationId: "gen-exec",
+      daemonGeneration: 1,
+      providerTurnId: "turn-exec",
+      mcpRequestId: "req-stalled-read",
+      toolName: "read_messages",
+      input: { limit: 5 },
+    });
+    await Promise.all([mutationStarted.promise, readStarted.promise]);
+    assert.equal(mutationSignalObserved, true, "mutating tool receives EffectExecutionContext.signal");
+    assert.equal(readSignalObserved, true, "read-only tool receives EffectExecutionContext.signal");
+
+    executor.fence();
+    await Promise.race([
+      executor.fenceAndDrain(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("fenceAndDrain hung on stalled bounded tools")), 3_000)),
+    ]);
+    await coordinator.drainJournalReservations();
+
+    const mutResult = await pendingMutation as { state: string; result: { structuredContent: Record<string, unknown> } };
+    assert.equal(mutResult.result.structuredContent.code, "SUPERVISED_EFFECT_OUTCOME_UNCERTAIN");
+    assert.equal(getEffect(stateDb.connection, String(mutResult.result.structuredContent.effect_id))?.state, "uncertain");
+
+    await assert.rejects(pendingRead, /daemon shut down/i);
+    const readRow = stateDb.connection.prepare(`
+      SELECT state FROM effects WHERE agent_id='agent-exec' AND json_extract(payload, '$.mcp_request_id')='req-stalled-read'
+    `).get() as { state: string } | undefined;
+    assert.equal(readRow?.state, "prepared", "interrupted read-only tool requeues cleanly to prepared");
+
+    stalledMutation.resolve();
+    stalledRead.resolve();
+  } finally {
+    await inbox.close();
+    stateDb.close();
+    await removeTestDirectory(root);
+  }
 });

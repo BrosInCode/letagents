@@ -7,7 +7,17 @@
  * to match the new target shape, and bump DAEMON_STATE_SCHEMA_VERSION.
  */
 import { DatabaseSync } from "node:sqlite";
-import { applyEffectJournalSchema } from "../effect-journal/schema.js";
+import {
+  BOUNDED_MCP_EFFECT_KIND,
+  BOUNDED_MCP_MAX_READ_ATTEMPTS,
+  EFFECT_JOURNAL_TABLE,
+  EFFECT_JOURNAL_TABLE_V2,
+  applyEffectJournalSchemaV2,
+  applyEffectsTableIndexesAndTriggerV3,
+  boundedMcpEffectIdempotencyKey,
+  serializeBoundedMcpPayload,
+  truncateEffectError,
+} from "../effect-journal/index.js";
 import { applyApprovalRequestClosureSchema } from "../execution-approval-journal.js";
 import { applyExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
 import { applyExecutionStorageSchema } from "../execution-storage-schema.js";
@@ -19,18 +29,173 @@ import { applyRuntimeRecoverySchema } from "../runtime-recovery-journal.js";
 import {
   DAEMON_STATE_APPLICATION_ID,
   SCHEMA_VERSION,
+  agentStateVersionTriggers,
   toSqliteUserVersion,
   applyAgentStateVersionSchema,
   normalizeSchemaSql,
+  quoteIdentifier,
   type Row,
 } from "./shared.js";
 import { assertDaemonStateVersionSupported } from "./version-gate.js";
 
 export type SchemaMigration = (database: DatabaseSync) => void;
 
-/** Schema v1 -> v2: introduces the unified external-effect journal and its version triggers. */
+/** Schema v1 -> v2: introduces the staging `effect_journal` table and its version triggers. */
 export function migrateV1ToV2(database: DatabaseSync): void {
-  applyEffectJournalSchema(database);
+  applyEffectJournalSchemaV2(database);
+  for (const [name, sql] of Object.entries(agentStateVersionTriggers({
+    table: EFFECT_JOURNAL_TABLE_V2,
+    key: "agent_id",
+    scope: "inbox",
+  }))) {
+    const actual = database.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").get(name) as Row | undefined;
+    if (actual && normalizeSchemaSql(String(actual.sql)) === normalizeSchemaSql(sql)) continue;
+    if (actual) database.exec(`DROP TRIGGER ${quoteIdentifier(name)}`);
+    database.exec(sql);
+  }
+}
+
+/**
+ * Schema v2 -> v3: migrates legacy bounded MCP `effects` rows into the unified
+ * external-effect journal (`kind = 'bounded_mcp_effect'`), drops the legacy
+ * `effects` table, promotes `effect_journal` -> `effects`, and installs the
+ * final v3 indexes, immutability trigger, and version triggers atomically
+ * inside the caller's write transaction.
+ */
+export function migrateV2ToV3(
+  database: DatabaseSync,
+  options?: { afterDropLegacyEffects?: () => void },
+): void {
+  for (const trigger of [
+    "agent_state_versions_effects_inbox_insert",
+    "agent_state_versions_effects_inbox_update",
+    "agent_state_versions_effects_inbox_delete",
+    "agent_state_versions_effect_journal_inbox_insert",
+    "agent_state_versions_effect_journal_inbox_update",
+    "agent_state_versions_effect_journal_inbox_delete",
+  ]) {
+    database.exec(`DROP TRIGGER IF EXISTS ${quoteIdentifier(trigger)}`);
+  }
+
+  // Preserve legacy insertion `rowid` order so tied-timestamp queries
+  // (`ORDER BY created_at DESC, rowid DESC`, e.g. reply GIF/attachment receipts)
+  // keep the exact winning row after migration.
+  const legacyRows = database.prepare(`
+    SELECT effect_id, agent_id, room_id, execution_generation_id, provider_turn_id,
+           mcp_request_id, tool_name, request_json, mutation, state, result_json,
+           error, created_at, updated_at
+    FROM effects
+    ORDER BY rowid ASC
+  `).all() as Row[];
+
+  const insertMigrated = database.prepare(`
+    INSERT INTO ${EFFECT_JOURNAL_TABLE_V2} (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+  `);
+
+  for (const row of legacyRows) {
+    const effectId = String(row.effect_id);
+    const agentId = String(row.agent_id);
+    const roomId = String(row.room_id);
+    const executionGenerationId = String(row.execution_generation_id);
+    const providerTurnId = String(row.provider_turn_id);
+    const mcpRequestId = String(row.mcp_request_id);
+    const toolName = String(row.tool_name);
+    const requestJson = String(row.request_json);
+    const mutation = Number(row.mutation) === 1;
+    const state = String(row.state);
+    const createdAt = String(row.created_at);
+    const updatedAt = String(row.updated_at);
+
+    let parsedRequest: unknown;
+    try {
+      parsedRequest = JSON.parse(requestJson);
+    } catch {
+      parsedRequest = requestJson;
+    }
+    const idempotencyKey = boundedMcpEffectIdempotencyKey(
+      executionGenerationId,
+      providerTurnId,
+      mcpRequestId,
+    );
+    let payloadJson: string;
+    try {
+      payloadJson = serializeBoundedMcpPayload({
+        room_id: roomId,
+        execution_generation_id: executionGenerationId,
+        provider_turn_id: providerTurnId,
+        mcp_request_id: mcpRequestId,
+        tool_name: toolName,
+        request: parsedRequest,
+        requestJson,
+        mutation,
+      }).payloadJson;
+    } catch {
+      // Legacy `effects.request_json` accepted arbitrary JSON up to 64 KiB
+      // (including nesting deeper than the new plain-wire depth limit of 64).
+      // Fall back to storing the raw JSON text inside `payload.request` while
+      // preserving exact `id`, `idempotency_key`, `request_bytes`, and
+      // `request_sha256` so one historical row can never brick an upgrade or
+      // weaken replay fencing.
+      payloadJson = serializeBoundedMcpPayload({
+        room_id: roomId,
+        execution_generation_id: executionGenerationId,
+        provider_turn_id: providerTurnId,
+        mcp_request_id: mcpRequestId,
+        tool_name: toolName,
+        request: requestJson,
+        requestJson,
+        mutation,
+      }).payloadJson;
+    }
+
+    const retryable = !mutation || (toolName === "complete_room_turn" && state !== "completed");
+    const maxAttempts = retryable ? BOUNDED_MCP_MAX_READ_ATTEMPTS : 1;
+    const attemptCount = state === "prepared" ? 0 : 1;
+
+    let outcomeJson: string | null = null;
+    if (state !== "prepared" && state !== "executing" && row.result_json !== null && row.result_json !== undefined) {
+      const rawResult = String(row.result_json);
+      try {
+        JSON.parse(rawResult);
+        outcomeJson = rawResult;
+      } catch {
+        outcomeJson = JSON.stringify(rawResult);
+      }
+    }
+
+    const lastError = state === "completed" || row.error === null || row.error === undefined
+      ? null
+      : truncateEffectError(String(row.error));
+
+    insertMigrated.run(
+      effectId,
+      agentId,
+      BOUNDED_MCP_EFFECT_KIND,
+      idempotencyKey,
+      state,
+      payloadJson,
+      outcomeJson,
+      retryable ? 1 : 0,
+      attemptCount,
+      maxAttempts,
+      lastError,
+      createdAt,
+      updatedAt,
+    );
+  }
+
+  database.exec("DROP TRIGGER IF EXISTS effect_journal_immutable_identity");
+  database.exec("DROP INDEX IF EXISTS effect_journal_runnable");
+  database.exec("DROP INDEX IF EXISTS effect_journal_agent_state");
+  database.exec("DROP TABLE effects");
+  options?.afterDropLegacyEffects?.();
+  database.exec(`ALTER TABLE ${EFFECT_JOURNAL_TABLE_V2} RENAME TO ${EFFECT_JOURNAL_TABLE}`);
+
+  applyEffectsTableIndexesAndTriggerV3(database);
   applyAgentStateVersionSchema(database);
 }
 
@@ -40,6 +205,7 @@ export function migrateV1ToV2(database: DatabaseSync): void {
  */
 export const DAEMON_STATE_MIGRATIONS: Readonly<Record<number, SchemaMigration>> = {
   1: migrateV1ToV2,
+  2: (database) => migrateV2ToV3(database),
 };
 
 type SchemaEntry = { type: string; name: string; tblName: string; sql: string };

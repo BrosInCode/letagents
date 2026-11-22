@@ -70,7 +70,7 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
   protected async completeBoundedEffectOnce(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
     providerTurnId: string;
-    effectId: string; result?: unknown; error?: string;
+    effectId: string; result?: unknown; error?: string; uncertain?: boolean;
   }, admittedDaemonExecution = false): Promise<{ completed: true }> {
     return this.boundedEffects.completeOnce(input, admittedDaemonExecution);
   }
