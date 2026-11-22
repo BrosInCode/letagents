@@ -347,16 +347,18 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const boundary = await this.boundary(remembered.provider);
     if (signal.aborted) return;
     if (!current() || !["codex", "open-model", "claude-code"].includes(remembered.provider) || !boundary.has("observePermissions")) { notify({ type: "unavailable" }); return; }
-    // The native connection id of the last snapshot. The daemon's connection id of a provider other than Codex
-    // is made from the process connection only, so a change of the native id is reported as a lost lane first.
-    let nativeConnectionId: unknown;
+    // The native connection id of the last snapshot, read as the boundary reads it (no id is ""), or null when
+    // no snapshot is current. The daemon's connection id of a provider other than Codex is made from the process
+    // connection only, so a change of the native id is reported as a lost lane first.
+    let nativeConnectionId: string | null = null;
     await this.observeNativePermissions(boundary, remembered.runtime, signal, (event, tokens) => {
       if (signal.aborted) return;
       if (event.type !== "request_closed") {
         const previous = nativeConnectionId;
-        nativeConnectionId = event.type === "snapshot" ? event.connectionId : undefined;
-        if (remembered.provider !== "codex" && previous !== undefined && event.type === "snapshot"
-          && previous !== event.connectionId && current()) notify({ type: "degraded" });
+        nativeConnectionId = event.type !== "snapshot" ? null
+          : typeof event.connectionId === "string" ? event.connectionId : "";
+        if (remembered.provider !== "codex" && previous !== null && nativeConnectionId !== null
+          && previous !== nativeConnectionId && current()) notify({ type: "degraded" });
       }
       if (!current()) { notify({ type: "unavailable" }); return; }
       if (event.type === "request_closed") {

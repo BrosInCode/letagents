@@ -228,10 +228,19 @@ test("through the real router: a known permission event with unreadable fields i
   } finally { await f.close(); }
 });
 
+/** The native connection ids of the first and the second snapshot for each change of the native connection. */
+const connectionChanges: Record<string, [string | undefined, string | undefined]> = {
+  "changed connection id": ["socket-1", "socket-2"],
+  "connection id added": [undefined, "socket-1"],
+  "connection id removed": ["socket-1", undefined],
+};
+const snapshotIds = (gap: unknown): [string | undefined, string | undefined] =>
+  typeof gap === "string" && gap in connectionChanges ? connectionChanges[gap]! : ["socket-1", "socket-1"];
+
 test("through the real router: a request that is listed again after the lane was lost can be answered", async () => {
   const gaps: Record<string, unknown[]> = {
     "no gap": [], degraded: [{ type: "degraded" }], unavailable: [{ type: "unavailable" }], malformed: [{ type: "snapshot", requests: null }],
-    "changed connection id": [],
+    "changed connection id": [], "connection id added": [], "connection id removed": [],
   };
   for (const providerId of ["open-model", "claude-code"] as const) {
     for (const [gap, events] of Object.entries(gaps)) {
@@ -262,11 +271,13 @@ test("through the real router: a request that is listed again after the lane was
         });
         for (let turn = 0; turn < 50 && !native; turn += 1) await new Promise(resolve => setImmediate(resolve));
         assert.ok(native, label);
-        const snapshot = (connectionId: string) => ({ type: "snapshot", connectionId, requests: [structuredClone(f.native.native)] });
-        native(snapshot("socket-1"));
+        const snapshot = (connectionId: string | undefined) => ({ type: "snapshot",
+          ...(connectionId === undefined ? {} : { connectionId }), requests: [structuredClone(f.native.native)] });
+        const [first, second] = snapshotIds(gap);
+        native(snapshot(first));
         for (const event of events) native(event);
         // The provider lists the same request again: an equal value in a new object.
-        native(snapshot(gap === "changed connection id" ? "socket-2" : "socket-1"));
+        native(snapshot(second));
         const [candidate] = await f.broker.list("room");
         assert.ok(candidate?.reference, `${label}: the request is listed as pending`);
         const result = await f.broker.decide(decision(candidate));
@@ -306,8 +317,8 @@ async function routedPermissions(f: Awaited<ReturnType<typeof fixture>>, provide
     assert.ok(native, "the observation reached the adapter");
     return { handle, native, writes: () => writes.get(handle.pid!) ?? 0,
       /** The provider lists the fixture's request: an equal value in a new object. The daemon's object for it is returned. */
-      list(connectionId = "socket-1") {
-        native({ type: "snapshot", connectionId, requests: [structuredClone(f.native.native)] });
+      list(connectionId: string | null = "socket-1") {
+        native({ type: "snapshot", ...(connectionId === null ? {} : { connectionId }), requests: [structuredClone(f.native.native)] });
         return (seen.at(-1) as Extract<ProviderPermissionObservation, { type: "snapshot" }>).requests[0]!;
       } };
   };
@@ -318,17 +329,19 @@ async function routedPermissions(f: Awaited<ReturnType<typeof fixture>>, provide
 
 for (const providerId of ["open-model", "claude-code"] as const) {
   test(`through the real router: a request of an ended authority is refused and the request of the new authority is answered (${providerId})`, async () => {
-    for (const gap of [{ type: "unavailable" }, { type: "degraded" }, { type: "snapshot", requests: null }, "changed connection id"] as const) {
+    for (const gap of [{ type: "unavailable" }, { type: "degraded" }, { type: "snapshot", requests: null },
+      "changed connection id", "connection id added", "connection id removed"] as const) {
       const f = await fixture(providerId);
       try {
         const { router, observe, options, refused } = await routedPermissions(f, providerId);
         const lane = await observe("routed");
-        const held = lane.list();
+        const [first, second] = snapshotIds(gap);
+        const held = lane.list(first ?? null);
         if (typeof gap !== "string") {
           lane.native(gap);
           await assert.rejects(router.replyPermission(lane.handle, held, "once", options), refused, "no answer while the lane is lost");
         }
-        const fresh = lane.list(gap === "changed connection id" ? "socket-2" : "socket-1");
+        const fresh = lane.list(second ?? null);
         assert.notEqual(fresh, held);
         await assert.rejects(router.replyPermission(lane.handle, held, "once", options), refused, `${JSON.stringify(gap)}: the older object stays refused`);
         assert.equal(lane.writes(), 0);
