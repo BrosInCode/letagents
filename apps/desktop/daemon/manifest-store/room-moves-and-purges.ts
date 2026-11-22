@@ -10,6 +10,8 @@ import {
   BOUNDED_MCP_EFFECT_KIND,
   completePreparedEffectAtomicallyInTransaction,
   failPreparedJoinRoomEffectInTransaction,
+  retireRoomWorkEffectsForPurgeInTransaction,
+  retireRoomWorkEffectsInTransaction,
   rowToBoundedMcpEffect,
 } from "../effect-journal/index.js";
 import { cancelInterruptedSupervisedTurn, pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
@@ -161,6 +163,15 @@ export const roomMovesAndPurges = storeMethods({
               }
             }
           }
+          if (input.to === "active") {
+            retireRoomWorkEffectsInTransaction(database, {
+              agentId: input.agentId,
+              expectedEpoch: updated.daemon_generation,
+              roomId: updated.source_room_id,
+              error: "room_moved",
+              nowIso: updatedAt,
+            });
+          }
           if (input.to === "active" || input.to === "failed") {
             // Reaching a terminal room-move phase releases the compensation rows
             // protected by the shared retention policy. Compact only after the
@@ -212,6 +223,11 @@ export const roomMovesAndPurges = storeMethods({
         }
         const now = new Date().toISOString();
         this.settleGivenAgentInboxForPurge(database, input.agentId, now);
+        retireRoomWorkEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
         const attachment = this.assertPurgePreconditions(database, input.agentId);
         const phase: DaemonPurgePhase = input.externalRevokeRequired
           ? input.workerSessionAttestation === "unknown" ? "reprepare_credentials" : "revoking_credentials"
@@ -413,7 +429,13 @@ export const roomMovesAndPurges = storeMethods({
           const purge = purgeFromRow(purgeRow);
           if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.daemonGeneration || purge.phase !== "local_commit") throw new ManifestConflictError("Purge is not authorized for local commit.");
           // A message that reached the stopped guest after preparation is settled here as well; otherwise the commit would refuse for good.
-          this.settleGivenAgentInboxForPurge(database, input.agentId, new Date().toISOString());
+          const commitNow = new Date().toISOString();
+          this.settleGivenAgentInboxForPurge(database, input.agentId, commitNow);
+          retireRoomWorkEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
           const attachment = this.assertPurgePreconditions(database, input.agentId);
           if (attachment.attachedWorkAttemptId !== purge.attached_work_attempt_id || attachment.preservedWorkspacePath !== purge.preserved_workspace_path) {
             throw new ManifestConflictError("Purge target attachment changed after preparation.");

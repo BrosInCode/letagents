@@ -4,6 +4,10 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { DAEMON_STATE_USER_VERSION } from "../daemon-state-database.js";
+import {
+  ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+  ROOM_WORK_PUBLISH_EFFECT_KIND,
+} from "../effect-journal/index.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry } from "../types.js";
@@ -941,4 +945,199 @@ test("purge rejection leaves generation, identity, and journal unchanged", async
     assert.ok(await store.getEntry(entry.id));
     assert.equal(await store.getPurge("purge_blocked"), null);
   } finally { await store.close(); await env.cleanup(); }
+});
+
+test("stopped-agent purge retires prepared room-work effects while preserving active-execution and unrelated effect blockers", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const stopped: DaemonManifestEntry = {
+    ...entry, id: "agent_rw_purge", desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
+    workspace_path: null, work_attempt_id: null, provider_ref: null, activity: [], turn_control: null, last_worker_binding: null,
+    workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
+  };
+  try {
+    await store.write([stopped]);
+    const db = new DatabaseSync(env.databasePath);
+    try {
+      const nowIso = "2026-10-02T00:00:00.000Z";
+      db.prepare(`
+        INSERT INTO effects (
+          id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+          retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+        ) VALUES
+          ('eff-rw-pub', ?, ?, 'rw:v1:purge-pub', 1, 'prepared', ?, NULL, 1, 1, 1000000, 1790900030000, 'publication_unavailable', ?, ?),
+          ('eff-rw-grp', ?, ?, 'rwg:v1:purge-grp', 1, 'prepared', ?, NULL, 1, 1, 1000000, 1790900030000, 'publication_unavailable', ?, ?)
+      `).run(
+        stopped.id, ROOM_WORK_PUBLISH_EFFECT_KIND,
+        JSON.stringify({
+          attempt_id: "att-1", digest: "a".repeat(64), review_page_digest: null,
+          review_page_index: null, review_page_total: null, revision: 1, room_id: stopped.room_id, source_message_id: "msg_1",
+        }),
+        nowIso, nowIso,
+        stopped.id, ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+        JSON.stringify({ inbox_item_id: "inbox-1", room_id: stopped.room_id, source_message_id: "msg_2" }),
+        nowIso, nowIso,
+      );
+      // 1. An unrelated prepared bounded_mcp_effect MUST still block purge and roll back room-work retirement.
+      seedBoundedMcpEffectRow(db, {
+        id: "eff-mcp-block",
+        agent_id: stopped.id,
+        room_id: stopped.room_id,
+        execution_generation_id: "gen-1",
+        provider_turn_id: "turn-1",
+        mcp_request_id: "req-1",
+        tool_name: "send_message",
+        request: {},
+        mutation: true,
+        state: "prepared",
+        created_at: nowIso,
+        updated_at: nowIso,
+      });
+    } finally { db.close(); }
+
+    await assert.rejects(() => store.preparePurge(1, {
+      operationId: "purge_rw_blocked_mcp", requestId: "purge_rw_blocked_mcp", agentId: stopped.id, daemonGeneration: 2,
+      externalRevokeRequired: false, workerSessionAttestation: "not_required", agentSessionId: null,
+    }), /blocker/);
+
+    const checkAfterMcpBlock = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal((checkAfterMcpBlock.prepare("SELECT state FROM effects WHERE id='eff-rw-pub'").get() as { state: string }).state, "prepared", "failed purge must roll back room-work retirement");
+      assert.equal((checkAfterMcpBlock.prepare("SELECT state FROM effects WHERE id='eff-rw-grp'").get() as { state: string }).state, "prepared");
+      // Remove unrelated MCP blocker, then seed an actively executing room-work upload.
+      checkAfterMcpBlock.prepare("DELETE FROM effects WHERE id='eff-mcp-block'").run();
+      checkAfterMcpBlock.prepare(`
+        INSERT INTO effects (
+          id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+          retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+        ) VALUES ('eff-rw-live', ?, ?, 'rw:v1:purge-live', 2, 'executing', ?, NULL, 1, 1, 1000000, NULL, NULL, '2026-10-02T00:00:00.000Z', '2026-10-02T00:00:00.000Z')
+      `).run(
+        stopped.id, ROOM_WORK_PUBLISH_EFFECT_KIND,
+        JSON.stringify({
+          attempt_id: "att-1", digest: "b".repeat(64), review_page_digest: null,
+          review_page_index: null, review_page_total: null, revision: 2, room_id: stopped.room_id, source_message_id: "msg_3",
+        }),
+      );
+    } finally { checkAfterMcpBlock.close(); }
+
+    // 2. An actively executing room-work effect MUST block purge and roll back prepared retirements.
+    await assert.rejects(() => store.preparePurge(1, {
+      operationId: "purge_rw_blocked_exec", requestId: "purge_rw_blocked_exec", agentId: stopped.id, daemonGeneration: 2,
+      externalRevokeRequired: false, workerSessionAttestation: "not_required", agentSessionId: null,
+    }), /blocker/);
+
+    const settleLive = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal((settleLive.prepare("SELECT state FROM effects WHERE id='eff-rw-pub'").get() as { state: string }).state, "prepared");
+      assert.equal((settleLive.prepare("SELECT state FROM effects WHERE id='eff-rw-live'").get() as { state: string }).state, "executing");
+      // Once the active execution settles back to prepared (e.g. failed upload retry), purge succeeds cleanly.
+      settleLive.prepare("UPDATE effects SET state='prepared', next_attempt_at_ms=1790900030000, last_error='publication_unavailable', updated_at='2026-10-02T00:00:05.000Z' WHERE id='eff-rw-live'").run();
+    } finally { settleLive.close(); }
+
+    const prepared = await store.preparePurge(1, {
+      operationId: "purge_rw_ok", requestId: "purge_rw_ok", agentId: stopped.id, daemonGeneration: 2,
+      externalRevokeRequired: false, workerSessionAttestation: "not_required", agentSessionId: null,
+    });
+    assert.equal(prepared.purge.phase, "local_commit");
+
+    const checkAfterPrepare = new DatabaseSync(env.databasePath);
+    try {
+      for (const id of ["eff-rw-pub", "eff-rw-grp", "eff-rw-live"]) {
+        const row = checkAfterPrepare.prepare("SELECT state, last_error FROM effects WHERE id=?").get(id) as { state: string; last_error: string };
+        assert.equal(row.state, "failed");
+        assert.equal(row.last_error, "agent_purged");
+      }
+    } finally { checkAfterPrepare.close(); }
+
+    const committed = await store.commitPurge(1, {
+      operationId: "purge_rw_ok", agentId: stopped.id, daemonGeneration: 2,
+    });
+    assert.equal(committed.purge.phase, "complete");
+    assert.equal(await store.getEntry(stopped.id), undefined);
+    const verifyDeleted = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal(Number((verifyDeleted.prepare("SELECT COUNT(*) AS n FROM effects WHERE agent_id=?").get(stopped.id) as { n: number }).n), 0);
+    } finally { verifyDeleted.close(); }
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
+});
+
+test("advancing a room move to active atomically retires prepared source-room room-work effects", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write([entry]);
+    await store.prepareRoomMove({
+      operation_id: "move_rw_1",
+      request_id: "move_rw_1",
+      agent_id: entry.id,
+      source_room_id: entry.room_id,
+      destination_room_id: "room_dest",
+      daemon_generation: 2,
+      work_attempt_id: null,
+      execution_generation_id: null,
+      agent_session_id: null,
+      activating_inbox_item_id: null,
+      provider_turn_id: null,
+      effect_id: null,
+      phase: "prepared",
+    });
+
+    const db = new DatabaseSync(env.databasePath);
+    try {
+      const nowIso = "2026-10-02T00:00:00.000Z";
+      db.prepare(`
+        INSERT INTO effects (
+          id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+          retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+        ) VALUES
+          ('eff-move-old-pub', ?, ?, 'rw:v1:move-old-pub', 1, 'prepared', ?, NULL, 1, 1, 1000000, 1790900030000, 'publication_unavailable', ?, ?),
+          ('eff-move-old-grp', ?, ?, 'rwg:v1:move-old-grp', 1, 'prepared', ?, NULL, 1, 1, 1000000, 1790900030000, 'publication_unavailable', ?, ?),
+          ('eff-move-new-pub', ?, ?, 'rw:v1:move-new-pub', 2, 'prepared', ?, NULL, 1, 0, 1000000, NULL, NULL, ?, ?)
+      `).run(
+        entry.id, ROOM_WORK_PUBLISH_EFFECT_KIND,
+        JSON.stringify({
+          attempt_id: "att-1", digest: "c".repeat(64), review_page_digest: null,
+          review_page_index: null, review_page_total: null, revision: 1, room_id: entry.room_id, source_message_id: "msg_1",
+        }),
+        nowIso, nowIso,
+        entry.id, ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
+        JSON.stringify({ inbox_item_id: "inbox-old", room_id: entry.room_id, source_message_id: "msg_2" }),
+        nowIso, nowIso,
+        entry.id, ROOM_WORK_PUBLISH_EFFECT_KIND,
+        JSON.stringify({
+          attempt_id: "att-2", digest: "d".repeat(64), review_page_digest: null,
+          review_page_index: null, review_page_total: null, revision: 1, room_id: "room_dest", source_message_id: "msg_9",
+        }),
+        nowIso, nowIso,
+      );
+    } finally { db.close(); }
+
+    const active = await store.advanceRoomMove({
+      operationId: "move_rw_1",
+      agentId: entry.id,
+      expectedDaemonGeneration: 2,
+      expectedExecutionGenerationId: null,
+      from: ["prepared"],
+      to: "active",
+      remoteRoomId: "room_dest",
+      destinationCursor: "msg_9",
+    });
+    assert.equal(active.phase, "active");
+
+    const check = new DatabaseSync(env.databasePath);
+    try {
+      for (const id of ["eff-move-old-pub", "eff-move-old-grp"]) {
+        const row = check.prepare("SELECT state, last_error FROM effects WHERE id=?").get(id) as { state: string; last_error: string };
+        assert.equal(row.state, "failed");
+        assert.equal(row.last_error, "room_moved");
+      }
+      assert.equal((check.prepare("SELECT state FROM effects WHERE id='eff-move-new-pub'").get() as { state: string }).state, "prepared");
+    } finally { check.close(); }
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
 });
