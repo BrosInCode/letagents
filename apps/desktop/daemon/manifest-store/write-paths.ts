@@ -7,6 +7,11 @@
  * A method name may be defined in only one module; store.ts throws on a duplicate.
  */
 import type { DatabaseSync } from "node:sqlite";
+import {
+  BOUNDED_MCP_EFFECT_KIND,
+  failPreparedJoinRoomEffectInTransaction,
+  rowToBoundedMcpEffect,
+} from "../effect-journal/index.js";
 import { pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
 import { type Row, type PreMembershipRoomMoveCancellation, ManifestConflictError, nullableString, storeMethods } from "./shared.js";
 import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
@@ -42,11 +47,6 @@ export const writePaths = storeMethods({
     const updateMove = database.prepare(`UPDATE agent_room_moves
       SET phase='failed',error=?,updated_at=?
       WHERE operation_id=? AND agent_id=? AND phase IN ('prepared','waiting_for_current_turn')`);
-    const updateEffect = database.prepare(`UPDATE effects
-      SET state='failed',error=?,updated_at=?
-      WHERE effect_id=? AND agent_id=? AND room_id=?
-        AND execution_generation_id=? AND provider_turn_id=?
-        AND tool_name='join_room' AND state='prepared'`);
     for (const row of moves) {
       const sourceRoomId = String(row.source_room_id);
       const workAttemptId = nullableString(row.work_attempt_id);
@@ -89,28 +89,28 @@ export const writePaths = storeMethods({
           throw new ManifestConflictError("Pre-membership room move is detached from its exact activating provider turn.");
         }
         const originExecutionGenerationId = String(authority.origin_execution_generation_id);
-        const effect = database.prepare(`SELECT agent_id,room_id,execution_generation_id,provider_turn_id,tool_name,state
-          FROM effects WHERE effect_id=?`).get(effectId) as Row | undefined;
+        const effectRow = database.prepare("SELECT * FROM effects WHERE id=? AND kind=?").get(effectId, BOUNDED_MCP_EFFECT_KIND) as Row | undefined;
+        const effect = effectRow ? rowToBoundedMcpEffect(effectRow) : null;
         if (!effect
-          || String(effect.agent_id) !== input.agentId
-          || String(effect.room_id) !== sourceRoomId
-          || String(effect.execution_generation_id) !== originExecutionGenerationId
-          || String(effect.provider_turn_id) !== providerTurnId
-          || String(effect.tool_name) !== "join_room"
-          || !["prepared", "failed"].includes(String(effect.state))) {
+          || effect.agent_id !== input.agentId
+          || effect.room_id !== sourceRoomId
+          || effect.execution_generation_id !== originExecutionGenerationId
+          || effect.provider_turn_id !== providerTurnId
+          || effect.tool_name !== "join_room"
+          || !["prepared", "failed"].includes(effect.state)) {
           throw new ManifestConflictError("Pre-membership room move is detached from its exact unresolved effect journal.");
         }
-        if (String(effect.state) === "prepared") {
-          const effectChanged = updateEffect.run(
-            input.detail,
-            timestamp,
+        if (effect.state === "prepared") {
+          const effectChanged = failPreparedJoinRoomEffectInTransaction(database, {
             effectId,
-            input.agentId,
-            sourceRoomId,
-            originExecutionGenerationId,
+            agentId: input.agentId,
+            roomId: sourceRoomId,
+            executionGenerationId: originExecutionGenerationId,
             providerTurnId,
-          );
-          if (Number(effectChanged.changes) !== 1) {
+            error: input.detail,
+            updatedAt: timestamp,
+          });
+          if (effectChanged !== 1) {
             throw new ManifestConflictError("Pre-membership room-move effect changed during lifecycle cancellation.");
           }
         }

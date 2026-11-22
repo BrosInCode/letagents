@@ -663,6 +663,9 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       if (input.requestId === "effect-disconnect") await disconnectedReadGate;
       if (input.requestId === "effect-handoff") await handoffReadGate;
       if (input.requestId === "effect-error") throw new Error("provider callback failed");
+      if (input.requestId === "effect-error-4xx") {
+        throw Object.assign(new Error("provider rejected request (400)"), { status: 400 });
+      }
       return {
         liveResult: { content: [{ type: "text", text: `live:${String(input.requestId)}` }] },
         durableResult: { content: [{ type: "text", text: `durable:${String(input.requestId)}` }] },
@@ -833,8 +836,10 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     assert.equal((inspector.result as { uncertain_effects: Array<{ effect_id: string }> }).uncertain_effects.length, 1);
     const effectInspection = new DatabaseSync(paths.manifestPath);
     try {
-      const rows = effectInspection.prepare(`SELECT execution_generation_id FROM effects
-        WHERE agent_id=? AND provider_turn_id=? AND mcp_request_id=?`).all(id, "cursor-turn-current", "effect-current") as Array<{ execution_generation_id: string }>;
+      const rows = effectInspection.prepare(`SELECT json_extract(payload, '$.execution_generation_id') AS execution_generation_id FROM effects
+        WHERE agent_id=? AND kind='bounded_mcp_effect'
+          AND json_extract(payload, '$.provider_turn_id')=?
+          AND json_extract(payload, '$.mcp_request_id')=?`).all(id, "cursor-turn-current", "effect-current") as Array<{ execution_generation_id: string }>;
       assert.equal(rows.length, 1);
       assert.equal(rows[0]?.execution_generation_id, providerTurnOriginGeneration);
     } finally { effectInspection.close(); }
@@ -917,12 +922,57 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     });
     assert.equal(failed.ok, false);
     assert.match(failed.error ?? "", /provider callback failed/);
-    const failedRetry = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
+    const uncertainCallbackRetry = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
       ...executeParams, mcp_request_id: "effect-error", tool_name: "post_status",
     });
-    assert.equal(failedRetry.ok, false);
-    assert.match(failedRetry.error ?? "", /provider callback failed/i);
+    assert.equal(uncertainCallbackRetry.ok, true, uncertainCallbackRetry.error);
+    assert.match(JSON.stringify(uncertainCallbackRetry.result), /SUPERVISED_EFFECT_OUTCOME_UNCERTAIN/);
+    assert.match(JSON.stringify(uncertainCallbackRetry.result), /provider callback failed/i);
     assert.equal(executedTools.filter((call) => call.requestId === "effect-error").length, 1);
+
+    const rejected4xx = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
+      ...executeParams, mcp_request_id: "effect-error-4xx", tool_name: "post_status",
+    });
+    assert.equal(rejected4xx.ok, false);
+    assert.match(rejected4xx.error ?? "", /provider rejected request \(400\)/);
+    const rejected4xxRetry = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
+      ...executeParams, mcp_request_id: "effect-error-4xx", tool_name: "post_status",
+    });
+    assert.equal(rejected4xxRetry.ok, false);
+    assert.match(rejected4xxRetry.error ?? "", /provider rejected request \(400\)/i);
+    assert.equal(executedTools.filter((call) => call.requestId === "effect-error-4xx").length, 1);
+
+    // Inspect unified `effects` rows directly to confirm EffectExecutor ownership, durable effectId
+    // propagation, per-row retryability, and fail-closed uncertain vs failed states.
+    const unifiedCheck = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    try {
+      const readByReq = (reqId: string) => unifiedCheck.prepare(`
+        SELECT id, kind, state, retryable, attempt_count, max_attempts
+        FROM effects
+        WHERE agent_id=? AND kind='bounded_mcp_effect' AND json_extract(payload, '$.mcp_request_id')=?
+      `).get(id, reqId) as { id: string; kind: string; state: string; retryable: number; attempt_count: number; max_attempts: number } | undefined;
+
+      const readRow = readByReq("effect-daemon-owned")!;
+      assert.equal(readRow.state, "completed");
+      assert.equal(readRow.retryable, 1);
+      assert.equal(readRow.attempt_count, 1);
+      assert.equal(readRow.max_attempts, 8);
+      assert.equal(exactCall.effectId, readRow.id, "cloud tool execution receives exact durable effects.id");
+
+      const ambiguousRow = readByReq("effect-error")!;
+      assert.equal(ambiguousRow.state, "uncertain");
+      assert.equal(ambiguousRow.retryable, 0);
+      assert.equal(ambiguousRow.attempt_count, 1);
+      assert.equal(ambiguousRow.max_attempts, 1);
+
+      const rejectedRow = readByReq("effect-error-4xx")!;
+      assert.equal(rejectedRow.state, "failed");
+      assert.equal(rejectedRow.retryable, 0);
+      assert.equal(rejectedRow.attempt_count, 1);
+      assert.equal(rejectedRow.max_attempts, 1);
+    } finally {
+      unifiedCheck.close();
+    }
 
     const disconnectedParams = {
       ...executeParams, mcp_request_id: "effect-disconnect", tool_name: "get_board",

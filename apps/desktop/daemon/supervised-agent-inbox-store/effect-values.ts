@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { rowToBoundedMcpEffect } from "../effect-journal/index.js";
 import type { SupervisedEffectRecord, Row } from "./types.js";
 
 export class EffectAuthorityError extends Error {}
@@ -31,15 +32,22 @@ export function truncateEffectError(error: string): string {
 }
 
 export function rowToEffect(row: Row): SupervisedEffectRecord {
+  const view = rowToBoundedMcpEffect(row);
   return {
-    effect_id: String(row.effect_id), agent_id: String(row.agent_id), room_id: String(row.room_id),
-    execution_generation_id: String(row.execution_generation_id), provider_turn_id: String(row.provider_turn_id),
-    mcp_request_id: String(row.mcp_request_id), tool_name: String(row.tool_name), request: JSON.parse(String(row.request_json)),
-    mutation: Number(row.mutation) === 1,
-    state: String(row.state) as SupervisedEffectRecord["state"],
-    result: row.result_json === null ? null : JSON.parse(String(row.result_json)),
-    error: row.error === null ? null : String(row.error),
-    created_at: String(row.created_at), updated_at: String(row.updated_at),
+    effect_id: view.effect_id,
+    agent_id: view.agent_id,
+    room_id: view.room_id,
+    execution_generation_id: view.execution_generation_id,
+    provider_turn_id: view.provider_turn_id,
+    mcp_request_id: view.mcp_request_id,
+    tool_name: view.tool_name,
+    request: view.request,
+    mutation: view.mutation,
+    state: view.state,
+    result: view.result,
+    error: view.error,
+    created_at: view.created_at,
+    updated_at: view.updated_at,
   };
 }
 

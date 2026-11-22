@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { hostGrantApiOrigin } from "./cloud-http.js";
+import { markExecutingBoundedMutationsUncertainInTransaction } from "./effect-journal/index.js";
 import { executionIdentity, nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import { processBirthState, type ProcessIdentity } from "./process-identity.js";
 import type { DatabaseSync } from "node:sqlite";
@@ -240,9 +241,12 @@ function settleStoppedRuntimeWork(database: DatabaseSync,
     WHERE agent_id=? AND observer_runtime_generation_id=?`)
     .run(record.agent_id, record.runtime_generation_id);
   // A process exit does not prove a mutating operation succeeded or failed.
-  database.prepare(`UPDATE effects SET state='uncertain',error=?,updated_at=?
-    WHERE agent_id=? AND execution_generation_id=? AND mutation=1 AND state='executing'`)
-    .run("The runtime was restarted before this action's result was confirmed. Check its result before repeating it.", at, record.agent_id, record.execution_generation_id);
+  markExecutingBoundedMutationsUncertainInTransaction(database, {
+    agentId: record.agent_id,
+    executionGenerationId: record.execution_generation_id,
+    error: "The runtime was restarted before this action's result was confirmed. Check its result before repeating it.",
+    updatedAt: at,
+  });
   database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
     ended_at_ms=MAX(created_at_ms,?) WHERE agent_id=? AND runtime_generation_id=?`)
     .run(Date.parse(at), record.agent_id, record.runtime_generation_id);
@@ -467,10 +471,13 @@ export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: Su
     ended_at_ms=MAX(created_at_ms,?) WHERE agent_id=? AND runtime_generation_id=? AND runtime_state<>'exited'`).run(Date.parse(at), turn.agent_id, runtimeId);
   database.prepare(`UPDATE runs SET state='lost',ended_at_ms=MAX(created_at_ms,?)
     WHERE agent_id=? AND runtime_generation_id=? AND state IN ('none','active')`).run(Date.parse(at), turn.agent_id, runtimeId);
-  database.prepare(`UPDATE effects SET state='uncertain',error=?,updated_at=?
-    WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND mutation=1 AND state='executing'`)
-    .run("The runtime was recovered before this action's result was confirmed. Check its result before repeating it.",
-      at, turn.agent_id, turn.origin_execution_generation_id, turn.provider_turn_id);
+  markExecutingBoundedMutationsUncertainInTransaction(database, {
+    agentId: turn.agent_id,
+    executionGenerationId: turn.origin_execution_generation_id,
+    providerTurnId: turn.provider_turn_id,
+    error: "The runtime was recovered before this action's result was confirmed. Check its result before repeating it.",
+    updatedAt: at,
+  });
   return runtimeId;
 }
 

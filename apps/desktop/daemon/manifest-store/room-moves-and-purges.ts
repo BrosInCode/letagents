@@ -6,6 +6,12 @@
  * A method name may be defined in only one module; store.ts throws on a duplicate.
  */
 import type { DatabaseSync } from "node:sqlite";
+import {
+  BOUNDED_MCP_EFFECT_KIND,
+  completePreparedEffectAtomicallyInTransaction,
+  failPreparedJoinRoomEffectInTransaction,
+  rowToBoundedMcpEffect,
+} from "../effect-journal/index.js";
 import { cancelInterruptedSupervisedTurn, pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
 import type { DaemonPurgePhase, DaemonPurgeRecord, DaemonPurgeWorkerSessionAttestation, DaemonRoomMovePhase, DaemonRoomMoveRecord } from "../types.js";
 import { type Row, roomMoveFromRow, purgeFromRow, ManifestConflictError, nullableString, json, parseJson, run, storeMethods } from "./shared.js";
@@ -108,7 +114,8 @@ export const roomMovesAndPurges = storeMethods({
               FROM inbox_items i
               JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
               WHERE i.inbox_item_id=?`).get(updated.activating_inbox_item_id) as Row | undefined;
-            const effectRow = database.prepare("SELECT * FROM effects WHERE effect_id=?").get(updated.effect_id) as Row | undefined;
+            const effectRow = database.prepare("SELECT * FROM effects WHERE id=? AND kind=?").get(updated.effect_id, BOUNDED_MCP_EFFECT_KIND) as Row | undefined;
+            const effectView = effectRow ? rowToBoundedMcpEffect(effectRow) : null;
             if (!authority
               || String(authority.inbox_agent_id) !== updated.agent_id
               || String(authority.inbox_room_id) !== updated.source_room_id
@@ -117,29 +124,42 @@ export const roomMovesAndPurges = storeMethods({
               || String(authority.binding_room_id) !== updated.source_room_id
               || String(authority.binding_work_attempt_id) !== updated.work_attempt_id
               || nullableString(authority.binding_provider_turn_id) !== updated.provider_turn_id
-              || !effectRow
-              || String(effectRow.agent_id) !== updated.agent_id
-              || String(effectRow.room_id) !== updated.source_room_id
-              || String(effectRow.execution_generation_id) !== String(authority.origin_execution_generation_id)
-              || nullableString(effectRow.provider_turn_id) !== updated.provider_turn_id
-              || String(effectRow.tool_name) !== "join_room"
-              || String(effectRow.state) !== "prepared") {
+              || !effectView
+              || effectView.agent_id !== updated.agent_id
+              || effectView.room_id !== updated.source_room_id
+              || effectView.execution_generation_id !== String(authority.origin_execution_generation_id)
+              || effectView.provider_turn_id !== updated.provider_turn_id
+              || effectView.tool_name !== "join_room"
+              || effectView.state !== "prepared") {
               throw new ManifestConflictError("Terminal room move lost its exact activating binding or prepared join-room effect.");
             }
-            const resultJson = input.to === "active"
-              ? json({
-                phase: "active",
-                moved: true,
-                old_room: updated.source_room_id,
-                destination_room: updated.remote_room_id ?? updated.destination_room_id,
-                destination_cursor: updated.destination_cursor,
-              })
-              : null;
-            const effectError = input.to === "failed"
-              ? (updated.error ?? "The room move failed before its effect journal was settled.").slice(0, 32_768)
-              : null;
-            run(database.prepare("UPDATE effects SET state=?,result_json=?,error=?,updated_at=? WHERE effect_id=? AND state='prepared'"),
-              input.to === "active" ? "completed" : "failed", resultJson, effectError, updatedAt, updated.effect_id);
+            if (input.to === "active") {
+              completePreparedEffectAtomicallyInTransaction(database, {
+                id: updated.effect_id,
+                outcomeJson: json({
+                  phase: "active",
+                  moved: true,
+                  old_room: updated.source_room_id,
+                  destination_room: updated.remote_room_id ?? updated.destination_room_id,
+                  destination_cursor: updated.destination_cursor,
+                }),
+                updatedAt,
+                minEpoch: updated.daemon_generation,
+              });
+            } else {
+              const changed = failPreparedJoinRoomEffectInTransaction(database, {
+                effectId: updated.effect_id,
+                agentId: updated.agent_id,
+                roomId: updated.source_room_id,
+                executionGenerationId: String(authority.origin_execution_generation_id),
+                providerTurnId: updated.provider_turn_id,
+                error: updated.error ?? "The room move failed before its effect journal was settled.",
+                updatedAt,
+              });
+              if (changed !== 1) {
+                throw new ManifestConflictError("Terminal room move lost its exact activating binding or prepared join-room effect.");
+              }
+            }
           }
           if (input.to === "active" || input.to === "failed") {
             // Reaching a terminal room-move phase releases the compensation rows
@@ -399,7 +419,7 @@ export const roomMovesAndPurges = storeMethods({
             throw new ManifestConflictError("Purge target attachment changed after preparation.");
           }
           for (const [table, column] of [
-            ["effects", "agent_id"], ["effect_journal", "agent_id"], ["effect_tombstones", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
+            ["effects", "agent_id"], ["effect_tombstones", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
             ["supervised_agent_ingress_cursors", "agent_id"], ["supervised_agent_history_boundaries", "agent_id"], ["supervised_agent_pruned_sources", "agent_id"],
             ["supervised_worker_mint_states", "agent_id"], ["supervised_worker_sessions", "agent_id"], ["inbox_items", "agent_id"], ["worker_binding_publications", "entry_id"],
             ["worker_generation_verifications", "entry_id"], ["worker_binding_watermarks", "entry_id"], ["worker_session_bindings", "entry_id"],

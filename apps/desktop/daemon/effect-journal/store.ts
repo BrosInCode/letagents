@@ -9,8 +9,14 @@
  */
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import {
+  BOUNDED_MCP_EFFECT_KIND,
+  boundedMcpEffectTurnHasActiveAuthority,
+  rowToBoundedMcpEffect,
+} from "./bounded-mcp.js";
 import { EFFECT_JOURNAL_TABLE, type EffectState } from "./schema.js";
 import {
+  EffectClaimRefusedError,
   EffectFenceError,
   EffectIdempotencyConflictError,
   EffectValidationError,
@@ -314,12 +320,13 @@ export function claimEffectForExecution(
     expectedEpoch?: number;
     nowMs: number;
     nowIso?: string;
+    authorizeClaim?: (database: DatabaseSync, effect: EffectRecord) => string | null;
   },
 ): EffectRecord {
   const daemonGeneration = assertPositiveEpoch(input.daemonGeneration, "daemonGeneration");
   if (input.expectedEpoch !== undefined) assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
   const nowIso = input.nowIso ?? new Date(input.nowMs).toISOString();
-  return withFencedEffectTransaction(database, assertWriteFence, () => {
+  const outcome = withFencedEffectTransaction(database, assertWriteFence, (): { claimed: EffectRecord | null; refusal: string | null } => {
     const row = database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row | undefined;
     if (!row) throw new EffectFenceError(`Unknown effect ${input.id}.`);
     const current = rowToEffectRecord(row);
@@ -342,6 +349,26 @@ export function claimEffectForExecution(
     if (current.next_attempt_at_ms !== null && current.next_attempt_at_ms > input.nowMs) {
       throw new EffectFenceError(`Effect ${input.id} is backed off until ${current.next_attempt_at_ms}.`);
     }
+    if (input.authorizeClaim) {
+      const refusal = input.authorizeClaim(database, current);
+      if (refusal !== null) {
+        const errorText = truncateEffectError(refusal);
+        const failed = database.prepare(`
+          UPDATE ${TABLE}
+          SET state = 'failed',
+              epoch = ?,
+              outcome = NULL,
+              last_error = ?,
+              next_attempt_at_ms = NULL,
+              updated_at = ?
+          WHERE id = ? AND state = 'prepared' AND epoch = ? AND attempt_count = ?
+        `).run(daemonGeneration, errorText, nowIso, input.id, current.epoch, current.attempt_count);
+        if (Number(failed.changes) !== 1) {
+          throw new EffectFenceError(`Effect ${input.id} lost its claim refusal compare-and-swap fence.`);
+        }
+        return { claimed: null, refusal: errorText };
+      }
+    }
     const result = database.prepare(`
       UPDATE ${TABLE}
       SET state = 'executing',
@@ -354,8 +381,15 @@ export function claimEffectForExecution(
     if (Number(result.changes) !== 1) {
       throw new EffectFenceError(`Effect ${input.id} lost its claim compare-and-swap fence.`);
     }
-    return rowToEffectRecord(database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row);
+    return {
+      claimed: rowToEffectRecord(database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row),
+      refusal: null,
+    };
   });
+  if (outcome.refusal !== null) {
+    throw new EffectClaimRefusedError(outcome.refusal);
+  }
+  return outcome.claimed!;
 }
 
 /** Settles an `executing` effect as `completed` under its exact `(epoch, attempt_count)` lease. */
@@ -674,6 +708,8 @@ export function recoverInterruptedEffectsOnStartup(
     const requeuedIds: string[] = [];
     const uncertainIds: string[] = [];
     const fencedFutureEpochIds: string[] = [];
+    const fencedOrphanPreparedIds: string[] = [];
+    const uncertainAgentIds = new Set<string>();
 
     // 1. Fence any non-terminal rows whose stored epoch exceeds the current
     //    daemon generation (for example after the generation file beside the DB
@@ -709,6 +745,7 @@ export function recoverInterruptedEffectsOnStartup(
           effect.id,
         );
         uncertainIds.push(effect.id);
+        uncertainAgentIds.add(effect.agent_id);
       } else if (effect.state === "prepared") {
         futureFailPreparedStmt.run(
           `Daemon started at generation ${daemonGeneration} below stored effect epoch ${effect.epoch}; refused execution before dispatch.`,
@@ -763,40 +800,104 @@ export function recoverInterruptedEffectsOnStartup(
           : "Daemon restarted while external effect was executing and maximum attempts were reached; outcome is uncertain.";
         uncertainStmt.run(daemonGeneration, message, nowIso, effect.id);
         uncertainIds.push(effect.id);
+        uncertainAgentIds.add(effect.agent_id);
       }
     }
 
-    // 3. Quarantine any already-attempted `prepared` retry rows whose current
-    //    handler policy is now non-retryable (for example after a policy tightening
-    //    across daemon upgrades) so they are never replayed automatically.
-    if (nonRetryableKinds.size > 0) {
-      const kindList = [...nonRetryableKinds];
-      const preparedRetries = database.prepare(`
-        SELECT * FROM ${TABLE}
-        WHERE state = 'prepared'
-          AND attempt_count >= 1
-          AND epoch <= ?
-          AND kind IN (${kindList.map(() => "?").join(", ")})
-        ORDER BY created_at, id
-      `).all(daemonGeneration, ...kindList) as Row[];
-      const quarantineStmt = database.prepare(`
+    // 3. Quarantine any already-attempted `prepared` retry rows whose policy is
+    //    non-retryable (either row-level `retryable = 0` or handler-level
+    //    `nonRetryableKinds`) so they are never replayed automatically.
+    const kindList = [...nonRetryableKinds];
+    const quarantinePredicate = kindList.length > 0
+      ? `(retryable = 0 OR kind IN (${kindList.map(() => "?").join(", ")}))`
+      : "retryable = 0";
+    const preparedRetries = database.prepare(`
+      SELECT * FROM ${TABLE}
+      WHERE state = 'prepared'
+        AND attempt_count >= 1
+        AND epoch <= ?
+        AND ${quarantinePredicate}
+      ORDER BY created_at, id
+    `).all(daemonGeneration, ...kindList) as Row[];
+    const quarantineStmt = database.prepare(`
+      UPDATE ${TABLE}
+      SET state = 'uncertain',
+          epoch = ?,
+          next_attempt_at_ms = NULL,
+          last_error = ?,
+          updated_at = ?
+      WHERE id = ? AND state = 'prepared' AND attempt_count >= 1
+    `);
+    for (const row of preparedRetries) {
+      const effect = rowToEffectRecord(row);
+      quarantineStmt.run(
+        daemonGeneration,
+        `Effect kind ${effect.kind} is now non-retryable (at-most-once); refusing replay after ${effect.attempt_count} prior attempt(s) and marking uncertain.`,
+        nowIso,
+        effect.id,
+      );
+      uncertainIds.push(effect.id);
+      uncertainAgentIds.add(effect.agent_id);
+    }
+
+    // 4. Orphan cleanup for on-demand bounded MCP `prepared` rows (separate from
+    //    background pump policy): a surviving, exactly authorized turn may keep
+    //    its prepared row until exact retry or turn settlement, whereas a
+    //    prepared row whose owning turn (or room move) already lost durable
+    //    authority is failed closed here so no unowned `prepared` row lingers.
+    //    Already-attempted mutations were quarantined to `uncertain` above and
+    //    are never failed here.
+    const hasTurnAuthorityTables = Boolean(
+      database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supervised_agent_provider_turn_bindings'").get(),
+    );
+    const preparedBounded = hasTurnAuthorityTables
+      ? database.prepare(`
+          SELECT * FROM ${TABLE}
+          WHERE state = 'prepared'
+            AND kind = ?
+            AND epoch <= ?
+          ORDER BY created_at, id
+        `).all(BOUNDED_MCP_EFFECT_KIND, daemonGeneration) as Row[]
+      : [];
+    if (preparedBounded.length > 0) {
+      const failOrphanStmt = database.prepare(`
         UPDATE ${TABLE}
-        SET state = 'uncertain',
+        SET state = 'failed',
             epoch = ?,
             next_attempt_at_ms = NULL,
             last_error = ?,
             updated_at = ?
-        WHERE id = ? AND state = 'prepared' AND attempt_count >= 1
+        WHERE id = ? AND state = 'prepared'
       `);
-      for (const row of preparedRetries) {
-        const effect = rowToEffectRecord(row);
-        quarantineStmt.run(
-          daemonGeneration,
-          `Effect kind ${effect.kind} is now non-retryable (at-most-once); refusing replay after ${effect.attempt_count} prior attempt(s) and marking uncertain.`,
-          nowIso,
-          effect.id,
-        );
-        uncertainIds.push(effect.id);
+      for (const row of preparedBounded) {
+        const decoded = rowToBoundedMcpEffect(row);
+        if (decoded.mutation && decoded.attempt_count >= 1) continue;
+        if (decoded.tool_name === "join_room") {
+          const activeMove = database.prepare(`
+            SELECT 1 FROM agent_room_moves
+            WHERE effect_id = ? AND agent_id = ? AND phase NOT IN ('active', 'failed')
+            LIMIT 1
+          `).get(decoded.effect_id, decoded.agent_id);
+          if (!activeMove) {
+            failOrphanStmt.run(
+              daemonGeneration,
+              "The room move owning this prepared join_room effect is no longer active.",
+              nowIso,
+              decoded.effect_id,
+            );
+            fencedOrphanPreparedIds.push(decoded.effect_id);
+          }
+          continue;
+        }
+        if (!boundedMcpEffectTurnHasActiveAuthority(database, decoded)) {
+          failOrphanStmt.run(
+            daemonGeneration,
+            "The supervised turn lost active authority before this prepared effect executed.",
+            nowIso,
+            decoded.effect_id,
+          );
+          fencedOrphanPreparedIds.push(decoded.effect_id);
+        }
       }
     }
 
@@ -815,6 +916,8 @@ export function recoverInterruptedEffectsOnStartup(
       requeuedIds,
       uncertainIds,
       fencedFutureEpochIds,
+      fencedOrphanPreparedIds,
+      uncertainAgentIds: [...uncertainAgentIds],
       preparedIds: preparedRows.map((row) => String(row.id)),
       allUncertainIds: allUncertainRows.map((row) => String(row.id)),
     };

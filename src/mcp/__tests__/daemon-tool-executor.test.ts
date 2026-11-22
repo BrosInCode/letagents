@@ -222,3 +222,79 @@ test("task mutations remain successful when the following presence update fails"
   assert.equal(requests[0].body.client_task_id, "due-dates");
   assert.equal(requests[0].body.source_message_id, "msg_121");
 });
+
+test("send_message and send_thread_message derive deterministic bounded-effect client_message_id from durable effectId and tag pre-dispatch rejections", async (t) => {
+  const sentBodies: Array<{ path: string; body: Record<string, unknown> }> = [];
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit = {}) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith("/presence")) {
+      return Response.json({ ok: true });
+    }
+    if ((init.method ?? "GET") === "GET" && parsed.pathname.includes("/messages/")) {
+      return Response.json({ id: "msg_10", thread_root_id: "msg_10" });
+    }
+    if (init.method === "POST" && parsed.pathname.endsWith("/messages")) {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      sentBodies.push({ path: parsed.pathname, body });
+      return Response.json({ id: `msg_${sentBodies.length + 100}`, text: body.text, client_message_id: body.client_message_id });
+    }
+    return Response.json({ error: "unexpected route" }, { status: 404 });
+  });
+
+  await executeDaemonTool({
+    provider: "cursor",
+    toolName: "send_message",
+    input: { text: "Cloud top-level reply", reply_to: "msg_10" },
+    requestId: "transient-mcp-req-1",
+    effectId: "durable-effect-uuid-1",
+    roomId: "focus_test",
+    apiUrl: "https://letagents.example",
+    bearer: "test-worker-bearer",
+    cwd: process.cwd(),
+    agentSession: session("focus_test", "send"),
+  });
+
+  await executeDaemonTool({
+    provider: "cursor",
+    toolName: "send_thread_message",
+    input: { text: "Cloud thread reply", thread_parent_id: "msg_10" },
+    requestId: "transient-mcp-req-2",
+    effectId: "durable-effect-uuid-2",
+    roomId: "focus_test",
+    apiUrl: "https://letagents.example",
+    bearer: "test-worker-bearer",
+    cwd: process.cwd(),
+    agentSession: session("focus_test", "send"),
+  });
+
+  assert.equal(sentBodies.length, 2);
+  assert.equal(sentBodies[0]!.body.client_message_id, "bounded-effect:durable-effect-uuid-1");
+  assert.equal(sentBodies[1]!.body.client_message_id, "bounded-effect:durable-effect-uuid-2");
+  for (const sent of sentBodies) {
+    const id = String(sent.body.client_message_id);
+    assert.equal(id.startsWith("internal:"), false);
+    assert.equal(id.startsWith("desktop-send:"), false);
+  }
+
+  // Pre-dispatch mismatch is tagged beforeExternalDispatch: true so mutations fail cleanly instead of going uncertain.
+  await assert.rejects(
+    () => executeDaemonTool({
+      provider: "cursor",
+      toolName: "send_message",
+      input: { text: "bad", reply_to: "msg_1", thread_parent_id: "msg_2" },
+      requestId: "transient-mcp-req-3",
+      effectId: "durable-effect-uuid-3",
+      roomId: "focus_test",
+      apiUrl: "https://letagents.example",
+      bearer: "test-worker-bearer",
+      cwd: process.cwd(),
+      agentSession: session("focus_test", "send"),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /reply_to and thread_parent_id must match/);
+      assert.equal((error as { beforeExternalDispatch?: unknown }).beforeExternalDispatch, true);
+      return true;
+    },
+  );
+});

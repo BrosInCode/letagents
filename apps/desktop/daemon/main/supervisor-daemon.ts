@@ -6,6 +6,7 @@
 import { localRoomRuntime } from "../local-room-runtime.js";
 import { stopBackgroundCommand } from "../background-command-stop.js";
 import { BoundedEffectCoordinator } from "../bounded-effect-coordinator.js";
+import { getEffect } from "../effect-journal/index.js";
 import { productionSupervisedDeliveryHttp, productionSupervisorGrantHttp, type SupervisorGrantHttp } from "../cloud-http.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "../control-request-router.js";
@@ -113,6 +114,8 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       journal: {
         prepare: (input, fence) => this.supervisedInbox.prepareEffect(input, fence),
         markExecuting: (input, fence) => this.supervisedInbox.markEffectExecuting(input, fence),
+        authorizeClaimInTransaction: (database, effectRecord, input) =>
+          this.supervisedInbox.authorizeBoundedEffectClaimInTransaction(database, effectRecord, input),
         complete: (input, fence) => this.supervisedInbox.completeEffect(input, fence),
       },
       roomMoves: {
@@ -132,6 +135,11 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       replyAttachments: {
         snapshot: (input) => this.replyAttachmentSpool.snapshot(input),
         keepOnly: (inboxItemId, spoolIds) => this.replyAttachmentSpool.keepOnly(inboxItemId, spoolIds),
+      },
+      executor: () => this.effectExecutor,
+      getEffect: (effectId) => {
+        const database = this.stateDatabase?.connection;
+        return database && database.isOpen ? getEffect(database, effectId) : null;
       },
     });
     this.hostApprovals = createHostApprovalBridge({

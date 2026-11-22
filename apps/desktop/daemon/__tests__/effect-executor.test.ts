@@ -203,21 +203,21 @@ test("effect journal enforces plain wire payloads, canonical idempotency, atomic
     }), EffectValidationError);
 
     // 4. SQLite immutability and transition triggers block tampering directly at the DB layer.
-    assert.throws(() => env.db.prepare("UPDATE effect_journal SET payload='{}' WHERE id=?").run(first.effect.id), /invalid/i);
-    assert.throws(() => env.db.prepare("UPDATE effect_journal SET idempotency_key='tampered' WHERE id=?").run(first.effect.id), /invalid/i);
-    assert.throws(() => env.db.prepare("UPDATE effect_journal SET state='completed' WHERE id=?").run(first.effect.id), /invalid/i);
-    assert.throws(() => env.db.prepare("UPDATE effect_journal SET state='uncertain', last_error='never ran' WHERE id=?").run(first.effect.id), /invalid/i);
-    assert.throws(() => env.db.prepare("UPDATE effect_journal SET next_attempt_at_ms=999 WHERE id=?").run(first.effect.id), /invalid/i);
+    assert.throws(() => env.db.prepare("UPDATE effects SET payload='{}' WHERE id=?").run(first.effect.id), /invalid/i);
+    assert.throws(() => env.db.prepare("UPDATE effects SET idempotency_key='tampered' WHERE id=?").run(first.effect.id), /invalid/i);
+    assert.throws(() => env.db.prepare("UPDATE effects SET state='completed' WHERE id=?").run(first.effect.id), /invalid/i);
+    assert.throws(() => env.db.prepare("UPDATE effects SET state='uncertain', last_error='never ran' WHERE id=?").run(first.effect.id), /invalid/i);
+    assert.throws(() => env.db.prepare("UPDATE effects SET next_attempt_at_ms=999 WHERE id=?").run(first.effect.id), /invalid/i);
     const claimed = claimEffectForExecution(env.db, () => {}, { id: first.effect.id, daemonGeneration: 2, nowMs: 1_000 });
-    assert.throws(() => env.db.prepare("UPDATE effect_journal SET epoch=1 WHERE id=?").run(claimed.id), /invalid/i);
+    assert.throws(() => env.db.prepare("UPDATE effects SET epoch=1 WHERE id=?").run(claimed.id), /invalid/i);
     // Non-retryable row cannot transition executing -> prepared at either store or SQLite trigger level.
     assert.throws(() => rescheduleEffectForRetry(env.db, () => {}, {
       id: claimed.id, expectedEpoch: 2, expectedAttemptCount: 1, nextAttemptAtMs: 5_000, error: "no retry",
     }), EffectFenceError);
-    assert.throws(() => env.db.prepare("UPDATE effect_journal SET state='prepared', next_attempt_at_ms=5000 WHERE id=?").run(claimed.id), /invalid/i);
+    assert.throws(() => env.db.prepare("UPDATE effects SET state='prepared', next_attempt_at_ms=5000 WHERE id=?").run(claimed.id), /invalid/i);
     completeEffect(env.db, () => {}, { id: claimed.id, expectedEpoch: 2, expectedAttemptCount: 1, outcome: { ok: true } });
     // Terminal immutability: completed row cannot be mutated even to failed.
-    assert.throws(() => env.db.prepare("UPDATE effect_journal SET state='failed', last_error='nope' WHERE id=?").run(claimed.id), /invalid/i);
+    assert.throws(() => env.db.prepare("UPDATE effects SET state='failed', last_error='nope' WHERE id=?").run(claimed.id), /invalid/i);
 
     // Uncertain rows can never transition back to prepared for automatic replay.
     const uncertainPrep = prepareEffect(env.db, () => {}, {
@@ -225,7 +225,7 @@ test("effect journal enforces plain wire payloads, canonical idempotency, atomic
     }).effect;
     claimEffectForExecution(env.db, () => {}, { id: uncertainPrep.id, daemonGeneration: 2, nowMs: 1_000 });
     markEffectUncertain(env.db, () => {}, { id: uncertainPrep.id, expectedEpoch: 2, expectedAttemptCount: 1, error: "unknown" });
-    assert.throws(() => env.db.prepare("UPDATE effect_journal SET state='prepared', next_attempt_at_ms=5000 WHERE id=?").run(uncertainPrep.id), /invalid/i);
+    assert.throws(() => env.db.prepare("UPDATE effects SET state='prepared', next_attempt_at_ms=5000 WHERE id=?").run(uncertainPrep.id), /invalid/i);
   } finally {
     await env.cleanup();
   }
@@ -1190,6 +1190,179 @@ test("startup recovery fences higher-epoch rows fail-closed without bricking Sup
     }
   } finally {
     await daemon?.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("on-demand (autoPump: false) prepared rows cause zero background pump work while auto-pumped kinds execute", async () => {
+  const env = await tempEnv("letagents-effect-autopump-false-");
+  try {
+    let onDemandCalls = 0;
+    let autoCalls = 0;
+    const executor = new EffectExecutor({
+      getDatabase: () => env.db,
+      currentDaemonGeneration: () => 1,
+      assertCurrent: async () => {},
+      assertWriteFence: () => {},
+      isClosing: () => false,
+      nowMs: () => 10_000,
+    });
+    executor.registerHandler("on_demand_kind", {
+      retryable: true,
+      autoPump: false,
+      defaultMaxAttempts: 4,
+      execute: async () => {
+        onDemandCalls += 1;
+        return { status: "completed", outcome: { ran: true } };
+      },
+    });
+    executor.registerHandler("auto_kind", {
+      retryable: true,
+      autoPump: true,
+      execute: async () => {
+        autoCalls += 1;
+        return { status: "completed", outcome: { auto: true } };
+      },
+    });
+
+    const onDemand = await executor.enqueue({
+      agent_id: "agent_1",
+      kind: "on_demand_kind",
+      idempotency_key: "od-1",
+      payload: { op: "wait_for_caller" },
+    });
+    const autoEffect = await executor.enqueue({
+      agent_id: "agent_1",
+      kind: "auto_kind",
+      idempotency_key: "auto-1",
+      payload: { op: "pump_me" },
+    });
+
+    await executor.recoverOnStartup();
+    await executor.pumpNow();
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(autoCalls, 1, "auto-pumped kind executes immediately");
+    assert.equal(getEffect(env.db, autoEffect.effect.id)?.state, "completed");
+    assert.equal(onDemandCalls, 0, "autoPump: false kind must never be dispatched by recoverOnStartup or pumpNow");
+    assert.equal(getEffect(env.db, onDemand.effect.id)?.state, "prepared");
+    assert.equal(getEffect(env.db, onDemand.effect.id)?.attempt_count, 0);
+
+    // Direct on-demand invocation executes the prepared row cleanly.
+    const ran = await executor.runEffect(onDemand.effect.id);
+    assert.equal(onDemandCalls, 1);
+    assert.equal(ran.state, "completed");
+    assert.equal(ran.attempt_count, 1);
+    await executor.fenceAndDrain();
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("startup recovery preserves surviving-turn prepared bounded MCP effects, fails orphaned prepared rows, and keeps attempted mutations uncertain", async () => {
+  const env = await tempEnv("letagents-effect-orphan-cleanup-");
+  const { seedBoundedMcpEffectRow } = await import("./helpers/bounded-effect-seed.js");
+  try {
+    const now = "2026-11-22T01:00:00.000Z";
+    // Seed surviving active agent + running turn + binding.
+    env.db.prepare(`
+      INSERT INTO agents (
+        agent_id, sort_order, version, created_by, created_at, display_name, room_id, provider,
+        charter, config_revision, runtime_configuration_revision, desired_state, observed_state,
+        work_attempt_id, provider_work_attempt_id, provider_continuation_id,
+        provider_execution_generation_id, condition, last_turn_control_sequence
+      ) VALUES
+        ('agent_alive', 0, 1, 'owner', ?, 'Alive', 'room_1', 'codex', 'c', 1, 1, 'running', 'working', 'wa_1', 'wa_1', 'cont_1', 'gen_1', 'none', 0),
+        ('agent_dead',  1, 1, 'owner', ?, 'Dead',  'room_1', 'codex', 'c', 1, 1, 'stopped', 'stopped', NULL,   NULL,   NULL,     NULL,    'none', 0)
+    `).run(now, now);
+    env.db.prepare(`
+      INSERT INTO inbox_items (
+        inbox_item_id, agent_id, room_id, source_message_id, source_message_json, activation_json,
+        fifo_sequence, state, attempt_count, action_id, reply_client_message_id, provider_turn_id,
+        created_at, updated_at
+      ) VALUES
+        ('inbox_alive', 'agent_alive', 'room_1', 'msg_1', '{}', '{}', 1, 'awaiting_result', 1, 'act_1', 'rep_1', 'turn_alive', ?, ?),
+        ('inbox_dead',  'agent_dead',  'room_1', 'msg_2', '{}', '{}', 1, 'acknowledged',    1, 'act_2', 'rep_2', 'turn_dead',  ?, ?)
+    `).run(now, now, now, now);
+    env.db.prepare(`
+      INSERT INTO supervised_agent_provider_turn_bindings (
+        inbox_item_id, agent_id, room_id, work_attempt_id, origin_execution_generation_id,
+        provider_continuation_id, provider_turn_id
+      ) VALUES
+        ('inbox_alive', 'agent_alive', 'room_1', 'wa_1', 'gen_1', 'cont_1', 'turn_alive'),
+        ('inbox_dead',  'agent_dead',  'room_1', 'wa_2', 'gen_2', 'cont_2', 'turn_dead')
+    `).run();
+
+    // Active room move keeps its prepared join_room effect; terminal room move orphans its prepared join_room effect.
+    env.db.prepare(`
+      INSERT INTO agent_room_moves (
+        operation_id, request_id, agent_id, source_room_id, destination_room_id, daemon_generation,
+        effect_id, phase, created_at, updated_at
+      ) VALUES
+        ('move_active', 'req_m1', 'agent_alive', 'room_1', 'room_2', 1, 'eff_join_alive', 'prepared', ?, ?),
+        ('move_done',   'req_m2', 'agent_dead',  'room_1', 'room_2', 1, 'eff_join_dead',  'failed',   ?, ?)
+    `).run(now, now, now, now);
+
+    // 1. Prepared bounded MCP row on surviving active turn -> MUST stay `prepared`.
+    seedBoundedMcpEffectRow(env.db, {
+      id: "eff_alive_prepared", agent_id: "agent_alive", room_id: "room_1",
+      execution_generation_id: "gen_1", provider_turn_id: "turn_alive", mcp_request_id: "r1",
+      tool_name: "send_message", request: { text: "hi" }, mutation: true, state: "prepared", created_at: now,
+    });
+    // 2. Prepared bounded MCP row on dead/completed turn -> MUST fail closed (`failed`).
+    seedBoundedMcpEffectRow(env.db, {
+      id: "eff_dead_prepared", agent_id: "agent_dead", room_id: "room_1",
+      execution_generation_id: "gen_2", provider_turn_id: "turn_dead", mcp_request_id: "r2",
+      tool_name: "send_message", request: { text: "orphan" }, mutation: true, state: "prepared", created_at: now,
+    });
+    // 3. Executing mutation on dead turn -> MUST become `uncertain` (never `failed`!).
+    seedBoundedMcpEffectRow(env.db, {
+      id: "eff_dead_executing_mutation", agent_id: "agent_dead", room_id: "room_1",
+      execution_generation_id: "gen_2", provider_turn_id: "turn_dead", mcp_request_id: "r3",
+      tool_name: "send_message", request: { text: "maybe sent" }, mutation: true, state: "executing", created_at: now,
+    });
+    // 4. Executing read on surviving turn -> requeues to `prepared` and STAYS `prepared`.
+    seedBoundedMcpEffectRow(env.db, {
+      id: "eff_alive_executing_read", agent_id: "agent_alive", room_id: "room_1",
+      execution_generation_id: "gen_1", provider_turn_id: "turn_alive", mcp_request_id: "r4",
+      tool_name: "get_board", request: {}, mutation: false, state: "executing", created_at: now,
+    });
+    // 5. Executing read on dead turn -> requeues to `prepared`, then orphan cleanup fails it to `failed`.
+    seedBoundedMcpEffectRow(env.db, {
+      id: "eff_dead_executing_read", agent_id: "agent_dead", room_id: "room_1",
+      execution_generation_id: "gen_2", provider_turn_id: "turn_dead", mcp_request_id: "r5",
+      tool_name: "get_board", request: {}, mutation: false, state: "executing", created_at: now,
+    });
+    // 6. Active & orphaned prepared join_room effects.
+    seedBoundedMcpEffectRow(env.db, {
+      id: "eff_join_alive", agent_id: "agent_alive", room_id: "room_1",
+      execution_generation_id: "gen_1", provider_turn_id: "turn_alive", mcp_request_id: "r6",
+      tool_name: "join_room", request: { name: "room_2" }, mutation: true, state: "prepared", created_at: now,
+    });
+    seedBoundedMcpEffectRow(env.db, {
+      id: "eff_join_dead", agent_id: "agent_dead", room_id: "room_1",
+      execution_generation_id: "gen_2", provider_turn_id: "turn_dead", mcp_request_id: "r7",
+      tool_name: "join_room", request: { name: "room_2" }, mutation: true, state: "prepared", created_at: now,
+    });
+
+    const report = recoverInterruptedEffectsOnStartup(env.db, () => {}, {
+      daemonGeneration: 2,
+      nowMs: 20_000,
+      nowIso: now,
+    });
+    assert.equal(getEffect(env.db, "eff_alive_prepared")?.state, "prepared", "surviving active turn keeps prepared effect");
+    assert.equal(getEffect(env.db, "eff_alive_executing_read")?.state, "prepared", "surviving active turn requeues read effect");
+    assert.equal(getEffect(env.db, "eff_join_alive")?.state, "prepared", "active room move keeps prepared join_room");
+    assert.equal(getEffect(env.db, "eff_dead_prepared")?.state, "failed", "dead turn prepared effect fails closed");
+    assert.equal(getEffect(env.db, "eff_dead_executing_read")?.state, "failed", "dead turn interrupted read fails closed");
+    assert.equal(getEffect(env.db, "eff_join_dead")?.state, "failed", "orphaned join_room fails closed");
+    assert.equal(getEffect(env.db, "eff_dead_executing_mutation")?.state, "uncertain", "attempted mutation on dead turn stays uncertain");
+    assert.deepEqual(report.uncertainAgentIds, ["agent_dead"]);
+    assert.deepEqual(
+      report.fencedOrphanPreparedIds.sort(),
+      ["eff_dead_executing_read", "eff_dead_prepared", "eff_join_dead"],
+    );
+  } finally {
     await env.cleanup();
   }
 });

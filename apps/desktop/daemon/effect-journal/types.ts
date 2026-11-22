@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite";
 import { assertPlainWireValue, canonicalizeJson } from "#daemon-contract/index.js";
 import type { EffectState } from "./schema.js";
 
@@ -19,6 +20,10 @@ export class EffectIdempotencyConflictError extends Error {
 
 export class EffectFenceError extends Error {
   override readonly name = "EffectFenceError";
+}
+
+export class EffectClaimRefusedError extends Error {
+  override readonly name = "EffectClaimRefusedError";
 }
 
 export type EffectRecord = {
@@ -60,6 +65,8 @@ export type EffectStartupRecoveryReport = {
   requeuedIds: string[];
   uncertainIds: string[];
   fencedFutureEpochIds: string[];
+  fencedOrphanPreparedIds: string[];
+  uncertainAgentIds: string[];
   preparedIds: string[];
   allUncertainIds: string[];
 };
@@ -104,8 +111,22 @@ export type EffectHandler = {
    * executions and unexpected throws settle to `uncertain` instead of replaying.
    */
   retryable: boolean;
+  /**
+   * Whether the background pump should automatically claim and execute `prepared`
+   * rows of this kind (default `true`). Set `false` for on-demand kinds (such as
+   * `bounded_mcp_effect`) that must only execute when driven by an active caller
+   * via `runEffect(effectId)` and must cause zero pump work while `prepared`.
+   */
+  autoPump?: boolean;
   /** Default attempt cap when `retryable: true` (defaults to 3; must be 1 when `retryable: false`). */
   defaultMaxAttempts?: number;
+  /**
+   * Optional domain authority guard evaluated inside `claimEffectForExecution`'s
+   * `BEGIN IMMEDIATE` transaction right before transitioning `prepared -> executing`.
+   * Returning a non-null refusal message atomically transitions the `prepared`
+   * row to `failed` and aborts execution with `EffectClaimRefusedError`.
+   */
+  authorizeClaim?: (database: DatabaseSync, effect: EffectRecord) => string | null;
   /**
    * Execute the external side effect once the row is durably claimed as `executing`.
    *
@@ -115,6 +136,16 @@ export type EffectHandler = {
    * recovery rather than settling it to `uncertain` or `failed`.
    */
   execute: (effect: EffectRecord, context: EffectExecutionContext) => Promise<EffectExecutionResult>;
+  /**
+   * Optional settlement wrapper invoked after `execute` returns, allowing domain
+   * coordinators to preserve custom result-size bounds, history pruning, or
+   * checkpoint test seams while still settling the claimed row atomically.
+   */
+  settle?: (
+    claimed: EffectRecord,
+    result: EffectExecutionResult,
+    defaultSettle: () => EffectRecord,
+  ) => Promise<EffectRecord>;
   /**
    * Optional read-only verifier for `uncertain` rows (for example querying a remote
    * endpoint by `idempotency_key` after a crash between external commit and receipt

@@ -1,5 +1,9 @@
-import { createHash } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import {
+  BOUNDED_MCP_EFFECT_KIND,
+  rowToBoundedMcpEffect,
+  settleBoundedEffectsForTerminalTurnInTransaction,
+} from "./effect-journal/index.js";
 import { PENDING_PEER_REPORT_SQL, settleQueuedPeers } from "./queued-peer-deliveries.js";
 
 type Row = Record<string, unknown>;
@@ -217,12 +221,13 @@ export function settleSupervisedTerminalItem(
     FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?`)
     .get(item.inboxItemId) as Row | undefined;
   if (!binding) return;
-  run(database.prepare(`UPDATE effects
-    SET state='failed',error='The provider turn settled before this effect completed.',updated_at=?
-    WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
-      AND (state='prepared' OR (state='executing' AND mutation=0))
-      AND tool_name<>'join_room'`),
-  timestamp, item.agentId, String(binding.origin_execution_generation_id), item.providerTurnId);
+  settleBoundedEffectsForTerminalTurnInTransaction(database, {
+    agentId: item.agentId,
+    executionGenerationId: String(binding.origin_execution_generation_id),
+    providerTurnId: item.providerTurnId,
+    error: "The provider turn settled before this effect completed.",
+    updatedAt: timestamp,
+  });
   settleCapturedExecutionAttempts(database, item.agentId, { inboxItemId: item.inboxItemId });
 }
 
@@ -239,27 +244,28 @@ export function pruneSupervisedAgentHistory(
   protectedUncertainEffectId: string | null = null,
 ): void {
   const compactableUncertain = database.prepare(`SELECT * FROM effects
-    WHERE agent_id=? AND state='uncertain' AND effect_id NOT IN (
-      SELECT effect_id FROM effects
-      WHERE agent_id=? AND state='uncertain'
-      ORDER BY CASE WHEN effect_id=? THEN 0 ELSE 1 END,updated_at DESC,effect_id DESC LIMIT ?
-    ) ORDER BY updated_at,effect_id`).all(
-    agentId, agentId, protectedUncertainEffectId, RETAINED_UNCERTAIN_EFFECTS_PER_AGENT,
+    WHERE agent_id=? AND kind=? AND state='uncertain' AND id NOT IN (
+      SELECT id FROM effects
+      WHERE agent_id=? AND kind=? AND state='uncertain'
+      ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END,updated_at DESC,id DESC LIMIT ?
+    ) ORDER BY updated_at,id`).all(
+    agentId, BOUNDED_MCP_EFFECT_KIND, agentId, BOUNDED_MCP_EFFECT_KIND,
+    protectedUncertainEffectId, RETAINED_UNCERTAIN_EFFECTS_PER_AGENT,
   ) as Row[];
   const insertTombstone = database.prepare(`INSERT INTO effect_tombstones
     (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
      tool_name,request_sha256,request_bytes,mutation,state,result_json,error,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-  const deleteCompactedEffect = database.prepare("DELETE FROM effects WHERE effect_id=? AND state='uncertain'");
-  for (const effect of compactableUncertain) {
-    const requestJson = String(effect.request_json);
+  const deleteCompactedEffect = database.prepare("DELETE FROM effects WHERE id=? AND state='uncertain'");
+  for (const row of compactableUncertain) {
+    const effect = rowToBoundedMcpEffect(row);
     run(insertTombstone,
-      String(effect.effect_id), String(effect.agent_id), String(effect.room_id),
-      String(effect.execution_generation_id), String(effect.provider_turn_id), String(effect.mcp_request_id),
-      String(effect.tool_name), createHash("sha256").update(requestJson).digest("hex"),
-      Buffer.byteLength(requestJson, "utf8"), Number(effect.mutation), "uncertain", null,
-      effect.error === null ? null : String(effect.error), String(effect.created_at), String(effect.updated_at));
-    run(deleteCompactedEffect, String(effect.effect_id));
+      effect.effect_id, effect.agent_id, effect.room_id,
+      effect.execution_generation_id, effect.provider_turn_id, effect.mcp_request_id,
+      effect.tool_name, effect.request_sha256,
+      effect.request_bytes, effect.mutation ? 1 : 0, "uncertain", null,
+      effect.error, effect.created_at, effect.updated_at);
+    run(deleteCompactedEffect, effect.effect_id);
   }
   // A tombstone remains replay/late-completion authority only while its exact
   // provider-turn binding exists. Its cardinality is transitively bounded:
@@ -307,9 +313,10 @@ export function pruneSupervisedAgentHistory(
       )
       AND NOT EXISTS (
         SELECT 1 FROM effects e
-        WHERE e.agent_id=i.agent_id AND e.provider_turn_id=i.provider_turn_id
+        WHERE e.agent_id=i.agent_id AND e.kind='bounded_mcp_effect'
+          AND json_extract(e.payload,'$.provider_turn_id')=i.provider_turn_id
           AND (b.origin_execution_generation_id IS NULL
-            OR e.execution_generation_id=b.origin_execution_generation_id)
+            OR json_extract(e.payload,'$.execution_generation_id')=b.origin_execution_generation_id)
           AND e.state IN ('prepared','executing')
       )
       -- A room-move cancellation is compensating state, not disposable
@@ -325,7 +332,9 @@ export function pruneSupervisedAgentHistory(
       )
     ORDER BY i.fifo_sequence DESC LIMIT -1 OFFSET ?`).all(agentId, retainedUnpinnedReceipts) as Row[];
   const deleteEffects = database.prepare(`DELETE FROM effects
-    WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+    WHERE agent_id=? AND kind='bounded_mcp_effect'
+      AND json_extract(payload,'$.execution_generation_id')=?
+      AND json_extract(payload,'$.provider_turn_id')=?
       AND state IN ('uncertain','completed','failed')`);
   const deleteEffectTombstones = database.prepare(`DELETE FROM effect_tombstones
     WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?`);
@@ -421,8 +430,9 @@ export function compactSupervisedTerminalHistory(database: DatabaseSync, agentId
         AND a.turn_control_inbox_item_id=i.inbox_item_id
         AND a.turn_control_status NOT IN ('completed','failed'))
       AND NOT EXISTS (SELECT 1 FROM effects e WHERE e.agent_id=i.agent_id
-        AND e.provider_turn_id=i.provider_turn_id
-        AND (b.origin_execution_generation_id IS NULL OR e.execution_generation_id=b.origin_execution_generation_id)
+        AND e.kind='bounded_mcp_effect'
+        AND json_extract(e.payload,'$.provider_turn_id')=i.provider_turn_id
+        AND (b.origin_execution_generation_id IS NULL OR json_extract(e.payload,'$.execution_generation_id')=b.origin_execution_generation_id)
         AND e.state IN ('prepared','executing'))
       AND NOT EXISTS (SELECT 1 FROM provider_continuation_repairs r WHERE r.inbox_item_id=i.inbox_item_id
         AND r.phase NOT IN ('committed','failed'))`).all(agentId) as Row[];

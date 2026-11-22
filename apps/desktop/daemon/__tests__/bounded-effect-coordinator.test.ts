@@ -512,6 +512,7 @@ test("execute classifies before preparation, revalidates authority, executes, th
     toolName: "read_messages",
     input: { limit: 1 },
     requestId: "request-a",
+    effectId: "effect-a",
     roomId: "room-a",
     apiUrl: "https://letagents.test",
     bearer: "bearer-a",
@@ -572,6 +573,7 @@ test("execution failure attempts admitted journal settlement but preserves the o
     effect_id: "effect-a",
     result: undefined,
     error: "external execution failed",
+    uncertain: true,
     expected: {
       agent_id: "agent-a",
       work_attempt_id: "attempt-a",
@@ -935,4 +937,59 @@ test("a room tool call that was prepared before its owner saved Read-only is not
   assert.equal(allowed.events.includes("runtime:execute"), true);
   const unchanged = harness();
   assert.equal((await unchanged.subject.execute(executeInput(roomToolCall("update_task")))).state, "completed");
+});
+
+test("fail-closed mutation error classification settles ambiguous/5xx/network/unmarked throws as uncertain and proven pre-dispatch/4xx rejections as failed", async () => {
+  const uncertainErrors: unknown[] = [
+    new Error("socket hang up"),
+    Object.assign(new Error("HTTP 502 Bad Gateway"), { status: 502 }),
+    Object.assign(new Error("HTTP 500 Internal Server Error"), { status: 500 }),
+    Object.assign(new Error("Request timed out"), { code: "ETIMEDOUT" }),
+  ];
+  for (const thrown of uncertainErrors) {
+    const state = harness({
+      runtimeMutation: true,
+      execute: async () => { throw thrown; },
+    });
+    await assert.rejects(state.subject.execute(executeInput()), (error) => error === thrown);
+    assert.equal(state.capturedCompletion?.uncertain, true, `expected uncertain for ${String(thrown)}`);
+  }
+
+  const definiteFailureErrors: unknown[] = [
+    Object.assign(new Error("Validation failed"), { name: "ZodError" }),
+    Object.assign(new Error("HTTP 400 Bad Request"), { status: 400 }),
+    Object.assign(new Error("HTTP 403 Forbidden"), { status: 403 }),
+    Object.assign(new Error("HTTP 409 Conflict"), { status: 409 }),
+    Object.assign(new Error("reply_to and thread_parent_id must match"), { beforeExternalDispatch: true }),
+  ];
+  for (const thrown of definiteFailureErrors) {
+    const state = harness({
+      runtimeMutation: true,
+      execute: async () => { throw thrown; },
+    });
+    await assert.rejects(state.subject.execute(executeInput()), (error) => error === thrown);
+    assert.equal(state.capturedCompletion?.uncertain, undefined, `expected definite failed (not uncertain) for ${String(thrown)}`);
+  }
+
+  // Read-only errors never mark uncertain.
+  const readError = new Error("HTTP 503 Service Unavailable");
+  const readState = harness({
+    runtimeMutation: false,
+    execute: async () => { throw readError; },
+  });
+  await assert.rejects(
+    readState.subject.execute(executeInput({ toolName: "read_messages", input: { limit: 1 } })),
+    (error) => error === readError,
+  );
+  assert.equal(readState.capturedCompletion?.uncertain, undefined);
+
+  // Durable effectId is passed in BOTH cloud and local execution paths.
+  const cloud = harness({ apiUrl: "https://letagents.test" });
+  await cloud.subject.execute(executeInput());
+  assert.equal(cloud.capturedExecution?.effectId, "effect-a");
+
+  const local = harness({ apiUrl: "letagents-local://rooms" });
+  await local.subject.execute(executeInput());
+  assert.equal(local.capturedExecution?.effectId, "effect-a");
+  assert.equal(local.capturedExecution?.requestId, "effect-a");
 });

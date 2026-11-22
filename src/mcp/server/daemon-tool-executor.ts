@@ -5,6 +5,7 @@ import { z, type ZodRawShape } from "zod";
 
 import { registerTools } from "./register-tools.js";
 import {
+  markPreDispatchError,
   runWithDaemonToolExecutionContext,
   type DaemonToolExecutionContext,
 } from "./runtime/daemon-tool-context.js";
@@ -60,30 +61,31 @@ function validateExecutionContext(input: ExecuteDaemonToolInput): ExecuteDaemonT
   const roomId = input.roomId.trim();
   const toolName = input.toolName.trim();
   const requestId = input.requestId.trim();
-  if (!SUPERVISED_PROVIDERS.has(provider)) throw new Error(`Unsupported supervised provider: ${input.provider}`);
+  const effectId = typeof input.effectId === "string" && input.effectId.trim() ? input.effectId.trim() : undefined;
+  if (!SUPERVISED_PROVIDERS.has(provider)) throw markPreDispatchError(new Error(`Unsupported supervised provider: ${input.provider}`));
   if (!roomId || roomId.length > 1_024 || /[\u0000-\u001f\u007f]/.test(roomId)) {
-    throw new Error("Daemon tool room authority is malformed.");
+    throw markPreDispatchError(new Error("Daemon tool room authority is malformed."));
   }
   if (input.agentSession.room_id !== roomId || input.agentSession.session_kind !== "worker"
     || input.agentSession.runtime.trim().toLowerCase() !== provider || input.agentSession.ended_at) {
-    throw new Error("Daemon tool worker session does not match its active room authority.");
+    throw markPreDispatchError(new Error("Daemon tool worker session does not match its active room authority."));
   }
-  if (!input.bearer.trim()) throw new Error("Daemon tool worker bearer is required.");
-  if (!isAbsolute(input.cwd)) throw new Error("Daemon tool workspace must be an absolute path.");
-  if (!toolName || !requestId) throw new Error("Daemon tool name and request id are required.");
+  if (!input.bearer.trim()) throw markPreDispatchError(new Error("Daemon tool worker bearer is required."));
+  if (!isAbsolute(input.cwd)) throw markPreDispatchError(new Error("Daemon tool workspace must be an absolute path."));
+  if (!toolName || !requestId) throw markPreDispatchError(new Error("Daemon tool name and request id are required."));
   let apiUrl: URL;
   try {
     apiUrl = new URL(input.apiUrl);
   } catch {
-    throw new Error("Daemon tool API URL is malformed.");
+    throw markPreDispatchError(new Error("Daemon tool API URL is malformed."));
   }
   const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
   if (apiUrl.username || apiUrl.password
     || (apiUrl.protocol !== "https:"
       && !(apiUrl.protocol === "http:" && loopbackHosts.has(apiUrl.hostname.toLowerCase())))) {
-    throw new Error("Daemon tool API URL must use HTTPS or an exact HTTP loopback host.");
+    throw markPreDispatchError(new Error("Daemon tool API URL must use HTTPS or an exact HTTP loopback host."));
   }
-  return { ...input, provider, roomId, toolName, requestId, apiUrl: apiUrl.origin };
+  return { ...input, provider, roomId, toolName, requestId, ...(effectId ? { effectId } : {}), apiUrl: apiUrl.origin };
 }
 
 /**
@@ -95,7 +97,7 @@ function validateExecutionContext(input: ExecuteDaemonToolInput): ExecuteDaemonT
 export async function executeDaemonTool(input: ExecuteDaemonToolInput): Promise<ExecuteDaemonToolResult> {
   const context = validateExecutionContext(input);
   const tool = handlersForProvider(context.provider, context.apiUrl).get(context.toolName);
-  if (!tool) throw new Error(`Unsupported supervised tool: ${context.toolName}`);
+  if (!tool) throw markPreDispatchError(new Error(`Unsupported supervised tool: ${context.toolName}`));
   const parsedInput = tool.inputSchema
     ? await z.object(tool.inputSchema).parseAsync(context.input)
     : context.input;
