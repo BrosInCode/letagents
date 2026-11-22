@@ -18,7 +18,8 @@ export function registerTaskVerdictTools(server: McpServer): void {
     {
       task_id: z.string().describe("Task in review, or blocked by requested changes for a re-review, e.g. 'task_1'."),
       verdict: z.enum(["approve", "request_changes", "comment"]).describe("GitHub review verdict."),
-      body: z.string().max(65_536).optional().describe("Review explanation. Empty or junk blocking verdicts are quarantined."),
+      // 64,512 = GitHub's 65,536 minus room for the server's signature line and marker.
+      body: z.string().max(64_512).optional().describe("Review explanation, at most 64,512 characters. Empty or junk blocking verdicts are quarantined."),
       expected_head_sha: z.string().regex(/^[0-9a-fA-F]{40}$/).describe("Exact 40-hex pull request head SHA that was reviewed."),
       idempotency_key: z.string().min(1).max(200).describe("Stable key for this logical verdict; reuse it only for an exact replay."),
       ...taskReviewIdentitySchema,

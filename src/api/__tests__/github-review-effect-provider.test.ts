@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createGitHubReviewProvider,
+  REVIEW_VERDICT_BODY_MAX_LENGTH,
   type GitHubReviewEffectRequest,
 } from "../workflow-effects/github-review-provider.js";
 
@@ -174,7 +175,24 @@ test("a nested marker in the agent's text cannot reassemble into a journal marke
   assert.equal(sent[0].match(/letagents-effect/g)?.length, 1);
 });
 
-test("a review that the signature would push over GitHub's size limit posts without it", async () => {
+test("agent text at the accepted limit, hidden padding included, always keeps the signature", async () => {
+  const { provider, sent } = capturingProvider();
+  const opening = "LGTM\n\n<!-- ";
+  const closing = " -->";
+  const padded = `${opening}${"x".repeat(REVIEW_VERDICT_BODY_MAX_LENGTH - opening.length - closing.length)}${closing}`;
+  assert.equal(padded.length, REVIEW_VERDICT_BODY_MAX_LENGTH);
+  await provider.create({ ...request, body: padded }, `lae_${"a".repeat(32)}`, {
+    // The longest signature the server can build: every part at its cap.
+    actor_label: `${"N".repeat(400)} | ${"O".repeat(400)}'s agent | Codex`,
+    task_id: "t".repeat(80),
+    room_id: `github.com/${"o".repeat(39)}/${"r".repeat(100)}/focus/${"f".repeat(120)}`,
+  });
+  assert.ok(sent[0].startsWith("<sub>Review by `"), "the signature is still the first line");
+  assert.ok(sent[0].includes(padded), "the agent's text is posted unchanged");
+  assert.ok(sent[0].length <= 65_536, `body is ${sent[0].length} characters`);
+});
+
+test("a row reserved under the older, larger cap posts without the signature when it would not fit", async () => {
   const { provider, sent } = capturingProvider();
   const marker = "<!-- letagents-effect:lae_correlation -->";
   const longBody = "x".repeat(65_536 - marker.length - 2);

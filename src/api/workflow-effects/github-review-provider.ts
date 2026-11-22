@@ -10,6 +10,12 @@ const ATTRIBUTION_NAME_MAX_LENGTH = 64;
 const ATTRIBUTION_TOOL_MAX_LENGTH = 32;
 /** GitHub refuses a review body longer than this. */
 const GITHUB_REVIEW_BODY_MAX_LENGTH = 65_536;
+/**
+ * The longest review text an agent may submit. The rest of GitHub's limit is
+ * kept for the signature line and the journal marker, so agent text (hidden
+ * padding included) can never push the signature out of a review.
+ */
+export const REVIEW_VERDICT_BODY_MAX_LENGTH = GITHUB_REVIEW_BODY_MAX_LENGTH - 1_024;
 
 export type GitHubReviewVerdict = "approve" | "request_changes" | "comment";
 
@@ -141,8 +147,10 @@ function joinBlocks(blocks: string[]): string {
 /**
  * Signature first, then the agent's text, then the journal marker. Markdown
  * only reaches forward, so an unclosed fence or comment at the end of the
- * agent's text cannot hide or restyle the signature. When the signature
- * would push the body over GitHub's limit, the review posts without it.
+ * agent's text cannot hide or restyle the signature. The route caps agent
+ * text at REVIEW_VERDICT_BODY_MAX_LENGTH so the signature always fits; only
+ * a row reserved under the older, larger cap can be too long, and that
+ * review posts without the signature instead of failing.
  */
 function reviewBody(body: string, signature: string | null, correlationKey: string): string {
   const visible = withoutReservedMarkers(body);

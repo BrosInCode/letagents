@@ -104,6 +104,15 @@ test("submit_review_verdict requires an exact 40-hex expected head SHA", () => {
   assert.equal(expectedHead.safeParse(undefined).success, false);
 });
 
+test("submit_review_verdict leaves room in GitHub's limit for the server's signature", () => {
+  const verdict = collectTaskToolRegistrations()
+    .find((registration) => registration.name === "submit_review_verdict");
+  assert.ok(verdict);
+  const body = verdict.schema.body as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(body.safeParse("x".repeat(64_512)).success, true);
+  assert.equal(body.safeParse("x".repeat(64_513)).success, false);
+});
+
 test("board task summaries bound workflow history and omit bulky artifact detail", () => {
   const artifacts = Array.from({ length: 12 }, (_, index) => ({
     provider: "github",
