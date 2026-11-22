@@ -1,4 +1,5 @@
 import { redactCredentialText } from "./credential-redaction.js";
+import type { ManifestTransitionCommit } from "./manifest-store.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import { advanceReconciliationState } from "./reconciler-state.js";
 import type {
@@ -20,6 +21,11 @@ export type ManifestTransitionPorts = {
       commitFence: CommitFence,
       roomMoveCancellation?: { agentId: string; detail: string },
     ): Promise<{ generation: number; entry: DaemonManifestEntry }>;
+    commitTransition(
+      expectedGeneration: number,
+      input: ManifestTransitionCommit,
+      commitFence: CommitFence,
+    ): Promise<{ generation: number }>;
   };
   authority: {
     currentManifestGeneration(): number;
@@ -116,7 +122,7 @@ export class ManifestTransitionCoordinator {
     commitFence?: CommitFence,
   ): Promise<void> {
     await this.ports.authority.assertCurrent();
-    const entry = await this.ports.store.getEntry(entryId);
+    const entry = await this.ports.store.getEntry(entryId, "summary");
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
     const safeCause = redactCredentialText(cause).value;
     const safeActor = redactCredentialText(actor).value;
@@ -159,18 +165,17 @@ export class ManifestTransitionCoordinator {
     const readyReachedAt = entry.provider === "cursor"
       ? resolveReadyReachedAt({ ...entry, observed_state: to, condition }, false, new Date().toISOString())
       : null;
-    const updated: DaemonManifestEntry = {
-      ...entry,
-      observed_state: to,
-      condition,
-      last_error: lastError,
-      ...(readyReachedAt ? { ready_reached_at: readyReachedAt } : {}),
-      reconciliation: nextReconciliation,
-      reconciliation_notices: notices.slice(-32),
-    };
-    const next = await this.ports.store.replaceEntry(
+    const next = await this.ports.store.commitTransition(
       this.ports.authority.currentManifestGeneration(),
-      updated,
+      {
+        agentId: entryId,
+        observedState: to,
+        condition,
+        lastError,
+        ...(readyReachedAt ? { readyReachedAt } : {}),
+        reconciliation: nextReconciliation,
+        reconciliationNotices: notices.slice(-32),
+      },
       commitFence ?? this.ports.authority.fenceCommit,
     );
     this.ports.authority.acceptManifestGeneration(next.generation);

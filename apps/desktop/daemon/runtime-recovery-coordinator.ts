@@ -126,16 +126,14 @@ export class RuntimeRecoveryCoordinator {
 
   async recoverTurnControls(): Promise<void> {
     await this.authority.serializeManifest(async () => {
-      const manifest = await this.store.load();
+      const { agentIds } = await this.store.listUnresolvedTurnControlRecovery();
+      if (agentIds.length === 0) return;
       const recoveredAt = new Date().toISOString();
-      let changed = false;
-      const entries: DaemonManifestEntry[] = [];
-      for (const entry of manifest.entries) {
-        const control = entry.turn_control;
-        if (!control || control.status === "completed") {
-          entries.push(entry);
-          continue;
-        }
+      const updatedEntries: DaemonManifestEntry[] = [];
+      for (const agentId of agentIds) {
+        const entry = await this.store.getEntry(agentId, "full");
+        const control = entry?.turn_control;
+        if (!entry || !control || control.status === "completed") continue;
 
         let correctionText = control.correction_text?.trim() || null;
         let correctionStrategy = control.correction_strategy ?? null;
@@ -219,12 +217,8 @@ export class RuntimeRecoveryCoordinator {
           || correctionStrategy !== (control.correction_strategy ?? null)
           || nextError !== control.error
           || control.operator_resolution != null;
-        if (!controlChanged) {
-          entries.push(entry);
-          continue;
-        }
-        changed = true;
-        entries.push({
+        if (!controlChanged) continue;
+        updatedEntries.push({
           ...entry,
           reconciliation: exactLegacyCorrectionApplied || retireWithoutClaimingEffect
             ? rememberCompletedControlAction(
@@ -251,10 +245,10 @@ export class RuntimeRecoveryCoordinator {
           },
         });
       }
-      if (!changed) return;
-      const next = await this.store.write(
+      if (updatedEntries.length === 0) return;
+      const next = await this.store.replaceEntriesBatch(
         this.authority.currentManifestGeneration(),
-        entries,
+        updatedEntries,
         (commit) => this.authority.fenceCommit(commit),
       );
       this.authority.acceptManifestGeneration(next.generation);

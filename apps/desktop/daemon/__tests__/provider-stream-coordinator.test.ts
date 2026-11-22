@@ -1385,17 +1385,19 @@ test("the native heartbeat reads its entry without activity events when the mani
     }) as unknown as typeof setInterval,
   });
   await harness.coordinator.install("agent-1", handle, "generation-2");
+  assert.equal(fullReads, 0, "install reads only scalar entry fields when getScalarEntry is offered");
+  assert.equal(scalarReads.length, 3, "prepareInstallation and post-onExit verification use getScalarEntry");
+  scalarReads.length = 0;
   harness.runtimeCustody.installLiveBinding("agent-1", {
     agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
   });
-  const readsAfterInstall = fullReads;
   heartbeat!();
   await harness.coordinator.drainCallbacks();
   heartbeat!();
   await harness.coordinator.drainCallbacks();
   assert.equal(activityCalls, 2, "the heartbeat still announces liveness from the scalar read");
   assert.deepEqual(scalarReads, ["agent-1", "agent-1"]);
-  assert.equal(fullReads, readsAfterInstall, "no heartbeat reads the full entry");
+  assert.equal(fullReads, 0, "neither install nor heartbeat reads the full entry");
   await harness.coordinator.disposeAll();
 });
 
@@ -2348,4 +2350,83 @@ test("stopping waits for stream callbacks no longer than its deadline, then goes
   await flush();
   assert.match(String(failure), /activity storage fault/);
   await failed;
+});
+
+test("install, typed activation, resume staging, wait restoration, and cursor checkpoint use scalar entry reads", async () => {
+  let fullReads = 0;
+  let scalarReads = 0;
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => "ready",
+    onGetEntry: () => { fullReads += 1; },
+    getScalarEntry: async (current) => { scalarReads += 1; return { ...current, activity: [] }; },
+    durabilityAttempt: {
+      execution_generations: [
+        {
+          execution_generation_id: "generation-1",
+          work_attempt_id: "attempt-1",
+          started_at: "2026-08-26T00:00:00.000Z",
+          actor: "daemon-provider",
+          generation: 1,
+          terminal: {
+            ended_at: "2026-08-26T00:00:01.000Z",
+            exit_code: 0,
+            signal: null,
+            stdio_archive_ref: null,
+            stdio_tail: "",
+            terminal_cause: "stopped",
+            actor: "daemon-provider",
+            generation: 1,
+            provider_continuation_id: "continuation-1",
+          },
+        },
+        {
+          execution_generation_id: "generation-2",
+          work_attempt_id: "attempt-1",
+          started_at: "2026-08-26T00:00:02.000Z",
+          actor: "daemon-provider",
+          generation: 2,
+          terminal: null,
+        },
+      ],
+      checkpoints: [],
+    },
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(fullReads, 0, "typed install and promotion never read full activity");
+  assert.ok(scalarReads >= 5, "prepareInstallation, install, and typedInstallationCanActivate all use getScalarEntry");
+
+  const pollingEntry: DaemonManifestEntry = { ...entry(), delivery_mode: "mcp_polling" };
+  harness.setManifest(pollingEntry);
+  const priorBinding: WorkerSessionBinding = {
+    entry_id: "agent-1",
+    room_id: "room-1",
+    work_attempt_id: "attempt-1",
+    execution_generation_id: "generation-1",
+    agent_session_id: "session-1",
+    credential_ref: "bearer-1",
+    api_url: "https://letagents.test",
+    room_cursor: "5",
+    last_sequence: 7,
+    last_observed_at_ms: 1_777_000_000_000,
+    updated_at: "2026-08-26T00:00:00.000Z",
+  };
+  const beforeStaging = scalarReads;
+  await harness.coordinator.stageWorkerBindingAfterResume(pollingEntry, priorBinding, "generation-2", handle);
+  assert.equal(scalarReads, beforeStaging + 1);
+  assert.equal(fullReads, 0, "stageWorkerBindingAfterResume reads only scalar entry fields");
+
+  const restored = await harness.coordinator.restoreWorkerBindingFromWait("agent-1", {
+    agentSessionId: "wrong-session",
+    roomCursor: "8",
+  });
+  assert.equal(restored, false);
+  assert.equal(scalarReads, beforeStaging + 2);
+  assert.equal(fullReads, 0, "restoreWorkerBindingFromWait reads only scalar entry fields");
+
+  await harness.coordinator.checkpointObservedWaitCursor(pollingEntry, "8", "session-1");
+  assert.equal(scalarReads, beforeStaging + 3);
+  assert.equal(fullReads, 0, "checkpointObservedWaitCursor reads only scalar entry fields");
+  await harness.coordinator.disposeAll();
 });

@@ -510,7 +510,7 @@ export class ProviderStreamCoordinator {
         ));
       });
       if (!this.adoptLeaseDisposer(lease, disposeExit)) return;
-      const currentEntry = await this.options.manifest.getEntry(entryId);
+      const currentEntry = await this.readScalarEntry(entryId);
       if (!this.isCurrentInstallation(installation)) return;
       if (!currentEntry || !this.entryMatchesInstallation(currentEntry, installation)) {
         throw new Error("Provider installation changed while attaching its operational prerequisites.");
@@ -721,7 +721,7 @@ export class ProviderStreamCoordinator {
     installation: ProviderInstallationToken,
   ): Promise<boolean> {
     if (!this.isCurrentInstallation(installation)) return false;
-    const entry = await this.options.manifest.getEntry(installation.entryId);
+    const entry = await this.readScalarEntry(installation.entryId);
     return Boolean(entry
       && this.entryMatchesInstallation(entry, installation)
       && entry.desired_state === "running"
@@ -976,7 +976,7 @@ export class ProviderStreamCoordinator {
       || configurationRevision! < 1) {
       throw new Error("Provider installation requires an exact durable provider birth.");
     }
-    const first = await this.options.manifest.getEntry(entryId);
+    const first = await this.readScalarEntry(entryId);
     if (!first || !this.entryMatchesBirth(first, handle, executionGenerationId, connection)) {
       throw new Error("Provider installation no longer matches its durable provider birth.");
     }
@@ -992,7 +992,7 @@ export class ProviderStreamCoordinator {
     if (!authorityMode && !idleCursor) {
       throw new Error("Provider installation has no frozen lifecycle authority.");
     }
-    const second = await this.options.manifest.getEntry(entryId);
+    const second = await this.readScalarEntry(entryId);
     if (!second || !this.entryMatchesBirth(second, handle, executionGenerationId, connection)) {
       throw new Error("Provider installation changed while verifying frozen lifecycle authority.");
     }
@@ -1126,7 +1126,7 @@ export class ProviderStreamCoordinator {
       || attempt.execution_generations.filter((candidate) => candidate.terminal === null).length !== 1) {
       throw new Error("Worker binding successor is not the single live execution generation.");
     }
-    const current = await this.options.manifest.getEntry(entry.id);
+    const current = await this.readScalarEntry(entry.id);
     if (!current || !this.acceptsLegacyWaitAuthority(current)
       || current.room_id !== entry.room_id
       || current.work_attempt_id !== ref.work_attempt_id
@@ -1148,7 +1148,7 @@ export class ProviderStreamCoordinator {
     entryId: string,
     evidence: SupervisedWaitEvidence,
   ): Promise<boolean> {
-    const entry = await this.options.manifest.getEntry(entryId);
+    const entry = await this.readScalarEntry(entryId);
     if (!entry || !this.acceptsLegacyWaitAuthority(entry)) return false;
     const pending = this.options.runtimeCustody.pendingResumeBinding(entryId);
     if (!pending || evidence.agentSessionId !== pending.agentSessionId) return false;
@@ -1672,7 +1672,7 @@ export class ProviderStreamCoordinator {
     await this.options.serializeEntry(entry.id, () => this.serializeCursorCheckpoint(entry.id, async () => {
       const executionGenerationId = entry.provider_ref?.execution_generation_id;
       if (!entry.work_attempt_id || !executionGenerationId) return;
-      const currentEntry = await this.options.manifest.getEntry(entry.id);
+      const currentEntry = await this.readScalarEntry(entry.id);
       if (!currentEntry
         || !this.acceptsLegacyWaitAuthority(currentEntry)
         || currentEntry.room_id !== entry.room_id
