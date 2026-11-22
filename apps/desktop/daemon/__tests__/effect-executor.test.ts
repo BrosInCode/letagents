@@ -1357,6 +1357,11 @@ test("startup recovery preserves surviving-turn prepared bounded MCP effects, fa
     assert.equal(getEffect(env.db, "eff_dead_executing_read")?.state, "failed", "dead turn interrupted read fails closed");
     assert.equal(getEffect(env.db, "eff_join_dead")?.state, "failed", "orphaned join_room fails closed");
     assert.equal(getEffect(env.db, "eff_dead_executing_mutation")?.state, "uncertain", "attempted mutation on dead turn stays uncertain");
+    assert.match(
+      String(getEffect(env.db, "eff_dead_executing_mutation")?.last_error ?? ""),
+      /may have completed; verify external state before repeating it/i,
+      "interrupted bounded MCP mutation preserves actionable verify-before-repeating guidance",
+    );
     assert.deepEqual(report.uncertainAgentIds, ["agent_dead"]);
     assert.deepEqual(
       report.fencedOrphanPreparedIds.sort(),

@@ -27,10 +27,12 @@ import { normalizeSchemaSql } from "../daemon-state-database/shared.js";
 import {
   BOUNDED_MCP_EFFECT_KIND,
   BOUNDED_MCP_MAX_READ_ATTEMPTS,
+  boundedMcpEffectIdempotencyKey,
   getEffect,
   rowToBoundedMcpEffect,
 } from "../effect-journal/index.js";
 import { SupervisorDaemon } from "../main.js";
+import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { cloneStateDatabaseForCompaction, prepareStateRecoveryBackup } from "../state-recovery-backup.js";
 import { withProtectedStateUpgrade } from "../state-recovery-key.js";
 import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
@@ -490,6 +492,195 @@ test("older v1/v2 backup gates refuse v3 and current v3 binary refuses future v4
     await assert.rejects(() => DaemonStateDatabase.open(futurePath), /Unsupported daemon state schema version/i);
     assert.deepEqual(await readFile(futurePath), futureBytes);
     assert.equal((await stat(futurePath)).mtimeMs, futureMtime);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("v2 -> v3 preserves tied-timestamp rowid order for GIF and attachment-clear receipts and migrates 128-deep legacy requests safely", async () => {
+  const env = await tempDir("letagents-v2-to-v3-edge-rows-");
+  const dbPath = join(env.root, "edge-v2.sqlite");
+  try {
+    const seed = new DatabaseSync(dbPath);
+    const tiedAt = "2026-08-14T12:00:00.000Z";
+    let deepRequestJson = "";
+    let deepSha256 = "";
+    try {
+      seed.exec(`PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID};`);
+      seed.exec("BEGIN IMMEDIATE");
+      applySchemaV1(seed);
+      runNumberedMigrations(seed, 1, 2, DAEMON_STATE_MIGRATIONS);
+      seed.exec(`PRAGMA user_version = ${toSqliteUserVersion(2)};`);
+
+      seed.prepare(`
+        INSERT INTO agents (
+          agent_id, sort_order, version, created_by, created_at, display_name,
+          room_id, provider, charter, desired_state, observed_state,
+          work_attempt_id, provider_work_attempt_id, provider_continuation_id,
+          condition
+        ) VALUES ('agent-edge', 1, 1, 'owner', ?, 'Edge',
+                  'room-edge', 'codex', 'test', 'running', 'working',
+                  'attempt-edge', 'attempt-edge', 'cont-edge', 'none')
+      `).run(tiedAt);
+      seed.prepare(`
+        INSERT INTO inbox_items (
+          inbox_item_id, agent_id, room_id, source_message_id, source_message_json,
+          activation_json, state, fifo_sequence, attempt_count, action_id,
+          reply_client_message_id, provider_turn_id, created_at, updated_at
+        ) VALUES ('inbox-edge', 'agent-edge', 'room-edge', 'msg-edge', '{"id":"msg-edge"}',
+                  '{}', 'awaiting_result', 1, 1, 'act-edge', 'reply-edge', 'turn-edge', ?, ?)
+      `).run(tiedAt, tiedAt);
+      seed.prepare(`
+        INSERT INTO supervised_agent_provider_turn_bindings (
+          inbox_item_id, agent_id, room_id, work_attempt_id,
+          origin_execution_generation_id, provider_turn_id, provider_continuation_id
+        ) VALUES ('inbox-edge', 'agent-edge', 'room-edge', 'attempt-edge',
+                  'gen-edge', 'turn-edge', 'cont-edge')
+      `).run();
+
+      const insertLegacy = seed.prepare(`
+        INSERT INTO effects (
+          effect_id, agent_id, room_id, execution_generation_id, provider_turn_id,
+          mcp_request_id, tool_name, request_json, mutation, state, result_json,
+          error, created_at, updated_at
+        ) VALUES (?, 'agent-edge', 'room-edge', 'gen-edge', 'turn-edge', ?, ?, ?, 1, 'completed', ?, NULL, ?, ?)
+      `);
+
+      // Tied-timestamp GIF receipts: earlier insertion has LARGER UUID (`fff...001`, FIRST),
+      // later insertion has SMALLER UUID (`000...002`, LAST). `replyGif` must keep LAST.
+      insertLegacy.run(
+        "ffffff00-0000-0000-0000-000000000001",
+        "req-gif-1",
+        "set_reply_gif",
+        JSON.stringify({
+          gif: {
+            provider: "giphy",
+            id: "gifFirst01",
+            title: "FIRST",
+            text_fallback_only: true,
+          },
+        }),
+        JSON.stringify({ structuredContent: { code: "REPLY_GIF_RECORDED" } }),
+        tiedAt,
+        tiedAt,
+      );
+      insertLegacy.run(
+        "00000000-0000-0000-0000-000000000002",
+        "req-gif-2",
+        "set_reply_gif",
+        JSON.stringify({
+          gif: {
+            provider: "giphy",
+            id: "gifLast02",
+            title: "LAST",
+            text_fallback_only: true,
+          },
+        }),
+        JSON.stringify({ structuredContent: { code: "REPLY_GIF_RECORDED" } }),
+        tiedAt,
+        tiedAt,
+      );
+
+      // Tied-timestamp attachment receipts: earlier insertion sets files (`fff...011`),
+      // later insertion clears files (`000...012`, `files: null`). `replyAttachments` must keep `[]`.
+      insertLegacy.run(
+        "ffffff00-0000-0000-0000-000000000011",
+        "req-att-1",
+        "set_reply_attachments",
+        JSON.stringify({
+          files: [{
+            spool_id: "spool-1",
+            name: "report.txt",
+            mime_type: "text/plain",
+            bytes: 12,
+            sha256: "a".repeat(64),
+          }],
+        }),
+        JSON.stringify({ structuredContent: { code: "REPLY_ATTACHMENTS_RECORDED" } }),
+        tiedAt,
+        tiedAt,
+      );
+      insertLegacy.run(
+        "00000000-0000-0000-0000-000000000012",
+        "req-att-2",
+        "set_reply_attachments",
+        JSON.stringify({ files: null }),
+        JSON.stringify({ structuredContent: { code: "REPLY_ATTACHMENTS_RECORDED" } }),
+        tiedAt,
+        tiedAt,
+      );
+
+      // Deeply nested legacy JSON (128 levels deep, ~770 bytes) previously accepted by legacy `effects`.
+      let nested: unknown = "leaf";
+      for (let i = 0; i < 128; i += 1) nested = { a: nested };
+      deepRequestJson = JSON.stringify(nested);
+      assert.ok(Buffer.byteLength(deepRequestJson, "utf8") < 1024);
+      deepSha256 = createHash("sha256").update(deepRequestJson).digest("hex");
+      insertLegacy.run(
+        "deep-legacy-effect-id",
+        "req-deep-128",
+        "send_message",
+        deepRequestJson,
+        JSON.stringify({ delivered: true }),
+        tiedAt,
+        tiedAt,
+      );
+
+      seed.exec("COMMIT");
+    } finally {
+      seed.close();
+    }
+
+    // Upgrade v2 -> v3 MUST succeed without failing on the 128-deep legacy row.
+    const opened = await DaemonStateDatabase.open(dbPath);
+    const inbox = new SupervisedAgentInboxStore(dbPath);
+    inbox.attachDatabase(opened.connection);
+    try {
+      assert.equal(Number(opened.connection.prepare("PRAGMA user_version").get()?.user_version), DAEMON_STATE_USER_VERSION);
+      validateDaemonStateShape(opened.connection);
+
+      // Tied-timestamp GIF & attachment-clear selection preserved exact insertion rowid order.
+      const gif = await inbox.replyGif("inbox-edge");
+      assert.equal(gif?.id, "gifLast02", "later inserted GIF receipt must win tied-timestamp selection");
+      assert.equal(gif?.title, "LAST");
+
+      const attachments = await inbox.replyAttachments("inbox-edge");
+      assert.deepEqual(attachments, [], "later inserted attachment clear must win tied-timestamp selection");
+
+      // Deeply nested legacy row preserved exact id, idempotency_key, request_sha256, bytes, and outcome.
+      const deepRow = opened.connection.prepare("SELECT * FROM effects WHERE id='deep-legacy-effect-id'").get() as Record<string, unknown>;
+      assert.ok(deepRow);
+      assert.equal(
+        String(deepRow.idempotency_key),
+        boundedMcpEffectIdempotencyKey("gen-edge", "turn-edge", "req-deep-128"),
+      );
+      const decodedDeep = rowToBoundedMcpEffect(deepRow);
+      assert.equal(decodedDeep.state, "completed");
+      assert.equal(decodedDeep.request_sha256, deepSha256);
+      assert.equal(decodedDeep.request_bytes, Buffer.byteLength(deepRequestJson, "utf8"));
+      assert.deepEqual(decodedDeep.result, { delivered: true });
+
+      // Attempting to reuse `req-deep-128` with a different request is refused by exact sha256 match.
+      await assert.rejects(
+        () => inbox.prepareEffect({
+          agent_id: "agent-edge",
+          room_id: "room-edge",
+          execution_generation_id: "gen-edge",
+          current_execution_generation_id: "gen-edge",
+          provider_turn_id: "turn-edge",
+          work_attempt_id: "attempt-edge",
+          provider_continuation_id: "cont-edge",
+          mcp_request_id: "req-deep-128",
+          tool_name: "send_message",
+          request: { text: "different payload" },
+          mutation: true,
+        }),
+        /reused for a different effect/i,
+      );
+    } finally {
+      await inbox.close();
+      opened.close();
+    }
   } finally {
     await env.cleanup();
   }

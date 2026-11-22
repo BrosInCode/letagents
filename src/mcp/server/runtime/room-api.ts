@@ -7,6 +7,7 @@ import {
   apiCall,
   isMissingRouteError,
 } from "./api.js";
+import { markPreDispatchError } from "./daemon-tool-context.js";
 import { maybeHandleRepoRoomAuthRequired } from "./device-auth.js";
 import { getLastMessageId } from "./messages.js";
 import { getCurrentRoom, getCurrentSupervisedRoomAuthority } from "./room-state.js";
@@ -29,7 +30,7 @@ export async function roomScopedApiCall<T>(input: {
   const supervised = hasSupervisedWorkerAuthority();
   const exactRoomAuthority = supervised ? getCurrentSupervisedRoomAuthority() : null;
   if (supervised && (!exactRoomAuthority || input.room_id !== exactRoomAuthority)) {
-    throw new Error("The daemon-supervised API request is missing its exact per-call room authority.");
+    throw markPreDispatchError(new Error("The daemon-supervised API request is missing its exact per-call room authority."));
   }
   const headers = {
     ...(input.options?.headers as Record<string, string> | undefined),
@@ -68,7 +69,7 @@ export async function roomScopedApiCall<T>(input: {
   }
 
   if (!input.project_id) {
-    throw new Error("No room is available for this request.");
+    throw markPreDispatchError(new Error("No room is available for this request."));
   }
 
   const result = await apiCall<T>(input.project_path(input.project_id), options);

@@ -202,6 +202,33 @@ type ActiveOnDemandExecution = {
   hasThrownError: boolean;
 };
 
+async function raceWithAbortSignal<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<{ aborted: true } | { aborted: false; value: T }> {
+  if (signal.aborted) {
+    void operation.catch(() => {});
+    return { aborted: true };
+  }
+  let onAbort: (() => void) | null = null;
+  const abortPromise = new Promise<{ aborted: true }>((resolve) => {
+    onAbort = () => resolve({ aborted: true });
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const result = await Promise.race([
+      operation.then((value) => ({ aborted: false as const, value })),
+      abortPromise,
+    ]);
+    if (result.aborted) {
+      void operation.catch(() => {});
+    }
+    return result;
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
 /** Whether an agent is a Codex agent whose saved access level is Read-only. */
 export function codexAgentIsReadOnly(entry: Pick<DaemonManifestEntry, "provider" | "permission_profile_id">): boolean {
   return entry.provider.trim().toLowerCase() === "codex" && entry.permission_profile_id?.trim() === "read_only";
@@ -272,13 +299,19 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
         }
         return null;
       },
-      execute: async (claimed) => {
+      execute: async (claimed, ctx) => {
         const invocation = this.activeOnDemand.get(claimed.id);
         if (!invocation) {
           return {
             status: "failed",
             error: "The supervised bounded MCP effect lost its active on-demand caller before execution.",
           };
+        }
+        if (ctx.signal.aborted) {
+          const error = new Error("The daemon shut down before the supervised tool began executing.");
+          invocation.thrownError = error;
+          invocation.hasThrownError = true;
+          return { status: "failed", error: error.message };
         }
         let context: BoundedEffectContext;
         try {
@@ -314,28 +347,61 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
           invocation.hasThrownError = true;
           return { status: "failed", error: error.message };
         }
+        if (ctx.signal.aborted) {
+          const error = new Error("The daemon shut down before the supervised tool began executing.");
+          invocation.thrownError = error;
+          invocation.hasThrownError = true;
+          return { status: "failed", error: error.message };
+        }
         try {
-          const executed = await invocation.runtime.executeDaemonTool({
-            provider: context.entry.provider,
-            toolName: invocation.input.toolName,
-            input: invocation.input.input,
-            requestId: isLocalRoomApi(context.agent.apiUrl) ? claimed.id : invocation.input.mcpRequestId,
-            effectId: claimed.id,
-            roomId: context.entry.room_id,
-            apiUrl: context.agent.apiUrl,
-            bearer: context.agent.bearer,
-            cwd: context.entry.workspace_path ?? "",
-            agentSession: session,
-          });
+          const raced = await raceWithAbortSignal(
+            invocation.runtime.executeDaemonTool({
+              provider: context.entry.provider,
+              toolName: invocation.input.toolName,
+              input: invocation.input.input,
+              requestId: isLocalRoomApi(context.agent.apiUrl) ? claimed.id : invocation.input.mcpRequestId,
+              effectId: claimed.id,
+              signal: ctx.signal,
+              roomId: context.entry.room_id,
+              apiUrl: context.agent.apiUrl,
+              bearer: context.agent.bearer,
+              cwd: context.entry.workspace_path ?? "",
+              agentSession: session,
+            }),
+            ctx.signal,
+          );
+          if (raced.aborted) {
+            if (invocation.mutation) {
+              const detail = "The daemon shut down while the mutating tool was executing. It may have completed; verify external state before repeating it.";
+              invocation.thrownError = new Error(detail);
+              invocation.hasThrownError = true;
+              return { status: "uncertain", error: detail };
+            }
+            const detail = "The daemon shut down while the read-only tool was executing.";
+            invocation.thrownError = new Error(detail);
+            invocation.hasThrownError = true;
+            return { status: "retry", delayMs: 0, error: detail };
+          }
           invocation.roomId = context.entry.room_id;
-          invocation.liveResult = executed.liveResult;
-          return { status: "completed", outcome: executed.durableResult };
+          invocation.liveResult = raced.value.liveResult;
+          return { status: "completed", outcome: raced.value.durableResult };
         } catch (error) {
           invocation.thrownError = error;
           invocation.hasThrownError = true;
           const detail = error instanceof Error ? error.message : String(error);
-          if (invocation.mutation && !isProvenBoundedMutationPreDispatchOr4xxError(error)) {
-            return { status: "uncertain", error: detail };
+          if (invocation.mutation) {
+            if (!ctx.signal.aborted && isProvenBoundedMutationPreDispatchOr4xxError(error)) {
+              return { status: "failed", error: detail };
+            }
+            return {
+              status: "uncertain",
+              error: ctx.signal.aborted
+                ? "The daemon shut down while the mutating tool was executing. It may have completed; verify external state before repeating it."
+                : detail,
+            };
+          }
+          if (ctx.signal.aborted) {
+            return { status: "retry", delayMs: 0, error: detail };
           }
           return { status: "failed", error: detail };
         }
@@ -360,6 +426,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
           };
         }
         if (result.status === "failed" || result.status === "uncertain") {
+          let settledInJournal = false;
           try {
             await this.reserveJournal(() => this.options.executionCompletion.complete({
               ...invocation.input,
@@ -367,17 +434,18 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
               error: result.error,
               ...(result.status === "uncertain" ? { uncertain: true } : {}),
             }, true));
+            settledInJournal = true;
           } catch {
             // Preserve the execution error. An unconfirmed journal completion is
             // deliberately never redriven as a mutation by the same request id.
           }
           return this.options.getEffect?.(claimed.id) ?? {
             ...claimed,
-            state: result.status,
-            last_error: result.error,
+            state: settledInJournal ? result.status : claimed.state,
+            last_error: settledInJournal ? result.error : claimed.last_error,
           };
         }
-        return defaultSettle();
+        return this.reserveJournal(async () => defaultSettle());
       },
     };
   }
@@ -470,11 +538,11 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       } finally {
         this.activeOnDemand.delete(effectId);
       }
-      if (invocation.hasThrownError) {
-        throw invocation.thrownError;
-      }
       if (settled.state === "uncertain") {
         return this.uncertainToolResponse(roomId, effectId, settled.last_error);
+      }
+      if (invocation.hasThrownError) {
+        throw invocation.thrownError;
       }
       if (settled.state === "failed") {
         throw new Error(settled.last_error ?? "The supervised effect failed before execution.");
@@ -537,6 +605,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       const uncertain = mutation && !isProvenBoundedMutationPreDispatchOr4xxError(error);
+      let settledUncertain = false;
       try {
         await this.reserveJournal(() => this.options.executionCompletion.complete({
           ...input,
@@ -544,9 +613,13 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
           error: detail,
           ...(uncertain ? { uncertain: true } : {}),
         }, true));
+        settledUncertain = uncertain;
       } catch {
         // Preserve the execution error. An unconfirmed journal completion is
         // deliberately never redriven as a mutation by the same request id.
+      }
+      if (settledUncertain) {
+        return this.uncertainToolResponse(context.entry.room_id, prepared.effect_id as string, detail);
       }
       throw error;
     }

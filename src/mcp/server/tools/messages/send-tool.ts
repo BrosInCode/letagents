@@ -30,8 +30,10 @@ import {
   readMessageAttachmentFiles,
   stageMessageAttachments,
 } from "../../runtime/message-attachments.js";
+import { ApiError } from "../../runtime/api.js";
 import {
   getDaemonToolExecutionContext,
+  markMutationRejectedBeforeCommit,
   markPreDispatchError,
 } from "../../runtime/daemon-tool-context.js";
 import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
@@ -253,16 +255,36 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
       },
     });
   } catch (error) {
-    if (staged.length && targetRoomId) await discardMessageAttachments(targetRoomId, staged);
+    if (staged.length && targetRoomId) {
+      try {
+        await discardMessageAttachments(targetRoomId, staged);
+      } catch {
+        // Best-effort cleanup of staged uploads; preserve the primary send error.
+      }
+    }
+    if (error instanceof ApiError
+      && Number.isInteger(error.status)
+      && error.status >= 400
+      && error.status < 500
+      && error.status !== 408) {
+      throw markMutationRejectedBeforeCommit(error);
+    }
     throw error;
   }
   touchCurrentRoom();
-  await syncRoomPresence(
-    targetRoomId ?? getCurrentRoom()?.room_id ?? null,
-    identity,
-    getRememberedRoomPresence(targetRoomId ?? getCurrentRoom()?.room_id ?? null, identity),
-    agentSession
-  );
+  // Presence is an ancillary post-commit update. Its failure (e.g. HTTP 403 or
+  // transient error) must never erase a committed message receipt or cause a
+  // caller to retry and duplicate the posted message.
+  try {
+    await syncRoomPresence(
+      targetRoomId ?? getCurrentRoom()?.room_id ?? null,
+      identity,
+      getRememberedRoomPresence(targetRoomId ?? getCurrentRoom()?.room_id ?? null, identity),
+      agentSession
+    );
+  } catch {
+    // Preserve the committed message receipt even when presence sync fails.
+  }
 
   // The `replied` receipt transition is server-owned: message creation marks
   // the publisher's receipt on the reply target atomically with the reply

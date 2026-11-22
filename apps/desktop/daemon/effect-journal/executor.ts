@@ -310,21 +310,28 @@ export class EffectExecutor {
 
   /**
    * Synchronous handoff/shutdown edge: prevents any new effect admission,
-   * clears retry timers, and aborts the cancellation signal for in-flight work.
+   * clears retry timers, and (by default) aborts the cancellation signal for
+   * in-flight work. Pass `{ abortInFlight: false }` during graceful
+   * `prepare_handoff` so admitted on-demand tool executions can finish draining
+   * before final shutdown fencing aborts remaining work.
    */
-  fence(): void {
-    if (this.fenced) return;
-    this.fenced = true;
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-      this.timerDueMs = Infinity;
+  fence(options?: { abortInFlight?: boolean }): void {
+    const abortInFlight = options?.abortInFlight ?? true;
+    if (!this.fenced) {
+      this.fenced = true;
+      if (this.timer) {
+        clearTimeout(this.timer);
+        this.timer = null;
+        this.timerDueMs = Infinity;
+      }
+      if (this.immediate) {
+        clearImmediate(this.immediate);
+        this.immediate = null;
+      }
     }
-    if (this.immediate) {
-      clearImmediate(this.immediate);
-      this.immediate = null;
+    if (abortInFlight && !this.abortController.signal.aborted) {
+      this.abortController.abort(new EffectFenceError("Effect executor fenced for shutdown or handoff."));
     }
-    this.abortController.abort(new EffectFenceError("Effect executor fenced for shutdown or handoff."));
   }
 
   /** Fences new work synchronously and waits for all admitted executions to settle. */

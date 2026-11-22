@@ -96,11 +96,20 @@ function validateExecutionContext(input: ExecuteDaemonToolInput): ExecuteDaemonT
  */
 export async function executeDaemonTool(input: ExecuteDaemonToolInput): Promise<ExecuteDaemonToolResult> {
   const context = validateExecutionContext(input);
+  if (context.signal?.aborted) {
+    throw markPreDispatchError(new Error("The daemon shut down before the supervised tool began executing."));
+  }
   const tool = handlersForProvider(context.provider, context.apiUrl).get(context.toolName);
   if (!tool) throw markPreDispatchError(new Error(`Unsupported supervised tool: ${context.toolName}`));
-  const parsedInput = tool.inputSchema
-    ? await z.object(tool.inputSchema).parseAsync(context.input)
-    : context.input;
+  let parsedInput: unknown;
+  try {
+    parsedInput = tool.inputSchema
+      ? await z.object(tool.inputSchema).parseAsync(context.input)
+      : context.input;
+  } catch (error) {
+    if (error instanceof Error) throw markPreDispatchError(error);
+    throw error;
+  }
   const authorizedInput = WORKSPACE_SCOPED_TOOLS.has(context.toolName)
     && parsedInput && typeof parsedInput === "object" && !Array.isArray(parsedInput)
     ? { ...parsedInput, cwd: context.cwd }

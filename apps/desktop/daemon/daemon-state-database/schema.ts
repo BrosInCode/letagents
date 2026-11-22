@@ -77,12 +77,15 @@ export function migrateV2ToV3(
     database.exec(`DROP TRIGGER IF EXISTS ${quoteIdentifier(trigger)}`);
   }
 
+  // Preserve legacy insertion `rowid` order so tied-timestamp queries
+  // (`ORDER BY created_at DESC, rowid DESC`, e.g. reply GIF/attachment receipts)
+  // keep the exact winning row after migration.
   const legacyRows = database.prepare(`
     SELECT effect_id, agent_id, room_id, execution_generation_id, provider_turn_id,
            mcp_request_id, tool_name, request_json, mutation, state, result_json,
            error, created_at, updated_at
     FROM effects
-    ORDER BY created_at, effect_id
+    ORDER BY rowid ASC
   `).all() as Row[];
 
   const insertMigrated = database.prepare(`
@@ -118,16 +121,36 @@ export function migrateV2ToV3(
       providerTurnId,
       mcpRequestId,
     );
-    const { payloadJson } = serializeBoundedMcpPayload({
-      room_id: roomId,
-      execution_generation_id: executionGenerationId,
-      provider_turn_id: providerTurnId,
-      mcp_request_id: mcpRequestId,
-      tool_name: toolName,
-      request: parsedRequest,
-      requestJson,
-      mutation,
-    });
+    let payloadJson: string;
+    try {
+      payloadJson = serializeBoundedMcpPayload({
+        room_id: roomId,
+        execution_generation_id: executionGenerationId,
+        provider_turn_id: providerTurnId,
+        mcp_request_id: mcpRequestId,
+        tool_name: toolName,
+        request: parsedRequest,
+        requestJson,
+        mutation,
+      }).payloadJson;
+    } catch {
+      // Legacy `effects.request_json` accepted arbitrary JSON up to 64 KiB
+      // (including nesting deeper than the new plain-wire depth limit of 64).
+      // Fall back to storing the raw JSON text inside `payload.request` while
+      // preserving exact `id`, `idempotency_key`, `request_bytes`, and
+      // `request_sha256` so one historical row can never brick an upgrade or
+      // weaken replay fencing.
+      payloadJson = serializeBoundedMcpPayload({
+        room_id: roomId,
+        execution_generation_id: executionGenerationId,
+        provider_turn_id: providerTurnId,
+        mcp_request_id: mcpRequestId,
+        tool_name: toolName,
+        request: requestJson,
+        requestJson,
+        mutation,
+      }).payloadJson;
+    }
 
     const retryable = !mutation || (toolName === "complete_room_turn" && state !== "completed");
     const maxAttempts = retryable ? BOUNDED_MCP_MAX_READ_ATTEMPTS : 1;

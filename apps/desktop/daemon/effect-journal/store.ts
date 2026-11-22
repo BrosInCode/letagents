@@ -795,9 +795,11 @@ export function recoverInterruptedEffectsOnStartup(
         );
         requeuedIds.push(effect.id);
       } else {
-        const message = !effect.retryable || !kindAllowsRetry
-          ? "Daemon restarted while non-idempotent external effect was executing; outcome is uncertain and was not replayed automatically."
-          : "Daemon restarted while external effect was executing and maximum attempts were reached; outcome is uncertain.";
+        const message = effect.kind === BOUNDED_MCP_EFFECT_KIND
+          ? "Room delivery restarted after this mutating tool crossed its execution boundary. It may have completed; verify external state before repeating it."
+          : !effect.retryable || !kindAllowsRetry
+            ? "Daemon restarted while non-idempotent external effect was executing; outcome is uncertain and was not replayed automatically. It may have completed; verify external state before repeating it."
+            : "Daemon restarted while external effect was executing and maximum attempts were reached; outcome is uncertain.";
         uncertainStmt.run(daemonGeneration, message, nowIso, effect.id);
         uncertainIds.push(effect.id);
         uncertainAgentIds.add(effect.agent_id);

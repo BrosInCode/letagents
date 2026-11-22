@@ -224,7 +224,9 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     // edge. No claimed FIFO item may observe the public fence before its
     // controller is aborted and its cleanup owner is established.
     this.supervisedDelivery?.fence();
-    this.effectExecutor?.fence();
+    // Stop admitting new effects immediately without aborting already-admitted
+    // bounded external tool calls before `drainExternalExecutions()` completes.
+    this.effectExecutor?.fence({ abortInFlight: false });
     this.wakeRoomMoveReconciliationWaiters();
     this.notifyStateChanged();
     // A bootstrap that already read tail N must commit N before lock/socket
@@ -242,9 +244,9 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     // the acknowledgement can authorize Electron to replace this daemon.
     this.workerRuntimeCustody.destroyOwnerCredentials();
     await this.providerExecution?.drainDispatches();
+    await this.boundedEffects.drainExternalExecutions();
     await this.effectExecutor?.fenceAndDrain();
     await this.boundedEffects.drainJournalReservations();
-    await this.boundedEffects.drainExternalExecutions();
     await this.providerTerminals.drainAndClose(() => {
       try { this.providerStreams.detachAll(); } catch (error) { this.handoffCleanupFailures.push(error); }
     });

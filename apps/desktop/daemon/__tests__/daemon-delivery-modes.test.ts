@@ -663,8 +663,15 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       if (input.requestId === "effect-disconnect") await disconnectedReadGate;
       if (input.requestId === "effect-handoff") await handoffReadGate;
       if (input.requestId === "effect-error") throw new Error("provider callback failed");
+      if (input.requestId === "effect-error-post-commit-403") {
+        // Simulates an unmarked post-commit HTTP 403 (e.g. presence sync after POST /messages committed).
+        throw Object.assign(new Error("presence forbidden (403)"), { status: 403 });
+      }
       if (input.requestId === "effect-error-4xx") {
-        throw Object.assign(new Error("provider rejected request (400)"), { status: 400 });
+        throw Object.assign(new Error("provider rejected request (400)"), {
+          status: 400,
+          mutationRejectedBeforeCommit: true,
+        });
       }
       return {
         liveResult: { content: [{ type: "text", text: `live:${String(input.requestId)}` }] },
@@ -917,11 +924,12 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       "a successful mutation is never rerun or relabeled as callback failure when only checkpointing fails",
     );
 
-    const failed = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
+    const ambiguousFirst = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
       ...executeParams, mcp_request_id: "effect-error", tool_name: "post_status",
     });
-    assert.equal(failed.ok, false);
-    assert.match(failed.error ?? "", /provider callback failed/);
+    assert.equal(ambiguousFirst.ok, true, ambiguousFirst.error);
+    assert.match(JSON.stringify(ambiguousFirst.result), /SUPERVISED_EFFECT_OUTCOME_UNCERTAIN/);
+    assert.match(JSON.stringify(ambiguousFirst.result), /provider callback failed/i);
     const uncertainCallbackRetry = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
       ...executeParams, mcp_request_id: "effect-error", tool_name: "post_status",
     });
@@ -929,6 +937,14 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     assert.match(JSON.stringify(uncertainCallbackRetry.result), /SUPERVISED_EFFECT_OUTCOME_UNCERTAIN/);
     assert.match(JSON.stringify(uncertainCallbackRetry.result), /provider callback failed/i);
     assert.equal(executedTools.filter((call) => call.requestId === "effect-error").length, 1);
+
+    const postCommit403First = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
+      ...executeParams, mcp_request_id: "effect-error-post-commit-403", tool_name: "post_status",
+    });
+    assert.equal(postCommit403First.ok, true, postCommit403First.error);
+    assert.match(JSON.stringify(postCommit403First.result), /SUPERVISED_EFFECT_OUTCOME_UNCERTAIN/);
+    assert.match(JSON.stringify(postCommit403First.result), /presence forbidden/i);
+    assert.equal(executedTools.filter((call) => call.requestId === "effect-error-post-commit-403").length, 1);
 
     const rejected4xx = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
       ...executeParams, mcp_request_id: "effect-error-4xx", tool_name: "post_status",
@@ -964,6 +980,12 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       assert.equal(ambiguousRow.retryable, 0);
       assert.equal(ambiguousRow.attempt_count, 1);
       assert.equal(ambiguousRow.max_attempts, 1);
+
+      const postCommit403Row = readByReq("effect-error-post-commit-403")!;
+      assert.equal(postCommit403Row.state, "uncertain");
+      assert.equal(postCommit403Row.retryable, 0);
+      assert.equal(postCommit403Row.attempt_count, 1);
+      assert.equal(postCommit403Row.max_attempts, 1);
 
       const rejectedRow = readByReq("effect-error-4xx")!;
       assert.equal(rejectedRow.state, "failed");
@@ -1120,6 +1142,192 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     assert.equal((await handoffTool).ok, true);
     assert.equal((await handoff).ok, true);
   } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("SupervisorDaemon.stop cancels and detaches a stalled bounded MCP tool without holding the singleton lock, settling mutations as uncertain", async () => {
+  const env = await fixture();
+  const id = "stalled_shutdown_agent";
+  const paths = {
+    lockPath: join(env.root, "stalled-shutdown.lock"),
+    ...testNamedDaemonEndpoint(env.root, "stalled-shutdown"),
+    manifestPath: join(env.root, "stalled-shutdown.sqlite"),
+    attemptsPath: join(env.root, "stalled-shutdown-attempts.json"),
+    attemptsRoot: join(env.root, "stalled-shutdown-attempts"),
+    auditPath: join(env.root, "stalled-shutdown-audit.jsonl"),
+    workerBindingsPath: join(env.root, "stalled-shutdown-bindings.json"),
+  };
+  const workspace = await provisionedWorkspace(env.root, id);
+  const handle = {
+    workAttemptId: workspace.id, pid: null,
+    providerContinuationId: "stalled-shutdown-continuation",
+    providerConnection: { kind: "codex_app_server" as const, pid: null, processIdentity: null },
+    observedState: "working" as const,
+  };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({
+      resume: true, midTurnInjection: false, transcriptAccess: false,
+      permissionPromptBridging: false, survivesRestart: true,
+    }),
+    spawn: async () => { throw new Error("stalled-shutdown test does not launch providers"); },
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("stalled-shutdown test does not resume providers"); },
+    poke: async () => {},
+    stop: async () => ({
+      endedAt: new Date().toISOString(), exitCode: 0, signal: null,
+      terminalCause: "stopped", providerContinuationId: handle.providerContinuationId,
+    }),
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+
+  let releaseStalledTool!: () => void;
+  const stalledToolGate = new Promise<void>((resolve) => { releaseStalledTool = resolve; });
+  let markToolStarted!: () => void;
+  const toolStarted = new Promise<void>((resolve) => { markToolStarted = resolve; });
+  let runtimeReceivedSignal = false;
+  let signalAbortedObserved = false;
+
+  const toolRuntime = {
+    supervisedToolIsMutation: (toolName: string) => toolName !== "get_board",
+    executeDaemonTool: async (input: Record<string, unknown>) => {
+      const signal = input.signal;
+      runtimeReceivedSignal = signal instanceof AbortSignal;
+      if (signal instanceof AbortSignal) {
+        signal.addEventListener("abort", () => { signalAbortedObserved = true; }, { once: true });
+      }
+      markToolStarted();
+      // Deliberately ignore signal to prove shutdown detaches even wedged / older pinned runtimes.
+      await stalledToolGate;
+      return {
+        liveResult: { content: [{ type: "text", text: "late-never-awaited" }] },
+        durableResult: { content: [{ type: "text", text: "late-never-awaited" }] },
+      };
+    },
+  };
+
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, undefined, async () => toolRuntime);
+
+  try {
+    await daemon.start();
+    const durability = (daemon as unknown as { durability: WorkDurabilityStore }).durability;
+    const attempt = await durability.createAttempt({
+      taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id,
+    });
+    const execution = await durability.startGeneration(
+      attempt.work_attempt_id,
+      "daemon-provider",
+      1,
+    );
+    const inserted = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "codex", desired_state: "running", observed_state: "working",
+      delivery_mode: "daemon_inbox", permission_profile_id: "full_access",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      run_id: execution.execution_generation_id,
+      deployment_id: serializeDaemonDeploymentId(id, execution.execution_generation_id),
+      provider_ref: {
+        work_attempt_id: attempt.work_attempt_id, provider_continuation_id: handle.providerContinuationId,
+        provider_connection: handle.providerConnection, execution_generation_id: execution.execution_generation_id,
+      },
+    } });
+    assert.equal(inserted.ok, true, inserted.error);
+    const internals = daemon as unknown as {
+      liveHandles: Map<string, typeof handle>;
+      workerBindings: WorkerBindingStore;
+      workerRuntimeCustody: WorkerRuntimeCustody;
+      supervisedInbox: SupervisedAgentInboxStore;
+      supervisedDelivery: { activeTurn: (agent: { agentId: string }) => { inboxItemId: string; sourceMessageId: string; phase: "dispatching" } | null };
+    };
+    internals.liveHandles.set(id, handle);
+    await internals.workerBindings.bind({
+      entry_id: id, room_id: entry.room_id, work_attempt_id: attempt.work_attempt_id,
+      execution_generation_id: execution.execution_generation_id, agent_session_id: "stalled-worker",
+      agent_session_token: "stalled-bearer", credential_ref: "stalled-bearer-id",
+      api_url: "https://letagents.example",
+    });
+    internals.workerRuntimeCustody.installWorkerAuthorization({
+      entryId: id, agentSessionId: "stalled-worker", bearer: "stalled-bearer", bearerId: "stalled-bearer-id",
+      agentKey: "emmymay/stalled", roomId: entry.room_id, workAttemptId: attempt.work_attempt_id,
+      grantId: "grant-stalled", grantGeneration: 1, daemonGeneration: 1,
+      apiUrl: "https://letagents.example", expiresAt: "2099-01-01T00:00:00.000Z", mintedAtMs: Date.now(),
+      agentSession: {
+        session_id: "stalled-worker", session_token: "", room_id: entry.room_id, session_kind: "worker",
+        runtime: "codex", actor_label: "Stalled | EmmyMay's agent | Codex",
+        agent_key: "emmymay/stalled", agent_instance_id: `daemon:${id}`, display_name: "Stalled",
+        owner_label: "EmmyMay", ide_label: "Codex",
+        created_at: "2026-08-14T00:00:00.000Z", updated_at: "2026-08-14T00:00:01.000Z",
+        last_seen_at: "2026-08-14T00:00:01.000Z", ended_at: null,
+      },
+    } satisfies CachedWorkerAuthorization);
+    const [item] = await internals.supervisedInbox.ingestPoll({
+      agent_id: id, room_id: entry.room_id, last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "trigger stalled tool" }, activation: {} }],
+    });
+    assert(item);
+    await internals.supervisedInbox.transition(item.inbox_item_id, "dispatching");
+    await internals.supervisedInbox.checkpointTurnStarted(item.inbox_item_id, "stalled-turn-1", {
+      work_attempt_id: attempt.work_attempt_id,
+      origin_execution_generation_id: execution.execution_generation_id,
+      provider_continuation_id: handle.providerContinuationId,
+    });
+    internals.supervisedDelivery.activeTurn = (agent) => (agent.agentId === id
+      ? { inboxItemId: item.inbox_item_id, sourceMessageId: "1", phase: "dispatching" }
+      : null);
+
+    const inflightRpc = daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
+      entry_id: id,
+      work_attempt_id: attempt.work_attempt_id,
+      execution_generation_id: execution.execution_generation_id,
+      daemon_generation: 1,
+      provider_turn_id: "stalled-turn-1",
+      mcp_request_id: "effect-stalled-shutdown",
+      tool_name: "post_status",
+      input: { status: "running" },
+    }).catch(() => ({ ok: false, error: "socket closed" }));
+
+    await toolStarted;
+    assert.equal(runtimeReceivedSignal, true, "bounded handler passes shutdown AbortSignal to runtime");
+
+    // Stop MUST resolve promptly while stalledToolGate is still blocked, releasing the singleton lock.
+    let stopCompleted = false;
+    await Promise.race([
+      daemon.stop().then(() => { stopCompleted = true; }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SupervisorDaemon.stop hung on stalled bounded tool")), 5_000)),
+    ]);
+    assert.equal(stopCompleted, true);
+    assert.equal(signalAbortedObserved, true, "effectExecutor.fence aborted the runtime's AbortSignal");
+
+    // Singleton lock must be released (a successor daemon can start cleanly) and the interrupted
+    // mutation must already be durably settled as `uncertain` in SQLite.
+    const checkDb = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    try {
+      const row = checkDb.prepare(`
+        SELECT state, last_error FROM effects
+        WHERE agent_id=? AND kind='bounded_mcp_effect' AND json_extract(payload, '$.mcp_request_id')='effect-stalled-shutdown'
+      `).get(id) as { state: string; last_error: string | null } | undefined;
+      assert.ok(row);
+      assert.equal(row.state, "uncertain");
+      assert.match(String(row.last_error ?? ""), /shut down/i);
+    } finally {
+      checkDb.close();
+    }
+
+    const successor = new SupervisorDaemon(paths, "darwin", port, true, 15_000);
+    try {
+      await successor.start();
+    } finally {
+      await successor.stop();
+    }
+
+    releaseStalledTool();
+    await inflightRpc;
+  } finally {
+    releaseStalledTool();
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }

@@ -297,4 +297,111 @@ test("send_message and send_thread_message derive deterministic bounded-effect c
       return true;
     },
   );
+
+  // Input Zod schema validation failure is tagged beforeExternalDispatch: true.
+  await assert.rejects(
+    () => executeDaemonTool({
+      provider: "cursor",
+      toolName: "send_message",
+      input: { text: 12345 },
+      requestId: "transient-mcp-req-4",
+      effectId: "durable-effect-uuid-4",
+      roomId: "focus_test",
+      apiUrl: "https://letagents.example",
+      bearer: "test-worker-bearer",
+      cwd: process.cwd(),
+      agentSession: session("focus_test", "send"),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "ZodError");
+      assert.equal((error as { beforeExternalDispatch?: unknown }).beforeExternalDispatch, true);
+      return true;
+    },
+  );
+});
+
+test("send_message preserves committed message receipt across post-commit presence 403, tags primary 4xx rejections, and forwards AbortSignal", async (t) => {
+  let observedSignal: AbortSignal | null | undefined;
+  let mode: "presence_403" | "send_403" = "presence_403";
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit = {}) => {
+    const parsed = new URL(url);
+    if (init.method === "POST" && parsed.pathname.endsWith("/messages")) {
+      observedSignal = init.signal;
+      if (mode === "send_403") {
+        return Response.json({ error: "forbidden by room policy" }, { status: 403 });
+      }
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return Response.json({ id: "msg_committed_200", text: body.text, client_message_id: body.client_message_id });
+    }
+    if (parsed.pathname.endsWith("/presence")) {
+      return Response.json({ error: "presence forbidden" }, { status: 403 });
+    }
+    return Response.json({ error: "unexpected route" }, { status: 404 });
+  });
+
+  // 1. POST /messages -> 200, then POST /presence -> 403 must still return the committed message.
+  const controller = new AbortController();
+  const committed = await executeDaemonTool({
+    provider: "cursor",
+    toolName: "send_message",
+    input: { text: "Committed before presence 403" },
+    requestId: "req-presence-403",
+    effectId: "effect-presence-403",
+    signal: controller.signal,
+    roomId: "focus_test",
+    apiUrl: "https://letagents.example",
+    bearer: "test-worker-bearer",
+    cwd: process.cwd(),
+    agentSession: session("focus_test", "send"),
+  });
+  assert.ok(observedSignal, "daemon shutdown AbortSignal is forwarded to fetch");
+  const committedText = committed.liveResult.content[0]?.type === "text" ? committed.liveResult.content[0].text : "";
+  assert.match(committedText, /msg_committed_200/);
+
+  // 2. Primary POST /messages -> 403 tags mutationRejectedBeforeCommit: true.
+  mode = "send_403";
+  await assert.rejects(
+    () => executeDaemonTool({
+      provider: "cursor",
+      toolName: "send_message",
+      input: { text: "Rejected directly by POST /messages" },
+      requestId: "req-send-403",
+      effectId: "effect-send-403",
+      roomId: "focus_test",
+      apiUrl: "https://letagents.example",
+      bearer: "test-worker-bearer",
+      cwd: process.cwd(),
+      agentSession: session("focus_test", "send"),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as { status?: unknown }).status, 403);
+      assert.equal((error as { mutationRejectedBeforeCommit?: unknown }).mutationRejectedBeforeCommit, true);
+      return true;
+    },
+  );
+
+  // 3. Pre-aborted signal fails before dispatch with beforeExternalDispatch: true.
+  controller.abort();
+  await assert.rejects(
+    () => executeDaemonTool({
+      provider: "cursor",
+      toolName: "send_message",
+      input: { text: "Never sent after abort" },
+      requestId: "req-pre-aborted",
+      effectId: "effect-pre-aborted",
+      signal: controller.signal,
+      roomId: "focus_test",
+      apiUrl: "https://letagents.example",
+      bearer: "test-worker-bearer",
+      cwd: process.cwd(),
+      agentSession: session("focus_test", "send"),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as { beforeExternalDispatch?: unknown }).beforeExternalDispatch, true);
+      return true;
+    },
+  );
 });

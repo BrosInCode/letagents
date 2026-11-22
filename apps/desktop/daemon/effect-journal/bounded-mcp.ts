@@ -146,29 +146,28 @@ export function rowToBoundedMcpEffect(row: Row): BoundedMcpEffectView {
  * Classifies an error thrown during a mutating bounded MCP tool execution.
  *
  * Fail-closed policy:
- * - Only PROVEN pre-dispatch validation errors or definitive HTTP 4xx server
- *   rejections return `true` (safe to settle as `failed`).
- * - Any HTTP 5xx, transport/network/timeout error, or unmarked plain `Error`
- *   (including errors thrown by an older pinned MCP runtime after sending a
- *   request) returns `false` so the mutation settles as `uncertain` instead of
- *   risking a duplicate external side effect.
+ * - ONLY errors carrying explicit dispatch-stage proof return `true` (safe to
+ *   settle as `failed`):
+ *   - `beforeExternalDispatch === true` (failed before any mutating external
+ *     request was sent, e.g. context/input schema validation or pre-dispatch check)
+ *   - `mutationRejectedBeforeCommit === true` (the primary mutating external
+ *     request itself was definitively rejected by the server without committing,
+ *     never an ancillary post-commit call such as presence sync)
+ * - Arbitrary `status` (e.g. HTTP 403 from a post-commit presence update) or
+ *   `name === "ZodError"` from an arbitrary point inside a multi-step tool are
+ *   NOT trusted. Any HTTP 5xx, transport/network/timeout error, shutdown abort
+ *   after dispatch, or unmarked error (including errors from an older pinned
+ *   MCP runtime) returns `false` so the mutation settles conservatively as
+ *   `uncertain` instead of risking a duplicate external side effect.
  */
 export function isProvenBoundedMutationPreDispatchOr4xxError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const candidate = error as {
-    name?: unknown;
-    status?: unknown;
     beforeExternalDispatch?: unknown;
+    mutationRejectedBeforeCommit?: unknown;
   };
-  if (candidate.beforeExternalDispatch === true) return true;
-  if (candidate.name === "ZodError") return true;
-  if (typeof candidate.status === "number"
-    && Number.isInteger(candidate.status)
-    && candidate.status >= 400
-    && candidate.status < 500) {
-    return true;
-  }
-  return false;
+  return candidate.beforeExternalDispatch === true
+    || candidate.mutationRejectedBeforeCommit === true;
 }
 
 /**

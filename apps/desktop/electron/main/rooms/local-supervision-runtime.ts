@@ -225,7 +225,7 @@ export async function readLocalSupervisorWork(roomId: string, afterCursor: strin
 }
 
 type LocalToolInput = {
-  provider: string; toolName: string; input: unknown; requestId: string; effectId?: string; roomId: string;
+  provider: string; toolName: string; input: unknown; requestId: string; effectId?: string; signal?: AbortSignal; roomId: string;
   apiUrl: string; bearer: string; cwd: string; agentSession: { session_id: string; agent_key: string; room_id: string };
 };
 type LocalToolContext = {
@@ -283,6 +283,7 @@ const localToolHandlers = defineLocalSupervisedToolHandlers<LocalToolContext>({
 
 /** The daemon performs the same effect fencing and journaling before entering either transport. */
 export async function executeLocalSupervisorTool(input: LocalToolInput) {
+  if (input.signal?.aborted) throw preDispatchError("The daemon shut down before the local supervised tool began executing.");
   if (input.apiUrl !== LOCAL_ROOM_API_ORIGIN) throw preDispatchError("Invalid local tool authority.");
   const worker = await authorizeLocalWorker(input.roomId, input.bearer, input.agentSession.session_id);
   if (worker.agent_key !== input.agentSession.agent_key || worker.runtime !== input.provider
