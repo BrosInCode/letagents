@@ -612,7 +612,24 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   async onStream(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void> {
     const remembered = this.required(handle);
-    return this.listen(await this.boundary(remembered.provider), remembered.runtime, "stream", (body) => listener(body as ProviderActionStreamEvent)).dispose;
+    // A stream event that was dropped at the boundary reaches the consumer as an explicit fault event. Its method is
+    // not a turn or item method, so no stream policy reads it as the failure of a turn.
+    const fault = (count: number): ProviderActionStreamEvent => ({
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId,
+      observedAt: new Date().toISOString(),
+      sequence: 0,
+      provider: remembered.provider,
+      kind: "error",
+      method: "boundary/event_dropped",
+      summary: "A provider event was not plain data and was dropped.",
+      payload: { dropped: count },
+      payloadTruncated: false,
+      payloadRedacted: true,
+      durablePayloadRef: null,
+    });
+    return this.listen(await this.boundary(remembered.provider), remembered.runtime, "stream",
+      (body) => listener(body as ProviderActionStreamEvent), (count) => listener(fault(count))).dispose;
   }
 
   async onExecution(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription> {
@@ -662,15 +679,22 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     return boundary.has("probeControl") ? boundary.probeControl(remembered.runtime) : { state: "unprobeable" };
   }
 
-  /** Start one subscription and give its events to `listener`. A `gap` event is not an event of the adapter; it is dropped here. */
+  /**
+   * Start one subscription and give its events to `listener`. The receiver is in place before the adapter is
+   * called, because an adapter can deliver events inside that call. `onGap` gets the count of dropped events.
+   * An execution gap needs no call here: the adapter's own position still counts the dropped observation, so the
+   * capture's existing comparison of the stored position with `position()` reports the source gap.
+   */
   private listen(
     boundary: ProviderRuntimeBoundary,
     runtime: ProviderRuntimeRef,
     kind: ProviderEventKind,
     listener: (body: unknown) => void,
+    onGap?: (count: number) => void,
   ): { id: string; sourceId?: string; dispose: () => void } {
     const id = randomUUID();
     this.eventListeners.set(id, (event) => {
+      if (event.kind === "gap") { onGap?.(event.body.count); return; }
       if (event.kind !== kind) return;
       if (event.final) this.eventListeners.delete(id);
       listener(event.body);
@@ -717,7 +741,6 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       boundary.connectEventSink((event) => {
         if (event.kind === "gap") {
           console.warn("[provider_events]", `${provider}: ${event.body.count} ${event.body.dropped} event(s) were not plain data and were dropped`);
-          return;
         }
         this.eventListeners.get(event.kind === "start" ? event.operationId : event.subscriptionId)?.(event);
       });

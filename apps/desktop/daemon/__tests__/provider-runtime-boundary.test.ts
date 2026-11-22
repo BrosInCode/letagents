@@ -262,7 +262,7 @@ test("the boundary reports the optional operations of its adapter as data", () =
 });
 
 test("each public operation of the boundary is listed as a data operation or as a transitional operation", () => {
-  const internal = new Set(["constructor", "has", "inspectIfHeld", "required", "matches", "held", "continuation", "terminal", "installed", "snapshot", "reference", "stopOptions", "deliver", "startHints"]);
+  const internal = new Set(["constructor", "has", "inspectIfHeld", "required", "matches", "held", "continuation", "terminal", "installed", "snapshot", "reference", "stopOptions", "deliver", "startHints", "send"]);
   const listed = new Set<string>([...DATA_OPERATIONS, ...TRANSPORT_OPERATIONS, ...Object.keys(TRANSITIONAL_OPERATIONS)]);
   const actual = Object.getOwnPropertyNames(ProviderRuntimeBoundary.prototype).filter((name) => !internal.has(name));
   assert.deepEqual(actual.filter((name) => !listed.has(name)), [], "an operation that is in no list");
@@ -577,6 +577,9 @@ test("an event that is not plain data never reaches the daemon as it is: a gap, 
   assert.deepEqual(events[2]!.body, { type: "unavailable" });
   const terminal = events[3]!.body as ProviderTerminalPayload;
   assert.equal(terminal.terminalCause, "protocol_error");
+  // Malformed data proves no process death: the replacement carries no witnessed death and no exit code.
+  assert.equal("nativeRuntimeDeath" in terminal, false);
+  assert.deepEqual([terminal.exitCode, terminal.signal], [null, null]);
   assert.equal(terminal.providerContinuationId, "thread-1");
   assert.equal((events[3] as { final?: true }).final, true);
   providerTerminalSchema.parse(jsonRoundTrip(terminal));
@@ -606,18 +609,87 @@ test("a permission subscription reports the end of the adapter's call as data, s
   assert.equal(events.length, 2);
 });
 
-test("through the router: each exit listener of a replaced runtime still gets the exit, and an error of a listener goes back to the adapter", async () => {
+test("through the router: each exit listener of a replaced runtime still gets the exit, and an error of one listener stays out of the adapter", async () => {
   const { adapter, exit } = recordingAdapter();
   const router = new ProviderActionPortRouter({ codex: async () => adapter });
   const first = await router.spawn({ ...SPAWN, provider: "codex" });
   const seen: string[] = [];
-  const stopListening = await router.onExit(first, (terminal) => { seen.push(terminal.terminalCause); });
   await router.onExit(first, () => { throw new Error("listener failed"); });
+  const stopListening = await router.onExit(first, (terminal) => { seen.push(terminal.terminalCause); });
   await router.spawn({ ...SPAWN, provider: "codex" });
   // The router's own exit watch runs first and forgets the replaced runtime; the two daemon listeners come after it.
-  assert.throws(() => exit(0), /listener failed/);
+  // The first of them throws: the adapter's call does not throw, and the second still gets the exit.
+  exit(0);
   assert.deepEqual(seen, ["stopped"]);
   stopListening();
+});
+
+test("through the router: a stream event after the exit of a replaced runtime still reaches its listener, and a dropped one arrives as a fault", async () => {
+  const streamListeners = new Map<ProviderHandle, (event: never) => void>();
+  const base = recordingAdapter();
+  const adapter = { ...base.adapter, onStream: (handle: ProviderHandle, listener: (event: never) => void) => { streamListeners.set(handle, listener); return () => { streamListeners.delete(handle); }; } } as unknown as SupervisedProviderAdapter;
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const first = await router.spawn({ ...SPAWN, provider: "codex" });
+  const seen: Array<{ kind: string; method: string; sequence: number }> = [];
+  const stop = await router.onStream(first, (event) => { seen.push({ kind: event.kind, method: event.method, sequence: event.sequence }); });
+  await router.spawn({ ...SPAWN, provider: "codex" });
+  base.exit(0); // The first runtime is replaced and has exited: the boundary forgets it here.
+  await assert.rejects(router.poke(first, "x"), STALE);
+
+  const emit = streamListeners.get(base.handles[0]!)!;
+  emit(STREAM_EVENT as never);
+  emit({ ...STREAM_EVENT, payload: { callback: () => undefined } } as never);
+  assert.deepEqual(seen, [
+    { kind: "text_delta", method: "item/agentMessage/delta", sequence: 7 },
+    { kind: "error", method: "boundary/event_dropped", sequence: 0 },
+  ]);
+  stop();
+  emit?.(STREAM_EVENT as never);
+  assert.equal(seen.length, 2);
+  assert.equal(streamListeners.size, 0, "the dispose removed the adapter's listener");
+});
+
+test("an execution subscription keeps its identity and position with an empty history, a dropped observation shows in the position, and an unsubscribe inside the replay stops it", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => {
+    events.push(event);
+    // The daemon ends the subscription while the adapter replays its history.
+    if ("subscriptionId" in event && event.subscriptionId === "s-replay") boundary.unsubscribe("s-replay");
+  });
+  const runtime = await boundary.spawn(SPAWN);
+
+  assert.deepEqual(boundary.subscribe(runtime.ref, "execution", "s-empty"), { subscriptionId: "s-empty", sourceId: "observer-1" });
+  assert.deepEqual(boundary.subscriptionPosition("s-empty"), { firstRetainedSequence: 1, latestSequence: 0 });
+  assert.equal(events.length, 0);
+
+  // A dropped last observation: nothing follows it, and the position still counts it. The capture compares its
+  // stored position with this value, so the difference is its source gap.
+  fake.retained.push({ sourceId: "observer-1", sequence: 1, fact: { domain: "control", kind: "state_changed", state: "responsive" } });
+  fake.execution[0]!({ sourceId: "observer-1", sequence: 1, fact: { hook: () => undefined } } as never);
+  assert.deepEqual(events.map((event) => [event.kind, event.body]), [["gap", { dropped: "execution", count: 1 }]]);
+  assert.deepEqual(boundary.subscriptionPosition("s-empty"), { firstRetainedSequence: 1, latestSequence: 1 });
+
+  events.length = 0;
+  fake.retained.push({ sourceId: "observer-1", sequence: 2, fact: { domain: "control", kind: "state_changed", state: "degraded" } });
+  fake.retained.push({ sourceId: "observer-1", sequence: 3, fact: { domain: "control", kind: "state_changed", state: "responsive" } });
+  boundary.subscribe(runtime.ref, "execution", "s-replay");
+  assert.equal(events.filter((event) => "subscriptionId" in event && event.subscriptionId === "s-replay").length, 1, "one event, then the unsubscribe");
+  assert.equal(boundary.subscriptionPosition("s-replay"), null);
+});
+
+test("a sink that throws does not throw into the adapter and makes no further event", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  let calls = 0;
+  boundary.connectEventSink(() => { calls += 1; throw new Error("sink failed"); });
+  const runtime = await boundary.spawn(SPAWN);
+  boundary.subscribe(runtime.ref, "stream", "s-stream");
+  boundary.subscribe(runtime.ref, "exit", "s-exit");
+  fake.stream[0]!(STREAM_EVENT as never);
+  fake.exit[0]!(TERMINAL);
+  assert.equal(calls, 2);
 });
 
 test("through the router: start hints reach the daemon's two functions, also after the start", async () => {

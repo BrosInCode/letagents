@@ -606,12 +606,12 @@ export class ProviderRuntimeBoundary {
   /**
    * Give one adapter event to the sink. The call is synchronous, at the moment
    * of the adapter's own call, as a listener was called before. An error of
-   * the sink goes back to the adapter, as an error of a listener did.
+   * the sink stays here: it does not go into the adapter's emit path, and it
+   * makes no further event.
    */
   private deliver(id: string, body: unknown, handle: ProviderHandle): void {
     const record = this.subscriptions.get(id);
-    const sink = this.sink;
-    if (!record || !sink) return;
+    if (!record || !this.sink) return;
     const base = { subscriptionId: id, ref: record.ref };
     let safe = body;
     let last = false;
@@ -619,6 +619,7 @@ export class ProviderRuntimeBoundary {
     try { assertPlainWireValue(body, GUARD); } catch { plain = false; }
     if (record.kind === "exit") {
       // An exit is never dropped. A terminal that is not what the contract says is reported as a protocol error.
+      // The replacement has no `nativeRuntimeDeath` and no success cause: malformed data proves no process death.
       if (!plain || !providerTerminalSchema.safeParse(body).success) {
         safe = { endedAt: new Date().toISOString(), exitCode: null, signal: null, terminalCause: "protocol_error", providerContinuationId: handle.providerContinuationId };
       }
@@ -627,12 +628,20 @@ export class ProviderRuntimeBoundary {
       // A permission event must not vanish: the daemon then shows no prompt. It learns that the lane cannot be read.
       safe = { type: "unavailable" };
     } else if (!plain) {
-      sink({ kind: "gap", ...base, seq: ++record.seq, order: ++this.order, body: { dropped: record.kind as "stream" | "execution", count: 1 } });
+      this.send({ kind: "gap", ...base, seq: ++record.seq, order: ++this.order, body: { dropped: record.kind as "stream" | "execution", count: 1 } });
       return;
     }
     // The record ends here. The adapter's own listener is left as it is: a listener was never removed at its last event before.
     if (last) this.subscriptions.delete(id);
-    sink({ kind: record.kind, ...base, seq: ++record.seq, order: ++this.order, ...(last ? { final: true as const } : {}), body: safe });
+    this.send({ kind: record.kind, ...base, seq: ++record.seq, order: ++this.order, ...(last ? { final: true as const } : {}), body: safe });
+  }
+
+  private send(event: ProviderEventEnvelope): void {
+    try {
+      this.sink?.(event);
+    } catch (error) {
+      console.warn("[provider_events]", `${this.provider}: the event sink failed for one ${event.kind} event: ${error instanceof Error ? error.message : "error"}`);
+    }
   }
 
   private startHints(operation: string, options: ProviderStartOptions): Pick<ProviderSpawnRequest, "onProgress" | "onNativeStarted"> {
@@ -641,7 +650,7 @@ export class ProviderRuntimeBoundary {
     const operationId = options.startOperationId;
     if (operationId === undefined) return {};
     const hint = (name: "progress" | "native_started") => () => {
-      this.sink?.({ kind: "start", operationId, order: ++this.order, body: { hint: name } });
+      this.send({ kind: "start", operationId, order: ++this.order, body: { hint: name } });
     };
     return { onProgress: hint("progress"), onNativeStarted: hint("native_started") };
   }
