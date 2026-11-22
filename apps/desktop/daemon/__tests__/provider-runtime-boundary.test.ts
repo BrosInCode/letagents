@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 
 import { assertPlainWireValue, toWireJsonSchema } from "#daemon-contract/wire-boundary.js";
@@ -10,6 +10,10 @@ import {
   ProviderBoundaryValueError,
   type ProviderEventEnvelope,
   ProviderRuntimeBoundary,
+  ProviderStepRefusedError,
+  PROVIDER_ERROR_FIELDS,
+  PROVIDER_STEP_BODY_SCHEMAS,
+  PROVIDER_STEP_NAMES,
   StaleProviderRuntimeRefError,
   TRANSITIONAL_OPERATIONS,
   TRANSPORT_OPERATIONS,
@@ -122,7 +126,7 @@ test("a stale reference is refused and is never resolved to the newest runtime o
   await assert.rejects(boundary.stop(first.ref), StaleProviderRuntimeRefError);
   await assert.rejects(boundary.poke(first.ref, "hello"), StaleProviderRuntimeRefError);
   assert.throws(() => boundary.subscribe(first.ref, "exit", "s-stale"), StaleProviderRuntimeRefError);
-  assert.throws(() => boundary.stopIdle(first.ref, () => undefined), StaleProviderRuntimeRefError);
+  await assert.rejects(boundary.stopIdle(first.ref, { operationId: "op-stale" }), StaleProviderRuntimeRefError);
   assert.deepEqual(calls, [], "no provider call for a stale reference");
 
   // The same work attempt with an id that was never made, another provider, and another work attempt.
@@ -262,7 +266,8 @@ test("the boundary reports the optional operations of its adapter as data", () =
 });
 
 test("each public operation of the boundary is listed as a data operation or as a transitional operation", () => {
-  const internal = new Set(["constructor", "has", "inspectIfHeld", "required", "matches", "held", "continuation", "terminal", "installed", "snapshot", "reference", "stopOptions", "deliver", "startHints", "send"]);
+  const internal = new Set(["constructor", "has", "inspectIfHeld", "required", "matches", "held", "continuation", "terminal", "installed", "snapshot", "reference", "stopOptions", "deliver", "startHints", "send",
+    "operation", "step", "check", "openStep", "sendStep", "answered", "refusal", "permissionRequest", "connectionKey", "tokensOf"]);
   const listed = new Set<string>([...DATA_OPERATIONS, ...TRANSPORT_OPERATIONS, ...Object.keys(TRANSITIONAL_OPERATIONS)]);
   const actual = Object.getOwnPropertyNames(ProviderRuntimeBoundary.prototype).filter((name) => !internal.has(name));
   assert.deepEqual(actual.filter((name) => !listed.has(name)), [], "an operation that is in no list");
@@ -443,7 +448,7 @@ test("an input that is declared data is checked before a property is read and be
   await assert.rejects(boundary.inspectPermissionProfile(runtime.ref, bad), ProviderBoundaryValueError);
   await assert.rejects(boundary.inspectPermissionFileChanges(runtime.ref, bad), ProviderBoundaryValueError);
   await assert.rejects(boundary.inspectPermissionMcpToolCall(runtime.ref, bad), ProviderBoundaryValueError);
-  assert.throws(() => boundary.replyPermission(runtime.ref, bad, "once"), ProviderBoundaryValueError);
+  await assert.rejects(boundary.replyPermission(runtime.ref, bad, "once", { operationId: "op-bad" }), ProviderBoundaryValueError);
   assert.equal(inspections, 0);
 
   // A plain request passes, and the adapter gets the same object: the Codex adapter matches it by identity.
@@ -795,4 +800,375 @@ test("through the router: a dropped execution observation calls the consumer's g
   assert.equal(subscription.position().latestSequence, 1);
   subscription.dispose();
   assert.equal(subscription.position().latestSequence, 1, "the last position stays the answer after the dispose");
+});
+
+// Step 4d-3a: an operation waits for the daemon with a `step` envelope, and the daemon answers with data.
+
+type StepEvent = Extract<ProviderEventEnvelope, { kind: "step" }>;
+const CONTROLLED = { capability: "native_interrupt", interrupted: true, resumed: false, state: "idle" } as const;
+
+/** A boundary whose sink keeps the step envelopes and answers each one with `answer`, when it is given. */
+function steppedBoundary(overrides: Partial<SupervisedProviderAdapter>, answer?: (event: StepEvent, boundary: ProviderRuntimeBoundary) => void) {
+  const fake = fakeAdapter(overrides);
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const steps: StepEvent[] = [];
+  boundary.connectEventSink((event) => { if (event.kind === "step") { steps.push(event); answer?.(event, boundary); } });
+  return { ...fake, boundary, steps };
+}
+
+test("a step is an envelope, the daemon answers it by operation and number, and the next step waits for the answer", async () => {
+  const order: string[] = [];
+  const { boundary, steps } = steppedBoundary({
+    controlTurn: async (_handle, _correction, options) => {
+      await options!.checkpointTurnStarted!("turn-9");
+      order.push("checkpointed");
+      await options!.markDispatched!();
+      order.push("dispatched");
+      return CONTROLLED;
+    },
+  });
+  const runtime = await boundary.spawn(SPAWN);
+  const result = boundary.controlTurn(runtime.ref, null, { operationId: "op-1", targetTurnId: "turn-9" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(steps.map((step) => [step.operationId, step.step, step.seq, step.body]), [["op-1", "checkpoint_turn_started", 1, { turnId: "turn-9" }]]);
+  assert.deepEqual(order, [], "the adapter waits at the step");
+  assert.equal(providerEventEnvelopeSchema.safeParse(JSON.parse(JSON.stringify(steps[0]))).success, true);
+  assert.throws(() => boundary.answerStep("op-1", 2, { ok: true }), ProviderStepRefusedError, "an answer for a step that is not open");
+  assert.throws(() => boundary.answerStep("op-other", 1, { ok: true }), ProviderStepRefusedError, "an answer for an unknown operation");
+  boundary.answerStep("op-1", 1, { ok: true });
+  assert.throws(() => boundary.answerStep("op-1", 1, { ok: true }), ProviderStepRefusedError, "a second answer");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["checkpointed"]);
+  assert.deepEqual([steps[1]!.step, steps[1]!.seq], ["mark_dispatched", 2]);
+  boundary.answerStep("op-1", 2, { ok: true });
+  assert.deepEqual(await result, CONTROLLED);
+  assert.deepEqual(order, ["checkpointed", "dispatched"]);
+  assert.throws(() => boundary.answerStep("op-1", 2, { ok: true }), ProviderStepRefusedError, "an answer after the end of the operation");
+  await assert.rejects(boundary.controlTurn(runtime.ref, null, { operationId: "" }), ProviderBoundaryValueError);
+});
+
+test("a refused step stops the adapter before its native work, and a sink that throws is a refusal", async () => {
+  let dispatched = 0;
+  const controlTurn: SupervisedProviderAdapter["controlTurn"] = async (_handle, _correction, options) => {
+    await options!.markDispatched!();
+    dispatched += 1;
+    return CONTROLLED;
+  };
+  const refused = steppedBoundary({ controlTurn }, (event, boundary) => {
+    boundary.answerStep(event.operationId, event.seq, { ok: false, error: { name: "Error", message: "the journal is closed", fields: { code: "JOURNAL_CLOSED" } } });
+  });
+  const runtime = await refused.boundary.spawn(SPAWN);
+  await assert.rejects(refused.boundary.controlTurn(runtime.ref, null, { operationId: "op-1" }),
+    (error: Error & { code?: string; daemonStep?: number }) => error.message === "the journal is closed" && error.code === "JOURNAL_CLOSED" && error.daemonStep === 1);
+
+  const fake = fakeAdapter({ controlTurn });
+  const broken = new ProviderRuntimeBoundary("codex", fake.adapter);
+  broken.connectEventSink(() => { throw new Error("sink is down"); });
+  const second = await broken.spawn(SPAWN);
+  await assert.rejects(broken.controlTurn(second.ref, null, { operationId: "op-2" }), /the event sink did not take the step/);
+
+  const silent = new ProviderRuntimeBoundary("codex", fakeAdapter({ controlTurn }).adapter);
+  const third = await silent.spawn(SPAWN);
+  await assert.rejects(silent.controlTurn(third.ref, null, { operationId: "op-3" }), /the event sink did not take the step/);
+  assert.equal(dispatched, 0);
+});
+
+test("a synchronous check needs its answer inside the delivery: no answer and a late answer are refusals", async () => {
+  let stopped = 0;
+  const stopIdle: SupervisedProviderAdapter["stopIdle"] = async (_handle, assertCurrent) => { assertCurrent(); stopped += 1; return TERMINAL; };
+  const unanswered = steppedBoundary({ stopIdle });
+  const runtime = await unanswered.boundary.spawn(SPAWN);
+  await assert.rejects(unanswered.boundary.stopIdle(runtime.ref, { operationId: "op-1" }), /the check got no answer/);
+  assert.deepEqual(unanswered.steps.map((step) => [step.step, step.sync]), [["assert_current", true]]);
+  assert.equal(stopped, 0);
+
+  const late = steppedBoundary({ stopIdle }, (event, boundary) => { queueMicrotask(() => { assert.throws(() => boundary.answerStep(event.operationId, event.seq, { ok: true }), ProviderStepRefusedError); }); });
+  const second = await late.boundary.spawn(SPAWN);
+  await assert.rejects(late.boundary.stopIdle(second.ref, { operationId: "op-2" }), /the check got no answer/);
+  assert.equal(stopped, 0);
+
+  const answered = steppedBoundary({ stopIdle }, (event, boundary) => boundary.answerStep(event.operationId, event.seq, { ok: true }));
+  const third = await answered.boundary.spawn(SPAWN);
+  assert.deepEqual(await answered.boundary.stopIdle(third.ref, { operationId: "op-3" }), TERMINAL);
+  assert.equal(stopped, 1);
+});
+
+test("a detach ends the observation only: the adapter sees its signal, and a step that waits takes a refusal", async () => {
+  const seen: boolean[] = [];
+  let dispatched = 0;
+  const { boundary, steps } = steppedBoundary({
+    controlExactTurn: async (_handle, options) => {
+      seen.push(options.detachSignal!.aborted);
+      if (options.detachSignal!.aborted) throw new Error("observation detached");
+      await options.checkpointTargetTurn("turn-3");
+      dispatched += 1;
+      return { outcome: "interrupt_dispatched", targetTurnId: "turn-3" };
+    },
+  });
+  const runtime = await boundary.spawn(SPAWN);
+  const waiting = boundary.controlExactTurn(runtime.ref, { operationId: "op-1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(steps.length, 1);
+  boundary.detachOperation("op-1");
+  await assert.rejects(waiting, /the operation was detached/);
+  assert.throws(() => boundary.answerStep("op-1", 1, { ok: true }), ProviderStepRefusedError);
+  await assert.rejects(boundary.controlExactTurn(runtime.ref, { operationId: "op-2", detached: true }), /observation detached/);
+  assert.deepEqual(seen, [false, true]);
+  assert.equal(dispatched, 0);
+  boundary.detachOperation("op-unknown");
+});
+
+test("an error leaves an operation as data: its name, its message and the listed fields, and nothing else", async () => {
+  const thrown = Object.assign(new Error("interrupt was not applied"), { turnControlOutcome: "not_applied", secret: "token-1", client: { send: () => undefined } });
+  const { boundary } = steppedBoundary({ controlTurn: async () => { throw thrown; } });
+  const runtime = await boundary.spawn(SPAWN);
+  const error = await boundary.controlTurn(runtime.ref, null, { operationId: "op-1" }).then(() => null, (reason: Error) => reason);
+  assert.ok(error instanceof Error);
+  assert.notEqual(error, thrown, "not the adapter's own object");
+  assert.deepEqual([error.name, error.message, (error as { turnControlOutcome?: string }).turnControlOutcome], ["Error", "interrupt was not applied", "not_applied"]);
+  assert.deepEqual(Object.keys(error).sort(), ["turnControlOutcome"]);
+});
+
+test("each error field that an adapter sets is in the list of fields that cross the boundary", () => {
+  const root = new URL("../../provider-runtime/agents/", import.meta.url);
+  const set = new Set<string>();
+  const scan = (directory: URL) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) { if (entry.name !== "__tests__") scan(new URL(`${entry.name}/`, directory)); continue; }
+      if (!entry.name.endsWith(".ts") || entry.name.endsWith(".test.ts")) continue;
+      const source = readFileSync(new URL(entry.name, directory), "utf8");
+      for (const match of source.matchAll(/Object\.assign\(new Error\([^;]*?\), \{ ([a-zA-Z]+):/g)) set.add(match[1]!);
+      for (const match of source.matchAll(/readonly ([a-zA-Z]*(?:Outcome|FailureCode))\b/g)) set.add(match[1]!);
+    }
+  };
+  scan(root);
+  assert.ok(set.size >= 5, "the scan found the adapters' error fields");
+  // Fields that only code inside the package reads.
+  const inside = new Set(["transientProviderStart"]);
+  assert.deepEqual([...set].filter((field) => !PROVIDER_ERROR_FIELDS.includes(field as never) && !inside.has(field)).sort(), []);
+});
+
+test("a permission request has a token while it is open, and the permission operations take the token", async () => {
+  const fake = eventAdapter();
+  const replies: unknown[] = [];
+  fake.adapter.replyPermission = async (_handle, request, _reply, options) => {
+    await options!.beforeNativeDispatch();
+    options!.assertNativeDispatch!();
+    replies.push(request);
+    return { outcome: "sent", scope: "request" };
+  };
+  fake.adapter.inspectPermissionProfile = async (_handle, request) => { replies.push(request); return { network: true }; };
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => {
+    if (event.kind === "step") boundary.answerStep(event.operationId, event.seq, { ok: true });
+    else events.push(event);
+  });
+  const runtime = await boundary.spawn(SPAWN);
+  const other = await boundary.spawn({ ...SPAWN, workAttemptId: "attempt-2" });
+  boundary.subscribe(runtime.ref, "permissions", "s-perm");
+  await new Promise((resolve) => setImmediate(resolve));
+  events.length = 0;
+  const emit = fake.permissions[0]!.listener as (event: unknown) => void;
+  const tokens = () => (events.at(-1) as { permissionTokens?: string[] }).permissionTokens;
+
+  const first = { id: 7, method: "item/commandExecution/requestApproval", connectionId: "socket-1", params: {} };
+  const second = { id: 8, method: "item/permissions/requestApproval", connectionId: "socket-1", params: {} };
+  emit({ type: "snapshot", connectionId: "socket-1", requests: [first] });
+  const [tokenOfFirst] = tokens()!;
+  emit({ type: "snapshot", connectionId: "socket-1", requests: [first, second] });
+  assert.equal(tokens()![0], tokenOfFirst, "the same request keeps its token");
+  const tokenOfSecond = tokens()![1]!;
+  assert.notEqual(tokenOfSecond, tokenOfFirst);
+
+  // The token crosses as JSON, and the adapter gets its own request object.
+  const named = JSON.parse(JSON.stringify({ token: tokenOfFirst }));
+  assert.deepEqual(await boundary.replyPermission(runtime.ref, named, "once", { operationId: "op-1" }), { outcome: "sent", scope: "request" });
+  assert.deepEqual(await boundary.inspectPermissionProfile(runtime.ref, { token: tokenOfSecond }), { network: true });
+  assert.equal(replies[0], first);
+  assert.equal(replies[1], second);
+
+  const refused = (error: Error & { outcome?: string }) => error.outcome === "not_dispatched";
+  await assert.rejects(boundary.replyPermission(other.ref, { token: tokenOfFirst }, "once", { operationId: "op-2" }), refused, "a token of another runtime");
+  emit({ type: "request_closed", request: first });
+  assert.deepEqual(tokens(), [tokenOfFirst]);
+  await assert.rejects(boundary.replyPermission(runtime.ref, { token: tokenOfFirst }, "once", { operationId: "op-3" }), refused, "a closed request");
+  // Codex uses the request id again: the new request is another object, and it gets a new token.
+  const again = { ...first };
+  emit({ type: "snapshot", connectionId: "socket-1", requests: [again] });
+  assert.notEqual(tokens()![0], tokenOfFirst);
+  await assert.rejects(boundary.replyPermission(runtime.ref, { token: tokenOfSecond }, "once", { operationId: "op-4" }), refused, "a request that the snapshot no longer has");
+  boundary.release(runtime.ref);
+  assert.equal(replies.length, 2);
+});
+
+test("the lines of a repair are acknowledged by a data call, one time", async () => {
+  let recorded = 0;
+  const { boundary, handles } = steppedBoundary({
+    repairContinuation: async (handle, request, options) => {
+      await options.checkpointReplacement("thread-2");
+      return { handle, outcome: "rematerialized", previousProviderContinuationId: request.expectedProviderContinuationId,
+        replacementProviderContinuationId: "thread-1", notices: ["said once"], noticesRecorded: () => { recorded += 1; } };
+    },
+  }, (event, target) => target.answerStep(event.operationId, event.seq, { ok: true }));
+  const runtime = await boundary.spawn(SPAWN);
+  const result = await boundary.repairContinuation(runtime.ref, { workAttemptId: "attempt-1", expectedProviderContinuationId: "thread-1", cwd: "/tmp/work", launchPolicy: {} }, { operationId: "op-1" });
+  assert.equal(handles.length, 1);
+  assert.deepEqual([result.runtime.ref.runtimeId, result.noticesAwaitAcknowledgement, result.notices], [runtime.ref.runtimeId, true, ["said once"]]);
+  assertPlainWireValue(result, "repair result");
+  assert.equal(recorded, 0);
+  boundary.acknowledgeRepairNotices("op-1");
+  boundary.acknowledgeRepairNotices("op-1");
+  assert.equal(recorded, 1);
+});
+
+test("through the router: the daemon's functions run at the steps, and a function that throws fails the operation with its own error", async () => {
+  const order: string[] = [];
+  const { adapter } = fakeAdapter({
+    controlTurn: async (_handle, _correction, options) => {
+      await options!.checkpointTurnStarted!("turn-9");
+      await options!.markDispatched!();
+      order.push("native interrupt");
+      return CONTROLLED;
+    },
+  });
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ ...SPAWN, provider: "codex" });
+  assert.deepEqual(await router.controlTurn(handle, null, {
+    checkpointTurnStarted: async (turnId) => { order.push(`checkpoint ${turnId}`); },
+    markDispatched: async () => { order.push("dispatch saved"); },
+  }), CONTROLLED);
+  assert.deepEqual(order, ["checkpoint turn-9", "dispatch saved", "native interrupt"]);
+
+  class JournalClosed extends Error { readonly lease = { private: true }; }
+  const own = new JournalClosed("the journal is closed");
+  order.length = 0;
+  await assert.rejects(router.controlTurn(handle, null, { markDispatched: async () => { throw own; } }), (error) => error === own);
+  assert.deepEqual(order, [], "no native work after a refused step");
+  assert.deepEqual(await router.controlTurn(handle, null), CONTROLLED, "a call with no functions");
+});
+
+test("a sink that answers a step and then throws does not authorize native work", async () => {
+  let work = 0;
+  const overrides: Partial<SupervisedProviderAdapter> = {
+    controlTurn: async (_handle, _correction, options) => { await options!.markDispatched!(); work += 1; return CONTROLLED; },
+    stopIdle: async (_handle, assertCurrent) => { assertCurrent(); work += 1; return TERMINAL; },
+  };
+  const boundary = new ProviderRuntimeBoundary("codex", fakeAdapter(overrides).adapter);
+  const late: Array<() => void> = [];
+  boundary.connectEventSink((event) => {
+    if (event.kind !== "step") return;
+    boundary.answerStep(event.operationId, event.seq, { ok: true });
+    late.push(() => boundary.answerStep(event.operationId, event.seq, { ok: true }));
+    throw new Error("sink failed after its answer");
+  });
+  const runtime = await boundary.spawn(SPAWN);
+  await assert.rejects(boundary.controlTurn(runtime.ref, null, { operationId: "op-1" }), /the event sink did not take the step/);
+  await assert.rejects(boundary.stopIdle(runtime.ref, { operationId: "op-2" }), /the event sink did not take the check/);
+  assert.equal(work, 0);
+  for (const answer of late) assert.throws(answer, ProviderStepRefusedError);
+});
+
+test("the body of a step is checked before it is an envelope, and each step shape is JSON data", async () => {
+  let work = 0;
+  const { boundary, steps } = steppedBoundary({
+    controlTurn: async (_handle, _correction, options) => { await options!.checkpointTurnStarted!((() => "turn") as never); work += 1; return CONTROLLED; },
+    controlExactTurn: async (_handle, options) => { await options.checkpointTargetTurn(""); work += 1; return { outcome: "interrupt_dispatched", targetTurnId: "" }; },
+    repairContinuation: async (handle, _request, options) => {
+      await options.checkpointReplacement({ id: "thread-2" } as never);
+      work += 1;
+      return { handle, outcome: "replaced", previousProviderContinuationId: "thread-1", replacementProviderContinuationId: "thread-2" };
+    },
+  }, (event, target) => target.answerStep(event.operationId, event.seq, { ok: true }));
+  const runtime = await boundary.spawn(SPAWN);
+  await assert.rejects(boundary.controlTurn(runtime.ref, null, { operationId: "op-1" }), ProviderBoundaryValueError);
+  await assert.rejects(boundary.controlExactTurn(runtime.ref, { operationId: "op-2" }), ProviderBoundaryValueError);
+  await assert.rejects(boundary.repairContinuation(runtime.ref, { workAttemptId: "attempt-1", expectedProviderContinuationId: "thread-1", cwd: "/tmp/work", launchPolicy: {} }, { operationId: "op-3" }), ProviderBoundaryValueError);
+  assert.deepEqual([steps.length, work], [0, 0], "no envelope and no native work for a body that is not valid");
+  // The refused step left no open wait: the same ids can be used again.
+  await assert.rejects(boundary.controlTurn(runtime.ref, null, { operationId: "op-1" }), ProviderBoundaryValueError);
+
+  const samples: Record<(typeof PROVIDER_STEP_NAMES)[number], unknown> = {
+    checkpoint_turn_started: { turnId: "turn-9" }, mark_dispatched: null, checkpoint_target_turn: { turnId: "turn-9" },
+    before_native_dispatch: null, assert_native_dispatch: null, assert_current: null, checkpoint_replacement: { providerContinuationId: "thread-2" },
+  };
+  for (const step of PROVIDER_STEP_NAMES) {
+    const envelope = JSON.parse(JSON.stringify({ kind: "step", operationId: "op-1", ref: runtime.ref, step, seq: 1, order: 1, body: samples[step] }));
+    assert.equal(providerEventEnvelopeSchema.safeParse(envelope).success, true, step);
+    assert.equal(PROVIDER_STEP_BODY_SCHEMAS[step].safeParse(envelope.body).success, true, step);
+    assert.equal(PROVIDER_STEP_BODY_SCHEMAS[step].safeParse({ turnId: 7 }).success, false, step);
+  }
+});
+
+test("a permission token ends with the authority that gave it", async () => {
+  for (const provider of ["codex", "open-model"] as const) {
+    const fake = eventAdapter();
+    const reached: string[] = [];
+    fake.adapter.replyPermission = async () => { reached.push("reply"); return { outcome: "sent", scope: "request" }; };
+    fake.adapter.inspectPermissionProfile = async () => { reached.push("profile"); return {}; };
+    fake.adapter.inspectPermissionFileChanges = async () => { reached.push("files"); return []; };
+    fake.adapter.inspectPermissionMcpToolCall = async () => { reached.push("mcp"); return {}; };
+    const boundary = new ProviderRuntimeBoundary(provider, fake.adapter);
+    const events: ProviderEventEnvelope[] = [];
+    boundary.connectEventSink((event) => { if (event.kind !== "step") events.push(event); });
+    const runtime = await boundary.spawn(SPAWN);
+    boundary.subscribe(runtime.ref, "permissions", "s-perm");
+    await new Promise((resolve) => setImmediate(resolve));
+    const emit = fake.permissions[0]!.listener as (event: unknown) => void;
+    const tokens = () => (events.at(-1) as { permissionTokens?: string[] }).permissionTokens;
+    const request = () => ({ id: 7, method: "item/commandExecution/requestApproval", connectionId: "socket-1", params: {} });
+    const refused = (error: Error & { outcome?: string }) => error.outcome === "not_dispatched";
+    const allRefused = async (token: string, label: string) => {
+      await assert.rejects(boundary.replyPermission(runtime.ref, { token }, "once", { operationId: `op-${label}` }), refused, label);
+      await assert.rejects(boundary.inspectPermissionProfile(runtime.ref, { token }), refused, label);
+      await assert.rejects(boundary.inspectPermissionFileChanges(runtime.ref, { token }), refused, label);
+      await assert.rejects(boundary.inspectPermissionMcpToolCall(runtime.ref, { token }), refused, label);
+    };
+
+    const first = request();
+    emit({ type: "snapshot", connectionId: "socket-1", requests: [first] });
+    const [issued] = tokens()!;
+    emit({ type: "snapshot", connectionId: "socket-1", requests: [provider === "codex" ? first : request()] });
+    assert.deepEqual(tokens(), [issued], "an unchanged snapshot keeps the token");
+
+    for (const lost of [{ type: "unavailable" }, { type: "degraded" }, { type: "snapshot", requests: null }]) {
+      emit({ type: "snapshot", connectionId: "socket-1", requests: [first] });
+      const [before] = tokens()!;
+      emit(lost);
+      await allRefused(before!, `${provider} after ${JSON.stringify(lost)}`);
+      // The lane is read again: the same request, or an equal one, gets a new token.
+      emit({ type: "snapshot", connectionId: "socket-1", requests: [provider === "codex" ? first : request()] });
+      assert.notEqual(tokens()![0], before);
+    }
+
+    const [beforeChange] = tokens()!;
+    emit({ type: "snapshot", connectionId: "socket-2", requests: [first] });
+    assert.notEqual(tokens()![0], beforeChange, "another connection id gives new tokens");
+    await allRefused(beforeChange!, `${provider} after a changed connection id`);
+
+    const [beforeProcess] = tokens()!;
+    assert.deepEqual(reached, [], "no adapter call for a token whose authority ended");
+    assert.deepEqual(await boundary.inspectPermissionProfile(runtime.ref, { token: beforeProcess! }), {});
+    assert.deepEqual(reached, ["profile"], "a live token reaches the adapter");
+  }
+});
+
+test("a permission token is refused after the native connection of its runtime changed", async () => {
+  const fake = eventAdapter();
+  let reached = 0;
+  fake.adapter.inspectPermissionProfile = async () => { reached += 1; return {}; };
+  const created: FakeHandle[] = [];
+  const spawn = fake.adapter.spawn.bind(fake.adapter);
+  fake.adapter.spawn = async (request) => { const handle = await spawn(request) as FakeHandle; created.push(handle); return handle; };
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  const runtime = await boundary.spawn(SPAWN);
+  boundary.subscribe(runtime.ref, "permissions", "s-perm");
+  await new Promise((resolve) => setImmediate(resolve));
+  (fake.permissions[0]!.listener as (event: unknown) => void)({ type: "snapshot", connectionId: "socket-1", requests: [{ id: 7, method: "m", connectionId: "socket-1" }] });
+  const [token] = (events.at(-1) as { permissionTokens: string[] }).permissionTokens;
+  created[0]!.providerConnection = { kind: "codex_app_server", url: "ws://127.0.0.1:1", pid: 5151, processIdentity: "birth-2" };
+  await assert.rejects(boundary.inspectPermissionProfile(runtime.ref, { token: token! }), (error: Error & { outcome?: string }) => error.outcome === "not_dispatched");
+  assert.equal(reached, 0);
 });
