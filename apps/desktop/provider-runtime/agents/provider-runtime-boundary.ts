@@ -12,20 +12,22 @@
 // Step 4d-1 moved the references, the values of the operations that carry
 // data only, and the value guard. Step 4d-2 moves the events: the daemon
 // connects one sink, a subscription is data, and each event reaches the sink
-// as an envelope. The operations in TRANSITIONAL_OPERATIONS still take a
-// callback or an AbortSignal beside the reference; step 4d-3 replaces those.
+// as an envelope. Step 4d-3a moves five operations that waited on functions
+// of the daemon: each wait is a `step` envelope, and the daemon answers it
+// with data. The operations in TRANSITIONAL_OPERATIONS still take a callback
+// or an AbortSignal beside the reference; step 4d-3b replaces those.
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { assertPlainWireValue, assertWireBoundarySchema, jsonValueSchema } from "#daemon-contract/wire-boundary.js";
 import type { ControlProbeResult, NativeTurnBoundary } from "../../shared/execution-protocol.js";
-import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../shared/provider-permissions.js";
+import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest } from "../../shared/provider-permissions.js";
 import type { ProviderUsage } from "../../shared/provider-usage.js";
 import type {
   ProviderAdapterCapabilities,
   ProviderContinuationRef,
   ProviderContinuationRepairRequest,
   ProviderContinuationRepairResult,
-  ProviderExactTurnControlOptions,
   ProviderExactTurnControlResult,
   ProviderHandle,
   ProviderNativePermissionRequest,
@@ -35,7 +37,6 @@ import type {
   ProviderRoomTurnResult,
   ProviderSpawnRequest,
   ProviderTerminalPayload,
-  ProviderTurnControlOptions,
   ProviderTurnControlResult,
   RoomTurnFileAccess,
   RoomTurnImageDelivery,
@@ -125,6 +126,82 @@ export type ProviderBoundaryStopOptions = z.output<typeof providerStopOptionsSch
 export const PROVIDER_EVENT_KINDS = ["exit", "stream", "execution", "permissions"] as const;
 export type ProviderEventKind = (typeof PROVIDER_EVENT_KINDS)[number];
 
+/** The points where an operation of step 4d-3a waits for the daemon. */
+export const PROVIDER_STEP_NAMES = [
+  "checkpoint_turn_started", "mark_dispatched", "checkpoint_target_turn", "before_native_dispatch",
+  "assert_native_dispatch", "assert_current", "checkpoint_replacement",
+] as const;
+export type ProviderStepName = (typeof PROVIDER_STEP_NAMES)[number];
+
+/**
+ * The fields of a thrown error that the daemon reads. An error crosses the boundary as data: its name, its message
+ * and these fields. A field that is not in this list does not cross.
+ */
+export const PROVIDER_ERROR_FIELDS = [
+  "code", "outcome", "turnControlOutcome", "roomTurnRecoveryOutcome", "providerFailureCode", "providerAttachOutcome",
+  "transientProviderStartFailure", "providerContinuationId",
+] as const;
+
+const errorFieldValue = z.union([z.string().max(4096), z.number(), z.boolean(), z.null()]);
+export const providerErrorDataSchema = z.strictObject({
+  name: z.string().max(256),
+  message: z.string().max(16_384),
+  stack: z.string().max(32_768).optional(),
+  fields: z.strictObject(Object.fromEntries(PROVIDER_ERROR_FIELDS.map((field) => [field, errorFieldValue.optional()])) as Record<(typeof PROVIDER_ERROR_FIELDS)[number], z.ZodOptional<typeof errorFieldValue>>),
+  /** The error is the daemon's own refusal of this step of the operation, and the adapter did not change it. */
+  daemonStep: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+});
+export type ProviderErrorData = z.output<typeof providerErrorDataSchema>;
+
+/** The data form of a thrown value. It reads only the name, the message, the stack and the listed fields. */
+export function providerErrorData(error: unknown): ProviderErrorData {
+  const source = (typeof error === "object" && error !== null ? error : {}) as Record<string, unknown>;
+  const fields: ProviderErrorData["fields"] = {};
+  for (const field of PROVIDER_ERROR_FIELDS) {
+    const value = source[field];
+    if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) fields[field] = value;
+    else if (typeof value === "string") fields[field] = value.slice(0, 4096);
+  }
+  const text = (value: unknown, fallback: string, max: number) => (typeof value === "string" ? value : fallback).slice(0, max);
+  return {
+    name: text(source.name, "Error", 256),
+    message: text(source.message, typeof error === "string" ? error : "The provider operation failed.", 16_384),
+    ...(typeof source.stack === "string" ? { stack: source.stack.slice(0, 32_768) } : {}),
+    fields,
+  };
+}
+
+/** An error with the name, the message and the fields of its data form. */
+export function providerErrorFromData(data: ProviderErrorData): Error {
+  const error = new Error(data.message);
+  // As the name of an error class: not a field that a copy or a comparison of the error sees.
+  Object.defineProperty(error, "name", { value: data.name, enumerable: false, writable: true, configurable: true });
+  if (data.stack !== undefined) error.stack = data.stack;
+  return Object.assign(error, data.fields);
+}
+
+export const providerStepAnswerSchema = z.discriminatedUnion("ok", [
+  z.strictObject({ ok: z.literal(true), body: jsonValueSchema.optional() }),
+  z.strictObject({ ok: z.literal(false), error: providerErrorDataSchema }),
+]);
+export type ProviderStepAnswer = z.output<typeof providerStepAnswerSchema>;
+
+/** Names one call of an operation that has steps. The daemon makes the id. */
+export const providerOperationOptionsSchema = z.strictObject({
+  operationId: boundedText,
+  /** The daemon's observation was ended before the call. The operation starts as after `detachOperation`. */
+  detached: z.literal(true).optional(),
+});
+export const providerTurnControlOptionsSchema = z.strictObject({
+  operationId: boundedText,
+  targetTurnId: z.string().nullable().optional(),
+  detached: z.literal(true).optional(),
+});
+export const providerPermissionReplyOptionsSchema = z.strictObject({ operationId: boundedText, expectedFileChanges: jsonValueSchema.optional() });
+/** The name of a permission request in place of the request: a token of a permission event. */
+export const providerPermissionTokenSchema = z.strictObject({ token: boundedText });
+export type ProviderPermissionToken = z.output<typeof providerPermissionTokenSchema>;
+
 const subscriptionId = boundedText;
 const eventCounter = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
 
@@ -144,6 +221,11 @@ export const providerEventEnvelopeSchema = z.discriminatedUnion("kind", [
     order: eventCounter,
     /** The last envelope of this subscription. The boundary has ended the subscription. */
     final: z.literal(true).optional(),
+    /**
+     * Permissions only: one token for each request of a `snapshot`, in the order of `body.requests`, or the one
+     * token of the request of a `request_closed`. A token names the request in the permission operations.
+     */
+    permissionTokens: z.array(boundedText).optional(),
     body: jsonValueSchema,
   }),
   // One or more events of this subscription did not reach the daemon because they were not plain data.
@@ -162,11 +244,25 @@ export const providerEventEnvelopeSchema = z.discriminatedUnion("kind", [
     order: eventCounter,
     body: z.strictObject({ hint: z.enum(["progress", "native_started"]) }),
   }),
+  // An operation waits for the daemon. The daemon answers with `answerStep`, and names the operation and `seq`.
+  z.strictObject({
+    kind: z.literal("step"),
+    operationId: boundedText,
+    ref: providerRuntimeRefSchema,
+    step: z.enum(PROVIDER_STEP_NAMES),
+    /** Counts the steps of this operation from 1. One step is open at a time. */
+    seq: eventCounter,
+    order: eventCounter,
+    /** The answer must come inside the delivery of this envelope. No answer is a refusal. */
+    sync: z.literal(true).optional(),
+    body: jsonValueSchema,
+  }),
 ]);
 export type ProviderEventEnvelope =
-  | { kind: ProviderEventKind; subscriptionId: string; ref: ProviderRuntimeRef; seq: number; order: number; final?: true; body: unknown }
+  | { kind: ProviderEventKind; subscriptionId: string; ref: ProviderRuntimeRef; seq: number; order: number; final?: true; permissionTokens?: string[]; body: unknown }
   | { kind: "gap"; subscriptionId: string; ref: ProviderRuntimeRef; seq: number; order: number; body: { dropped: "stream" | "execution"; count: number } }
-  | { kind: "start"; operationId: string; order: number; body: { hint: "progress" | "native_started" } };
+  | { kind: "start"; operationId: string; order: number; body: { hint: "progress" | "native_started" } }
+  | { kind: "step"; operationId: string; ref: ProviderRuntimeRef; step: ProviderStepName; seq: number; order: number; sync?: true; body: unknown };
 
 /** The transport for all events of one boundary. The daemon connects it one time. It is not a per-call callback. */
 export type ProviderEventSink = (event: ProviderEventEnvelope) => void;
@@ -183,7 +279,7 @@ export const providerSubscriptionPositionSchema = z.strictObject({
   latestSequence: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
 });
 
-/** The schemas of the values that steps 4d-1 and 4d-2 moved. Each one meets the shared wire rule of the RPC contract. */
+/** The schemas of the values that steps 4d-1, 4d-2 and 4d-3a moved. Each one meets the shared wire rule of the RPC contract. */
 export const PROVIDER_BOUNDARY_SCHEMAS = {
   providerConnectionRef: providerConnectionRefSchema,
   providerRuntimeRef: providerRuntimeRefSchema,
@@ -195,6 +291,12 @@ export const PROVIDER_BOUNDARY_SCHEMAS = {
   providerEventEnvelope: providerEventEnvelopeSchema,
   providerSubscription: providerSubscriptionSchema,
   providerSubscriptionPosition: providerSubscriptionPositionSchema,
+  providerErrorData: providerErrorDataSchema,
+  providerStepAnswer: providerStepAnswerSchema,
+  providerOperationOptions: providerOperationOptionsSchema,
+  providerTurnControlOptions: providerTurnControlOptionsSchema,
+  providerPermissionReplyOptions: providerPermissionReplyOptionsSchema,
+  providerPermissionToken: providerPermissionTokenSchema,
 } as const;
 for (const schema of Object.values(PROVIDER_BOUNDARY_SCHEMAS)) assertWireBoundarySchema(schema);
 
@@ -208,7 +310,23 @@ export const DATA_OPERATIONS = [
   "roomTurnFileAccess", "compactionProgress", "runtimeCustody", "describeManagedLaunchContract",
   "correlatePermissionTurn", "inspectPermissionFileChanges", "inspectPermissionProfile",
   "inspectPermissionMcpToolCall", "stop", "stopRef", "subscribe", "unsubscribe", "subscriptionPosition",
+  "controlTurn", "controlExactTurn", "repairContinuation", "acknowledgeRepairNotices", "stopIdle", "replyPermission",
+  "answerStep", "detachOperation",
 ] as const;
+
+/**
+ * The steps of each operation of step 4d-3a. A step with `sync` is a check that the daemon answers inside the
+ * delivery of the envelope. That works because the sink is called in the same process and on the same stack. A
+ * transport between processes cannot answer in the same call: it needs a fence value that the adapter can compare
+ * itself. That part of the contract is not process-neutral yet.
+ */
+export const OPERATION_STEPS = {
+  controlTurn: ["checkpoint_turn_started", "mark_dispatched"],
+  controlExactTurn: ["checkpoint_target_turn", "mark_dispatched"],
+  repairContinuation: ["checkpoint_replacement"],
+  stopIdle: ["assert_current (sync)"],
+  replyPermission: ["before_native_dispatch", "assert_native_dispatch (sync)"],
+} as const;
 
 /** The one place where the daemon gives the boundary a function: the transport for events. */
 export const TRANSPORT_OPERATIONS = ["connectEventSink"] as const;
@@ -218,17 +336,12 @@ export const TRANSPORT_OPERATIONS = ["connectEventSink"] as const;
  * AbortSignal. The part that is not data is named for each.
  */
 export const TRANSITIONAL_OPERATIONS = {
-  controlTurn: ["checkpointTurnStarted", "markDispatched"],
-  controlExactTurn: ["checkpointTargetTurn", "markDispatched", "detachSignal"],
   runRoomTurn: [
     "beforeNativeDispatch", "checkpointTurnStarted", "checkpointPreparedTurn", "checkpointProviderState",
     "settleLifecycleBeforeIdle", "markDurableTurnStarted", "checkpointTerminalResult", "detachSignal",
     "markDispatched", "request.attachments[].image.data (Uint8Array)",
   ],
   recoverRoomTurn: ["detachSignal", "checkpointProviderState", "settleLifecycleBeforeIdle", "checkpointTerminalResult"],
-  repairContinuation: ["checkpointReplacement", "detachSignal", "result.noticesRecorded"],
-  stopIdle: ["assertCurrent"],
-  replyPermission: ["beforeNativeDispatch", "assertNativeDispatch"],
 } as const;
 
 /** The reference names a runtime that this boundary does not hold. Nothing was sent to a provider. */
@@ -253,7 +366,31 @@ export class ProviderBoundaryValueError extends Error {
 export const providerStartOptionsSchema = z.strictObject({ startOperationId: boundedText.optional() });
 export type ProviderStartOptions = z.output<typeof providerStartOptionsSchema>;
 export type ProviderBoundarySpawnRequest = Omit<ProviderSpawnRequest, "onProgress" | "onNativeStarted">;
-export type ProviderBoundaryRepairResult = Omit<ProviderContinuationRepairResult, "handle"> & { runtime: ProviderRuntimeSnapshot };
+export type ProviderBoundaryRepairResult = Omit<ProviderContinuationRepairResult, "handle" | "noticesRecorded"> & {
+  runtime: ProviderRuntimeSnapshot;
+  /** The adapter waits to hear that its lines are recorded. The daemon says so with `acknowledgeRepairNotices`. */
+  noticesAwaitAcknowledgement: boolean;
+};
+export type ProviderPermissionRequestName = ProviderNativePermissionRequest | ProviderPermissionToken;
+
+/** The operation is not open, or the step is not the one that waits. Nothing was dispatched. */
+export class ProviderStepRefusedError extends Error {
+  readonly code = "PROVIDER_STEP_REFUSED";
+  constructor(detail: string) {
+    super(`Provider operation step was refused: ${detail}`);
+    this.name = "ProviderStepRefusedError";
+  }
+}
+
+type OpenOperation = {
+  ref: ProviderRuntimeRef;
+  seq: number;
+  /** The step that waits now. */
+  open: { seq: number; sync: boolean; answer?: ProviderStepAnswer; settle?: (answer: ProviderStepAnswer) => void } | null;
+  detach: AbortController;
+  /** The errors that this boundary threw into the adapter for a refused step, by step. */
+  refusals: WeakMap<object, number>;
+};
 export type ProviderBoundaryOperation = keyof SupervisedProviderAdapter;
 
 const GUARD = { allowUndefinedProperties: true } as const;
@@ -316,6 +453,10 @@ export class ProviderRuntimeBoundary {
   }>();
   private sink: ProviderEventSink | null = null;
   private order = 0;
+  private readonly openOperations = new Map<string, OpenOperation>();
+  private readonly repairNotices = new Map<string, { runtimeId: string; recorded: () => void }>();
+  /** The permission requests that the latest events named, for each runtime. A token dies with its request. */
+  private readonly permissionTokens = new Map<string, { runtimeId: string; request: object }>();
 
   constructor(readonly provider: string, private readonly adapter: SupervisedProviderAdapter) {}
 
@@ -478,6 +619,8 @@ export class ProviderRuntimeBoundary {
     this.handles.delete(ref.runtimeId);
     // A released reference stays stale: the same handle object gets a new id if an adapter returns it again.
     this.runtimeIds.delete(handle);
+    for (const [token, entry] of this.permissionTokens) if (entry.runtimeId === ref.runtimeId) this.permissionTokens.delete(token);
+    for (const [id, entry] of this.repairNotices) if (entry.runtimeId === ref.runtimeId) this.repairNotices.delete(id);
   }
 
   async poke(ref: ProviderRuntimeRef, message: string): Promise<void> {
@@ -547,25 +690,22 @@ export class ProviderRuntimeBoundary {
     return guarded("correlatePermissionTurn", "result", await this.required("correlatePermissionTurn")(handle, request, options));
   }
 
-  async inspectPermissionFileChanges(ref: ProviderRuntimeRef, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null> {
+  async inspectPermissionFileChanges(ref: ProviderRuntimeRef, request: CodexNativePermissionRequest | ProviderPermissionToken): Promise<readonly CodexPermissionFileChange[] | null> {
     const handle = this.held(ref);
-    // Checked in place and not copied: the Codex adapter matches this request by object identity.
-    guarded("inspectPermissionFileChanges", "request", request);
-    return guarded("inspectPermissionFileChanges", "result", await this.required("inspectPermissionFileChanges")(handle, request));
+    const native = this.permissionRequest("inspectPermissionFileChanges", ref, request) as CodexNativePermissionRequest;
+    return guarded("inspectPermissionFileChanges", "result", await this.required("inspectPermissionFileChanges")(handle, native));
   }
 
-  async inspectPermissionProfile(ref: ProviderRuntimeRef, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null> {
+  async inspectPermissionProfile(ref: ProviderRuntimeRef, request: CodexNativePermissionRequest | ProviderPermissionToken): Promise<Record<string, unknown> | null> {
     const handle = this.held(ref);
-    // Checked in place and not copied: the Codex adapter matches this request by object identity.
-    guarded("inspectPermissionProfile", "request", request);
-    return guarded("inspectPermissionProfile", "result", await this.required("inspectPermissionProfile")(handle, request));
+    const native = this.permissionRequest("inspectPermissionProfile", ref, request) as CodexNativePermissionRequest;
+    return guarded("inspectPermissionProfile", "result", await this.required("inspectPermissionProfile")(handle, native));
   }
 
-  async inspectPermissionMcpToolCall(ref: ProviderRuntimeRef, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null> {
+  async inspectPermissionMcpToolCall(ref: ProviderRuntimeRef, request: CodexNativePermissionRequest | ProviderPermissionToken): Promise<Record<string, unknown> | null> {
     const handle = this.held(ref);
-    // Checked in place and not copied: the Codex adapter matches this request by object identity.
-    guarded("inspectPermissionMcpToolCall", "request", request);
-    return guarded("inspectPermissionMcpToolCall", "result", await this.required("inspectPermissionMcpToolCall")(handle, request));
+    const native = this.permissionRequest("inspectPermissionMcpToolCall", ref, request) as CodexNativePermissionRequest;
+    return guarded("inspectPermissionMcpToolCall", "result", await this.required("inspectPermissionMcpToolCall")(handle, native));
   }
 
   async stop(ref: ProviderRuntimeRef, options?: ProviderBoundaryStopOptions): Promise<ProviderTerminalPayload> {
@@ -583,15 +723,6 @@ export class ProviderRuntimeBoundary {
 
   // The operations below are transitional: see TRANSITIONAL_OPERATIONS.
 
-  controlTurn(ref: ProviderRuntimeRef, correction?: string | null, options?: ProviderTurnControlOptions): Promise<ProviderTurnControlResult> {
-    return this.adapter.controlTurn(this.held(ref), correction, options);
-  }
-
-  controlExactTurn(ref: ProviderRuntimeRef, options: ProviderExactTurnControlOptions): Promise<ProviderExactTurnControlResult> {
-    const handle = this.held(ref);
-    return this.required("controlExactTurn")(handle, options);
-  }
-
   runRoomTurn(ref: ProviderRuntimeRef, request: ProviderRoomTurnRequest, options?: ProviderRoomTurnOptions): Promise<ProviderRoomTurnResult> {
     const handle = this.held(ref);
     return this.required("runRoomTurn")(handle, request, options);
@@ -606,36 +737,231 @@ export class ProviderRuntimeBoundary {
     return this.required("recoverRoomTurn")(handle, request, options);
   }
 
+  // The operations below have steps: see OPERATION_STEPS. Each waits for the daemon with a `step` envelope.
+
+  async controlTurn(ref: ProviderRuntimeRef, correction: string | null | undefined, options: { operationId: string; targetTurnId?: string | null }): Promise<ProviderTurnControlResult> {
+    const handle = this.held(ref);
+    if (correction !== undefined) guarded("controlTurn", "correction", correction);
+    conforming("controlTurn", providerTurnControlOptionsSchema, guarded("controlTurn", "options", options));
+    return this.operation("controlTurn", ref, options.operationId, false, async (operation) => guarded("controlTurn", "result",
+      await this.adapter.controlTurn(handle, correction, {
+        targetTurnId: options.targetTurnId,
+        checkpointTurnStarted: async (turnId) => { await this.step(operation, "checkpoint_turn_started", { turnId }); },
+        markDispatched: async () => { await this.step(operation, "mark_dispatched", null); },
+      })));
+  }
+
+  async controlExactTurn(ref: ProviderRuntimeRef, options: { operationId: string; targetTurnId?: string | null; detached?: true }): Promise<ProviderExactTurnControlResult> {
+    const handle = this.held(ref);
+    conforming("controlExactTurn", providerTurnControlOptionsSchema, guarded("controlExactTurn", "options", options));
+    const run = this.required("controlExactTurn");
+    return this.operation("controlExactTurn", ref, options.operationId, options.detached === true, async (operation, record) => guarded("controlExactTurn", "result",
+      await run(handle, {
+        targetTurnId: options.targetTurnId,
+        checkpointTargetTurn: async (turnId) => { await this.step(operation, "checkpoint_target_turn", { turnId }); },
+        markDispatched: async () => { await this.step(operation, "mark_dispatched", null); },
+        detachSignal: record.detach.signal,
+      })));
+  }
+
   /**
    * The result names the runtime that holds the conversation after the
    * repair. It is the reference that was given when the adapter kept its
    * handle, and a new reference when the adapter made a new handle.
    */
-  async repairContinuation(
-    ref: ProviderRuntimeRef,
-    request: ProviderContinuationRepairRequest,
-    options: { checkpointReplacement: (providerContinuationId: string) => Promise<void>; detachSignal?: AbortSignal },
-  ): Promise<ProviderBoundaryRepairResult> {
+  async repairContinuation(ref: ProviderRuntimeRef, request: ProviderContinuationRepairRequest, options: { operationId: string; detached?: true }): Promise<ProviderBoundaryRepairResult> {
     const handle = this.held(ref);
-    const { handle: repaired, ...result } = await this.required("repairContinuation")(handle, request, options);
-    return { ...result, runtime: this.installed("repairContinuation", repaired, ref.workAttemptId) };
+    guarded("repairContinuation", "request", request);
+    conforming("repairContinuation", providerOperationOptionsSchema, guarded("repairContinuation", "options", options));
+    const run = this.required("repairContinuation");
+    return this.operation("repairContinuation", ref, options.operationId, options.detached === true, async (operation, record) => {
+      const { handle: repaired, noticesRecorded, ...result } = await run(handle, request, {
+        checkpointReplacement: async (providerContinuationId) => { await this.step(operation, "checkpoint_replacement", { providerContinuationId }); },
+        detachSignal: record.detach.signal,
+      });
+      guarded("repairContinuation", "result", result);
+      const runtime = this.installed("repairContinuation", repaired, ref.workAttemptId);
+      if (typeof noticesRecorded === "function") this.repairNotices.set(operation, { runtimeId: runtime.ref.runtimeId, recorded: noticesRecorded });
+      return { ...result, runtime, noticesAwaitAcknowledgement: typeof noticesRecorded === "function" };
+    });
   }
 
-  stopIdle(ref: ProviderRuntimeRef, assertCurrent: () => void): Promise<ProviderTerminalPayload> {
-    const handle = this.held(ref);
-    return this.required("stopIdle")(handle, assertCurrent);
+  /** The lines of a repair are recorded. One time for each repair; a second call, or an unknown id, does nothing. */
+  acknowledgeRepairNotices(operationId: string): void {
+    guarded("acknowledgeRepairNotices", "operationId", operationId);
+    const entry = this.repairNotices.get(operationId);
+    this.repairNotices.delete(operationId);
+    entry?.recorded();
   }
 
-  replyPermission(
+  async stopIdle(ref: ProviderRuntimeRef, options: { operationId: string }): Promise<ProviderTerminalPayload> {
+    const handle = this.held(ref);
+    conforming("stopIdle", providerOperationOptionsSchema, guarded("stopIdle", "options", options));
+    const run = this.required("stopIdle");
+    return this.operation("stopIdle", ref, options.operationId, false, async (operation) =>
+      this.terminal("stopIdle", await run(handle, () => { this.check(operation, "assert_current", null); })));
+  }
+
+  async replyPermission(
     ref: ProviderRuntimeRef,
-    request: ProviderNativePermissionRequest,
+    request: ProviderPermissionRequestName,
     reply: "once" | "reject",
-    options?: ProviderPermissionDispatchOptions,
+    options: { operationId: string; expectedFileChanges?: readonly CodexPermissionFileChange[] },
   ): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }> {
     const handle = this.held(ref);
-    guarded("replyPermission", "request", request);
+    const native = this.permissionRequest("replyPermission", ref, request);
     guarded("replyPermission", "reply", reply);
-    return this.required("replyPermission")(handle, request, reply, options);
+    conforming("replyPermission", providerPermissionReplyOptionsSchema, guarded("replyPermission", "options", options));
+    const run = this.required("replyPermission");
+    return this.operation("replyPermission", ref, options.operationId, false, async (operation) => guarded("replyPermission", "result",
+      await run(handle, native, reply, {
+        expectedFileChanges: options.expectedFileChanges,
+        beforeNativeDispatch: async () => { await this.step(operation, "before_native_dispatch", null); },
+        assertNativeDispatch: () => { this.check(operation, "assert_native_dispatch", null); },
+      })));
+  }
+
+  /**
+   * Answer the step that waits. Only the open step of an open operation takes an answer: a second answer, an answer
+   * for another step, and an answer after the end of the operation are refused with ProviderStepRefusedError.
+   */
+  answerStep(operationId: string, seq: number, answer: ProviderStepAnswer): void {
+    guarded("answerStep", "operationId", operationId);
+    guarded("answerStep", "seq", seq);
+    conforming("answerStep", providerStepAnswerSchema, guarded("answerStep", "answer", answer));
+    const open = this.openOperations.get(operationId)?.open;
+    if (!open || open.seq !== seq || open.answer !== undefined) throw new ProviderStepRefusedError("no step with this number waits");
+    open.answer = answer;
+    open.settle?.(answer);
+  }
+
+  /**
+   * End the daemon's observation of an operation. The native work of the provider is not interrupted. A step that
+   * waits ends with a refusal, so the adapter dispatches nothing for it. An unknown id does nothing.
+   */
+  detachOperation(operationId: string): void {
+    guarded("detachOperation", "operationId", operationId);
+    const record = this.openOperations.get(operationId);
+    if (!record) return;
+    record.detach.abort();
+    const open = record.open;
+    if (open && !open.sync && open.answer === undefined) {
+      open.answer = { ok: false, error: providerErrorData(new ProviderStepRefusedError("the operation was detached")) };
+      open.settle?.(open.answer);
+    }
+  }
+
+  /** Run one operation that has steps. An error leaves as its data form, built again as an error. */
+  private async operation<T>(name: string, ref: ProviderRuntimeRef, operationId: string, detached: boolean, run: (operationId: string, record: OpenOperation) => Promise<T>): Promise<T> {
+    if (this.openOperations.has(operationId)) throw new ProviderBoundaryValueError(name, "the operation id is in use");
+    const record: OpenOperation = {
+      ref: { provider: ref.provider, workAttemptId: ref.workAttemptId, runtimeId: ref.runtimeId },
+      seq: 0, open: null, detach: new AbortController(), refusals: new WeakMap(),
+    };
+    if (detached) record.detach.abort();
+    this.openOperations.set(operationId, record);
+    try {
+      return await run(operationId, record);
+    } catch (error) {
+      if (error instanceof ProviderBoundaryValueError) throw error;
+      const data = providerErrorData(error);
+      const daemonStep = typeof error === "object" && error !== null ? record.refusals.get(error) : undefined;
+      throw Object.assign(providerErrorFromData(data), daemonStep === undefined ? {} : { daemonStep });
+    } finally {
+      this.openOperations.delete(operationId);
+    }
+  }
+
+  /** Wait for the daemon at one step. Returns the body of the answer. A refusal is thrown into the adapter. */
+  private async step(operationId: string, step: ProviderStepName, body: unknown): Promise<unknown> {
+    const { record, open } = this.openStep(operationId, false);
+    const answered = new Promise<ProviderStepAnswer>((resolve) => { open.settle = resolve; });
+    if (record.detach.signal.aborted) open.answer = { ok: false, error: providerErrorData(new ProviderStepRefusedError("the operation was detached")) };
+    else if (!this.sendStep(operationId, record, step, open, body)) {
+      open.answer ??= { ok: false, error: providerErrorData(new ProviderStepRefusedError("the event sink did not take the step")) };
+    }
+    const answer = open.answer ?? await answered;
+    record.open = null;
+    return this.answered(record, open.seq, answer);
+  }
+
+  /** Ask the daemon at one step and read its answer when the sink returns. No answer is a refusal. */
+  private check(operationId: string, step: ProviderStepName, body: unknown): void {
+    const { record, open } = this.openStep(operationId, true);
+    if (!record.detach.signal.aborted) this.sendStep(operationId, record, step, open, body);
+    const answer = open.answer ?? { ok: false as const, error: providerErrorData(new ProviderStepRefusedError("the check got no answer")) };
+    // A later answer finds no open step.
+    record.open = null;
+    this.answered(record, open.seq, answer);
+  }
+
+  private openStep(operationId: string, sync: boolean): { record: OpenOperation; open: NonNullable<OpenOperation["open"]> } {
+    const record = this.openOperations.get(operationId);
+    if (!record) throw new ProviderStepRefusedError("the operation has ended");
+    if (record.open) throw new ProviderStepRefusedError("another step of the operation waits");
+    const open = { seq: ++record.seq, sync };
+    record.open = open;
+    return { record, open };
+  }
+
+  private sendStep(operationId: string, record: OpenOperation, step: ProviderStepName, open: NonNullable<OpenOperation["open"]>, body: unknown): boolean {
+    if (!this.sink) return false;
+    try {
+      this.sink({ kind: "step", operationId, ref: record.ref, step, seq: open.seq, order: ++this.order, ...(open.sync ? { sync: true as const } : {}), body });
+      return true;
+    } catch (error) {
+      console.warn("[provider_events]", `${this.provider}: the event sink failed for the step '${step}': ${error instanceof Error ? error.message : "error"}`);
+      return false;
+    }
+  }
+
+  private answered(record: OpenOperation, seq: number, answer: ProviderStepAnswer): unknown {
+    if (answer.ok) return answer.body ?? null;
+    const refusal = providerErrorFromData(answer.error);
+    record.refusals.set(refusal, seq);
+    throw refusal;
+  }
+
+  /**
+   * The request that a permission operation names. A token must be of this runtime and its request must still be
+   * open. A request object is checked in place and not copied: the Codex adapter matches it by object identity.
+   */
+  private permissionRequest(operation: string, ref: ProviderRuntimeRef, request: ProviderPermissionRequestName): ProviderNativePermissionRequest {
+    guarded(operation, "request", request);
+    const named: unknown = request;
+    if (!isRecord(named) || typeof named.token !== "string" || Object.keys(named).length !== 1) return request as ProviderNativePermissionRequest;
+    const entry = this.permissionTokens.get(named.token);
+    if (!entry || entry.runtimeId !== ref.runtimeId) {
+      throw Object.assign(new Error("The permission request of this token is not open on this runtime."), { outcome: "not_dispatched" });
+    }
+    return entry.request as ProviderNativePermissionRequest;
+  }
+
+  /**
+   * The tokens of a permission event. A request keeps its token while it stays open: the same object, or for a
+   * provider that lists its requests again, an equal value. A request that a snapshot no longer has, and a closed
+   * request, lose their token. A new request never gets an old token.
+   */
+  private tokensOf(runtimeId: string, body: unknown): string[] | undefined {
+    if (!isRecord(body) || (body.type !== "snapshot" && body.type !== "request_closed")) return undefined;
+    const live = [...this.permissionTokens].filter(([, entry]) => entry.runtimeId === runtimeId);
+    const tokenOf = (request: object, taken: Set<string>): string | undefined =>
+      live.find(([token, entry]) => !taken.has(token) && entry.request === request)?.[0]
+      ?? (this.provider === "codex" ? undefined : live.find(([token, entry]) => !taken.has(token) && isDeepStrictEqual(entry.request, request))?.[0]);
+    if (body.type === "request_closed") {
+      const token = tokenOf(body.request as object, new Set());
+      if (token) this.permissionTokens.delete(token);
+      return token ? [token] : [];
+    }
+    const taken = new Set<string>();
+    const tokens = (body.requests as object[]).map((request) => {
+      const token = tokenOf(request, taken) ?? randomUUID();
+      taken.add(token);
+      this.permissionTokens.set(token, { runtimeId, request });
+      return token;
+    });
+    for (const [token] of live) if (!taken.has(token)) this.permissionTokens.delete(token);
+    return tokens;
   }
 
   /**
@@ -650,6 +976,7 @@ export class ProviderRuntimeBoundary {
     let safe = body;
     let last = false;
     let plain = true;
+    let tokens: string[] | undefined;
     try { assertPlainWireValue(body, GUARD); } catch { plain = false; }
     if (record.kind === "exit") {
       // An exit is never dropped. A terminal that is not what the contract says is reported as a protocol error.
@@ -663,13 +990,14 @@ export class ProviderRuntimeBoundary {
       // A permission event must not vanish: the daemon then shows no prompt. For an event that is not plain data,
       // or that is not one of the known events with the fields that the daemon reads, it learns that the lane cannot be read.
       if (!plain || !knownPermissionEvent(body)) safe = { type: "unavailable" };
+      tokens = this.tokensOf(record.ref.runtimeId, safe);
     } else if (!plain) {
       this.send({ kind: "gap", ...base, seq: ++record.seq, order: ++this.order, body: { dropped: record.kind as "stream" | "execution", count: 1 } });
       return;
     }
     // The record ends here. The adapter's own listener is left as it is: a listener was never removed at its last event before.
     if (last) this.subscriptions.delete(id);
-    this.send({ kind: record.kind, ...base, seq: ++record.seq, order: ++this.order, ...(last ? { final: true as const } : {}), body: safe });
+    this.send({ kind: record.kind, ...base, seq: ++record.seq, order: ++this.order, ...(last ? { final: true as const } : {}), ...(tokens ? { permissionTokens: tokens } : {}), body: safe });
   }
 
   private send(event: ProviderEventEnvelope): void {

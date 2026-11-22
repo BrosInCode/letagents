@@ -27,12 +27,15 @@ import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSub
 import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
 import type { SupervisedProviderAdapter } from "#provider-runtime/agents/provider-adapter.js";
-import { ProviderRuntimeBoundary, type ProviderEventEnvelope, type ProviderEventKind, type ProviderRuntimeRef, type ProviderRuntimeSnapshot } from "#provider-runtime/agents/provider-runtime-boundary.js";
+import { ProviderRuntimeBoundary, providerErrorData, type ProviderEventEnvelope, type ProviderEventKind, type ProviderPermissionToken, type ProviderRuntimeRef, type ProviderRuntimeSnapshot, type ProviderStepName } from "#provider-runtime/agents/provider-runtime-boundary.js";
 import type { ProviderNativePermissionEvent } from "#provider-runtime/agents/provider-adapter.js";
 
 /** What the router keeps for a work attempt: the provider, its data boundary and the reference of the installed runtime. */
 type Remembered = { provider: string; boundary: ProviderRuntimeBoundary; runtime: ProviderRuntimeRef | null };
 type Installed = Remembered & { runtime: ProviderRuntimeRef };
+type StepEnvelope = Extract<ProviderEventEnvelope, { kind: "step" }>;
+/** What the daemon does at each step of one operation. A step with no entry is answered at once. */
+type StepHandlers = Partial<Record<ProviderStepName, (body: unknown) => unknown>>;
 
 /**
  * The contract between the daemon and a provider adapter. Its one definition
@@ -135,6 +138,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   private readonly eventListeners = new Map<string, (event: ProviderEventEnvelope) => void>();
   /** The start listener of each runtime that was started with hints, by runtime id. */
   private readonly startListeners = new Map<string, string>();
+  /** The operations that wait for this daemon at their steps, by operation id. */
+  private readonly stepHandlers = new Map<string, (event: StepEnvelope) => void>();
+  /** The token of each permission request that an event named. The request itself stays with the boundary. */
+  private readonly permissionTokens = new WeakMap<object, string>();
 
   constructor(
     private readonly adapterLoaders: Readonly<Record<string, ProviderAdapterLoader>> = {},
@@ -266,11 +273,11 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   async controlTurn(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string; targetTurnId?: string | null; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult> {
     const remembered = this.required(handle);
-    const result = await (await this.boundary(remembered.provider)).controlTurn(remembered.runtime, correction, {
-      targetTurnId: options?.targetTurnId,
-      checkpointTurnStarted: options?.checkpointTurnStarted,
-      markDispatched: options?.markDispatched,
-    });
+    const boundary = await this.boundary(remembered.provider);
+    const result = await this.withSteps(boundary, {
+      checkpoint_turn_started: (body) => options?.checkpointTurnStarted?.((body as { turnId: string }).turnId),
+      mark_dispatched: () => options?.markDispatched?.(),
+    }, undefined, (operation) => boundary.controlTurn(remembered.runtime, correction, { ...operation, targetTurnId: options?.targetTurnId }));
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
     return result;
   }
@@ -286,7 +293,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const remembered = this.required(handle);
     const boundary = await this.boundary(remembered.provider);
     if (!boundary.has("controlExactTurn")) throw new Error(`Provider '${remembered.provider}' does not support exact turn control.`);
-    return boundary.controlExactTurn(remembered.runtime, options);
+    return this.withSteps(boundary, {
+      checkpoint_target_turn: (body) => options.checkpointTargetTurn((body as { turnId: string }).turnId),
+      mark_dispatched: () => options.markDispatched(),
+    }, options.detachSignal, (operation) => boundary.controlExactTurn(remembered.runtime, { ...operation, targetTurnId: options.targetTurnId }));
   }
 
   async inspectTurnBoundary(handle: ProviderActionHandle): Promise<NativeTurnBoundary> {
@@ -330,7 +340,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const boundary = await this.boundary(remembered.provider);
     if (signal.aborted) return;
     if (!current() || !["codex", "open-model", "claude-code"].includes(remembered.provider) || !boundary.has("observePermissions")) { notify({ type: "unavailable" }); return; }
-    await this.observeNativePermissions(boundary, remembered.runtime, signal, event => {
+    await this.observeNativePermissions(boundary, remembered.runtime, signal, (event, tokens) => {
       if (signal.aborted) return;
       if (!current()) { notify({ type: "unavailable" }); return; }
       if (event.type === "request_closed") {
@@ -357,6 +367,8 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         : remembered.provider === "claude-code"
           ? { provider: "claude-code", native: structuredClone(native as ClaudeNativePermissionRequest) }
           : { provider: "open-model", native: structuredClone(native as OpenCodeNativePermissionRequest) });
+      // The daemon keeps the request for its own reading. For the boundary, the token is the name of the request.
+      requests.forEach((request, index) => { if (tokens[index]) this.permissionTokens.set(request.native, tokens[index]!); });
       notify({ type: "snapshot", requests, connectionId });
     });
   }
@@ -370,7 +382,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     boundary: ProviderRuntimeBoundary,
     runtime: ProviderRuntimeRef,
     signal: AbortSignal,
-    listener: (event: ProviderNativePermissionEvent) => void,
+    listener: (event: ProviderNativePermissionEvent, tokens: readonly string[]) => void,
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const id = randomUUID();
@@ -380,7 +392,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       this.eventListeners.set(id, (event) => {
         if (event.kind !== "permissions") return;
         const body = event.body as ProviderNativePermissionEvent | { type: "settled"; outcome: "ended" | "failed"; message?: string };
-        if (body.type !== "settled") { listener(body); return; }
+        if (body.type !== "settled") { listener(body, event.permissionTokens ?? []); return; }
         if (body.outcome === "failed") reject(new Error(body.message ?? "failed")); else resolve();
       });
       try {
@@ -403,7 +415,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         if (request.native.method === "mcpServer/elicitation/request") {
           const boundary = await this.boundary(remembered.provider);
           if (!current() || !boundary.has("inspectPermissionMcpToolCall")) return { outcome: "correlation_unproven" };
-          const proposal = await boundary.inspectPermissionMcpToolCall(remembered.runtime, request.native);
+          const proposal = await boundary.inspectPermissionMcpToolCall(remembered.runtime, this.named(request.native));
           if (!current() || !proposal || proposal.threadId !== continuation
             || typeof proposal.turnId !== "string" || !proposal.turnId.trim() || proposal.turnId.length > 512) {
             return { outcome: "correlation_unproven" };
@@ -422,13 +434,13 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         if (kind === "network") {
           const boundary = await this.boundary(remembered.provider);
           if (!current() || !boundary.has("inspectPermissionProfile")) return { outcome: "correlation_unproven" };
-          const profile = await boundary.inspectPermissionProfile(remembered.runtime, request.native);
+          const profile = await boundary.inspectPermissionProfile(remembered.runtime, this.named(request.native));
           if (!current() || !profile) return { outcome: "correlation_unproven" };
         }
         if (kind === "file_change") {
           const boundary = await this.boundary(remembered.provider);
           if (!current() || !boundary.has("inspectPermissionFileChanges")) return { outcome: "correlation_unproven" };
-          const fileChanges = await boundary.inspectPermissionFileChanges(remembered.runtime, request.native);
+          const fileChanges = await boundary.inspectPermissionFileChanges(remembered.runtime, this.named(request.native));
           if (!current() || !fileChanges?.length) return { outcome: "correlation_unproven" };
           return { outcome: "correlated", providerContinuationId: continuation!, providerTurnId: params.turnId, kind, fileChanges };
         }
@@ -454,16 +466,19 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       if (!current() || request.provider !== remembered.provider) throw Object.assign(new Error("Permission provider binding changed."), { outcome: "not_dispatched" });
     };
     assertCurrent();
-    const native = request.provider === "codex" ? request.native : structuredClone(request.native);
+    const token = this.permissionTokens.get(request.native);
+    const native = token ? { token } : request.provider === "codex" ? request.native : structuredClone(request.native);
     const boundary = await this.boundary(remembered.provider);
     assertCurrent();
     if (!boundary.has("replyPermission") || typeof options?.beforeNativeDispatch !== "function") throw Object.assign(new Error("Permission dispatch is unsupported."), { outcome: "not_dispatched" });
     let admitted = false;
-    const result = await boundary.replyPermission(remembered.runtime, native, reply, {
-      expectedFileChanges: options.expectedFileChanges,
-      beforeNativeDispatch: async () => { assertCurrent(); await options.beforeNativeDispatch(); assertCurrent(); },
-      assertNativeDispatch: () => { assertCurrent(); options.assertNativeDispatch?.(); admitted = true; },
-    }).catch(error => {
+    const result = await this.withSteps(boundary, {
+      before_native_dispatch: async () => { assertCurrent(); await options.beforeNativeDispatch(); assertCurrent(); },
+      assert_native_dispatch: () => { assertCurrent(); options.assertNativeDispatch?.(); admitted = true; },
+    }, undefined, (operation) => boundary.replyPermission(remembered.runtime, native, reply, {
+      ...operation,
+      ...(options.expectedFileChanges === undefined ? {} : { expectedFileChanges: options.expectedFileChanges }),
+    })).catch(error => {
       if (admitted && !current()) throw Object.assign(new Error("Permission dispatch cannot be confirmed."), { outcome: "uncertain" });
       throw error;
     });
@@ -519,7 +534,12 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const boundary = await this.boundary(remembered.provider);
     assertOwned();
     if (!boundary.has("repairContinuation")) throw new Error(`Provider '${remembered.provider}' does not support continuation repair.`);
-    const { runtime, ...repaired } = await boundary.repairContinuation(remembered.runtime, request, options);
+    let repairId = "";
+    const { runtime, noticesAwaitAcknowledgement, ...result } = await this.withSteps(boundary, {
+      checkpoint_replacement: (body) => options.checkpointReplacement((body as { providerContinuationId: string }).providerContinuationId),
+    }, options.detachSignal, (operation) => { repairId = operation.operationId; return boundary.repairContinuation(remembered.runtime, request, operation); });
+    // The adapter's wait for "the lines are recorded" is a data call that names the repair.
+    const repaired = { ...result, ...(noticesAwaitAcknowledgement ? { noticesRecorded: () => boundary.acknowledgeRepairNotices(repairId) } : {}) };
     assertOwned();
     if (runtime.ref.workAttemptId !== workAttemptId || runtime.pid !== pid
       || !sameProviderActionConnectionIdentity(runtime.providerConnection, connection)) {
@@ -562,10 +582,12 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       throw new Error("The exact provider cannot prove idle replacement.");
     }
     assertCurrent();
-    return boundary.stopIdle(remembered.runtime, () => {
-      if (this.required(handle) !== remembered) throw new Error("Provider changed before idle replacement.");
-      assertCurrent();
-    });
+    return this.withSteps(boundary, {
+      assert_current: () => {
+        if (this.required(handle) !== remembered) throw new Error("Provider changed before idle replacement.");
+        assertCurrent();
+      },
+    }, undefined, (operation) => boundary.stopIdle(remembered.runtime, operation));
   }
 
   async stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {
@@ -738,6 +760,51 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     }
   }
 
+  /** The name of a permission request for the boundary: its token when an event gave one, else the request. */
+  private named<T extends object>(request: T): T | ProviderPermissionToken {
+    const token = this.permissionTokens.get(request);
+    return token ? { token } : request;
+  }
+
+  /**
+   * Run one operation whose steps this daemon answers. The daemon's function for a step runs at the delivery of
+   * the step, as its callback ran before. A function that throws refuses the step; the operation then fails with
+   * that same error object, unless the adapter made another error of it.
+   */
+  private async withSteps<T>(
+    boundary: ProviderRuntimeBoundary,
+    handlers: StepHandlers,
+    detachSignal: AbortSignal | undefined,
+    run: (operation: { operationId: string; detached?: true }) => Promise<T>,
+  ): Promise<T> {
+    const operationId = randomUUID();
+    const refusals = new Map<number, unknown>();
+    const answer = (seq: number, error?: { thrown: unknown }) => {
+      if (error) refusals.set(seq, error.thrown);
+      try {
+        boundary.answerStep(operationId, seq, error ? { ok: false, error: providerErrorData(error.thrown) } : { ok: true });
+      } catch { /* The operation ended or was detached; its step took a refusal already. */ }
+    };
+    this.stepHandlers.set(operationId, (event) => {
+      let result: unknown;
+      try { result = handlers[event.step]?.(event.body); } catch (thrown) { answer(event.seq, { thrown }); return; }
+      if (event.sync || !(result instanceof Promise)) { answer(event.seq); return; }
+      result.then(() => answer(event.seq), (thrown: unknown) => answer(event.seq, { thrown }));
+    });
+    const detach = () => boundary.detachOperation(operationId);
+    detachSignal?.addEventListener("abort", detach, { once: true });
+    try {
+      return await run({ operationId, ...(detachSignal?.aborted ? { detached: true as const } : {}) });
+    } catch (error) {
+      const step = (error as { daemonStep?: unknown } | null)?.daemonStep;
+      if (typeof step === "number" && refusals.has(step)) throw refusals.get(step);
+      throw error;
+    } finally {
+      detachSignal?.removeEventListener("abort", detach);
+      this.stepHandlers.delete(operationId);
+    }
+  }
+
   /** The data boundary of one provider. The adapter behind it is loaded at the first use and is named nowhere else. */
   private boundary(provider: string): Promise<ProviderRuntimeBoundary> {
     const current = this.boundaries.get(provider);
@@ -747,6 +814,13 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       boundary.connectEventSink((event) => {
         if (event.kind === "gap") {
           console.warn("[provider_events]", `${provider}: ${event.body.count} ${event.body.dropped} event(s) were not plain data and were dropped`);
+        }
+        if (event.kind === "step") {
+          const handler = this.stepHandlers.get(event.operationId);
+          if (handler) handler(event);
+          // No operation of this daemon waits under that id: the step must not stay open.
+          else boundary.answerStep(event.operationId, event.seq, { ok: false, error: providerErrorData(new Error("No operation waits for this step.")) });
+          return;
         }
         this.eventListeners.get(event.kind === "start" ? event.operationId : event.subscriptionId)?.(event);
       });
