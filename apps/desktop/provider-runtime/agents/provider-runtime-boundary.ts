@@ -257,6 +257,8 @@ export type ProviderBoundaryRepairResult = Omit<ProviderContinuationRepairResult
 export type ProviderBoundaryOperation = keyof SupervisedProviderAdapter;
 
 const GUARD = { allowUndefinedProperties: true } as const;
+/** The adapter's permission events, and the one event that reports the end of the adapter's observation call. */
+const PERMISSION_EVENT_TYPES = new Set(["snapshot", "request_closed", "degraded", "unavailable", "settled"]);
 
 function guarded<T>(operation: string, part: string, value: T): T {
   try {
@@ -359,31 +361,47 @@ export class ProviderRuntimeBoundary {
       end: () => undefined,
     };
     this.subscriptions.set(id, record);
+    // Each callback is bound to this record, not to the id: an id can be used again after its subscription ended,
+    // and a late call of an old callback must not arrive under the new subscription.
+    const receive = (body: unknown) => this.deliver(id, record, body, handle);
+    let result: ProviderSubscription = { subscriptionId: id };
+    let end: () => void;
     try {
       if (kind === "exit") {
-        record.end = this.adapter.onExit(handle, (terminal) => this.deliver(id, terminal, handle));
+        end = this.adapter.onExit(handle, receive);
       } else if (kind === "stream") {
-        record.end = this.adapter.onStream(handle, (event) => this.deliver(id, event, handle));
+        end = this.adapter.onStream(handle, receive);
       } else if (kind === "execution") {
-        const subscription = this.required("onExecution")(handle, (event) => this.deliver(id, event, handle));
-        record.end = () => subscription.dispose();
+        const subscription = this.required("onExecution")(handle, receive);
+        end = () => subscription.dispose();
+        try {
+          result = { subscriptionId: id, sourceId: guarded("subscribe", "sourceId", subscription.sourceId) };
+        } catch (error) {
+          subscription.dispose();
+          throw error;
+        }
         record.position = () => subscription.position();
-        return { subscriptionId: id, sourceId: guarded("subscribe", "sourceId", subscription.sourceId) };
       } else {
         const controller = new AbortController();
-        record.end = () => controller.abort();
+        end = () => controller.abort();
         // The adapter's promise is reported as one event, so nothing but data comes back. It does not end the
         // subscription: an adapter may call the listener after its promise settled, and only the daemon ends it.
-        void this.required("observePermissions")(handle, (event) => this.deliver(id, event, handle), controller.signal).then(
-          () => this.deliver(id, { type: "settled", outcome: "ended" }, handle),
-          (error: unknown) => this.deliver(id, { type: "settled", outcome: "failed", message: error instanceof Error ? error.message : "failed" }, handle),
+        void this.required("observePermissions")(handle, receive, controller.signal).then(
+          () => receive({ type: "settled", outcome: "ended" }),
+          (error: unknown) => receive({ type: "settled", outcome: "failed", message: error instanceof Error ? error.message : "failed" }),
         );
       }
     } catch (error) {
-      this.subscriptions.delete(id);
+      if (this.subscriptions.get(id) === record) this.subscriptions.delete(id);
       throw error;
     }
-    return { subscriptionId: id };
+    record.end = end;
+    // The subscription can have ended inside the adapter's call: the daemon ended it during a replay, or its
+    // final event arrived at once. The adapter's listener is removed here, because nothing else can do it later.
+    if (this.subscriptions.get(id) !== record) {
+      try { end(); } catch { /* the adapter already removed it */ }
+    }
+    return result;
   }
 
   /** End a subscription. A second call, or a call for an id that is not known, does nothing. */
@@ -609,9 +627,8 @@ export class ProviderRuntimeBoundary {
    * the sink stays here: it does not go into the adapter's emit path, and it
    * makes no further event.
    */
-  private deliver(id: string, body: unknown, handle: ProviderHandle): void {
-    const record = this.subscriptions.get(id);
-    if (!record || !this.sink) return;
+  private deliver(id: string, record: NonNullable<ReturnType<typeof this.subscriptions.get>>, body: unknown, handle: ProviderHandle): void {
+    if (this.subscriptions.get(id) !== record || !this.sink) return;
     const base = { subscriptionId: id, ref: record.ref };
     let safe = body;
     let last = false;
@@ -621,12 +638,15 @@ export class ProviderRuntimeBoundary {
       // An exit is never dropped. A terminal that is not what the contract says is reported as a protocol error.
       // The replacement has no `nativeRuntimeDeath` and no success cause: malformed data proves no process death.
       if (!plain || !providerTerminalSchema.safeParse(body).success) {
-        safe = { endedAt: new Date().toISOString(), exitCode: null, signal: null, terminalCause: "protocol_error", providerContinuationId: handle.providerContinuationId };
+        safe = { endedAt: new Date().toISOString(), exitCode: null, signal: null, terminalCause: "protocol_error",
+          providerContinuationId: typeof handle.providerContinuationId === "string" ? handle.providerContinuationId : null };
       }
       last = true;
-    } else if (!plain && record.kind === "permissions") {
-      // A permission event must not vanish: the daemon then shows no prompt. It learns that the lane cannot be read.
-      safe = { type: "unavailable" };
+    } else if (record.kind === "permissions") {
+      // A permission event must not vanish: the daemon then shows no prompt. For an event that is not plain data,
+      // or that is not one of the known events, it learns that the lane cannot be read.
+      const type = plain && typeof body === "object" && body !== null && !Array.isArray(body) ? (body as { type?: unknown }).type : undefined;
+      if (typeof type !== "string" || !PERMISSION_EVENT_TYPES.has(type)) safe = { type: "unavailable" };
     } else if (!plain) {
       this.send({ kind: "gap", ...base, seq: ++record.seq, order: ++this.order, body: { dropped: record.kind as "stream" | "execution", count: 1 } });
       return;

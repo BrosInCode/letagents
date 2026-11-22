@@ -374,7 +374,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const id = randomUUID();
-      const stop = () => { this.eventListeners.delete(id); boundary.unsubscribe(id); };
+      // The abort ends the subscription, so the adapter's own end can no longer arrive as an event. The promise
+      // resolves here, as the adapter's promise resolved at the abort.
+      const stop = () => { this.eventListeners.delete(id); boundary.unsubscribe(id); resolve(); };
       this.eventListeners.set(id, (event) => {
         if (event.kind !== "permissions") return;
         const body = event.body as ProviderNativePermissionEvent | { type: "settled"; outcome: "ended" | "failed"; message?: string };
@@ -632,17 +634,17 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       (body) => listener(body as ProviderActionStreamEvent), (count) => listener(fault(count))).dispose;
   }
 
-  async onExecution(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription> {
+  async onExecution(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void, onGap?: () => void): Promise<NativeExecutionSubscription> {
     const remembered = this.required(handle);
     const boundary = await this.boundary(remembered.provider);
     if (!boundary.has("onExecution")) throw new Error(`Provider '${remembered.provider}' does not expose native execution observations.`);
-    const subscription = this.listen(boundary, remembered.runtime, "execution", (body) => listener(body as NativeExecutionObservation));
+    const subscription = this.listen(boundary, remembered.runtime, "execution", (body) => listener(body as NativeExecutionObservation), () => onGap?.());
     // The last position that was read stays the answer after the subscription ends.
     let position = boundary.subscriptionPosition(subscription.id) ?? { firstRetainedSequence: 1, latestSequence: 0 };
     return Object.freeze({
       sourceId: subscription.sourceId ?? "",
       position: () => (position = boundary.subscriptionPosition(subscription.id) ?? position),
-      dispose: subscription.dispose,
+      dispose: () => { position = boundary.subscriptionPosition(subscription.id) ?? position; subscription.dispose(); },
     });
   }
 
@@ -681,9 +683,8 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   /**
    * Start one subscription and give its events to `listener`. The receiver is in place before the adapter is
-   * called, because an adapter can deliver events inside that call. `onGap` gets the count of dropped events.
-   * An execution gap needs no call here: the adapter's own position still counts the dropped observation, so the
-   * capture's existing comparison of the stored position with `position()` reports the source gap.
+   * called, because an adapter can deliver events inside that call. `onGap` gets the count of dropped events, so
+   * the consumer of the subscription can use its own fault path.
    */
   private listen(
     boundary: ProviderRuntimeBoundary,
@@ -724,7 +725,12 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     try {
       const started = await start({ startOperationId });
       const runtimeId = (started as { ref?: { runtimeId?: unknown } } | null)?.ref?.runtimeId;
-      if (typeof runtimeId === "string") this.startListeners.set(runtimeId, startOperationId);
+      if (typeof runtimeId === "string") {
+        this.dropStartListener(runtimeId);
+        this.startListeners.set(runtimeId, startOperationId);
+      } else {
+        this.eventListeners.delete(startOperationId);
+      }
       return started;
     } catch (error) {
       this.eventListeners.delete(startOperationId);
@@ -810,12 +816,17 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     this.forgetEnded(previous.boundary, previous.runtime);
   }
 
+  private dropStartListener(runtimeId: string): void {
+    const startListener = this.startListeners.get(runtimeId);
+    if (!startListener) return;
+    this.startListeners.delete(runtimeId);
+    this.eventListeners.delete(startListener);
+  }
+
   private forgetEnded(boundary: ProviderRuntimeBoundary, runtime: ProviderRuntimeRef): void {
     const exit = this.exits.get(runtime.runtimeId);
     if (!exit?.exited || !exit.replaced) return;
     this.exits.delete(runtime.runtimeId);
-    const startListener = this.startListeners.get(runtime.runtimeId);
-    if (startListener) { this.startListeners.delete(runtime.runtimeId); this.eventListeners.delete(startListener); }
     boundary.release(runtime);
   }
 
@@ -824,7 +835,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     if (this.exits.has(runtime.runtimeId)) return;
     const exit = { exited: false, replaced: false };
     this.exits.set(runtime.runtimeId, exit);
-    try { this.listen(boundary, runtime, "exit", () => { exit.exited = true; this.forgetEnded(boundary, runtime); }); }
+    try {
+      this.listen(boundary, runtime, "exit", () => {
+        exit.exited = true;
+        // A runtime that has exited sends no start hint. Its listener goes here, with or without a replacement.
+        this.dropStartListener(runtime.runtimeId);
+        this.forgetEnded(boundary, runtime);
+      });
+    }
     catch { /* An adapter that cannot report this exit keeps the handle attachable, as before. */ }
   }
 

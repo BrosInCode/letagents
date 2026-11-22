@@ -677,6 +677,7 @@ test("an execution subscription keeps its identity and position with an empty hi
   boundary.subscribe(runtime.ref, "execution", "s-replay");
   assert.equal(events.filter((event) => "subscriptionId" in event && event.subscriptionId === "s-replay").length, 1, "one event, then the unsubscribe");
   assert.equal(boundary.subscriptionPosition("s-replay"), null);
+  assert.equal(fake.disposedCount(), 1, "the adapter's subscription of the ended replay is disposed");
 });
 
 test("a sink that throws does not throw into the adapter and makes no further event", async () => {
@@ -701,4 +702,88 @@ test("through the router: start hints reach the daemon's two functions, also aft
   assert.deepEqual(seen, ["native"]);
   hints.onProgress?.();
   assert.deepEqual(seen, ["native", "progress"]);
+});
+
+test("a callback of an ended subscription delivers nothing under a new subscription that uses the same id", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  const first = await boundary.spawn(SPAWN);
+  boundary.subscribe(first.ref, "exit", "s-same");
+  const oldCallback = fake.exit[0]!;
+  boundary.unsubscribe("s-same");
+  boundary.release(first.ref);
+  const second = await boundary.spawn(SPAWN);
+  boundary.subscribe(second.ref, "exit", "s-same");
+
+  oldCallback(TERMINAL); // A late call from the first runtime.
+  assert.deepEqual(events, [], "nothing arrives under the second runtime's reference");
+  fake.exit.at(-1)!({ ...TERMINAL, terminalCause: "killed" });
+  assert.deepEqual(events.map((event) => [(event as { ref: { runtimeId: string } }).ref.runtimeId, (event.body as ProviderTerminalPayload).terminalCause]), [[second.ref.runtimeId, "killed"]]);
+});
+
+test("a subscription whose adapter result is not valid leaves no adapter subscription behind", async () => {
+  let disposed = 0;
+  const { adapter } = fakeAdapter({ onExecution: () => ({ sourceId: (() => "x") as never, position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose: () => { disposed += 1; } }) });
+  const boundary = new ProviderRuntimeBoundary("codex", adapter);
+  boundary.connectEventSink(() => undefined);
+  const runtime = await boundary.spawn(SPAWN);
+  assert.throws(() => boundary.subscribe(runtime.ref, "execution", "s-bad"), ProviderBoundaryValueError);
+  assert.equal(disposed, 1);
+  assert.equal(boundary.subscriptionPosition("s-bad"), null);
+});
+
+test("a permission event that is not a known event becomes unavailable, also when it is plain data", async () => {
+  const fake = eventAdapter();
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  const runtime = await boundary.spawn(SPAWN);
+  boundary.subscribe(runtime.ref, "permissions", "s-perm");
+  await Promise.resolve();
+  await Promise.resolve();
+  events.length = 0;
+  for (const body of [null, "snapshot", 7, [], {}, { type: "made_up" }, { type: 3 }]) fake.permissions[0]!.listener(body as never);
+  assert.deepEqual(events.map((event) => event.body), Array.from({ length: 7 }, () => ({ type: "unavailable" })));
+  const snapshot = { type: "snapshot", connectionId: "socket-1", requests: [] };
+  fake.permissions[0]!.listener(snapshot as never);
+  assert.equal(events.at(-1)!.body, snapshot, "a known event is the adapter's own object");
+});
+
+test("through the router: aborting a permission observation settles its promise, also when the adapter's call is still open or the signal is aborted already", async () => {
+  const signals: AbortSignal[] = [];
+  // As the real adapters: the observation call stays open until the abort.
+  const { adapter } = fakeAdapter({ observePermissions: (_handle, _listener, signal) => { signals.push(signal); return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })); } });
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ ...SPAWN, provider: "codex" });
+
+  const controller = new AbortController();
+  let settled = "pending";
+  const observation = router.observePermissions(handle, () => undefined, controller.signal).then(() => { settled = "resolved"; }, () => { settled = "rejected"; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, "pending");
+  controller.abort();
+  await observation;
+  assert.equal(settled, "resolved");
+  assert.equal(signals[0]!.aborted, true, "the abort reached the adapter");
+
+  const already = new AbortController();
+  already.abort();
+  await router.observePermissions(handle, () => undefined, already.signal);
+});
+
+test("through the router: a dropped execution observation calls the consumer's gap function", async () => {
+  const fake = eventAdapter();
+  const router = new ProviderActionPortRouter({ codex: async () => fake.adapter });
+  const handle = await router.spawn({ ...SPAWN, provider: "codex" });
+  const received: unknown[] = [];
+  let gaps = 0;
+  const subscription = await router.onExecution(handle, (event) => received.push(event), () => { gaps += 1; });
+  fake.retained.push({ sourceId: "observer-1", sequence: 1 });
+  fake.execution[0]!({ sourceId: "observer-1", sequence: 1, fact: { hook: () => undefined } } as never);
+  assert.deepEqual([received.length, gaps], [0, 1]);
+  assert.equal(subscription.position().latestSequence, 1);
+  subscription.dispose();
+  assert.equal(subscription.position().latestSequence, 1, "the last position stays the answer after the dispose");
 });

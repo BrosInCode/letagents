@@ -298,7 +298,8 @@ export interface ProviderActionPort {
   stopBackgroundCommand?(handle: ProviderActionHandle, taskId: string): Promise<"stopping" | "not_running" | "failed">;
   compactionProgress?(workAttemptId: string, provider: string): { state: "compacting"; startedAt: string } | null;
   runtimeCustody?(workAttemptId: string, provider: string): ProviderRuntimeCustody;
-  onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription>;
+  /** `onGap` is called when one or more observations of this subscription were lost and can not be delivered. */
+  onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void, onGap?: () => void): Promise<NativeExecutionSubscription>;
   probeControl?(handle: ProviderActionHandle): Promise<ControlProbeResult>;
   observePermissions?(handle: ProviderActionHandle, listener: (event: ProviderPermissionObservation) => void, signal: AbortSignal): Promise<void>;
   /** `roomTurnId` is the durable turn the caller expects; a provider uses it only where its transcript proves it. */
