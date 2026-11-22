@@ -26,6 +26,7 @@ export function useAgentStartupRows(options: {
   entries: () => readonly DesktopSupervisorManifestEntry[] | undefined;
 }) {
   const state = shallowRef(initialAgentStartupState());
+  const retryRequests = new Map<string, Promise<DesktopSupervisorManifestEntry>>();
   const dispatch = (event: AgentStartupEvent) => { state.value = reduceAgentStartups(state.value, event); };
 
   watch(() => [options.roomIdentifier(), options.entries() ?? []] as const, ([room, entries], previous) => {
@@ -71,18 +72,27 @@ export function useAgentStartupRows(options: {
 
   /** Starts the saved agent again; the daemon picks up after the stages it already finished. */
   async function retry(entryId: string): Promise<void> {
+    if (retryRequests.has(entryId) || viewFor(entryId, Date.now())?.status !== "failed") return;
     dispatch({ type: "retry", entryId, nowMs: Date.now() });
     try {
-      await desktopIpc.supervisor.setDesiredState(entryId, "running");
+      const request = desktopIpc.supervisor.setDesiredState(entryId, "running");
+      retryRequests.set(entryId, request);
+      await request;
     } catch (error) {
       dispatch({ type: "retry", entryId, nowMs: null });
       throw error;
+    } finally {
+      retryRequests.delete(entryId);
     }
   }
 
   async function cancel(entryId: string): Promise<void> {
+    if (!viewFor(entryId, Date.now())?.canCancel) return;
     dispatch({ type: "cancel", entryId });
     try {
+      // Retry authorizes the agent before recording its running intent. Stop after that request settles.
+      const retryRequest = retryRequests.get(entryId);
+      if (retryRequest) await retryRequest.catch(() => undefined);
       await desktopIpc.supervisor.setDesiredState(entryId, "stopped");
     } catch (error) {
       dispatch({ type: "cancel_failed", entryId });

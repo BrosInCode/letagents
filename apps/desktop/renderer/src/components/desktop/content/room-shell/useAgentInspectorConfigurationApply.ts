@@ -1,6 +1,8 @@
-import type { Ref } from "vue";
+import { onScopeDispose, type Ref } from "vue";
+import type { DesktopSupervisorAgentConfiguration } from "../../../../../../electron/ipc-types";
 import type { AgentInspectorActionState } from "../../../../domain/agent-inspector";
 import {
+  configurationHasRuntimeLag,
   isStaleDaemonGenerationError,
   settleConfigurationAlreadyApplied,
   snapshotConfigurationApply,
@@ -30,7 +32,39 @@ export function useAgentInspectorConfigurationApply<Operation extends Configurat
   operationIdentityCurrent(operation: Operation): boolean;
   operationCurrent(operation: Operation): boolean;
   recoverGeneration(operation: Operation, draft: AgentInspectorConfigurationDraft): Promise<void>;
+  onApplied?(configuration: DesktopSupervisorAgentConfiguration): void;
 }) {
+  let restartCheck: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
+  onScopeDispose(() => { disposed = true; clearTimeout(restartCheck); });
+
+  function checkRestart(operation: Operation, expectedRevision: number, until = Date.now() + 45_000): void {
+    const read = desktopIpc.supervisor?.getAgentConfiguration;
+    if (disposed || !read) return;
+    clearTimeout(restartCheck);
+    restartCheck = setTimeout(async () => {
+      if (disposed || !options.operationIdentityCurrent(operation)) return;
+      const configuration = await read({ entryId: operation.entryId, daemonGeneration: operation.daemonGeneration }).catch(() => null);
+      if (disposed || !options.operationIdentityCurrent(operation)) return;
+      if (configuration?.entryId === operation.entryId && configuration.daemonGeneration === operation.daemonGeneration
+        && configuration.configRevision === expectedRevision && !configurationHasRuntimeLag(configuration)
+        && options.operationCurrent(operation)) {
+        options.configurationResource.value = { ...options.configurationResource.value, configuration };
+        options.actionState.value = { ...options.actionState.value!, message: "The agent is using your saved settings." };
+        options.onApplied?.(configuration);
+        return;
+      }
+      if (Date.now() < until && options.operationCurrent(operation)) {
+        checkRestart(operation, expectedRevision, until);
+        return;
+      }
+      options.actionState.value = {
+        ...options.actionState.value!, status: "error",
+        message: "The new settings haven’t been confirmed yet. Check Live or reload Settings.",
+      };
+    }, 1_500);
+  }
+
   async function applyAgentInspectorSettings(): Promise<void> {
     if (!desktopIpc.supervisor?.applyAgentConfiguration) return;
     const projection = options.selectedProjection.value;
@@ -69,10 +103,15 @@ export function useAgentInspectorConfigurationApply<Operation extends Configurat
           status: "success",
           message: "The agent is already using your saved settings.",
         };
+        const confirmed = options.configurationResource.value.configuration;
+        if (confirmed?.entryId === operation.entryId && confirmed.daemonGeneration === operation.daemonGeneration
+          && confirmed.configRevision === snapshot.expectedConfigurationRevision && !configurationHasRuntimeLag(confirmed)) {
+          options.onApplied?.(confirmed);
+        }
         return;
       }
       const message = result.outcome === "restarting"
-        ? "Restart started. Reload when the agent is ready to check that your settings were applied."
+        ? "Restarting with your saved settings…"
         : result.outcome === "busy_active_turn"
           ? "This agent is working. Wait for it to finish, then restart it to apply your settings."
           : result.outcome === "unsupported"
@@ -85,6 +124,7 @@ export function useAgentInspectorConfigurationApply<Operation extends Configurat
         status: result.outcome === "restarting" ? "success" : "error",
         message,
       };
+      if (result.outcome === "restarting") checkRestart(operation, snapshot.expectedConfigurationRevision);
     } catch (error) {
       if (!options.operationIdentityCurrent(operation)) return;
       const refreshed = await options.refreshSupervisorStatus();

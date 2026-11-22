@@ -21,16 +21,26 @@
         <span class="room-agent-startup-tag">{{ view.providerLabel }} agent</span>
         <time v-if="elapsedLabel" class="room-agent-startup-elapsed">{{ elapsedLabel }}</time>
       </div>
-      <button
-        class="room-agent-startup-line"
-        type="button"
-        :aria-expanded="expanded"
-        :aria-controls="detailId"
-        @click="expanded = !expanded"
-      >
-        <span class="room-agent-startup-text" :class="{ 'is-shimmer': view.status === 'running' }" aria-live="polite">{{ view.line }}</span>
-        <ChevronRight class="room-agent-startup-chevron" :size="13" aria-hidden="true" />
-      </button>
+      <div class="room-agent-startup-progress">
+        <button
+          class="room-agent-startup-line"
+          type="button"
+          :aria-expanded="expanded"
+          :aria-controls="detailId"
+          @click="expanded = !expanded"
+        >
+          <span class="room-agent-startup-text" :class="{ 'is-shimmer': view.status === 'running' }" aria-live="polite">{{ view.line }}</span>
+          <ChevronRight class="room-agent-startup-chevron" :size="13" aria-hidden="true" />
+        </button>
+        <button
+          v-if="view.canCancel || view.status === 'cancelling'"
+          class="room-agent-startup-action room-agent-startup-cancel"
+          type="button"
+          :aria-label="`Cancel launch for ${view.name}`"
+          :disabled="!view.canCancel"
+          @click="emit('cancel', view.entryId)"
+        >Cancel launch</button>
+      </div>
       <div v-if="view.status !== 'joined'" class="room-agent-startup-segments" aria-hidden="true">
         <i v-for="stage in view.stages" :key="stage.key" :data-s="stage.state" />
       </div>
@@ -48,11 +58,10 @@
         <button
           v-if="view.failure.action === 'sign_in' || view.failure.action === 'install'"
           type="button"
-          class="is-primary"
+          class="room-agent-startup-action is-primary"
           @click="emit('setup', view.entryId)"
         >{{ view.failure.action === "sign_in" ? "Sign in…" : "Set up…" }}</button>
-        <button type="button" :class="{ 'is-primary': view.failure.action === 'retry' }" :disabled="busy" @click="run(() => emit('retry', view.entryId))">Try again</button>
-        <button type="button" :disabled="busy" @click="run(() => emit('cancel', view.entryId))">Cancel</button>
+        <button type="button" class="room-agent-startup-action" :class="{ 'is-primary': view.failure.action === 'retry' }" :disabled="busy" @click="run(() => emit('retry', view.entryId))">Try again</button>
       </div>
     </div>
   </article>
@@ -201,12 +210,12 @@ function run(action: () => void): void {
 .room-agent-startup-tag { color: var(--text-tertiary); font-size: 12px; }
 .room-agent-startup-elapsed { color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; }
 
+.room-agent-startup-progress { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
 .room-agent-startup-line {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 100%;
-  margin-top: 3px;
+  min-width: 0;
   padding: 2px 6px 2px 0;
   border: 0;
   border-radius: 6px;
@@ -308,7 +317,7 @@ function run(action: () => void): void {
 }
 
 .room-agent-startup-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.room-agent-startup-actions button {
+.room-agent-startup-action {
   height: 28px;
   padding: 0 11px;
   border: 1px solid var(--border-strong);
@@ -321,11 +330,12 @@ function run(action: () => void): void {
   cursor: pointer;
   transition: transform 140ms var(--ease-out), background-color 120ms ease;
 }
-.room-agent-startup-actions button:hover:not(:disabled) { background: var(--accent-hover); }
-.room-agent-startup-actions button.is-primary { border-color: transparent; background: var(--blue); color: #fff; }
-.room-agent-startup-actions button:active:not(:disabled) { transform: scale(0.97); }
-.room-agent-startup-actions button:disabled { opacity: 0.6; cursor: default; }
-.room-agent-startup-actions button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.room-agent-startup-action:hover:not(:disabled) { background: var(--accent-hover); }
+.room-agent-startup-action.is-primary { border-color: transparent; background: var(--blue); color: #fff; }
+.room-agent-startup-action:active:not(:disabled) { transform: scale(0.97); }
+.room-agent-startup-action:disabled { opacity: 0.6; cursor: default; }
+.room-agent-startup-action:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.room-agent-startup-cancel { flex: none; background: transparent; color: var(--text-secondary); font-size: 12px; }
 
 @keyframes room-agent-startup-spin { to { transform: rotate(360deg); } }
 @keyframes room-agent-startup-sheen { from { background-position: 100% 0; } to { background-position: -150% 0; } }
@@ -345,6 +355,8 @@ function run(action: () => void): void {
   .room-agent-startup-slot svg,
   .room-agent-startup-avatar,
   .room-agent-startup-segments i::after,
-  .room-agent-startup-chevron { transition: none; }
+  .room-agent-startup-chevron,
+  .room-agent-startup-action { transition: none; }
+  .room-agent-startup-action:active:not(:disabled) { transform: none; }
 }
 </style>

@@ -936,16 +936,16 @@ export interface AgentInspectorCorrectionRequest {
 /** A busy agent a person can correct now instead of queueing a room message. */
 export interface AgentCorrectionTarget {
   entryId: string;
+  providerTurnId: string;
   displayName: string;
   mentionInsertText: string;
 }
 
-/** Composer text handed to a correction, and the draft (and its room) it came from. */
-export interface ComposerCorrectionHandoff {
+export interface ComposerSteerIntent {
   entryId: string;
+  roomId: string;
+  providerTurnId: string;
   text: string;
-  draft: string;
-  draftNamespace: string | null;
 }
 
 const correctionBoxTexts = new WeakMap<object, string>();
@@ -968,8 +968,9 @@ export function agentCorrectionTargets(
   projections: readonly Pick<AgentInspectorProjection, "entryId" | "displayName" | "mentionInsertText" | "turnControl">[],
 ): AgentCorrectionTarget[] {
   return projections.flatMap((projection) =>
-    projection.turnControl?.status === "ready" && projection.turnControl.canCorrect && projection.mentionInsertText
-      ? [{ entryId: projection.entryId, displayName: projection.displayName, mentionInsertText: projection.mentionInsertText }]
+    projection.turnControl?.status === "ready" && projection.turnControl.canCorrect
+      && projection.turnControl.providerTurnId && projection.mentionInsertText
+      ? [{ entryId: projection.entryId, providerTurnId: projection.turnControl.providerTurnId, displayName: projection.displayName, mentionInsertText: projection.mentionInsertText }]
       : []);
 }
 

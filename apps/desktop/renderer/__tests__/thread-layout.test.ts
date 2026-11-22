@@ -10,9 +10,10 @@ describe("inline room thread layout", () => {
   it("keeps the reply surface inside the owner bubble with no modal or resize pane", () => {
     assert.match(view, /<template #thread>[\s\S]*<RoomThreadPanel/);
     assert.doesNotMatch(view, /room-thread-backdrop|room-thread-resize-handle|threadPaneOverlay/);
-    const bubble = message.slice(message.indexOf('<div class="room-message-bubble">'), message.indexOf('<MessageReactionBar'));
+    const bubble = message.slice(message.indexOf('class="room-message-bubble"'), message.indexOf('<MessageReactionBar'));
     assert.match(bubble, /aria-expanded="activeThreadRoot"/);
     assert.match(bubble, /<slot name="thread"/);
+    assert.match(bubble, /<ThreadTransition reveal @settled="finishThreadMotion"/);
   });
   it("contains wheel chaining within a bounded, focusable reply scroller", () => {
     const body = styles.match(/\.room-thread-body\s*\{([^}]*)\}/)?.[1] || "";

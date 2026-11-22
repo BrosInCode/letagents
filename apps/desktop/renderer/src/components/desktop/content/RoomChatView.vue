@@ -21,7 +21,7 @@
           :error="messagePins.state.value.error" @refresh="messagePins.refresh" @reveal="jumpToMessage" />
         <RoomMessageViewport
           ref="messageViewport"
-          v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="emit('open-agent-detail', workspaceAgentTarget($event, participants))"
+          v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="emit('open-agent-detail', $event)"
           @open-add-agent="emit('open-add-agent')"
           :active-search-message-id="activeTimelineMessageId"
           :active-thread-parent-id="activeThreadParentId"
@@ -38,7 +38,6 @@
           :activity-notice="roomActivity.notice.value"
           :steer-offer="steerOffer"
           :steer-disabled="sending"
-          :presence-lines="roomActivity.presenceLines.value"
           @activity-hold="(held) => held ? roomActivity.pause() : roomActivity.resume()"
           @activity-calm-action="runCalmAction"
           @steer="steerComposerDraft"
@@ -100,6 +99,7 @@
               :pending-attachment-drafts="threadPendingAttachmentDrafts"
               :has-older-replies="activeThreadHasOlder"
               :loading-older-replies="loadingOlderThreadReplies"
+              :loading-replies="loadingThreadId === activeThreadPanelParent.id"
               :reveal-message-id="threadRevealTargetId"
               :search-query="searchQuery"
               :active-search-message-id="activeSearchMessageId"
@@ -124,6 +124,7 @@
               @open-task="emit('open-task', $event)"
               @jump-message="jumpToMessage"
               @load-older-replies="loadOlderThreadReplies"
+              @retry-replies="loadThread(activeThreadPanelParent.id)"
               @pick-attachments="pickThreadAttachments"
               @remove-attachment="removeThreadAttachment"
               @stage-dropped-attachments="stageThreadDroppedAttachments"
@@ -179,7 +180,7 @@
           @stop-agent-turn="(agentId, approvalId) => emit('stop-agent-turn', agentId, approvalId)"
           @approval-notice="roomActivity.calm"
           @send-message="handleComposerSend"
-          @open-agent-correction="(handoff, opened) => emit('open-agent-correction', handoff, opened)"
+          @steer-turn="(intent, complete) => emit('steer-turn', intent, complete)"
         />
 
         <ImageViewer
@@ -213,14 +214,16 @@ import type { RoomGif } from "../../../../../../../shared/room-expressions.mjs";
 
 import type { ChatScrollPosition } from "../../../domain/chat-scroll";
 import { provideRoomMessageMotion } from "../../../../../../../shared/ui/useRoomMessageMotion";
-import { workspaceAgentTarget } from "../../../domain/room-contributions";
-import { computed, nextTick, onBeforeUnmount, onDeactivated, provide, ref, toRef, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onDeactivated, provide, ref, shallowReactive, shallowRef, toRef, watch } from "vue";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { useStableIdSet } from "../../../composables/useStableIdSet";
 import PinnedMessages from "../../../../../../../shared/ui/PinnedMessages.vue";
 import { provideRoomMessagePins, useRoomMessagePins } from "../../../composables/useRoomMessagePins";
-import { provideRoomMessageReactions, useRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
-import { provideRoomMessageReceipts, useRoomMessageReceipts } from "../../../composables/useRoomMessageReceipts";
+import { provideRoomMessageReactions, useMessageViewer, useRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
+import { claudeLimitNotice } from "../../../domain/claude-usage-limit";
+import { savedModelLabel } from "../../../domain/claude-model-labels";
+import { latestFailedAgentMessage } from "../../../domain/room-message-receipts";
+import { provideRoomMessageReceipts, useRoomMessageReceipts, type RoomMessageModelRecoveryAction } from "../../../composables/useRoomMessageReceipts";
 import { buildLetAgentsMessageUrl, isLocalRoomIdentifier } from "../../../domain/room-urls";
 import type {
   DesktopAgentPresence,
@@ -242,13 +245,14 @@ import {
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import type { PersonTarget } from "../../../domain/person-target";
 import type { PersonMenuPosition } from "../../../domain/person-context-menu";
-import type { AgentCorrectionTarget, ComposerCorrectionHandoff } from "../../../domain/agent-inspector";
+import type { AgentCorrectionTarget, ComposerSteerIntent } from "../../../domain/agent-inspector";
 import {
   isGitHubRoomMessage,
 } from "./desktop-chat-message/github-event";
 import { useDesktopMessageDraft } from "../../../domain/desktop-message-drafts";
 import { useRoomActivity } from "../../../composables/useRoomActivity";
 import RoomComposer from "./room-chat/RoomComposer.vue";
+import { composerAgentLaunchKey } from "./room-chat/composer-agent-launch";
 import RoomAskBar from "./asks/RoomAskBar.vue";
 import type { RoomInviteBotContext } from "./room-chat/RoomInviteBotPanel.vue";
 import type { ComposerEventPreview } from "./room-chat/composer-event-preview";
@@ -326,7 +330,7 @@ const messagePins = useRoomMessagePins(computed(() => props.roomIdentifier ?? ""
   (message) => pushActionToast(message, "error", 6_000));
 provideRoomMessagePins(messagePins);
 const messageReceipts = useRoomMessageReceipts(computed(() => props.roomIdentifier ?? ""), computed(() => props.messageNamespace ?? ""));
-provideRoomMessageReceipts(messageReceipts);
+provideRoomMessageReceipts({ ...messageReceipts, modelRecoveryFor });
 provideRoomMessageReactions(useRoomMessageReactions(
   computed(() => props.roomIdentifier ?? ""),
   (message) => pushActionToast(message, "error", 6_000),
@@ -357,7 +361,7 @@ const emit = defineEmits<{
   "open-agent-reasoning-fallback": [target: AgentModalTarget];
   "open-agent-detail": [target: AgentModalTarget];
   "open-person": [target: PersonTarget, position: PersonMenuPosition];
-  "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
+  "steer-turn": [intent: ComposerSteerIntent, complete: (error: string | null) => void];
   "open-add-agent": [];
   "open-ask-agent": [];
   "scroll-position": [scrollTop: ChatScrollPosition];
@@ -399,11 +403,9 @@ const roomActivity = useRoomActivity({
 // The same object while the target is the same, so typing more of the draft
 // does not redraw the message list.
 const steerOffer = computed<ActivitySteerOffer | null>((previous) =>
-  stableSteerOffer(previous, roomComposer.value?.steerOffer?.target));
+  stableSteerOffer(previous, roomComposer.value?.steerActivityTarget));
 function steerComposerDraft(): void {
-  roomComposer.value?.steer((opened, displayName) => {
-    if (opened) roomActivity.confirmSteer(displayName);
-  });
+  roomComposer.value?.steer(roomActivity.confirmSteer);
 }
 const threadReturnFocusElement = ref<HTMLElement | null>(null);
 const transientHighlightMessageId = ref<string | null>(null);
@@ -412,6 +414,8 @@ const fetchedThreadRoot = ref<DesktopRoomMessage | null>(null);
 const fetchedThreadReplies = ref<DesktopRoomMessage[]>([]);
 const fetchedThreadHasOlder = ref(false);
 const loadingOlderThreadReplies = ref(false);
+const loadingThreadId = ref<string | null>(null);
+let threadRequestRevision = 0;
 const threadSummaryOverrides = ref(new Map<string, DesktopRoomMessageThreadSummary>());
 const openedThreadSummaries = ref(new Map<string, DesktopRoomMessageThreadSummary>());
 const lastMarkedThreadReadKey = ref<string | null>(null);
@@ -649,9 +653,13 @@ async function loadThread(threadRootId: string): Promise<void> {
   if (!roomIdentifier) return;
   const roomApi = desktopIpc.room;
   if (!roomApi?.getThread) return;
+  const revision = ++threadRequestRevision;
+  const isCurrent = () => revision === threadRequestRevision
+    && isActiveThreadContext(threadRootId, roomIdentifier, messageNamespace);
+  loadingThreadId.value = threadRootId;
   try {
     const page = await roomApi.getThread(roomIdentifier, threadRootId);
-    if (!isActiveThreadContext(threadRootId, roomIdentifier, messageNamespace)) return;
+    if (!isCurrent()) return;
     reconcileDesktopMessageOutbox(roomIdentifier, page.replies, messageNamespace);
     fetchedThreadRootId.value = threadRootId;
     rememberOpenedThreadSummary(threadRootId, page.root.thread ?? page.summary);
@@ -661,12 +669,14 @@ async function loadThread(threadRootId: string): Promise<void> {
     fetchedThreadHasOlder.value = page.hasOlder;
 
   } catch (error) {
-    if (/Thread not found/.test(String(error)) && isActiveThreadContext(threadRootId, roomIdentifier, messageNamespace)) {
+    if (/Thread not found/.test(String(error)) && isCurrent()) {
       fetchedThreadRoot.value = null;
       fetchedThreadReplies.value = [];
       closeThread();
     }
     // Keep the already loaded room messages usable if the thread endpoint is unavailable.
+  } finally {
+    if (revision === threadRequestRevision) loadingThreadId.value = null;
   }
 }
 
@@ -850,6 +860,93 @@ function askFromReceipt(messageId: string, threadRootId: string | null, target: 
   });
 }
 
+interface ModelRecovery {
+  key: string;
+  entryId: string;
+  agentKey: string;
+  agentName: string;
+  messageId: string;
+  threadRootId: string | null;
+  limitFamily: string;
+}
+
+type ModelRetry = ModelRecovery & { modelLabel: string; state: "ready" | "sending" | "error" };
+
+const agentLaunchHost = inject(composerAgentLaunchKey, null);
+const viewer = useMessageViewer();
+const openingModelRecovery = shallowRef<ModelRecovery | null>(null);
+const modelRetries = shallowReactive(new Map<string, ModelRetry | "sent">());
+
+function modelRecoveryFor(message: DesktopRoomMessage, agentId: string): RoomMessageModelRecoveryAction | null {
+  const login = (viewer.value?.login ?? agentLaunchHost?.context().viewerLogin)?.toLowerCase();
+  if (!props.active || !login || message.outgoing || message.agentIdentity || message.source !== "browser"
+    || (message.senderProfile?.login ?? message.sender).toLowerCase() !== login) return null;
+
+  const key = JSON.stringify([agentId, message.id]);
+  const retry = modelRetries.get(key);
+  if (retry === "sent") return null;
+  const entry = roomSupervisorEntries.value.find((agent) => agent.id === agentId && agent.desiredState === "running");
+  if (retry) {
+    return {
+      modelLabel: retry.modelLabel,
+      retrying: retry.state === "sending",
+      retryError: retry.state === "error",
+      disabled: props.sending || entry?.agentKey !== retry.agentKey,
+      activate: () => retryOriginalMessage(key),
+    };
+  }
+
+  const openAgent = agentLaunchHost?.openAgent;
+  if (!entry?.agentKey || !openAgent) return null;
+  const receipt = latestFailedAgentMessage(entry);
+  const limitFamily = claudeLimitNotice(receipt?.error, entry.provider)?.modelFamily;
+  if (!limitFamily || receipt?.sourceMessageId !== message.id) return null;
+  const recovery = {
+    key, entryId: entry.id, agentKey: entry.agentKey, agentName: entry.displayName,
+    messageId: message.id, threadRootId: threadParentId(message), limitFamily,
+  };
+  return {
+    activate() {
+      openAgent(entry.id, "settings");
+      openingModelRecovery.value = recovery;
+    },
+  };
+}
+
+function cancelModelRecoverySwitch(): void {
+  openingModelRecovery.value = null;
+}
+
+function finishModelRecovery(entryId: string, provider: string, model: string | null): boolean {
+  const recovery = openingModelRecovery.value;
+  const family = /^(?:claude-)?(fable|opus|sonnet|haiku)(?:[-\s\[]|$)/i.exec(model?.trim() ?? "")?.[1]?.toLowerCase();
+  if (!props.active || recovery?.entryId !== entryId || !model?.trim() || family === recovery.limitFamily) return false;
+  modelRetries.set(recovery.key, { ...recovery, modelLabel: savedModelLabel(provider, model), state: "ready" });
+  openingModelRecovery.value = null;
+  return true;
+}
+
+function retryOriginalMessage(key: string): void {
+  const retry = modelRetries.get(key);
+  if (!retry || retry === "sent" || retry.state === "sending" || !props.active || props.sending) return;
+  const available = roomSupervisorEntries.value.some((entry) => entry.id === retry.entryId
+    && entry.agentKey === retry.agentKey && entry.desiredState === "running");
+  if (!available) return;
+  const sending: ModelRetry = { ...retry, state: "sending" };
+  modelRetries.set(key, sending);
+  askFromReceipt(retry.messageId, retry.threadRootId, {
+    mention: receiptMentionFor(retry.agentKey, retry.agentName),
+  }, (sent) => {
+    if (modelRetries.get(key) !== sending) return;
+    modelRetries.set(key, sent ? "sent" : { ...retry, state: "error" });
+  });
+}
+
+watch(() => [props.roomIdentifier, props.messageNamespace] as const, () => {
+  modelRetries.clear();
+  openingModelRecovery.value = null;
+});
+
 function revealMessageFromInfo(messageId: string): void {
   messageReceipts.close();
   jumpToMessage(messageId);
@@ -900,6 +997,8 @@ watch(toRef(props, "messageNamespace"), () => {
   fetchedThreadReplies.value = [];
   fetchedThreadHasOlder.value = false;
   loadingOlderThreadReplies.value = false;
+  loadingThreadId.value = null;
+  threadRequestRevision++;
   threadSummaryOverrides.value = new Map();
   openedThreadSummaries.value = new Map();
   lastMarkedThreadReadKey.value = null;
@@ -944,19 +1043,20 @@ function focusComposerWithMention(mentionText: string): void {
   roomComposer.value?.focusWithMention(mentionText);
 }
 
-async function revealThread(messageId: string): Promise<void> {
+async function revealThread(messageId: string, replyId?: string): Promise<void> {
   const namespace = props.messageNamespace;
+  threadRevealTargetId.value = replyId ?? null;
   openThread(messageId, false);
   await nextTick();
-  const revealed = messageViewport.value?.scrollToMessage(messageId);
+  const revealed = messageViewport.value?.scrollToMessage(messageId, replyId ? "instant" : undefined);
   await loadThread(messageId);
   if (!revealed && namespace === props.messageNamespace && activeThreadParentId.value === messageId) {
     await nextTick();
-    messageViewport.value?.scrollToMessage(messageId);
+    messageViewport.value?.scrollToMessage(messageId, replyId ? "instant" : undefined);
   }
 }
 
-defineExpose({ openThread: revealThread, focusComposerWithMention });
+defineExpose({ openThread: revealThread, focusComposerWithMention, cancelModelRecoverySwitch, finishModelRecovery });
 
 onBeforeUnmount(() => {
   if (transientHighlightTimeout !== null) {

@@ -475,6 +475,7 @@ async function mountViewport(count: number, options: { idle?: boolean; initialSc
         ...props, ref: (value: unknown) => { viewport = value as typeof viewport; },
         "onLoad-older": () => calls.push("load-older"),
         "onReveal-message": (id: string) => calls.push(`reveal:${id}`),
+        "onReveal-thread": (parentId: string, replyId: string) => calls.push(`thread:${parentId}:${replyId}`),
       });
     },
   });
@@ -612,6 +613,36 @@ test("a new message while reading a detached window is not mounted and does not 
     await flush();
     assert.ok(!view.mounted().includes("late_0"));
     assert.deepEqual(view.firstVisible(), anchor);
+    const pill = () => descendants(view.root).find(node => node.props["data-testid"] === "desktop-new-messages-pill");
+    assert.ok(descendants(pill()!).some(node => node.text.trim() === "1 new message"));
+    (pill()!.props.onClick as () => void)();
+    await flush();
+    assert.ok(view.atBottom());
+    assert.equal(view.mounted().at(-1), "late_0");
+    assert.equal(pill(), undefined);
+  } finally { view.app.unmount(); }
+});
+
+test("the reply notice opens the exact reply and ignores replies already being read", async () => {
+  const view = await mountViewport(10);
+  const messages = roomMessages(10);
+  const reply = (id: string, parentId: string, minute: number) => ({
+    ...messages[0], id, threadRootId: parentId, threadReplyToId: parentId,
+    timestamp: `2026-11-01T00:${minute}:00.000Z`, text: "A reply to check",
+  });
+  const notice = () => descendants(view.root).find(node => node.props["data-testid"] === "room-thread-activity-pill");
+  try {
+    view.props.threadMessages = messages;
+    await flush();
+    assert.equal(notice(), undefined);
+    view.props.readingThreadParentId = "msg_1";
+    view.props.threadMessages = [...messages, reply("reply_other", "msg_2", 10), reply("reply_reading", "msg_1", 11)];
+    await flush();
+    const action = descendants(notice()!).find(node => node.props.class === "room-thread-activity-open")!;
+    (action.props.onClick as () => void)();
+    await flush();
+    assert.ok(view.calls.includes("thread:msg_2:reply_other"));
+    assert.equal(notice(), undefined);
   } finally { view.app.unmount(); }
 });
 

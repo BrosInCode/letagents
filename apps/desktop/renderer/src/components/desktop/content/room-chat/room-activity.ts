@@ -196,6 +196,7 @@ export function createActivityNoticeQueue(timers: ActivityTimers, onChange: () =
 export interface ActivitySteerOffer {
   entryId: string;
   displayName: string;
+  pending?: boolean;
 }
 
 /**
@@ -207,8 +208,9 @@ export function stableSteerOffer(
   target: ActivitySteerOffer | null | undefined,
 ): ActivitySteerOffer | null {
   if (!target) return null;
-  const { entryId, displayName } = target;
-  return previous?.entryId === entryId && previous.displayName === displayName ? previous : { entryId, displayName };
+  const { entryId, displayName, pending } = target;
+  return previous?.entryId === entryId && previous.displayName === displayName && previous.pending === pending
+    ? previous : { entryId, displayName, pending };
 }
 
 export interface ActivityWork {
@@ -235,19 +237,6 @@ export function pickActivityPill<W extends ActivityWork>(input: {
   if (input.work.length) return { kind: "live", work: input.work };
   if (input.typing.length) return { kind: "typing", names: input.typing };
   return null;
-}
-
-/** A quiet timeline line for a join or a leave, kept only in this window. */
-export interface PresenceTimelineLine {
-  id: string;
-  timestamp: string;
-  kind: "connected" | "disconnected";
-  text: string;
-}
-
-export function presenceTimelineText(kind: PresenceTimelineLine["kind"], agent: PresenceChipAgent): string {
-  if (kind === "disconnected") return `${agent.displayName} left`;
-  return agent.ideLabel ? `${agent.displayName} joined · ${agent.ideLabel}` : `${agent.displayName} joined`;
 }
 
 /** Whole seconds, then minutes: "8s", "2m". */

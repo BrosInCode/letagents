@@ -32,6 +32,7 @@ test("the title is the answer: one agent by name, several by count, nobody in wo
   assert.deepEqual(summarizeReceipt({ agents: [agent({})], noWake: null }),
     { tone: "positive", replied: 1, total: 1, title: "LivelyDelta replied" });
   assert.equal(summarizeReceipt({ agents: [agent({ state: "responding" })], noWake: null }).title, "LivelyDelta is working");
+  assert.equal(summarizeReceipt({ agents: [agent({ state: "queued" })], noWake: null }).tone, "waiting");
   const many = summarizeReceipt({
     agents: [agent({}), agent({ agentKey: "a/b", displayName: "QuartzPeak", state: "responding" }), agent({ agentKey: "a/c", state: "no_reply" })],
     noWake: null,
@@ -72,7 +73,7 @@ test("durations use whole units that keep their width", () => {
 
 test("the readers line counts people against the room, and says everyone or nobody plainly", () => {
   const reader = (name: string) => ({ name, avatarUrl: null, readAt: "2026-11-08T10:00:00.000Z" });
-  assert.equal(readersLabel({ readers: [], notRead: [{ name: "Tobi", avatarUrl: null }] }), "Nobody has read it yet");
+  assert.equal(readersLabel({ readers: [], notRead: [{ name: "Tobi", avatarUrl: null }] }), "No reads yet");
   assert.equal(readersLabel({ readers: [reader("Shannon")], notRead: [{ name: "Tobi", avatarUrl: null }] }), "Read by Shannon");
   assert.equal(readersLabel({ readers: [reader("Shannon"), reader("Tobi")], notRead: [] }), "Read by everyone");
   assert.equal(readersLabel({ readers: [reader("Shannon"), reader("Tobi"), reader("Ada")], notRead: [{ name: "Kemi", avatarUrl: null }] }), "Read by 3 of 4");

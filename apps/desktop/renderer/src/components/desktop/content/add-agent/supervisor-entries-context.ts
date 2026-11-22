@@ -1,6 +1,7 @@
 import { inject, type InjectionKey, type Ref } from "vue";
 import type { DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
 import type { SupervisorEntriesResource } from "../../../../domain/agent-inspector-identity";
+import { isLocalRoomIdentifier } from "../../../../domain/room-urls";
 
 /**
  * The room shell's view of the daemon's supervisor entries, shared with the
@@ -20,6 +21,15 @@ export interface SupervisorEntriesContext {
 
 export const supervisorEntriesKey: InjectionKey<SupervisorEntriesContext> =
   Symbol("supervisor-entries");
+
+export function isOwnedLocalRoomAgent(
+  roomIdentifier: string | null | undefined,
+  agentKey: string | null | undefined,
+  entries: readonly DesktopSupervisorManifestEntry[] | undefined,
+): boolean {
+  return Boolean(isLocalRoomIdentifier(roomIdentifier) && agentKey
+    && entries?.some(entry => entry.localRoomId === roomIdentifier && entry.agentKey === agentKey));
+}
 
 export function useSupervisorEntriesContext(): SupervisorEntriesContext {
   const context = inject(supervisorEntriesKey, null);

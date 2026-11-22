@@ -13,18 +13,51 @@
       @keydown.esc.stop.prevent="close(true)"
     >
       <header class="room-receipt-head">
-        <h3 id="room-receipt-title" :key="summary.title" class="room-receipt-title" :class="{ 'is-changed': titleChanged }">
-          <CircleAlert v-if="summary.tone === 'nobody'" :size="15" :stroke-width="2" aria-hidden="true" />
-          <span>{{ summary.title }}</span>
-        </h3>
-        <time class="room-receipt-sent" :datetime="receipt.sentAt">Sent {{ clock(receipt.sentAt) }}</time>
+        <h3 id="room-receipt-title" class="room-receipt-title">Message info</h3>
+        <button type="button" class="room-receipt-copy" aria-label="Copy message link" :title="copied ? 'Link copied' : 'Copy message link'" @click="copyLink">
+          <Check v-if="copied" :size="15" class="room-receipt-copied" aria-hidden="true" />
+          <Link2 v-else :size="15" aria-hidden="true" />
+        </button>
+        <span class="sr-only" role="status">{{ copied ? "Link copied" : "" }}</span>
       </header>
 
-      <template v-if="summary.tone === 'nobody'">
-        <p class="room-receipt-why">{{ noWakeSentence(receipt.noWake) }}</p>
-        <template v-if="askable.length">
-          <p class="room-receipt-eyebrow">Ask one now</p>
-          <ul class="room-receipt-list" aria-label="Agents you can ask">
+      <div class="room-receipt-reading">
+        <button
+          v-if="receipt.readers.length"
+          type="button"
+          class="room-receipt-readers"
+          :aria-expanded="readersOpen"
+          aria-controls="room-receipt-readers"
+          @click="readersOpen = !readersOpen; queuePlace()"
+        >
+          <span class="room-receipt-people" aria-hidden="true">
+            <ChatPersonAvatar v-for="(reader, index) in receipt.readers.slice(0, 3)" :key="index" :name="reader.name" :avatar-url="reader.avatarUrl" />
+            <i v-if="receipt.readers.length > 3" class="room-receipt-more">+{{ receipt.readers.length - 3 }}</i>
+          </span>
+          <span class="room-receipt-readers-label">{{ readersLabel(receipt) }}</span>
+          <ChevronDown class="room-receipt-chevron" :size="13" aria-hidden="true" />
+        </button>
+        <p v-else class="room-receipt-no-reads">
+          <Eye :size="16" aria-hidden="true" />
+          {{ readersLabel(receipt) }}
+        </p>
+        <div v-show="readersOpen && receipt.readers.length" id="room-receipt-readers" class="room-receipt-readers-list">
+          <ul aria-label="People who read this message">
+            <li v-for="(reader, index) in receipt.readers" :key="index">
+              <ChatPersonAvatar :name="reader.name" :avatar-url="reader.avatarUrl" aria-hidden="true" />
+              <span>{{ reader.name }}</span>
+              <time :datetime="reader.readAt">{{ clock(reader.readAt) }}</time>
+            </li>
+          </ul>
+          <p v-if="receipt.notRead?.length" class="room-receipt-unread">Not read yet · {{ receipt.notRead.map((person) => person.name).join(", ") }}</p>
+        </div>
+      </div>
+
+      <div class="room-receipt-activity">
+        <h4 class="room-receipt-eyebrow">Agent activity</h4>
+        <template v-if="!agents.length">
+          <p class="room-receipt-why">{{ noWakeSentence(receipt.noWake) }}</p>
+          <ul v-if="askable.length" class="room-receipt-list" aria-label="Agents you can ask">
             <li v-for="agent in askable" :key="agent.agentKey" class="room-receipt-row">
               <span class="room-receipt-tile" aria-hidden="true">
                 <img v-if="agent.icon" :src="agent.icon" alt="" draggable="false" />
@@ -44,13 +77,7 @@
             </li>
           </ul>
         </template>
-      </template>
-
-      <template v-else>
-        <div class="room-receipt-meter" aria-hidden="true">
-          <i v-for="agent in agents" :key="agent.agentKey" :data-kind="receiptRowKind(agent.state)" />
-        </div>
-        <ul class="room-receipt-list" aria-label="Agents this message woke">
+        <ul v-else class="room-receipt-list" aria-label="Agents this message reached">
           <li v-for="agent in agents" :key="agent.agentKey" class="room-receipt-row">
             <button
               v-if="rowAction(agent)"
@@ -78,44 +105,13 @@
             </span>
           </li>
         </ul>
-      </template>
-
-      <footer class="room-receipt-foot">
-        <button
-          type="button"
-          class="room-receipt-readers"
-          :disabled="!receipt.readers.length"
-          :aria-expanded="readersOpen"
-          aria-controls="room-receipt-readers"
-          @click="readersOpen = !readersOpen; queuePlace()"
-        >
-          <span v-if="receipt.readers.length" class="room-receipt-people" aria-hidden="true">
-            <ChatPersonAvatar v-for="reader in receipt.readers.slice(0, 3)" :key="reader.name" :name="reader.name" :avatar-url="reader.avatarUrl" />
-            <i v-if="receipt.readers.length > 3" class="room-receipt-more">+{{ receipt.readers.length - 3 }}</i>
-          </span>
-          <span class="room-receipt-readers-label">{{ readersLabel(receipt) }}</span>
-          <ChevronRight v-if="receipt.readers.length" class="room-receipt-chevron" :size="13" :stroke-width="2" aria-hidden="true" />
-        </button>
-        <button type="button" class="room-receipt-copy" @click="copyLink">{{ copied ? "Copied" : "Copy link" }}</button>
-      </footer>
-      <div id="room-receipt-readers" class="room-receipt-readers-list" :class="{ 'is-open': readersOpen }">
-        <div>
-          <ul aria-label="People who read this message">
-            <li v-for="reader in receipt.readers" :key="reader.name">
-              <ChatPersonAvatar :name="reader.name" :avatar-url="reader.avatarUrl" />
-              <span>{{ reader.name }}</span>
-              <time :datetime="reader.readAt">{{ clock(reader.readAt) }}</time>
-            </li>
-          </ul>
-          <p v-if="receipt.notRead?.length" class="room-receipt-unread">Not read yet: {{ receipt.notRead.map((person) => person.name).join(", ") }}</p>
-        </div>
       </div>
     </section>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-import { Bot, Check, ChevronRight, CircleAlert, Clock3, Minus } from "@lucide/vue";
+import { Bot, Check, ChevronDown, ChevronRight, CircleAlert, Clock3, Eye, Link2, Minus } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 
 import type { DesktopMessageReceipt, DesktopParticipantSummary, DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
@@ -124,7 +120,7 @@ import { injectRoomMessageReceipts } from "../../../../composables/useRoomMessag
 import { formatDate } from "../../../../domain/formatters";
 import { messageOutcomeTarget } from "../../../../domain/message-outcome";
 import {
-  noWakeSentence, orderReceiptAgents, readersLabel, receiptRowDetail, receiptRowKind, receiptRowLabel, summarizeReceipt, visibleReceipt,
+  noWakeSentence, orderReceiptAgents, readersLabel, receiptRowDetail, receiptRowKind, receiptRowLabel, visibleReceipt,
 } from "../../../../domain/message-receipt-view";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import ChatPersonAvatar from "./RoomReceiptPersonAvatar.vue";
@@ -151,7 +147,6 @@ const emit = defineEmits<{
 const receipts = injectRoomMessageReceipts();
 const opened = computed(() => receipts?.opened.value ?? null);
 const receipt = computed(() => opened.value ? visibleReceipt(receipts?.receiptFor(opened.value.messageId)) : null);
-const summary = computed(() => summarizeReceipt(receipt.value ?? { agents: [], noWake: null }));
 const agents = computed(() => orderReceiptAgents(receipt.value?.agents ?? []));
 
 const surface = ref<HTMLElement | null>(null);
@@ -159,10 +154,10 @@ const shown = ref(false);
 const readersOpen = ref(false);
 const copied = ref(false);
 const asking = ref<string | null>(null);
-const titleChanged = ref(false);
 const position = shallowRef<Record<string, string>>({});
 const now = ref(Date.now());
 let clockTimer: ReturnType<typeof setInterval> | null = null;
+let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
 const viewer = useMessageViewer();
 const mySupervisedKeys = computed(() => new Set(props.supervisorEntries
@@ -229,13 +224,15 @@ function ask(agent: { agentKey: string; displayName: string }): void {
 }
 
 async function copyLink(): Promise<void> {
-  const messageId = opened.value?.messageId;
-  const link = messageId ? props.messageLink(messageId) ?? messageId : null;
-  if (!link) return;
+  const request = opened.value;
+  if (!request) return;
+  const link = props.messageLink(request.messageId) ?? request.messageId;
   try {
     await navigator.clipboard.writeText(link);
+    if (opened.value !== request) return;
     copied.value = true;
-    window.setTimeout(() => { copied.value = false; }, 1200);
+    if (copyTimer) clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => { copied.value = false; }, 1200);
   } catch {
     // The clipboard can be unavailable; nothing else changes.
   }
@@ -260,9 +257,12 @@ function place(): void {
   const rect = mark.getBoundingClientRect();
   const width = element.offsetWidth;
   const height = element.offsetHeight;
-  const below = rect.bottom + 8 + height <= window.innerHeight - 8;
+  const belowSpace = window.innerHeight - rect.bottom - 16;
+  const aboveSpace = rect.top - 16;
+  const below = height <= belowSpace || belowSpace >= aboveSpace;
   const left = Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12));
-  const top = below ? rect.bottom + 8 : Math.max(8, rect.top - 8 - height);
+  const desiredTop = below ? rect.bottom + 8 : rect.top - 8 - height;
+  const top = Math.max(8, Math.min(desiredTop, window.innerHeight - 8 - height));
   position.value = {
     left: `${Math.round(left)}px`,
     top: `${Math.round(top)}px`,
@@ -271,16 +271,10 @@ function place(): void {
 }
 
 let placeFrame = 0;
-let settleTimer: ReturnType<typeof setTimeout> | null = null;
 function queuePlace(): void {
   if (!opened.value) return;
   cancelAnimationFrame(placeFrame);
-  if (settleTimer) clearTimeout(settleTimer);
-  placeFrame = requestAnimationFrame(() => {
-    place();
-    // A list that opens grows over 200 ms; place again once it has its height.
-    settleTimer = setTimeout(place, 220);
-  });
+  placeFrame = requestAnimationFrame(place);
 }
 
 /** Scroll and resize move the popover only while it is open. */
@@ -294,7 +288,6 @@ function listen(on: boolean): void {
     window.removeEventListener("resize", queuePlace);
     document.removeEventListener("scroll", queuePlace, { capture: true });
     cancelAnimationFrame(placeFrame);
-    if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
   }
 }
 
@@ -314,6 +307,8 @@ function handlePointerDown(event: PointerEvent): void {
 watch(() => opened.value?.messageId, async (messageId, previous) => {
   listen(Boolean(messageId));
   readersOpen.value = false;
+  if (copyTimer) clearTimeout(copyTimer);
+  copied.value = false;
   asking.value = null;
   if (!messageId) { shown.value = false; return; }
   if (messageId !== previous) shown.value = false;
@@ -325,14 +320,6 @@ watch(() => opened.value?.messageId, async (messageId, previous) => {
   });
 });
 
-// Only a real change animates: the title of an open receipt, never its first paint.
-watch(() => summary.value.title, (title, before) => {
-  if (!opened.value || !before || title === before) return;
-  titleChanged.value = true;
-  window.setTimeout(() => { titleChanged.value = false; }, 220);
-  queuePlace();
-});
-
 watch(() => receipt.value, (next) => {
   if (opened.value && next === null) receipts?.close();
   else if (next) queuePlace();
@@ -341,11 +328,15 @@ watch(() => receipt.value, (next) => {
 // The working timer is the only thing that ticks, and only while one shows.
 watch(() => agents.value.some((agent) => ["working", "waiting"].includes(receiptRowKind(agent.state))) && Boolean(opened.value), (ticking) => {
   if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
-  if (ticking) clockTimer = setInterval(() => { now.value = Date.now(); }, 1000);
+  if (ticking) {
+    now.value = Date.now();
+    clockTimer = setInterval(() => { now.value = Date.now(); }, 1000);
+  }
 }, { immediate: true });
 
 onBeforeUnmount(() => {
   listen(false);
   if (clockTimer) clearInterval(clockTimer);
+  if (copyTimer) clearTimeout(copyTimer);
 });
 </script>

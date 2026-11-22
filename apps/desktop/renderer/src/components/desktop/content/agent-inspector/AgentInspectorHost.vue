@@ -15,7 +15,7 @@
         @open-reasoning="emit('open-reasoning', $event)"
         @reveal-live-request="emit('reveal-live-request', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
-        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
+        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="(overwrite: boolean, restart?: boolean) => emit('settings-save', overwrite, restart)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
   </div>
@@ -42,7 +42,7 @@
         @open-reasoning="emit('open-reasoning', $event)"
         @reveal-live-request="emit('reveal-live-request', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
-        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
+        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="(overwrite: boolean, restart?: boolean) => emit('settings-save', overwrite, restart)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
   </Teleport>
@@ -107,10 +107,11 @@ const props = defineProps<{
   roomIdentifier: string;
   roomDisplayName?: string;
   requestVersion: number;
-  initialTab?: "overview" | "live" | "work" | "workspace" | "diagnostics";
+  initialTab?: "overview" | "live" | "work" | "workspace" | "settings" | "diagnostics";
   roomAgentWork?: DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
+  workspaceFilePath?: string;
   reasoningSessions: readonly DesktopReasoningSession[];
   /** Agents' turns their owners share with the room. */
   liveActivitySessions?: readonly DesktopReasoningSession[];
@@ -128,7 +129,7 @@ const emit = defineEmits<{
   "reveal-message": [canonicalMessageId: string];
   "settings-selected": [];
   "settings-patch": [patch: Partial<AgentInspectorConfigurationDraft>];
-  "settings-save": [overwrite: boolean];
+  "settings-save": [overwrite: boolean, restart?: boolean];
   "settings-apply": [];
   "settings-reload": [];
   "room-move-prepare": [destination: string];
@@ -170,7 +171,7 @@ const liveAnnouncement = computed(() => {
 });
 function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
   const workspace = { roomAgentWork: props.roomAgentWork ?? [], roomAgentWorkStatus: props.roomAgentWorkStatus ?? 'idle',
-    workspaceSourceMessageId: props.workspaceSourceMessageId, workspaceAgentKey: props.selection.agentKey,
+    workspaceSourceMessageId: props.workspaceSourceMessageId, workspaceFilePath: props.workspaceFilePath, workspaceAgentKey: props.selection.agentKey,
     initialTab: props.initialTab };
   if (props.projection) {
     return {
@@ -297,6 +298,7 @@ function handleHostKeydown(event: KeyboardEvent): void {
   if (!props.open || !compact.value || event.key !== "Escape") return;
   const target = event.target as (EventTarget & { closest?: (selector: string) => Element | null }) | null;
   if (target?.closest?.('[role="menu"]') || target?.closest?.('.workspace-reader-backdrop')) return;
+  if (target?.closest?.('[role="combobox"][aria-expanded="true"]')) return;
   event.preventDefault();
   event.stopPropagation();
   emit("close");

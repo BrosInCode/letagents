@@ -4,7 +4,13 @@
       <button ref="identityTrigger" type="button" class="desktop-composer-agent-identity-trigger" :disabled="launching"
         aria-label="Choose agent name and avatar" aria-haspopup="dialog" :aria-expanded="identityOpen"
         data-testid="desktop-composer-agent-identity-button" @click="showIdentity">
-        <AgentAvatar :avatar="chip.avatar" :name="chip.displayName || providerName" :size="32" />
+        <span ref="identityAvatarAnchor" class="desktop-composer-agent-avatar-anchor">
+          <AgentAvatar :avatar="chip.avatar" :name="chip.displayName || providerName" :size="25" />
+        </span>
+        <span class="desktop-composer-agent-chip-copy">
+          <span class="desktop-composer-agent-chip-who">{{ chip.displayName || `New ${providerName} agent` }}<template v-if="launching"> · starting…</template></span>
+          <span class="desktop-composer-agent-chip-spec">Name &amp; avatar</span>
+        </span>
       </button>
       <button
         ref="trigger"
@@ -22,8 +28,10 @@
           <img v-if="chipIcon" :src="chipIcon" alt="" draggable="false" />
           <Bot v-else :size="13" />
         </span>
-        <span class="desktop-composer-agent-chip-who">{{ chip.displayName || `New ${providerName} agent` }}<template v-if="launching"> · starting…</template></span>
-        <span class="desktop-composer-agent-chip-spec">{{ spec }}</span>
+        <span class="desktop-composer-agent-chip-copy">
+          <span class="desktop-composer-agent-chip-who">Settings</span>
+          <span class="desktop-composer-agent-chip-spec">{{ spec }}</span>
+        </span>
         <ChevronUp class="desktop-composer-agent-chip-caret" :size="12" aria-hidden="true" />
       </button>
       <button
@@ -58,7 +66,7 @@
     >
       <p :id="`${menuId}-coach-title`" class="desktop-composer-agent-coach-title">Two steps to start this agent</p>
       <ol :id="`${menuId}-coach-steps`">
-        <li>Click the chip to choose the model{{ efforts.length ? ", effort" : "" }} and access.</li>
+        <li>Choose a name and avatar, or adjust the model{{ efforts.length ? ", effort" : "" }} and access in Settings.</li>
         <li>Type its first message, then press Enter.</li>
       </ol>
       <p v-if="fellBackLine" class="desktop-composer-agent-coach-note">{{ fellBackLine }}</p>
@@ -242,6 +250,7 @@ const open = ref(false);
 const identityOpen = ref(false);
 const identityName = ref("");
 const identityTrigger = ref<HTMLButtonElement | null>(null);
+const identityAvatarAnchor = ref<HTMLElement | null>(null);
 const identityPanel = ref<HTMLElement | null>(null);
 const identityPosition = ref<Record<string, string>>({ visibility: "hidden" });
 const animate = ref(false);
@@ -320,7 +329,7 @@ function chooseAvatar(avatar: AgentAvatarDescriptor | null): void {
       ? `.identity-character-rail [data-character="${avatar.character}"] .agent-identity-avatar`
       : "[data-agent-avatar-source] .agent-identity-avatar";
     const source = captureAgentAvatarSource(identityPanel.value?.querySelector<HTMLElement>(selector) ?? null);
-    flyAgentAvatar(source, identityTrigger.value);
+    flyAgentAvatar(source, identityAvatarAnchor.value);
   });
 }
 function trapIdentityFocus(event: KeyboardEvent): void {
@@ -516,13 +525,10 @@ function openAt(at: "main" | "where"): void {
   }
 }
 
-defineExpose({ avatarElement: () => identityTrigger.value, close: closeMenu, open: openAt, isOpen: () => open.value || identityOpen.value, focus: () => trigger.value?.focus({ preventScroll: true }) });
+defineExpose({ avatarElement: () => identityAvatarAnchor.value, close: closeMenu, open: openAt, isOpen: () => open.value || identityOpen.value, focus: () => trigger.value?.focus({ preventScroll: true }) });
 </script>
 
 <style scoped>
-.desktop-composer-agent-identity-trigger{display:grid;place-items:center;width:42px;padding:2px;flex:none;border:0;border-radius:12px;background:transparent;color:var(--text);cursor:pointer}
-.desktop-composer-agent-identity-trigger:hover{background:var(--hover)}
-.desktop-composer-agent-identity-trigger:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .desktop-composer-agent-identity{position:fixed;box-sizing:border-box;z-index:1000;overflow:auto;padding:18px;border:1px solid var(--border-strong);border-radius:24px;background:var(--bg-secondary,#111);color:var(--text);box-shadow:0 20px 70px #0005;overscroll-behavior:contain;animation:identity-arrive 220ms cubic-bezier(.2,.75,.2,1)}
 .desktop-composer-agent-identity header,.desktop-composer-agent-identity footer{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .desktop-composer-agent-identity header{margin-bottom:16px;font-size:14px}

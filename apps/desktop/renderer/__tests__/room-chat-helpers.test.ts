@@ -1195,6 +1195,7 @@ it('places only turn contributions beside their visible conversation and never p
       workspace: snapshot, contribution: { changes: snapshot, summary: 'Saved tasks' } } };
   const entries = buildMessageTimelineEntries([message, roomMessage('msg_2', null, '2026-05-28T12:02:00Z')], [work]);
   assert.deepEqual(entries.map(entry => entry.type), ['date', 'message', 'contribution', 'message']);
+  assert.equal(entries.find(entry => entry.type === 'contribution')?.sourceMessage, message);
   const skewed = { ...work, summary: { ...work.summary, contribution: { ...work.summary.contribution, changes: { ...snapshot, captured_at: '2026-05-27T12:00:00Z' } } } };
   assert.deepEqual(buildMessageTimelineEntries([message], [skewed]).map(entry => entry.type), ['date', 'message', 'contribution']);
   assert.equal(buildMessageTimelineEntries([], [work]).length, 0, 'hidden/absent sources cannot leave receipts in the conversation');
