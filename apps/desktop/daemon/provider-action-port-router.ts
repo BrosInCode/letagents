@@ -37,6 +37,13 @@ type StepEnvelope = Extract<ProviderEventEnvelope, { kind: "step" }>;
 /** What the daemon does at each step of one operation. A step with no entry is answered at once. */
 type StepHandlers = Partial<Record<ProviderStepName, (body: unknown) => unknown>>;
 
+/** One text field of a step body. The boundary checks the body; the daemon does not act on a value it cannot read. */
+function stepText(body: unknown, field: string): string {
+  const value = typeof body === "object" && body !== null ? (body as Record<string, unknown>)[field] : undefined;
+  if (typeof value !== "string" || !value) throw new Error(`The provider step has no '${field}'.`);
+  return value;
+}
+
 /**
  * The contract between the daemon and a provider adapter. Its one definition
  * is in the provider runtime package; the four adapter classes implement it
@@ -275,7 +282,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const remembered = this.required(handle);
     const boundary = await this.boundary(remembered.provider);
     const result = await this.withSteps(boundary, {
-      checkpoint_turn_started: (body) => options?.checkpointTurnStarted?.((body as { turnId: string }).turnId),
+      checkpoint_turn_started: (body) => options?.checkpointTurnStarted?.(stepText(body, "turnId")),
       mark_dispatched: () => options?.markDispatched?.(),
     }, undefined, (operation) => boundary.controlTurn(remembered.runtime, correction, { ...operation, targetTurnId: options?.targetTurnId }));
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
@@ -294,7 +301,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const boundary = await this.boundary(remembered.provider);
     if (!boundary.has("controlExactTurn")) throw new Error(`Provider '${remembered.provider}' does not support exact turn control.`);
     return this.withSteps(boundary, {
-      checkpoint_target_turn: (body) => options.checkpointTargetTurn((body as { turnId: string }).turnId),
+      checkpoint_target_turn: (body) => options.checkpointTargetTurn(stepText(body, "turnId")),
       mark_dispatched: () => options.markDispatched(),
     }, options.detachSignal, (operation) => boundary.controlExactTurn(remembered.runtime, { ...operation, targetTurnId: options.targetTurnId }));
   }
@@ -536,7 +543,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     if (!boundary.has("repairContinuation")) throw new Error(`Provider '${remembered.provider}' does not support continuation repair.`);
     let repairId = "";
     const { runtime, noticesAwaitAcknowledgement, ...result } = await this.withSteps(boundary, {
-      checkpoint_replacement: (body) => options.checkpointReplacement((body as { providerContinuationId: string }).providerContinuationId),
+      checkpoint_replacement: (body) => options.checkpointReplacement(stepText(body, "providerContinuationId")),
     }, options.detachSignal, (operation) => { repairId = operation.operationId; return boundary.repairContinuation(remembered.runtime, request, operation); });
     // The adapter's wait for "the lines are recorded" is a data call that names the repair.
     const repaired = { ...result, ...(noticesAwaitAcknowledgement ? { noticesRecorded: () => boundary.acknowledgeRepairNotices(repairId) } : {}) };

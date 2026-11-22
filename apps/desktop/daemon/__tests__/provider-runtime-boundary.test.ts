@@ -12,6 +12,8 @@ import {
   ProviderRuntimeBoundary,
   ProviderStepRefusedError,
   PROVIDER_ERROR_FIELDS,
+  PROVIDER_STEP_BODY_SCHEMAS,
+  PROVIDER_STEP_NAMES,
   StaleProviderRuntimeRefError,
   TRANSITIONAL_OPERATIONS,
   TRANSPORT_OPERATIONS,
@@ -265,7 +267,7 @@ test("the boundary reports the optional operations of its adapter as data", () =
 
 test("each public operation of the boundary is listed as a data operation or as a transitional operation", () => {
   const internal = new Set(["constructor", "has", "inspectIfHeld", "required", "matches", "held", "continuation", "terminal", "installed", "snapshot", "reference", "stopOptions", "deliver", "startHints", "send",
-    "operation", "step", "check", "openStep", "sendStep", "answered", "permissionRequest", "tokensOf"]);
+    "operation", "step", "check", "openStep", "sendStep", "answered", "refusal", "permissionRequest", "connectionKey", "tokensOf"]);
   const listed = new Set<string>([...DATA_OPERATIONS, ...TRANSPORT_OPERATIONS, ...Object.keys(TRANSITIONAL_OPERATIONS)]);
   const actual = Object.getOwnPropertyNames(ProviderRuntimeBoundary.prototype).filter((name) => !internal.has(name));
   assert.deepEqual(actual.filter((name) => !listed.has(name)), [], "an operation that is in no list");
@@ -1044,4 +1046,129 @@ test("through the router: the daemon's functions run at the steps, and a functio
   await assert.rejects(router.controlTurn(handle, null, { markDispatched: async () => { throw own; } }), (error) => error === own);
   assert.deepEqual(order, [], "no native work after a refused step");
   assert.deepEqual(await router.controlTurn(handle, null), CONTROLLED, "a call with no functions");
+});
+
+test("a sink that answers a step and then throws does not authorize native work", async () => {
+  let work = 0;
+  const overrides: Partial<SupervisedProviderAdapter> = {
+    controlTurn: async (_handle, _correction, options) => { await options!.markDispatched!(); work += 1; return CONTROLLED; },
+    stopIdle: async (_handle, assertCurrent) => { assertCurrent(); work += 1; return TERMINAL; },
+  };
+  const boundary = new ProviderRuntimeBoundary("codex", fakeAdapter(overrides).adapter);
+  const late: Array<() => void> = [];
+  boundary.connectEventSink((event) => {
+    if (event.kind !== "step") return;
+    boundary.answerStep(event.operationId, event.seq, { ok: true });
+    late.push(() => boundary.answerStep(event.operationId, event.seq, { ok: true }));
+    throw new Error("sink failed after its answer");
+  });
+  const runtime = await boundary.spawn(SPAWN);
+  await assert.rejects(boundary.controlTurn(runtime.ref, null, { operationId: "op-1" }), /the event sink did not take the step/);
+  await assert.rejects(boundary.stopIdle(runtime.ref, { operationId: "op-2" }), /the event sink did not take the check/);
+  assert.equal(work, 0);
+  for (const answer of late) assert.throws(answer, ProviderStepRefusedError);
+});
+
+test("the body of a step is checked before it is an envelope, and each step shape is JSON data", async () => {
+  let work = 0;
+  const { boundary, steps } = steppedBoundary({
+    controlTurn: async (_handle, _correction, options) => { await options!.checkpointTurnStarted!((() => "turn") as never); work += 1; return CONTROLLED; },
+    controlExactTurn: async (_handle, options) => { await options.checkpointTargetTurn(""); work += 1; return { outcome: "interrupt_dispatched", targetTurnId: "" }; },
+    repairContinuation: async (handle, _request, options) => {
+      await options.checkpointReplacement({ id: "thread-2" } as never);
+      work += 1;
+      return { handle, outcome: "replaced", previousProviderContinuationId: "thread-1", replacementProviderContinuationId: "thread-2" };
+    },
+  }, (event, target) => target.answerStep(event.operationId, event.seq, { ok: true }));
+  const runtime = await boundary.spawn(SPAWN);
+  await assert.rejects(boundary.controlTurn(runtime.ref, null, { operationId: "op-1" }), ProviderBoundaryValueError);
+  await assert.rejects(boundary.controlExactTurn(runtime.ref, { operationId: "op-2" }), ProviderBoundaryValueError);
+  await assert.rejects(boundary.repairContinuation(runtime.ref, { workAttemptId: "attempt-1", expectedProviderContinuationId: "thread-1", cwd: "/tmp/work", launchPolicy: {} }, { operationId: "op-3" }), ProviderBoundaryValueError);
+  assert.deepEqual([steps.length, work], [0, 0], "no envelope and no native work for a body that is not valid");
+  // The refused step left no open wait: the same ids can be used again.
+  await assert.rejects(boundary.controlTurn(runtime.ref, null, { operationId: "op-1" }), ProviderBoundaryValueError);
+
+  const samples: Record<(typeof PROVIDER_STEP_NAMES)[number], unknown> = {
+    checkpoint_turn_started: { turnId: "turn-9" }, mark_dispatched: null, checkpoint_target_turn: { turnId: "turn-9" },
+    before_native_dispatch: null, assert_native_dispatch: null, assert_current: null, checkpoint_replacement: { providerContinuationId: "thread-2" },
+  };
+  for (const step of PROVIDER_STEP_NAMES) {
+    const envelope = JSON.parse(JSON.stringify({ kind: "step", operationId: "op-1", ref: runtime.ref, step, seq: 1, order: 1, body: samples[step] }));
+    assert.equal(providerEventEnvelopeSchema.safeParse(envelope).success, true, step);
+    assert.equal(PROVIDER_STEP_BODY_SCHEMAS[step].safeParse(envelope.body).success, true, step);
+    assert.equal(PROVIDER_STEP_BODY_SCHEMAS[step].safeParse({ turnId: 7 }).success, false, step);
+  }
+});
+
+test("a permission token ends with the authority that gave it", async () => {
+  for (const provider of ["codex", "open-model"] as const) {
+    const fake = eventAdapter();
+    const reached: string[] = [];
+    fake.adapter.replyPermission = async () => { reached.push("reply"); return { outcome: "sent", scope: "request" }; };
+    fake.adapter.inspectPermissionProfile = async () => { reached.push("profile"); return {}; };
+    fake.adapter.inspectPermissionFileChanges = async () => { reached.push("files"); return []; };
+    fake.adapter.inspectPermissionMcpToolCall = async () => { reached.push("mcp"); return {}; };
+    const boundary = new ProviderRuntimeBoundary(provider, fake.adapter);
+    const events: ProviderEventEnvelope[] = [];
+    boundary.connectEventSink((event) => { if (event.kind !== "step") events.push(event); });
+    const runtime = await boundary.spawn(SPAWN);
+    boundary.subscribe(runtime.ref, "permissions", "s-perm");
+    await new Promise((resolve) => setImmediate(resolve));
+    const emit = fake.permissions[0]!.listener as (event: unknown) => void;
+    const tokens = () => (events.at(-1) as { permissionTokens?: string[] }).permissionTokens;
+    const request = () => ({ id: 7, method: "item/commandExecution/requestApproval", connectionId: "socket-1", params: {} });
+    const refused = (error: Error & { outcome?: string }) => error.outcome === "not_dispatched";
+    const allRefused = async (token: string, label: string) => {
+      await assert.rejects(boundary.replyPermission(runtime.ref, { token }, "once", { operationId: `op-${label}` }), refused, label);
+      await assert.rejects(boundary.inspectPermissionProfile(runtime.ref, { token }), refused, label);
+      await assert.rejects(boundary.inspectPermissionFileChanges(runtime.ref, { token }), refused, label);
+      await assert.rejects(boundary.inspectPermissionMcpToolCall(runtime.ref, { token }), refused, label);
+    };
+
+    const first = request();
+    emit({ type: "snapshot", connectionId: "socket-1", requests: [first] });
+    const [issued] = tokens()!;
+    emit({ type: "snapshot", connectionId: "socket-1", requests: [provider === "codex" ? first : request()] });
+    assert.deepEqual(tokens(), [issued], "an unchanged snapshot keeps the token");
+
+    for (const lost of [{ type: "unavailable" }, { type: "degraded" }, { type: "snapshot", requests: null }]) {
+      emit({ type: "snapshot", connectionId: "socket-1", requests: [first] });
+      const [before] = tokens()!;
+      emit(lost);
+      await allRefused(before!, `${provider} after ${JSON.stringify(lost)}`);
+      // The lane is read again: the same request, or an equal one, gets a new token.
+      emit({ type: "snapshot", connectionId: "socket-1", requests: [provider === "codex" ? first : request()] });
+      assert.notEqual(tokens()![0], before);
+    }
+
+    const [beforeChange] = tokens()!;
+    emit({ type: "snapshot", connectionId: "socket-2", requests: [first] });
+    assert.notEqual(tokens()![0], beforeChange, "another connection id gives new tokens");
+    await allRefused(beforeChange!, `${provider} after a changed connection id`);
+
+    const [beforeProcess] = tokens()!;
+    assert.deepEqual(reached, [], "no adapter call for a token whose authority ended");
+    assert.deepEqual(await boundary.inspectPermissionProfile(runtime.ref, { token: beforeProcess! }), {});
+    assert.deepEqual(reached, ["profile"], "a live token reaches the adapter");
+  }
+});
+
+test("a permission token is refused after the native connection of its runtime changed", async () => {
+  const fake = eventAdapter();
+  let reached = 0;
+  fake.adapter.inspectPermissionProfile = async () => { reached += 1; return {}; };
+  const created: FakeHandle[] = [];
+  const spawn = fake.adapter.spawn.bind(fake.adapter);
+  fake.adapter.spawn = async (request) => { const handle = await spawn(request) as FakeHandle; created.push(handle); return handle; };
+  const boundary = new ProviderRuntimeBoundary("codex", fake.adapter);
+  const events: ProviderEventEnvelope[] = [];
+  boundary.connectEventSink((event) => events.push(event));
+  const runtime = await boundary.spawn(SPAWN);
+  boundary.subscribe(runtime.ref, "permissions", "s-perm");
+  await new Promise((resolve) => setImmediate(resolve));
+  (fake.permissions[0]!.listener as (event: unknown) => void)({ type: "snapshot", connectionId: "socket-1", requests: [{ id: 7, method: "m", connectionId: "socket-1" }] });
+  const [token] = (events.at(-1) as { permissionTokens: string[] }).permissionTokens;
+  created[0]!.providerConnection = { kind: "codex_app_server", url: "ws://127.0.0.1:1", pid: 5151, processIdentity: "birth-2" };
+  await assert.rejects(boundary.inspectPermissionProfile(runtime.ref, { token: token! }), (error: Error & { outcome?: string }) => error.outcome === "not_dispatched");
+  assert.equal(reached, 0);
 });
