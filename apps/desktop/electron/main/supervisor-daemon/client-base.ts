@@ -102,6 +102,7 @@ export abstract class SupervisorDaemonClientBase {
   protected readonly statePreparationWaitMs: number;
   protected readonly requestTimeoutMs: number;
   protected readonly turnControlRequestTimeoutMs: number;
+  protected readonly asyncRpcWaitTimeoutsMs?: Partial<Record<import("#daemon-contract/index.js").DaemonAsyncRpcMethod, number>>;
   protected readonly now: () => Date;
   protected attachedDaemonObservation: {
     identity: DaemonProcessIdentity;
@@ -155,6 +156,7 @@ export abstract class SupervisorDaemonClientBase {
     this.statePreparationWaitMs = options.statePreparationWaitMs ?? 30_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
+    this.asyncRpcWaitTimeoutsMs = options.asyncRpcWaitTimeoutsMs;
     this.now = options.now ?? (() => new Date());
     this.readyStatusTtlMs = options.readyStatusTtlMs ?? 2000;
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd, env) => {

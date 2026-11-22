@@ -12,6 +12,7 @@
  */
 import { z } from "zod";
 import {
+  DAEMON_ASYNC_RPC_WAIT_TIMEOUTS,
   DAEMON_CONTROL_MAX_REQUEST_BYTES,
   DAEMON_LOCAL_BOARD_MAX_FRAME_BYTES,
   DAEMON_RPC_TIMEOUTS,
@@ -88,6 +89,8 @@ export interface DaemonRpcMethodDefinition<
   readonly asyncEffect?: {
     readonly kind: DaemonAsyncRpcEffectKind;
     readonly outcome: TOutcome;
+    /** Client-side wait budget after `{ effect_id, daemon_generation }` is accepted (`0` = no deadline). */
+    readonly waitTimeoutMs: number;
   };
   /** Admitted even after `prepare_handoff` schedules daemon retirement. */
   readonly handoffLifecycle?: boolean;
@@ -456,6 +459,7 @@ export const DAEMON_RPC_METHODS = {
     asyncEffect: {
       kind: "rpc_apply_agent_configuration",
       outcome: daemonAgentConfigurationApplyResultSchema,
+      waitTimeoutMs: DAEMON_ASYNC_RPC_WAIT_TIMEOUTS.applyAgentConfigurationMs,
     },
     invalidParamsMessage: "Agent configuration apply requires exact typed coordinates.",
   }),
@@ -482,6 +486,7 @@ export const DAEMON_RPC_METHODS = {
     asyncEffect: {
       kind: "rpc_bootstrap_room_ingress",
       outcome: daemonBootstrapRoomIngressResultSchema,
+      waitTimeoutMs: DAEMON_ASYNC_RPC_WAIT_TIMEOUTS.bootstrapRoomIngressMs,
     },
   }),
 
@@ -656,6 +661,7 @@ export const DAEMON_RPC_METHODS = {
     asyncEffect: {
       kind: "rpc_install_host_grant",
       outcome: daemonInstallHostGrantResultSchema,
+      waitTimeoutMs: DAEMON_ASYNC_RPC_WAIT_TIMEOUTS.installHostGrantMs,
     },
     handoffDrainAllowed: true,
   }),
@@ -739,6 +745,7 @@ export const DAEMON_RPC_METHODS = {
     asyncEffect: {
       kind: "rpc_recover_agent_runtime",
       outcome: daemonRecoverAgentRuntimeResultSchema,
+      waitTimeoutMs: DAEMON_ASYNC_RPC_WAIT_TIMEOUTS.recoverAgentRuntimeMs,
     },
     invalidParamsMessage: "Agent runtime recovery requires exact typed coordinates.",
   }),
@@ -756,6 +763,7 @@ export const DAEMON_RPC_METHODS = {
     asyncEffect: {
       kind: "rpc_retire_agent",
       outcome: daemonRetireAgentResultSchema,
+      waitTimeoutMs: DAEMON_ASYNC_RPC_WAIT_TIMEOUTS.retireAgentMs,
     },
     invalidParamsMessage: "Retire requires exact typed coordinates.",
   }),
@@ -875,6 +883,26 @@ export function isAsyncDaemonRpcMethod(method: string): method is DaemonAsyncRpc
 
 export function isDaemonAsyncRpcAccepted(value: unknown): value is z.output<typeof daemonAsyncRpcAcceptedSchema> {
   return daemonAsyncRpcAcceptedSchema.safeParse(value).success;
+}
+
+/**
+ * Resolves the caller-side wait deadline (ms) for an async RPC effect after
+ * `{ effect_id, daemon_generation }` is accepted. Returns `0` for methods
+ * without a caller deadline (such as `supervisor.apply_agent_configuration`).
+ */
+export function resolveDaemonAsyncRpcWaitTimeoutMs(
+  method: DaemonAsyncRpcMethod,
+  overrides?: Partial<Record<DaemonAsyncRpcMethod, number>>,
+): number {
+  const override = overrides?.[method];
+  if (override !== undefined && Number.isFinite(override) && override >= 0) {
+    return Math.floor(override);
+  }
+  const spec = DAEMON_RPC_METHODS[method].asyncEffect;
+  if (!spec) {
+    throw new Error(`RPC method ${method} does not declare asyncEffect metadata.`);
+  }
+  return spec.waitTimeoutMs;
 }
 
 export type DaemonRpcMethod = keyof typeof DAEMON_RPC_METHODS;

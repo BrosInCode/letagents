@@ -13,6 +13,7 @@ import {
   daemonAgentConfigurationViewSchema,
   daemonAttemptDetailSchema,
   DAEMON_ASYNC_RPC_METHOD_NAMES,
+  DAEMON_ASYNC_RPC_WAIT_TIMEOUTS,
   DAEMON_CONTROL_MAX_REQUEST_BYTES,
   DAEMON_IMPLEMENTATION_VERSION,
   DAEMON_LOCAL_BOARD_MAX_FRAME_BYTES,
@@ -30,6 +31,7 @@ import {
   looseJsonObject,
   maxRequestBytesForMethod,
   parseDaemonRpcParams,
+  resolveDaemonAsyncRpcWaitTimeoutMs,
   resolveDaemonRpcTimeoutMs,
   serializeDaemonRpcContractDocument,
   toWireJsonSchema,
@@ -402,6 +404,33 @@ test("contract metadata drives framing limits, version gating, handoff sets, and
     assert.equal(resolveDaemonRpcTimeoutMs(method), DAEMON_RPC_TIMEOUTS.defaultMs, `${method} must use short default timeout`);
     assert.ok(DAEMON_RPC_METHODS[method].asyncEffect, `${method} must declare asyncEffect metadata`);
   }
+  assert.deepEqual(DAEMON_ASYNC_RPC_WAIT_TIMEOUTS, {
+    recoverAgentRuntimeMs: 30_000,
+    bootstrapRoomIngressMs: 45_000,
+    installHostGrantMs: 60_000,
+    retireAgentMs: 60_000,
+    applyAgentConfigurationMs: 0,
+  });
+  assert.equal(resolveDaemonAsyncRpcWaitTimeoutMs("supervisor.recover_agent_runtime"), 30_000);
+  assert.equal(resolveDaemonAsyncRpcWaitTimeoutMs("supervisor.bootstrap_room_ingress"), 45_000);
+  assert.equal(resolveDaemonAsyncRpcWaitTimeoutMs("supervisor.install_host_grant"), 60_000);
+  assert.equal(resolveDaemonAsyncRpcWaitTimeoutMs("supervisor.retire_agent"), 60_000);
+  assert.equal(resolveDaemonAsyncRpcWaitTimeoutMs("supervisor.apply_agent_configuration"), 0);
+  assert.equal(
+    resolveDaemonAsyncRpcWaitTimeoutMs("supervisor.retire_agent", { "supervisor.retire_agent": 125 }),
+    125,
+  );
+  assert.equal(
+    resolveDaemonAsyncRpcWaitTimeoutMs("supervisor.retire_agent", { "supervisor.retire_agent": 0 }),
+    0,
+  );
+  const contractDoc = buildDaemonRpcContractDocument();
+  assert.deepEqual(contractDoc.contract.asyncWaitTimeouts, DAEMON_ASYNC_RPC_WAIT_TIMEOUTS);
+  assert.equal(contractDoc.methods["supervisor.recover_agent_runtime"].asyncEffect?.waitTimeoutMs, 30_000);
+  assert.equal(contractDoc.methods["supervisor.bootstrap_room_ingress"].asyncEffect?.waitTimeoutMs, 45_000);
+  assert.equal(contractDoc.methods["supervisor.install_host_grant"].asyncEffect?.waitTimeoutMs, 60_000);
+  assert.equal(contractDoc.methods["supervisor.retire_agent"].asyncEffect?.waitTimeoutMs, 60_000);
+  assert.equal(contractDoc.methods["supervisor.apply_agent_configuration"].asyncEffect?.waitTimeoutMs, 0);
   assert.equal(resolveDaemonRpcTimeoutMs("daemon.prepare_handoff"), 0);
   assert.equal(resolveDaemonRpcTimeoutMs("supervisor.execute_bounded_tool"), 0);
   assert.equal(

@@ -3714,6 +3714,13 @@
   "$id": "https://letagents.chat/schemas/daemon-rpc-contract.v3.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": {
+    "asyncWaitTimeouts": {
+      "applyAgentConfigurationMs": 0,
+      "bootstrapRoomIngressMs": 45000,
+      "installHostGrantMs": 60000,
+      "recoverAgentRuntimeMs": 30000,
+      "retireAgentMs": 60000
+    },
     "defaultMaxRequestBytes": 65536,
     "implementationVersion": "2.0.284-modern.15",
     "localBoardMaxFrameBytes": 16777216,
@@ -5071,7 +5078,8 @@
         "kind": "rpc_apply_agent_configuration",
         "outcome": {
           "$ref": "#/$defs/DaemonAgentConfigurationApplyResult"
-        }
+        },
+        "waitTimeoutMs": 0
       },
       "handoffDrainAllowed": false,
       "handoffLifecycle": false,
@@ -5184,7 +5192,8 @@
         "kind": "rpc_bootstrap_room_ingress",
         "outcome": {
           "$ref": "#/$defs/DaemonBootstrapRoomIngressResult"
-        }
+        },
+        "waitTimeoutMs": 45000
       },
       "handoffDrainAllowed": false,
       "handoffLifecycle": false,
@@ -5761,7 +5770,8 @@
         "kind": "rpc_install_host_grant",
         "outcome": {
           "$ref": "#/$defs/DaemonInstallHostGrantResult"
-        }
+        },
+        "waitTimeoutMs": 60000
       },
       "handoffDrainAllowed": true,
       "handoffLifecycle": false,
@@ -6149,7 +6159,8 @@
         "kind": "rpc_recover_agent_runtime",
         "outcome": {
           "$ref": "#/$defs/DaemonRecoverAgentRuntimeResult"
-        }
+        },
+        "waitTimeoutMs": 30000
       },
       "handoffDrainAllowed": false,
       "handoffLifecycle": false,
@@ -6361,7 +6372,8 @@
         "kind": "rpc_retire_agent",
         "outcome": {
           "$ref": "#/$defs/DaemonRetireAgentResult"
-        }
+        },
+        "waitTimeoutMs": 60000
       },
       "handoffDrainAllowed": false,
       "handoffLifecycle": false,

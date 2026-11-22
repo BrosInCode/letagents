@@ -42,3 +42,18 @@ export const DAEMON_RPC_TIMEOUTS = Object.freeze({
   longPollMaxWaitMs: 30_000,
   noneMs: 0,
 } as const);
+
+/**
+ * Canonical client-side observation wait budgets (in milliseconds) for async
+ * RPC effects after the control socket returns `{ effect_id, daemon_generation }`
+ * within `DAEMON_RPC_TIMEOUTS.defaultMs`. `0` means no caller deadline
+ * (e.g. `supervisor.apply_agent_configuration`, which legitimately waits for
+ * an active turn to finish before replacing a provider).
+ */
+export const DAEMON_ASYNC_RPC_WAIT_TIMEOUTS = Object.freeze({
+  recoverAgentRuntimeMs: 30_000,
+  bootstrapRoomIngressMs: 45_000,
+  installHostGrantMs: 60_000,
+  retireAgentMs: 60_000,
+  applyAgentConfigurationMs: 0,
+} as const);

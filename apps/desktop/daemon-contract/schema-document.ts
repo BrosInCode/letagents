@@ -8,6 +8,7 @@
  */
 import { z } from "zod";
 import {
+  DAEMON_ASYNC_RPC_WAIT_TIMEOUTS,
   DAEMON_CONTROL_MAX_REQUEST_BYTES,
   DAEMON_IMPLEMENTATION_VERSION,
   DAEMON_LOCAL_BOARD_MAX_FRAME_BYTES,
@@ -104,6 +105,7 @@ export interface DaemonRpcMethodSchemaEntry {
   readonly asyncEffect?: {
     readonly kind: DaemonAsyncRpcEffectKind;
     readonly outcome: Record<string, unknown>;
+    readonly waitTimeoutMs: number;
   };
 }
 
@@ -119,6 +121,7 @@ export interface DaemonRpcContractDocument {
     readonly defaultMaxRequestBytes: number;
     readonly localBoardMaxFrameBytes: number;
     readonly timeouts: typeof DAEMON_RPC_TIMEOUTS;
+    readonly asyncWaitTimeouts: typeof DAEMON_ASYNC_RPC_WAIT_TIMEOUTS;
   };
   readonly envelope: {
     readonly request: Record<string, unknown>;
@@ -267,6 +270,7 @@ export function buildDaemonRpcContractDocument(): DaemonRpcContractDocument {
             asyncEffect: {
               kind: spec.asyncEffect.kind,
               outcome: methodProps.outcome,
+              waitTimeoutMs: spec.asyncEffect.waitTimeoutMs,
             },
           }
         : {}),
@@ -295,6 +299,7 @@ export function buildDaemonRpcContractDocument(): DaemonRpcContractDocument {
       defaultMaxRequestBytes: DAEMON_CONTROL_MAX_REQUEST_BYTES,
       localBoardMaxFrameBytes: DAEMON_LOCAL_BOARD_MAX_FRAME_BYTES,
       timeouts: DAEMON_RPC_TIMEOUTS,
+      asyncWaitTimeouts: DAEMON_ASYNC_RPC_WAIT_TIMEOUTS,
     },
     envelope: {
       request: rawEnvelope.request,

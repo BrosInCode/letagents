@@ -1098,3 +1098,269 @@ test("unrecorded terminal outcomes remain recoverable after watch-cache eviction
     await env.cleanup();
   }
 });
+
+test("SupervisorDaemonClient enforces per-method observation deadlines, cleans up waiters/watch loop, leaves daemon execution untouched, and keeps apply_agent_configuration unbounded", async () => {
+  const env = await fixture();
+  const previousAllow = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  const previousRuntimeFp = process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+  const previousCompatFp = process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+  const spawnEnv = supervisorDaemonSpawnEnvironment();
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = spawnEnv.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+  process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT = spawnEnv.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+
+  const dbPath = join(env.root, "daemon-state.sqlite");
+  const endpoint = testDaemonEndpoint(env.root);
+  const stateDb = await DaemonStateDatabase.open(dbPath);
+  const noopFence = () => {};
+  const generation = 11;
+
+  const executor = new EffectExecutor({
+    getDatabase: () => stateDb.connection,
+    currentDaemonGeneration: () => generation,
+    assertCurrent: async () => undefined,
+    assertWriteFence: noopFence,
+    isClosing: () => false,
+  });
+  let stateWatch!: DaemonStateWatch;
+  const settleResolvers = new Map<string, () => void>();
+  const waitForSettled = (effectId: string) => new Promise<void>((resolve) => {
+    const existing = coordinator.getForGeneration(effectId, generation);
+    if (existing && (existing.state === "completed" || existing.state === "failed" || existing.state === "uncertain")) {
+      resolve();
+      return;
+    }
+    settleResolvers.set(effectId, resolve);
+  });
+  const coordinator = new AsyncRpcEffectCoordinator({
+    getExecutor: () => executor,
+    notifyImmediate: () => {
+      stateWatch?.notifyImmediate();
+      for (const [id, resolve] of [...settleResolvers]) {
+        const view = coordinator.getForGeneration(id, generation);
+        if (view && (view.state === "completed" || view.state === "failed" || view.state === "uncertain")) {
+          settleResolvers.delete(id);
+          resolve();
+        }
+      }
+    },
+  });
+  stateWatch = new DaemonStateWatch({
+    currentGeneration: () => generation,
+    isHandoffScheduled: () => false,
+    assertCurrent: async () => undefined,
+    entries: async () => [],
+    rpcEffects: (gen) => coordinator.listForGeneration(gen),
+    rpcEffectEvictionVersion: (gen) => coordinator.evictionVersion(gen),
+  });
+  coordinator.registerHandlers(executor);
+
+  let releaseWedgedRetire!: () => void;
+  const wedgedRetireGate = new Promise<void>((resolve) => { releaseWedgedRetire = resolve; });
+  let wedgedRetireEffectId = "";
+  let wedgedRetireCalls = 0;
+  let wedgedRetireAborted = false;
+
+  let releaseConcurrentBootstrap!: () => void;
+  const concurrentBootstrapGate = new Promise<void>((resolve) => { releaseConcurrentBootstrap = resolve; });
+  let concurrentRetireEffectId = "";
+  let releaseConcurrentRetire!: () => void;
+  const concurrentRetireGate = new Promise<void>((resolve) => { releaseConcurrentRetire = resolve; });
+
+  let releaseApply!: () => void;
+  const applyGate = new Promise<void>((resolve) => { releaseApply = resolve; });
+  let applyEffectId = "";
+
+  const socket = new DaemonControlSocket(
+    endpoint.socketPath,
+    async (request) => {
+      if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
+        return {
+          healthy: true,
+          protocol_version: DAEMON_PROTOCOL_VERSION,
+          implementation_version: DAEMON_IMPLEMENTATION_VERSION,
+          runtime_environment_fingerprint: spawnEnv.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT,
+          compatibility_fingerprint: spawnEnv.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT,
+          capabilities: {
+            agent_lifecycle_v1: true,
+            agent_state_subscription_v1: true,
+            agent_inspector_settings_v1: true,
+            async_rpc_effects_v1: true,
+          },
+          generation,
+          pid: process.pid,
+          started_at: "2026-11-22T00:00:00.000Z",
+        };
+      }
+      if (request.method === "manifest.watch_state") {
+        const params = (request.params ?? {}) as {
+          after_daemon_generation?: number;
+          after_sequence?: number;
+          wait_ms?: number;
+          changed_only?: boolean;
+        };
+        return stateWatch.watch({
+          afterDaemonGeneration: params.after_daemon_generation ?? 0,
+          afterSequence: params.after_sequence ?? 0,
+          waitMs: params.wait_ms ?? 5_000,
+          changedOnly: params.changed_only === true,
+        });
+      }
+      if (request.method === "supervisor.get_rpc_effect") {
+        const params = request.params as { effect_id: string; daemon_generation: number };
+        return coordinator.getForGeneration(params.effect_id, params.daemon_generation);
+      }
+      if (request.method === "supervisor.retire_agent") {
+        const params = request.params as { entry_id: string; daemon_generation: number };
+        if (params.entry_id === "agent-wedged") {
+          const accepted = await coordinator.submitRetireAgent(
+            { entryId: params.entry_id, daemonGeneration: generation, hasRevokedAgentSessionId: true, grantRevokedWithoutWorkerSession: false },
+            async (signal) => {
+              wedgedRetireCalls += 1;
+              signal.addEventListener("abort", () => { wedgedRetireAborted = true; }, { once: true });
+              await wedgedRetireGate;
+              return { outcome: "retired" as const };
+            },
+          );
+          wedgedRetireEffectId = accepted.effect_id;
+          return accepted;
+        }
+        const accepted = await coordinator.submitRetireAgent(
+          { entryId: params.entry_id, daemonGeneration: generation, hasRevokedAgentSessionId: true, grantRevokedWithoutWorkerSession: false },
+          async () => {
+            await concurrentRetireGate;
+            return { outcome: "retired" as const };
+          },
+        );
+        concurrentRetireEffectId = accepted.effect_id;
+        return accepted;
+      }
+      if (request.method === "supervisor.bootstrap_room_ingress") {
+        const params = request.params as { entry_id: string; daemon_generation: number };
+        return coordinator.submitBootstrapRoomIngress(
+          { entry_id: params.entry_id, daemon_generation: generation },
+          async () => {
+            await concurrentBootstrapGate;
+            return { status: "bootstrapped" as const, last_observed_message_id: "msg_1" };
+          },
+        );
+      }
+      if (request.method === "supervisor.apply_agent_configuration") {
+        const params = request.params as { entry_id: string; daemon_generation: number; expected_configuration_revision: number };
+        const accepted = await coordinator.submitApplyAgentConfiguration(
+          {
+            entryId: params.entry_id,
+            daemonGeneration: generation,
+            expectedConfigurationRevision: params.expected_configuration_revision,
+          },
+          async () => {
+            await applyGate;
+            return { outcome: "restarting" as const };
+          },
+        );
+        applyEffectId = accepted.effect_id;
+        return accepted;
+      }
+      throw new Error(`Unexpected test method: ${request.method}`);
+    },
+    undefined,
+    undefined,
+    { peerProofPath: endpoint.peerProofPath ?? null },
+  );
+
+  try {
+    await socket.start();
+
+    const client = new SupervisorDaemonClient({
+      stateDir: env.root,
+      socketPath: endpoint.socketPath,
+      peerProofPath: endpoint.peerProofPath,
+      requestTimeoutMs: process.platform === "win32" ? 2_000 : 1_000,
+      asyncRpcWaitTimeoutsMs: {
+        "supervisor.retire_agent": 120,
+        "supervisor.bootstrap_room_ingress": 3_000,
+      },
+      spawnDaemon: () => { throw new Error("must reuse running test socket"); },
+    });
+    const internalClient = client as unknown as {
+      rpcEffectWaiters: Map<string, unknown>;
+      rpcEffectWatchLoop: unknown;
+    };
+
+    // 1. Healthy daemon + wedged retire_agent: client rejects promptly at its wait deadline
+    //    with uncertain-outcome guidance, cleans up its waiter and idle watch loop, and never
+    //    cancels, resubmits, or falsely settles the in-flight daemon effect.
+    await assert.rejects(
+      () => within(
+        client.retireAgent("agent-wedged", generation),
+        "bounded caller wait rejects when retire_agent exceeds its deadline",
+        2_000,
+      ),
+      /timed out waiting for supervisor\.retire_agent.*120ms.*Outcome is uncertain; verify external state before repeating it\./,
+    );
+    assert.ok(wedgedRetireEffectId, "daemon accepted retire_agent immediately before caller deadline");
+    assert.equal(wedgedRetireCalls, 1, "caller timeout must never resubmit the daemon effect");
+    assert.equal(wedgedRetireAborted, false, "caller timeout must not abort the daemon execution");
+    assert.equal(getEffect(stateDb.connection, wedgedRetireEffectId)?.state, "executing", "daemon SQLite row remains executing until real settlement");
+    assert.equal(internalClient.rpcEffectWaiters.size, 0, "timed-out waiter must be removed");
+    assert.equal(internalClient.rpcEffectWatchLoop, null, "idle watch loop must abort when the last waiter times out");
+
+    // Releasing the daemon effect after caller timeout settles cleanly in SQLite without erroring the client.
+    const wedgedSettled = waitForSettled(wedgedRetireEffectId);
+    releaseWedgedRetire();
+    await within(wedgedSettled, "wedged daemon effect completes truthfully after caller timeout", 2_000);
+    assert.equal(getEffect(stateDb.connection, wedgedRetireEffectId)?.state, "completed");
+
+    // 2. Concurrent waiter isolation: one timed-out waiter must not break a sibling waiter sharing
+    //    the same state-watch loop, and the watch loop shuts down once the sibling completes.
+    const slowRetirePromise = client.retireAgent("agent-concurrent-timeout", generation);
+    const healthyBootstrapPromise = client.bootstrapRoomIngress("agent-concurrent-ok", generation);
+    await assert.rejects(
+      () => within(slowRetirePromise, "concurrent retire_agent hits its own 120ms deadline", 2_000),
+      /timed out waiting for supervisor\.retire_agent.*Outcome is uncertain/,
+    );
+    assert.equal(internalClient.rpcEffectWaiters.size, 1, "sibling waiter remains registered");
+    assert.ok(internalClient.rpcEffectWatchLoop !== null, "watch loop stays alive for the sibling waiter");
+    releaseConcurrentBootstrap();
+    const bootstrapStatus = await within(healthyBootstrapPromise, "sibling bootstrap completes normally", 2_000);
+    assert.equal(bootstrapStatus, "bootstrapped");
+    assert.equal(internalClient.rpcEffectWaiters.size, 0);
+    assert.equal(internalClient.rpcEffectWatchLoop, null);
+    const concurrentRetireSettled = waitForSettled(concurrentRetireEffectId);
+    releaseConcurrentRetire();
+    await within(concurrentRetireSettled, "concurrent daemon retire finishes cleanly", 2_000);
+
+    // 3. `supervisor.apply_agent_configuration` keeps waitTimeoutMs = 0 (unbounded) by contract:
+    //    it waits past the 120ms finite deadline used above and resolves cleanly when released.
+    const applyPromise = client.applyAgentConfiguration({
+      entryId: "agent-apply",
+      daemonGeneration: generation,
+      expectedConfigurationRevision: 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.ok(applyEffectId, "apply_agent_configuration accepted immediately");
+    assert.equal(internalClient.rpcEffectWaiters.size, 1, "apply_agent_configuration remains awaiting with no caller deadline");
+    releaseApply();
+    const applyResult = await within(applyPromise, "apply_agent_configuration resolves once active work finishes", 2_000);
+    assert.deepEqual(applyResult, { outcome: "restarting" });
+    assert.equal(internalClient.rpcEffectWaiters.size, 0);
+    assert.equal(internalClient.rpcEffectWatchLoop, null);
+
+    await executor.fenceAndDrain();
+  } finally {
+    releaseWedgedRetire();
+    releaseConcurrentBootstrap();
+    releaseConcurrentRetire();
+    releaseApply();
+    stateWatch.close();
+    await socket.stop().catch(() => undefined);
+    stateDb.close();
+    if (previousAllow === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousAllow;
+    if (previousRuntimeFp === undefined) delete process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+    else process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = previousRuntimeFp;
+    if (previousCompatFp === undefined) delete process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+    else process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT = previousCompatFp;
+    await env.cleanup();
+  }
+});

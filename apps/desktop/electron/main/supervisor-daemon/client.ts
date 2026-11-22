@@ -15,6 +15,7 @@ import type {
 import {
   isDaemonAsyncRpcAccepted,
   jsonValueSchema,
+  resolveDaemonAsyncRpcWaitTimeoutMs,
   type DaemonAsyncRpcMethod,
   type DaemonAsyncRpcOutcome,
   type DaemonRpcEffectView,
@@ -40,6 +41,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     method: DaemonAsyncRpcMethod;
     resolve: (view: DaemonRpcEffectView) => void;
     reject: (error: Error) => void;
+    timer: NodeJS.Timeout | null;
   }>();
   private readonly probingRpcEffects = new Set<string>();
   private rpcEffectWatchLoop: {
@@ -200,6 +202,31 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     return settled.result as DaemonAsyncRpcOutcome<M>;
   }
 
+  private takeRpcEffectWaiter(effectId: string): {
+    generation: number;
+    method: DaemonAsyncRpcMethod;
+    resolve: (view: DaemonRpcEffectView) => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout | null;
+  } | null {
+    const waiter = this.rpcEffectWaiters.get(effectId);
+    if (!waiter) return null;
+    this.rpcEffectWaiters.delete(effectId);
+    if (waiter.timer !== null) {
+      clearTimeout(waiter.timer);
+      waiter.timer = null;
+    }
+    return waiter;
+  }
+
+  private stopIdleRpcEffectWatchLoop(): void {
+    if (this.rpcEffectWaiters.size === 0 && this.rpcEffectWatchLoop) {
+      const loop = this.rpcEffectWatchLoop;
+      this.rpcEffectWatchLoop = null;
+      loop.controller.abort();
+    }
+  }
+
   private awaitRpcEffect(
     method: DaemonAsyncRpcMethod,
     effectId: string,
@@ -209,12 +236,29 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     if (existing && (existing.state === "completed" || existing.state === "failed" || existing.state === "uncertain")) {
       return Promise.resolve(existing);
     }
+    const waitTimeoutMs = resolveDaemonAsyncRpcWaitTimeoutMs(method, this.asyncRpcWaitTimeoutsMs);
     return new Promise<DaemonRpcEffectView>((resolve, reject) => {
+      let timer: NodeJS.Timeout | null = null;
+      if (waitTimeoutMs > 0) {
+        timer = setTimeout(() => {
+          const expired = this.takeRpcEffectWaiter(effectId);
+          if (!expired) return;
+          this.invalidateReadyStatus();
+          this.stopIdleRpcEffectWatchLoop();
+          expired.reject(
+            new Error(
+              `Supervisor daemon timed out waiting for ${method} (${effectId}) after ${waitTimeoutMs}ms. Outcome is uncertain; verify external state before repeating it.`,
+            ),
+          );
+        }, waitTimeoutMs);
+        timer.unref?.();
+      }
       this.rpcEffectWaiters.set(effectId, {
         generation: daemonGeneration,
         method,
         resolve,
         reject,
+        timer,
       });
       const watchAlreadyRunning = Boolean(
         this.rpcEffectWatchLoop
@@ -230,21 +274,18 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
 
   private rejectStaleRpcEffectWaiters(daemonGeneration: number, invalidateOnReject: boolean): void {
     let rejectedAny = false;
-    for (const [effectId, waiter] of this.rpcEffectWaiters) {
+    for (const [effectId, waiter] of [...this.rpcEffectWaiters]) {
       if (waiter.generation !== daemonGeneration) {
-        this.rpcEffectWaiters.delete(effectId);
+        const stale = this.takeRpcEffectWaiter(effectId);
+        if (!stale) continue;
         rejectedAny = true;
-        waiter.reject(new Error(`Supervisor daemon generation changed while waiting for ${waiter.method}.`));
+        stale.reject(new Error(`Supervisor daemon generation changed while waiting for ${stale.method}.`));
       }
     }
     if (rejectedAny && invalidateOnReject) {
       this.invalidateReadyStatus();
     }
-    if (this.rpcEffectWaiters.size === 0 && this.rpcEffectWatchLoop) {
-      const loop = this.rpcEffectWatchLoop;
-      this.rpcEffectWatchLoop = null;
-      loop.controller.abort();
-    }
+    this.stopIdleRpcEffectWatchLoop();
   }
 
   private observeRpcEffects(
@@ -289,8 +330,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
         if (terminal) {
           const waiter = this.rpcEffectWaiters.get(effect.effect_id);
           if (waiter && waiter.generation === daemonGeneration) {
-            this.rpcEffectWaiters.delete(effect.effect_id);
-            waiter.resolve(effect);
+            this.takeRpcEffectWaiter(effect.effect_id)?.resolve(effect);
           }
         }
       }
@@ -306,11 +346,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
         }
       }
     }
-    if (this.rpcEffectWaiters.size === 0 && this.rpcEffectWatchLoop) {
-      const loop = this.rpcEffectWatchLoop;
-      this.rpcEffectWatchLoop = null;
-      loop.controller.abort();
-    }
+    this.stopIdleRpcEffectWatchLoop();
   }
 
   /**
@@ -329,30 +365,22 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       const waiter = this.rpcEffectWaiters.get(effectId);
       if (!waiter || waiter.generation !== daemonGeneration) return;
       if (!durable) {
-        this.rpcEffectWaiters.delete(effectId);
+        const missing = this.takeRpcEffectWaiter(effectId);
         this.invalidateReadyStatus();
-        waiter.reject(
+        this.stopIdleRpcEffectWatchLoop();
+        missing?.reject(
           new Error(`Supervisor daemon has no record of async RPC effect ${effectId} for generation ${daemonGeneration}.`),
         );
-        if (this.rpcEffectWaiters.size === 0 && this.rpcEffectWatchLoop) {
-          const loop = this.rpcEffectWatchLoop;
-          this.rpcEffectWatchLoop = null;
-          loop.controller.abort();
-        }
         return;
       }
       this.observeRpcEffects(daemonGeneration, [durable], false);
     } catch (error) {
       const waiter = this.rpcEffectWaiters.get(effectId);
       if (waiter && waiter.generation === daemonGeneration) {
-        this.rpcEffectWaiters.delete(effectId);
+        const failed = this.takeRpcEffectWaiter(effectId);
         this.invalidateReadyStatus();
-        waiter.reject(error instanceof Error ? error : new Error(String(error)));
-        if (this.rpcEffectWaiters.size === 0 && this.rpcEffectWatchLoop) {
-          const loop = this.rpcEffectWatchLoop;
-          this.rpcEffectWatchLoop = null;
-          loop.controller.abort();
-        }
+        this.stopIdleRpcEffectWatchLoop();
+        failed?.reject(error instanceof Error ? error : new Error(String(error)));
       }
     } finally {
       this.probingRpcEffects.delete(effectId);
@@ -424,10 +452,9 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       } catch (error) {
         if (!controller.signal.aborted) {
           const err = error instanceof Error ? error : new Error(String(error));
-          for (const [effectId, waiter] of this.rpcEffectWaiters) {
+          for (const [effectId, waiter] of [...this.rpcEffectWaiters]) {
             if (waiter.generation === generation) {
-              this.rpcEffectWaiters.delete(effectId);
-              waiter.reject(err);
+              this.takeRpcEffectWaiter(effectId)?.reject(err);
             }
           }
         }

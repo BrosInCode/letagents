@@ -7,7 +7,7 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
-import { DAEMON_PROTOCOL_VERSION, isDaemonAsyncRpcAccepted, type DaemonRpcEffectView } from "#daemon-contract/index.js";
+import { DAEMON_ASYNC_RPC_WAIT_TIMEOUTS, DAEMON_PROTOCOL_VERSION, isDaemonAsyncRpcAccepted, type DaemonRpcEffectView } from "#daemon-contract/index.js";
 import { connectDaemon, daemonEndpoint } from "../../../../../shared/daemon-endpoint.mjs";
 import { processTreeHelperPath } from "../../../../../shared/process-tree.mjs";
 import { materializeNodeShim, resolveStandInRuntime, type MaterializeNodeShimOptions } from "./executable-shim.js";
@@ -1057,8 +1057,8 @@ export class EdgeDaemonClient {
   }
 
   async installHostGrant(params: Record<string, unknown>): Promise<{ status: string; agent_session_id?: string }> {
-    const raw = await this.request("supervisor.install_host_grant", params, { timeoutMs: 60_000 });
-    return this.awaitAsyncRpcEffect("supervisor.install_host_grant", raw, 60_000);
+    const raw = await this.request("supervisor.install_host_grant", params, { timeoutMs: DAEMON_ASYNC_RPC_WAIT_TIMEOUTS.installHostGrantMs });
+    return this.awaitAsyncRpcEffect("supervisor.install_host_grant", raw, DAEMON_ASYNC_RPC_WAIT_TIMEOUTS.installHostGrantMs);
   }
 
   installOpenModelCredential(params: Record<string, unknown>): Promise<{ status: string }> {
@@ -1070,8 +1070,8 @@ export class EdgeDaemonClient {
     daemon_generation: number;
     initial_message?: string;
   }): Promise<{ status: string; last_observed_message_id: string | null }> {
-    const raw = await this.request("supervisor.bootstrap_room_ingress", params, { timeoutMs: 45_000 });
-    return this.awaitAsyncRpcEffect("supervisor.bootstrap_room_ingress", raw, 45_000);
+    const raw = await this.request("supervisor.bootstrap_room_ingress", params, { timeoutMs: DAEMON_ASYNC_RPC_WAIT_TIMEOUTS.bootstrapRoomIngressMs });
+    return this.awaitAsyncRpcEffect("supervisor.bootstrap_room_ingress", raw, DAEMON_ASYNC_RPC_WAIT_TIMEOUTS.bootstrapRoomIngressMs);
   }
 
   controlTurn(params: {
