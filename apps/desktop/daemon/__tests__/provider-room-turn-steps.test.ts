@@ -309,6 +309,50 @@ test("a detach while the daemon's checkpoint runs does not end the turn before t
   assert.equal(checkpointFinished, true);
 });
 
+test("Cursor's init and idle checkpoints after a detach reach the daemon, and the turn waits for them", async () => {
+  // Cursor prepares its wrapper, marks the turn durable, then records the wrapper's init identity and, at the end,
+  // its idle identity. A handoff can detach between those points; the daemon's narrow exception for an admitted
+  // Cursor transition (delivery-turn.ts) decides them, so each must still reach it, and the turn stays joined.
+  const detach = new AbortController();
+  const recorded: string[] = [];
+  let finishInit!: () => void;
+  const initPaused = new Promise<void>((resolve) => { finishInit = resolve; });
+  let initEntered!: () => void;
+  const initStarted = new Promise<void>((resolve) => { initEntered = resolve; });
+  let turnEnded = false;
+  const { router, handle } = await routed(fakeAdapter(async (_handle, _request, options) => {
+    await options!.beforeNativeDispatch!();
+    await options!.checkpointPreparedTurn!({ providerTurnId: "cursor-turn", providerContinuationId: "cursor-pending:1", providerConnection: CONNECTION });
+    options!.markDurableTurnStarted!();
+    await options!.checkpointProviderState!({ providerContinuationId: "chat-1", providerConnection: CONNECTION });
+    await options!.checkpointProviderState!({ providerContinuationId: "chat-1", providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null } });
+    await options!.settleLifecycleBeforeIdle!();
+    await options!.checkpointTerminalResult!(REPLY);
+    return REPLY;
+  }));
+  let states = 0;
+  const turn = router.runRoomTurn(handle, REQUEST, {
+    beforeNativeDispatch: async () => { recorded.push("dispatch"); },
+    checkpointPreparedTurn: async () => { recorded.push("prepared"); },
+    markDurableTurnStarted: () => { recorded.push("durable"); detach.abort(); },
+    checkpointProviderState: async (state) => {
+      states += 1;
+      if (states === 1) { initEntered(); await initPaused; }
+      recorded.push(`state:${state.providerContinuationId}:${state.providerConnection.pid ?? "idle"}`);
+    },
+    settleLifecycleBeforeIdle: async () => { recorded.push("settled"); },
+    checkpointTerminalResult: async () => { recorded.push("terminal"); },
+    detachSignal: detach.signal,
+  }).finally(() => { turnEnded = true; });
+  await initStarted;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(detach.signal.aborted, true);
+  assert.equal(turnEnded, false, "the turn is joined to the init checkpoint");
+  finishInit();
+  assert.deepEqual(await turn, REPLY);
+  assert.deepEqual(recorded, ["dispatch", "prepared", "durable", "state:chat-1:5151", "state:chat-1:idle", "settled", "terminal"]);
+});
+
 test("operations of step 4d-3a keep their rule: a detach refuses the step that waits", async () => {
   const boundary = new ProviderRuntimeBoundary("cursor", {
     ...fakeAdapter(async () => REPLY),
