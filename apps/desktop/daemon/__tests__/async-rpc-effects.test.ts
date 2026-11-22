@@ -1169,6 +1169,8 @@ test("SupervisorDaemonClient enforces per-method observation deadlines, cleans u
 
   let releaseApply!: () => void;
   const applyGate = new Promise<void>((resolve) => { releaseApply = resolve; });
+  let signalApplyAccepted!: () => void;
+  const applyAccepted = new Promise<void>((resolve) => { signalApplyAccepted = resolve; });
   let applyEffectId = "";
 
   const socket = new DaemonControlSocket(
@@ -1259,6 +1261,7 @@ test("SupervisorDaemonClient enforces per-method observation deadlines, cleans u
           },
         );
         applyEffectId = accepted.effect_id;
+        signalApplyAccepted();
         return accepted;
       }
       throw new Error(`Unexpected test method: ${request.method}`);
@@ -1283,7 +1286,7 @@ test("SupervisorDaemonClient enforces per-method observation deadlines, cleans u
       spawnDaemon: () => { throw new Error("must reuse running test socket"); },
     });
     const internalClient = client as unknown as {
-      rpcEffectWaiters: Map<string, unknown>;
+      rpcEffectWaiters: Map<string, { timer: NodeJS.Timeout | null }>;
       rpcEffectWatchLoop: unknown;
     };
 
@@ -1331,15 +1334,25 @@ test("SupervisorDaemonClient enforces per-method observation deadlines, cleans u
     await within(concurrentRetireSettled, "concurrent daemon retire finishes cleanly", 2_000);
 
     // 3. `supervisor.apply_agent_configuration` keeps waitTimeoutMs = 0 (unbounded) by contract:
-    //    it waits past the 120ms finite deadline used above and resolves cleanly when released.
+    //    wait deterministically for daemon acceptance and client waiter registration, verify no
+    //    wait timer was armed, confirm it stays pending past the 120ms finite deadline used above,
+    //    and resolve cleanly when released.
     const applyPromise = client.applyAgentConfiguration({
       entryId: "agent-apply",
       daemonGeneration: generation,
       expectedConfigurationRevision: 1,
     });
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await within(applyAccepted, "apply_agent_configuration accepted immediately", 3_000);
     assert.ok(applyEffectId, "apply_agent_configuration accepted immediately");
-    assert.equal(internalClient.rpcEffectWaiters.size, 1, "apply_agent_configuration remains awaiting with no caller deadline");
+    const waiterDeadline = Date.now() + 3_000;
+    while (!internalClient.rpcEffectWaiters.has(applyEffectId) && Date.now() < waiterDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const applyWaiter = internalClient.rpcEffectWaiters.get(applyEffectId);
+    assert.ok(applyWaiter, "apply_agent_configuration waiter registered");
+    assert.equal(applyWaiter.timer, null, "apply_agent_configuration must not arm a caller wait timer");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(internalClient.rpcEffectWaiters.has(applyEffectId), true, "apply_agent_configuration remains awaiting past finite deadline");
     releaseApply();
     const applyResult = await within(applyPromise, "apply_agent_configuration resolves once active work finishes", 2_000);
     assert.deepEqual(applyResult, { outcome: "restarting" });
