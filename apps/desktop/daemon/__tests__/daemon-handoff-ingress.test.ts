@@ -198,8 +198,8 @@ test("a host-grant install queued before handoff cannot retain plaintext or repo
     releaseTick();
     await heldTick;
     const rejected = await queuedInstall;
-    assert.equal(rejected.ok, true);
-    assert.deepEqual(rejected.result, { status: "stale" });
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.error ?? "", /handoff|handed off|fenced|shutting down/i);
     assert.equal(mintCalls, 0, "a retired daemon cannot mint a worker session");
     assert.equal(internals.workerRuntimeCustody.hostGrant("queued_host_grant"), undefined, "a retired daemon retains no plaintext grant");
     await within(handoff, "queued host-grant handoff", 1_000);

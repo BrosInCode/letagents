@@ -13,7 +13,7 @@ export const DAEMON_PROTOCOL_VERSION: number = 3;
 // decides whether the already-running daemon contains this desktop build's
 // code. Every PR that changes daemon or provider-runtime code takes a new
 // value so an updated desktop replaces a running older daemon.
-export const DAEMON_IMPLEMENTATION_VERSION: string = "2.0.284-modern.13";
+export const DAEMON_IMPLEMENTATION_VERSION: string = "2.0.284-modern.17";
 
 /**
  * Maximum number of recent activity events carried in state-watch summaries
@@ -37,11 +37,7 @@ export const DAEMON_RPC_TIMEOUTS = Object.freeze({
   richReadMs: 15_000,
   turnControlMs: 15_000,
   roomMoveCommitMs: 15_000,
-  recoveryMs: 30_000,
   localBoardMs: 30_000,
-  bootstrapIngressMs: 45_000,
-  installHostGrantMs: 60_000,
-  retireMs: 60_000,
   longPollDefaultWaitMs: 25_000,
   longPollMaxWaitMs: 30_000,
   noneMs: 0,

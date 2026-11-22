@@ -31,11 +31,15 @@ import {
   daemonAgentConfigurationUpdateResultSchema,
   daemonAgentConfigurationViewSchema,
   daemonAgentStreamEventSchema,
+  daemonAsyncRpcAcceptedSchema,
   daemonAttemptDetailSchema,
+  daemonBootstrapRoomIngressResultSchema,
   daemonInspectorDetailSchema,
+  daemonInstallHostGrantResultSchema,
   daemonManifestEntrySchema,
   daemonManifestEntryViewSchema,
   daemonPurgeAgentResultSchema,
+  daemonRecoverAgentRuntimeResultSchema,
   daemonRetireAgentResultSchema,
   daemonRoomMoveRecordSchema,
   daemonStateWatchResultSchema,
@@ -46,6 +50,7 @@ import {
   retiredRuntimeEvidenceListSchema,
   signedHostApprovalRequestSchema,
   workplaceReachabilitySchema,
+  type DaemonAsyncRpcEffectKind,
 } from "./wire-types.js";
 
 export type RpcFixedTimeoutClass =
@@ -53,11 +58,7 @@ export type RpcFixedTimeoutClass =
   | "rich_read"
   | "turn_control"
   | "room_move_commit"
-  | "recovery"
-  | "local_board"
-  | "bootstrap_ingress"
-  | "install_host_grant"
-  | "retire";
+  | "local_board";
 
 export type RpcTimeoutSpec =
   | { readonly kind: "fixed"; readonly ms: number; readonly class: RpcFixedTimeoutClass }
@@ -73,10 +74,20 @@ export type RpcTimeoutSpec =
 export interface DaemonRpcMethodDefinition<
   TParams extends z.ZodType = z.ZodType,
   TResult extends z.ZodType = z.ZodType,
+  TOutcome extends z.ZodType = z.ZodType,
 > {
   readonly params: TParams;
   readonly result: TResult;
   readonly timeout: RpcTimeoutSpec;
+  /**
+   * When present, the RPC returns `{ effect_id, daemon_generation }` at once
+   * under the short default timeout and delivers its typed domain outcome
+   * asynchronously through `manifest.watch_state` (`rpc_effects`).
+   */
+  readonly asyncEffect?: {
+    readonly kind: DaemonAsyncRpcEffectKind;
+    readonly outcome: TOutcome;
+  };
   /** Admitted even after `prepare_handoff` schedules daemon retirement. */
   readonly handoffLifecycle?: boolean;
   /** Admitted while reversible handoff drain waits for in-flight turns. */
@@ -91,9 +102,13 @@ export interface DaemonRpcMethodDefinition<
   readonly invalidParamsMessage?: string;
 }
 
-function defineMethod<TParams extends z.ZodType, TResult extends z.ZodType>(
-  spec: DaemonRpcMethodDefinition<TParams, TResult>,
-): DaemonRpcMethodDefinition<TParams, TResult> {
+function defineMethod<
+  TParams extends z.ZodType,
+  TResult extends z.ZodType,
+  TOutcome extends z.ZodType = z.ZodNever,
+>(
+  spec: DaemonRpcMethodDefinition<TParams, TResult, TOutcome>,
+): DaemonRpcMethodDefinition<TParams, TResult, TOutcome> {
   return spec;
 }
 
@@ -117,30 +132,10 @@ const FIXED_ROOM_MOVE_COMMIT: RpcTimeoutSpec = {
   ms: DAEMON_RPC_TIMEOUTS.roomMoveCommitMs,
   class: "room_move_commit",
 };
-const FIXED_RECOVERY: RpcTimeoutSpec = {
-  kind: "fixed",
-  ms: DAEMON_RPC_TIMEOUTS.recoveryMs,
-  class: "recovery",
-};
 const FIXED_LOCAL_BOARD: RpcTimeoutSpec = {
   kind: "fixed",
   ms: DAEMON_RPC_TIMEOUTS.localBoardMs,
   class: "local_board",
-};
-const FIXED_BOOTSTRAP_INGRESS: RpcTimeoutSpec = {
-  kind: "fixed",
-  ms: DAEMON_RPC_TIMEOUTS.bootstrapIngressMs,
-  class: "bootstrap_ingress",
-};
-const FIXED_INSTALL_HOST_GRANT: RpcTimeoutSpec = {
-  kind: "fixed",
-  ms: DAEMON_RPC_TIMEOUTS.installHostGrantMs,
-  class: "install_host_grant",
-};
-const FIXED_RETIRE: RpcTimeoutSpec = {
-  kind: "fixed",
-  ms: DAEMON_RPC_TIMEOUTS.retireMs,
-  class: "retire",
 };
 const NO_TIMEOUT: RpcTimeoutSpec = { kind: "none" };
 const LONG_POLL_TIMEOUT: RpcTimeoutSpec = {
@@ -455,8 +450,12 @@ export const DAEMON_RPC_METHODS = {
       daemon_generation: positiveSafeInt,
       expected_configuration_revision: positiveSafeInt,
     }),
-    result: daemonAgentConfigurationApplyResultSchema,
-    timeout: NO_TIMEOUT,
+    result: daemonAsyncRpcAcceptedSchema,
+    timeout: FIXED_DEFAULT,
+    asyncEffect: {
+      kind: "rpc_apply_agent_configuration",
+      outcome: daemonAgentConfigurationApplyResultSchema,
+    },
     invalidParamsMessage: "Agent configuration apply requires exact typed coordinates.",
   }),
 
@@ -477,11 +476,12 @@ export const DAEMON_RPC_METHODS = {
       daemon_generation: z.number(),
       initial_message: z.string().optional(),
     }),
-    result: z.object({
-      status: z.enum(["bootstrapped", "existing", "stale"]),
-      last_observed_message_id: z.string().nullable(),
-    }),
-    timeout: FIXED_BOOTSTRAP_INGRESS,
+    result: daemonAsyncRpcAcceptedSchema,
+    timeout: FIXED_DEFAULT,
+    asyncEffect: {
+      kind: "rpc_bootstrap_room_ingress",
+      outcome: daemonBootstrapRoomIngressResultSchema,
+    },
   }),
 
   "supervisor.borrow_worker_credential": defineMethod({
@@ -638,11 +638,12 @@ export const DAEMON_RPC_METHODS = {
       credential_only: z.boolean().optional(),
       recovery_only: z.boolean().optional(),
     }),
-    result: z.object({
-      status: z.enum(["installed", "stale", "provider_unavailable"]),
-      agent_session_id: z.string().optional(),
-    }),
-    timeout: FIXED_INSTALL_HOST_GRANT,
+    result: daemonAsyncRpcAcceptedSchema,
+    timeout: FIXED_DEFAULT,
+    asyncEffect: {
+      kind: "rpc_install_host_grant",
+      outcome: daemonInstallHostGrantResultSchema,
+    },
     handoffDrainAllowed: true,
   }),
 
@@ -720,11 +721,12 @@ export const DAEMON_RPC_METHODS = {
 
   "supervisor.recover_agent_runtime": defineMethod({
     params: recoverAgentRuntimeParamsSchema,
-    result: z.object({
-      outcome: z.literal("recovering"),
-      entry: daemonManifestEntryViewSchema,
-    }),
-    timeout: FIXED_RECOVERY,
+    result: daemonAsyncRpcAcceptedSchema,
+    timeout: FIXED_DEFAULT,
+    asyncEffect: {
+      kind: "rpc_recover_agent_runtime",
+      outcome: daemonRecoverAgentRuntimeResultSchema,
+    },
     invalidParamsMessage: "Agent runtime recovery requires exact typed coordinates.",
   }),
 
@@ -736,8 +738,12 @@ export const DAEMON_RPC_METHODS = {
 
   "supervisor.retire_agent": defineMethod({
     params: retireOrPurgeParamsSchema,
-    result: daemonRetireAgentResultSchema,
-    timeout: FIXED_RETIRE,
+    result: daemonAsyncRpcAcceptedSchema,
+    timeout: FIXED_DEFAULT,
+    asyncEffect: {
+      kind: "rpc_retire_agent",
+      outcome: daemonRetireAgentResultSchema,
+    },
     invalidParamsMessage: "Retire requires exact typed coordinates.",
   }),
 
@@ -834,6 +840,29 @@ export const DAEMON_RPC_METHODS = {
     handoffDrainAllowed: true,
   }),
 } as const satisfies Record<string, DaemonRpcMethodDefinition>;
+
+export const DAEMON_ASYNC_RPC_OUTCOMES = {
+  "supervisor.apply_agent_configuration": daemonAgentConfigurationApplyResultSchema,
+  "supervisor.bootstrap_room_ingress": daemonBootstrapRoomIngressResultSchema,
+  "supervisor.install_host_grant": daemonInstallHostGrantResultSchema,
+  "supervisor.recover_agent_runtime": daemonRecoverAgentRuntimeResultSchema,
+  "supervisor.retire_agent": daemonRetireAgentResultSchema,
+} as const;
+
+export type DaemonAsyncRpcMethod = keyof typeof DAEMON_ASYNC_RPC_OUTCOMES;
+export type DaemonAsyncRpcOutcome<M extends DaemonAsyncRpcMethod> = z.output<(typeof DAEMON_ASYNC_RPC_OUTCOMES)[M]>;
+
+export const DAEMON_ASYNC_RPC_METHOD_NAMES: readonly DaemonAsyncRpcMethod[] = Object.freeze(
+  (Object.keys(DAEMON_ASYNC_RPC_OUTCOMES) as DaemonAsyncRpcMethod[]).sort(),
+);
+
+export function isAsyncDaemonRpcMethod(method: string): method is DaemonAsyncRpcMethod {
+  return Object.hasOwn(DAEMON_ASYNC_RPC_OUTCOMES, method);
+}
+
+export function isDaemonAsyncRpcAccepted(value: unknown): value is z.output<typeof daemonAsyncRpcAcceptedSchema> {
+  return daemonAsyncRpcAcceptedSchema.safeParse(value).success;
+}
 
 export type DaemonRpcMethod = keyof typeof DAEMON_RPC_METHODS;
 export type DaemonRpcParams<M extends DaemonRpcMethod> = z.input<(typeof DAEMON_RPC_METHODS)[M]["params"]>;

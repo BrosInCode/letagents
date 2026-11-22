@@ -7,7 +7,7 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
-import { DAEMON_PROTOCOL_VERSION } from "#daemon-contract/index.js";
+import { DAEMON_PROTOCOL_VERSION, isDaemonAsyncRpcAccepted, type DaemonRpcEffectView } from "#daemon-contract/index.js";
 import { connectDaemon, daemonEndpoint } from "../../../../../shared/daemon-endpoint.mjs";
 import { processTreeHelperPath } from "../../../../../shared/process-tree.mjs";
 import { materializeNodeShim, resolveStandInRuntime, type MaterializeNodeShimOptions } from "./executable-shim.js";
@@ -145,6 +145,7 @@ export interface EdgeWatchStateResult {
   entries: EdgeManifestEntryView[];
   removed_entry_ids?: string[];
   entry_order?: string[];
+  rpc_effects?: DaemonRpcEffectView[];
 }
 
 export interface EdgeHostApprovalChallenge {
@@ -996,20 +997,68 @@ export class EdgeDaemonClient {
     return this.request("manifest.watch_state", params, { timeoutMs: waitMs + 10_000 });
   }
 
-  installHostGrant(params: Record<string, unknown>): Promise<{ status: string; agent_session_id?: string }> {
-    return this.request("supervisor.install_host_grant", params, { timeoutMs: 60_000 });
+  /**
+   * Resolves either a synchronous legacy daemon reply or an asynchronous
+   * `{ effect_id, daemon_generation }` acknowledgement delivered through
+   * `manifest.watch_state` (`rpc_effects`), keeping upgrade-rig compatibility
+   * with older baseline daemons.
+   */
+  async awaitAsyncRpcEffect<T>(method: string, response: unknown, timeoutMs = 60_000): Promise<T> {
+    if (!isDaemonAsyncRpcAccepted(response)) {
+      return response as T;
+    }
+    const deadline = Date.now() + timeoutMs;
+    let afterGen = 0;
+    let afterSeq = 0;
+    while (Date.now() < deadline) {
+      const remaining = Math.max(100, Math.min(5_000, deadline - Date.now()));
+      const initial = afterGen === 0;
+      const snapshot = await this.watchState({
+        after_daemon_generation: afterGen,
+        after_sequence: afterSeq,
+        wait_ms: initial ? 0 : remaining,
+        changed_only: !initial,
+      });
+      if (snapshot.daemon_generation !== response.daemon_generation) {
+        throw new Error(
+          `Supervisor daemon generation changed from ${response.daemon_generation} to ${snapshot.daemon_generation} while waiting for ${method} (${response.effect_id}).`,
+        );
+      }
+      const match = snapshot.rpc_effects?.find((effect) => effect.effect_id === response.effect_id);
+      if (match) {
+        if (match.state === "completed") return match.result as T;
+        if (match.state === "failed" || match.state === "uncertain") {
+          throw new Error(
+            match.error || `Daemon RPC effect ${method} (${response.effect_id}) ended in state ${match.state}.`,
+          );
+        }
+      }
+      const noProgress = !initial && snapshot.daemon_generation === afterGen && snapshot.sequence === afterSeq;
+      afterGen = snapshot.daemon_generation;
+      afterSeq = snapshot.sequence;
+      if (noProgress) {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 5));
+      }
+    }
+    throw new Error(`Timed out after ${timeoutMs}ms waiting for async RPC effect ${method} (${response.effect_id}).`);
+  }
+
+  async installHostGrant(params: Record<string, unknown>): Promise<{ status: string; agent_session_id?: string }> {
+    const raw = await this.request("supervisor.install_host_grant", params, { timeoutMs: 60_000 });
+    return this.awaitAsyncRpcEffect("supervisor.install_host_grant", raw, 60_000);
   }
 
   installOpenModelCredential(params: Record<string, unknown>): Promise<{ status: string }> {
     return this.request("supervisor.install_open_model_credential", params, { timeoutMs: 15_000 });
   }
 
-  bootstrapRoomIngress(params: {
+  async bootstrapRoomIngress(params: {
     entry_id: string;
     daemon_generation: number;
     initial_message?: string;
   }): Promise<{ status: string; last_observed_message_id: string | null }> {
-    return this.request("supervisor.bootstrap_room_ingress", params, { timeoutMs: 45_000 });
+    const raw = await this.request("supervisor.bootstrap_room_ingress", params, { timeoutMs: 45_000 });
+    return this.awaitAsyncRpcEffect("supervisor.bootstrap_room_ingress", raw, 45_000);
   }
 
   controlTurn(params: {

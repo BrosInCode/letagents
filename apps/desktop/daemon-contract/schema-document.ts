@@ -35,19 +35,26 @@ import {
   daemonAgentConfigurationUpdateResultSchema,
   daemonAgentConfigurationViewSchema,
   daemonAgentStreamEventSchema,
+  daemonAsyncRpcAcceptedSchema,
+  daemonAsyncRpcEffectKindSchema,
   daemonAttemptDetailSchema,
+  daemonBootstrapRoomIngressResultSchema,
   daemonCapabilitiesSchema,
   daemonInspectorDetailSchema,
+  daemonInstallHostGrantResultSchema,
   daemonManifestEntrySchema,
   daemonManifestEntryViewSchema,
   daemonProviderConnectionSchema,
   daemonProviderRuntimeReferenceSchema,
   daemonPurgeAgentResultSchema,
+  daemonRecoverAgentRuntimeResultSchema,
   daemonRequestEnvelopeSchema,
   daemonResponseEnvelopeSchema,
   daemonRetireAgentResultSchema,
   daemonRoomMovePhaseSchema,
   daemonRoomMoveRecordSchema,
+  daemonRpcEffectStateSchema,
+  daemonRpcEffectViewSchema,
   daemonStateWatchChangesSchema,
   daemonStateWatchResultSchema,
   daemonStateWatchSnapshotSchema,
@@ -81,6 +88,7 @@ import {
   supervisedPermissionProfileSchema,
   workAttemptCheckpointSchema,
   hostApprovalOperationSchemas,
+  type DaemonAsyncRpcEffectKind,
   type HostApprovalSignedOperation,
 } from "./wire-types.js";
 
@@ -93,6 +101,10 @@ export interface DaemonRpcMethodSchemaEntry {
   readonly maxRequestBytes: number;
   readonly params: Record<string, unknown>;
   readonly result: Record<string, unknown>;
+  readonly asyncEffect?: {
+    readonly kind: DaemonAsyncRpcEffectKind;
+    readonly outcome: Record<string, unknown>;
+  };
 }
 
 export interface DaemonRpcContractDocument {
@@ -132,19 +144,26 @@ function createWireTypeRegistry() {
     ["DaemonAgentConfigurationUpdateResult", daemonAgentConfigurationUpdateResultSchema],
     ["DaemonAgentConfigurationView", daemonAgentConfigurationViewSchema],
     ["DaemonAgentStreamEvent", daemonAgentStreamEventSchema],
+    ["DaemonAsyncRpcAccepted", daemonAsyncRpcAcceptedSchema],
+    ["DaemonAsyncRpcEffectKind", daemonAsyncRpcEffectKindSchema],
     ["DaemonAttemptDetail", daemonAttemptDetailSchema],
+    ["DaemonBootstrapRoomIngressResult", daemonBootstrapRoomIngressResultSchema],
     ["DaemonCapabilities", daemonCapabilitiesSchema],
     ["DaemonInspectorDetail", daemonInspectorDetailSchema],
+    ["DaemonInstallHostGrantResult", daemonInstallHostGrantResultSchema],
     ["DaemonManifestEntry", daemonManifestEntrySchema],
     ["DaemonManifestEntryView", daemonManifestEntryViewSchema],
     ["DaemonProviderConnection", daemonProviderConnectionSchema],
     ["DaemonProviderRuntimeReference", daemonProviderRuntimeReferenceSchema],
     ["DaemonPurgeAgentResult", daemonPurgeAgentResultSchema],
+    ["DaemonRecoverAgentRuntimeResult", daemonRecoverAgentRuntimeResultSchema],
     ["DaemonRequestEnvelope", daemonRequestEnvelopeSchema],
     ["DaemonResponseEnvelope", daemonResponseEnvelopeSchema],
     ["DaemonRetireAgentResult", daemonRetireAgentResultSchema],
     ["DaemonRoomMovePhase", daemonRoomMovePhaseSchema],
     ["DaemonRoomMoveRecord", daemonRoomMoveRecordSchema],
+    ["DaemonRpcEffectState", daemonRpcEffectStateSchema],
+    ["DaemonRpcEffectView", daemonRpcEffectViewSchema],
     ["DaemonStateWatchChanges", daemonStateWatchChangesSchema],
     ["DaemonStateWatchResult", daemonStateWatchResultSchema],
     ["DaemonStateWatchSnapshot", daemonStateWatchSnapshotSchema],
@@ -198,6 +217,7 @@ export function buildDaemonRpcContractDocument(): DaemonRpcContractDocument {
     methodShapes[method] = z.object({
       params: spec.params,
       result: spec.result,
+      ...(spec.asyncEffect ? { outcome: spec.asyncEffect.outcome } : {}),
     });
   }
 
@@ -242,6 +262,14 @@ export function buildDaemonRpcContractDocument(): DaemonRpcContractDocument {
       maxRequestBytes: spec.maxRequestBytes ?? DAEMON_CONTROL_MAX_REQUEST_BYTES,
       params: methodProps.params,
       result: methodProps.result,
+      ...(spec.asyncEffect
+        ? {
+            asyncEffect: {
+              kind: spec.asyncEffect.kind,
+              outcome: methodProps.outcome,
+            },
+          }
+        : {}),
     };
   }
 

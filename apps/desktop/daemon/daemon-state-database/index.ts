@@ -18,6 +18,7 @@ export {
   migrateV2ToV3,
   runNumberedMigrations,
   validateDaemonStateShape,
+  validateDaemonStateShapeForVersion,
   type SchemaMigration,
 } from "./schema.js";
 export {

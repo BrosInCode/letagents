@@ -35,6 +35,7 @@ import {
   supervisorCompatibilityFingerprint,
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
+import { SupervisorDaemonRequestTimeoutError } from "../main/supervisor-daemon/errors.js";
 import {
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
@@ -1523,6 +1524,80 @@ async function startWireDaemon(
   };
   let handoffPrepared = false;
   const handoff = { prepare: null as null | (() => Promise<void>) };
+  const rpcEffects: Array<{
+    effect_id: string;
+    agent_id: string;
+    kind: string;
+    daemon_generation: number;
+    state: "prepared" | "executing" | "completed" | "failed" | "uncertain";
+    result?: unknown;
+    error?: string | null;
+    updated_at: string;
+  }> = [];
+  let rpcEffectCounter = 0;
+  let watchSequence = 7;
+  const watchWaiters = new Set<() => void>();
+  const wakeWatchWaiters = () => {
+    for (const wake of watchWaiters) wake();
+    watchWaiters.clear();
+  };
+  const stallAsyncAck = new Set<string>();
+  const asyncEffectOverride: { value: null | { state: "failed" | "uncertain"; error: string } } = { value: null };
+  const scheduleAsyncRpcEffect = (
+    kind: string,
+    agentId: string,
+    delayMs: number,
+    computeOutcome: () => unknown,
+  ) => {
+    const effectId = `rpc:${kind}:${++rpcEffectCounter}`;
+    const settleView = () => {
+      const override = asyncEffectOverride.value;
+      if (override) {
+        return {
+          effect_id: effectId,
+          agent_id: agentId,
+          kind,
+          daemon_generation: generation,
+          state: override.state,
+          error: override.error,
+          updated_at: "2026-01-01T00:00:01.000Z",
+        };
+      }
+      return {
+        effect_id: effectId,
+        agent_id: agentId,
+        kind,
+        daemon_generation: generation,
+        state: "completed" as const,
+        result: computeOutcome(),
+        updated_at: "2026-01-01T00:00:01.000Z",
+      };
+    };
+    if (delayMs > 0) {
+      const pending = {
+        effect_id: effectId,
+        agent_id: agentId,
+        kind,
+        daemon_generation: generation,
+        state: "executing" as const,
+        updated_at: "2026-01-01T00:00:00.000Z",
+      };
+      rpcEffects.push(pending);
+      watchSequence += 1;
+      wakeWatchWaiters();
+      setTimeout(() => {
+        const index = rpcEffects.findIndex((item) => item.effect_id === effectId);
+        if (index >= 0) rpcEffects[index] = settleView();
+        watchSequence += 1;
+        wakeWatchWaiters();
+      }, delayMs).unref?.();
+    } else {
+      rpcEffects.push(settleView());
+      watchSequence += 1;
+      wakeWatchWaiters();
+    }
+    return { effect_id: effectId, daemon_generation: generation };
+  };
   const server = createTestDaemonServer(socketPath, (socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -1532,6 +1607,7 @@ async function startWireDaemon(
       const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n"))) as { id: string; method: string; params?: Record<string, any> };
       requests.push({ method: request.method, params: request.params });
       if (unresponsiveAfterPrepare && handoffPrepared && (request.method === "daemon.negotiate" || request.method === "daemon.status")) return;
+      if (stallAsyncAck.has(request.method)) return;
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
@@ -1543,7 +1619,7 @@ async function startWireDaemon(
           }
           responseDelayMs = negotiation.delayMs;
         }
-        result = { maintenance_hold_id: maintenance.id, healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
+        result = { maintenance_hold_id: maintenance.id, healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true, async_rpc_effects_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
           ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
         if (handoff.prepare) {
@@ -1564,9 +1640,38 @@ async function startWireDaemon(
         result = entries.find((candidate) => candidate.id === request.params?.entry_id) ?? null;
         responseDelayMs = manifestListDelayMs;
       } else if (request.method === "manifest.watch_state") {
-        result = request.params?.changed_only === true && Number(request.params.after_sequence) > 0 && stateChanges.value
-          ? { daemon_generation: generation, sequence: 8, complete: false, ...stateChanges.value }
-          : { daemon_generation: generation, sequence: 7, entries };
+        const replyWatch = () => {
+          if (socket.destroyed) return;
+          const payload = request.params?.changed_only === true && Number(request.params.after_sequence) > 0 && stateChanges.value
+            ? { daemon_generation: generation, sequence: 8, complete: false, ...stateChanges.value, ...(rpcEffects.length > 0 ? { rpc_effects: rpcEffects.map((item) => ({ ...item })) } : {}) }
+            : request.params?.changed_only === true && Number(request.params.after_sequence) > 0 && rpcEffects.length > 0
+              ? { daemon_generation: generation, sequence: watchSequence, complete: false, entries: [], removed_entry_ids: [], entry_order: entries.map((item) => item.id), rpc_effects: rpcEffects.map((item) => ({ ...item })) }
+              : { daemon_generation: generation, sequence: watchSequence, entries, ...(rpcEffects.length > 0 ? { rpc_effects: rpcEffects.map((item) => ({ ...item })) } : {}) };
+          socket.end(`${JSON.stringify({ version, id: request.id, ok: true, result: payload })}\n`);
+        };
+        const afterGen = Number(request.params?.after_daemon_generation ?? 0);
+        const afterSeq = Number(request.params?.after_sequence ?? 0);
+        const waitMs = Number(request.params?.wait_ms ?? 0);
+        if (afterGen === generation && afterSeq >= watchSequence && waitMs > 0 && !stateChanges.value) {
+          let finished = false;
+          const finish = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            watchWaiters.delete(finish);
+            replyWatch();
+          };
+          const timer = setTimeout(finish, Math.min(waitMs, 5_000));
+          timer.unref?.();
+          watchWaiters.add(finish);
+          socket.once("close", () => {
+            clearTimeout(timer);
+            watchWaiters.delete(finish);
+          });
+          return;
+        }
+        replyWatch();
+        return;
       } else if (request.method === "manifest.put") {
         const next = { ...request.params!.entry, workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null }, activity: [] };
         const existing = entries.find((candidate) => candidate.id === next.id);
@@ -1582,11 +1687,13 @@ async function startWireDaemon(
         if (applied) entry.desired_state = request.params!.desired_state;
         result = { applied, entry };
       } else if (request.method === "supervisor.recover_agent_runtime") {
-        const entry = entries.find((candidate) => candidate.id === request.params!.entry_id)!;
-        entry.observed_state = "starting";
-        entry.condition = "none";
-        entry.provider_ref = null;
-        result = { outcome: "recovering", entry };
+        result = scheduleAsyncRpcEffect("rpc_recover_agent_runtime", String(request.params!.entry_id), 0, () => {
+          const entry = entries.find((candidate) => candidate.id === request.params!.entry_id)!;
+          entry.observed_state = "starting";
+          entry.condition = "none";
+          entry.provider_ref = null;
+          return { outcome: "recovering", entry };
+        });
       } else if (request.method === "manifest.control_turn") {
         responseDelayMs = controlTurnDelayMs;
         result = {
@@ -1608,15 +1715,23 @@ async function startWireDaemon(
       } else if (request.method === "supervisor.update_agent_configuration") {
         result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1, ...configurationExtras.value } };
       } else if (request.method === "supervisor.apply_agent_configuration") {
-        responseDelayMs = configurationApplyResponseDelayMs;
-        result = { outcome: request.params!.entry_id === "agent_invalid" ? "invented" : "restarting" };
+        result = scheduleAsyncRpcEffect(
+          "rpc_apply_agent_configuration",
+          String(request.params!.entry_id),
+          configurationApplyResponseDelayMs,
+          () => ({ outcome: request.params!.entry_id === "agent_invalid" ? "invented" : "restarting" }),
+        );
       } else if (request.method === "supervisor.retire_agent") {
-        responseDelayMs = retireResponseDelayMs;
-        result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
-          ? { outcome: "retired" }
-          : request.params!.entry_id === "agent_grant_only"
-            ? { outcome: "revocation_required", revocation_kind: "grant_only" }
-            : { outcome: "revocation_required", revocation_kind: "worker_session", agent_session_id: "session_exact" };
+        result = scheduleAsyncRpcEffect(
+          "rpc_retire_agent",
+          String(request.params!.entry_id),
+          retireResponseDelayMs,
+          () => (request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
+            ? { outcome: "retired" }
+            : request.params!.entry_id === "agent_grant_only"
+              ? { outcome: "revocation_required", revocation_kind: "grant_only" }
+              : { outcome: "revocation_required", revocation_kind: "worker_session", agent_session_id: "session_exact" }),
+        );
       } else if (request.method === "supervisor.purge_agent") {
         result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
           ? { outcome: "purged", purged_work_attempt_id: "attempt-cleanup" }
@@ -1633,13 +1748,23 @@ async function startWireDaemon(
       } else if (request.method === "supervisor.retry_room_delivery") {
         result = { accepted: true };
       } else if (request.method === "supervisor.install_host_grant") {
-        result = { status: "installed" };
+        result = scheduleAsyncRpcEffect(
+          "rpc_install_host_grant",
+          String(request.params!.entry_id),
+          0,
+          () => ({ status: "installed" }),
+        );
       } else if (request.method === "supervisor.sync_execution_delegations") {
         result = { status: "queued" };
       } else if (request.method === "supervisor.install_open_model_credential") {
         result = { status: "installed" };
       } else if (request.method === "supervisor.bootstrap_room_ingress") {
-        result = { status: "bootstrapped" };
+        result = scheduleAsyncRpcEffect(
+          "rpc_bootstrap_room_ingress",
+          String(request.params!.entry_id),
+          0,
+          () => ({ status: "bootstrapped", last_observed_message_id: null }),
+        );
       } else if (request.method === "supervisor.host_approval_challenge") {
         result = hostApprovals.challenge();
       } else if (request.method === "supervisor.host_approval_request") {
@@ -1656,7 +1781,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, configurationExtras, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation, stateChanges };
+  return { server, entries, requests, hostApprovals, configurationExtras, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation, stateChanges, stallAsyncAck, asyncEffectOverride };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -2166,13 +2291,13 @@ test("configuration apply waits for the authority-bearing daemon result beyond t
     undefined,
     0,
     0,
-    35,
+    45 + PIPE_ALLOWANCE_MS,
   );
   try {
     const client = new SupervisorDaemonClient({
       stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath,
       daemonScriptPath,
-      requestTimeoutMs: 5,
+      requestTimeoutMs: 15 + PIPE_ALLOWANCE_MS,
       spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
     });
     const startedAt = Date.now();
@@ -2181,7 +2306,7 @@ test("configuration apply waits for the authority-bearing daemon result beyond t
       daemonGeneration: 39,
       expectedConfigurationRevision: 2,
     }), { outcome: "restarting" });
-    assert.ok(Date.now() - startedAt >= 30, "configuration apply waits beyond the injected ordinary request deadline");
+    assert.ok(Date.now() - startedAt >= 35 + PIPE_ALLOWANCE_MS, "configuration apply waits beyond the injected ordinary request deadline");
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 
@@ -2290,18 +2415,90 @@ test("retirement completion is not bound to the three-second control-request dea
     0,
     undefined,
     0,
-    25,
+    45 + PIPE_ALLOWANCE_MS,
   );
   try {
     const client = new SupervisorDaemonClient({
       stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath,
       daemonScriptPath,
-      requestTimeoutMs: 5,
+      requestTimeoutMs: 15 + PIPE_ALLOWANCE_MS,
       spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
     });
     assert.deepEqual(await client.retireAgent("agent_exact", 40), {
       outcome: "revocation_required", revocationKind: "worker_session", agentSessionId: "session_exact",
     });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("async RPC methods bound socket acknowledgement to requestTimeoutMs and surface failed/uncertain watch outcomes", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 40);
+  wire.entries.push({ ...wireEntryWithCausalProjection(), id: "agent_dead", observed_state: "failed", condition: "coordination_blocked", workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "terminal", observed_at: null, detail: null }, activity: [] });
+  try {
+    const client = new SupervisorDaemonClient({
+      stateDir: env.root,
+      socketPath: env.socketPath,
+      peerProofPath: env.peerProofPath,
+      daemonScriptPath,
+      requestTimeoutMs: 35 + PIPE_ALLOWANCE_MS,
+      readyStatusTtlMs: 60_000,
+      spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
+    });
+    // Prime ready status first before stalling async ACK frames.
+    await client.ensureRunning();
+
+    // Every converted async RPC uses the short default socket timeout (no 30s/45s/60s/unlimited blocking wait).
+    for (const method of [
+      "supervisor.apply_agent_configuration",
+      "supervisor.recover_agent_runtime",
+      "supervisor.bootstrap_room_ingress",
+      "supervisor.install_host_grant",
+      "supervisor.retire_agent",
+    ] as const) {
+      wire.stallAsyncAck.clear();
+      wire.stallAsyncAck.add(method);
+      const startedAt = Date.now();
+      let callPromise: Promise<unknown>;
+      if (method === "supervisor.apply_agent_configuration") {
+        callPromise = client.applyAgentConfiguration({ entryId: "agent_dead", daemonGeneration: 40, expectedConfigurationRevision: 2 });
+      } else if (method === "supervisor.recover_agent_runtime") {
+        callPromise = client.recoverAgentRuntime("agent_dead");
+      } else if (method === "supervisor.bootstrap_room_ingress") {
+        callPromise = client.bootstrapRoomIngress("agent_dead", 40);
+      } else if (method === "supervisor.install_host_grant") {
+        callPromise = client.installHostGrant({
+          entryId: "agent_dead", roomId: "room_1", agentKey: "owner/agent", grantId: "g1", supervisorGrant: "secret",
+          grantGeneration: 1, daemonGeneration: 40, hostId: "h1", installationId: "i1", ownerAccountId: null, scopeKey: null,
+          expiresAt: "2099-01-01T00:00:00.000Z", apiUrl: "https://letagents.example",
+        });
+      } else {
+        callPromise = client.retireAgent("agent_dead", 40);
+      }
+      await assert.rejects(callPromise, (error: unknown) =>
+        error instanceof SupervisorDaemonRequestTimeoutError && error.message.includes(method));
+      assert.ok(Date.now() - startedAt < 1_000 + PIPE_ALLOWANCE_MS, `${method} stalled ACK must time out at requestTimeoutMs`);
+    }
+
+    wire.stallAsyncAck.clear();
+    // Terminal failed and uncertain outcomes delivered over manifest.watch_state reject with exact error text.
+    wire.asyncEffectOverride.value = { state: "failed", error: "provider rejected configuration restart" };
+    await assert.rejects(
+      () => client.applyAgentConfiguration({ entryId: "agent_dead", daemonGeneration: 40, expectedConfigurationRevision: 2 }),
+      /provider rejected configuration restart/,
+    );
+    wire.asyncEffectOverride.value = { state: "uncertain", error: "Daemon stopped or handed off while this operation was in flight." };
+    await assert.rejects(
+      () => client.retireAgent("agent_dead", 40),
+      /Daemon stopped or handed off/,
+    );
+    wire.asyncEffectOverride.value = null;
   } finally {
     await closeServer(wire.server, env.socketPath);
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;

@@ -12,6 +12,7 @@ import {
   buildDaemonRpcContractDocument,
   daemonAgentConfigurationViewSchema,
   daemonAttemptDetailSchema,
+  DAEMON_ASYNC_RPC_METHOD_NAMES,
   DAEMON_CONTROL_MAX_REQUEST_BYTES,
   DAEMON_IMPLEMENTATION_VERSION,
   DAEMON_LOCAL_BOARD_MAX_FRAME_BYTES,
@@ -390,12 +391,18 @@ test("contract metadata drives framing limits, version gating, handoff sets, and
   assert.equal(resolveDaemonRpcTimeoutMs("manifest.control_turn"), DAEMON_RPC_TIMEOUTS.turnControlMs);
   assert.equal(resolveDaemonRpcTimeoutMs("manifest.control_turn", undefined, { turnControlTimeoutMs: 4200 }), 4200);
   assert.equal(resolveDaemonRpcTimeoutMs("supervisor.commit_room_move"), DAEMON_RPC_TIMEOUTS.roomMoveCommitMs);
-  assert.equal(resolveDaemonRpcTimeoutMs("supervisor.recover_agent_runtime"), DAEMON_RPC_TIMEOUTS.recoveryMs);
-  assert.equal(resolveDaemonRpcTimeoutMs("supervisor.bootstrap_room_ingress"), DAEMON_RPC_TIMEOUTS.bootstrapIngressMs);
-  assert.equal(resolveDaemonRpcTimeoutMs("supervisor.install_host_grant"), DAEMON_RPC_TIMEOUTS.installHostGrantMs);
-  assert.equal(resolveDaemonRpcTimeoutMs("supervisor.retire_agent"), DAEMON_RPC_TIMEOUTS.retireMs);
+  assert.deepEqual([...DAEMON_ASYNC_RPC_METHOD_NAMES], [
+    "supervisor.apply_agent_configuration",
+    "supervisor.bootstrap_room_ingress",
+    "supervisor.install_host_grant",
+    "supervisor.recover_agent_runtime",
+    "supervisor.retire_agent",
+  ]);
+  for (const method of DAEMON_ASYNC_RPC_METHOD_NAMES) {
+    assert.equal(resolveDaemonRpcTimeoutMs(method), DAEMON_RPC_TIMEOUTS.defaultMs, `${method} must use short default timeout`);
+    assert.ok(DAEMON_RPC_METHODS[method].asyncEffect, `${method} must declare asyncEffect metadata`);
+  }
   assert.equal(resolveDaemonRpcTimeoutMs("daemon.prepare_handoff"), 0);
-  assert.equal(resolveDaemonRpcTimeoutMs("supervisor.apply_agent_configuration"), 0);
   assert.equal(resolveDaemonRpcTimeoutMs("supervisor.execute_bounded_tool"), 0);
   assert.equal(
     resolveDaemonRpcTimeoutMs("manifest.watch_state", { wait_ms: 10_000 }, { defaultTimeoutMs: 2_500 }),

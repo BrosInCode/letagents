@@ -569,7 +569,7 @@ test("execute classifies before preparation, revalidates authority, executes, th
   await state.subject.drainExternalExecutions();
 });
 
-test("execution failure attempts admitted journal settlement but preserves the original error", async () => {
+test("execution failure attempts admitted journal settlement: mutations keep verify-before-repeating guidance without claiming persistence, reads preserve the original error", async () => {
   const original = new Error("external execution failed");
   let completionInput: Record<string, unknown> | null = null;
   const state = harness({
@@ -582,7 +582,13 @@ test("execution failure attempts admitted journal settlement but preserves the o
 
   await assert.rejects(
     state.subject.execute(executeInput()),
-    (error) => error === original,
+    (error: unknown) => (
+      error instanceof Error
+      && error.cause === original
+      && /external execution failed/i.test(error.message)
+      && /could not be recorded in the effect journal/i.test(error.message)
+      && /verify external state before repeating/i.test(error.message)
+    ),
   );
   assert.deepEqual(completionInput, {
     effect_id: "effect-a",
@@ -597,6 +603,20 @@ test("execution failure attempts admitted journal settlement but preserves the o
   });
   await state.subject.drainJournalReservations();
   await state.subject.drainExternalExecutions();
+
+  // Read-only tools still rethrow the exact original error when settlement fails.
+  const readOriginal = new Error("read transport timeout");
+  const readState = harness({
+    runtimeMutation: false,
+    execute: async () => { throw readOriginal; },
+    complete: async () => { throw new Error("journal settlement also failed"); },
+  });
+  await assert.rejects(
+    readState.subject.execute(executeInput({ toolName: "read_messages", input: {} })),
+    (error) => error === readOriginal,
+  );
+  await readState.subject.drainJournalReservations();
+  await readState.subject.drainExternalExecutions();
 });
 
 test("complete preserves validation order, Cursor capability enforcement, and fence selection", async () => {

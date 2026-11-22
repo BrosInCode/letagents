@@ -67,6 +67,9 @@ export interface DaemonControlOperations {
   applyAgentConfiguration(input: {
     entryId: string; daemonGeneration: number; expectedConfigurationRevision: number;
   }): unknown;
+  submitApplyAgentConfiguration(input: {
+    entryId: string; daemonGeneration: number; expectedConfigurationRevision: number;
+  }): unknown;
   /** Only the desktop app's signed request reaches this. */
   setLiveSharing(input: { entryId: string; daemonGeneration: number; enabled: boolean }): unknown;
   prepareInspectorRoomMove(input: { entryId: string; destinationRoomId: string; requestId: string; daemonGeneration: number }): unknown;
@@ -319,7 +322,7 @@ export function createDaemonControlRequestHandler(
       expectedRevision: params.expected_revision,
       configuration: params.configuration,
     }),
-    "supervisor.apply_agent_configuration": (params) => operations.applyAgentConfiguration({
+    "supervisor.apply_agent_configuration": (params) => operations.submitApplyAgentConfiguration({
       entryId: params.entry_id,
       daemonGeneration: params.daemon_generation,
       expectedConfigurationRevision: params.expected_configuration_revision,

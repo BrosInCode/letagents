@@ -12,7 +12,14 @@ import type {
   DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
 } from "../../ipc-types.js";
-import { jsonValueSchema, type DaemonRpcParams } from "#daemon-contract/index.js";
+import {
+  isDaemonAsyncRpcAccepted,
+  jsonValueSchema,
+  type DaemonAsyncRpcMethod,
+  type DaemonAsyncRpcOutcome,
+  type DaemonRpcEffectView,
+  type DaemonRpcParams,
+} from "#daemon-contract/index.js";
 import { apiUrl } from "#provider-runtime/paths.js";
 import { supervisedDeliveryModeForProvider } from "../agents/provider-registry.js";
 import { SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT } from "./constants.js";
@@ -23,7 +30,23 @@ import type { DesktopSupervisorStateWatchResult } from "./types.js";
 import { nonEmptyString, record, validTurnControlActionId } from "./wire-values.js";
 import { SupervisorDaemonHostApprovalClient } from "./client-host-approvals.js";
 
+const MAX_OBSERVED_RPC_EFFECTS_PER_GENERATION = 256;
+
 export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
+  private readonly observedRpcEffects = new Map<number, Map<string, DaemonRpcEffectView>>();
+  private readonly observedRpcEffectOrder = new Map<number, string[]>();
+  private readonly rpcEffectWaiters = new Map<string, {
+    generation: number;
+    method: DaemonAsyncRpcMethod;
+    resolve: (view: DaemonRpcEffectView) => void;
+    reject: (error: Error) => void;
+  }>();
+  private rpcEffectWatchLoop: {
+    generation: number;
+    controller: AbortController;
+    promise: Promise<void>;
+  } | null = null;
+
   /** Troubleshooting observes the service without taking lifecycle ownership. */
   async getServiceSnapshot(): Promise<DesktopSupervisorServiceSnapshot> {
     const status = await this.connectIfRunning();
@@ -102,7 +125,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
   }
 
   private async requestStateWatch(
-    input: { afterDaemonGeneration: number; afterSequence: number; waitMs?: number },
+    input: { afterDaemonGeneration: number; afterSequence: number; waitMs?: number; signal?: AbortSignal },
     changedOnly: boolean,
   ): Promise<DesktopSupervisorStateWatchResult> {
     const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
@@ -111,7 +134,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       after_sequence: input.afterSequence,
       wait_ms: waitMs,
       ...(changedOnly ? { changed_only: true } : {}),
-    }, { unrefSocket: true });
+    }, { unrefSocket: true, signal: input.signal });
     if (
       !Number.isSafeInteger(value.daemon_generation)
       || value.daemon_generation < 1
@@ -121,6 +144,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     ) {
       throw new Error("Supervisor daemon returned an invalid state snapshot.");
     }
+    this.observeRpcEffects(value.daemon_generation, value.rpc_effects);
     const entries = value.entries.map((entry) => mapEntry(entry, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT));
     if (!("complete" in value) || value.complete !== false) {
       return { complete: true, daemonGeneration: value.daemon_generation, sequence: value.sequence, entries };
@@ -138,6 +162,216 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       removedEntryIds,
       entryOrder,
     };
+  }
+
+  protected override rememberReadyStatus(
+    status: import("../../ipc-types.js").DesktopSupervisorDaemonStatus,
+  ): import("../../ipc-types.js").DesktopSupervisorDaemonStatus {
+    const remembered = super.rememberReadyStatus(status);
+    if (!this.maintenanceRequested && !status.maintenanceHoldId) {
+      this.rejectStaleRpcEffectWaiters(status.generation, false);
+    }
+    return remembered;
+  }
+
+  /**
+   * Dispatches a long-running RPC under the short default socket timeout (which
+   * returns `{ effect_id, daemon_generation }` at once) and awaits its terminal
+   * outcome delivered through `manifest.watch_state` (`rpc_effects`).
+   */
+  private async callAsyncRpcEffect<M extends DaemonAsyncRpcMethod>(
+    method: M,
+    params: DaemonRpcParams<M>,
+  ): Promise<DaemonAsyncRpcOutcome<M>> {
+    const accepted = await this.call(method, params);
+    if (!isDaemonAsyncRpcAccepted(accepted)) {
+      throw new Error(`Supervisor daemon returned an invalid async effect acknowledgement for ${method}.`);
+    }
+    const settled = await this.awaitRpcEffect(method, accepted.effect_id, accepted.daemon_generation);
+    if (settled.state === "failed" || settled.state === "uncertain") {
+      this.invalidateReadyStatus();
+      throw new Error(settled.error || `Supervisor daemon request failed: ${method}`);
+    }
+    if (settled.result === null || typeof settled.result !== "object" || Array.isArray(settled.result)) {
+      throw new Error(`Supervisor daemon returned an invalid async effect outcome for ${method}.`);
+    }
+    return settled.result as DaemonAsyncRpcOutcome<M>;
+  }
+
+  private awaitRpcEffect(
+    method: DaemonAsyncRpcMethod,
+    effectId: string,
+    daemonGeneration: number,
+  ): Promise<DaemonRpcEffectView> {
+    const existing = this.observedRpcEffects.get(daemonGeneration)?.get(effectId);
+    if (existing && (existing.state === "completed" || existing.state === "failed" || existing.state === "uncertain")) {
+      return Promise.resolve(existing);
+    }
+    return new Promise<DaemonRpcEffectView>((resolve, reject) => {
+      this.rpcEffectWaiters.set(effectId, {
+        generation: daemonGeneration,
+        method,
+        resolve,
+        reject,
+      });
+      this.ensureRpcEffectWatch(daemonGeneration);
+    });
+  }
+
+  private rejectStaleRpcEffectWaiters(daemonGeneration: number, invalidateOnReject: boolean): void {
+    let rejectedAny = false;
+    for (const [effectId, waiter] of this.rpcEffectWaiters) {
+      if (waiter.generation !== daemonGeneration) {
+        this.rpcEffectWaiters.delete(effectId);
+        rejectedAny = true;
+        waiter.reject(new Error(`Supervisor daemon generation changed while waiting for ${waiter.method}.`));
+      }
+    }
+    if (rejectedAny && invalidateOnReject) {
+      this.invalidateReadyStatus();
+    }
+    if (this.rpcEffectWaiters.size === 0 && this.rpcEffectWatchLoop) {
+      const loop = this.rpcEffectWatchLoop;
+      this.rpcEffectWatchLoop = null;
+      loop.controller.abort();
+    }
+  }
+
+  private observeRpcEffects(
+    daemonGeneration: number,
+    effects: readonly DaemonRpcEffectView[] | undefined,
+  ): void {
+    this.rejectStaleRpcEffectWaiters(daemonGeneration, true);
+    if (Array.isArray(effects) && effects.length > 0) {
+      let byId = this.observedRpcEffects.get(daemonGeneration);
+      if (!byId) {
+        for (const oldGen of this.observedRpcEffects.keys()) {
+          if (oldGen < daemonGeneration) {
+            this.observedRpcEffects.delete(oldGen);
+            this.observedRpcEffectOrder.delete(oldGen);
+          }
+        }
+        byId = new Map();
+        this.observedRpcEffects.set(daemonGeneration, byId);
+      }
+      let order = this.observedRpcEffectOrder.get(daemonGeneration);
+      if (!order) {
+        order = [];
+        this.observedRpcEffectOrder.set(daemonGeneration, order);
+      }
+      for (const effect of effects) {
+        if (!effect || typeof effect.effect_id !== "string" || effect.daemon_generation !== daemonGeneration) continue;
+        const previous = byId.get(effect.effect_id);
+        byId.set(effect.effect_id, effect);
+        const terminal = effect.state === "completed" || effect.state === "failed" || effect.state === "uncertain";
+        const wasTerminal = previous !== undefined
+          && (previous.state === "completed" || previous.state === "failed" || previous.state === "uncertain");
+        if (terminal && !wasTerminal) {
+          order.push(effect.effect_id);
+          while (order.length > MAX_OBSERVED_RPC_EFFECTS_PER_GENERATION) {
+            const evicted = order.shift();
+            if (evicted) byId.delete(evicted);
+          }
+        }
+        if (terminal) {
+          const waiter = this.rpcEffectWaiters.get(effect.effect_id);
+          if (waiter && waiter.generation === daemonGeneration) {
+            this.rpcEffectWaiters.delete(effect.effect_id);
+            waiter.resolve(effect);
+          }
+        }
+      }
+    }
+    if (this.rpcEffectWaiters.size === 0 && this.rpcEffectWatchLoop) {
+      const loop = this.rpcEffectWatchLoop;
+      this.rpcEffectWatchLoop = null;
+      loop.controller.abort();
+    }
+  }
+
+  private hasWaitersForGeneration(generation: number): boolean {
+    for (const waiter of this.rpcEffectWaiters.values()) {
+      if (waiter.generation === generation) return true;
+    }
+    return false;
+  }
+
+  private ensureRpcEffectWatch(generation: number): void {
+    if (
+      this.rpcEffectWatchLoop
+      && this.rpcEffectWatchLoop.generation === generation
+      && !this.rpcEffectWatchLoop.controller.signal.aborted
+    ) {
+      return;
+    }
+    if (this.rpcEffectWatchLoop) {
+      const previous = this.rpcEffectWatchLoop;
+      this.rpcEffectWatchLoop = null;
+      previous.controller.abort();
+    }
+    const controller = new AbortController();
+    const loop = {
+      generation,
+      controller,
+      promise: Promise.resolve(),
+    };
+    loop.promise = (async () => {
+      let afterDaemonGeneration = 0;
+      let afterSequence = 0;
+      try {
+        while (this.hasWaitersForGeneration(generation) && !controller.signal.aborted) {
+          const initialSnapshot = afterDaemonGeneration === 0;
+          const result = await this.requestStateWatch(
+            {
+              afterDaemonGeneration,
+              afterSequence,
+              waitMs: initialSnapshot ? 0 : 25_000,
+              signal: controller.signal,
+            },
+            !initialSnapshot,
+          );
+          if (result.daemonGeneration !== generation) break;
+          const noProgress = !initialSnapshot
+            && result.daemonGeneration === afterDaemonGeneration
+            && result.sequence === afterSequence;
+          afterDaemonGeneration = result.daemonGeneration;
+          afterSequence = result.sequence;
+          if (noProgress && this.hasWaitersForGeneration(generation) && !controller.signal.aborted) {
+            await new Promise<void>((resolveDelay) => {
+              const onAbort = () => {
+                clearTimeout(timer);
+                resolveDelay();
+              };
+              const timer = setTimeout(() => {
+                controller.signal.removeEventListener("abort", onAbort);
+                resolveDelay();
+              }, 5);
+              timer.unref?.();
+              controller.signal.addEventListener("abort", onAbort, { once: true });
+            });
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          for (const [effectId, waiter] of this.rpcEffectWaiters) {
+            if (waiter.generation === generation) {
+              this.rpcEffectWaiters.delete(effectId);
+              waiter.reject(err);
+            }
+          }
+        }
+      } finally {
+        if (this.rpcEffectWatchLoop === loop) {
+          this.rpcEffectWatchLoop = null;
+        }
+        const nextWaiter = this.rpcEffectWaiters.values().next().value as { generation: number } | undefined;
+        if (nextWaiter) {
+          this.ensureRpcEffectWatch(nextWaiter.generation);
+        }
+      }
+    })();
+    this.rpcEffectWatchLoop = loop;
   }
 
   async watchAgentStream(input: {
@@ -272,7 +506,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       this.invalidateReadyStatus();
       throw new Error("This supervisor is too old for safe provider runtime recovery; rebuild the desktop daemon.");
     }
-    const result = await this.call(
+    const result = await this.callAsyncRpcEffect(
       "supervisor.recover_agent_runtime",
       recovery
         ? {
@@ -471,7 +705,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     }
     const status = await this.ensureRunning();
     if (!status.capabilities.agentInspectorSettings) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon."); }
-    const result = await this.call("supervisor.apply_agent_configuration", {
+    const result = await this.callAsyncRpcEffect("supervisor.apply_agent_configuration", {
       entry_id: input.entryId,
       daemon_generation: input.daemonGeneration,
       expected_configuration_revision: input.expectedConfigurationRevision,
@@ -553,7 +787,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       || typeof grantRevokedWithoutWorkerSession !== "boolean") throw new Error("Retire requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon."); }
-    const result = await this.call("supervisor.retire_agent", revokedAgentSessionId !== null
+    const result = await this.callAsyncRpcEffect("supervisor.retire_agent", revokedAgentSessionId !== null
       ? {
           entry_id: entryId,
           daemon_generation: daemonGeneration,
@@ -732,7 +966,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     // Never let a request started against an old process install into its
     // successor. The daemon independently checks this fence too.
     if (status.generation !== input.daemonGeneration) { this.invalidateReadyStatus(); return "stale"; }
-    const result = await this.call("supervisor.install_host_grant", {
+    const result = await this.callAsyncRpcEffect("supervisor.install_host_grant", {
       entry_id: input.entryId,
       room_id: input.roomId,
       agent_key: input.agentKey,
@@ -769,7 +1003,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
   async bootstrapRoomIngress(entryId: string, daemonGeneration: number, initialMessage?: string): Promise<"bootstrapped" | "existing" | "stale"> {
     const status = await this.ensureRunning();
     if (status.generation !== daemonGeneration) { this.invalidateReadyStatus(); return "stale"; }
-    const result = await this.call("supervisor.bootstrap_room_ingress", {
+    const result = await this.callAsyncRpcEffect("supervisor.bootstrap_room_ingress", {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
       ...(initialMessage?.trim() ? { initial_message: initialMessage.trim() } : {}),
