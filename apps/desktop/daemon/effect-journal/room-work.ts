@@ -15,10 +15,20 @@ import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { EFFECT_JOURNAL_TABLE } from "./schema.js";
 import {
+  failEffectInTransaction,
+  getEffect,
   listEffectsForAgent,
+  prepareEffectInTransaction,
   pruneTerminalEffectsByKindsInTransaction,
+  withFencedEffectTransaction,
 } from "./store.js";
-import type { EffectRecord } from "./types.js";
+import {
+  assertPositiveEpoch,
+  EffectFenceError,
+  type EffectRecord,
+  type PrepareEffectInput,
+  type PrepareEffectResult,
+} from "./types.js";
 
 export const ROOM_WORK_PUBLISH_EFFECT_KIND = "room_work_publish" as const;
 export const ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND = "room_work_grouped_no_reply" as const;
@@ -173,4 +183,97 @@ export function pruneTerminalRoomWorkEffectsInTransaction(
     ROOM_WORK_EFFECT_KINDS,
     maxRetained,
   );
+}
+
+/**
+ * Atomically retires superseded `prepared` room-work publish effects for a
+ * source and admits (or updates) the replacement effect carrying the maximum
+ * inherited retry deadline (`next_attempt_at_ms`) inside one fenced write
+ * transaction. If replacement admission fails for any reason, SQLite rolls back
+ * the entire transaction so the superseded `prepared` row(s) and their retry
+ * deadline remain intact.
+ */
+export function supersedeRoomWorkPublishEffects(
+  database: DatabaseSync,
+  assertWriteFence: () => void,
+  input: {
+    staleEffectIds: readonly string[];
+    replacement: Omit<PrepareEffectInput, "kind" | "retryable" | "max_attempts" | "next_attempt_at_ms"> & {
+      payload: RoomWorkPublishEffectPayload;
+    };
+    nowIso?: string;
+  },
+): PrepareEffectResult {
+  const nowIso = input.nowIso ?? new Date().toISOString();
+  const epoch = assertPositiveEpoch(input.replacement.epoch);
+  return withFencedEffectTransaction(database, assertWriteFence, () => {
+    let inheritedRetryAtMs: number | null = null;
+    for (const staleId of input.staleEffectIds) {
+      const current = getEffect(database, staleId);
+      if (!current) {
+        throw new EffectFenceError(`Unknown superseded room-work effect ${staleId}.`);
+      }
+      if (current.idempotency_key === input.replacement.idempotency_key) continue;
+      if (current.state !== "prepared") {
+        throw new EffectFenceError(
+          `Superseded room-work effect ${staleId} cannot be retired from state ${current.state}.`,
+        );
+      }
+      if (current.epoch > epoch) {
+        throw new EffectFenceError(
+          `Stale daemon generation ${epoch} cannot supersede room-work effect ${staleId} owned by epoch ${current.epoch}.`,
+        );
+      }
+      if (current.next_attempt_at_ms !== null) {
+        inheritedRetryAtMs = inheritedRetryAtMs === null
+          ? current.next_attempt_at_ms
+          : Math.max(inheritedRetryAtMs, current.next_attempt_at_ms);
+      }
+      failEffectInTransaction(database, {
+        id: staleId,
+        expectedEpoch: epoch,
+        error: "superseded_by_newer_revision",
+        nowIso,
+      });
+    }
+
+    const prepared = prepareEffectInTransaction(
+      database,
+      {
+        ...input.replacement,
+        kind: ROOM_WORK_PUBLISH_EFFECT_KIND,
+        retryable: true,
+        max_attempts: ROOM_WORK_EFFECT_MAX_ATTEMPTS,
+        next_attempt_at_ms: inheritedRetryAtMs,
+      },
+      nowIso,
+    );
+
+    if (!prepared.created
+      && prepared.effect.state === "prepared"
+      && inheritedRetryAtMs !== null
+      && (prepared.effect.next_attempt_at_ms === null || prepared.effect.next_attempt_at_ms < inheritedRetryAtMs)) {
+      const updated = database.prepare(`
+        UPDATE ${EFFECT_JOURNAL_TABLE}
+        SET next_attempt_at_ms = ?,
+            epoch = MAX(epoch, ?),
+            updated_at = ?
+        WHERE id = ? AND state = 'prepared' AND epoch <= ?
+      `).run(inheritedRetryAtMs, epoch, nowIso, prepared.effect.id, epoch);
+      if (Number(updated.changes) !== 1) {
+        throw new EffectFenceError(
+          `Room-work replacement effect ${prepared.effect.id} lost its supersession deadline update fence.`,
+        );
+      }
+      const refreshed = getEffect(database, prepared.effect.id);
+      if (!refreshed) {
+        throw new EffectFenceError(
+          `Room-work replacement effect ${prepared.effect.id} disappeared after deadline update.`,
+        );
+      }
+      return { created: false, effect: refreshed };
+    }
+
+    return prepared;
+  });
 }

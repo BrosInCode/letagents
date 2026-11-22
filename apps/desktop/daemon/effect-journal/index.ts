@@ -69,6 +69,7 @@ export {
   claimEffectForExecution,
   completeEffectInTransaction,
   completeEffect,
+  failEffectInTransaction,
   failEffect,
   rescheduleEffectForRetry,
   markEffectUncertain,
@@ -91,6 +92,7 @@ export {
   listActiveRoomWorkEffectsForAgent,
   hasInterruptedRoomWorkEffects,
   pruneTerminalRoomWorkEffectsInTransaction,
+  supersedeRoomWorkPublishEffects,
   type RoomWorkPublishEffectPayload,
   type RoomWorkGroupedNoReplyEffectPayload,
 } from "./room-work.js";

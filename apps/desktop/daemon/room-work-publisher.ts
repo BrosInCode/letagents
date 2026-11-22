@@ -17,7 +17,6 @@ import {
   listActiveRoomWorkEffectsForAgent,
   parseRoomWorkGroupedNoReplyEffectPayload,
   parseRoomWorkPublishEffectPayload,
-  prepareEffect,
   pruneTerminalRoomWorkEffectsInTransaction,
   recoverInterruptedEffectsOnStartup,
   rescheduleEffectForRetry,
@@ -26,6 +25,7 @@ import {
   ROOM_WORK_PUBLISH_EFFECT_KIND,
   roomWorkGroupedNoReplyIdempotencyKey,
   roomWorkPublishIdempotencyKey,
+  supersedeRoomWorkPublishEffects,
   withFencedEffectTransaction,
   type EffectHandler,
   type EffectRecord,
@@ -64,14 +64,22 @@ type Options = {
 type Row = Record<string, string | number | null>;
 type PublicationAuthority = NonNullable<ReturnType<typeof currentWorkerPublicationAuthority>>;
 type PendingPublishSettlement = {
+  attemptCount: number;
   record: RoomWorkPublication;
   reviewPage: WorkspaceReviewPage | null;
   result: RoomWorkPublishResult;
 };
 type PendingGroupedSettlement = {
+  attemptCount: number;
   inboxItemId: string;
   result: PeerReceiptResult;
 };
+class RoomWorkSettlementStorageError extends Error {
+  constructor(cause: unknown) {
+    super("Room-work publication settlement storage write failed.", { cause });
+    this.name = "RoomWorkSettlementStorageError";
+  }
+}
 const COALESCE_MS = 1_000;
 const RETRY_MS = 30_000;
 /** How many receipt-derived `failed` summaries one pass stages. */
@@ -549,8 +557,12 @@ export class RoomWorkPublisher {
         if (this.unavailable() || signal.aborted) {
           return { status: "retry", error: "publication_cancelled_on_close", retryAfterMs: 0 };
         }
-        const settlementKey = `${claimed.id}:${claimed.attempt_count}`;
-        this.pendingPublishSettlements.set(settlementKey, { record, reviewPage, result });
+        this.pendingPublishSettlements.set(claimed.id, {
+          attemptCount: claimed.attempt_count,
+          record,
+          reviewPage,
+          result,
+        });
         return {
           status: "completed",
           outcome: {
@@ -561,41 +573,45 @@ export class RoomWorkPublisher {
         };
       },
       settle: async (claimed, executionResult, defaultSettle) => {
-        const settlementKey = `${claimed.id}:${claimed.attempt_count}`;
-        const pending = this.pendingPublishSettlements.get(settlementKey);
-        this.pendingPublishSettlements.delete(settlementKey);
+        const pending = this.pendingPublishSettlements.get(claimed.id);
+        this.pendingPublishSettlements.delete(claimed.id);
         if (executionResult.status !== "completed") {
-          return defaultSettle();
+          return this.runDefaultSettle(defaultSettle);
         }
-        if (this.unavailable() || !pending) {
+        if (this.unavailable() || !pending || pending.attemptCount !== claimed.attempt_count) {
           return this.rescheduleCancelledEffect(claimed, "publication_cancelled_on_close");
         }
-        const settled = withFencedEffectTransaction(this.database, this.writeFence, () => {
-          if (pending.result === "acknowledged") {
-            this.store.acknowledgeInTransaction(pending.record);
-            if (pending.reviewPage) {
-              this.workspaces.acknowledgePage(
-                pending.record.agentId,
-                pending.record.roomId,
-                pending.record.sourceMessageId,
-                pending.reviewPage,
-              );
+        try {
+          const settled = withFencedEffectTransaction(this.database, this.writeFence, () => {
+            if (pending.result === "acknowledged") {
+              this.store.acknowledgeInTransaction(pending.record);
+              if (pending.reviewPage) {
+                this.workspaces.acknowledgePage(
+                  pending.record.agentId,
+                  pending.record.roomId,
+                  pending.record.sourceMessageId,
+                  pending.reviewPage,
+                );
+              }
+            } else {
+              this.store.stopInTransaction(pending.record, pending.result);
             }
-          } else {
-            this.store.stopInTransaction(pending.record, pending.result);
-          }
-          const completed = completeEffectInTransaction(this.database, {
-            id: claimed.id,
-            expectedEpoch: claimed.epoch,
-            expectedAttemptCount: claimed.attempt_count,
-            outcome: executionResult.outcome,
-            nowIso: this.nowIso(),
+            const completed = completeEffectInTransaction(this.database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            });
+            pruneTerminalRoomWorkEffectsInTransaction(this.database, claimed.agent_id);
+            return completed;
           });
-          pruneTerminalRoomWorkEffectsInTransaction(this.database, claimed.agent_id);
-          return completed;
-        });
-        if (pending.result === "conflict") this.report("publication_conflict");
-        return settled;
+          if (pending.result === "conflict") this.report("publication_conflict");
+          return settled;
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          return this.handleSettlementStorageFailure(claimed, error);
+        }
       },
     };
   }
@@ -660,57 +676,112 @@ export class RoomWorkPublisher {
         if (this.unavailable() || signal.aborted || after?.grant !== current.grant || after?.worker !== current.worker) {
           return { status: "retry", error: "authority_changed_during_grouped_report", retryAfterMs: 0 };
         }
-        const settlementKey = `${claimed.id}:${claimed.attempt_count}`;
-        this.pendingGroupedSettlements.set(settlementKey, { inboxItemId: payload.inbox_item_id, result });
+        this.pendingGroupedSettlements.set(claimed.id, {
+          attemptCount: claimed.attempt_count,
+          inboxItemId: payload.inbox_item_id,
+          result,
+        });
         return {
           status: "completed",
           outcome: { status: result, inbox_item_id: payload.inbox_item_id },
         };
       },
       settle: async (claimed, executionResult, defaultSettle) => {
-        const settlementKey = `${claimed.id}:${claimed.attempt_count}`;
-        const pending = this.pendingGroupedSettlements.get(settlementKey);
-        this.pendingGroupedSettlements.delete(settlementKey);
+        const pending = this.pendingGroupedSettlements.get(claimed.id);
+        this.pendingGroupedSettlements.delete(claimed.id);
         if (executionResult.status !== "completed") {
-          return defaultSettle();
+          return this.runDefaultSettle(defaultSettle);
         }
-        if (this.unavailable() || !pending) {
+        if (this.unavailable() || !pending || pending.attemptCount !== claimed.attempt_count) {
           return this.rescheduleCancelledEffect(claimed, "publication_cancelled_on_close");
         }
-        return withFencedEffectTransaction(this.database, this.writeFence, () => {
-          resolvePeerReceipt(this.database, pending.inboxItemId, pending.result, this.nowIso());
-          const completed = completeEffectInTransaction(this.database, {
-            id: claimed.id,
-            expectedEpoch: claimed.epoch,
-            expectedAttemptCount: claimed.attempt_count,
-            outcome: executionResult.outcome,
-            nowIso: this.nowIso(),
+        try {
+          return withFencedEffectTransaction(this.database, this.writeFence, () => {
+            resolvePeerReceipt(this.database, pending.inboxItemId, pending.result, this.nowIso());
+            const completed = completeEffectInTransaction(this.database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            });
+            pruneTerminalRoomWorkEffectsInTransaction(this.database, claimed.agent_id);
+            return completed;
           });
-          pruneTerminalRoomWorkEffectsInTransaction(this.database, claimed.agent_id);
-          return completed;
-        });
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError) throw error;
+          return this.handleSettlementStorageFailure(claimed, error);
+        }
       },
     };
   }
 
-  private rescheduleCancelledEffect(claimed: EffectRecord, error: string): EffectRecord {
-    if (claimed.attempt_count < claimed.max_attempts) {
+  private runDefaultSettle(defaultSettle: () => EffectRecord): EffectRecord {
+    try {
+      return defaultSettle();
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      if (error instanceof EffectFenceError) throw error;
+      if (!this.unavailable()) this.report("storage_unavailable");
+      throw new RoomWorkSettlementStorageError(error);
+    }
+  }
+
+  private handleSettlementStorageFailure(claimed: EffectRecord, error: unknown): EffectRecord {
+    if (this.unavailable()) throw error;
+    if (error instanceof EffectFenceError) throw error;
+    this.report("storage_unavailable");
+    try {
+      return this.rescheduleExecutingEffect(claimed, this.now() + RETRY_MS, "settlement_write_failed");
+    } catch (retryError) {
+      if (retryError instanceof DaemonFenceLostError) throw retryError;
+      throw new RoomWorkSettlementStorageError(error);
+    }
+  }
+
+  private rescheduleExecutingEffect(effect: EffectRecord, nextAttemptAtMs: number, error: string): EffectRecord {
+    if (effect.attempt_count < effect.max_attempts) {
       return rescheduleEffectForRetry(this.database, this.writeFence, {
-        id: claimed.id,
-        expectedEpoch: claimed.epoch,
-        expectedAttemptCount: claimed.attempt_count,
-        nextAttemptAtMs: this.now(),
+        id: effect.id,
+        expectedEpoch: effect.epoch,
+        expectedAttemptCount: effect.attempt_count,
+        nextAttemptAtMs: Math.max(0, nextAttemptAtMs),
         error,
         nowIso: this.nowIso(),
       });
     }
     return failEffect(this.database, this.writeFence, {
-      id: claimed.id,
-      expectedEpoch: claimed.epoch,
-      expectedAttemptCount: claimed.attempt_count,
+      id: effect.id,
+      expectedEpoch: effect.epoch,
+      expectedAttemptCount: effect.attempt_count,
       error,
       nowIso: this.nowIso(),
     });
+  }
+
+  private rescheduleCancelledEffect(claimed: EffectRecord, error: string): EffectRecord {
+    return this.rescheduleExecutingEffect(claimed, this.now(), error);
+  }
+
+  /**
+   * Recovers an orphaned `executing` room-work effect whose execution promise
+   * is no longer active in this process (for example after a failed SQLite
+   * settlement write left the row `executing`). Never touches genuinely active
+   * in-flight executions or future-epoch rows.
+   */
+  private recoverInactiveExecutingEffect(effect: EffectRecord, now: number): EffectRecord {
+    if (effect.state !== "executing") return effect;
+    if (this.executor.isEffectActive(effect.id)) return effect;
+    if (effect.attempt_count < 1 || effect.epoch > this.options.daemonGeneration()) return effect;
+    const updatedAtMs = Date.parse(effect.updated_at);
+    const baseMs = Number.isFinite(updatedAtMs) ? Math.min(updatedAtMs, now) : now;
+    try {
+      return this.rescheduleExecutingEffect(effect, baseMs + RETRY_MS, "recovered_inactive_executing_effect");
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      if (!this.unavailable()) this.report("storage_unavailable");
+      return effect;
+    }
   }
 
   private pendingGroupedReports(agentId: string) {
@@ -732,12 +803,15 @@ export class RoomWorkPublisher {
         sourceMessageId: pin.sourceMessageId,
         inboxItemId,
       });
-      const existing = getEffectByIdempotencyKey(
+      let existing = getEffectByIdempotencyKey(
         this.database,
         agentId,
         ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND,
         idempotencyKey,
       );
+      if (existing?.state === "executing") {
+        existing = this.recoverInactiveExecutingEffect(existing, now);
+      }
       if (existing) {
         if (existing.state !== "prepared") return [];
         if (existing.next_attempt_at_ms !== null && existing.next_attempt_at_ms > now) return [];
@@ -768,7 +842,6 @@ export class RoomWorkPublisher {
       await this.options.assertCurrent();
       if (this.unavailable()) return;
       if (this.ownsExecutor && !this.recoveredOwnedExecutor) {
-        this.recoveredOwnedExecutor = true;
         if (hasInterruptedRoomWorkEffects(this.database)) {
           recoverInterruptedEffectsOnStartup(this.database, this.writeFence, {
             daemonGeneration: this.options.daemonGeneration(),
@@ -776,6 +849,7 @@ export class RoomWorkPublisher {
             nowIso: this.nowIso(),
           });
         }
+        this.recoveredOwnedExecutor = true;
       }
       // Give changed agents the next pass, alternating with the recovery sweep
       // so continuous live output cannot starve missed hints or retry work.
@@ -812,7 +886,11 @@ export class RoomWorkPublisher {
         ROOM_WORK_PUBLISH_EFFECT_KIND,
       );
       const activeBySource = new Map<string, EffectRecord[]>();
-      for (const effect of activePublish) {
+      for (const rawEffect of activePublish) {
+        const effect = rawEffect.state === "executing"
+          ? this.recoverInactiveExecutingEffect(rawEffect, now)
+          : rawEffect;
+        if (effect.state !== "prepared" && effect.state !== "executing") continue;
         const parsed = parseRoomWorkPublishEffectPayload(effect.payload);
         if (!parsed) continue;
         const sourceKey = `${parsed.room_id}\0${parsed.source_message_id}`;
@@ -854,53 +932,42 @@ export class RoomWorkPublisher {
         const sourceKey = `${record.roomId}\0${record.sourceMessageId}`;
         const activeForSource = activeBySource.get(sourceKey) ?? [];
         if (activeForSource.some(effect => effect.state === "executing")) continue;
-        let inheritedRetryAtMs: number | null = null;
-        for (const prior of activeForSource) {
-          if (prior.idempotency_key === idempotencyKey) continue;
-          if (prior.state === "prepared") {
-            if (prior.next_attempt_at_ms !== null) {
-              inheritedRetryAtMs = inheritedRetryAtMs === null
-                ? prior.next_attempt_at_ms
-                : Math.max(inheritedRetryAtMs, prior.next_attempt_at_ms);
-            }
-            try {
-              failEffect(this.database, this.writeFence, {
-                id: prior.id,
-                expectedEpoch: this.options.daemonGeneration(),
-                error: "superseded_by_newer_revision",
-                nowIso: this.nowIso(),
-              });
-            } catch (error) {
-              if (error instanceof DaemonFenceLostError) throw error;
-            }
-          }
-        }
-        const existing = getEffectByIdempotencyKey(
-          this.database,
-          record.agentId,
-          ROOM_WORK_PUBLISH_EFFECT_KIND,
-          idempotencyKey,
+        const stalePrepared = activeForSource.filter(
+          effect => effect.state === "prepared" && effect.idempotency_key !== idempotencyKey,
         );
+        let existing: EffectRecord | null;
+        if (stalePrepared.length > 0) {
+          try {
+            existing = supersedeRoomWorkPublishEffects(this.database, this.writeFence, {
+              staleEffectIds: stalePrepared.map(effect => effect.id),
+              replacement: {
+                agent_id: record.agentId,
+                idempotency_key: idempotencyKey,
+                epoch: this.options.daemonGeneration(),
+                payload,
+              },
+              nowIso: this.nowIso(),
+            }).effect;
+          } catch (error) {
+            if (error instanceof DaemonFenceLostError) throw error;
+            if (error instanceof EffectFenceError) {
+              if (this.unavailable()) return;
+              throw error;
+            }
+            if (!this.unavailable()) this.report("storage_unavailable");
+            continue;
+          }
+        } else {
+          existing = getEffectByIdempotencyKey(
+            this.database,
+            record.agentId,
+            ROOM_WORK_PUBLISH_EFFECT_KIND,
+            idempotencyKey,
+          );
+        }
         if (existing) {
           if (existing.state !== "prepared") continue;
           if (existing.next_attempt_at_ms !== null && existing.next_attempt_at_ms > now) continue;
-        } else if (inheritedRetryAtMs !== null && inheritedRetryAtMs > now) {
-          // Preserve durable retry backoff across revision advances and restarts.
-          try {
-            prepareEffect(this.database, this.writeFence, {
-              agent_id: record.agentId,
-              kind: ROOM_WORK_PUBLISH_EFFECT_KIND,
-              idempotency_key: idempotencyKey,
-              epoch: this.options.daemonGeneration(),
-              payload,
-              retryable: true,
-              max_attempts: ROOM_WORK_EFFECT_MAX_ATTEMPTS,
-              next_attempt_at_ms: inheritedRetryAtMs,
-            }, this.nowIso());
-          } catch (error) {
-            if (error instanceof DaemonFenceLostError) throw error;
-          }
-          continue;
         }
         const authority = this.authority(record.agentId);
         if (authority && this.sameOrigin(authority.origin, record)) {
@@ -943,13 +1010,17 @@ export class RoomWorkPublisher {
         } catch (error) {
           if (error instanceof DaemonFenceLostError) throw error;
           if (error instanceof EffectClaimRefusedError) continue;
+          if (error instanceof RoomWorkSettlementStorageError) continue;
           if (error instanceof EffectFenceError) {
             if (this.unavailable()) return;
             throw error;
           }
           if (!this.unavailable()) this.report("publication_unavailable");
         } finally {
-          if (effectId) this.pendingDispatchAuthority.delete(effectId);
+          if (effectId) {
+            this.pendingDispatchAuthority.delete(effectId);
+            this.pendingPublishSettlements.delete(effectId);
+          }
         }
       }
       // Grouped deliveries have no native attempt or RoomWork summary. Spend
@@ -977,13 +1048,17 @@ export class RoomWorkPublisher {
         } catch (error) {
           if (error instanceof DaemonFenceLostError) throw error;
           if (error instanceof EffectClaimRefusedError) continue;
+          if (error instanceof RoomWorkSettlementStorageError) continue;
           if (error instanceof EffectFenceError) {
             if (this.unavailable()) return;
             throw error;
           }
           if (!this.unavailable()) this.report("publication_unavailable");
         } finally {
-          if (effectId) this.pendingDispatchAuthority.delete(effectId);
+          if (effectId) {
+            this.pendingDispatchAuthority.delete(effectId);
+            this.pendingGroupedSettlements.delete(effectId);
+          }
         }
       }
     } catch { failed = true; if (!this.unavailable()) this.report("authority_unavailable"); }

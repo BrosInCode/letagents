@@ -1794,3 +1794,326 @@ test("terminal room-work effects stay bounded per agent while preserving active 
   assert.equal(getEffect(f.db, "eff-old-0"), null, "oldest terminal room-work effects are pruned");
   assert.equal(f.row(1).acknowledgedRevision, 1, "room_work_publications provenance remains intact");
 });
+
+test("failed room_work_publish settlement recovers without restart, unblocks newer revisions, and never touches live in-flight work", async t => {
+  await t.test("Layer 1: completion-only SQLite write failure rolls back and reschedules retry without spin", async t => {
+    const f = await fixture(t);
+    let now = Date.parse("2026-10-02T00:00:00Z");
+    f.options.now = () => now;
+    f.captureMessage(1);
+    f.db.exec(`
+      CREATE TRIGGER fail_room_work_complete
+      BEFORE UPDATE OF state ON effects
+      WHEN NEW.kind = '${ROOM_WORK_PUBLISH_EFFECT_KIND}' AND NEW.state = 'completed'
+      BEGIN SELECT RAISE(ABORT, 'simulated_complete_write_failure'); END;
+    `);
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.row(1).acknowledgedRevision, 0, "domain acknowledgment rolled back with failed completion");
+    assert.ok(f.diagnostics.includes("storage_unavailable"));
+    assert.ok(!f.diagnostics.includes("publication_unavailable"));
+    const [effect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND });
+    assert.equal(effect?.state, "prepared", "Layer 1 immediately rescheduled executing row back to prepared");
+    assert.equal(effect?.next_attempt_at_ms, now + 30_000);
+    assert.equal(effect?.last_error, "settlement_write_failed");
+
+    f.db.exec("DROP TRIGGER fail_room_work_complete;");
+    now += 1_000;
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 1, "backoff prevents immediate tight-loop spin before 30s");
+
+    now = Date.parse("2026-10-02T00:00:30Z");
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 2, "recovered without restart once backoff elapsed");
+    assert.equal(f.row(1).acknowledgedRevision, 1);
+    const completed = getEffect(f.db, effect!.id)!;
+    assert.equal(completed.state, "completed");
+    assert.equal(completed.attempt_count, 2);
+  });
+
+  await t.test("Layer 2: full update outage leaves row executing and next flush recovers same revision without restart", async t => {
+    const f = await fixture(t);
+    let now = Date.parse("2026-10-02T00:00:00Z");
+    f.options.now = () => now;
+    f.captureMessage(1);
+    f.db.exec(`
+      CREATE TRIGGER fail_room_work_all_updates
+      BEFORE UPDATE ON effects
+      WHEN OLD.kind = '${ROOM_WORK_PUBLISH_EFFECT_KIND}' AND OLD.state = 'executing'
+      BEGIN SELECT RAISE(ABORT, 'simulated_storage_outage'); END;
+    `);
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.row(1).acknowledgedRevision, 0, "domain acknowledgment rolled back");
+    assert.ok(f.diagnostics.includes("storage_unavailable"));
+    assert.ok(!f.diagnostics.includes("publication_unavailable"));
+    const [stuck] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND });
+    assert.equal(stuck?.state, "executing", "row remained executing when all updates failed");
+
+    f.db.exec("DROP TRIGGER fail_room_work_all_updates;");
+    now += 1_000;
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 1, "Layer 2 recovers row to prepared with 30s deadline without spinning at 1s");
+    const recovered = getEffect(f.db, stuck!.id)!;
+    assert.equal(recovered.state, "prepared");
+    assert.equal(recovered.next_attempt_at_ms, Date.parse("2026-10-02T00:00:30Z"));
+
+    now = Date.parse("2026-10-02T00:00:30Z");
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 2, "recovered row retried and completed without daemon restart");
+    assert.equal(f.row(1).acknowledgedRevision, 1);
+    assert.equal(getEffect(f.db, stuck!.id)?.state, "completed");
+  });
+
+  await t.test("Layer 2: inactive executing row unblocks newer summary revision while preserving backoff", async t => {
+    const f = await fixture(t);
+    let now = Date.parse("2026-10-02T00:00:00Z");
+    f.options.now = () => now;
+    f.captureMessage(1);
+    f.db.exec(`
+      CREATE TRIGGER fail_room_work_all_updates_rev
+      BEFORE UPDATE ON effects
+      WHEN OLD.kind = '${ROOM_WORK_PUBLISH_EFFECT_KIND}' AND OLD.state = 'executing'
+      BEGIN SELECT RAISE(ABORT, 'simulated_storage_outage'); END;
+    `);
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.row(1).acknowledgedRevision, 0);
+    const [stuckRev1] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND });
+    assert.equal(stuckRev1?.state, "executing");
+
+    f.db.exec("DROP TRIGGER fail_room_work_all_updates_rev;");
+    now += 1_000;
+    f.operation(1);
+    f.operation(1, { kind: "completed", outcome: "succeeded" });
+    await f.publisher.flush();
+    assert.equal(f.row(1).revision, 2);
+    assert.equal(f.sent.length, 1, "newer revision inherits the recovered backoff deadline instead of dispatching at 1s");
+    assert.equal(getEffect(f.db, stuckRev1!.id)?.state, "failed");
+    const active = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["prepared"] });
+    assert.equal(active.length, 1);
+    assert.equal(active[0]!.next_attempt_at_ms, Date.parse("2026-10-02T00:00:30Z"));
+
+    now = Date.parse("2026-10-02T00:00:30Z");
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 2, "rev 2 dispatches and succeeds without daemon restart");
+    assert.equal(f.sent[1]!.revision, 2);
+    assert.equal(f.row(1).acknowledgedRevision, 2);
+  });
+
+  await t.test("control: genuinely active in-flight executing upload is never recovered or superseded", async t => {
+    const f = await fixture(t);
+    let closing = false;
+    let now = Date.parse("2026-10-02T00:00:00Z");
+    const executor = new EffectExecutor({
+      getDatabase: () => f.db,
+      currentDaemonGeneration: () => 1,
+      assertCurrent: async () => {},
+      assertWriteFence: () => {},
+      isClosing: () => closing,
+      nowMs: () => now,
+    });
+    let started!: () => void;
+    let release!: (result: RoomWorkPublishResult) => void;
+    const inFlight = new Promise<void>(resolve => { started = resolve; });
+    let holdFirst = true;
+    const publisher = new RoomWorkPublisher(f.db, {
+      ...f.options,
+      isClosing: () => closing,
+      now: () => now,
+      effectExecutor: executor,
+      publish: async (input) => {
+        f.sent.push(input);
+        if (holdFirst) {
+          holdFirst = false;
+          started();
+          return new Promise<RoomWorkPublishResult>(resolve => { release = resolve; });
+        }
+        return "acknowledged";
+      },
+    });
+    t.after(() => { closing = true; publisher.close(); executor.fence(); });
+
+    f.captureMessage(1);
+    f.receipts.stage(f.row(1), f.summary(1));
+    const staged = f.row(1);
+    const prepared = await executor.prepare({
+      agent_id: "agent",
+      kind: ROOM_WORK_PUBLISH_EFFECT_KIND,
+      idempotency_key: roomWorkPublishIdempotencyKey({
+        roomId: staged.roomId,
+        sourceMessageId: staged.sourceMessageId,
+        revision: staged.revision,
+        digest: staged.digest!,
+      }),
+      payload: {
+        room_id: staged.roomId,
+        source_message_id: staged.sourceMessageId,
+        attempt_id: staged.attemptId!,
+        revision: staged.revision,
+        digest: staged.digest!,
+        review_page_index: null,
+        review_page_total: null,
+        review_page_digest: null,
+      },
+      retryable: true,
+      max_attempts: 1_000_000,
+    });
+
+    const activeRun = executor.runEffect(prepared.effect.id);
+    await inFlight;
+    assert.equal(executor.isEffectActive(prepared.effect.id), true);
+    assert.equal(getEffect(f.db, prepared.effect.id)?.state, "executing");
+
+    // Advance local summary to rev 2 and run flush() well past RETRY_MS while rev 1 is genuinely live.
+    f.operation(1);
+    f.receipts.stage(f.row(1), f.summary(1));
+    assert.equal(f.row(1).revision, 2);
+    now += 60_000;
+    await publisher.flush();
+    assert.equal(f.sent.length, 1, "flush never duplicates or supersedes a genuinely active in-flight upload");
+    assert.equal(getEffect(f.db, prepared.effect.id)?.state, "executing");
+
+    release("acknowledged");
+    const settled = await activeRun;
+    assert.equal(settled.state, "completed");
+
+    await publisher.flush();
+    assert.equal(f.sent.length, 2, "once in-flight rev 1 finishes, rev 2 publishes cleanly");
+    assert.equal(f.sent[1]!.revision, 2);
+    assert.equal(f.row(1).acknowledgedRevision, 2);
+  });
+});
+
+test("failed room_work_grouped_no_reply settlement recovers without daemon restart", async t => {
+  await t.test("Layer 1: completion write failure rolls back peer receipt and reschedules retry", async t => {
+    const f = await fixture(t);
+    let now = Date.parse("2026-10-02T00:00:00Z");
+    f.options.now = () => now;
+    await settledPeerGroup(f);
+    const calls: string[] = [];
+    f.options.reportGroupedNoReply = async (input) => {
+      calls.push(`${input.roomId}/${input.sourceMessageId}`);
+      return "no_reply";
+    };
+    f.db.exec(`
+      CREATE TRIGGER fail_grouped_complete
+      BEFORE UPDATE OF state ON effects
+      WHEN NEW.kind = '${ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND}' AND NEW.state = 'completed'
+      BEGIN SELECT RAISE(ABORT, 'simulated_grouped_complete_failure'); END;
+    `);
+    await f.publisher.flush();
+    assert.equal(calls.length, 1);
+    assert.equal(pendingGrouped(f.db).length, 1, "peer receipt rolled back on settlement write failure");
+    assert.ok(f.diagnostics.includes("storage_unavailable"));
+    const [effect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND });
+    assert.equal(effect?.state, "prepared");
+    assert.equal(effect?.next_attempt_at_ms, now + 30_000);
+
+    f.db.exec("DROP TRIGGER fail_grouped_complete;");
+    now += 1_000;
+    await f.publisher.flush();
+    assert.equal(calls.length, 1, "grouped retry obeys 30s backoff");
+
+    now = Date.parse("2026-10-02T00:00:30Z");
+    await f.publisher.flush();
+    assert.equal(calls.length, 2);
+    assert.deepEqual(pendingGrouped(f.db), []);
+    assert.equal(getEffect(f.db, effect!.id)?.state, "completed");
+  });
+
+  await t.test("Layer 2: full update outage leaves grouped row executing and next flush recovers without restart", async t => {
+    const f = await fixture(t);
+    let now = Date.parse("2026-10-02T00:00:00Z");
+    f.options.now = () => now;
+    await settledPeerGroup(f);
+    const calls: string[] = [];
+    f.options.reportGroupedNoReply = async (input) => {
+      calls.push(`${input.roomId}/${input.sourceMessageId}`);
+      return "no_reply";
+    };
+    f.db.exec(`
+      CREATE TRIGGER fail_grouped_all_updates
+      BEFORE UPDATE ON effects
+      WHEN OLD.kind = '${ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND}' AND OLD.state = 'executing'
+      BEGIN SELECT RAISE(ABORT, 'simulated_grouped_outage'); END;
+    `);
+    await f.publisher.flush();
+    assert.equal(calls.length, 1);
+    assert.equal(pendingGrouped(f.db).length, 1, "peer receipt rolled back");
+    const [stuck] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_GROUPED_NO_REPLY_EFFECT_KIND });
+    assert.equal(stuck?.state, "executing");
+
+    f.db.exec("DROP TRIGGER fail_grouped_all_updates;");
+    now += 1_000;
+    await f.publisher.flush();
+    assert.equal(calls.length, 1, "Layer 2 recovers grouped row to prepared with 30s deadline");
+    assert.equal(getEffect(f.db, stuck!.id)?.state, "prepared");
+    assert.equal(getEffect(f.db, stuck!.id)?.next_attempt_at_ms, Date.parse("2026-10-02T00:00:30Z"));
+
+    now = Date.parse("2026-10-02T00:00:30Z");
+    await f.publisher.flush();
+    assert.equal(calls.length, 2, "grouped receipt retried and resolved without daemon restart");
+    assert.deepEqual(pendingGrouped(f.db), []);
+    assert.equal(getEffect(f.db, stuck!.id)?.state, "completed");
+  });
+});
+
+test("superseding a revision transfers its durable retry deadline atomically even if replacement admission fails", async t => {
+  const f = await fixture(t);
+  let now = Date.parse("2026-10-02T00:00:00Z");
+  const deadline = now + 30_000;
+  f.options.now = () => now;
+  f.options.publish = async input => { f.sent.push(input); throw new Error("offline"); };
+  f.captureMessage(1);
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.row(1).revision, 1);
+  const [rev1Effect] = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND });
+  assert.equal(rev1Effect?.state, "prepared");
+  assert.equal(rev1Effect?.next_attempt_at_ms, deadline);
+
+  // Advance summary to rev 2 and block replacement admission in SQLite.
+  now = Date.parse("2026-10-02T00:00:01Z");
+  f.operation(1);
+  f.operation(1, { kind: "completed", outcome: "succeeded" });
+  f.db.exec(`
+    CREATE TRIGGER fail_replacement_insert
+    BEFORE INSERT ON effects
+    WHEN NEW.kind = '${ROOM_WORK_PUBLISH_EFFECT_KIND}'
+    BEGIN SELECT RAISE(ABORT, 'simulated_replacement_insert_failure'); END;
+  `);
+  await f.publisher.flush();
+  assert.equal(f.row(1).revision, 2);
+  assert.equal(f.sent.length, 1, "failed replacement admission never dispatches immediately");
+  assert.ok(f.diagnostics.includes("storage_unavailable"));
+  const afterRollback = getEffect(f.db, rev1Effect!.id)!;
+  assert.equal(afterRollback.state, "prepared", "old prepared row is rolled back intact when replacement admission fails");
+  assert.equal(afterRollback.next_attempt_at_ms, deadline, "durable retry deadline stays intact on rollback");
+  assert.equal(listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND }).length, 1);
+
+  // Drop fault at t = 2s: supersession now commits atomically and preserves the 30s deadline (no 2s retry).
+  f.db.exec("DROP TRIGGER fail_replacement_insert;");
+  now = Date.parse("2026-10-02T00:00:02Z");
+  f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1, "replacement effect preserves the 30s deadline and does not retry at 2s");
+  assert.equal(getEffect(f.db, rev1Effect!.id)?.state, "failed");
+  const preparedAfter = listEffectsForAgent(f.db, "agent", { kind: ROOM_WORK_PUBLISH_EFFECT_KIND, states: ["prepared"] });
+  assert.equal(preparedAfter.length, 1);
+  assert.equal(preparedAfter[0]!.next_attempt_at_ms, deadline);
+
+  // Restart at t = 5s: deadline still honored across restart.
+  f.restart();
+  now = Date.parse("2026-10-02T00:00:05Z");
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1, "inherited retry deadline survives restart");
+
+  // At t = 30s: rev 2 dispatches and settles cleanly.
+  now = deadline;
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 2);
+  assert.equal(f.sent[1]!.revision, 2);
+  assert.equal(f.row(1).acknowledgedRevision, 2);
+  assert.equal(getEffect(f.db, preparedAfter[0]!.id)?.state, "completed");
+});
