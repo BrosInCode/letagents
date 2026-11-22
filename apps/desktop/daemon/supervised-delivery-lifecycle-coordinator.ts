@@ -34,7 +34,7 @@ export type SupervisedDeliveryLifecyclePorts = {
   > | null;
   manifest: {
     unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
-    getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+    getEntry(entryId: string, activityMode?: "full" | "summary"): Promise<DaemonManifestEntry | undefined>;
     getAgentConfiguration(entryId: string): Promise<{ polling_contract?: "custodial_polling_v1" | null } | undefined>;
     pendingRoomMoves(entryId: string): Promise<DaemonRoomMoveRecord[]>;
   };
@@ -65,7 +65,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
 
   /** Whether the lane is restarted if its runtime ends now, read fresh from the manifest. */
   private async laneOutlook(entryId: string): Promise<"restarts" | "needs_owner" | undefined> {
-    const entry = await this.ports.manifest.getEntry(entryId);
+    const entry = await this.ports.manifest.getEntry(entryId, "summary");
     if (!entry || entry.desired_state !== "running") return undefined;
     return restartsAfterNextFailure(entry.reconciliation?.exit_timestamps_ms ?? [], Date.now())
       ? "restarts" : "needs_owner";
@@ -82,7 +82,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
     }
     const delivery = this.ports.delivery;
     if (!delivery) throw new Error("Supervised bounded turns are unavailable.");
-    const entry = await this.ports.manifest.getEntry(input.entryId);
+    const entry = await this.ports.manifest.getEntry(input.entryId, "summary");
     const handle = this.ports.liveHandle(input.entryId);
     const binding = await this.ports.bindings.get(input.entryId);
     const credential = binding ? await this.ports.bindings.credentialFor(binding) : null;
@@ -136,7 +136,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
     if (this.ports.isHandoffScheduled() || !delivery || !this.ports.supportsRoomTurns()) return;
     if (this.ports.isLifecycleActive(entryId)) return;
     if (deliveryDrainBlocksRuntime(await this.ports.manifest.unresolvedDeliveryDrain(entryId))) return;
-    const entry = await this.ports.manifest.getEntry(entryId);
+    const entry = await this.ports.manifest.getEntry(entryId, "summary");
     // Legacy worker polling and daemon ingress are mutually exclusive across
     // every crash boundary; complete the durable cutover first.
     if (entry?.provider === "codex" && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling") {

@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import type { StatementSync } from "node:sqlite";
 import { PENDING_RUNTIME_RECOVERY_SQL } from "../runtime-recovery-journal.js";
 import { composeDaemonManifestEntry, projectDaemonManifestEntry } from "../manifest-entry-projection.js";
-import type { DaemonActivityEvent, DaemonAgentConfiguration, DaemonManifest, DaemonManifestEntry, DaemonProviderConnection, DaemonPurgePhase, DaemonPurgeRecord, DaemonPurgeWorkerSessionAttestation, DaemonRoomMovePhase, DaemonRoomMoveRecord } from "../types.js";
+import type { DaemonActivityEvent, DaemonAgentConfiguration, DaemonManifest, DaemonManifestEntry, DaemonProviderConnection, DaemonPurgePhase, DaemonPurgeRecord, DaemonPurgeWorkerSessionAttestation, DaemonRoomMovePhase, DaemonRoomMoveRecord, ObservedState, PolicyCondition, ReconciliationNotice, ReconciliationState } from "../types.js";
 import type { ManifestStore } from "./store.js";
 
 export type StoredManifest = { manifest: DaemonManifest; checksum: string };
@@ -37,6 +37,16 @@ export function liveSharingState(value: unknown): LiveSharingState {
   return value === "on" || value === "withdrawing" ? value : "off";
 }
 export type PreMembershipRoomMoveCancellation = { agentId: string; detail: string };
+/** Targeted observed-state / reconciliation transition persisted without touching activity_events. */
+export type ManifestTransitionCommit = {
+  agentId: string;
+  observedState: ObservedState;
+  condition: PolicyCondition;
+  lastError: string | null;
+  readyReachedAt?: string | null;
+  reconciliation: ReconciliationState;
+  reconciliationNotices: ReconciliationNotice[];
+};
 export type PendingTypedLifecycleEffect = {
   factId: string; agentId: string; factSequence: number;
   observerExecutionGenerationId: string; observerRuntimeGenerationId: string;
@@ -205,6 +215,13 @@ export const MANIFEST_READS = {
   generation: "SELECT generation FROM manifest_metadata WHERE singleton = 1",
   allEntries: `${MANIFEST_ENTRY_SELECT} ORDER BY i.sort_order`,
   entryIds: "SELECT agent_id FROM agent_identities ORDER BY sort_order",
+  unresolvedTurnControlAgentIds: `SELECT t.agent_id
+    FROM turn_control_journals t
+    JOIN agent_identities i USING (agent_id)
+    WHERE t.turn_control_present = 1
+      AND t.action_id IS NOT NULL
+      AND (t.status IS NULL OR t.status <> 'completed')
+    ORDER BY i.sort_order`,
   agentManifestVersions: "SELECT agent_id, manifest_version FROM agent_state_versions",
   roomEntries: `${MANIFEST_ENTRY_SELECT} WHERE m.room_id = ? ORDER BY i.sort_order`,
   entry: `${MANIFEST_ENTRY_SELECT} WHERE i.agent_id = ?`,

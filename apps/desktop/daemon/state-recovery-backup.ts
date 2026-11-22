@@ -394,6 +394,17 @@ export async function markStateRecoveryBackupValidated(
   return { status: "validated" };
 }
 
+/**
+ * True when a recovery backup is on disk and no receipt records it as
+ * validated, for example after an upgrade whose first start failed or ended
+ * before validation. The caller then reads the whole state again before it
+ * validates. A path that is not a private regular file also counts.
+ */
+export async function stateRecoveryBackupAwaitsValidation(databasePath: string, database: DatabaseSync): Promise<boolean> {
+  try { if (!await regularFile(backupPath(databasePath), true)) return false; } catch { return true; }
+  return !database.prepare("SELECT 1 FROM migration_records WHERE migration_key=?").get(RECEIPT_KEY);
+}
+
 export async function cleanupStateRecoveryBackup(
   databasePath: string, database: DatabaseSync, options: { now?: Date; clear?: boolean } = {},
 ): Promise<boolean> {

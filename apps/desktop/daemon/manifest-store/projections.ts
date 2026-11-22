@@ -261,19 +261,30 @@ export const projections = storeMethods({
     }
     // Bound the database read itself: state watchers never need raw payloads.
     // sort_order breaks sequence ties exactly as the stable wire projection does.
-    const activityRows = activityMode === "summary"
-      ? (this.reads.get(database, "activitySummary")
-        .all(agentId, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT) as Row[]).reverse()
-      : this.reads.get(database, "activity").all(agentId) as Row[];
-    const activity = activityRows.map((event) => activityEventFromRow(event, parseJson(event.payload_json)));
-    const stages = (this.reads.get(database, "stages").all(agentId) as Row[]).map((stage) => String(stage.stage)) as DaemonTurnControlEffect["stages"];
-    const completedActions = (this.reads.get(database, "completedActions").all(agentId, MAX_PROJECTED_COMPLETED_ACTION_IDS) as Row[])
-      .map((action) => String(action.action_id)).reverse();
-    const exitTimestamps = (this.reads.get(database, "exitTimestamps").all(agentId) as Row[]).map((item) => Number(item.timestamp_ms));
-    const notices = (this.reads.get(database, "notices").all(agentId) as Row[]).map((notice): ReconciliationNotice => ({
-      at: String(notice.at), kind: String(notice.kind) as ReconciliationNotice["kind"], cause: String(notice.cause),
-      ...(bool(notice.terminal_present) ? { terminal: this.terminalFromRow(notice, "terminal_") } : {}),
-    }));
+    const activity = bool(row.activity_present)
+      ? (activityMode === "summary"
+        ? (this.reads.get(database, "activitySummary")
+          .all(agentId, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT) as Row[]).reverse()
+        : this.reads.get(database, "activity").all(agentId) as Row[])
+        .map((event) => activityEventFromRow(event, activityMode === "summary" ? null : parseJson(event.payload_json)))
+      : [];
+    const stages = bool(row.turn_control_present) && row.action_id !== null
+      ? (this.reads.get(database, "stages").all(agentId) as Row[]).map((stage) => String(stage.stage)) as DaemonTurnControlEffect["stages"]
+      : [];
+    const reconciliationPresent = bool(row.reconciliation_present);
+    const completedActions = reconciliationPresent
+      ? (this.reads.get(database, "completedActions").all(agentId, MAX_PROJECTED_COMPLETED_ACTION_IDS) as Row[])
+        .map((action) => String(action.action_id)).reverse()
+      : [];
+    const exitTimestamps = reconciliationPresent
+      ? (this.reads.get(database, "exitTimestamps").all(agentId) as Row[]).map((item) => Number(item.timestamp_ms))
+      : [];
+    const notices = bool(row.reconciliation_notices_present)
+      ? (this.reads.get(database, "notices").all(agentId) as Row[]).map((notice): ReconciliationNotice => ({
+        at: String(notice.at), kind: String(notice.kind) as ReconciliationNotice["kind"], cause: String(notice.cause),
+        ...(bool(notice.terminal_present) ? { terminal: this.terminalFromRow(notice, "terminal_") } : {}),
+      }))
+      : [];
 
     const runtime: DaemonManifestDomainProjection["runtime_deployment"] = {
       agent_id: agentId,

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
-import { prepareStateRecoveryBackup, markStateRecoveryBackupValidated, cleanupStateRecoveryBackup, recordStateRecoveryBackupWarning, StateRecoveryError } from "./state-recovery-backup.js";
+import { prepareStateRecoveryBackup, markStateRecoveryBackupValidated, cleanupStateRecoveryBackup, recordStateRecoveryBackupWarning, stateRecoveryBackupAwaitsValidation, StateRecoveryError } from "./state-recovery-backup.js";
 import { compactDaemonStateDatabase } from "./daemon-state-maintenance.js";
 
 export type StateRecoveryBootstrap = {
@@ -42,17 +42,31 @@ export function requestHostApprovalVerifier(): Promise<string | null> {
   });
 }
 
+export type ProtectedStateUpgradeContext = {
+  /**
+   * True when every stored entry and payload must parse before validation
+   * completes: this start upgraded the schema or rewrote the database, or a
+   * recovery backup still waits for its validation receipt.
+   */
+  validateFullState: boolean;
+};
+
 /** Caller holds the daemon singleton; initialize is the existing schema owner. */
 export async function withProtectedStateUpgrade<T>(
-  path: string, initialize: () => Promise<T>, bootstrap: StateRecoveryBootstrap,
+  path: string,
+  initialize: (context: ProtectedStateUpgradeContext) => Promise<T>,
+  bootstrap: StateRecoveryBootstrap,
   assertCurrent?: () => Promise<void>,
 ): Promise<T> {
   let database: DatabaseSync | null = null;
   try {
     const freshBackup = await prepareStateRecoveryBackup(path, DAEMON_STATE_SCHEMA_VERSION, bootstrap.getBackupKey ?? requestStateRecoveryKey);
     database = await openDaemonStateDatabase(path, (opened) => new DaemonStateSchema().createSchema(opened));
+    let rewritten = false;
     if (assertCurrent) {
       const maintenance = await compactDaemonStateDatabase(path, database, assertCurrent);
+      // A checkpoint result also follows a completed copy: the content is new even when the WAL is not reclaimed yet.
+      rewritten = maintenance === "compacted" || maintenance === "checkpoint_busy" || maintenance === "checkpoint_failed";
       if (maintenance !== "not_needed" && maintenance !== "compacted") {
         database.prepare(`INSERT INTO migration_failures(migration_key,reason,failed_at,quarantined_path)
           VALUES ('state-space-maintenance',?,?, '') ON CONFLICT(migration_key)
@@ -62,7 +76,9 @@ export async function withProtectedStateUpgrade<T>(
         database.exec("DELETE FROM migration_failures WHERE migration_key='state-space-maintenance'");
       }
     }
-    const result = await initialize();
+    const validateFullState = freshBackup !== null || rewritten
+      || await stateRecoveryBackupAwaitsValidation(path, database);
+    const result = await initialize({ validateFullState });
     new DaemonStateSchema().validateCurrentShape(database);
     const validation = await markStateRecoveryBackupValidated(path, database, { freshBackup });
     if (validation.status !== "unverified") {
