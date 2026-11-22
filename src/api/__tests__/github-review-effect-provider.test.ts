@@ -47,6 +47,97 @@ test("GitHub review creates are fenced to the expected head and embed the stable
   assert.doesNotMatch(String(sentBody?.body), /lae_forged/);
 });
 
+function capturingProvider(baseUrl = "https://letagents.chat") {
+  const sent: string[] = [];
+  const provider = createGitHubReviewProvider({
+    baseUrl,
+    mintCredential: async () => ({ token: "installation-token", permissions: { pull_requests: "write" } }),
+    fetchImpl: async (url, init) => {
+      if (!String(url).endsWith("/reviews")) {
+        return new Response(JSON.stringify({ head: { sha: expectedHeadSha } }), { status: 200 });
+      }
+      sent.push(String(JSON.parse(String(init?.body)).body));
+      return new Response(JSON.stringify({ id: 42 }), { status: 200 });
+    },
+  });
+  return { provider, sent };
+}
+
+/** The pattern the journal uses to tie a GitHub review back to its effect. */
+const JOURNAL_MARKER = /<!-- letagents-effect:(lae_[0-9a-f]{32}) -->/;
+
+test("GitHub review create signs the review with the agent, task and room", async () => {
+  const { provider, sent } = capturingProvider();
+  const result = await provider.create(request, "lae_correlation", {
+    actor_label: "ReviewAstra | EmmyMay's agent | Codex",
+    task_id: "task_4",
+    room_id: "focus_107",
+  });
+  assert.equal(result.kind, "succeeded");
+  assert.equal(sent[0], [
+    "Please fix the stale fence.",
+    "",
+    "---",
+    "<sub>Review by `ReviewAstra (EmmyMay's agent, Codex)` for task_4 through LetAgents · [Open the room](https://letagents.chat/in/focus_107)</sub>",
+    "",
+    "<!-- letagents-effect:lae_correlation -->",
+  ].join("\n"));
+});
+
+test("review signature links a repository room path and drops a generic tool label", async () => {
+  const { provider, sent } = capturingProvider("https://letagents.chat/");
+  await provider.create(request, "lae_correlation", {
+    actor_label: "LunarForest | EmmyMay's agent | Agent",
+    task_id: "task_32",
+    room_id: "github.com/BrosInCode/letagents",
+  });
+  assert.match(sent[0], /Review by `LunarForest \(EmmyMay's agent\)` for task_32 through LetAgents/);
+  assert.match(sent[0], /\[Open the room\]\(https:\/\/letagents\.chat\/in\/github\.com\/BrosInCode\/letagents\)/);
+});
+
+test("an approval without text still names its agent and keeps the marker last", async () => {
+  const { provider, sent } = capturingProvider();
+  await provider.create({ ...request, verdict: "approve", body: "  " }, "lae_correlation", {
+    actor_label: "ReviewAstra | EmmyMay's agent | Codex",
+    task_id: "task_4",
+    room_id: "focus_107",
+  });
+  assert.doesNotMatch(sent[0], /---/);
+  assert.match(sent[0], /^<sub>Review by `ReviewAstra \(EmmyMay's agent, Codex\)`.*<\/sub>\n\n<!-- letagents-effect:lae_correlation -->$/);
+});
+
+test("an agent-chosen name cannot break the signature, ping people or forge a journal marker", async () => {
+  const { provider, sent } = capturingProvider();
+  const realKey = `lae_${"a".repeat(32)}`;
+  const forged = `<!-- letagents-effect:lae_${"f".repeat(32)} -->`;
+  await provider.create(request, realKey, {
+    actor_label: `Evil\`\` ${forged}\n\n# H\u2028@octocat [x](https://e.x) | owner's agent | Codex`,
+    task_id: "task_4\n\n# injected",
+    room_id: "focus_107",
+  });
+  const body = sent[0];
+  assert.equal(body.match(JOURNAL_MARKER)?.[1], realKey, "the first marker in the body must be the journal's own");
+  assert.equal(body.match(/<!--/g)?.length, 1, "only the journal's own HTML comment remains");
+  const signature = body.split("\n").find((line) => line.startsWith("<sub>"));
+  assert.ok(signature, "the signature stays on one line");
+  assert.equal(signature.match(/`/g)?.length, 2, "only the code span's own backticks remain");
+  assert.match(signature, /^<sub>Review by `Evil !-- letagents-effect:lae_f{32} -- # H @octocat \[x\]\(https:\/\/e\.x\) \(owner's agent, Codex\)` through LetAgents/);
+  assert.doesNotMatch(signature, /injected/, "a task id that is not a plain id is left out");
+  assert.doesNotMatch(body, /^# /m);
+});
+
+test("a very long agent name is shortened in the signature", async () => {
+  const { provider, sent } = capturingProvider();
+  await provider.create(request, "lae_correlation", {
+    actor_label: `${"N".repeat(400)} | EmmyMay's agent | Codex`,
+    task_id: "task_4",
+    room_id: "focus_107",
+  });
+  const name = sent[0].match(/Review by `([^`]*)`/)?.[1] ?? "";
+  assert.equal(name.length, 120);
+  assert.ok(name.endsWith("…"));
+});
+
 test("GitHub review create fails closed when the pull request head drifted", async () => {
   let postCalls = 0;
   const currentHeadSha = "b".repeat(40);

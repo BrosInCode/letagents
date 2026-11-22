@@ -24,6 +24,11 @@ function resolveBaseUrl(): string {
   return process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL || DEFAULT_BASE_URL;
 }
 
+/** The public LetAgents origin that links posted to GitHub point at. */
+export function getLetAgentsPublicBaseUrl(): string {
+  return resolveBaseUrl();
+}
+
 function normalizePrivateKey(privateKey: string | undefined): string | undefined {
   const trimmed = privateKey?.trim();
   if (!trimmed) {

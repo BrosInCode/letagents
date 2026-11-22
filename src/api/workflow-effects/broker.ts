@@ -1,6 +1,7 @@
 import type { ReserveTrackerWorkflowEffectInput, ReserveWorkflowEffectInput } from "../db/workflow-effects.js";
 import type { WorkflowEffect } from "../db/types/effects.js";
 import {
+  type GitHubReviewAttribution,
   type GitHubReviewCreateResult,
   type GitHubReviewEffectRequest,
   type GitHubReviewLookupResult,
@@ -120,6 +121,15 @@ const unconfiguredTrackerExecutor: WorkflowEffectExecutor = {
     throw new Error("Connectors are not enabled on this server; the tracker cannot be checked.");
   },
 };
+
+/**
+ * Built from the row's own columns, not its request payload, so the signature
+ * never changes the payload's idempotency fingerprint and a row reserved
+ * before this existed is still signed when it runs.
+ */
+function toReviewAttribution(effect: WorkflowEffect): GitHubReviewAttribution {
+  return { actor_label: effect.created_by, task_id: effect.task_id, room_id: effect.room_id };
+}
 
 function toReviewRequest(effect: WorkflowEffect): GitHubReviewEffectRequest {
   const payload = effect.request_payload;
@@ -264,7 +274,7 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
   const provider = deps.provider;
   const nowFn = deps.now ?? (() => new Date());
   const githubExecutor: WorkflowEffectExecutor = {
-    create: (effect) => provider.create(toReviewRequest(effect), effect.correlation_key),
+    create: (effect) => provider.create(toReviewRequest(effect), effect.correlation_key, toReviewAttribution(effect)),
     lookup: (effect) => provider.lookup(toReviewRequest(effect), effect.correlation_key),
   };
   const executorFor = (effect: WorkflowEffect): WorkflowEffectExecutor =>

@@ -1,12 +1,26 @@
 import { githubRequest, mintInstallationCredential, type GitHubInstallationCredential } from "../github/app-client.js";
-import { getGitHubAppConfig, type GitHubAppConfig } from "../github/config.js";
+import { getGitHubAppConfig, getLetAgentsPublicBaseUrl, type GitHubAppConfig } from "../github/config.js";
 import { githubReviewPermission } from "../github/app-installation.js";
+import { parseAgentActorLabel } from "../../shared/agent-identity.js";
 
 const GITHUB_API = "https://api.github.com";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const LOOKUP_MAX_PAGES = 3;
+const ATTRIBUTION_NAME_MAX_LENGTH = 120;
 
 export type GitHubReviewVerdict = "approve" | "request_changes" | "comment";
+
+/**
+ * Who asked for a review, taken by the broker from the effect row the server
+ * wrote (never from the agent's request). Every review posts as the one
+ * GitHub App, so this is the only place a reader sees which agent wrote it.
+ */
+export interface GitHubReviewAttribution {
+  /** The worker's server-side actor label, e.g. `ReviewAstra | EmmyMay's agent | Codex`. */
+  actor_label: string;
+  task_id: string | null;
+  room_id: string;
+}
 
 export interface GitHubReviewEffectRequest {
   owner: string;
@@ -39,7 +53,11 @@ export type GitHubReviewLookupResult =
   | { kind: "not_found" };
 
 export interface GitHubReviewProvider {
-  create(request: GitHubReviewEffectRequest, correlationKey: string): Promise<GitHubReviewCreateResult>;
+  create(
+    request: GitHubReviewEffectRequest,
+    correlationKey: string,
+    attribution?: GitHubReviewAttribution | null,
+  ): Promise<GitHubReviewCreateResult>;
   lookup(request: GitHubReviewEffectRequest, correlationKey: string): Promise<GitHubReviewLookupResult>;
 }
 
@@ -49,6 +67,54 @@ function marker(correlationKey: string): string {
 
 function withoutReservedMarkers(body: string): string {
   return body.replace(/<!--\s*letagents-effect:[^>]*-->/gi, "").trim();
+}
+
+/**
+ * One line of agent-chosen text made safe for a Markdown code span: no line
+ * breaks (a blank line would end the span), no backticks (they would close
+ * it) and no angle brackets (they could form a correlation marker that the
+ * journal reads before the real one).
+ */
+function inlineCodeText(value: string, maxLength: number): string {
+  const flat = value
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
+    .replace(/[`<>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return flat.length > maxLength ? `${flat.slice(0, maxLength - 1).trimEnd()}…` : flat;
+}
+
+function attributionName(actorLabel: string): string {
+  const parsed = parseAgentActorLabel(actorLabel);
+  if (!parsed) return "";
+  const details = [parsed.owner_attribution, parsed.ide_label === "Agent" ? null : parsed.ide_label]
+    .filter((part): part is string => Boolean(part));
+  return details.length > 0 ? `${parsed.display_name} (${details.join(", ")})` : parsed.display_name;
+}
+
+function roomUrl(baseUrl: string, roomId: string): string | null {
+  const segments = roomId.split("/").filter(Boolean);
+  if (segments.length === 0) return null;
+  return `${baseUrl.replace(/\/+$/, "")}/in/${segments.map(encodeURIComponent).join("/")}`;
+}
+
+/**
+ * The visible signature line under a review the App posts for an agent:
+ * which agent wrote it, for which board task, and a link to the room.
+ */
+export function reviewAttributionFooter(attribution: GitHubReviewAttribution, baseUrl: string): string {
+  const name = inlineCodeText(attributionName(attribution.actor_label), ATTRIBUTION_NAME_MAX_LENGTH) || "Agent";
+  const taskId = attribution.task_id && /^[A-Za-z0-9_.:-]{1,80}$/.test(attribution.task_id)
+    ? attribution.task_id
+    : null;
+  const link = roomUrl(baseUrl, attribution.room_id);
+  return `<sub>Review by \`${name}\`${taskId ? ` for ${taskId}` : ""} through LetAgents${link ? ` · [Open the room](${link})` : ""}</sub>`;
+}
+
+function reviewBody(body: string, footer: string | null, correlationKey: string): string {
+  const visible = withoutReservedMarkers(body);
+  const signed = footer ? (visible ? `${visible}\n\n---\n${footer}` : footer) : visible;
+  return `${signed}${signed ? "\n\n" : ""}${marker(correlationKey)}`;
 }
 
 function reviewEvent(verdict: GitHubReviewVerdict): "APPROVE" | "REQUEST_CHANGES" | "COMMENT" {
@@ -96,9 +162,12 @@ export function createGitHubReviewProvider(options: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   mintCredential?: (request: GitHubReviewEffectRequest) => Promise<GitHubInstallationCredential>;
+  /** The LetAgents origin for the room link in the signature line. */
+  baseUrl?: string;
 } = {}): GitHubReviewProvider {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const baseUrl = () => options.baseUrl ?? options.config?.baseUrl ?? getLetAgentsPublicBaseUrl();
 
   async function credentialFor(request: GitHubReviewEffectRequest): Promise<GitHubInstallationCredential> {
     if (options.mintCredential) return options.mintCredential(request);
@@ -111,7 +180,7 @@ export function createGitHubReviewProvider(options: {
   }
 
   return {
-    async create(request, correlationKey) {
+    async create(request, correlationKey, attribution) {
       let token: string;
       try {
         const credential = await credentialFor(request);
@@ -156,7 +225,7 @@ export function createGitHubReviewProvider(options: {
       }
 
       try {
-        const body = withoutReservedMarkers(request.body);
+        const footer = attribution ? reviewAttributionFooter(attribution, baseUrl()) : null;
         const response = await githubRequest({
           url: `${GITHUB_API}/repos/${encodeURIComponent(request.owner)}/${encodeURIComponent(request.repo)}/pulls/${request.pull_number}/reviews`,
           method: "POST",
@@ -166,7 +235,7 @@ export function createGitHubReviewProvider(options: {
           body: {
             event: reviewEvent(request.verdict),
             commit_id: request.expected_head_sha,
-            body: `${body}${body ? "\n\n" : ""}${marker(correlationKey)}`,
+            body: reviewBody(request.body, footer, correlationKey),
           },
         });
         if (!response.ok) {
