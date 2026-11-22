@@ -217,6 +217,30 @@ test("duplicate submissions with the same key create one provider effect", async
   assert.equal(creates, 1);
 });
 
+test("the review is signed from the effect row, outside the fingerprinted request payload", async () => {
+  const { store } = makeMemoryStore();
+  const attributions: unknown[] = [];
+  const provider: GitHubReviewProvider = {
+    async create(_request, _correlationKey, attribution) {
+      attributions.push(attribution);
+      return { kind: "succeeded", external_id: "review_1", external_url: null, response_payload: {} };
+    },
+    async lookup() { return { kind: "not_found" }; },
+  };
+  const broker = createWorkflowEffectBroker({ store, provider });
+  const effect = await broker.submitGitHubReviewVerdict(submission({
+    actor_label: "ReviewAstra | EmmyMay's agent | Codex",
+  }));
+  assert.deepEqual(attributions, [{
+    actor_label: "ReviewAstra | EmmyMay's agent | Codex",
+    task_id: "task_32",
+    room_id: "focus_37",
+  }]);
+  assert.deepEqual(Object.keys(effect.request_payload).sort(), [
+    "body", "expected_head_sha", "installation_id", "owner", "pull_number", "repo", "verdict",
+  ]);
+});
+
 test("permission changes cannot hide an existing receipt or recreate an uncertain review", async () => {
   for (const firstStatus of [201, 503]) {
     const { store } = makeMemoryStore();
