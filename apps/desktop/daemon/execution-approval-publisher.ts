@@ -81,11 +81,13 @@ export type ExecutionApprovalPublisherOptions = {
 type PublicationAuthority = NonNullable<ReturnType<typeof currentWorkerPublicationAuthority>>;
 type PendingPublishSettlement = {
   attemptCount: number;
+  authority: PublicationAuthority;
   record: ExecutionApprovalPublicationRecord;
   result: ExecutionApprovalPublicationHttpResult;
 };
 type PendingCloseSettlement = {
   attemptCount: number;
+  authority: PublicationAuthority;
   record: ExecutionApprovalPublicationRecord;
   result: ExecutionApprovalPublicationCloseHttpResult;
 };
@@ -94,6 +96,13 @@ class ApprovalSettlementStorageError extends Error {
   constructor(cause: unknown) {
     super("Execution approval publication settlement storage write failed.", { cause });
     this.name = "ApprovalSettlementStorageError";
+  }
+}
+
+class ApprovalCustodyLostError extends Error {
+  constructor() {
+    super("Execution approval publication dispatch custody changed before settlement.");
+    this.name = "ApprovalCustodyLostError";
   }
 }
 
@@ -320,6 +329,21 @@ export class ExecutionApprovalPublisher {
     return current?.grant.ownerAccountId && current.grant.scopeKey === "owner" ? current : null;
   }
 
+  private matchesDispatchAuthority(
+    record: ExecutionApprovalPublicationRecord,
+    authority: PublicationAuthority,
+  ): boolean {
+    if (this.unavailable()) return false;
+    const current = this.currentAuthority(record.agentId);
+    return Boolean(
+      current
+      && current.grant === authority.grant
+      && current.worker === authority.worker
+      && sameWorkerPublicationOrigin(current.origin, record)
+      && current.worker.workAttemptId === record.workAttemptId,
+    );
+  }
+
   private createPublishEffectHandler(): EffectHandler {
     return {
       retryable: true,
@@ -420,6 +444,7 @@ export class ExecutionApprovalPublisher {
         }
         this.pendingPublishSettlements.set(claimed.id, {
           attemptCount: claimed.attempt_count,
+          authority: current,
           record,
           result,
         });
@@ -441,10 +466,16 @@ export class ExecutionApprovalPublisher {
           return this.runDefaultSettle(defaultSettle);
         }
         if (this.unavailable() || !pending || pending.attemptCount !== claimed.attempt_count) {
-          return this.rescheduleCancelledEffect(claimed, "publication_cancelled_on_close");
+          return this.rescheduleSettlementRejection(claimed, "publication_cancelled_on_close");
+        }
+        if (!this.matchesDispatchAuthority(pending.record, pending.authority)) {
+          return this.rescheduleSettlementRejection(claimed, "authority_changed_before_settlement");
         }
         try {
           const settled = withFencedEffectTransaction(this.database, this.writeFence, () => {
+            if (!this.matchesDispatchAuthority(pending.record, pending.authority)) {
+              throw new ApprovalCustodyLostError();
+            }
             if (pending.result.status === "conflict") {
               this.store.conflictInTransaction(pending.record);
             } else if (pending.result.status === "terminal") {
@@ -470,6 +501,9 @@ export class ExecutionApprovalPublisher {
           return settled;
         } catch (error) {
           if (error instanceof DaemonFenceLostError) throw error;
+          if (error instanceof ApprovalCustodyLostError) {
+            return this.rescheduleSettlementRejection(claimed, "authority_changed_before_settlement");
+          }
           return this.handleSettlementStorageFailure(claimed, error);
         }
       },
@@ -564,6 +598,7 @@ export class ExecutionApprovalPublisher {
         }
         this.pendingCloseSettlements.set(claimed.id, {
           attemptCount: claimed.attempt_count,
+          authority: current,
           record,
           result,
         });
@@ -581,10 +616,16 @@ export class ExecutionApprovalPublisher {
           return this.runDefaultSettle(defaultSettle);
         }
         if (this.unavailable() || !pending || pending.attemptCount !== claimed.attempt_count) {
-          return this.rescheduleCancelledEffect(claimed, "publication_cancelled_on_close");
+          return this.rescheduleSettlementRejection(claimed, "publication_cancelled_on_close");
+        }
+        if (!this.matchesDispatchAuthority(pending.record, pending.authority)) {
+          return this.rescheduleSettlementRejection(claimed, "authority_changed_before_settlement");
         }
         try {
           const settled = withFencedEffectTransaction(this.database, this.writeFence, () => {
+            if (!this.matchesDispatchAuthority(pending.record, pending.authority)) {
+              throw new ApprovalCustodyLostError();
+            }
             if (pending.result.status === "conflict") {
               this.store.conflictInTransaction(pending.record);
             } else if (pending.result.status === "terminal") {
@@ -610,6 +651,9 @@ export class ExecutionApprovalPublisher {
           return settled;
         } catch (error) {
           if (error instanceof DaemonFenceLostError) throw error;
+          if (error instanceof ApprovalCustodyLostError) {
+            return this.rescheduleSettlementRejection(claimed, "authority_changed_before_settlement");
+          }
           return this.handleSettlementStorageFailure(claimed, error);
         }
       },
@@ -661,6 +705,17 @@ export class ExecutionApprovalPublisher {
 
   private rescheduleCancelledEffect(claimed: EffectRecord, error: string): EffectRecord {
     return this.rescheduleExecutingEffect(claimed, this.now(), error);
+  }
+
+  private rescheduleSettlementRejection(claimed: EffectRecord, error: string): EffectRecord {
+    try {
+      return this.rescheduleCancelledEffect(claimed, error);
+    } catch (retryError) {
+      if (retryError instanceof DaemonFenceLostError) throw retryError;
+      if (retryError instanceof EffectFenceError) throw retryError;
+      if (!this.unavailable()) this.report("storage_unavailable");
+      throw new ApprovalSettlementStorageError(retryError);
+    }
   }
 
   /**

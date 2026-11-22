@@ -1009,3 +1009,131 @@ test("durable retry backoff survives restart, atomic attempt admission rolls bac
   const allEffects = JSON.stringify(f.database.prepare("SELECT payload, outcome, last_error FROM effects").all());
   assert.doesNotMatch(allEffects, /PRIVATE_RAW|PRIVATE_GRANT|PRIVATE_WORKER|PRIVATE_SESSION/);
 });
+
+test("dispatch custody removed or replaced during EffectExecutor's final pre-settlement await never commits a stale receipt", async t => {
+  type PublisherInternals = {
+    pendingPublishSettlements: Map<string, unknown>;
+    pendingCloseSettlements: Map<string, unknown>;
+  };
+
+  for (const mode of ["removed", "replaced"] as const) {
+    await t.test(`publish — custody ${mode} during final pre-settlement await`, async t => {
+      const f = fixture(t);
+      let currentNow = now;
+      f.setNow(currentNow);
+      f.setDelegations([delegation(1)]);
+      const internals = f.publisher as unknown as PublisherInternals;
+      let intercepted = false;
+      f.options.assertCurrent = async () => {
+        if (!intercepted && internals.pendingPublishSettlements.size > 0) {
+          intercepted = true;
+          if (mode === "removed") {
+            f.custody.deleteHostGrant("agent");
+            f.custody.deleteWorkerAuthorization("agent");
+          } else {
+            f.custody.installHostGrant({ ...f.grant, grantId: "grant-rotated", grantGeneration: 2 });
+            f.custody.installWorkerAuthorization({ ...f.worker, grantId: "grant-rotated", grantGeneration: 2 });
+          }
+        }
+      };
+
+      f.publisher.changed("agent");
+      await f.publisher.flush();
+      assert.equal(intercepted, true, "test must intercept EffectExecutor's pre-settlement assertAuthority await");
+      assert.equal(f.sent.length, 1);
+      assert.equal(
+        f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state,
+        "attempted",
+        `stale publish receipt must not commit after custody is ${mode} before settlement`,
+      );
+      const [effect] = listEffectsForAgent(f.database, "agent", { kind: EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND });
+      assert.equal(effect?.state, "prepared");
+      assert.equal(effect?.last_error, "authority_changed_before_settlement");
+
+      // Reinstall valid custody (if removed) and verify reconciliation replays and commits cleanly.
+      if (mode === "removed") {
+        f.custody.installHostGrant(f.grant);
+        f.custody.installWorkerAuthorization(f.worker);
+      }
+      await f.publisher.flush();
+      assert.equal(f.sent.length, 2);
+      assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, "acknowledged");
+      assert.equal(getEffect(f.database, effect!.id)?.state, "completed");
+    });
+
+    await t.test(`close — custody ${mode} during final pre-settlement await`, async t => {
+      const f = fixture(t);
+      let currentNow = now;
+      f.setNow(currentNow);
+      f.setDelegations([delegation(1)]);
+      f.publisher.changed("agent");
+      await f.publisher.flush();
+      assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, "acknowledged");
+
+      f.options.entries.getExecutionApproval = async () => {
+        const base = admission().approval;
+        return { ...base, request: { ...base.request, state: "superseded" as const } };
+      };
+      const internals = f.publisher as unknown as PublisherInternals;
+      let intercepted = false;
+      f.options.assertCurrent = async () => {
+        if (!intercepted && internals.pendingCloseSettlements.size > 0) {
+          intercepted = true;
+          if (mode === "removed") {
+            f.custody.deleteHostGrant("agent");
+            f.custody.deleteWorkerAuthorization("agent");
+          } else {
+            f.custody.installHostGrant({ ...f.grant, grantId: "grant-rotated", grantGeneration: 2 });
+            f.custody.installWorkerAuthorization({ ...f.worker, grantId: "grant-rotated", grantGeneration: 2 });
+          }
+        }
+      };
+
+      await f.publisher.flush();
+      assert.equal(intercepted, true, "test must intercept EffectExecutor's pre-settlement assertAuthority await");
+      assert.equal(f.closed.length, 1);
+      assert.equal(
+        f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state,
+        "closing",
+        `stale close receipt must not commit after custody is ${mode} before settlement`,
+      );
+      const [closeEffect] = listEffectsForAgent(f.database, "agent", { kind: EXECUTION_APPROVAL_CLOSE_EFFECT_KIND });
+      assert.equal(closeEffect?.state, "prepared");
+      assert.equal(closeEffect?.last_error, "authority_changed_before_settlement");
+
+      if (mode === "removed") {
+        f.custody.installHostGrant(f.grant);
+        f.custody.installWorkerAuthorization(f.worker);
+      }
+      await f.publisher.flush();
+      assert.equal(f.closed.length, 2);
+      assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, "closed");
+      assert.equal(getEffect(f.database, closeEffect!.id)?.state, "completed");
+    });
+  }
+
+  await t.test("control — unchanged custody during final pre-settlement await commits publish and close normally", async t => {
+    const f = fixture(t);
+    f.setDelegations([delegation(1)]);
+    const internals = f.publisher as unknown as PublisherInternals;
+    let sawPublishPreSettle = false;
+    let sawClosePreSettle = false;
+    f.options.assertCurrent = async () => {
+      if (internals.pendingPublishSettlements.size > 0) sawPublishPreSettle = true;
+      if (internals.pendingCloseSettlements.size > 0) sawClosePreSettle = true;
+    };
+
+    f.publisher.changed("agent");
+    await f.publisher.flush();
+    assert.equal(sawPublishPreSettle, true);
+    assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, "acknowledged");
+
+    f.options.entries.getExecutionApproval = async () => {
+      const base = admission().approval;
+      return { ...base, request: { ...base.request, state: "superseded" as const } };
+    };
+    await f.publisher.flush();
+    assert.equal(sawClosePreSettle, true);
+    assert.equal(f.database.prepare("SELECT state FROM execution_approval_publications").get()!.state, "closed");
+  });
+});
