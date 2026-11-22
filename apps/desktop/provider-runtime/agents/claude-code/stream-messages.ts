@@ -126,10 +126,10 @@ export function assistantTextOf(message: ClaudeStreamMessage): string | null {
  * order the prompt's attachment notes number them.
  */
 export function userStreamJsonLine(text: string, uuid?: string, attachments?: ProviderRoomTurnRequest["attachments"]): string {
-  const images = includedRoomTurnImages(attachments).flatMap(image => image.data ? [
+  const images = includedRoomTurnImages(attachments).flatMap(image => image.base64 ? [
     { type: "text", text: roomTurnImageLabel(image) },
     { type: "image", source: { type: "base64", media_type: image.mimeType,
-      data: Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString("base64") } },
+      data: image.base64 } },
   ] : []);
   return JSON.stringify({
     type: "user",

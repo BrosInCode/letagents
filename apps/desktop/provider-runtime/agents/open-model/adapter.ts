@@ -37,7 +37,7 @@ export class OpenModelProviderAdapter extends OpenModelAdapterLaunch implements 
     // that an unanswered user message always remains and the model is
     // re-invoked until the bounded-turn abort fires.
     const turnId = mintNativeUserMessageId(Date.now());
-    await (options.beforeNativeDispatch ?? options.markDispatched)?.();
+    await options.beforeNativeDispatch?.();
     handle.setState("working");
     await handle.client.promptAsync(handle.providerContinuationId, {
       messageID: turnId,

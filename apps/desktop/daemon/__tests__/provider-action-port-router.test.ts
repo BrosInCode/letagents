@@ -388,7 +388,7 @@ function fakeAdapter(provider: FakeProvider, calls: string[]): NativeProviderAda
       return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
     },
     async runRoomTurn(handle, request, options) {
-      await options?.markDispatched?.();
+      await options?.beforeNativeDispatch?.();
       calls.push(`${provider}:room-turn:${handle.workAttemptId}:${request.inboxItemId}`);
       return { turnId: `turn:${request.inboxItemId}`, outcome: "reply", text: "bounded reply" };
     },

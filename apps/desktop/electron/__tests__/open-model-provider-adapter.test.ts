@@ -857,7 +857,7 @@ function imageTurn(png = pngView()): ProviderRoomTurnRequest {
     attachments: [
       { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "cannot_read_pdf", category: "file" },
       { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: png.bytes.length, status: "image",
-        image: { mimeType: "image/png", data: png.view } },
+        image: { mimeType: "image/png", base64: Buffer.from(png.view).toString("base64") } },
       { index: 3, fileName: "staged.png", mimeType: "image/png", sizeBytes: 10, status: "image",
         image: { mimeType: "image/png", path: "/scratch/turn-1/image-2.png" } },
     ],
