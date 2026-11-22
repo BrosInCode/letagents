@@ -1,7 +1,7 @@
 <template>
   <div class="room-agent-launch-notice" :data-state="view.status" data-testid="room-agent-launch-notice">
     <button type="button" class="room-agent-launch-open" @click="emit('open')" :aria-label="`View ${view.name} in Agents: ${view.line}`">
-      <span ref="avatar" class="room-agent-launch-portrait" data-agent-launch-destination><AgentAvatar :avatar="entry.avatar" :name="view.name" :size="30" /></span>
+      <span ref="avatar" class="room-agent-launch-portrait" :class="{ 'is-in-flight': avatarInFlight }" data-agent-launch-destination><AgentAvatar :avatar="entry.avatar" :name="view.name" :size="30" /></span>
       <span class="room-agent-launch-copy"><strong>{{ view.name }}</strong><span aria-live="polite">{{ view.line }}</span></span>
       <span class="room-agent-launch-link">View in Agents <ArrowUpRight :size="13" /></span>
     </button>
@@ -14,7 +14,7 @@ import { ref } from 'vue';
 import AgentAvatar from '../../../../../../../../shared/ui/agent-identity/AgentAvatar.vue';
 import type { DesktopSupervisorManifestEntry } from '../../../../../../electron/ipc-types';
 import type { AgentStartupView } from '../../../../domain/agent-startup';
-defineProps<{ entry: DesktopSupervisorManifestEntry; view: AgentStartupView }>();
+defineProps<{ entry: DesktopSupervisorManifestEntry; view: AgentStartupView; avatarInFlight?: boolean }>();
 const emit = defineEmits<{ open: []; dismiss: [] }>();
 const avatar = ref<HTMLElement | null>(null);
 defineExpose({ avatarElement: () => avatar.value });
@@ -23,6 +23,7 @@ defineExpose({ avatarElement: () => avatar.value });
 .room-agent-launch-notice{display:flex;align-items:center;gap:4px;width:var(--room-composer-width);margin:0 auto 8px;padding:5px 7px 5px 9px;border:1px solid var(--border);border-radius:15px;background:var(--bg-secondary);color:var(--text)}
 .room-agent-launch-open{display:flex;align-items:center;gap:11px;min-width:0;flex:1;padding:3px;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer}
 .room-agent-launch-portrait{display:flex;flex:none}
+.room-agent-launch-portrait.is-in-flight{opacity:0}
 .room-agent-launch-copy{display:flex;gap:9px;align-items:baseline;min-width:0;font-size:12px;line-height:1.4}
 .room-agent-launch-copy :is(strong,span){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .room-agent-launch-copy strong{font-weight:600}.room-agent-launch-copy>span{color:var(--text-secondary)}

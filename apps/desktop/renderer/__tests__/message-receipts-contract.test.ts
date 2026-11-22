@@ -28,7 +28,7 @@ test("receipts are for the sender only: the mark and Message info show on your o
 test("the old Message info surface is gone and the receipt popover replaces it", () => {
   assert.doesNotMatch(chatView, /RoomMessageInfoSurface/);
   assert.match(chatView, /<RoomMessageReceiptPopover[\s\S]{0,400}?@ask="askFromReceipt"/);
-  assert.match(chatView, /provideRoomMessageReceipts\(messageReceipts\)/);
+  assert.match(chatView, /provideRoomMessageReceipts\(\{ \.\.\.messageReceipts, modelRecoveryFor \}\)/);
 });
 
 test("Ask is a reply to your own message that mentions one agent", () => {

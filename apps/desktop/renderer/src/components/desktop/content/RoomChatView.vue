@@ -226,6 +226,7 @@ import { provideRoomMessageReactions, useMessageViewer, useRoomMessageReactions 
 import { claudeLimitNotice } from "../../../domain/claude-usage-limit";
 import { savedModelLabel } from "../../../domain/claude-model-labels";
 import { latestFailedAgentMessage } from "../../../domain/room-message-receipts";
+import { agentScheduledRetry } from "../../../domain/scheduled-retry";
 import { provideRoomMessageReceipts, useRoomMessageReceipts, type RoomMessageModelRecoveryAction } from "../../../composables/useRoomMessageReceipts";
 import { buildLetAgentsMessageUrl, isLocalRoomIdentifier } from "../../../domain/room-urls";
 import type {
@@ -564,7 +565,7 @@ function toggleThread(messageId: string): void {
   else openThread(messageId);
 }
 
-function openThread(messageId: string, refresh = true): void {
+function openThread(messageId: string, refresh = true, revealMessageId: string | null = null): void {
   if (document.activeElement instanceof HTMLElement) {
     threadReturnFocusElement.value = document.activeElement;
   }
@@ -573,6 +574,7 @@ function openThread(messageId: string, refresh = true): void {
     clearThreadAttachmentDrafts();
   }
   forgetOpenedThreadSummary(messageId);
+  threadRevealTargetId.value = revealMessageId;
   activeThreadParentId.value = messageId;
   if (refresh) void loadThread(messageId);
 }
@@ -807,8 +809,7 @@ function jumpToMessage(messageId: string): void {
   if (destination.kind === "thread") {
     // The source graph already contains this exact reply. Render it directly;
     // a refresh RPC must not be allowed to turn a known link into a no-op.
-    threadRevealTargetId.value = messageId;
-    openThread(destination.threadRootId, false);
+    openThread(destination.threadRootId, false, messageId);
     void nextTick(() => messageViewport.value?.scrollToMessage(destination.threadRootId));
     return;
   }
@@ -896,16 +897,23 @@ function modelRecoveryFor(message: DesktopRoomMessage, agentId: string): RoomMes
       modelLabel: retry.modelLabel,
       retrying: retry.state === "sending",
       retryError: retry.state === "error",
-      disabled: props.sending || entry?.agentKey !== retry.agentKey,
+      disabled: props.sending || entry?.agentKey !== retry.agentKey || Boolean(entry.deliveryAttention),
       activate: () => retryOriginalMessage(key),
     };
   }
 
   const openAgent = agentLaunchHost?.openAgent;
   if (!entry?.agentKey || !openAgent) return null;
-  const receipt = latestFailedAgentMessage(entry);
+  // A continuation that never ran cannot supersede the outcome of the original ask.
+  const receipts = entry.deliveryReceipts ?? [];
+  const receipt = latestFailedAgentMessage({
+    deliveryReceipts: receipts.filter((delivery) =>
+      !delivery.sourceMessageId.startsWith("task-continuation:") || Boolean(delivery.providerTurnId)),
+  });
   const limitFamily = claudeLimitNotice(receipt?.error, entry.provider)?.modelFamily;
   if (!limitFamily || receipt?.sourceMessageId !== message.id) return null;
+  if (entry.deliveryAttention) return { blocked: true, activate: () => openAgent(entry.id, "diagnostics") };
+  if (agentScheduledRetry(receipts)) return null;
   const recovery = {
     key, entryId: entry.id, agentKey: entry.agentKey, agentName: entry.displayName,
     messageId: message.id, threadRootId: threadParentId(message), limitFamily,
@@ -935,7 +943,7 @@ function retryOriginalMessage(key: string): void {
   const retry = modelRetries.get(key);
   if (!retry || retry === "sent" || retry.state === "sending" || !props.active || props.sending) return;
   const available = roomSupervisorEntries.value.some((entry) => entry.id === retry.entryId
-    && entry.agentKey === retry.agentKey && entry.desiredState === "running");
+    && entry.agentKey === retry.agentKey && entry.desiredState === "running" && !entry.deliveryAttention);
   if (!available) return;
   const sending: ModelRetry = { ...retry, state: "sending" };
   modelRetries.set(key, sending);
@@ -997,6 +1005,7 @@ function handleComposerSend(
 
 watch(toRef(props, "messageNamespace"), () => {
   activeThreadParentId.value = null;
+  threadRevealTargetId.value = null;
   fetchedThreadRootId.value = null;
   fetchedThreadRoot.value = null;
   fetchedThreadReplies.value = [];
@@ -1016,8 +1025,7 @@ watch(
     const searchResult = threadMessagesWithThreadOverrides.value.find((message) => message.id === messageId);
     const parentId = searchResult ? threadParentId(searchResult) : null;
     if (parentId) {
-      threadRevealTargetId.value = messageId;
-      openThread(parentId);
+      openThread(parentId, true, messageId);
       void nextTick(() => messageViewport.value?.scrollToMessage(parentId));
     }
   },
@@ -1050,8 +1058,7 @@ function focusComposerWithMention(mentionText: string): void {
 
 async function revealThread(messageId: string, replyId?: string): Promise<void> {
   const namespace = props.messageNamespace;
-  threadRevealTargetId.value = replyId ?? null;
-  openThread(messageId, false);
+  openThread(messageId, false, replyId);
   await nextTick();
   const revealed = messageViewport.value?.scrollToMessage(messageId, replyId ? "instant" : undefined);
   await loadThread(messageId);

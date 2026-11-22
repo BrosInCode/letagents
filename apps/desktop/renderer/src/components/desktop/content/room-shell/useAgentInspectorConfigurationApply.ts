@@ -1,4 +1,4 @@
-import { onScopeDispose, type Ref } from "vue";
+import { onScopeDispose, watch, type Ref } from "vue";
 import type { DesktopSupervisorAgentConfiguration } from "../../../../../../electron/ipc-types";
 import type { AgentInspectorActionState } from "../../../../domain/agent-inspector";
 import {
@@ -35,8 +35,24 @@ export function useAgentInspectorConfigurationApply<Operation extends Configurat
   onApplied?(configuration: DesktopSupervisorAgentConfiguration): void;
 }) {
   let restartCheck: ReturnType<typeof setTimeout> | undefined;
+  let acceptedRestart: { operation: Operation; roomId: string; revision: number } | null = null;
   let disposed = false;
   onScopeDispose(() => { disposed = true; clearTimeout(restartCheck); });
+
+  function confirmRestart(configuration: DesktopSupervisorAgentConfiguration | null): void {
+    const accepted = acceptedRestart;
+    if (!accepted || !configuration || !options.selectionCurrent(accepted.operation.entryId, accepted.roomId)
+      || configuration.entryId !== accepted.operation.entryId
+      || configuration.daemonGeneration !== accepted.operation.daemonGeneration
+      || configuration.configRevision !== accepted.revision || configurationHasRuntimeLag(configuration)) return;
+    acceptedRestart = null;
+    clearTimeout(restartCheck);
+    options.onApplied?.(configuration);
+  }
+
+  // A reload after the polling deadline can still confirm the same accepted restart.
+  watch(() => options.configurationResource.value.status === "ready"
+    ? options.configurationResource.value.configuration : null, confirmRestart);
 
   function checkRestart(operation: Operation, expectedRevision: number, until = Date.now() + 45_000): void {
     const read = desktopIpc.supervisor?.getAgentConfiguration;
@@ -51,7 +67,7 @@ export function useAgentInspectorConfigurationApply<Operation extends Configurat
         && options.operationCurrent(operation)) {
         options.configurationResource.value = { ...options.configurationResource.value, configuration };
         options.actionState.value = { ...options.actionState.value!, message: "The agent is using your saved settings." };
-        options.onApplied?.(configuration);
+        confirmRestart(configuration);
         return;
       }
       if (Date.now() < until && options.operationCurrent(operation)) {
@@ -80,6 +96,7 @@ export function useAgentInspectorConfigurationApply<Operation extends Configurat
     }
     const operation = options.beginOperation("Restarting the idle agent with its saved configuration…", status.generation);
     if (!operation) return;
+    acceptedRestart = null;
     try {
       const result = await desktopIpc.supervisor.applyAgentConfiguration({
         entryId: snapshot.entryId,
@@ -124,7 +141,10 @@ export function useAgentInspectorConfigurationApply<Operation extends Configurat
         status: result.outcome === "restarting" ? "success" : "error",
         message,
       };
-      if (result.outcome === "restarting") checkRestart(operation, snapshot.expectedConfigurationRevision);
+      if (result.outcome === "restarting") {
+        acceptedRestart = { operation, roomId: projection.roomId, revision: snapshot.expectedConfigurationRevision };
+        checkRestart(operation, snapshot.expectedConfigurationRevision);
+      }
     } catch (error) {
       if (!options.operationIdentityCurrent(operation)) return;
       const refreshed = await options.refreshSupervisorStatus();

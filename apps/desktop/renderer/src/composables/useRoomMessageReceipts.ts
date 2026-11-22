@@ -32,6 +32,7 @@ export interface RoomReceiptOpenRequest {
 }
 
 export interface RoomMessageModelRecoveryAction {
+  blocked?: boolean;
   modelLabel?: string;
   retrying?: boolean;
   retryError?: boolean;

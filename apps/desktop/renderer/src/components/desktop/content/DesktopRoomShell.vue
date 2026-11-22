@@ -139,8 +139,8 @@
       <!-- Requests to join, for room admins: a pill above the composer, where the room asks things of you. -->
       <template #above-composer>
         <RoomAgentLaunchNotice v-if="launchNoticeView && latestRoomLaunch" ref="roomLaunchNotice" :key="latestRoomLaunch.id"
-          :entry="latestRoomLaunch" :view="launchNoticeView"
-          @open="openSavedAgentInAgents" @dismiss="savedRoomLaunch = null" />
+          :entry="latestRoomLaunch" :view="launchNoticeView" :avatar-in-flight="arrivingAgentId === latestRoomLaunch.id"
+          @open="openSavedAgent(latestRoomLaunch.id, true)" @dismiss="savedRoomLaunch = null" />
         <div class="desktop-join-request-banner" data-testid="desktop-join-request-banner">
           <JoinRequestBanner
             v-if="joinRequestBannerAvailable"
@@ -636,7 +636,7 @@ watch(supervisorEntries, entries => {
   else if (savedLaunchSeenInRoster) savedRoomLaunch.value = null;
 });
 
-function openSavedAgent(entryId: string, inAgents = false, initialTab?: "settings"): void {
+function openSavedAgent(entryId: string, inAgents = false, initialTab?: "settings" | "diagnostics"): void {
   const entry = supervisorEntries.value.find(candidate => candidate.id === entryId)
     ?? (savedRoomLaunch.value?.id === entryId ? savedRoomLaunch.value : null);
   if (!entry || entry.roomId !== props.room.identifier) return;
@@ -646,9 +646,6 @@ function openSavedAgent(entryId: string, inAgents = false, initialTab?: "setting
     document.querySelector<HTMLElement>('[data-testid="desktop-room-tab-activity"]')?.focus({ preventScroll: true });
   }
   openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: backgroundCommandOwner(entry.createdBy), initialTab }));
-}
-function openSavedAgentInAgents(): void {
-  if (savedRoomLaunch.value) openSavedAgent(savedRoomLaunch.value.id, true);
 }
 async function presentSavedAgent(entry: DesktopSupervisorManifestEntry, source?: AgentAvatarFlightSource | null): Promise<void> {
   if (entry.roomId !== props.room.identifier) return;

@@ -89,7 +89,7 @@ test('room messages show one event card while retaining other link previews and 
     const app = createSSRApp({
       setup() {
         provider.provideRoomMessageLinkPreviews({
-          contextKey: ref('room'),
+          contextKey: ref('room'), repository: ref('org/repo'), revision: ref(0),
           previewsFor: () => [preview, second].filter(item => tracked.includes(item.url)),
           track: (message: { urls: string[] }) => { tracked = message.urls; return () => {} },
         })

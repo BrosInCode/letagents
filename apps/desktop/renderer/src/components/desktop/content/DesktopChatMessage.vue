@@ -340,9 +340,10 @@
             class="room-message-model-recovery-action"
             type="button"
             :disabled="modelRecovery.disabled || modelRecovery.retrying"
+            :title="modelRecovery.blocked ? 'Resolve the waiting delivery before switching models' : undefined"
             @click.stop="modelRecovery.activate()"
           >
-            {{ modelRecovery.retrying ? "Retrying…" : modelRecovery.modelLabel ? "Retry original message" : "Change model" }}
+            {{ modelRecovery.retrying ? "Retrying…" : modelRecovery.modelLabel ? "Retry original message" : modelRecovery.blocked ? "Review delivery" : "Change model" }}
             <ChevronRight v-if="!modelRecovery.modelLabel" :size="12" aria-hidden="true" />
           </button>
           </template>
