@@ -210,7 +210,7 @@ export const DAEMON_STATE_MIGRATIONS: Readonly<Record<number, SchemaMigration>> 
 
 type SchemaEntry = { type: string; name: string; tblName: string; sql: string };
 
-let cachedReferenceSchema: readonly SchemaEntry[] | null = null;
+const cachedReferenceSchemas = new Map<number, readonly SchemaEntry[]>();
 
 function readSchemaEntries(database: DatabaseSync): SchemaEntry[] {
   const rows = database.prepare(`
@@ -784,16 +784,24 @@ export function runNumberedMigrations(
   }
 }
 
-function referenceSchema(): readonly SchemaEntry[] {
-  if (cachedReferenceSchema) return cachedReferenceSchema;
+function referenceSchemaForVersion(version: number): readonly SchemaEntry[] {
+  const existing = cachedReferenceSchemas.get(version);
+  if (existing) return existing;
+  if (!Number.isSafeInteger(version) || version < 1 || version > SCHEMA_VERSION) {
+    throw new Error(`Unsupported daemon state schema version ${version}.`);
+  }
   const memory = new DatabaseSync(":memory:");
   try {
     memory.exec("PRAGMA foreign_keys = ON");
-    applySchemaCurrent(memory);
+    applySchemaV1(memory);
+    if (version > 1) {
+      runNumberedMigrations(memory, 1, version);
+    }
     memory.exec(`PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID}`);
-    memory.exec(`PRAGMA user_version = ${toSqliteUserVersion(SCHEMA_VERSION)}`);
-    cachedReferenceSchema = readSchemaEntries(memory);
-    return cachedReferenceSchema;
+    memory.exec(`PRAGMA user_version = ${toSqliteUserVersion(version)}`);
+    const entries = readSchemaEntries(memory);
+    cachedReferenceSchemas.set(version, entries);
+    return entries;
   } finally {
     memory.close();
   }
@@ -801,13 +809,17 @@ function referenceSchema(): readonly SchemaEntry[] {
 
 /**
  * Compares the database's full `sqlite_master` shape 1:1 against a fresh
- * in-memory database built from the exact same schema code.
+ * in-memory database built from the exact same schema code for `expectedVersion`
+ * (defaults to the current `SCHEMA_VERSION`).
  */
-export function validateDaemonStateShape(database: DatabaseSync): void {
-  if (assertDaemonStateVersionSupported(database) !== SCHEMA_VERSION) {
-    throw new Error(`Daemon state storage requires schema version ${SCHEMA_VERSION}.`);
+export function validateDaemonStateShapeForVersion(
+  database: DatabaseSync,
+  expectedVersion: number = SCHEMA_VERSION,
+): void {
+  if (assertDaemonStateVersionSupported(database) !== expectedVersion) {
+    throw new Error(`Daemon state storage requires schema version ${expectedVersion}.`);
   }
-  const expected = referenceSchema();
+  const expected = referenceSchemaForVersion(expectedVersion);
   const actual = readSchemaEntries(database);
   const expectedMap = new Map(expected.map((entry) => [`${entry.type}:${entry.name}`, entry]));
   const actualMap = new Map(actual.map((entry) => [`${entry.type}:${entry.name}`, entry]));
@@ -831,6 +843,14 @@ export function validateDaemonStateShape(database: DatabaseSync): void {
   }
 }
 
+/**
+ * Compares the database's full `sqlite_master` shape 1:1 against a fresh
+ * in-memory database built from the exact same schema code.
+ */
+export function validateDaemonStateShape(database: DatabaseSync): void {
+  validateDaemonStateShapeForVersion(database, SCHEMA_VERSION);
+}
+
 /** Owns the single daemon-state schema and plain numbered transitions from v1. */
 export class DaemonStateSchema {
   constructor(readonly schemaInitializationHook?: (database: DatabaseSync) => void) {}
@@ -852,6 +872,7 @@ export class DaemonStateSchema {
         database.exec(`PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID}`);
         database.exec(`PRAGMA user_version = ${toSqliteUserVersion(SCHEMA_VERSION)}`);
       } else if (lockedVersion < SCHEMA_VERSION) {
+        validateDaemonStateShapeForVersion(database, lockedVersion);
         runNumberedMigrations(database, lockedVersion, SCHEMA_VERSION);
       }
       this.validateCurrentShape(database);

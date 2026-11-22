@@ -68,6 +68,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
         BOUNDED_MCP_EFFECT_KIND,
         this.boundedEffects.createExecutorHandler(),
       );
+      this.asyncRpcEffects.registerHandlers(this.effectExecutor);
       this.roomWorkPublisher = RoomWorkPublisher.attach(database, {
         workspaceLocation: (id) => this.durability.getAttempt(id).then(({ workspace_path: path, workspace_identity }) =>
           ({ path, revision: workspace_identity.resolved_revision, remote: recordedRemote(workspace_identity) })),
@@ -140,6 +141,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
       () => this.supervisedDelivery?.fenceAndDrain(),
       () => this.fenceAndDrainRoomMoveReconciliations(),
       () => this.effectExecutor?.fenceAndDrain(),
+      () => this.asyncRpcEffects.dispose(),
       () => this.boundedEffects.drainJournalReservations(),
       () => this.providerExecution?.clearRecoveryTimers(),
       () => this.providerReconciliation?.disposeAll(),
@@ -192,6 +194,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     // persisted before the shared stores are closed for successor attach.
     await this.providerExecution?.drainDispatches();
     try { await this.effectExecutor?.fenceAndDrain(); } catch (error) { failures.push(error); }
+    captureSync(() => this.asyncRpcEffects.dispose());
     await this.boundedEffects.drainJournalReservations();
     captureSync(() => this.providerStreams.detachAll());
     // Complete every local cleanup step even if one fails. The process-level
@@ -247,6 +250,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     await this.providerExecution?.drainDispatches();
     await this.boundedEffects.drainExternalExecutions();
     await this.effectExecutor?.fenceAndDrain();
+    this.asyncRpcEffects.dispose();
     await this.boundedEffects.drainJournalReservations();
     await this.providerTerminals.drainAndClose(() => {
       try { this.providerStreams.detachAll(); } catch (error) { this.handoffCleanupFailures.push(error); }

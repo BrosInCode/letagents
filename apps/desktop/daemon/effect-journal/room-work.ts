@@ -187,7 +187,7 @@ export function pruneTerminalRoomWorkEffectsInTransaction(
 
 /**
  * Atomically retires superseded `prepared` room-work publish effects for a
- * source and admits (or updates) the replacement effect carrying the maximum
+ * source and admits (or reuses) the replacement effect carrying the maximum
  * inherited retry deadline (`next_attempt_at_ms`) inside one fenced write
  * transaction. If replacement admission fails for any reason, SQLite rolls back
  * the entire transaction so the superseded `prepared` row(s) and their retry
@@ -237,7 +237,7 @@ export function supersedeRoomWorkPublishEffects(
       });
     }
 
-    const prepared = prepareEffectInTransaction(
+    return prepareEffectInTransaction(
       database,
       {
         ...input.replacement,
@@ -248,32 +248,5 @@ export function supersedeRoomWorkPublishEffects(
       },
       nowIso,
     );
-
-    if (!prepared.created
-      && prepared.effect.state === "prepared"
-      && inheritedRetryAtMs !== null
-      && (prepared.effect.next_attempt_at_ms === null || prepared.effect.next_attempt_at_ms < inheritedRetryAtMs)) {
-      const updated = database.prepare(`
-        UPDATE ${EFFECT_JOURNAL_TABLE}
-        SET next_attempt_at_ms = ?,
-            epoch = MAX(epoch, ?),
-            updated_at = ?
-        WHERE id = ? AND state = 'prepared' AND epoch <= ?
-      `).run(inheritedRetryAtMs, epoch, nowIso, prepared.effect.id, epoch);
-      if (Number(updated.changes) !== 1) {
-        throw new EffectFenceError(
-          `Room-work replacement effect ${prepared.effect.id} lost its supersession deadline update fence.`,
-        );
-      }
-      const refreshed = getEffect(database, prepared.effect.id);
-      if (!refreshed) {
-        throw new EffectFenceError(
-          `Room-work replacement effect ${prepared.effect.id} disappeared after deadline update.`,
-        );
-      }
-      return { created: false, effect: refreshed };
-    }
-
-    return prepared;
   });
 }

@@ -181,6 +181,11 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
       (provider as { observePermissions: unknown }).observePermissions = observe;
       broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation");
     },
+    /** A new broker whose permission operations are the given ones, for example a real router's. */
+    permissionsThrough(port: Pick<ProviderActionPort, "observePermissions" | "correlatePermissionTurn" | "replyPermission">) {
+      Object.assign(provider, port);
+      broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation");
+    },
     async close() { broker.close(); db.close(); await inbox.close(); await store.close(); await removeTestDirectory(root); } };
 }
 
@@ -222,6 +227,164 @@ test("through the real router: a known permission event with unreadable fields i
     }
   } finally { await f.close(); }
 });
+
+/** The native connection ids of the first and the second snapshot for each change of the native connection. */
+const connectionChanges: Record<string, [string | undefined, string | undefined]> = {
+  "changed connection id": ["socket-1", "socket-2"],
+  "connection id added": [undefined, "socket-1"],
+  "connection id removed": ["socket-1", undefined],
+};
+const snapshotIds = (gap: unknown): [string | undefined, string | undefined] =>
+  typeof gap === "string" && gap in connectionChanges ? connectionChanges[gap]! : ["socket-1", "socket-1"];
+
+test("through the real router: a request that is listed again after the lane was lost can be answered", async () => {
+  const gaps: Record<string, unknown[]> = {
+    "no gap": [], degraded: [{ type: "degraded" }], unavailable: [{ type: "unavailable" }], malformed: [{ type: "snapshot", requests: null }],
+    "changed connection id": [], "connection id added": [], "connection id removed": [],
+  };
+  for (const providerId of ["open-model", "claude-code"] as const) {
+    for (const [gap, events] of Object.entries(gaps)) {
+      const label = `${providerId}, ${gap}`;
+      const f = await fixture(providerId);
+      try {
+        let native!: (event: unknown) => void;
+        let writes = 0;
+        const adapter = { id: providerId,
+          capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: true }),
+          spawn: async (request: { workAttemptId: string }) => ({ workAttemptId: request.workAttemptId, pid: 4311, providerContinuationId: "continuation",
+            providerConnection: f.handle.providerConnection, observedState: () => "working" }),
+          onExit: () => () => undefined, onStream: () => () => undefined,
+          observePermissions: async (_handle: unknown, listener: typeof native) => { native = listener; },
+          correlatePermissionTurn: async () => ({ outcome: "correlated", providerContinuationId: "continuation", providerTurnId: f.state.turnId }),
+          replyPermission: async (_handle: unknown, _request: unknown, _reply: unknown, options: { beforeNativeDispatch(): Promise<void>; assertNativeDispatch?(): void }) => {
+            await options.beforeNativeDispatch();
+            options.assertNativeDispatch?.();
+            writes += 1;
+            return providerId === "open-model" ? { outcome: "processed", nativeScope: "request" } : { outcome: "sent", scope: "request" };
+          } } as unknown as NativeProviderAdapter;
+        const router = new ProviderActionPortRouter({ [providerId]: async () => adapter });
+        const routed = await router.spawn({ provider: providerId, workAttemptId: "routed", roomId: "room", cwd: f.workspace, launchPolicy: {} });
+        f.permissionsThrough({
+          observePermissions: (_handle, listener, signal) => router.observePermissions(routed, listener, signal),
+          correlatePermissionTurn: (_handle, request, options) => router.correlatePermissionTurn(routed, request, options),
+          replyPermission: (_handle, request, reply, options) => router.replyPermission(routed, request, reply, options),
+        });
+        for (let turn = 0; turn < 50 && !native; turn += 1) await new Promise(resolve => setImmediate(resolve));
+        assert.ok(native, label);
+        const snapshot = (connectionId: string | undefined) => ({ type: "snapshot",
+          ...(connectionId === undefined ? {} : { connectionId }), requests: [structuredClone(f.native.native)] });
+        const [first, second] = snapshotIds(gap);
+        native(snapshot(first));
+        for (const event of events) native(event);
+        // The provider lists the same request again: an equal value in a new object.
+        native(snapshot(second));
+        const [candidate] = await f.broker.list("room");
+        assert.ok(candidate?.reference, `${label}: the request is listed as pending`);
+        const result = await f.broker.decide(decision(candidate));
+        assert.equal(writes, 1, `${label}: one native write`);
+        assert.equal(result, providerId === "open-model" ? "resolved" : "decision_sent", label);
+      } finally { await f.close(); }
+    }
+  }
+});
+
+/** A real router over one controlled adapter that counts its native permission writes for each native process. */
+async function routedPermissions(f: Awaited<ReturnType<typeof fixture>>, providerId: "open-model" | "claude-code") {
+  const listeners = new Map<number, (event: unknown) => void>();
+  const writes = new Map<number, number>();
+  let pid = 4311;
+  const adapter = { id: providerId,
+    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: true }),
+    spawn: async (request: { workAttemptId: string }) => {
+      const own = pid++;
+      return { workAttemptId: request.workAttemptId, pid: own, providerContinuationId: `continuation-${own}`,
+        providerConnection: { ...f.handle.providerConnection, processIdentity: `native-birth-${own}` }, observedState: () => "working" };
+    },
+    onExit: () => () => undefined, onStream: () => () => undefined,
+    observePermissions: async (handle: { pid: number }, listener: (event: unknown) => void) => { listeners.set(handle.pid, listener); },
+    replyPermission: async (handle: { pid: number }, _request: unknown, _reply: unknown, dispatch: { beforeNativeDispatch(): Promise<void>; assertNativeDispatch?(): void }) => {
+      await dispatch.beforeNativeDispatch();
+      dispatch.assertNativeDispatch?.();
+      writes.set(handle.pid, (writes.get(handle.pid) ?? 0) + 1);
+      return providerId === "open-model" ? { outcome: "processed", nativeScope: "request" } : { outcome: "sent", scope: "request" };
+    } } as unknown as NativeProviderAdapter;
+  const router = new ProviderActionPortRouter({ [providerId]: async () => adapter });
+  const observe = async (workAttemptId: string) => {
+    const handle = await router.spawn({ provider: providerId, workAttemptId, roomId: "room", cwd: f.workspace, launchPolicy: {} });
+    const seen: ProviderPermissionObservation[] = [];
+    await router.observePermissions(handle, (event) => seen.push(event), new AbortController().signal);
+    const native = listeners.get(handle.pid!)!;
+    assert.ok(native, "the observation reached the adapter");
+    return { handle, native, writes: () => writes.get(handle.pid!) ?? 0,
+      /** The provider lists the fixture's request: an equal value in a new object. The daemon's object for it is returned. */
+      list(connectionId: string | null = "socket-1") {
+        native({ type: "snapshot", ...(connectionId === null ? {} : { connectionId }), requests: [structuredClone(f.native.native)] });
+        return (seen.at(-1) as Extract<ProviderPermissionObservation, { type: "snapshot" }>).requests[0]!;
+      } };
+  };
+  const options = { beforeNativeDispatch: async () => undefined, assertNativeDispatch: () => undefined };
+  const refused = (error: Error & { outcome?: string }) => error.outcome === "not_dispatched";
+  return { router, observe, options, refused };
+}
+
+for (const providerId of ["open-model", "claude-code"] as const) {
+  test(`through the real router: a request of an ended authority is refused and the request of the new authority is answered (${providerId})`, async () => {
+    for (const gap of [{ type: "unavailable" }, { type: "degraded" }, { type: "snapshot", requests: null },
+      "changed connection id", "connection id added", "connection id removed"] as const) {
+      const f = await fixture(providerId);
+      try {
+        const { router, observe, options, refused } = await routedPermissions(f, providerId);
+        const lane = await observe("routed");
+        const [first, second] = snapshotIds(gap);
+        const held = lane.list(first ?? null);
+        if (typeof gap !== "string") {
+          lane.native(gap);
+          await assert.rejects(router.replyPermission(lane.handle, held, "once", options), refused, "no answer while the lane is lost");
+        }
+        const fresh = lane.list(second ?? null);
+        assert.notEqual(fresh, held);
+        await assert.rejects(router.replyPermission(lane.handle, held, "once", options), refused, `${JSON.stringify(gap)}: the older object stays refused`);
+        assert.equal(lane.writes(), 0);
+        await router.replyPermission(lane.handle, fresh, "once", options);
+        assert.equal(lane.writes(), 1, JSON.stringify(gap));
+      } finally { await f.close(); }
+    }
+  });
+
+  test(`through the real router: a request of one runtime is not answered on another runtime (${providerId})`, async () => {
+    const f = await fixture(providerId);
+    try {
+      const { router, observe, options, refused } = await routedPermissions(f, providerId);
+      const a = await observe("runtime-a");
+      const b = await observe("runtime-b");
+      const fromA = a.list();
+      const fromB = b.list();
+      assert.deepEqual(fromA, fromB, "the two runtimes report equal requests");
+      await assert.rejects(router.replyPermission(b.handle, fromA, "once", options), refused);
+      await assert.rejects(router.replyPermission(a.handle, fromB, "once", options), refused);
+      assert.deepEqual([a.writes(), b.writes()], [0, 0]);
+      await router.replyPermission(b.handle, fromB, "once", options);
+      await router.replyPermission(a.handle, fromA, "once", options);
+      assert.deepEqual([a.writes(), b.writes()], [1, 1]);
+    } finally { await f.close(); }
+  });
+
+  test(`through the real router: a request that a snapshot removed is not answered when an equal request comes later (${providerId})`, async () => {
+    const f = await fixture(providerId);
+    try {
+      const { router, observe, options, refused } = await routedPermissions(f, providerId);
+      const lane = await observe("routed");
+      const removed = lane.list();
+      lane.native({ type: "snapshot", connectionId: "socket-1", requests: [] });
+      await assert.rejects(router.replyPermission(lane.handle, removed, "once", options), refused);
+      const reused = lane.list();
+      await assert.rejects(router.replyPermission(lane.handle, removed, "once", options), refused);
+      assert.equal(lane.writes(), 0);
+      await router.replyPermission(lane.handle, reused, "once", options);
+      assert.equal(lane.writes(), 1);
+    } finally { await f.close(); }
+  });
+}
 
 test("idle permission reservation requires a healthy empty exact lane and cannot revive after activity", async () => {
   const f = await fixture();

@@ -22,6 +22,7 @@ import type { NativeExecutionObservation, NativeExecutionSubscription } from "..
 import type { ExecutionCaptureCoordinator } from "../../execution-capture-coordinator.js";
 import type { ProviderCheckpointCoordinator } from "../../provider-checkpoint-coordinator.js";
 import type { ProviderStreamCoordinator } from "../../provider-stream-coordinator.js";
+import { daemonRawSocketRequest, daemonSocketRequest } from "../../../electron/__tests__/daemon-socket-request.js";
 
 export const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt",
@@ -221,25 +222,10 @@ if (WINDOWS_TEST_HELPER && !process.env.LETAGENTS_PROCESS_TREE_HELPER) process.e
  */
 export const REQUEST_ARRIVAL_MS = process.platform === "win32" ? 500 : 10;
 
+export const daemonRawRequest = daemonRawSocketRequest;
+
 export async function daemonRequest(socketPath: string, method: string, params?: unknown, version = DAEMON_PROTOCOL_VERSION): Promise<{ ok: boolean; result?: unknown; error?: string; version: number }> {
-  return new Promise((resolve, reject) => {
-    const client = connectDaemon(socketPath);
-    let received = "";
-    let settled = false;
-    client.setEncoding("utf8");
-    client.once("error", reject);
-    client.once("close", () => {
-      if (!settled) reject(new Error(`Daemon connection closed before '${method}' returned a response.`));
-    });
-    client.on("data", (chunk) => {
-      received += chunk;
-      if (!received.includes("\n")) return;
-      settled = true;
-      client.end();
-      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
-    });
-    client.on("connect", () => client.write(`${JSON.stringify({ version, id: "test", method, params })}\n`));
-  });
+  return daemonSocketRequest(socketPath, method, params, version);
 }
 
 export const TEST_OID = "a".repeat(40);

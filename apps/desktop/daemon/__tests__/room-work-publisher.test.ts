@@ -18,6 +18,7 @@ import {
   listEffectsForAgent,
   roomWorkGroupedNoReplyIdempotencyKey,
   roomWorkPublishIdempotencyKey,
+  supersedeRoomWorkPublishEffects,
 } from "../effect-journal/index.js";
 import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import { parseExecutionFact } from "../execution-protocol.js";
@@ -2116,4 +2117,86 @@ test("superseding a revision transfers its durable retry deadline atomically eve
   assert.equal(f.sent[1]!.revision, 2);
   assert.equal(f.row(1).acknowledgedRevision, 2);
   assert.equal(getEffect(f.db, preparedAfter[0]!.id)?.state, "completed");
+});
+
+test("supersedeRoomWorkPublishEffects reuses an already-prepared replacement without violating effects_immutable_identity", async t => {
+  const f = await fixture(t);
+  const nowIso = "2026-10-02T00:00:05.000Z";
+  const staleDeadline = Date.parse("2026-10-02T00:00:30.000Z");
+  const digest1 = "1".repeat(64);
+  const digest2 = "2".repeat(64);
+  const staleKey = roomWorkPublishIdempotencyKey({ roomId: "room", sourceMessageId: "msg_1", revision: 1, digest: digest1 });
+  const replacementKey = roomWorkPublishIdempotencyKey({ roomId: "room", sourceMessageId: "msg_1", revision: 2, digest: digest2 });
+
+  f.db.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES (?, 'agent', ?, ?, 1, 'prepared', ?, NULL, 1, 1, 1000000, ?, 'publication_unavailable', ?, ?)
+  `).run(
+    "eff-stale-rev1",
+    ROOM_WORK_PUBLISH_EFFECT_KIND,
+    staleKey,
+    JSON.stringify({
+      attempt_id: "attempt-1",
+      digest: digest1,
+      review_page_digest: null,
+      review_page_index: null,
+      review_page_total: null,
+      revision: 1,
+      room_id: "room",
+      source_message_id: "msg_1",
+    }),
+    staleDeadline,
+    nowIso,
+    nowIso,
+  );
+  f.db.prepare(`
+    INSERT INTO effects (
+      id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+      retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+    ) VALUES (?, 'agent', ?, ?, 1, 'prepared', ?, NULL, 1, 0, 1000000, NULL, NULL, ?, ?)
+  `).run(
+    "eff-existing-rev2",
+    ROOM_WORK_PUBLISH_EFFECT_KIND,
+    replacementKey,
+    JSON.stringify({
+      attempt_id: "attempt-1",
+      digest: digest2,
+      review_page_digest: null,
+      review_page_index: null,
+      review_page_total: null,
+      revision: 2,
+      room_id: "room",
+      source_message_id: "msg_1",
+    }),
+    nowIso,
+    nowIso,
+  );
+
+  const result = supersedeRoomWorkPublishEffects(f.db, () => {}, {
+    staleEffectIds: ["eff-stale-rev1"],
+    replacement: {
+      agent_id: "agent",
+      idempotency_key: replacementKey,
+      epoch: 1,
+      payload: {
+        room_id: "room",
+        source_message_id: "msg_1",
+        attempt_id: "attempt-1",
+        revision: 2,
+        digest: digest2,
+        review_page_index: null,
+        review_page_total: null,
+        review_page_digest: null,
+      },
+    },
+    nowIso,
+  });
+
+  assert.equal(result.created, false);
+  assert.equal(result.effect.id, "eff-existing-rev2");
+  assert.equal(result.effect.state, "prepared");
+  assert.equal(getEffect(f.db, "eff-stale-rev1")?.state, "failed");
+  assert.equal(getEffect(f.db, "eff-stale-rev1")?.last_error, "superseded_by_newer_revision");
 });

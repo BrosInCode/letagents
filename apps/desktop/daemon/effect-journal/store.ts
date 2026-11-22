@@ -14,6 +14,7 @@ import {
   boundedMcpEffectTurnHasActiveAuthority,
   rowToBoundedMcpEffect,
 } from "./bounded-mcp.js";
+import { ASYNC_RPC_EFFECT_KINDS } from "./rpc-effects.js";
 import { EFFECT_JOURNAL_TABLE, type EffectState } from "./schema.js";
 import {
   EffectClaimRefusedError,
@@ -942,6 +943,39 @@ export function recoverInterruptedEffectsOnStartup(
           );
           fencedOrphanPreparedIds.push(decoded.effect_id);
         }
+      }
+    }
+
+    // 5. Fence any unstarted generation-scoped async RPC `prepared` rows from
+    //    this or earlier generations: async RPC callers bind to one daemon
+    //    generation and never replay across a daemon restart (and secret-bearing
+    //    invocations like `rpc_install_host_grant` keep their bearer in memory only).
+    const preparedAsyncRpc = database.prepare(`
+      SELECT id FROM ${TABLE}
+      WHERE state = 'prepared'
+        AND epoch <= ?
+        AND kind IN (${ASYNC_RPC_EFFECT_KINDS.map(() => "?").join(", ")})
+      ORDER BY created_at, id
+    `).all(daemonGeneration, ...ASYNC_RPC_EFFECT_KINDS) as Row[];
+    if (preparedAsyncRpc.length > 0) {
+      const failStaleRpcStmt = database.prepare(`
+        UPDATE ${TABLE}
+        SET state = 'failed',
+            epoch = ?,
+            next_attempt_at_ms = NULL,
+            last_error = ?,
+            updated_at = ?
+        WHERE id = ? AND state = 'prepared'
+      `);
+      for (const row of preparedAsyncRpc) {
+        const effectId = String(row.id);
+        failStaleRpcStmt.run(
+          daemonGeneration,
+          "Daemon restarted before this generation-scoped RPC effect started.",
+          nowIso,
+          effectId,
+        );
+        fencedOrphanPreparedIds.push(effectId);
       }
     }
 

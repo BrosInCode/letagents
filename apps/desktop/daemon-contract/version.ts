@@ -13,7 +13,7 @@ export const DAEMON_PROTOCOL_VERSION: number = 3;
 // decides whether the already-running daemon contains this desktop build's
 // code. Every PR that changes daemon or provider-runtime code takes a new
 // value so an updated desktop replaces a running older daemon.
-export const DAEMON_IMPLEMENTATION_VERSION: string = "2.0.284-modern.18";
+export const DAEMON_IMPLEMENTATION_VERSION: string = "2.0.284-modern.17";
 
 /**
  * Maximum number of recent activity events carried in state-watch summaries
@@ -37,12 +37,23 @@ export const DAEMON_RPC_TIMEOUTS = Object.freeze({
   richReadMs: 15_000,
   turnControlMs: 15_000,
   roomMoveCommitMs: 15_000,
-  recoveryMs: 30_000,
   localBoardMs: 30_000,
-  bootstrapIngressMs: 45_000,
-  installHostGrantMs: 60_000,
-  retireMs: 60_000,
   longPollDefaultWaitMs: 25_000,
   longPollMaxWaitMs: 30_000,
   noneMs: 0,
+} as const);
+
+/**
+ * Canonical client-side observation wait budgets (in milliseconds) for async
+ * RPC effects after the control socket returns `{ effect_id, daemon_generation }`
+ * within `DAEMON_RPC_TIMEOUTS.defaultMs`. `0` means no caller deadline
+ * (e.g. `supervisor.apply_agent_configuration`, which legitimately waits for
+ * an active turn to finish before replacing a provider).
+ */
+export const DAEMON_ASYNC_RPC_WAIT_TIMEOUTS = Object.freeze({
+  recoverAgentRuntimeMs: 30_000,
+  bootstrapRoomIngressMs: 45_000,
+  installHostGrantMs: 60_000,
+  retireAgentMs: 60_000,
+  applyAgentConfigurationMs: 0,
 } as const);

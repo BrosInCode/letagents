@@ -62,6 +62,8 @@ export interface SupervisorDaemonLifecycleOptions {
   statePreparationWaitMs?: number;
   requestTimeoutMs?: number;
   turnControlRequestTimeoutMs?: number;
+  /** Optional per-method caller wait deadline overrides for async RPC effects (`0` = no deadline). */
+  asyncRpcWaitTimeoutsMs?: Partial<Record<import("#daemon-contract/index.js").DaemonAsyncRpcMethod, number>>;
   now?: () => Date;
   /**
    * How long a verified-ready status answers `ensureRunning` without a new
