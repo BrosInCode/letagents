@@ -494,6 +494,7 @@ import RoomDeletionDialog from "./components/desktop/content/RoomDeletionDialog.
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
+import { isMembershipRefusal } from "./components/desktop/content/auth-onboarding";
 import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import CompanyInviteDialog from "./components/desktop/company/CompanyInviteDialog.vue";
@@ -763,16 +764,16 @@ async function openOnboardingRoom(id: string, icon?: HTMLElement) {
   if (flight) roomArrival.value = "waiting";
   try {
     const snapshot = await joinRoomCode(id);
-    if (snapshot?.access.status !== "ready") return;
+    if (!snapshot || (snapshot.access.status !== "ready" && !isMembershipRefusal(snapshot.access.status))) return;
     const openedEntryId = activeEntry.value.id;
     const openedRoomId = normalizeRoomIdentifier(snapshot.roomIdentifier);
     await finishFirstRunOnboarding(snapshot, flight && {
-      animateArrival: metadataReady => flight.fly(() => {
+      animateArrival: () => flight.fly(() => {
         const entry = activeEntry.value;
         if (entry.type !== "room") return null;
         return entry.id === openedEntryId || normalizeRoomIdentifier(entry.roomIdentifier) === openedRoomId
           ? entry.id : null;
-      }, metadataReady).finally(clearArrival),
+      }).finally(clearArrival),
     });
   } finally {
     clearArrival();

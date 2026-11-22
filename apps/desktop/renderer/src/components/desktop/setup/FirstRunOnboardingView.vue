@@ -77,10 +77,11 @@
                 data-testid="first-run-theme-continue" @click="continueTheme(!themeSaveFailed)">
                 {{ savingCompanyTheme ? "Saving…" : themeSaveFailed ? "Continue with my theme" : "Continue" }} <ArrowRight aria-hidden="true" />
               </button>
-              <button v-else-if="stage === 'room'" :class="selectedRoomIdentifier ? 'primary-button onboarding-primary' : 'onboarding-quiet'"
-                type="button" :disabled="busy" data-testid="first-run-open-room"
+              <button v-else-if="stage === 'room' && (roomNeedsGithubAccess || !selectedRoomIdentifier)"
+                :class="roomNeedsGithubAccess ? 'primary-button onboarding-primary' : 'onboarding-quiet'"
+                type="button" :disabled="busy" :data-testid="roomNeedsGithubAccess ? 'first-run-room-connect-github' : 'first-run-room-skip'"
                 @click="roomNeedsGithubAccess ? emit('connect-room-auth') : emit('finish')">
-                {{ roomNeedsGithubAccess ? "Connect GitHub" : selectedRoomIdentifier ? "Open room" : "Skip for now" }}
+                {{ roomNeedsGithubAccess ? "Connect GitHub" : "Skip for now" }}
                 <ArrowRight aria-hidden="true" />
               </button>
             </footer>

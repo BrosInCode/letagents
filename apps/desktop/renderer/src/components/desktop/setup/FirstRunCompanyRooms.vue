@@ -9,6 +9,7 @@
           class="company-rooms-row"
           type="button"
           :aria-pressed="isSelected(room)"
+          :data-room-id="room.room_id"
           :disabled="busy"
           :data-testid="`first-run-company-room-${room.room_id}`"
           @click="chooseRoom(room.room_id, $event)"

@@ -22,8 +22,8 @@ let holdSetupCompletion = false;
 let releaseSetupCompletion;
 let holdFirstRoomRead = false;
 let releaseFirstRoomRead;
-let holdWorkspaceMetadata = false;
-let releaseWorkspaceMetadata;
+let holdAppInfo = false;
+let releaseAppInfo;
 let newRoomIdentifier = 'room_q4';
 const organizations = [
   { github_org_id: '42', login: 'Herotel', avatar_url: null, theme_id: null, theme_revision: 0, role: 'owner', setup: false, joined: false },
@@ -103,7 +103,12 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'room.rename': renamedRooms.set(args[0], args[1]); return { identifier: args[0], name: args[0], displayName: args[1] };
     case 'organizations.pendingInvite': return links.getPendingCompanyLink();
     case 'organizations.acknowledgeInvite': links.acknowledgeCompanyLink(args[0]); return;
-    case 'app.getInfo': return { appName: 'LetAgents', appVersion: 'test', platform: 'darwin', versions: process.versions, workspaceRoot: profile, homePath: profile, apiUrl: 'https://letagents.chat' };
+    case 'app.getInfo':
+      if (holdAppInfo) {
+        holdAppInfo = false;
+        await new Promise(resolve => { releaseAppInfo = resolve; });
+      }
+      return { appName: 'LetAgents', appVersion: 'test', platform: 'darwin', versions: process.versions, workspaceRoot: profile, homePath: profile, apiUrl: 'https://letagents.chat' };
     case 'rental.getMarketplace': return { providers: [] };
     case 'room.getSnapshot':
       if (holdFirstRoomRead && args[0] === companyRoom.room_id) {
@@ -112,10 +117,6 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
       }
       return snapshot(args[0] || undefined);
     case 'room.listAccountRooms':
-      if (holdWorkspaceMetadata) {
-        holdWorkspaceMetadata = false;
-        await new Promise(resolve => { releaseWorkspaceMetadata = resolve; });
-      }
       return [];
     case 'room.getSourceStates': return {};
     case 'room.getMyWork': return { cards: [], next_cursor: null, has_connections: false, providers: [] };
@@ -267,6 +268,7 @@ try {
     await waitFor(`!document.querySelector('[data-testid="new-room-modal"]')`);
   }
   const roomChoice = '[data-testid="first-run-company-room-github.com/herotel/app"]';
+  assert.ok(await js(`Boolean(document.querySelector('[data-testid="first-run-room-skip"]:enabled'))`), 'the room picker can be skipped');
   const origin = await js(`document.querySelector('${roomChoice} .company-rooms-icon').getBoundingClientRect().toJSON()`);
   const hasMotion = await js(`!matchMedia('(prefers-reduced-motion: reduce)').matches`);
   await js(`void Object.defineProperty(document, 'startViewTransition', { value: undefined, configurable: true })`);
@@ -286,14 +288,16 @@ try {
     style.textContent = '.desktop-sidebar-frame [data-sidebar-entry-id][data-active="true"] { display: none !important; }';
     document.head.append(style);
   }`);
-  holdWorkspaceMetadata = true;
+  holdAppInfo = true;
   releaseFirstRoomRead();
   await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);
-  for (let attempt = 0; !releaseWorkspaceMetadata && attempt < 100; attempt++) {
+  assert.ok(await js(`!Array.from(document.querySelectorAll('[data-step="room"] footer button')).some(button => button.textContent.trim() === 'Open room')`),
+    'choosing a room does not add a second Open room button while the sidebar loads');
+  for (let attempt = 0; !releaseAppInfo && attempt < 100; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 25));
   }
-  assert.ok(releaseWorkspaceMetadata, 'workspace metadata starts loading while the landing row is missing');
-  await new Promise(resolve => setTimeout(resolve, 2650));
+  assert.ok(releaseAppInfo, 'unrelated app info is pending while the row is missing');
+  await new Promise(resolve => setTimeout(resolve, 200));
   await js(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
   assert.ok(await js(`!document.querySelector('.first-room-flight')`), 'landing waits while the sidebar row is still loading');
   if (hasMotion) {
@@ -308,17 +312,27 @@ try {
   const cancelFlight = process.env.LETAGENTS_SMOKE_CANCEL_ROOM_FLIGHT === '1';
   if (hasMotion) {
     await js(`{
+      const source = document.querySelector('${roomChoice} .company-rooms-icon svg');
+      source.replaceWith(source.cloneNode(true));
       window.roomFlightSamples = [];
+      let originalAnimation;
       const until = performance.now() + 5000;
       function sample(t) {
         const flight = document.querySelector('.first-room-flight');
         if (flight) {
           const target = document.querySelector('[data-first-room-landing]');
           const bounds = flight.getBoundingClientRect();
+          const animation = flight.getAnimations()[0];
+          originalAnimation ??= animation;
           window.roomFlightSamples.push({
-            t, x: bounds.x, y: bounds.y, target: target.getBoundingClientRect().toJSON(),
+            t, x: bounds.x, y: bounds.y, sameAnimation: animation === originalAnimation, target: target.getBoundingClientRect().toJSON(),
             sameRoom: target.closest('[data-sidebar-entry-id]')?.textContent.includes('app'),
           });
+          if (window.roomFlightSamples.length === 3) {
+            const replacement = target.cloneNode(true);
+            replacement.removeAttribute('data-first-room-landing');
+            target.replaceWith(replacement);
+          }
           if (${cancelFlight} && window.roomFlightSamples.length === 5) {
             target.closest('[data-sidebar-entry-id]').style.display = 'none';
           }
@@ -331,14 +345,16 @@ try {
       requestAnimationFrame(sample);
     }`);
   }
-  await js(`document.getElementById('defer-sidebar-room-row').remove()`);
-  releaseWorkspaceMetadata();
+  const rowShownAt = Date.now();
+  const rowShown = await js(`{ document.getElementById('defer-sidebar-room-row').remove(); performance.now(); }`);
   if (hasMotion) {
     await waitFor(`Boolean(window.roomFlightEnded)`);
     const samples = await js(`window.roomFlightSamples`);
-    writeFileSync(join(output, 'room-flight.json'), JSON.stringify({ origin, cancelFlight, samples }, null, 2));
+    writeFileSync(join(output, 'room-flight.json'), JSON.stringify({ origin, rowShown, cancelFlight, samples }, null, 2));
     const first = samples[0], last = samples.at(-1);
     assert.ok(first.sameRoom, 'the flight targets the active room row');
+    assert.ok(first.t - rowShown < 250, 'stable row starts the flight while app info is pending');
+    assert.ok(samples.every(frame => frame.sameAnimation), 'replacing the target preserves the original animation');
     const dx = first.target.x - origin.x, dy = first.target.y - origin.y;
     const length = Math.hypot(dx, dy);
     assert.ok(Math.hypot(first.x - origin.x, first.y - origin.y) < 3, 'takeoff starts at the picker glyph');
@@ -352,7 +368,7 @@ try {
       prior = along;
     }
     if (cancelFlight) {
-      assert.ok(last.t - first.t < 250, 'removing the row promptly ends the flight');
+      assert.equal(samples.length, 5, 'no flight frame follows removal of the target row');
       await js(`document.querySelector('[data-sidebar-entry-id][data-active="true"]').style.removeProperty('display')`);
     } else {
       assert.ok(samples.length > 5 && last.t - first.t > 300, 'natural playback spans multiple frames');
@@ -360,6 +376,9 @@ try {
     }
     await waitFor(`!document.querySelector('.first-room-flight, [data-first-room-landing], [data-testid="desktop-first-run-onboarding"]')`);
   }
+  // The visible row can accept the glyph even if an unrelated refresh stalls.
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, 6000 - (Date.now() - rowShownAt))));
+  releaseAppInfo();
   await js(`delete document.startViewTransition`);
   await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);
   if (runFullscreen) {

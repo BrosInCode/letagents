@@ -26,7 +26,7 @@ interface OpenRoomOptions {
 
 export interface FirstRunWorkspaceReveal {
   dismissModal?: () => void;
-  animateArrival?: (metadataReady: Promise<void>) => Promise<void> | undefined;
+  animateArrival?: () => Promise<void> | undefined;
 }
 
 interface DesktopSetupOnboardingOptions {
@@ -399,9 +399,9 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         // Chat already has the newly opened room. Refresh account and room metadata in the background.
         void options.refresh().catch(() => undefined);
       } else {
-        // The landing row may depend on metadata fetched by this refresh.
+        // Populate the workspace while the picker watches for its actual sidebar row.
         const metadataReady = options.refresh();
-        const arrival = reveal?.animateArrival?.(metadataReady);
+        const arrival = reveal?.animateArrival?.();
         try {
           await Promise.all([metadataReady, arrival]);
         } finally {

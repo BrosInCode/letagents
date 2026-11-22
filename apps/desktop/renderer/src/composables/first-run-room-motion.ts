@@ -1,10 +1,9 @@
 const reducedMotion = "(prefers-reduced-motion: reduce)";
-const landingWait = 2_500;
 const maxLandingWait = 5_000;
 const flightDuration = 420;
 
 type ActiveEntry = () => string | null;
-type Landing = { icon: SVGSVGElement; bounds: DOMRect };
+type Landing = { entryId: string; icon: SVGSVGElement; bounds: DOMRect };
 
 function roomLanding(entryId: string, reveal = false): Landing | undefined {
   const shell = document.querySelector(".desktop-shell");
@@ -23,38 +22,28 @@ function roomLanding(entryId: string, reveal = false): Landing | undefined {
     bounds = icon.getBoundingClientRect();
     if (bounds.bottom > viewport.bottom || bounds.top < viewport.top) return;
   }
-  return bounds.width && bounds.height ? { icon, bounds } : undefined;
+  return bounds.width && bounds.height ? { entryId, icon, bounds } : undefined;
 }
 
 function sameLanding(a: Landing | undefined, b: Landing): boolean {
-  return Boolean(a && a.icon === b.icon && (["left", "top", "width", "height"] as const)
+  return Boolean(a && a.entryId === b.entryId && (["left", "top", "width", "height"] as const)
     .every(side => Math.abs(a.bounds[side] - b.bounds[side]) < .5));
 }
 
-function waitForLanding(activeEntry: ActiveEntry, preference: MediaQueryList, metadataReady: Promise<void>): Promise<Landing | undefined> {
+function waitForLanding(activeEntry: ActiveEntry, preference: MediaQueryList): Promise<Landing | undefined> {
   return new Promise(resolve => {
     let previous: Landing | undefined;
     let frame = 0;
-    let deadline = 0;
-    let finished = false;
-    let ready = false;
     const finish = (landing?: Landing) => {
-      finished = true;
-      clearTimeout(deadline);
       clearTimeout(fallback);
       cancelAnimationFrame(frame);
       resolve(landing);
     };
     const fallback = window.setTimeout(finish, maxLandingWait);
-    const startGracePeriod = () => {
-      ready = true;
-      if (!finished) deadline = window.setTimeout(finish, landingWait);
-    };
-    void metadataReady.then(startGracePeriod, startGracePeriod);
     const check = () => {
       const entryId = activeEntry();
       if (!entryId || preference.matches || document.querySelector('.desktop-shell[data-sidebar-mode="hidden"]')) { finish(); return; }
-      const landing = ready ? roomLanding(entryId, true) : undefined;
+      const landing = roomLanding(entryId, true);
       if (landing && sameLanding(previous, landing)) { finish(landing); return; }
       previous = landing;
       frame = requestAnimationFrame(check);
@@ -65,13 +54,16 @@ function waitForLanding(activeEntry: ActiveEntry, preference: MediaQueryList, me
 
 export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (sidebarEdge: number) => void) {
   const preference = window.matchMedia(reducedMotion);
-  const glyph = icon?.querySelector("svg");
-  if (!icon || !glyph || preference.matches) return;
+  const roomId = icon?.closest<HTMLElement>("[data-room-id]")?.dataset.roomId;
+  if (!icon || !roomId || preference.matches) return;
+  const sourceRow = `.company-rooms-row[data-room-id="${CSS.escape(roomId)}"]`;
   icon.dataset.firstRoomDeparture = "";
 
-  async function fly(activeEntry: ActiveEntry, metadataReady: Promise<void>) {
-    const landing = await waitForLanding(activeEntry, preference, metadataReady);
-    if (!landing || !glyph?.isConnected) return;
+  async function fly(activeEntry: ActiveEntry) {
+    const landing = await waitForLanding(activeEntry, preference);
+    const source = document.querySelector<HTMLElement>(`${sourceRow} .company-rooms-icon`);
+    const glyph = source?.querySelector("svg");
+    if (!landing || !source || !glyph?.checkVisibility({ visibilityProperty: true, opacityProperty: true })) return;
     const origin = glyph.getBoundingClientRect();
     const sidebar = landing.icon.closest(".desktop-sidebar-frame")?.getBoundingClientRect();
     if (!origin.width || !origin.height || !sidebar) return;
@@ -85,7 +77,9 @@ export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (
     });
     flight.append(glyph.cloneNode(true));
     document.body.append(flight);
-    landing.icon.dataset.firstRoomLanding = "";
+    source.dataset.firstRoomDeparture = "";
+    let landingIcon = landing.icon;
+    landingIcon.dataset.firstRoomLanding = "";
     const { left, top, width, height } = landing.bounds;
     const animation = flight.animate([
       { transform: "translate3d(0, 0, 0) scale(1, 1)" },
@@ -97,6 +91,11 @@ export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (
       const entry = activeEntry();
       const current = entry && roomLanding(entry);
       if (!current || !sameLanding(landing, current)) { cancel(); return; }
+      if (current.icon !== landingIcon) {
+        delete landingIcon.dataset.firstRoomLanding;
+        landingIcon = current.icon;
+        landingIcon.dataset.firstRoomLanding = "";
+      }
       frame = requestAnimationFrame(checkTarget);
     }
     frame = requestAnimationFrame(checkTarget);
@@ -108,7 +107,8 @@ export function prepareFirstRoomFlight(icon: HTMLElement | undefined, onStart: (
     finally {
       cancelAnimationFrame(frame);
       preference.removeEventListener("change", cancel);
-      delete landing.icon.dataset.firstRoomLanding;
+      delete landingIcon.dataset.firstRoomLanding;
+      delete source.dataset.firstRoomDeparture;
       flight.remove();
     }
   }

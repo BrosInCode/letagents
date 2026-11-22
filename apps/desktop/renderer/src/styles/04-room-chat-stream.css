@@ -12,6 +12,8 @@
 }
 
 .room-chat-main {
+  --room-composer-width: min(calc(100% - 48px), 960px);
+
   position: relative;
   display: grid;
   background: var(--workspace-canvas, transparent);
