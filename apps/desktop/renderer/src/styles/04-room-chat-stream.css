@@ -259,6 +259,9 @@
 }
 
 .room-message-bubble {
+  --bubble-padding-inline: initial;
+  --bubble-padding-bottom: initial;
+  --bubble-radius: initial;
   position: relative;
   box-sizing: border-box;
   width: fit-content;
@@ -297,7 +300,7 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--message-accent) 8%, transparent);
 }
 
-.room-chat-message.is-ambient-system-message > .room-chat-message-content > .room-message-bubble {
+.room-chat-message.is-ambient-system-message > .room-chat-message-content > .room-message-line > .room-message-bubble {
   margin-top: 3px;
   padding: 0;
   border-radius: 0;
@@ -325,10 +328,6 @@
   margin-left: 0;
 }
 
-.room-chat-message.is-ambient-system-message > .room-chat-message-content > .room-message-meta .room-message-reply-action {
-  display: none;
-}
-
 /*
  * A wake line keeps the ambient rhythm and reads as one sentence: the crescent
  * stands in for the dot, the line already names the agent, and the time
@@ -347,7 +346,7 @@
   column-gap: 8px;
   min-width: 0;
 }
-.room-chat-message.is-wake-notice > .room-chat-message-content > .room-message-bubble {
+.room-chat-message.is-wake-notice > .room-chat-message-content > .room-message-line > .room-message-bubble {
   order: 1;
   min-width: 0;
   margin-top: 0;
@@ -367,7 +366,7 @@
   flex-basis: 100%;
 }
 
-.room-chat-message[data-owner-kind="github"] > .room-chat-message-content > .room-message-bubble {
+.room-chat-message[data-owner-kind="github"] > .room-chat-message-content > .room-message-line > .room-message-bubble {
   width: 100%;
   max-width: 100%;
   padding: 0;
@@ -376,11 +375,11 @@
   box-shadow: none;
 }
 
-.room-chat-message[data-owner-kind="github"] > .room-chat-message-content > .room-message-bubble::before {
+.room-chat-message[data-owner-kind="github"] > .room-chat-message-content > .room-message-line > .room-message-bubble::before {
   display: none;
 }
 
-.desktop-room-shell .room-chat-message.is-ambient-system-message > .room-chat-message-content > .room-message-bubble {
+.desktop-room-shell .room-chat-message.is-ambient-system-message > .room-chat-message-content > .room-message-line > .room-message-bubble {
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -393,131 +392,255 @@
   to { opacity: 1; }
 }
 
-.room-thread-activity-pill {
+.room-chat-controls {
   position: absolute;
-  right: 30px;
-  /* Above the "new messages" pill, which sits above the activity line. */
-  bottom: 80px;
+  inset-inline: max(24px, calc((100% - var(--room-chat-content-max)) / 2));
+  bottom: 44px;
   z-index: 3;
   display: flex;
-  align-items: stretch;
-  max-width: min(360px, calc(100% - 60px));
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.room-thread-activity-pill,
+.room-new-messages-pill {
+  max-width: 100%;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  pointer-events: auto;
+  animation: room-chat-control-in 170ms var(--ease-out);
+}
+
+.room-thread-activity-pill {
+  display: flex;
+  align-items: center;
+  width: min(100%, 320px);
+  gap: 2px;
+  padding: 3px;
   border-radius: 12px;
-  background:
-    var(--bg-elevated);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 14px 38px rgba(0, 0, 0, 0.28);
+}
+
+.room-thread-activity-open,
+.room-thread-activity-dismiss,
+.room-new-messages-pill {
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
 }
 
 .room-thread-activity-open,
 .room-thread-activity-dismiss {
   border: 0;
-  color: var(--text);
-  cursor: pointer;
+  border-radius: 8px;
+  background: transparent;
 }
 
 .room-thread-activity-open {
   display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  flex: 1 1 auto;
   min-width: 0;
-  gap: 2px;
-  padding: 9px 12px;
-  background: transparent;
+  gap: 8px;
+  padding: 7px 8px;
   text-align: left;
 }
 
-.room-thread-activity-open span,
-.room-thread-activity-open small {
+.room-thread-activity-text,
+.room-thread-activity-text small {
   overflow: hidden;
+  font-size: 0.77rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-thread-activity-text strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.room-thread-activity-text small {
+  display: block;
+  margin-top: 2px;
   color: var(--text-tertiary);
-  font-size: 0.68rem;
-  font-weight: 760;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.room-thread-activity-open strong {
-  overflow: hidden;
-  color: #ffffff;
-  font-size: 0.82rem;
-  font-weight: 850;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.room-thread-activity-open:hover {
-  background: rgba(255, 255, 255, 0.045);
+  font-size: 0.72rem;
 }
 
 .room-thread-activity-dismiss {
   display: inline-grid;
+  flex: 0 0 32px;
+  height: 32px;
+  padding: 0;
   place-items: center;
-  width: 34px;
-  min-width: 34px;
-  background: rgba(255, 255, 255, 0.035);
-  color: var(--text-tertiary);
-}
-
-.room-thread-activity-dismiss:hover {
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--text);
-}
-
-.room-thread-activity-dismiss svg {
-  width: 14px;
-  height: 14px;
 }
 
 .room-new-messages-pill {
-  position: absolute;
-  right: 30px;
-  /* Clear of the activity line at the bottom of the list. */
-  bottom: 40px;
-  z-index: 3;
-  padding: 7px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
   border-radius: 999px;
-  background:
-    var(--bg-elevated);
-  color: #ffffff;
   font-size: 0.76rem;
-  font-weight: 900;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 10px 28px rgba(0, 0, 0, 0.28);
-  animation: room-panel-in 180ms var(--ease-out);
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
 }
 
-.room-new-messages-pill:hover {
-  transform: translateY(-1px);
+.room-chat-controls button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .room-chat-controls button:hover {
+    background: color-mix(in srgb, var(--bg-elevated), var(--text) 7%);
+    color: var(--text);
+  }
+}
+
+.room-chat-controls button:active {
+  background: color-mix(in srgb, var(--bg-elevated), var(--text) 11%);
+}
+
+@keyframes room-chat-control-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-thread-activity-pill,
+  .room-new-messages-pill { animation: none; }
+}
+
+.room-message-line {
+  display: contents;
+}
+
+.room-chat-message[data-chat-role] > .room-chat-message-content > .room-message-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.room-message-line > .room-message-bubble {
+  min-width: 0;
+}
+
+/* Messages and file-change summaries share the same edges. */
+:is(.room-chat-message, .room-contribution)[data-chat-role] {
+  --room-message-avatar-space: 40px;
+  --room-message-bubble-max: 30rem;
+}
+
+:is(.room-chat-message, .room-contribution)[data-chat-role]:not(.is-thread-context) {
+  --room-message-bubble-max: 36rem;
 }
 
 /* Direction and color communicate the four people/agent roles without changing message behavior. */
-.room-chat-message[data-chat-role] { grid-template-columns: 32px minmax(0, 1fr); gap: 12px; }
-.room-chat-message[data-chat-role] > .room-chat-message-content { position: relative; width: fit-content; max-width: min(74%, 480px); }
-.room-chat-message[data-chat-role] > .room-chat-message-content > .room-message-bubble {
-  background: linear-gradient(125deg, var(--chat-bubble-start), var(--chat-bubble) 48%, var(--chat-bubble-end));
-  border: 0; color: var(--chat-foreground); box-shadow: none; padding: 11px 16px; border-radius: 22px;
+.room-chat-message[data-chat-role] {
+  --room-message-inset: 14px;
+  --room-message-block-inset: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  container-type: inline-size;
 }
-.room-chat-message:is([data-chat-role="self"], [data-chat-role="own-agent"]) { grid-template-columns: minmax(0, 1fr) 32px; }
-.room-chat-message:is([data-chat-role="self"], [data-chat-role="own-agent"]) > .chat-avatar { grid-column: 2; grid-row: 1; }
-.room-chat-message:is([data-chat-role="self"], [data-chat-role="own-agent"]) > .room-chat-message-content { grid-column: 1; grid-row: 1; justify-self: end; justify-items: end; }
-.room-chat-message:is([data-chat-role="self"], [data-chat-role="own-agent"]) > .room-chat-message-content > .room-message-meta { justify-content: flex-end; }
-.room-chat-message.is-compact-continuation > .chat-avatar { visibility: hidden; }
-.room-chat-message[data-chat-role].has-thread > .room-chat-message-content { width: min(74%, 480px); }
-.room-chat-message[data-chat-role].is-thread-context > .room-chat-message-content { max-width: calc(100% - 12px); }
-@media (hover: hover) and (pointer: fine) {
-  .room-chat-message[data-chat-role] > .room-chat-message-content > .room-message-bubble:hover {
-    background: linear-gradient(var(--chat-hover), var(--chat-hover)), linear-gradient(125deg, var(--chat-bubble-start), var(--chat-bubble) 48%, var(--chat-bubble-end));
+
+.room-chat-message[data-chat-role]:not(.is-thread-context) {
+  --room-message-inset: 18px;
+  --room-message-block-inset: 11px;
+}
+
+.room-chat-message[data-chat-role]:not(.is-thread-context, .is-compact-continuation, .is-ambient-system-message, .is-github-message) {
+  padding-block: 15px;
+}
+
+.room-chat-message[data-chat-role] > .room-chat-message-content > .room-message-line > .room-message-bubble {
+  --bubble-padding-inline: clamp(12px, 4cqi, var(--room-message-inset));
+  --bubble-padding-bottom: var(--room-message-block-inset);
+  --bubble-radius: 14px;
+  max-width: min(var(--room-message-bubble-max), 100%);
+  margin-top: 0;
+  padding: var(--room-message-block-inset) var(--bubble-padding-inline) var(--bubble-padding-bottom);
+  border: 0;
+  border-radius: var(--bubble-radius);
+  background: var(--chat-bubble);
+  color: var(--chat-foreground);
+  box-shadow: none;
+}
+
+.room-chat-message[data-chat-role="self"] > .room-chat-message-content > .room-message-line > .room-message-bubble {
+  background: var(--chat-bubble-start);
+}
+
+.room-chat-message[data-chat-role] > .room-chat-message-content > .room-message-line {
+  margin-top: 5px;
+}
+
+.room-chat-message[data-chat-role].is-compact-continuation > .room-chat-message-content > .room-message-line {
+  margin-top: 3px;
+}
+
+.room-message-line > .chat-avatar {
+  margin-top: 2px;
+}
+
+.room-chat-message.is-compact-continuation .room-message-line > .chat-avatar {
+  visibility: hidden;
+}
+
+.room-chat-message[data-chat-role] > .room-chat-message-content > :is(.room-message-meta, .room-message-outgoing, .message-reactions, .room-message-delivery-receipts) {
+  max-width: min(var(--room-message-bubble-max), calc(100% - var(--room-message-avatar-space)));
+  margin-inline-start: var(--room-message-avatar-space);
+}
+
+.room-chat-message[data-chat-role] > .room-chat-message-content > .room-message-meta {
+  width: auto;
+  gap: 8px;
+}
+
+.room-chat-message[data-chat-role] .room-message-meta-tail {
+  width: auto;
+}
+
+.room-chat-message:is([data-chat-role="self"], [data-chat-role="own-agent"]) > .room-chat-message-content {
+  justify-items: end;
+}
+
+.room-chat-message:is([data-chat-role="self"], [data-chat-role="own-agent"]) > .room-chat-message-content > .room-message-line {
+  flex-direction: row-reverse;
+}
+
+.room-chat-message:is([data-chat-role="self"], [data-chat-role="own-agent"]) > .room-chat-message-content > :is(.room-message-meta, .room-message-outgoing, .message-reactions, .room-message-delivery-receipts) {
+  margin-inline-start: 0;
+  margin-inline-end: var(--room-message-avatar-space);
+}
+
+.room-chat-message:is([data-chat-role="self"], [data-chat-role="own-agent"]) > .room-chat-message-content > .room-message-meta {
+  justify-content: flex-end;
+}
+
+.room-chat-message[data-chat-role].has-thread > .room-chat-message-content > .room-message-line {
+  width: 100%;
+}
+
+.room-chat-message[data-chat-role].has-thread > .room-chat-message-content > .room-message-line > .room-message-bubble {
+  --room-thread-width: min(var(--room-message-bubble-max), calc(100% - var(--room-message-avatar-space)));
+  max-width: var(--room-thread-width);
+}
+
+.room-chat-message[data-chat-role].has-thread > .room-chat-message-content > .room-message-line > .room-message-bubble[data-thread-wide] {
+  min-inline-size: var(--room-thread-width);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .room-chat-message[data-chat-role].has-thread > .room-chat-message-content > .room-message-line > .room-message-bubble {
+    transition: min-inline-size 160ms cubic-bezier(.22, 1, .36, 1);
   }
-}
-@media (max-width: 760px) {
-  .room-chat-message[data-chat-role] { gap: 8px; }
-  .room-chat-message[data-chat-role] > .room-chat-message-content { max-width: calc(100% - 12px); }
-  .room-chat-message[data-chat-role] > .room-chat-message-content > .room-message-bubble { padding: 10px 14px; }
-  .room-chat-message[data-chat-role].has-thread > .room-chat-message-content { width: calc(100% - 12px); }
 }
 
 .room-chat-message.is-github-history { display: block; width: 100%; padding: 0 4px 0 0; border-bottom: 1px solid var(--border); }

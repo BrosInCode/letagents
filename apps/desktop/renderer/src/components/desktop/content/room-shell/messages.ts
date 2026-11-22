@@ -2,6 +2,9 @@ import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 export { encodeRoomPathIdentifier } from "../../../../domain/room-urls";
 import { compareText } from "../../../../domain/formatters";
 
+const roomStatusPrefix = /^\[status\]\s*/i;
+const routineRoomNotice = /^(?:task_\d+ moved to (?:proposed|accepted|assigned):|Focus Room opened(?::| for task_\d+:)|Jev linked pull request #\d+ to \S+ as a suggestion\.)/i;
+
 export function mergeRoomMessages(
   current: readonly DesktopRoomMessage[],
   incoming: readonly DesktopRoomMessage[],
@@ -23,7 +26,15 @@ export function mergeRoomMessages(
 
 export function isHiddenChatMessage(message: DesktopRoomMessage): boolean {
   if (message.agentPromptKind === "auto" && !message.text.trim()) return true;
-  return message.source === "agent" && /^\[status\]\s*/i.test(message.text || "");
+  const status = roomStatusPrefix.exec(message.text || "");
+  if (!status) return false;
+  if (message.source === "agent") return true;
+  // Some system producers omit the source. The Board, Rooms and Board
+  // Manager still show the underlying task, focus room and approval request.
+  return (message.source === null || message.source === "system")
+    && message.sender.toLowerCase() === "letagents"
+    && !message.attachments.length && !message.gif && !message.thread?.replyCount
+    && routineRoomNotice.test(message.text.slice(status[0].length));
 }
 
 interface RoomMessageSortKey {

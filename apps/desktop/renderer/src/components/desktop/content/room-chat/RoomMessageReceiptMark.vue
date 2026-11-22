@@ -9,13 +9,10 @@
     :data-receipt-context="context"
     aria-haspopup="dialog"
     :aria-expanded="isOpen"
-    :aria-label="`${summary!.title}. Show who this message woke`"
+    :aria-label="`Show message info. ${summary!.title}`"
     @click.stop="toggle"
   >
-    <template v-if="summary!.tone === 'nobody'">
-      <span class="room-receipt-mark-glyph" aria-hidden="true"><CircleAlert :size="12" :stroke-width="2" /></span>
-      <span>Nobody woken</span>
-    </template>
+    <span v-if="summary!.tone === 'nobody'" class="room-receipt-mark-glyph" aria-hidden="true"><BellOff :size="13" /></span>
     <template v-else>
       <span class="room-receipt-mark-logos" aria-hidden="true">
         <template v-for="agent in logoAgents" :key="agent.agentKey">
@@ -26,6 +23,7 @@
       <span class="room-receipt-mark-glyph" aria-hidden="true">
         <span v-if="summary!.tone === 'active'" class="room-receipt-dots"><i /><i /><i /></span>
         <CircleAlert v-else-if="summary!.tone === 'attention'" :size="12" :stroke-width="2" />
+        <Clock3 v-else-if="summary!.tone === 'waiting'" :size="12" />
         <Check v-else-if="summary!.tone === 'positive'" :size="12" :stroke-width="2.4" />
         <Minus v-else :size="12" :stroke-width="2.2" />
       </span>
@@ -35,7 +33,7 @@
 </template>
 
 <script setup lang="ts">
-import { Bot, Check, CircleAlert, Minus } from "@lucide/vue";
+import { BellOff, Bot, Check, CircleAlert, Clock3, Minus } from "@lucide/vue";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 
 import { injectRoomMessageReceipts } from "../../../../composables/useRoomMessageReceipts";

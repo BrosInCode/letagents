@@ -291,7 +291,7 @@ export function useRoomShellInspectorSettings(context: unknown) {
     }
   }
 
-  async function saveAgentInspectorSettings(overwrite: boolean): Promise<void> {
+  async function saveAgentInspectorSettings(overwrite: boolean, restart = false): Promise<void> {
     if (!desktopIpc.supervisor?.updateAgentConfiguration) return;
     const projection = app.selectedAgentDetailProjection.value;
     if (!projection) return;
@@ -337,6 +337,7 @@ export function useRoomShellInspectorSettings(context: unknown) {
         return;
       }
       if (result.outcome === "invalid") throw new Error(result.error);
+      const savedCurrentDraft = agentInspectorSettingsDraftVersion === snapshot.draftVersion;
       const settled = settleConfigurationUpdate(
         agentInspectorConfigurationResource.value,
         agentInspectorSettingsDraftVersion,
@@ -347,6 +348,7 @@ export function useRoomShellInspectorSettings(context: unknown) {
       agentInspectorSettingsDraftVersion = settled.draftVersion;
       agentInspectorSettingsConflict.value = false;
       agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "save_settings", status: "success", message: "Settings saved." };
+      if (restart && savedCurrentDraft) await app.applyAgentInspectorSettings();
     } catch (error) {
       if (!agentInspectorOperationIdentityCurrent(operation)) return;
       const refreshed = await app.refreshSupervisorStatus();

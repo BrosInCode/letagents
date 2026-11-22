@@ -38,28 +38,6 @@ function messageDraftKey(namespace: string | null, threadRootId: string | null):
 const emptyDraft = (): MessageDraft => ({ text: "", textRevision: 0, quote: null, selectedQuoteText: null });
 
 /**
- * Capture a room's composer draft for putting text back later. The room's
- * composer may be gone by then (its room was switched away from), so the
- * restore writes the shared draft store; it is dropped if the account changed
- * or drafts were cleared meanwhile, never landing in another account's draft.
- */
-export function captureDesktopMessageDraftRestore(namespace: string | null): (text: string) => boolean {
-  const key = messageDraftKey(namespace, null);
-  const capturedAccount = account.value;
-  const capturedGeneration = generation;
-  return (text) => {
-    if (!text.trim() || account.value !== capturedAccount || generation !== capturedGeneration) return false;
-    const saved = drafts.get(key) ?? emptyDraft();
-    drafts.set(key, {
-      ...saved,
-      text: saved.text.trim() ? `${saved.text}\n\n${text}` : text,
-      textRevision: ++revision,
-    });
-    return true;
-  };
-}
-
-/**
  * Restore a refused outgoing send's text back into its original room or thread
  * composer draft under the current account scope.
  */

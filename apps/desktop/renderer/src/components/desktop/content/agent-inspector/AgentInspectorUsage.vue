@@ -15,6 +15,7 @@
       </div>
     </div>
     <p v-else class="agent-inspector-work-empty">{{ loading ? 'Reading account limits…' : 'Account limits are not available from this provider yet.' }}</p>
+    <p v-if="fable && !hasFableWindow && !loading" class="inspector-usage-stale">Claude hasn’t reported a Fable-specific reading for this session.</p>
     <p v-if="windows.length && accountStale" class="inspector-usage-stale">Last reported limits · waiting for an update</p>
     <div class="agent-inspector-context-heading"><span>Context window</span><span>{{ contextLabel }}</span></div>
     <div class="agent-inspector-context-meter" :data-compacting="isCompacting" :data-compacted="usage?.compaction === 'compacted'"
@@ -33,8 +34,16 @@
 import { formatCompactNumber, formatDate } from "../../../../domain/formatters";
 import { computed } from "vue";
 import type { ProviderUsage } from "../../../../../../shared/provider-usage";
-const props = defineProps<{ usage: ProviderUsage | null; loading: boolean; stale: boolean; compacting: boolean }>();
-const windows = computed(() => props.usage?.account.windows ?? []);
+import { isFableModel, isFableUsageWindow } from "../../../../domain/claude-usage-limit";
+const props = defineProps<{ usage: ProviderUsage | null; model?: string | null; loading: boolean; stale: boolean; compacting: boolean }>();
+const fable = computed(() => isFableModel(props.model));
+const windows = computed(() => {
+  const items = props.usage?.account.windows ?? [];
+  if (!items.some(item => isFableUsageWindow(item.id))) return items;
+  return items.map(item => isFableUsageWindow(item.id) ? { ...item, label: "Fable · Weekly" } : item)
+    .sort((a, b) => fable.value ? Number(isFableUsageWindow(b.id)) - Number(isFableUsageWindow(a.id)) : 0);
+});
+const hasFableWindow = computed(() => windows.value.some(item => isFableUsageWindow(item.id)));
 const isCompacting = computed(() => !props.stale && (props.compacting || props.usage?.compaction === 'compacting'));
 const accountStale = computed(() => props.stale || props.usage?.account.state === 'stale'
   || windows.value.some(window => Date.now() - Date.parse(window.observedAt) > 90_000 || (window.resetsAt && Date.parse(window.resetsAt) <= Date.now())));

@@ -25,6 +25,7 @@ test('all palette and custom colors remain readable across gradient, hover and c
   }
   for (const color of [...chatColorPresets.map(p => p.value), ...custom]) {
     const surface = readableChatSurface(color);
+    assert.ok(chatColorContrast(hex(surface.inlineCodeForeground), hex(surface.inlineCodeBackground)) >= 7, color);
     const foreground = hex(surface.foreground);
     const hover = Number(surface.hover.match(/\/ ([\d.]+)/)![1]);
     for (const stop of [rgb(surface.start), hex(color), rgb(surface.end)]) {
@@ -140,8 +141,7 @@ test('desktop messages use authenticated ownership for the four colors without c
     assert.ok(html.includes(`data-chat-role="${role}"`));
     assert.ok(html.includes(`--chat-bubble:${defaultChatColors[role]}`));
     assert.match(html, /data-thread-message-id="msg_99"/);
-    assert.match(html, /aria-label="Copy message"/);
-    assert.match(html, /aria-label="Jump to root"/);
+    assert.match(html, /aria-label="Message actions"/);
   }
 });
 

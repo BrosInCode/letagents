@@ -42,7 +42,7 @@ export function lastVisibleRoomMessageId(root: Page | null = pageOrNull()): stri
 /**
  * A message the main list does not draw as a row of its own: a thread reply, a
  * GitHub event, or what the room view hides everywhere (`isHiddenChatMessage`:
- * blank automatic prompts and agent `[status]` posts), the same function the
+ * blank automatic prompts and hidden `[status]` posts), the same function the
  * room view uses, so the two rules cannot drift.
  */
 function isSilentInMainList(message: DesktopRoomMessage): boolean {

@@ -120,7 +120,7 @@
       @open-reasoning="openReasoningInspector"
       @open-agent-reasoning-fallback="openAgentReasoningFallback"
       @open-agent-detail="openAgentDetailFromParticipant"
-      @open-agent-correction="openAgentCorrectionFromComposer"
+      @steer-turn="steerComposerTurn"
       @open-add-agent="openAddAgentModal"
       @open-ask-agent="emit('open-ask-agent')"
       @restore-conversation="restoreAgentConversation"
@@ -311,7 +311,8 @@
       :room-identifier="room.identifier"
       :room-display-name="room.displayName || room.name"
       :request-version="selectedAgentDetailRequestVersion"
-      :initial-tab="agentInspectorInitialTab" v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId }"
+      :initial-tab="agentInspectorInitialTab"
+      v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId, workspaceFilePath: selectedAgentDetailTarget?.workspaceFilePath }"
       :reasoning-sessions="reasoningSessions"
       :live-activity-sessions="liveActivitySessions ?? []"
       :correction-request="agentInspectorCorrectionRequest"
@@ -494,14 +495,14 @@ const {
   retireAgentInspectorAgent, purgeAgentInspectorAgent,
 } = Object.assign(app, useRoomShellInspectorSettings(app));
 const {
-  runAgentInspectorAction,
+  runAgentInspectorAction, steerComposerTurn,
 } = Object.assign(app, useRoomShellInspectorRunActions(app));
 
 Object.assign(app, useRoomShellStorageWatcher(app));
 
 const {
   agentInspectorProjections, agentInspectorCorrectionRequest, correctableAgents,
-  openAgentCorrectionOrInspector, openAgentCorrectionFromComposer, selectedAgentDetailProjection,
+  openAgentCorrectionOrInspector, selectedAgentDetailProjection,
   applyAgentInspectorSettings, selectedAgentInspectorActionState,
   selectedAgentInspectorWorkArtifacts, deliveryReceiptsByMessage,
 } = Object.assign(app, useRoomShellAgentProjections(app));
@@ -635,7 +636,7 @@ watch(supervisorEntries, entries => {
   else if (savedLaunchSeenInRoster) savedRoomLaunch.value = null;
 });
 
-function openSavedAgent(entryId: string, inAgents = false): void {
+function openSavedAgent(entryId: string, inAgents = false, initialTab?: "settings"): void {
   const entry = supervisorEntries.value.find(candidate => candidate.id === entryId)
     ?? (savedRoomLaunch.value?.id === entryId ? savedRoomLaunch.value : null);
   if (!entry || entry.roomId !== props.room.identifier) return;
@@ -644,7 +645,7 @@ function openSavedAgent(entryId: string, inAgents = false): void {
     // The chat notice becomes hidden; give the inspector a visible return target.
     document.querySelector<HTMLElement>('[data-testid="desktop-room-tab-activity"]')?.focus({ preventScroll: true });
   }
-  openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: backgroundCommandOwner(entry.createdBy) }));
+  openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: backgroundCommandOwner(entry.createdBy), initialTab }));
 }
 function openSavedAgentInAgents(): void {
   if (savedRoomLaunch.value) openSavedAgent(savedRoomLaunch.value.id, true);
@@ -696,7 +697,7 @@ provide(composerAgentLaunchKey, {
   },
   chooseWorktree: openAgentWorktree,
   agentSaved: (entry, source) => { void presentSavedAgent(entry, source); },
-  openAgent: openSavedAgent,
+  openAgent: (entryId, initialTab) => openSavedAgent(entryId, false, initialTab),
   openFirstMessageWork: (entryId) => { void revealRoomMessage(`desktop-initial-message:${entryId}`); },
 });
 async function loadReleasePlanning() {

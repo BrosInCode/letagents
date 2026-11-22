@@ -3,21 +3,15 @@ import type { DesktopAgentPresence } from "../../../electron/ipc-types";
 import type { ComposerEventPreview } from "../components/desktop/content/room-chat/composer-event-preview";
 import {
   createActivityNoticeQueue,
-  presenceTimelineText,
   type ActivityNotice,
   type CalmNoticeInput,
-  type PresenceTimelineLine,
 } from "../components/desktop/content/room-chat/room-activity";
 import { useAgentPresenceChips } from "./useAgentPresenceChips";
 
-/** Join and leave lines kept in one room's timeline. */
-export const PRESENCE_TIMELINE_LIMIT = 50;
-
 /**
  * The notices on a room's activity line: agents joining and leaving, GitHub
- * updates, and calm lines about the person's own actions. Joins and leaves also leave a quiet line in the timeline,
- * which this window keeps until the room changes. A GitHub update stays off
- * the line while someone is writing, as it did in the composer.
+ * updates, and feedback about the person's own actions. GitHub updates wait
+ * while someone is writing.
  */
 export function useRoomActivity(input: {
   presence: () => readonly DesktopAgentPresence[];
@@ -27,14 +21,12 @@ export function useRoomActivity(input: {
   drafting: () => boolean;
 }): {
   notice: Ref<ActivityNotice | null>;
-  presenceLines: Ref<readonly PresenceTimelineLine[]>;
   pause(): void;
   resume(): void;
   confirmSteer(displayName: string): void;
   calm(notice: CalmNoticeInput): void;
 } {
   const notice = shallowRef<ActivityNotice | null>(null);
-  const presenceLines = shallowRef<readonly PresenceTimelineLine[]>([]);
   let sequence = 0;
   const queue = createActivityNoticeQueue({
     now: () => Date.now(),
@@ -47,10 +39,6 @@ export function useRoomActivity(input: {
     scope: input.scope,
     ready: input.ready,
     onChanges(changes) {
-      const timestamp = new Date().toISOString();
-      presenceLines.value = [...presenceLines.value, ...changes.map((change) => ({
-        id: `presence:${change.id}`, timestamp, kind: change.kind, text: presenceTimelineText(change.kind, change),
-      }))].slice(-PRESENCE_TIMELINE_LIMIT);
       for (const change of changes) {
         queue.push(change.kind === "connected"
           ? { kind: "join", id: `join:${change.id}`, agents: [change] }
@@ -59,10 +47,7 @@ export function useRoomActivity(input: {
     },
   });
 
-  watch(input.scope, () => {
-    queue.clear();
-    presenceLines.value = [];
-  });
+  watch(input.scope, () => queue.clear());
 
   // A GitHub update joins the line once; when its source drops it, it leaves.
   let previewIds = new Set<string>();
@@ -83,7 +68,6 @@ export function useRoomActivity(input: {
 
   return {
     notice,
-    presenceLines,
     pause: () => queue.pause(),
     resume: () => queue.resume(),
     confirmSteer(displayName) {

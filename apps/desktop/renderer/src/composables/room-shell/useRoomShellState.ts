@@ -44,7 +44,7 @@ export function useRoomShellState(context: unknown) {
   const addAgentModalOpen = ref(false);
   const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
   const selectedAgentDetailRequestVersion = ref(0);
-  const agentInspectorInitialTab = ref<"overview" | "live" | "work" | "workspace" | "diagnostics">("overview");
+  const agentInspectorInitialTab = ref<"overview" | "live" | "work" | "workspace" | "settings" | "diagnostics">("overview");
   const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
   const agentInspectorCompact = ref(false);
   // Agent inspector request tokens and timers. Its loaders, the room-change and

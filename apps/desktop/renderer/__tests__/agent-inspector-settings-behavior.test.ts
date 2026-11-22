@@ -21,6 +21,7 @@ interface HostNode {
   value: unknown;
   options: unknown[];
   classList: { add: (...names: string[]) => void; remove: (...names: string[]) => void; contains: (name: string) => boolean };
+  style: { setProperty: (name: string, value: string) => void };
   ownerDocument: typeof testDocument;
   getRootNode: () => typeof testDocument;
   offsetHeight: number;
@@ -84,6 +85,7 @@ function matches(node: HostNode, selector: string): boolean {
   if (selector === "button:not([disabled])") return node.type === "button" && !node.props.disabled;
   if (selector === "button") return node.type === "button";
   if (selector === '[role="menu"]') return node.props.role === "menu";
+  if (selector === '[role="combobox"][aria-expanded="true"]') return node.props.role === "combobox" && node.props["aria-expanded"] === true;
   if (selector === '.workspace-reader-backdrop') return String(node.props.class ?? '').split(' ').includes('workspace-reader-backdrop');
   return false;
 }
@@ -100,6 +102,7 @@ function hostNode(type: string, text = ""): HostNode {
     focusCount: 0,
     value: "",
     options: [],
+    style: { setProperty: () => undefined },
     classList: {
       add: (...names: string[]) => names.forEach((name) => classes.add(name)),
       remove: (...names: string[]) => names.forEach((name) => classes.delete(name)),
@@ -205,6 +208,20 @@ function nodeByProp(root: HostNode, key: string, value: unknown): HostNode {
   return node;
 }
 
+async function openModelPicker(root: HostNode): Promise<HostNode> {
+  const picker = nodeByProp(root, "data-testid", "agent-inspector-model-picker");
+  (picker.props.onClick as () => void)();
+  await nextTick();
+  return nodeByProp(root, "role", "listbox");
+}
+
+function choosePickerOption(list: HostNode, label: string): void {
+  const option = descendants(list).find((node) => node.props.role === "option"
+    && node.children.some((child) => child.type === "span" && textContent(child) === label));
+  assert.ok(option, `expected choice ${label}`);
+  (option.props.onClick as () => void)();
+}
+
 function mount(component: object, props: Record<string, unknown>): { root: HostNode; app: App } {
   const root = hostNode("root");
   const app = renderer.createApp(component, props);
@@ -268,6 +285,7 @@ before(async () => {
   ProviderBadge = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/desktop-chat-message/ProviderBadge.vue")).default;
   AgentInspectorHomeHarness = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorHomeHarness.vue")).default;
   DesktopSwitch = (await vite.ssrLoadModule("/renderer/src/components/desktop/controls/DesktopSwitch.vue")).default;
+  const DesktopModelPicker = (await vite.ssrLoadModule("/renderer/src/components/desktop/controls/DesktopModelPicker.vue")).default;
   agentRoomAudienceKey = (await vite.ssrLoadModule("/renderer/src/domain/agent-home-harness.ts")).agentRoomAudienceKey;
   await Promise.all([
     attachClientRender(AgentInspectorDiagnostics, "components/desktop/content/agent-inspector/AgentInspectorDiagnostics.vue"),
@@ -282,6 +300,7 @@ before(async () => {
     attachClientRender(ProviderBadge, "components/desktop/content/desktop-chat-message/ProviderBadge.vue"),
     attachClientRender(AgentInspectorHomeHarness, "components/desktop/content/agent-inspector/AgentInspectorHomeHarness.vue"),
     attachClientRender(DesktopSwitch, "components/desktop/controls/DesktopSwitch.vue"),
+    attachClientRender(DesktopModelPicker, "components/desktop/controls/DesktopModelPicker.vue"),
   ]);
 });
 
@@ -388,7 +407,7 @@ test("deleting retired history requires the displayed agent name", async () => {
   assert.equal(button.props.disabled, false);
   (button.props.onClick as () => void)();
   assert.equal(purges, 1);
-  assert.match(textContent(mounted.root), /project files will remain/);
+  assert.match(textContent(mounted.root), /project files are still available/);
   mounted.app.unmount();
 });
 
@@ -406,7 +425,7 @@ test("mounted Settings exposes provider-declared permission profiles as a single
 });
 
 test("mounted Settings lets a supervised agent edit its model, Claude Code included, and says when it is fixed", () => {
-  const modelInput = (root: HostNode) => descendants(root).find((node) => node.type === "input" && node.props.placeholder === "Default model");
+  const modelInput = (root: HostNode) => nodeByProp(root, "data-testid", "agent-inspector-model-picker");
   for (const id of ["codex", "claude-code"]) {
     const supervised = mount(AgentInspectorSettings, settingsProps({
       resource: { ...readyResource, configuration: { ...configuration, provider: id } },
@@ -420,6 +439,40 @@ test("mounted Settings lets a supervised agent edit its model, Claude Code inclu
   assert.equal(modelInput(fixed.root)?.props.disabled, true);
   assert.match(textContent(fixed.root), /The model cannot be changed for this agent\./);
   fixed.app.unmount();
+});
+
+test("a saved Fable model can be switched to a catalog Opus option and restarted", async () => {
+  const bridge = window.letagentsDesktop;
+  const models = [{ id: "claude-fable-5-2", label: "Fable 5.2" }, { id: "claude-opus-5-5", label: "Opus 5.5" }];
+  Object.assign(window, { letagentsDesktop: { workers: {
+    listAgentProviderModels: async () => ({ providerId: "claude-code", status: "ready", models }),
+  } } });
+  const saved = { ...configuration, provider: "claude-code" as const, model: models[0]!.id };
+  const resource = Vue.ref<AgentInspectorConfigurationResource>({ ...readyResource, configuration: saved, draft: configurationDraft(saved) });
+  const saves: unknown[][] = [];
+  const view = mount({ setup: () => () => Vue.h(AgentInspectorSettings, settingsProps({
+    resource: resource.value, providers: [{ ...provider, id: "claude-code" }],
+    onPatch: (patch: Partial<NonNullable<AgentInspectorConfigurationResource["draft"]>>) => {
+      resource.value = { ...resource.value, draft: { ...resource.value.draft!, ...patch } };
+    },
+    onSave: (...args: unknown[]) => saves.push(args),
+  })) }, {});
+  try {
+    await Promise.resolve();
+    await nextTick();
+    const picker = nodeByProp(view.root, "data-testid", "agent-inspector-model-picker");
+    assert.equal(textContent(picker), "Fable 5.2");
+    const options = await openModelPicker(view.root);
+    assert.equal(textContent(nodeByProp(options, "aria-selected", true)), "Fable 5.2");
+    choosePickerOption(options, "Opus 5.5");
+    await nextTick();
+    assert.equal(resource.value.draft?.model, "claude-opus-5-5");
+    (buttonByText(view.root, "Save & restart").props.onClick as () => void)();
+    assert.deepEqual(saves, [[false, true]]);
+  } finally {
+    view.app.unmount();
+    Object.assign(window, { letagentsDesktop: bridge });
+  }
 });
 
 test("mounted Settings honors exact supervised profile gates instead of generic provider availability", () => {
@@ -706,16 +759,17 @@ test("mounted room-move recovery survives an inspector remount without an in-mem
 });
 
 test("mounted busy and refreshing settings prevent draft edits and overlapping saves", () => {
-  const busy = mount(AgentInspectorSettings, settingsProps({ busy: true }));
-  for (const control of descendants(busy.root).filter((node) => node.type === "textarea" || node.type === "select")) {
+  const edited = { ...readyResource, draft: { ...readyResource.draft!, model: "next-model" } };
+  const busy = mount(AgentInspectorSettings, settingsProps({ busy: true, resource: edited }));
+  for (const control of descendants(busy.root).filter((node) => node.type === "textarea" || node.props.role === "combobox")) {
     if (Object.hasOwn(control.props, "readonly")) assert.notEqual(control.props.readonly, false);
     else assert.equal(control.props.disabled, true);
   }
-  assert.equal(buttonByText(busy.root, "Saving…").props.disabled, true);
+  assert.equal(buttonByText(busy.root, "Save & restart").props.disabled, true);
   busy.app.unmount();
 
   const refreshing = mount(AgentInspectorSettings, settingsProps({
-    resource: { ...readyResource, status: "refreshing" },
+    resource: { ...edited, status: "refreshing" },
   }));
   assert.equal(buttonByText(refreshing.root, "Save changes").props.disabled, true);
   refreshing.app.unmount();
@@ -731,13 +785,13 @@ test("mounted Settings offers an explicit, non-overlapping restart only for a sa
   }));
   const apply = buttonByText(lagging.root, "Restart to apply changes");
   assert.equal(apply.props.disabled, false);
-  assert.match(textContent(lagging.root), /Save your edits before restarting/);
+  assert.match(textContent(lagging.root), /Restart needed/);
   (apply.props.onClick as () => void)();
   assert.equal(applies, 1);
   lagging.app.unmount();
 
   const current = mount(AgentInspectorSettings, settingsProps());
-  assert.equal(descendants(current.root).some((node) => node.type === "button" && textContent(node) === "Restart to apply changes"), false);
+  assert.equal(descendants(current.root).some((node) => node.props.class === "agent-inspector-settings-footer"), false);
   current.app.unmount();
 
   const pending = mount(AgentInspectorSettings, settingsProps({ resource: laggingResource, applyPending: true }));
@@ -1053,8 +1107,10 @@ test("compact Host gives the overflow menu first Escape ownership before closing
 
   (buttonByText(testBody, "Settings").props.onClick as () => void)();
   await nextTick();
-  const model = descendants(testBody).find((node) => node.type === "input" && node.props.placeholder === "Default model");
-  assert.ok(model, "expected the mounted Settings model field");
+  const options = await openModelPicker(testBody);
+  choosePickerOption(options, "Enter a model ID…");
+  await nextTick();
+  const model = nodeByProp(testBody, "placeholder", "Model ID");
   (model.props.onInput as (event: object) => void)({ target: { value: unsavedModel } });
   await nextTick();
   assert.equal(currentModel, unsavedModel);
@@ -1086,7 +1142,7 @@ test("compact Host gives the overflow menu first Escape ownership before closing
   assert.equal(testDocument.activeElement, trigger);
   assert.ok(nodeByProp(testBody, "role", "dialog"), "Inspector remains open after menu dismissal");
   assert.equal(currentModel, unsavedModel, "menu dismissal must preserve the Settings draft");
-  assert.equal(descendants(testBody).find((node) => node.type === "input" && node.props.placeholder === "Default model")?.props.value, unsavedModel);
+  assert.equal(textContent(nodeByProp(testBody, "data-testid", "agent-inspector-model-picker")), unsavedModel);
 
   const readerBackdrop = hostNode('div');
   readerBackdrop.props.class = 'workspace-reader-backdrop';
@@ -1381,17 +1437,22 @@ test("saved tool permissions refresh with Settings and recover from a failed rev
     await flush();
     assert.equal(reads, 1);
     granted = true;
-    (buttonByText(mounted.root, "Reload").props.onClick as () => void)();
+    (nodeByProp(mounted.root, "aria-label", "Reload settings").props.onClick as () => void)();
     await flush();
-    assert.match(textContent(mounted.root), /Bash · Do App/);
-    await (buttonByText(mounted.root, "Revoke").props.onClick as () => Promise<void>)();
+    assert.equal(textContent(nodeByProp(mounted.root, "id", "agent-inspector-rule-scope-rule")), "Do App");
+    const revoke = () => {
+      const button = nodeByProp(mounted.root, "aria-label", "Revoke permission for Bash");
+      return (button.props.onClick as (event: object) => Promise<void>)({ currentTarget: button });
+    };
+    await revoke();
     await flush();
     const retry = buttonByText(mounted.root, "Retry").props.onClick as () => Promise<void>;
-    const revoking = (buttonByText(mounted.root, "Revoke").props.onClick as () => Promise<void>)();
+    const revoking = revoke();
     await retry(); // A stale Retry callback must not invalidate the in-flight mutation.
     finish(); await revoking; await flush();
     assert.equal(textContent(mounted.root).includes("Revoking…"), false);
-    assert.equal(textContent(mounted.root).includes("Bash · Do App"), false);
+    assert.equal(descendants(mounted.root).some((node) => node.props["aria-label"] === "Revoke permission for Bash"), false);
+    assert.match(textContent(mounted.root), /Permission revoked for Bash/);
     assert.deepEqual(revocations, Array(2).fill({ agentId: "agent_a", ruleId: "rule", revision: 1 }));
   } finally { mounted.app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
@@ -1428,13 +1489,14 @@ test("room workspace permissions distinguish old and current scopes before revoc
   const mounted = mount(AgentInspectorSettings, settingsProps());
   try {
     await new Promise(resolve => setImmediate(resolve)); await nextTick();
-    assert.match(textContent(mounted.root), /Write · Room OLD-ROOM · Workspace aaaaaaaa/);
-    assert.match(textContent(mounted.root), /Write · Room NEW-ROOM · Workspace bbbbbbbb/);
+    assert.match(textContent(mounted.root), /Room OLD-ROOM · Workspace aaaaaaaa/);
+    assert.match(textContent(mounted.root), /Room NEW-ROOM · Workspace bbbbbbbb/);
     assert.doesNotMatch(textContent(mounted.root), /This room workspace/);
-    const current = descendants(mounted.root).find(node => node.type === "span" && node.props.title === "bbbbbbbb-2222 · /new/workspace");
+    const current = nodeByProp(mounted.root, "id", "agent-inspector-rule-scope-current");
     assert.ok(current);
-    const buttons = descendants(mounted.root).filter(node => node.type === "button" && textContent(node) === "Revoke");
-    await (buttons[1]!.props.onClick as () => Promise<void>)();
+    assert.equal(current.props.title, "bbbbbbbb-2222 · /new/workspace");
+    const button = nodeByProp(mounted.root, "aria-describedby", "agent-inspector-rule-scope-current");
+    await (button.props.onClick as (event: object) => Promise<void>)({ currentTarget: button });
     assert.equal((revoked[0] as { ruleId: string }).ruleId, "current");
   } finally { mounted.app.unmount(); }
 });
@@ -1496,7 +1558,7 @@ test("the owner's own setup is a switch that is off by default and saved on its 
     assert.deepEqual(patches, [], "it is not an edit to the draft");
     assert.deepEqual(saves, [], "and it does not ride on Save changes");
     assert.equal(ownSetupSwitch(mounted.root)!.props["aria-checked"], true);
-    assert.match(textContent(mounted.root), /Restart the agent to apply them\./, "it applies at the next start, like any saved change");
+    assert.match(textContent(mounted.root), /Restart needed/, "it applies at the next start, like any saved change");
     const timing = (root: HostNode) => textContent(descendants(root).find((node) => node.props["data-testid"] === "agent-inspector-home-harness-timing")!);
     const restart = (root: HostNode) => descendants(root).find((node) => node.props["data-testid"] === "agent-inspector-home-harness-restart");
     assert.equal(timing(mounted.root), "This agent has not restarted since you turned this on. It gets your setup the next time it starts.");

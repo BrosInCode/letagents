@@ -106,14 +106,13 @@ test("a message shows its reactions, marks the viewer's own, and offers to add o
   assert.match(html, /<button[^>]*class="message-reaction"[^>]*aria-pressed="false"[^>]*aria-label="Ada reacted with 🚀"/);
   assert.equal(html.match(/class="message-reaction-count"[^>]*>(\d+)</g)?.length, 2);
   assert.match(html, /class="message-reaction message-reaction-add"[^>]*aria-expanded="false"/);
-  assert.match(html, /class="room-message-reply-action room-message-react-action"[^>]*aria-expanded="false"/);
-  assert.match(html, /room-message-react-action/, "the hover toolbar offers the picker too");
+  assert.match(html, /class="room-message-meta-action"[^>]*aria-label="Message actions"/);
 });
 
 test("a message without reactions shows no bar but can still be reacted to", async () => {
   const { html } = await render({ message: message() });
   assert.doesNotMatch(html, /class="message-reactions"/);
-  assert.match(html, /room-message-react-action/);
+  assert.match(html, /class="room-message-meta-action"[^>]*aria-label="Message actions"/);
 });
 
 test('a loading GIF-only message hides its fallback prose, while a GIF with ordinary text keeps that text', async () => {
@@ -134,7 +133,7 @@ test("someone who cannot react sees the reactions without any control", async ()
   });
   assert.match(html, /<span[^>]*class="message-reaction"[^>]*role="img"[^>]*aria-label="Ada reacted with 👍"/);
   assert.doesNotMatch(html, /<button[^>]*class="message-reaction/);
-  assert.doesNotMatch(html, /room-message-react-action|message-reaction-add/);
+  assert.doesNotMatch(html, /message-reaction-add/);
 });
 
 test("messages the server sent without reactions, unsent messages and wake notices cannot be reacted to", async () => {
@@ -146,15 +145,15 @@ test("messages the server sent without reactions, unsent messages and wake notic
     message({ source: "wake_rule" }),
   ]) {
     const { html } = await render({ message: candidate });
-    assert.doesNotMatch(html, /room-message-react-action|message-reaction-add/, JSON.stringify(candidate.id));
+    assert.doesNotMatch(html, /message-reaction-add/, JSON.stringify(candidate.id));
   }
 });
 
 test("outside a room that provides reactions the message renders as before", async () => {
   const { html, tracked } = await render({ message: message(), provide: false });
   assert.deepEqual(tracked, []);
-  assert.doesNotMatch(html, /message-reaction|room-message-react-action/);
-  assert.match(html, /aria-label="Copy message"/);
+  assert.doesNotMatch(html, /message-reaction/);
+  assert.match(html, /aria-label="Message actions"/);
 });
 
 

@@ -237,12 +237,12 @@ describe("live card width (styles)", () => {
   }
 
   it("gives a message with a live card the width of the message column, not the width of its text", () => {
-    const content = declarations(".room-chat-message > .room-chat-message-content:has(.room-inline-demo.is-live)");
-    assert.equal(content.width, "min(100%, 814px)");
-    assert.equal(content["max-width"], "none", "the 78% and 68ch limits of a chat message do not apply");
-    const bubble = declarations(".room-chat-message-content:has(.room-inline-demo.is-live) > .room-message-bubble");
-    assert.equal(bubble.width, "100%", "not fit-content: the bubble does not follow its text or the chips");
-    assert.equal(bubble["max-width"], "none");
+    const line = declarations(".room-chat-message-content:has(.room-inline-demo.is-live) > .room-message-line");
+    assert.equal(line.width, "100%");
+    const bubble = declarations(".room-chat-message > .room-chat-message-content:has(.room-inline-demo.is-live) > .room-message-line > .room-message-bubble");
+    assert.equal(bubble.width, "100%", "the bubble does not follow its text or the chips");
+    assert.equal(bubble["flex-basis"], "814px", "the bubble can shrink beside the avatar and actions");
+    assert.equal(bubble["max-width"], "814px");
   });
 
   it("caps the card at what its scale needs, and 814 px is that plus the bubble's padding and border", () => {

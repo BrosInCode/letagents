@@ -9,21 +9,17 @@
  */
 
 /*
- * A live card has one width, whatever its message says or who is viewing: the
- * width of the message column, up to what its scale needs. A message is normally
- * as wide as its text, so the message with a live card is as wide as the column
- * (the demo's 760 px, the card's padding and border, and the bubble's padding
- * and border come to 814 px). The faces and tools shorten inside the card and
- * cannot make it wider; its scale stays the same while people come and go.
+ * Give the demo the available width beside the avatar and actions, up to its
+ * 814 px canvas and padding budget. Text and presence chips follow that width.
  */
-.room-chat-message > .room-chat-message-content:has(.room-inline-demo.is-live) {
-  width: min(100%, 814px);
-  max-width: none;
+.room-chat-message-content:has(.room-inline-demo.is-live) > .room-message-line {
+  width: 100%;
 }
 
-.room-chat-message-content:has(.room-inline-demo.is-live) > .room-message-bubble {
+.room-chat-message > .room-chat-message-content:has(.room-inline-demo.is-live) > .room-message-line > .room-message-bubble {
+  flex-basis: 814px;
   width: 100%;
-  max-width: none;
+  max-width: 814px;
 }
 
 .room-message-attachments:has(.room-inline-demo.is-live) {

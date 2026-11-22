@@ -67,7 +67,7 @@ const idle = project(entry("supervised_idle", "HarborMarsh", false));
 
 test("only an agent with a live, correctable turn is offered as a correction target", () => {
   assert.deepEqual(agentCorrectionTargets([busy, idle]), [
-    { entryId: "supervised_busy", displayName: "LunarAmber", mentionInsertText: "LunarAmber" },
+    { entryId: "supervised_busy", providerTurnId: busy.turnControl!.providerTurnId, displayName: "LunarAmber", mentionInsertText: "LunarAmber" },
   ]);
   // Without live supervisor state the turn cannot be changed, so no shortcut.
   assert.deepEqual(agentCorrectionTargets([project(entry("supervised_busy", "LunarAmber", true), "stale")]), []);
@@ -87,7 +87,7 @@ test("a draft that mentions one busy agent becomes that agent's correction witho
   assert.equal(mentionedCorrectionTarget("@LunarAmber ", targets), null);
   assert.equal(mentionedCorrectionTarget("status update for the room", targets), null);
   // Two busy agents are ambiguous: a correction reaches one private session.
-  const second = { entryId: "supervised_other", displayName: "SparrowReef", mentionInsertText: "SparrowReef" };
+  const second = { entryId: "supervised_other", providerTurnId: "other_turn", displayName: "SparrowReef", mentionInsertText: "SparrowReef" };
   assert.equal(mentionedCorrectionTarget("@LunarAmber @SparrowReef stop", [...targets, second]), null);
 });
 

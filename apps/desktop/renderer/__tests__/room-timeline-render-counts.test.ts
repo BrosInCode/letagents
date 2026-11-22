@@ -246,19 +246,20 @@ function activityEvent(sequence: number) {
 const typed = (text: string) => Array.from({ length: text.length }, (_, index) => text.slice(0, index + 1));
 
 test("typing '@agent …' while that agent works does not redraw the message list per key", async () => {
-  const target = { entryId: "supervised_wren", displayName: "Wren", mentionInsertText: "Wren" };
+  const target = { entryId: "supervised_wren", providerTurnId: "turn_wren", displayName: "Wren", mentionInsertText: "Wren" };
   const run = async (stable: boolean) => {
     const scope = effectScope();
     const draft = scope.run(() => messageDrafts.useDesktopMessageDraft(() => ROOM).text)!;
     draft.value = "";
     const mounted = mountCounting(() => {
-      const composer = ref<{ steerOffer: { target: typeof target } | null } | null>(null);
+      const composer = ref<{ steerActivityTarget: typeof target | null } | null>(null);
       // RoomChatView's mapping (stable), and the mapping before this change (a new object per draft change).
       const steerOffer: ComputedRef<unknown> = stable
-        ? computed((previous) => roomActivity.stableSteerOffer(previous as never, composer.value?.steerOffer?.target))
+        ? computed((previous) => roomActivity.stableSteerOffer(previous as never, composer.value?.steerActivityTarget))
         : computed(() => {
-          const offer = composer.value?.steerOffer;
-          return offer ? { entryId: offer.target.entryId, displayName: offer.target.displayName } : null;
+          void draft.value;
+          const offer = composer.value?.steerActivityTarget;
+          return offer ? { entryId: offer.entryId, displayName: offer.displayName } : null;
         });
       const composerProps = {
         ref: composer, attaching: false, attachmentDrafts: [], attachmentError: null, participants: [],
@@ -374,5 +375,74 @@ test("a start-up clock tick redraws only its own row", async (context) => {
     assert.ok(mounted.updates("RoomAgentStartupRow") > 0, "the start-up row itself keeps time");
   } finally {
     mounted.app.unmount();
+  }
+});
+
+test("the room timeline can cancel a launch while checking sign-in and settings", async () => {
+  const entry = supervisorEntry({ workspacePath: null });
+  const entries = shallowRef([entry]);
+  const stopped = { ...entry, desiredState: "stopped" as const, observedState: "stopped" as const };
+  const calls: string[][] = [];
+  const pending = Promise.withResolvers<DesktopSupervisorManifestEntry>();
+  const previousBridge = window.letagentsDesktop;
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    setDesiredState: (...args: string[]) => { calls.push(args); return pending.promise; },
+  } } });
+  const mounted = mountCounting(() => () => Vue.h(loaded.RoomMessageViewport, viewportProps({ supervisorEntries: entries.value })));
+  const row = () => descendants(mounted.root).find((node) => node.props["data-testid"] === `room-agent-startup-${entry.id}`)!;
+  const cancel = () => descendants(row()).find((node) => node.props["aria-label"] === "Cancel launch for Wren");
+  try {
+    await nextTick();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.ok(descendants(row()).some((node) => node.text === "Checking sign-in and settings…"));
+    const click = cancel()?.props.onClick as (() => void) | undefined;
+    assert.ok(click);
+    click();
+    click();
+    await nextTick();
+    assert.deepEqual(calls, [[entry.id, "stopped"]]);
+    assert.equal(row().props["data-state"], "cancelling");
+    assert.equal(cancel()?.props.disabled, true);
+    pending.resolve(stopped);
+    entries.value = [stopped];
+    await nextTick();
+    assert.equal(row().props["data-state"], "cancelled");
+    assert.equal(cancel(), undefined);
+  } finally {
+    mounted.app.unmount();
+    Object.assign(window, { letagentsDesktop: previousBridge });
+  }
+});
+
+test("cancelling during retry records the stop after the running intent", async () => {
+  const { useAgentStartupRows } = await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/useAgentStartupRows.ts") as
+    typeof import("../src/components/desktop/content/room-chat/useAgentStartupRows");
+  const entry = supervisorEntry({ observedState: "failed", workspacePath: null, lastError: "spawn claude ENOENT" });
+  const restart = Promise.withResolvers<DesktopSupervisorManifestEntry>();
+  const calls: string[] = [];
+  const previousBridge = window.letagentsDesktop;
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    setDesiredState: async (id: string, desiredState: string) => {
+      assert.equal(id, entry.id);
+      calls.push(desiredState);
+      if (desiredState === "running") return restart.promise;
+      throw new Error("Stop request failed");
+    },
+  } } });
+  const scope = effectScope();
+  try {
+    const rows = scope.run(() => useAgentStartupRows({ roomIdentifier: () => ROOM, entries: () => [entry] }))!;
+    const retrying = rows.retry(entry.id);
+    const cancelling = rows.cancel(entry.id);
+    assert.deepEqual(calls, ["running"]);
+    assert.equal(rows.viewFor(entry.id, Date.now())?.status, "cancelling");
+    restart.resolve(entry);
+    await retrying;
+    await assert.rejects(cancelling, /Stop request failed/);
+    assert.deepEqual(calls, ["running", "stopped"]);
+    assert.equal(rows.viewFor(entry.id, Date.now())?.canCancel, true);
+  } finally {
+    scope.stop();
+    Object.assign(window, { letagentsDesktop: previousBridge });
   }
 });

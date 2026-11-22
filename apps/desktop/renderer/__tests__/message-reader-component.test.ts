@@ -127,6 +127,15 @@ test('copy uses original text and reports denied clipboard access instead of fal
   assert.match(vm.copyStatus.value, /Could not copy/);
 });
 
+test('desktop long messages show one inline reading control', async () => {
+  const text = 'A long desktop message. '.repeat(80);
+  const html = await renderToString(createSSRApp({ render: () => h(DesktopLongMessage, {
+    text, html: `<p>${text}</p>`, messageId: 'long-message',
+  }) }));
+  assert.match(html, /data-testid="long-message-toggle"/);
+  assert.doesNotMatch(html, /data-testid="open-reader"/);
+});
+
 test('desktop reader has sender, avatar and room context without duplicate close actions or counters', async t => {
   // Render through the desktop wrapper so its prop forwarding is covered; open the shared reader.
   const originalSetup = LongMessage.setup;

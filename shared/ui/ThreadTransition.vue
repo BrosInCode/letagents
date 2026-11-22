@@ -6,7 +6,7 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, watch } from 'vue'
-const props = defineProps<{ instant?: boolean }>()
+const props = defineProps<{ instant?: boolean; reveal?: boolean }>()
 const emit = defineEmits<{ settled: [] }>()
 
 // An inline disclosure must move the following room messages with it. Measure
@@ -53,7 +53,8 @@ function animate(element: HTMLElement, open: boolean, done: () => void, duration
   if (props.instant || matchMedia('(prefers-reduced-motion: reduce)').matches) { finish(); return }
 
   const fromHeight = open ? previous?.height ?? 0 : element.getBoundingClientRect().height
-  const fromOpacity = open ? previous?.opacity ?? '0' : getComputedStyle(element).opacity
+  const fromOpacity = props.reveal ? '1' : open ? previous?.opacity ?? '0' : getComputedStyle(element).opacity
+  const toOpacity = open || props.reveal ? 1 : 0
   element.style.height = 'auto'
   const toHeight = open ? element.getBoundingClientRect().height : 0
   element.style.overflow = 'hidden'
@@ -61,9 +62,9 @@ function animate(element: HTMLElement, open: boolean, done: () => void, duration
 
   const animation = element.animate([
     { height: `${fromHeight}px`, opacity: fromOpacity },
-    { height: `${toHeight}px`, opacity: open ? '1' : '0' },
+    { height: `${toHeight}px`, opacity: String(toOpacity) },
   ], { duration, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'both' })
-  running = { element, animation, fromHeight, toHeight, fromOpacity: Number(fromOpacity), toOpacity: open ? 1 : 0, finish }
+  running = { element, animation, fromHeight, toHeight, fromOpacity: Number(fromOpacity), toOpacity, finish }
   // Replies can arrive while an empty/loading thread is still opening.
   // Observe its content, not the animated wrapper, and continue from the
   // current frame if that content grows or shrinks.

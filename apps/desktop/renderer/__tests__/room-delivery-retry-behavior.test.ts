@@ -1697,12 +1697,10 @@ test("viewport bounds scroll geometry work and preserves reading offsets through
     await nextTick();
     assert.equal(list.scrollTop, beforePrepend + 130, "KeepAlive restores the message offset after reactivation reflow");
 
-    let smoothScroll: ScrollToOptions | undefined;
-    list.scrollTo = options => { smoothScroll = options; };
     const latest = descendants(root).find(node => node.props["data-testid"] === "desktop-new-messages-pill")!;
     (latest.props.onClick as () => void)();
-    assert.deepEqual(smoothScroll, { top: list.scrollHeight, behavior: "smooth" });
-    // The browser produces intermediate scroll events during smooth follow.
+    await nextTick();
+    assert.equal(list.scrollTop, list.scrollHeight, "the latest action goes straight to the bottom");
     list.scrollTop = list.scrollHeight - list.clientHeight;
     scroll();
     props.messages = [...props.messages, { ...message("message_z"), timestamp: "2026-07-20T12:01:00.000Z" }];
@@ -1907,7 +1905,7 @@ test("outgoing row exposes sending, uncertain retry, and confirmed state without
     const sending = outbox.retryDesktopOutgoingMessage(id);
     await nextTick();
     assert.ok(descendants(root).some(node => node.text.includes("Sending…")));
-    assert.equal(buttons(root).some(node => node.props["aria-label"] === "Quote reply"), false);
+    assert.equal(buttons(root).some(node => node.props["aria-label"] === "Message actions"), false);
     reject(new Error("Timed out")); await sending; await nextTick();
     assert.ok(descendants(root).some(node => node.text.includes("Delivery not confirmed")));
     const retry = (buttonByText(root, "Retry safely").props.onClick as () => Promise<void>)();
@@ -1915,7 +1913,7 @@ test("outgoing row exposes sending, uncertain retry, and confirmed state without
     assert.deepEqual(calls[0], calls[1]);
     resolve({ message: { ...message("msg_2"), clientMessageId: id } }); await retry; await nextTick();
     assert.equal(descendants(root).some(node => node.props.class === "room-message-outgoing"), false);
-    assert.equal(buttons(root).some(node => node.props["aria-label"] === "Quote reply"), true);
+    assert.equal(buttons(root).some(node => node.props["aria-label"] === "Message actions"), true);
   } finally { app.unmount(); outbox.clearDesktopMessageOutbox(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 

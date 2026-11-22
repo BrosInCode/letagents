@@ -1,14 +1,14 @@
 <template>
-  <div class="long-message" data-testid="long-message">
+  <div class="long-message" data-testid="long-message" :data-long-message="isLong ? '' : undefined">
     <div
       :id="contentId"
       class="long-message-content"
-      :class="{ collapsed: isLong && !expanded }"
+      :class="{ collapsed: isLong && !expanded && previewHtml === null }"
     >
-      <div :class="contentClass" v-html="html" @click="handleInlineReferenceClick" />
+      <div :class="contentClass" v-html="previewHtml ?? html" @click="handleInlineReferenceClick" />
     </div>
 
-    <div v-if="isLong" class="long-message-actions">
+    <div v-if="isLong" class="long-message-actions" :class="{ 'inline-only': !showReaderButton }">
       <button
         class="long-message-button"
         type="button"
@@ -18,8 +18,11 @@
         @click="expanded = !expanded"
       >
         {{ expanded ? 'Show less' : 'Read more' }}
+        <svg class="long-message-chevron" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
       </button>
-      <button class="long-message-button" type="button" data-testid="open-reader" @click="openReader">
+      <button v-if="showReaderButton" class="long-message-button" type="button" data-testid="open-reader" @click="openReader">
         Open reader
       </button>
     </div>
@@ -50,6 +53,9 @@ const props = withDefaults(defineProps<{
   roomIdentifier?: string | null
   /** Class on the element that holds the rendered HTML; each app styles its own. */
   contentClass?: string
+  showReaderButton?: boolean
+  /** Optionally replace the height-clipped preview with an excerpt of the rendered HTML. */
+  excerpt?: (html: string) => string | null
   /**
    * App-specific click handling, run first. Return an action to claim the click:
    * the component then closes the reader and runs the action.
@@ -60,6 +66,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   roomIdentifier: null,
   contentClass: 'long-message-html',
+  showReaderButton: true,
   collapseAfterChars: 1400,
   collapseAfterLines: 18,
 })
@@ -77,12 +84,14 @@ const lineCount = computed(() => props.text ? props.text.split(/\r\n|\r|\n/).len
 const isLong = computed(() =>
   props.text.length > props.collapseAfterChars || lineCount.value > props.collapseAfterLines,
 )
+const previewHtml = computed(() => isLong.value && !expanded.value ? props.excerpt?.(props.html) ?? null : null)
 const safeMessageId = computed(() => props.messageId.replace(/[^A-Za-z0-9_-]/g, '-') || 'message')
 const contentId = computed(() => `message-content-${safeMessageId.value}`)
 
 function openReader(): void {
   readerOpen.value = true
 }
+defineExpose({ isLong, openReader })
 
 function closeReader(): void {
   readerOpen.value = false
@@ -158,8 +167,10 @@ function handleInlineReferenceClick(event: MouseEvent): void {
   font-weight: 500;
 }
 
-.long-message-button:first-child::after { content: '⌄'; font-size: 15px; }
-.long-message-button[aria-expanded="true"]::after { transform: rotate(180deg); }
+.long-message-actions.inline-only { margin-top: 6px; }
+.inline-only .long-message-button { color: color-mix(in srgb, var(--chat-foreground, var(--text)) 78%, transparent); }
+.long-message-chevron { flex: none; }
+.long-message-button[aria-expanded="true"] .long-message-chevron { transform: rotate(180deg); }
 .long-message-button:hover { text-decoration: underline; text-underline-offset: 3px; }
 .long-message-button:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 3px; }
 

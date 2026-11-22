@@ -13,7 +13,10 @@ const claudeAliasLabels: Record<string, string> = {
 
 /** A readable name for a saved model id the model list no longer shows; any other id as it is. */
 export function savedModelLabel(providerId: string | null | undefined, model: string): string {
-  return (providerId === "claude-code" || providerId === "claude") && Object.hasOwn(claudeAliasLabels, model)
-    ? claudeAliasLabels[model]!
-    : model;
+  if (providerId !== "claude-code" && providerId !== "claude") return model;
+  if (Object.hasOwn(claudeAliasLabels, model)) return claudeAliasLabels[model]!;
+  const match = /^claude-(fable|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(\[1m\])?$/.exec(model);
+  if (!match) return model;
+  const [, family, major, minor, longContext] = match;
+  return `${family![0]!.toUpperCase()}${family!.slice(1)} ${major}${minor ? `.${minor}` : ""}${longContext ? " 1M" : ""}`;
 }

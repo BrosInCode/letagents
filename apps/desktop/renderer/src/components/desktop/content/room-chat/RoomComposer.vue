@@ -239,9 +239,9 @@
       </button>
       <p v-if="slash.hint.value" role="status">{{ slash.hint.value }}</p>
     </div>
-    <div v-if="sendError" class="desktop-composer-footer">
-      <p class="desktop-composer-error" data-testid="desktop-composer-error">
-        {{ sendError }}
+    <div v-if="steerError || sendError" class="desktop-composer-footer">
+      <p class="desktop-composer-error" role="status" data-testid="desktop-composer-error">
+        {{ steerError || sendError }}
       </p>
     </div>
   </form>
@@ -292,8 +292,9 @@ import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../..
 import {
   mentionedCorrectionTarget,
   type AgentCorrectionTarget,
-  type ComposerCorrectionHandoff,
+  type ComposerSteerIntent,
 } from "../../../../domain/agent-inspector";
+import type { ActivitySteerOffer } from "./room-activity";
 
 export interface RoomComposerReplyTarget {
   id: string;
@@ -344,10 +345,13 @@ const emit = defineEmits<{
   "stop-agent-turn": [agentId: string, approvalId: string];
   /** A calm line for the room's activity line: "Denied 3 requests from Juniper". */
   "approval-notice": [notice: CalmNoticeInput];
-  "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
+  "steer-turn": [intent: ComposerSteerIntent, complete: (error: string | null) => void];
 }>();
 
 const { text: draft, captureSubmittedDraft } = useDesktopMessageDraft(() => props.messageNamespace || props.roomIdentifier);
+const pendingSteer = shallowRef<ActivitySteerOffer | null>(null);
+const steerError = ref<string | null>(null);
+watch([draft, () => props.messageNamespace], () => { steerError.value = null; });
 const typing = useRoomTyping(computed(() => props.roomIdentifier ?? ""));
 watch(draft, value => { if (!value) typing.stop(); });
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
@@ -618,7 +622,7 @@ function dismissAgentCoach(dontShowAgain: boolean): void {
   if (dontShowAgain) rememberCoachHintDismissed();
 }
 
-const canSend = computed(() => Boolean(!props.roomLoading && props.roomIdentifier && (agentChip.value
+const canSend = computed(() => Boolean(!props.roomLoading && !pendingSteer.value && props.roomIdentifier && (agentChip.value
   ? draft.value.trim() && !agentLaunching.value
   : draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0 || props.pendingAttachmentDrafts.length > 0)));
 // Enter while files upload sends the message as soon as they finish, with them.
@@ -640,12 +644,13 @@ const sendLabel = computed(() => {
 });
 // Steering is plain text for one agent's private session, so a reply,
 // a quote or attachments keep the message a room message. The offer shows on
-// the room's activity line: "<agent> is mid-turn · your message waits [Steer]".
+// the room's activity line, alongside the normal room send action.
 const steerOffer = computed(() =>
-  props.correctableAgents?.length && !props.replyTo && !selectedGif.value
+  props.correctableAgents?.length && !props.roomLoading && !agentChip.value && !props.replyTo && !selectedGif.value
     && props.attachmentDrafts.length === 0 && props.pendingAttachmentDrafts.length === 0
     ? mentionedCorrectionTarget(draft.value, props.correctableAgents)
     : null);
+const steerActivityTarget = computed(() => pendingSteer.value ?? steerOffer.value?.target);
 const roomHandle = computed(() => {
   const label = (props.roomLabel || props.roomIdentifier || "").trim().replace(/^#/, "");
   return label ? `#${label}` : "room";
@@ -867,25 +872,28 @@ function sendRoomMessage(): void {
   );
 }
 
-/**
- * Steer: hand the draft to the Inspector's correction box for the agent's
- * live turn; it leaves the composer only once that opened. `done` hears
- * whether it opened, so the activity line can confirm it.
- */
-function steer(done?: (opened: boolean, displayName: string) => void): void {
+function steer(done: (displayName: string) => void): void {
   const offer = steerOffer.value;
-  if (!offer || props.sending) return;
-  const handedOver = draft.value;
-  const handoff = {
+  const roomId = props.roomIdentifier;
+  if (!offer || !roomId || props.sending || pendingSteer.value) return;
+  const namespace = props.messageNamespace;
+  const clearSubmittedText = captureSubmittedDraft();
+  const pending = { entryId: offer.target.entryId, displayName: offer.target.displayName, pending: true };
+  pendingSteer.value = pending;
+  steerError.value = null;
+  focusInput();
+  emit("steer-turn", {
     entryId: offer.target.entryId,
+    roomId,
+    providerTurnId: offer.target.providerTurnId,
     text: offer.text,
-    draft: handedOver,
-    draftNamespace: props.messageNamespace || props.roomIdentifier,
-  };
-  emit("open-agent-correction", handoff, (opened) => {
-    // Opening may have restored an earlier, abandoned hand-over; keep that.
-    if (opened) draft.value = draft.value.replace(handedOver, "").trim();
-    done?.(opened, offer.target.displayName);
+  }, (error) => {
+    if (pendingSteer.value !== pending) return;
+    pendingSteer.value = null;
+    if (!error) clearSubmittedText();
+    if (roomId !== props.roomIdentifier || namespace !== props.messageNamespace) return;
+    steerError.value = error;
+    if (!error) done(pending.displayName);
   });
 }
 
@@ -1046,5 +1054,5 @@ function focusWithMention(mentionText: string): void {
   });
 }
 
-defineExpose({ focusWithMention, drafting, steerOffer, steer });
+defineExpose({ focusWithMention, drafting, steerActivityTarget, steer });
 </script>

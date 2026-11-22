@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
+import type { DesktopParticipantSummary, DesktopRoomAgentWork, DesktopRoomMessage, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
 import {
   isCurrentAgentInspectorOperation,
   isCurrentAgentInspectorSupervisorUpdate,
@@ -492,6 +492,42 @@ test("contribution targets resolve a local supervisor by its projected key witho
   assert.equal(selection.kind === "supervised" && selection.supervisorEntryId, "supervised_garden");
   assert.equal(selection.workspaceSourceMessageId, "msg_1");
   assert.equal(resolveAgentInspectorSelection(resource("ready", [entry({ agentKey: null })]), request, "room_a").kind, "external");
+});
+
+test("workspace cards show a verified agent name or Agent, including historical contributions", async () => {
+  const { workspaceAgentTarget } = await import("../src/domain/room-contributions");
+  const workerId = "worker-1ef2ae46d42641c5a0d50eecba76178f";
+  const agentKey = "owner/" + workerId;
+  const work: DesktopRoomAgentWork = {
+    attemptId: "attempt_1", roomId: "room_a", sourceMessageId: "msg_1", agentKey, revision: 1,
+    summary: { version: 1, availability: "cleared" }, updatedAt: "2026-09-08T00:00:00Z",
+  };
+  const publisher: Pick<DesktopRoomMessage, "id" | "sender" | "actorLabel" | "agentIdentity"> = {
+    id: "msg_1", sender: "GardenSignal | Ada's agent | Codex", actorLabel: null,
+    agentIdentity: {
+      agentKey, displayName: "GardenSignal", name: null, ownerLabel: "Ada",
+      ownerAttribution: null, ideLabel: "Codex", actorLabel: null, agentSessionId: null,
+    },
+  };
+  const participant: DesktopParticipantSummary = {
+    kind: "agent", participantKey: "agent:" + agentKey, agentKey, displayName: "CopperVale", actorLabel: null,
+    githubLogin: null, ownerLabel: null, ideLabel: null, hiddenAt: null, activityState: "offline",
+    lastSeenAt: work.updatedAt, lastRoomActivityAt: null, lastLiveHeartbeatAt: null, sourceFlags: ["messages"],
+  };
+  const rawParticipant = { ...participant, displayName: workerId, actorLabel: workerId };
+
+  assert.equal(workspaceAgentTarget(work, [participant], publisher).displayName, "CopperVale");
+  assert.equal(workspaceAgentTarget(work, [rawParticipant], publisher).displayName, "GardenSignal");
+  assert.equal(workspaceAgentTarget(work, [], publisher).displayName, "GardenSignal");
+  assert.equal(workspaceAgentTarget(work, [], { ...publisher, id: "msg_2" }).displayName, "Agent");
+  assert.equal(workspaceAgentTarget(work, [], {
+    ...publisher, agentIdentity: { ...publisher.agentIdentity!, agentKey: "owner/other-agent" },
+  }).displayName, "Agent");
+  const unresolved = workspaceAgentTarget(work, [rawParticipant]);
+  assert.equal(unresolved.displayName, "Agent");
+  assert.equal(unresolved.sender, "Agent");
+  assert.equal(unresolved.agentKey, agentKey);
+  assert.equal(unresolved.workspaceSourceMessageId, work.sourceMessageId);
 });
 
 test("workIndicatorAgentTarget projects work indicators to an agent modal target with initialTab: live and no workSourceMessageId", () => {

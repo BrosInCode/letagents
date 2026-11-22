@@ -1,5 +1,5 @@
 <template>
-  <section class="agent-inspector-permissions agent-inspector-home-harness" aria-labelledby="agent-inspector-home-harness-title">
+  <section class="agent-inspector-settings-switch-row" aria-labelledby="agent-inspector-home-harness-title">
     <div class="agent-inspector-home-harness-row">
       <strong id="agent-inspector-home-harness-title">{{ homeHarnessTitle(configuration.provider) }}</strong>
       <DesktopSwitch
@@ -15,18 +15,22 @@
     </div>
     <p v-if="unavailableReason" class="agent-inspector-settings-note">{{ unavailableReason }}</p>
     <template v-else>
-      <p id="agent-inspector-home-harness-description" class="agent-inspector-settings-note">
-        {{ homeHarnessDescription(configuration.provider, configuration.permissionProfileId) }}
-        {{ homeHarnessApprovalNote(configuration.provider, configuration.permissionProfileId) }}
-        {{ homeHarnessLimitNote(configuration.provider) }}
-      </p>
+      <p id="agent-inspector-home-harness-description" class="agent-inspector-settings-note">Your tools and hooks can act with your account’s permissions.</p>
       <p
         class="agent-inspector-settings-note"
         :data-tone="roomWarning ? 'warning' : undefined"
         :role="roomWarning ? 'alert' : undefined"
         data-testid="agent-inspector-home-harness-room"
       >{{ homeHarnessRoomNote(audience) }}</p>
-      <p class="agent-inspector-settings-note" data-testid="agent-inspector-home-harness-timing">{{ homeHarnessTimingNote(state) }}</p>
+      <details class="agent-inspector-settings-disclosure">
+        <summary><span>What this grants</span><ChevronRight :size="15" aria-hidden="true" /></summary>
+        <div class="agent-inspector-disclosure-copy">
+          <p>{{ homeHarnessDescription(configuration.provider, configuration.permissionProfileId) }}</p>
+          <p>{{ homeHarnessApprovalNote(configuration.provider, configuration.permissionProfileId) }} {{ homeHarnessLimitNote(configuration.provider) }}</p>
+          <p data-testid="agent-inspector-home-harness-timing">{{ homeHarnessTimingNote(state) }}</p>
+          <p v-if="savedRulesNote" data-testid="agent-inspector-home-harness-rules">{{ savedRulesNote }}</p>
+        </div>
+      </details>
       <p
         v-if="restartNote"
         class="agent-inspector-settings-note"
@@ -34,7 +38,6 @@
         role="status"
         data-testid="agent-inspector-home-harness-restart"
       >{{ restartNote.text }}</p>
-      <p v-if="savedRulesNote" class="agent-inspector-settings-note" data-testid="agent-inspector-home-harness-rules">{{ savedRulesNote }}</p>
       <p v-if="unsavedEdits" class="agent-inspector-settings-note">Save or reload your other changes before changing this.</p>
       <p class="sr-only" role="status">{{ saving ? "Saving…" : "" }}</p>
       <p v-if="error" class="agent-inspector-settings-error" role="alert">{{ error }}</p>
@@ -44,6 +47,7 @@
 
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
+import { ChevronRight } from "@lucide/vue";
 import type { DesktopSupervisorAgentConfiguration } from "../../../../../../electron/ipc-types";
 import {
   agentRoomAudienceKey,
