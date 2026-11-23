@@ -213,8 +213,13 @@ async function readEnvelope(path: string): Promise<{ header: Header; sha256: str
 }
 
 /** Splits decrypted bytes into lines as bytes, so no line but the longest row is ever one string. */
-function lineSplitter(onLine: (line: string) => void): { push(bytes: Buffer): void; end(): void } {
+function lineSplitter(onLine: (line: string) => void): { push(bytes: Buffer): void; end(): void; wipe(): void } {
+  // Plaintext held between pieces is zeroed on every path, as the whole plaintext was before.
   let pending: Buffer[] = [];
+  const wipe = () => {
+    for (const part of pending) part.fill(0);
+    pending = [];
+  };
   const emit = (parts: Buffer[]) => {
     const line = Buffer.concat(parts);
     try { onLine(line.toString("utf8")); } finally { line.fill(0); }
@@ -223,19 +228,20 @@ function lineSplitter(onLine: (line: string) => void): { push(bytes: Buffer): vo
     push(bytes) {
       let start = 0;
       for (let newline = bytes.indexOf(10); newline >= 0; newline = bytes.indexOf(10, start)) {
-        emit([...pending, bytes.subarray(start, newline)]);
-        for (const part of pending) part.fill(0);
-        pending = [];
+        try { emit([...pending, bytes.subarray(start, newline)]); } finally { wipe(); }
         start = newline + 1;
       }
       if (start < bytes.length) pending.push(Buffer.from(bytes.subarray(start)));
     },
     end() {
-      // Trailing whitespace after the last record is ignored, as before.
-      if (pending.length && Buffer.concat(pending).toString("utf8").trim()) emit(pending);
-      for (const part of pending) part.fill(0);
-      pending = [];
+      try {
+        if (!pending.length) return;
+        const rest = Buffer.concat(pending);
+        // Trailing whitespace after the last record is ignored, as before.
+        try { if (rest.toString("utf8").trim()) emit([rest]); } finally { rest.fill(0); }
+      } finally { wipe(); }
     },
+    wipe,
   };
 }
 
@@ -341,13 +347,15 @@ export async function decryptStateRecoveryBackup(path: string, key: Buffer): Pro
       const active = snapshotRestorer(envelope.header.sourceVersion);
       restorer = active;
       const lines = lineSplitter((line) => active.add(JSON.parse(line) as SnapshotRecord));
-      for await (const chunk of fileChunks(file, envelope.start, envelope.stop)) {
-        const bytes = plain.update(chunk);
-        try { lines.push(bytes); } finally { bytes.fill(0); }
-      }
-      const last = plain.final();
-      try { lines.push(last); } finally { last.fill(0); }
-      lines.end();
+      try {
+        for await (const chunk of fileChunks(file, envelope.start, envelope.stop)) {
+          const bytes = plain.update(chunk);
+          try { lines.push(bytes); } finally { bytes.fill(0); }
+        }
+        const last = plain.final();
+        try { lines.push(last); } finally { last.fill(0); }
+        lines.end();
+      } finally { lines.wipe(); }
       return active.finish();
     } finally { await file.close(); }
   } catch {
