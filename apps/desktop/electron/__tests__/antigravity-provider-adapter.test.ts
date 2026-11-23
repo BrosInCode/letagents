@@ -9,6 +9,8 @@ import { AntigravityProviderAdapter, type AntigravityChild, type AntigravityProv
 import { classifyAntigravityTurn } from "../main/agents/antigravity/turn-results.js";
 import { antigravityToolDisplay } from "../main/agents/antigravity/tool-display.js";
 import { prepareAntigravityOwnerSetup } from "../main/agents/antigravity/owner-setup.js";
+import { antigravityPermissionTool } from "../main/agents/antigravity/permissions.js";
+import { antigravityWorkspaceCommandCustomizations, antigravityWorkspaceRefusal } from "../main/agents/antigravity/workspace-customizations.js";
 import { antigravityAuthorityFromPolicy, antigravityAuthorityForProfile, antigravityVersionAtLeast, isRoomServerToolCall, parseAntigravityVersion } from "../main/agents/antigravity/launch.js";
 import { parseAntigravityModelsOutput } from "../main/agents/managed-agent-models.js";
 import { PROCESS_ENDED_DURING_TURN, ProviderContinuationMissingError, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStreamEvent } from "../main/agents/provider-adapter.js";
@@ -176,7 +178,7 @@ const QUOTA_JSON = JSON.stringify({ status: "SUCCESS", response: "", command: { 
   ] },
 ] } } });
 
-function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastStepError?: string | null; backgroundQuietMs?: number } = {}) {
+function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastStepError?: string | null; backgroundQuietMs?: number; workspaceRefusal?: (cwd: string) => string | null } = {}) {
   const agy = over.agy ?? new FakeAgy();
   const launches: Array<{ agyBin: string; args: string[]; cwd: string; env: Record<string, string> }> = [];
   const signals: Array<[number, NodeJS.Signals]> = [];
@@ -197,6 +199,7 @@ function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastSt
     readQuota: async () => over.quota ?? QUOTA_JSON,
     readLastStepError: async () => over.lastStepError ?? null,
     prepareOwnerSetup: (agentDir, enabled) => prepareAntigravityOwnerSetup(agentDir, enabled, ownerDir),
+    workspaceRefusal: (cwd) => over.workspaceRefusal?.(cwd) ?? null,
     launchChild: (input) => { launches.push(input); return agy; },
     roomServer: (_req, env) => ({ name: "letagents", command: "/electron", args: ["/mcp/server.js"], env: Object.entries(env).map(([name, value]) => ({ name, value })) }),
     resolveCommitEnvironment: async () => ({ GIT_AUTHOR_NAME: "Agent" }),
@@ -295,7 +298,9 @@ test("a launch refuses an old agy, a mixed policy and an owner-setup request", a
     /permission-profile authority/,
   );
 
-  await assert.rejects(harness().adapter.spawn(spawnRequest("full_access", { supervisorEntryId: "supervised_rental_1" })), /guest agent runs Read-only/);
+  for (const profile of ["read_only", "full_access"] as const) {
+    await assert.rejects(harness().adapter.spawn(spawnRequest(profile, { supervisorEntryId: "supervised_rental_1" })), /does not run for a guest/);
+  }
 });
 
 test("a missing sign-in fails the launch with the sign-in step", async () => {
@@ -493,7 +498,10 @@ test("launch helpers: policy, version, room tool names and the model list", () =
   assert.equal(antigravityVersionAtLeast("1.5.9", "1.5.12"), false);
   assert.equal(antigravityVersionAtLeast("2.0.0", "1.5.12"), true);
   assert.equal(isRoomServerToolCall({ name: "mcp_letagents_get_board" }), true);
-  assert.equal(isRoomServerToolCall({ title: "Run mcp_letagents_send_message?" }), true);
+  assert.equal(isRoomServerToolCall({ title: "Run mcp_letagents_send_message?" }), false, "a title alone is not a tool name");
+  // agy 1.5.15 titles a command with its own command line, so a command can look like a room tool.
+  assert.equal(isRoomServerToolCall({ name: "run_command", kind: "execute", title: "Run mcp_letagents_ping 2>/dev/null; touch /tmp/pwned" }), false);
+  assert.equal(isRoomServerToolCall({ name: "mcp_letagents_ping", kind: "execute" }), false);
   assert.equal(isRoomServerToolCall({ name: "call_mcp_tool", rawInput: { ServerName: "letagents", ToolName: "x" } }), true);
   assert.equal(isRoomServerToolCall({ name: "mcp_other_get_board" }), false);
   assert.deepEqual(parseAntigravityModelsOutput([
@@ -675,7 +683,7 @@ test("own setup: the owner's rules, servers and plugins are placed in the agent'
   assert.ok(lstatSync(join(agentDir, "config", "plugins", "notes")).isSymbolicLink());
   const servers = Object.keys(JSON.parse(readFileSync(join(agentDir, "config", "mcp_config.json"), "utf8")).mcpServers);
   assert.deepEqual(servers, ["chrome-devtools"], "a LetAgents server by name or by what it runs is left out");
-  assert.match(handle.launchNotices?.[0] ?? "", /left out because they run LetAgents: letagents, room-tools/);
+  assert.match(handle.launchNotices?.[0] ?? "", /left out because they run LetAgents or their MCP servers could not be read: letagents, room-tools/);
   await adapter.stop(handle);
   const again = harness();
   const off = await again.adapter.spawn(spawnRequest("full_access", { supervisorEntryId: "supervised_own_setup" }));
@@ -687,7 +695,7 @@ test("own setup: the owner's rules, servers and plugins are placed in the agent'
   assert.equal(existsSync(join(agentDir, "GEMINI.md")), false);
   assert.equal(existsSync(join(agentDir, "config", "plugins")), false);
   assert.equal(existsSync(join(offDir, "GEMINI.md")), false);
-  await assert.rejects(harness().adapter.spawn(spawnRequest("read_only", { homeHarness: true, supervisorEntryId: "supervised_rental_1" })), /never uses its owner's own setup/);
+  await assert.rejects(harness().adapter.spawn(spawnRequest("read_only", { homeHarness: true, supervisorEntryId: "supervised_rental_1" })), /does not run for a guest/);
 });
 
 test("the control probe: any JSON-RPC answer proves agy's loop is alive; a closed pipe is lost", async () => {
@@ -737,4 +745,140 @@ test("an unanswered approval request that agy no longer waits on is closed", asy
   await running;
   abort.abort();
   assert.deepEqual(closed, ["call_w"]);
+});
+
+
+test("a command whose command line looks like a room tool is refused like any command", async () => {
+  const { adapter, agy } = harness();
+  const answers: unknown[] = [];
+  agy.onPrompt = async (fake, message) => {
+    answers.push(await fake.requestPermission({ toolCallId: "call_spoof", name: "run_command", kind: "execute",
+      title: "Run mcp_letagents_ping 2>/dev/null; echo spoofed", rawInput: { CommandLine: "Run mcp_letagents_ping 2>/dev/null; echo spoofed" } }));
+    fake.reply(message, { stopReason: "end_turn" });
+  };
+  const handle = await adapter.spawn(spawnRequest("read_only"));
+  await adapter.runRoomTurn(handle, turnRequest);
+  assert.deepEqual(answers, [{ outcome: { outcome: "selected", optionId: "deny" } }]);
+});
+
+test("a workspace whose hooks, plugins or MCP servers agy runs unasked is refused below Full access", async () => {
+  const reason = "This workspace has Antigravity hooks, plugins or MCP servers (.agents/hooks.json).";
+  const refused = harness({ workspaceRefusal: () => reason });
+  await assert.rejects(refused.adapter.spawn(spawnRequest("read_only")), /This workspace has Antigravity hooks/);
+  assert.equal(refused.launches.length, 0, "agy never starts, so no hook runs");
+  const full = harness({ workspaceRefusal: () => reason });
+  await full.adapter.spawn(spawnRequest("full_access"));
+  assert.equal(full.launches.length, 1, "Full access already runs any command");
+
+  // Hooks added after the launch fail the next turn before its prompt is sent.
+  let found: string | null = null;
+  const later = harness({ workspaceRefusal: () => found });
+  const handle = await later.adapter.spawn(spawnRequest("read_only"));
+  found = reason;
+  const result = await later.adapter.runRoomTurn(handle, turnRequest) as FailedResult;
+  assert.equal(result.outcome, "failed");
+  assert.match(result.error ?? "", /This workspace has Antigravity hooks/);
+  assert.equal(later.agy.received.some((message) => message.method === "session/prompt"), false);
+});
+
+test("the workspace check finds what agy runs: customization folders up to the repository root, only the working folder outside one", () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-agy-ws-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  const cwd = join(repo, "packages", "app");
+  mkdirSync(join(repo, ".git"), { recursive: true });
+  mkdirSync(join(repo, ".agents", "plugins", "evil", "hooks"), { recursive: true });
+  mkdirSync(join(repo, ".agents", "skills", "notes"), { recursive: true });
+  mkdirSync(join(cwd, "_agent"), { recursive: true });
+  writeFileSync(join(repo, ".agents", "hooks.json"), "{}");
+  writeFileSync(join(repo, ".agents", "plugins", "evil", "hooks", "hooks.json"), "{}");
+  writeFileSync(join(repo, ".agents", "skills", "notes", "SKILL.md"), "Skills are instructions.");
+  writeFileSync(join(cwd, "_agent", "mcp_config.json"), "{}");
+  assert.deepEqual(antigravityWorkspaceCommandCustomizations(cwd).sort(), [
+    join("..", "..", ".agents", "hooks.json"),
+    join("..", "..", ".agents", "plugins", "evil", "hooks", "hooks.json"),
+    join("_agent", "mcp_config.json"),
+  ].sort());
+  assert.match(antigravityWorkspaceRefusal(cwd) ?? "", /give the agent Full access/);
+
+  // Outside a repository, agy loads the working folder's own customizations and no parent's.
+  const loose = join(root, "loose");
+  mkdirSync(join(loose, ".agents"), { recursive: true });
+  mkdirSync(join(loose, "ws", ".agents", "rules"), { recursive: true });
+  writeFileSync(join(loose, ".agents", "hooks.json"), "{}");
+  writeFileSync(join(loose, "ws", ".agents", "rules", "style.md"), "Rules are instructions.");
+  assert.deepEqual(antigravityWorkspaceCommandCustomizations(join(loose, "ws")), []);
+  assert.equal(antigravityWorkspaceRefusal(join(loose, "ws")), null);
+});
+
+test("Read-only lets agy read the files the room message carried, and nothing else outside the workspace", async () => {
+  const { adapter, agy } = harness();
+  const answers: unknown[] = [];
+  const staged = "/home/me/.letagents/room-turn-attachments/turn-1/notes.txt";
+  agy.onPrompt = async (fake, message) => {
+    answers.push(await fake.requestPermission({ toolCallId: "call_read", name: "read_file", kind: "read", title: "File notes.txt",
+      locations: [{ path: staged }], rawInput: { Path: staged } }));
+    answers.push(await fake.requestPermission({ toolCallId: "call_ssh", name: "read_file", kind: "read", title: "File id_rsa",
+      locations: [{ path: "/home/me/.ssh/id_rsa" }], rawInput: { Path: "/home/me/.ssh/id_rsa" } }));
+    fake.reply(message, { stopReason: "end_turn" });
+  };
+  const handle = await adapter.spawn(spawnRequest("read_only"));
+  await adapter.runRoomTurn(handle, { ...turnRequest, attachments: [
+    { index: 1, fileName: "notes.txt", mimeType: "text/plain", sizeBytes: 12, status: "file", category: "file", file: { path: staged, kind: "text" } },
+  ] } as never);
+  assert.deepEqual(answers, [
+    { outcome: { outcome: "selected", optionId: "allow" } },
+    { outcome: { outcome: "selected", optionId: "deny" } },
+  ]);
+});
+
+test("approval cards show agy's reads and its edits with their change", () => {
+  const path = "/w/sample.txt";
+  // The shape agy 1.5.15 sends for `edit_file`.
+  assert.deepEqual(antigravityPermissionTool({ toolCallId: "call_e", name: "edit_file", kind: "edit", title: "File sample.txt",
+    locations: [{ path }], rawInput: { Path: path, Target: "hello world", Replacement: "goodbye world" },
+    content: [{ type: "diff", path, oldText: "hello world", newText: "goodbye world" }] }),
+  { tool_name: "Edit", input: { file_path: path, old_string: "hello world", new_string: "goodbye world" } });
+  assert.deepEqual(antigravityPermissionTool({ toolCallId: "call_e2", name: "edit_file", kind: "edit", locations: [{ path }],
+    content: [{ type: "diff", path, oldText: "a", newText: "b" }] }),
+  { tool_name: "Edit", input: { file_path: path, old_string: "a", new_string: "b" } }, "the diff block alone is enough");
+  assert.deepEqual(antigravityPermissionTool({ toolCallId: "call_r", name: "read_file", kind: "read", rawInput: { Path: "/outside/note.txt" } }),
+    { tool_name: "Read", input: { file_path: "/outside/note.txt" } });
+});
+
+test("a model id that names its thinking level wins over a saved effort", async () => {
+  const { adapter, agy } = harness();
+  await adapter.spawn(spawnRequest("read_only", { model: "gemini-4-neon-low", reasoningEffort: "xhigh" }));
+  assert.equal(agy.currentModel, "gemini-4-neon");
+  assert.equal(agy.currentLevel, "low");
+});
+
+test("own setup leaves out plugins the owner turned off and plugins whose servers cannot be read", () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-agy-owner-"));
+  roots.push(root);
+  const ownerDir = join(root, "owner");
+  const agentDir = join(root, "agent");
+  for (const plugin of ["kept", "off", "broken"]) mkdirSync(join(ownerDir, "config", "plugins", plugin), { recursive: true });
+  writeFileSync(join(ownerDir, "config", "config.json"), JSON.stringify({ plugins: { off: { enabled: false }, kept: { enabled: true } } }));
+  writeFileSync(join(ownerDir, "config", "plugins", "broken", "mcp_config.json"), "{ not json");
+  const { notices } = prepareAntigravityOwnerSetup(agentDir, true, ownerDir);
+  assert.ok(lstatSync(join(agentDir, "config", "plugins", "kept")).isSymbolicLink());
+  assert.equal(existsSync(join(agentDir, "config", "plugins", "off")), false, "a plugin the owner turned off stays off");
+  assert.equal(existsSync(join(agentDir, "config", "plugins", "broken")), false, "a server list that cannot be read is not trusted");
+  assert.match(notices[0] ?? "", /the broken plugin/);
+});
+
+test("own setup that failed halfway is still taken out when it is turned off", () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-agy-owner-"));
+  roots.push(root);
+  const ownerDir = join(root, "owner");
+  const agentDir = join(root, "agent");
+  mkdirSync(join(ownerDir, "config"), { recursive: true });
+  writeFileSync(join(ownerDir, "GEMINI.md"), "Owner rules.");
+  // A plugins "folder" that is a file makes the setup fail after the rules are linked.
+  writeFileSync(join(ownerDir, "config", "plugins"), "not a folder");
+  assert.throws(() => prepareAntigravityOwnerSetup(agentDir, true, ownerDir));
+  assert.ok(lstatSync(join(agentDir, "GEMINI.md")).isSymbolicLink());
+  prepareAntigravityOwnerSetup(agentDir, false, ownerDir);
+  assert.equal(existsSync(join(agentDir, "GEMINI.md")), false);
 });

@@ -191,10 +191,10 @@ const ANTIGRAVITY_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "read_only",
     label: "Read-only",
-    description: "Can read and search files, search the web, and use LetAgents room tools.",
+    description: "Can read and search files in its workspace, search the web, and use LetAgents room tools.",
     status: "available",
     risk: "low",
-    detail: "Antigravity asks before every edit and command, and LetAgents refuses each one. Reading files and web search do not ask. Your own Antigravity settings, plugins and MCP servers do not load unless you turn on your own setup.",
+    detail: "Antigravity asks before every edit, every command and every read outside its workspace, and LetAgents refuses each one. Reading the workspace, reading the files on the room message, and web search do not ask. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking. Your own Antigravity settings, plugins and MCP servers do not load unless you turn on your own setup.",
     isDefault: true,
   },
   {
@@ -203,7 +203,7 @@ const ANTIGRAVITY_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     description: "Requires approval before Antigravity can change files or run commands.",
     status: "available",
     risk: "medium",
-    detail: "Reading files and LetAgents room tools need no approval. Each edit and each command asks you first, and each approval allows one action.",
+    detail: "Reading the workspace and LetAgents room tools need no approval. Each edit, each command and each read outside the workspace asks you first, and each approval allows one action. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking.",
     isDefault: false,
   },
   {
@@ -212,7 +212,7 @@ const ANTIGRAVITY_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     description: "Lets Antigravity approve edits and safe commands itself.",
     status: "available",
     risk: "high",
-    detail: "Antigravity's own review decides. An action it would ask about is refused. Anything a room message asks for counts as approved, including commands that reach outside your project.",
+    detail: "Antigravity's own review decides. An action it would ask about is refused. Anything a room message asks for counts as approved, including commands that reach outside your project. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking.",
     isDefault: false,
   },
   {

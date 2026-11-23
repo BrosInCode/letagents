@@ -100,9 +100,9 @@ export function attestProviderSpawnPolicy(
     }
     if (homeHarness) ownerSetupPolicy = authority;
   } else if (provider === "antigravity") {
-    // A guest works for someone else: Antigravity refuses every edit and command for it.
-    if (request.supervisorEntryId?.startsWith("supervised_rental_") && profile !== "read_only") {
-      throw new Error("antigravity launch refused: a guest agent runs Read-only.");
+    // agy reads files and searches the web without asking at every level, so it cannot work for a guest.
+    if (request.supervisorEntryId?.startsWith("supervised_rental_")) {
+      throw new Error("antigravity launch refused: Antigravity does not run for a guest.");
     }
     for (const key of Object.keys(policy)) {
       if (!(ANTIGRAVITY_AUTHORITY_KEYS as readonly string[]).includes(key)) {

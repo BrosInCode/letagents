@@ -17,7 +17,7 @@ import { AntigravityAdapterBase } from "./adapter-base.js";
 import type { AntigravityActiveTurn, AntigravityHandle } from "./handle.js";
 import { antigravityPromptBlocks, boundedAntigravityRoomTurnPrompt, classifyAntigravityTurn } from "./turn-results.js";
 import { parseAntigravityQuota } from "./usage.js";
-import { antigravityPermissionOption, type AntigravityNativePermissionRequest } from "./permissions.js";
+import { antigravityPathForms, antigravityPermissionOption, type AntigravityNativePermissionRequest } from "./permissions.js";
 
 const CONTROL_PROBE_TIMEOUT_MS = 5_000;
 
@@ -221,7 +221,9 @@ export class AntigravityProviderAdapter extends AntigravityAdapterBase implement
     await (options.beforeNativeDispatch ?? options.markDispatched)?.();
     await options.checkpointTurnStarted?.(turnId);
     const context = handle.roomContext.prepare(request, handle.providerContinuationId);
-    const prompt = handle.connection.request<Record<string, unknown> | null>("session/prompt", {
+    // Hooks or plugins added to the workspace since launch would run with this prompt, unasked.
+    const workspaceRefusal = handle.authority.dangerouslySkipPermissions || !handle.cwd ? null : this.deps.workspaceRefusal(handle.cwd);
+    const prompt = workspaceRefusal ? Promise.resolve({ stopReason: null, error: workspaceRefusal }) : handle.connection.request<Record<string, unknown> | null>("session/prompt", {
       sessionId: handle.providerContinuationId,
       prompt: antigravityPromptBlocks(boundedAntigravityRoomTurnPrompt(request, context.lines, handle.authority), request),
     }).then(
@@ -233,8 +235,10 @@ export class AntigravityProviderAdapter extends AntigravityAdapterBase implement
         throw error;
       },
     );
+    const stagedFiles = new Set((request.attachments ?? []).flatMap((attachment) =>
+      attachment.status === "file" && attachment.file?.path ? antigravityPathForms(attachment.file.path) : []));
     const turn: AntigravityActiveTurn = { turnId, text: [], refusedTool: false, toolStatuses: new Map(), result: prompt,
-      openCommands: new Set(), lastUpdateAt: Date.now(), lastUsageAt: 0, lastCommandEndAt: 0 };
+      openCommands: new Set(), lastUpdateAt: Date.now(), lastUsageAt: 0, lastCommandEndAt: 0, stagedFiles };
     turn.settled = this.settleWholeTurn(handle, turn);
     handle.activeTurn = turn;
     handle.state = "working";

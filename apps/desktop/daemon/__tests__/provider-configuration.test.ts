@@ -1058,12 +1058,12 @@ test("Antigravity profiles: Read-only by default, Ask before writes, Auto and Fu
     { id: "sandboxed_write", label: "Sandboxed writes", status: "unsupported", isDefault: false },
   ]);
   const profile = (id: string) => profiles.find((candidate) => candidate.id === id)!;
-  assert.equal(profile("read_only").description, "Can read and search files, search the web, and use LetAgents room tools.");
+  assert.equal(profile("read_only").description, "Can read and search files in its workspace, search the web, and use LetAgents room tools.");
   assert.equal(profile("read_only").detail,
-    "Antigravity asks before every edit and command, and LetAgents refuses each one. Reading files and web search do not ask. Your own Antigravity settings, plugins and MCP servers do not load unless you turn on your own setup.");
+    "Antigravity asks before every edit, every command and every read outside its workspace, and LetAgents refuses each one. Reading the workspace, reading the files on the room message, and web search do not ask. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking. Your own Antigravity settings, plugins and MCP servers do not load unless you turn on your own setup.");
   assert.equal(profile("auto_review").description, "Lets Antigravity approve edits and safe commands itself.");
   assert.equal(profile("auto_review").detail,
-    "Antigravity's own review decides. An action it would ask about is refused. Anything a room message asks for counts as approved, including commands that reach outside your project.");
+    "Antigravity's own review decides. An action it would ask about is refused. Anything a room message asks for counts as approved, including commands that reach outside your project. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking.");
   assert.equal(profile("full_access").description, "Can change files and run commands on this computer without asking.");
   assert.equal(profile("full_access").detail, "Commands can access files outside the project. Use only for work you trust.");
   assert.equal(profile("ask_before_write").description, "Requires approval before Antigravity can change files or run commands.");
@@ -1132,13 +1132,11 @@ test("Antigravity refuses unknown native options and conflicting authority; it t
   assert.equal(homeHarnessAvailability({ id: "supervised_abc", provider: "antigravity", deliveryMode: "daemon_inbox" }), "available");
 });
 
-test("an Antigravity guest runs Read-only only", () => {
+test("Antigravity never runs for a guest: its file reads and web searches cannot be limited", () => {
   const guest = { ...antigravitySelection, supervisorEntryId: "supervised_rental_ask_0123" };
-  assert.deepEqual(deriveProviderConfigurationSnapshot({ ...guest, permissionProfileId: "read_only" }, {}).launchPolicy,
-    { agentMode: "default", dangerouslySkipPermissions: false, hostDecision: "reject" });
-  for (const permissionProfileId of ["auto_review", "full_access"]) {
-    assert.throws(() => deriveProviderConfigurationSnapshot({ ...guest, permissionProfileId }, {}), /guest agent runs Read-only/);
-    assert.throws(() => resolveProviderConfigurationSnapshot({ ...guest, permissionProfileId, launchPolicy: {} }), /guest agent runs Read-only/);
+  for (const permissionProfileId of ["read_only", "ask_before_write", "auto_review", "full_access"]) {
+    assert.throws(() => deriveProviderConfigurationSnapshot({ ...guest, permissionProfileId }, {}), /does not run for a guest/);
+    assert.throws(() => resolveProviderConfigurationSnapshot({ ...guest, permissionProfileId, launchPolicy: {} }), /does not run for a guest/);
   }
   assert.equal(deriveProviderConfigurationSnapshot({ ...antigravitySelection, supervisorEntryId: "supervised_owner_agent",
     permissionProfileId: "full_access" }, {}).permissionProfileId, "full_access", "an owner's own agent is not a guest");

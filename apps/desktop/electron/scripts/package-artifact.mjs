@@ -310,6 +310,7 @@ const requiredAppFiles = [
   "dist-electron/main/agents/antigravity/turn-errors.js",
   "dist-electron/main/agents/antigravity/turn-results.js",
   "dist-electron/main/agents/antigravity/usage.js",
+  "dist-electron/main/agents/antigravity/workspace-customizations.js",
   "dist-electron/main/agents/claude-code-provider-adapter.js",
   "dist-electron/main/agents/claude-code/adapter.js",
   "dist-electron/main/agents/claude-code/adapter-background-work.js",

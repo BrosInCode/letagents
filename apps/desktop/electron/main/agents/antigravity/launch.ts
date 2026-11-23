@@ -226,14 +226,16 @@ export function antigravityRoomServer(input: {
   };
 }
 
-/** Whether an ACP tool call belongs to the room's own MCP server. */
+/**
+ * Whether an ACP tool call belongs to the room's own MCP server. Only the
+ * tool's own name counts: a command's title is its command line, which can
+ * be made to look like a room tool (`Run mcp_letagents_x; touch …`).
+ */
 export function isRoomServerToolCall(toolCall: Record<string, unknown> | null): boolean {
-  if (!toolCall) return false;
+  if (!toolCall || toolCall.kind === "execute") return false;
   const prefix = `mcp_${ANTIGRAVITY_ROOM_SERVER_NAME}_`;
   const name = typeof toolCall.name === "string" ? toolCall.name : "";
   if (name.startsWith(prefix)) return true;
-  const title = typeof toolCall.title === "string" ? toolCall.title : "";
-  if (/^Run(?:ning)? /.test(title) && title.replace(/^Run(?:ning)? /, "").replace(/\?$/, "").startsWith(prefix)) return true;
   // When MCP tools did not fit its context, agy calls them through `call_mcp_tool`.
   const input = toolCall.rawInput && typeof toolCall.rawInput === "object" ? toolCall.rawInput as Record<string, unknown> : null;
   return name === "call_mcp_tool" && input?.ServerName === ANTIGRAVITY_ROOM_SERVER_NAME;

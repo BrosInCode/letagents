@@ -122,10 +122,11 @@ export function homeHarnessApprovalNote(provider: string, permissionProfileId: s
     return "With Full access, those tools run without asking you.";
   }
   if (kind === "antigravity") {
-    if (permissionProfileId === "ask_before_write") return "With Ask before writes, you approve each of your MCP tools before it runs, as you do each edit and command.";
-    if (permissionProfileId === "auto_review") return "With Auto, Antigravity's own review decides whether each of those tools runs. What it would ask you about is refused.";
+    const hooks = "Your plugins' hooks run without asking at every level.";
+    if (permissionProfileId === "ask_before_write") return `With Ask before writes, you approve each of your MCP tools before it runs, as you do each edit and command. ${hooks}`;
+    if (permissionProfileId === "auto_review") return `With Auto, Antigravity's own review decides whether each of those tools runs. What it would ask you about is refused. ${hooks}`;
     if (permissionProfileId === "full_access") return "With Full access, those tools run without asking you.";
-    return "With Read-only, your MCP tools are refused like every edit and command. Your plugins' skills and your rules still apply.";
+    return `With Read-only, your MCP tools are refused like every edit and command. Your plugins' skills and your rules still apply. ${hooks}`;
   }
   if (kind === "claude-code") {
     const projectStaysOut = "A project's own servers and settings are not loaded.";

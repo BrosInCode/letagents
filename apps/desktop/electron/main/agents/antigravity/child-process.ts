@@ -11,6 +11,7 @@ import type { ProviderSpawnRequest } from "../provider-adapter.js";
 import { antigravityChildEnvironment, antigravityRoomServer } from "./launch.js";
 import { readAntigravityLastStepError } from "./turn-errors.js";
 import { prepareAntigravityOwnerSetup } from "./owner-setup.js";
+import { antigravityWorkspaceRefusal } from "./workspace-customizations.js";
 import { withoutRoomAuthority } from "../room-authority-environment.js";
 
 const VERSION_TIMEOUT_MS = 15_000;
@@ -41,6 +42,8 @@ export interface AntigravityProviderAdapterDependencies {
   readLastStepError(databasePath: string): Promise<string | null>;
   /** Place the owner's own setup in the agent's folder, or take it out. */
   prepareOwnerSetup(agentDir: string, enabled: boolean): { notices: string[] };
+  /** Why an agent below Full access must not run in this workspace (hooks, plugins, MCP servers agy runs unasked), or null. */
+  workspaceRefusal(cwd: string): string | null;
   launchChild(input: { agyBin: string; args: string[]; cwd: string; env: Record<string, string> }): AntigravityChild;
   /** The room's MCP server for this agent's sessions. `roomServerEnvironment` holds its supervisor coordinates. */
   roomServer(req: ProviderSpawnRequest, roomServerEnvironment: Record<string, string>): AntigravityRoomServerSpec;
@@ -173,6 +176,7 @@ export const DEFAULT_ANTIGRAVITY_DEPENDENCIES: AntigravityProviderAdapterDepende
   readQuota: defaultReadQuota,
   readLastStepError: readAntigravityLastStepError,
   prepareOwnerSetup: (agentDir, enabled) => prepareAntigravityOwnerSetup(agentDir, enabled),
+  workspaceRefusal: antigravityWorkspaceRefusal,
   launchChild: defaultLaunchChild,
   roomServer: (req, roomServerEnvironment) => {
     const runtime = resolveLetAgentsMcpRuntime({ devEntryPath: req.devMcpServerEntryPath, env: desktopRuntimeEnvironment() });

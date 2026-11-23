@@ -12,7 +12,9 @@
  * (verified on agy 1.5.15), and such a server would act as the owner. The
  * room's server given to the session stays the agent's only LetAgents
  * connection. With the setup off, everything placed here is removed again.
- * The owner's permission rules (`settings.json`) are not used.
+ * The owner's permission rules (`settings.json`) are not used, and plugins
+ * the owner turned off stay off. A plugin's hooks run as agy runs them, with
+ * no request to answer at any access level; the access levels' copy says so.
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -57,6 +59,19 @@ function removeManaged(agentDir: string): void {
   rmSync(join(agentDir, MARKER), { force: true });
 }
 
+/** Plugins the owner turned off (`agy plugin disable`), which agy records in `config/config.json`. */
+function disabledPlugins(ownerDir: string): Set<string> {
+  try {
+    const plugins = (JSON.parse(readFileSync(join(ownerDir, "config", "config.json"), "utf8")) as { plugins?: unknown })?.plugins;
+    if (!plugins || typeof plugins !== "object") return new Set();
+    return new Set(Object.entries(plugins as Record<string, unknown>)
+      .filter(([, value]) => (value as { enabled?: unknown } | null)?.enabled === false)
+      .map(([name]) => name));
+  } catch {
+    return new Set();
+  }
+}
+
 function link(target: string, path: string): boolean {
   if (!existsSync(target)) return false;
   symlinkSync(target, path);
@@ -73,6 +88,8 @@ export function prepareAntigravityOwnerSetup(agentDir: string, enabled: boolean,
   if (!enabled) return { notices: [] };
   mkdirSync(join(agentDir, "config"), { recursive: true, mode: 0o700 });
   mkdirSync(join(agentDir, "antigravity-cli"), { recursive: true, mode: 0o700 });
+  // Written first, so a setup that fails halfway is still taken out when the owner turns it off.
+  writeFileSync(join(agentDir, MARKER), JSON.stringify({ placed: [], complete: false }), { mode: 0o600 });
   const placed: string[] = [];
   const leftOut: string[] = [];
   for (const rules of ["GEMINI.md", "AGENTS.md"]) {
@@ -92,10 +109,16 @@ export function prepareAntigravityOwnerSetup(agentDir: string, enabled: boolean,
   const pluginsDir = join(ownerDir, "config", "plugins");
   if (existsSync(pluginsDir)) {
     mkdirSync(join(agentDir, "config", "plugins"), { mode: 0o700 });
+    const disabled = disabledPlugins(ownerDir);
     for (const plugin of readdirSync(pluginsDir)) {
-      const pluginServers = readServers(join(pluginsDir, plugin, "mcp_config.json"));
+      // A plugin the owner turned off stays off: its switch lives in the owner's config.json, which is not given.
+      if (disabled.has(plugin)) continue;
+      const serversPath = join(pluginsDir, plugin, "mcp_config.json");
+      const pluginServers = readServers(serversPath);
+      // A server list that cannot be read cannot be shown to hold no LetAgents server.
+      const unreadable = pluginServers === null && existsSync(serversPath);
       const letagents = Object.entries(pluginServers ?? {}).filter(([name, server]) => server && typeof server === "object" && isLetAgentsServer(name, server));
-      if (letagents.length) {
+      if (letagents.length || unreadable) {
         leftOut.push(`the ${plugin} plugin`);
         continue;
       }
@@ -106,10 +129,10 @@ export function prepareAntigravityOwnerSetup(agentDir: string, enabled: boolean,
   for (const skills of ["config/skills", "config/skills.json", "antigravity-cli/skills"]) {
     if (link(join(ownerDir, skills), join(agentDir, skills))) placed.push(skills);
   }
-  writeFileSync(join(agentDir, MARKER), JSON.stringify({ placed }), { mode: 0o600 });
+  writeFileSync(join(agentDir, MARKER), JSON.stringify({ placed, complete: true }), { mode: 0o600 });
   return {
     notices: leftOut.length
-      ? [`With your own setup on, this agent's only LetAgents connection is its room's own. These parts of your Antigravity setup were left out because they run LetAgents: ${leftOut.slice(0, 6).join(", ")}${leftOut.length > 6 ? ` and ${leftOut.length - 6} more` : ""}.`]
+      ? [`With your own setup on, this agent's only LetAgents connection is its room's own. These parts of your Antigravity setup were left out because they run LetAgents or their MCP servers could not be read: ${leftOut.slice(0, 6).join(", ")}${leftOut.length > 6 ? ` and ${leftOut.length - 6} more` : ""}.`]
       : [],
   };
 }

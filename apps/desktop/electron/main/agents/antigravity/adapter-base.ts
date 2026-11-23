@@ -5,14 +5,13 @@ import { ProviderContinuationMissingError, type ProviderActivityEvent, type Prov
 import { attestProviderSpawnPolicy, launchNoticeSaidOnce, spawnUsesHomeHarness } from "../provider-spawn-configuration.js";
 import { DEFAULT_STOP_GRACE_MS, delay, observeFencedExit, ProviderProcessCustody, safeStreamPayload, sameProcessBirthIdentity, terminateFreshLaunch, type ProviderProcessExit } from "../provider-evidence.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint } from "../provider-execution-observer.js";
-import { rentalCredentialIsolationMarker } from "../rental-child-environment.js";
 import { daemonStateDirEnvironment } from "../windows-child-environment.js";
 import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
 import { AcpConnection, AcpConnectionClosedError, AcpRpcError, acpRecord, acpString, type AcpJsonRecord } from "./acp-connection.js";
 import { DEFAULT_ANTIGRAVITY_DEPENDENCIES, type AntigravityChild, type AntigravityProviderAdapterDependencies } from "./child-process.js";
 import { AntigravityHandle } from "./handle.js";
 import { antigravityToolDisplay } from "./tool-display.js";
-import { antigravityNativePermission } from "./permissions.js";
+import { antigravityNativePermission, antigravityPathForms, antigravityToolPath } from "./permissions.js";
 import { claudeToolOperation } from "../../../../../../shared/claude-tool-operation.mjs";
 import { type AntigravityEffort, isAntigravityEffort, splitAntigravityModelId, ANTIGRAVITY_CAPABILITIES, ANTIGRAVITY_SIGN_IN_LINE, ANTIGRAVITY_SIGN_IN_REQUIRED, antigravityAcpArgs, antigravityAgentDataDir, antigravityAuthorityFromPolicy, defaultAntigravityDataRoot, isAntigravityQuestion, isAntigravitySignInError, isRoomServerToolCall, requireSupportedAntigravityVersion, resolveAntigravityExecutable } from "./launch.js";
 
@@ -123,10 +122,17 @@ export abstract class AntigravityAdapterBase {
     if (current && !current.terminal) throw new Error(`Antigravity work attempt '${req.workAttemptId}' already has a live process.`);
     if (!req.agentDisplayName?.trim()) throw new Error("Antigravity spawn requires the durable agent display name from the manifest.");
     if (req.deliveryMode !== "daemon_inbox") throw new Error("Antigravity room agents require daemon_inbox delivery.");
+    // agy reads files and searches the web without asking at every level, so it cannot work for a guest.
+    if (req.supervisorEntryId?.startsWith("supervised_rental_")) throw new Error("Antigravity does not run for a guest: its file reads and web searches cannot be limited.");
     const homeHarness = spawnUsesHomeHarness("antigravity", req);
     const authority = antigravityAuthorityFromPolicy(attestProviderSpawnPolicy("antigravity", req));
     const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
     requireSupportedAntigravityVersion(await this.deps.readVersion(this.agyBin));
+    // agy runs a workspace's hooks, plugins and MCP servers at session start, with no request to answer.
+    if (!authority.dangerouslySkipPermissions) {
+      const refusal = this.deps.workspaceRefusal(req.cwd);
+      if (refusal) throw new Error(refusal);
+    }
 
     const supervisorEnv: Record<string, string> = req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId
       ? {
@@ -143,7 +149,6 @@ export abstract class AntigravityAdapterBase {
         } : {}),
         LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
         LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
-        ...(req.supervisorEntryId.startsWith("supervised_rental_") ? { [rentalCredentialIsolationMarker]: "1" } : {}),
         ...(req.permissionProfileId ? { LETAGENTS_PERMISSION_PROFILE_ID: req.permissionProfileId } : {}),
       }
       : {};
@@ -245,6 +250,7 @@ export abstract class AntigravityAdapterBase {
       handle.state = "idle";
       handle.currentModel = applied.model;
       handle.geminiDir = geminiDir;
+      handle.cwd = req.cwd;
       const ownerNotice = ownerSetupNotices.whenChanged(req.supervisorEntryId, ownerSetup.notices[0] ?? null);
       handle.launchNotices = [...(ownerNotice ? [ownerNotice] : []), ...applied.notices];
       handle.ownerSetup = homeHarness;
@@ -302,7 +308,8 @@ export abstract class AntigravityAdapterBase {
           await setOption(String(modelOption.id), requestedModel);
         } else if (modelOption && split.effort && offered.includes(split.family)) {
           await setOption(String(modelOption.id), split.family);
-          effort ??= split.effort;
+          // An id that names its thinking level (`gemini-4-neon-low`) says it outright; a saved effort does not override it.
+          effort = split.effort;
         } else if (modelOption) {
           // agy listed the models this account has, and this one is not among them.
           throw new AcpRpcError(`Model '${requestedModel}' is not offered.`, -32602);
@@ -339,7 +346,10 @@ export abstract class AntigravityAdapterBase {
       return cancelled;
     }
     const roomTool = isRoomServerToolCall(toolCall);
-    if (!roomTool && handle.authority.hostDecision === "ask" && toolCall) {
+    // The files this turn's room message carried are staged outside the workspace, where agy asks before reading.
+    const stagedPath = acpString(toolCall?.kind) === "read" ? antigravityToolPath(toolCall) : null;
+    const stagedRead = Boolean(stagedPath && antigravityPathForms(stagedPath).some((form) => handle.activeTurn?.stagedFiles?.has(form)));
+    if (!roomTool && !stagedRead && handle.authority.hostDecision === "ask" && toolCall) {
       // Ask before writes: the request waits for the owner's answer on a desktop approval card.
       if (!handle.permissionControlAvailable) return cancelled;
       const native = antigravityNativePermission(id, toolCall);
@@ -357,7 +367,7 @@ export abstract class AntigravityAdapterBase {
           payload: { decision: "asked", toolCallId: native.request.tool_use_id, kind: acpString(toolCall.kind), title: acpString(toolCall.title) } });
       });
     }
-    const allow = roomTool || handle.authority.hostDecision === "allow";
+    const allow = roomTool || stagedRead || handle.authority.hostDecision === "allow";
     const optionId = allow ? optionOfKind(params?.options, ["allow_once", "allow_always"]) : optionOfKind(params?.options, ["reject_once", "reject_always"]);
     if (!optionId) return cancelled;
     if (!allow) {

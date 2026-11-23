@@ -483,7 +483,8 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
       }
     }
     const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "ask_before_write", "auto_review", "full_access"]);
-    if (guest && profile !== "read_only") throw new Error("antigravity launch refused: a guest agent runs Read-only.");
+    // agy reads files and searches the web without asking at every level, so it cannot work for a guest.
+    if (guest) throw new Error("antigravity launch refused: Antigravity does not run for a guest.");
     // agy asks before every edit and command in its default mode. The adapter
     // answers: Read-only and Auto refuse what is asked, Ask before writes takes
     // it to the owner, Full access starts agy with nothing to ask.

@@ -140,21 +140,21 @@ const cursorProfiles: readonly SupervisedPermissionProfile[] = [
 const antigravityProfiles: readonly SupervisedPermissionProfile[] = [
   {
     id: "read_only", label: "Read-only",
-    description: "Can read and search files, search the web, and use LetAgents room tools.",
+    description: "Can read and search files in its workspace, search the web, and use LetAgents room tools.",
     status: "available", risk: "low",
-    detail: "Antigravity asks before every edit and command, and LetAgents refuses each one. Reading files and web search do not ask. Your own Antigravity settings, plugins and MCP servers do not load unless you turn on your own setup.", isDefault: true,
+    detail: "Antigravity asks before every edit, every command and every read outside its workspace, and LetAgents refuses each one. Reading the workspace, reading the files on the room message, and web search do not ask. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking. Your own Antigravity settings, plugins and MCP servers do not load unless you turn on your own setup.", isDefault: true,
   },
   {
     id: "ask_before_write", label: "Ask before writes",
     description: "Requires approval before Antigravity can change files or run commands.",
     status: "available", risk: "medium",
-    detail: "Reading files and LetAgents room tools need no approval. Each edit and each command asks you first, and each approval allows one action.", isDefault: false,
+    detail: "Reading the workspace and LetAgents room tools need no approval. Each edit, each command and each read outside the workspace asks you first, and each approval allows one action. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking.", isDefault: false,
   },
   {
     id: "auto_review", label: "Auto",
     description: "Lets Antigravity approve edits and safe commands itself.",
     status: "available", risk: "high",
-    detail: "Antigravity's own review decides. An action it would ask about is refused. Anything a room message asks for counts as approved, including commands that reach outside your project.", isDefault: false,
+    detail: "Antigravity's own review decides. An action it would ask about is refused. Anything a room message asks for counts as approved, including commands that reach outside your project. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking.", isDefault: false,
   },
   {
     id: "full_access", label: "Full access",
@@ -216,6 +216,19 @@ const OWNER_SETUP_DESCRIPTIONS: Readonly<Record<string, Readonly<Record<string, 
     },
     full_access: {
       detail: "Commands can access files outside your project. Use only for work you trust. While your own setup is on, the project's own Claude settings, hooks, skills, commands and MCP servers are not loaded. Its CLAUDE.md still is.",
+    },
+  },
+  antigravity: {
+    // agy runs a plugin's hooks with no request to answer, at every level (verified on agy 1.5.15).
+    read_only: {
+      description: "Can read and search files in its workspace, search the web, and use LetAgents room tools. Your plugins' hooks run as you set them up.",
+      detail: "Its own tools cannot change files or run commands, and your MCP tools are refused too: LetAgents refuses each request. Your plugins' hooks run without asking. Nothing asks you.",
+    },
+    ask_before_write: {
+      detail: "Reading the workspace and LetAgents room tools need no approval. Each edit, each command, each read outside the workspace and each of your MCP tools asks you first. Your plugins' hooks run without asking.",
+    },
+    auto_review: {
+      detail: "Antigravity's own review decides, and what it would ask about is refused. Anything a room message asks for counts as approved. Your plugins' hooks run without asking.",
     },
   },
   codex: {

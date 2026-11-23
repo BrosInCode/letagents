@@ -21,6 +21,8 @@ export type AntigravityActiveTurn = {
   deniedTools?: Set<string>;
   /** Tool calls that had a permission request, with the tool name the request carried. */
   requestedTools?: Map<string, string>;
+  /** The daemon-owned files this turn's room message carried: agy may read exactly these, wherever they are. */
+  stagedFiles?: Set<string>;
   /** The owner asked to stop this turn (session/cancel was sent). */
   cancelRequested?: boolean;
   /** Each tool call's last status, so a repeated update is not reported twice. */
@@ -57,6 +59,8 @@ export class AntigravityHandle implements ProviderHandle {
   usage: ProviderUsage;
   /** The agent's own Antigravity data folder (`--gemini-dir`). */
   geminiDir: string | null = null;
+  /** The agent's working folder, where agy looks for workspace customizations. */
+  cwd: string | null = null;
   /** The model agy reports for this session, which decides whose limits apply. */
   currentModel: string | null = null;
   quotaReadAt = 0;

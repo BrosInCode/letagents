@@ -5,6 +5,8 @@
  * writes `Write`, its edits `Edit` and its fetches `WebFetch`, so approval
  * cards, "Always allowed" rules and automatic review read them the same way.
  */
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ClaudeNativePermissionRequest } from "../../../../shared/provider-permissions.js";
 import { acpRecord, acpString, type AcpJsonRecord } from "./acp-connection.js";
 
@@ -20,12 +22,26 @@ export type AntigravityPendingPermission = {
   settle: (answer: AcpJsonRecord) => void;
 };
 
+/** A path as written and as the file system resolves it (`/tmp` is `/private/tmp` on macOS). */
+export function antigravityPathForms(path: string): string[] {
+  const forms = new Set([resolve(path)]);
+  try { forms.add(realpathSync(path)); } catch { /* a path that does not exist has one form */ }
+  return [...forms];
+}
+
+/** The file a tool call names: its input's path, or its first location. */
+export function antigravityToolPath(toolCall: AcpJsonRecord | null): string | null {
+  if (!toolCall) return null;
+  const raw = acpRecord(toolCall.rawInput) ?? acpRecord(toolCall.args) ?? {};
+  const location = acpString(acpRecord((toolCall.locations as unknown[] | undefined)?.[0])?.path);
+  return acpString(raw.TargetFile) ?? acpString(raw.Path) ?? acpString(raw.AbsolutePath) ?? location ?? null;
+}
+
 export function antigravityPermissionTool(toolCall: AcpJsonRecord): { tool_name: string; input: Record<string, unknown> } {
   const name = acpString(toolCall.name) ?? "";
   const kind = acpString(toolCall.kind);
   const raw = acpRecord(toolCall.rawInput) ?? acpRecord(toolCall.args) ?? {};
-  const location = acpString(acpRecord((toolCall.locations as unknown[] | undefined)?.[0])?.path);
-  const filePath = acpString(raw.TargetFile) ?? acpString(raw.Path) ?? acpString(raw.AbsolutePath) ?? location;
+  const filePath = antigravityToolPath(toolCall);
   if (kind === "execute" || name === "run_command") {
     const command = acpString(raw.CommandLine) ?? acpString(raw.command) ?? acpString(toolCall.title) ?? "";
     const cwd = acpString(raw.Cwd);
@@ -35,11 +51,18 @@ export function antigravityPermissionTool(toolCall: AcpJsonRecord): { tool_name:
     return { tool_name: "Write", input: { file_path: filePath, ...(typeof raw.Content === "string" ? { content: raw.Content } : {}) } };
   }
   if (kind === "edit" && filePath) {
+    // agy 1.5.15 sends `Target`/`Replacement`, and the same change as a `diff` content block.
+    const diff = (Array.isArray(toolCall.content) ? toolCall.content : []).map(acpRecord).find((block) => block?.type === "diff") ?? null;
+    const oldText = [raw.Target, raw.TargetContent, diff?.oldText].find((value): value is string => typeof value === "string");
+    const newText = [raw.Replacement, raw.ReplacementContent, diff?.newText].find((value): value is string => typeof value === "string");
     return { tool_name: "Edit", input: {
       file_path: filePath,
-      ...(typeof raw.TargetContent === "string" ? { old_string: raw.TargetContent } : {}),
-      ...(typeof raw.ReplacementContent === "string" ? { new_string: raw.ReplacementContent } : {}),
+      ...(oldText !== undefined ? { old_string: oldText } : {}),
+      ...(newText !== undefined ? { new_string: newText } : {}),
     } };
+  }
+  if ((kind === "read" || name === "read_file" || name === "view_file") && filePath) {
+    return { tool_name: "Read", input: { file_path: filePath } };
   }
   if (kind === "fetch") {
     const url = acpString(raw.Url) ?? acpString(raw.url) ?? acpString(toolCall.title) ?? "";

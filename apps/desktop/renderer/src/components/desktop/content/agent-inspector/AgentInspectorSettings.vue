@@ -305,7 +305,11 @@ async function loadModels(): Promise<void> {
 }
 function chooseModel(value: string): void {
   customModel.value = value === "custom";
-  if (customModel.value) return;
+  if (customModel.value) {
+    // A typed Antigravity id names its own thinking level, and no effort picker shows for it: a saved level would be hidden.
+    if (props.resource.configuration?.provider === "antigravity" && props.resource.draft?.reasoningEffort) patch({ reasoningEffort: null });
+    return;
+  }
   const model = value ? value.slice("model:".length) : null;
   // An Antigravity model offers its own thinking levels: a saved level it lacks goes back to its default.
   const effort = props.resource.draft?.reasoningEffort ?? null;
