@@ -60,6 +60,12 @@ export interface EdgeDaemonOptions {
   tempRoot?: string;
   /** Optional process-table enumerator override (defaults to OS `ps` / native Windows lookup). */
   listProcesses?: (extraPids?: Iterable<number>) => ProcessSnapshotEntry[];
+  /**
+   * The `complete_room_turn` schema the stand-in MCP runtime lists. "product" (default) is the
+   * contract the Cursor wrapper requires; "summary_only" is a malformed one, to make a turn end
+   * `not_started` on purpose.
+   */
+  devMcpCompletionContract?: EdgeDevMcpCompletionContract;
 }
 
 export interface EdgeDaemonStatus {
@@ -211,7 +217,30 @@ function readConfiguredMcpVersion(): string {
  * real `node_modules/` directory + `--letagents-runtime-contract` JSON output
  * + minimal stdio MCP JSON-RPC responses).
  */
-async function materializeDevMcpPackage(rootDir: string): Promise<string> {
+export type EdgeDevMcpCompletionContract = "product" | "summary_only";
+
+/**
+ * The input schema of `complete_room_turn` as the stand-in lists it. "product" matches
+ * src/mcp/server/tools/supervised-room-turn.ts, which the Cursor wrapper checks before
+ * it starts Cursor; "summary_only" is the schema this stand-in listed before, which the
+ * wrapper refuses.
+ */
+export function edgeDevMcpCompletionInputSchema(contract: EdgeDevMcpCompletionContract): Record<string, unknown> {
+  if (contract === "summary_only") return { type: "object", properties: { summary: { type: "string" } } };
+  return {
+    type: "object",
+    properties: {
+      outcome: { type: "string", enum: ["reply", "no_reply"] },
+      text: { type: "string" },
+    },
+    required: ["outcome"],
+  };
+}
+
+export async function materializeDevMcpPackage(
+  rootDir: string,
+  completionContract: EdgeDevMcpCompletionContract = "product",
+): Promise<string> {
   const mcpVersion = readConfiguredMcpVersion();
   await mkdir(join(rootDir, "node_modules"), { recursive: true });
   await writeFile(
@@ -272,7 +301,7 @@ process.stdin.on("data", (chunk) => {
           { name: "send_message", description: "Send room message", inputSchema: { type: "object", properties: { text: { type: "string" } } } },
           { name: "get_board", description: "Get room board", inputSchema: { type: "object", properties: {} } },
           { name: "claim_task", description: "Claim task", inputSchema: { type: "object", properties: { task_id: { type: "string" } } } },
-          { name: "complete_room_turn", description: "Complete bounded room turn", inputSchema: { type: "object", properties: { summary: { type: "string" } } } },
+          { name: "complete_room_turn", description: "Complete bounded room turn", inputSchema: ${JSON.stringify(edgeDevMcpCompletionInputSchema(completionContract))} },
         ],
       });
     } else if (msg.method === "resources/list") {
@@ -1803,7 +1832,7 @@ export async function startEdgeDaemon(options: EdgeDaemonOptions = {}): Promise<
     ]);
 
     const apiUrl = await roomServer.start();
-    const devMcpEntryPath = await materializeDevMcpPackage(devMcpDir);
+    const devMcpEntryPath = await materializeDevMcpPackage(devMcpDir, options.devMcpCompletionContract);
 
     const existingPath = process.env.PATH ?? process.env.Path ?? "";
     const prependedPath = existingPath ? `${binDir}${delimiter}${existingPath}` : binDir;
