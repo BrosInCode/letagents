@@ -1561,6 +1561,39 @@ test("legacy DB move-aside Windows process-list snapshot proves reused or absent
     assert.deepEqual(result.signals, []);
   }
 
+  // More than one batch: 300 distinct pids are read as 256 + 44, and a batch that cannot be read leaves only its
+  // pids to WMI.
+  {
+    const env = await tempDir("letagents-win-snapshot-batches-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      const entries = Array.from({ length: 300 }, (_, index) => ({ id: `r${index}`, pid: (index + 1) * 4, birth: "win32-ft:130000000000000000" }));
+      await seed(dbPath, entries);
+      const batches: number[][] = [];
+      const wmiCalls: number[][] = [];
+      const archived = await moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "win32",
+        birthState: () => "unknown",
+        checkWindowsProcessAbsent: () => false,
+        readWindowsProcessBirths: (pids) => {
+          batches.push([...pids]);
+          if (batches.length === 2) return undefined;
+          return new Map(pids.map((pid) => [pid, { listed: false as const }]));
+        },
+        queryWindowsWmiCreations: (pids) => {
+          wmiCalls.push([...pids]);
+          return new Map(pids.map((pid) => [pid, "20261030032839.146576+060"]));
+        },
+        signalProcessTreeOutcome: () => { throw new Error("no record may be signalled"); },
+      });
+      assert.ok(archived && archived.includes(".legacy-"));
+      assert.deepEqual(batches.map((batch) => batch.length), [256, 44]);
+      assert.deepEqual(wmiCalls, [batches[1]], "only the unread batch goes to WMI");
+    } finally {
+      await env.cleanup();
+    }
+  }
+
   // A listed equal creation time is the recorded process itself, still unreadable through the helper: unknown,
   // refused, not signalled, and WMI is not asked to overrule an exact match.
   {

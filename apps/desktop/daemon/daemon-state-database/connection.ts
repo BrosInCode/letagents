@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isOwnerPrivate, ownerPrivatePlatform, protectOwnerPrivate, windowsToolPaths } from "../../../../shared/owner-private-fs.mjs";
 import {
-  isBirthEvidence, signalTree, signalTreeOutcome, windowsProcessBirths, windowsProcessInfo,
+  isBirthEvidence, MAX_WINDOWS_BIRTH_PIDS, signalTree, signalTreeOutcome, windowsProcessBirths, windowsProcessInfo,
   type TreeSignalOutcome, type WindowsSnapshotBirth,
 } from "../../../../shared/process-tree.mjs";
 import { renameWithRetryAsync } from "../../../../shared/rename-retry.mjs";
@@ -327,11 +327,19 @@ function resolveLegacyRuntimeStates(
   }
   if (remaining.length === 0) return results;
 
-  const snapshot = readSnapshot ? readSnapshot([...new Set(remaining.map((item) => item.pid))]) : undefined;
+  // One snapshot per batch of at most MAX_WINDOWS_BIRTH_PIDS pids; a batch that cannot be read leaves its pids to WMI.
+  const snapshot = new Map<number, WindowsSnapshotBirth>();
+  if (readSnapshot) {
+    const pids = [...new Set(remaining.map((item) => item.pid))];
+    for (let start = 0; start < pids.length; start += MAX_WINDOWS_BIRTH_PIDS) {
+      const batch = readSnapshot(pids.slice(start, start + MAX_WINDOWS_BIRTH_PIDS));
+      if (batch) for (const [pid, birth] of batch) snapshot.set(pid, birth);
+    }
+  }
   const wmiCandidates: Array<{ key: string; pid: number; recordedFiletime: bigint }> = [];
   for (const item of remaining) {
     const recordedFiletime = parseWindowsBirthFiletime(item.birth);
-    const listed = snapshot?.get(item.pid);
+    const listed = snapshot.get(item.pid);
     if (listed?.listed === false) {
       // A fresh, successful snapshot that does not list the pid: the recorded process is gone.
       results.set(item.key, "gone");
