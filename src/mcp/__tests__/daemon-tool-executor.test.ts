@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -191,6 +191,39 @@ test("workspace-local tools cannot redirect daemon execution outside the authori
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("publish_page in the daemon reads the page in the agent's workspace and posts it with the worker's credential", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-daemon-page-"));
+  const workspace = join(root, "project");
+  await mkdir(workspace);
+  await writeFile(join(workspace, "report.html"), "<!doctype html><title>Report</title>");
+  await writeFile(join(root, "outside.html"), "<p>outside</p>");
+  const requests: Array<{ url: string; method?: string; authorization: string | null; body: unknown }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    requests.push({ url: String(url), method: init?.method, authorization: new Headers(init?.headers).get("Authorization"),
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
+    return new Response(JSON.stringify({ id: "page_ab12" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  t.after(async () => {
+    globalThis.fetch = originalFetch;
+    await rm(root, { recursive: true, force: true });
+  });
+  const publish = (input: Record<string, unknown>, requestId: string) => executeDaemonTool({
+    provider: "cursor", toolName: "publish_page", input: { room_id: "focus_1", ...input }, requestId,
+    roomId: "focus_1", apiUrl: "https://letagents.example", bearer: "worker-bearer", cwd: workspace, agentSession: session("focus_1", "one"),
+  });
+  const text = (output: Awaited<ReturnType<typeof publish>>) => output.liveResult.content[0]?.type === "text" ? output.liveResult.content[0].text : "";
+
+  await publish({ path: "report.html" }, "effect_page_file");
+  assert.deepEqual(requests.at(-1), { url: "https://letagents.example/api/v1/rooms/focus_1/pages", method: "POST",
+    authorization: "Bearer worker-bearer", body: { html: "<!doctype html><title>Report</title>" } });
+  await publish({ source: { message_id: "msg_2893", attachment_id: "att_1" } }, "effect_page_source");
+  assert.deepEqual(requests.at(-1)?.body, { source: { messageId: "msg_2893", attachmentId: "att_1" } });
+  const refused = await publish({ path: "../outside.html" }, "effect_page_outside");
+  assert.match(text(refused), /Nothing was published/);
+  assert.equal(requests.length, 2, "a file outside the workspace is never sent");
 });
 
 test("task mutations remain successful when the following presence update fails", async (t) => {

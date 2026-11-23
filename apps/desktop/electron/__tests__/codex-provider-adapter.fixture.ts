@@ -788,6 +788,10 @@ export const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused
   check_repo: "refused",
   // The daemon reads the named files on this Mac, outside Codex's sandbox, and posts them to the room.
   set_reply_attachments: "refused",
+  // The daemon reads the named page file on this Mac, outside Codex's sandbox, and publishes it to the room.
+  publish_page: "refused",
+  // Only for writing a page for publish_page.
+  get_page_reference: "refused",
   // Runs git, then asks GitHub, GitLab or Bitbucket about the repository: another machine.
   check_repo_visibility: "refused",
   // Runs git and writes .letagents.json into the repository.

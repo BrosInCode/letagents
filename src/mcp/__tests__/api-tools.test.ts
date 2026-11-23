@@ -23,6 +23,7 @@ const originalFetch = globalThis.fetch;
 const { registerApiTools, apiMethodRequest, PAGE_DATA_NOTE } = await import("../server/tools/api-tools.js");
 const { registerPageTools, readPageFile, pageHtmlPart, PUBLISH_PAGE_DESCRIPTION, PUBLISH_PAGE_FROM_ATTACHMENT_DESCRIPTION, READ_PAGE_MAX_CHARS } = await import("../server/tools/page-tools.js");
 const { pinAttachmentWorkingFolder } = await import("../server/runtime/message-attachments.js");
+const { runWithDaemonToolExecutionContext } = await import("../server/runtime/daemon-tool-context.js");
 const { REMOTE_ALLOWED_TOOLS, REMOTE_STRIPPED_INPUT_FIELDS, isRemoteExcludedTool } = await import("../server/remote-tool-surface.js");
 const { SUPERVISED_READ_ONLY_TOOLS } = await import("../../../shared/supervised-read-tools.mjs");
 const { CODEX_READ_ONLY_ROOM_TOOLS } = await import("../../../shared/codex-read-only-room-tools.mjs");
@@ -242,7 +243,7 @@ test("the page tools: publish_page takes a file only where files can be read, an
   assert.deepEqual([...attachmentOnly.keys()], ["list_pages", "read_page", "read_page_diagnostics", "get_page_reference", "publish_page"]);
   assert.deepEqual(Object.keys(attachmentOnly.get("publish_page")!.schema), ["source", "page_id", "draft", "room_id"], "no path where files cannot be read");
   assert.equal(attachmentOnly.get("publish_page")!.description, PUBLISH_PAGE_FROM_ATTACHMENT_DESCRIPTION);
-  assert.match(PUBLISH_PAGE_FROM_ATTACHMENT_DESCRIPTION, /set_reply_attachments/, "desktop room agents learn how to attach the file");
+  assert.match(PUBLISH_PAGE_FROM_ATTACHMENT_DESCRIPTION, /Send the file in a message first/);
   for (const description of [PUBLISH_PAGE_DESCRIPTION, PUBLISH_PAGE_FROM_ATTACHMENT_DESCRIPTION]) {
     assert.match(description, /Call get_page_reference before you write or change a page/);
     assert.ok(description.length < 1_400, "the reference is not in the description");
@@ -349,7 +350,18 @@ test("publish_page reads the page with the attachment file guard: in the workspa
   const prior = process.env.LETAGENTS_EXECUTION_PROFILE;
   try {
     process.env.LETAGENTS_EXECUTION_PROFILE = "supervised_room_turn";
-    await assert.rejects(readPageFile("desk.html"), /Desktop room agents publish a page from an attachment, not a file path\. Attach the \.html file to a room message, then call publish_page with source/);
+    // A desktop agent's own MCP process never reads its files: the daemon runs its tool calls.
+    await assert.rejects(readPageFile("desk.html"), /This agent's tools cannot read its workspace here\. Attach the \.html file to a room message, then call publish_page with source/);
+    // The daemon reads the page in the workspace it runs the agent's calls in, with the same checks.
+    const inDaemon = <T>(cwd: string, run: () => Promise<T>) => runWithDaemonToolExecutionContext(
+      { roomId: "design-lounge", apiUrl: "http://127.0.0.1:39997", bearer: "worker-bearer", cwd, agentSession: {} as never }, run);
+    assert.equal(await inDaemon(project, () => readPageFile("desk.html")), "<!doctype html><title>Desk</title>");
+    assert.equal(await inDaemon(project, () => readPageFile(join(project, "desk.html"))), "<!doctype html><title>Desk</title>");
+    await assert.rejects(inDaemon(project, () => readPageFile("../outside.html")), /outside|workspace/);
+    await assert.rejects(inDaemon(project, () => readPageFile(".env")), /may hold credentials, so it is never attached\. Nothing was published\./);
+    await assert.rejects(inDaemon(project, () => readPageFile("big.html")), /larger than 2 MB/);
+    await assert.rejects(inDaemon(project, () => readPageFile("notes.txt")), /not an \.html file\. Nothing was published\./);
+    await assert.rejects(inDaemon("", () => readPageFile("desk.html")), /needs this agent's workspace folder/);
   } finally {
     if (prior === undefined) delete process.env.LETAGENTS_EXECUTION_PROFILE;
     else process.env.LETAGENTS_EXECUTION_PROFILE = prior;

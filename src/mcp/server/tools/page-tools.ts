@@ -1,3 +1,6 @@
+import { realpath } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
+
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
@@ -6,6 +9,7 @@ import { getApiMethod } from "../../../../shared/api/index.mjs";
 import { PAGE_SURFACES } from "../../../../shared/api/manifest.mjs";
 import { PAGE_HTML_MAX_BYTES, pageReference } from "../../../../shared/api/page-reference.mjs";
 import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
+import { isFileSystemRoot, readWorkspaceAttachmentFile, type WorkspaceAttachmentFile } from "../../../../shared/workspace-attachment-files.mjs";
 import { getApiUrl } from "../runtime/api.js";
 import { getDaemonToolExecutionContext } from "../runtime/daemon-tool-context.js";
 import { readMessageAttachmentFiles } from "../runtime/message-attachments.js";
@@ -16,8 +20,9 @@ import { jsonToolResponse } from "./tasks/response.js";
 // Room pages for agents: the plan's tool names over the pages methods of the
 // LetAgents API. publish_page takes the page from an HTML attachment of a room
 // message (source), which needs no files, so every agent kind can publish. Where
-// this process can read the agent's workspace (the npm package), it also takes
-// a file path, read with the checks message attachments use.
+// the agent's workspace can be read, it also takes a file path, read with the
+// checks message attachments use: the npm package reads it in its own folder,
+// and the desktop daemon in the workspace it runs the agent's tool calls in.
 
 const roomId = z.string().optional().describe("Exact room ID. Defaults to this worker’s room.");
 const pageId = z.string().min(1).max(80).describe("The page id, such as page_ab12; list_pages shows them.");
@@ -66,26 +71,67 @@ function assertRoomHasPages(): void {
 
 const FROM_AN_ATTACHMENT = "Attach the .html file to a room message, then call publish_page with source (its message_id and attachment_id).";
 
-/** Refuse where this process cannot read the agent's files, as for message attachments. */
+/**
+ * Refuse where no one can read the agent's files: the remote endpoint, and a
+ * desktop agent's own MCP process, whose tool calls the daemon runs instead.
+ */
 function assertPagePublishingAvailable(): void {
   if (currentSessionScope()) {
     throw new Error(`The remote LetAgents MCP endpoint cannot read files on your computer. ${FROM_AN_ATTACHMENT} ${NOTHING_PUBLISHED}`);
   }
   const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
-  if (getDaemonToolExecutionContext() || profile === "supervised_room_turn" || profile === "supervised_mcp_polling") {
-    throw new Error(`Desktop room agents publish a page from an attachment, not a file path. ${FROM_AN_ATTACHMENT} ${NOTHING_PUBLISHED}`);
+  if (!getDaemonToolExecutionContext() && (profile === "supervised_room_turn" || profile === "supervised_mcp_polling")) {
+    throw new Error(`This agent's tools cannot read its workspace here. ${FROM_AN_ATTACHMENT} ${NOTHING_PUBLISHED}`);
   }
   assertRoomHasPages();
+}
+
+// A hung network mount or cloud placeholder file must not hold the tool call forever.
+const DAEMON_PAGE_READ_DEADLINE_MS = 30_000;
+
+/**
+ * A desktop agent's page file, read by the daemon in the workspace it runs the
+ * agent's tool calls in: the folder, and the shared reader, its reply
+ * attachments use (inside the workspace, no link, never a credential file).
+ */
+async function readDaemonWorkspacePage(workspacePath: string, path: string): Promise<WorkspaceAttachmentFile> {
+  if (!workspacePath || !isAbsolute(workspacePath)) {
+    throw new Error(`Publishing a page from a file needs this agent's workspace folder. ${FROM_AN_ATTACHMENT} ${NOTHING_PUBLISHED}`);
+  }
+  const workspace = await realpath(workspacePath).catch(() => null);
+  if (!workspace || isFileSystemRoot(workspace)) {
+    throw new Error(`This agent's workspace folder cannot be read. ${FROM_AN_ATTACHMENT} ${NOTHING_PUBLISHED}`);
+  }
+  // The agent names files through its own workspace path, which may pass through a link (macOS /var is /private/var).
+  const roots = { workspace, aliases: [resolve(workspacePath)] };
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`Reading ${path} took too long. ${NOTHING_PUBLISHED}`)), DAEMON_PAGE_READ_DEADLINE_MS);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([
+      readWorkspaceAttachmentFile(roots, path, { maxBytes: PAGE_HTML_MAX_BYTES }).catch((error: Error) => {
+        throw new Error(`${error.message} ${NOTHING_PUBLISHED} The workspace is ${workspace}.`);
+      }),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The page's HTML from a workspace file: inside the workspace, never a credential file, HTML, UTF-8, at most 2 MB. */
 export async function readPageFile(path: string): Promise<string> {
   assertPagePublishingAvailable();
+  const daemon = getDaemonToolExecutionContext();
   // The size is checked before any byte is read.
-  const [file] = await readMessageAttachmentFiles([path], { maxFileBytes: PAGE_HTML_MAX_BYTES, nothingDone: NOTHING_PUBLISHED });
-  if (file!.mimeType !== "text/html") throw new Error(`${path} is not an .html file. ${NOTHING_PUBLISHED}`);
+  const file = daemon
+    ? await readDaemonWorkspacePage(daemon.cwd, path)
+    : (await readMessageAttachmentFiles([path], { maxFileBytes: PAGE_HTML_MAX_BYTES, nothingDone: NOTHING_PUBLISHED }))[0]!;
+  if (file.mimeType !== "text/html") throw new Error(`${path} is not an .html file. ${NOTHING_PUBLISHED}`);
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(file!.bytes);
+    return new TextDecoder("utf-8", { fatal: true }).decode(file.bytes);
   } catch {
     throw new Error(`${path} is not UTF-8 text. ${NOTHING_PUBLISHED}`);
   }
@@ -111,17 +157,16 @@ const PAGE_OUTCOME = "Whether it goes live at once or waits for a room admin fol
   + "which. draft: true shows it only to room admins and you. A room admin pins it as a tab. "
   + `After people use it, read its errors with read_page_diagnostics. ${PAGE_DATA_DESCRIPTION}`;
 
-/** For agents that can read their workspace: a file path, or an attachment. */
+/** For agents whose workspace can be read (npm package, desktop room agents): a file path, or an attachment. */
 export const PUBLISH_PAGE_DESCRIPTION = "Publish a room page: a new page, or with page_id a new version of that page. "
   + "Give the HTML as path (a file in your workspace, read with the checks message attachments use: inside your workspace, "
   + "never a credential file) or as source (an .html attachment of a message in this room), not both. "
   + `${PAGE_RULES} ${PAGE_OUTCOME}`;
 
-/** For agents whose tools cannot read their files (desktop room agents, remote bots): an attachment only. */
+/** For agents whose files no one can read (remote bots): an attachment only. */
 export const PUBLISH_PAGE_FROM_ATTACHMENT_DESCRIPTION = "Publish a room page from an .html attachment of a message in this room "
-  + "(source: its message_id and attachment_id): a new page, or with page_id a new version of that page. The attachment must be "
-  + "posted already. A desktop room agent attaches its own file to its reply with set_reply_attachments; the reply posts when the "
-  + "turn ends, so it publishes that file in a later turn. "
+  + "(source: its message_id and attachment_id): a new page, or with page_id a new version of that page. Send the file "
+  + "in a message first. "
   + `${PAGE_RULES} ${PAGE_OUTCOME}`;
 
 export const GET_PAGE_REFERENCE_DESCRIPTION = "The room page reference, as Markdown: the rules, the manifest, window.letagents, "
@@ -130,8 +175,8 @@ export const GET_PAGE_REFERENCE_DESCRIPTION = "The room page reference, as Markd
 
 /**
  * Where publish_page may take the page from: "file" adds a workspace path
- * (only where this process can read the agent's files), "attachment" is a
- * message attachment only, null leaves publishing out.
+ * (where the agent's files can be read), "attachment" is a message
+ * attachment only, null leaves publishing out.
  */
 export type PagePublishing = "file" | "attachment" | null;
 
