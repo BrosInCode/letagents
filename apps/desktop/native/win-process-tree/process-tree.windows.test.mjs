@@ -24,6 +24,7 @@ import {
   terminateTree,
   terminateTreeOutcome,
   WINDOWS_BIRTH_PREFIX,
+  windowsProcessBirths,
   windowsProcessInfo,
   windowsTreeSize,
 } from "../../../../shared/process-tree.mjs";
@@ -483,4 +484,70 @@ test("the app uses a found helper only when its bytes are the sealed build", { s
   assert.match(String(processTreeHelperRefusal()), /is not the sealed/);
   // A configured helper that is not sealed is refused, with no fallback.
   assert.equal(processTreeHelperPath({ env: { LETAGENTS_PROCESS_TREE_HELPER: packaged }, resourcesPath: resources, seal: { builds: { x64: { sha256: built } } } }), null);
+});
+
+// births: the system process list, read without opening a process (task_22). System (4) cannot be opened without
+// elevation, but the list names its creation time; a pid that is not a multiple of 4 is never a Windows process id.
+const NEVER_A_PID = 4294967293;
+
+test("births reads creation times from the system process list, equal to info's, also for System", { skip }, () => {
+  const self = windowsProcessInfo(process.pid, helper);
+  const births = windowsProcessBirths([process.pid, 4, NEVER_A_PID], helper);
+  assert.ok(births, "the snapshot must be readable here");
+  assert.deepEqual(births.get(process.pid), { listed: true, creationTime: self.creationTime });
+  assert.equal(births.get(4)?.listed, true);
+  assert.match(births.get(4).creationTime, /^[1-9]\d*$/);
+  assert.deepEqual(births.get(NEVER_A_PID), { listed: false });
+});
+
+test("births refuses bad arguments with the usage exit and reads at most 256 pids", { skip }, () => {
+  const run = (args) => spawnSync(helperPath, ["births", ...args], { encoding: "utf8", windowsHide: true });
+  for (const args of [[], ["0"], ["04"], ["-4"], ["4x"], ["4294967296"], Array.from({ length: 257 }, (_, index) => String((index + 1) * 4))]) {
+    const result = run(args);
+    assert.equal(result.status, 120, `births ${args.slice(0, 3).join(" ")}`);
+    assert.equal(result.stdout, "");
+  }
+  const most = run(Array.from({ length: 256 }, (_, index) => String((index + 1) * 4)));
+  assert.equal(most.status, 0, most.stderr);
+  assert.equal(JSON.parse(most.stdout).births.length, 256);
+});
+
+test("births answers only from a list whose every length and offset it checks; anything else is exit 121 and no answer", { skip }, () => {
+  const run = (mode, pids = ["1001", "2001", "3001", "4001"]) => spawnSync(shortListHelper(), ["births", ...pids], {
+    encoding: "utf8", windowsHide: true, env: { ...process.env, LETAGENTS_TEST_SNAPSHOT: mode },
+  });
+  // The harness lists its own real pid beside made-up ones. On current Windows pids are multiples of 4 (an NT
+  // implementation detail, not an API guarantee) and the made-up ones are not, so the two cannot collide. Both halves
+  // of that assumption are checked here, so a Windows that changes it fails this test instead of a harness case.
+  for (const made of [1001, 2001, 3001, 4001]) assert.notEqual(made % 4, 0, `${made} could be a real pid`);
+  const real = [process.pid];
+  for (let index = 0; index < 8; index += 1) {
+    const child = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8", windowsHide: true });
+    real.push(Number(child.stdout));
+  }
+  for (const pid of real) assert.equal(pid % 4, 0, `Windows gave pid ${pid}, not a multiple of 4`);
+  const known = {
+    births: [
+      { pid: 1001, listed: true, creationTime: "5" },
+      { pid: 2001, listed: true, creationTime: null },
+      { pid: 3001, listed: true, creationTime: "7" },
+      { pid: 4001, listed: false },
+    ],
+  };
+  for (const mode of ["valid", "mismatch-then-valid"]) {
+    const result = run(mode);
+    assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
+    assert.deepEqual(JSON.parse(result.stdout), known, mode);
+  }
+  const negative = run("negative-time", ["1001"]);
+  assert.equal(negative.status, 0, negative.stderr);
+  assert.deepEqual(JSON.parse(negative.stdout), { births: [{ pid: 1001, listed: true, creationTime: null }] });
+  // The last three: the helper's own entry, the anchor that proves the offsets, is missing, wrong or doubled.
+  for (const mode of ["truncated", "entry-cut", "over-length", "next-outside", "next-short", "next-misaligned", "wide-pid",
+    "duplicate", "status-error", "always-mismatch", "too-large", "self-missing", "self-wrong-time", "self-twice"]) {
+    const result = run(mode);
+    assert.equal(result.status, 121, `${mode}: exit ${result.status}`);
+    assert.equal(result.stdout, "", `${mode} printed an answer`);
+    assert.match(result.stderr, /letagents-process-tree: /, mode);
+  }
 });

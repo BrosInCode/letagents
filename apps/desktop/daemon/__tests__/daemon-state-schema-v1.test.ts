@@ -1473,6 +1473,199 @@ test("legacy DB move-aside Windows WMI fallback preserves UTC offsets and micros
   }
 });
 
+test("legacy DB move-aside Windows process-list snapshot proves reused or absent PIDs without WMI, never signals them, and keeps equal or unread births fail-closed", async () => {
+  const seed = async (dbPath: string, entries: Array<{ id: string; pid: number; birth: string }>) => {
+    const database = new DatabaseSync(dbPath);
+    try {
+      database.exec(`
+        PRAGMA application_id = 0;
+        PRAGMA user_version = 52;
+        CREATE TABLE runtime_deployments (agent_id TEXT PRIMARY KEY, provider_connection_pid INTEGER, provider_process_identity TEXT);
+      `);
+      for (const item of entries) database.prepare("INSERT INTO runtime_deployments VALUES (?, ?, ?)").run(item.id, item.pid, item.birth);
+    } finally {
+      database.close();
+    }
+    await protectOwnerPrivate(dbPath, "file", { force: true });
+  };
+  type Snapshot = Map<number, { listed: false } | { listed: true; creationTime: string | null }> | undefined;
+  /** One reset with the helper refused (unknown), absence unproved, and WMI denied unless a test supplies it. */
+  const reset = async (
+    entries: Array<{ id: string; pid: number; birth: string }>,
+    snapshot: Snapshot,
+    wmi: ((pids: readonly number[]) => Map<number, string> | null) = () => null,
+  ) => {
+    const env = await tempDir("letagents-win-snapshot-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    await seed(dbPath, entries);
+    const before = await readFile(dbPath);
+    const snapshotCalls: number[][] = [];
+    const wmiCalls: number[][] = [];
+    const signals: number[] = [];
+    let outcome: string | Error | null;
+    try {
+      outcome = await moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "win32",
+        birthState: () => "unknown",
+        checkWindowsProcessAbsent: () => false,
+        readWindowsProcessBirths: (pids) => { snapshotCalls.push([...pids]); return snapshot; },
+        queryWindowsWmiCreations: (pids) => { wmiCalls.push([...pids]); return wmi(pids); },
+        signalProcessTreeOutcome: (pid) => { signals.push(pid); return "ended"; },
+      });
+    } catch (error) {
+      outcome = error as Error;
+    }
+    const names = await readdir(env.root);
+    const unchanged = names.includes("daemon-state.sqlite") && Buffer.compare(before, await readFile(dbPath)) === 0;
+    await env.cleanup();
+    return { outcome, snapshotCalls, wmiCalls, signals, archived: names.some((name) => name.includes(".legacy-")), unchanged };
+  };
+  const refused = (result: Awaited<ReturnType<typeof reset>>) => {
+    assert.ok(result.outcome instanceof Error && /birth identity could not be resolved/i.test(result.outcome.message), String(result.outcome));
+    assert.equal(result.archived, false);
+    assert.equal(result.unchanged, true, "an unresolved identity must leave the legacy database byte-for-byte unchanged");
+  };
+
+  // W1 with WMI denied: System (4) is listed with a creation time other than the recorded one. The pid names another
+  // process: the reset proceeds, nothing is signalled, and WMI is not asked.
+  {
+    const result = await reset(
+      [{ id: "sys", pid: 4, birth: "win32-ft:130000000000000000" }],
+      new Map([[4, { listed: true, creationTime: "134381518010039201" }]]),
+    );
+    assert.ok(typeof result.outcome === "string" && result.outcome.includes(".legacy-"), String(result.outcome));
+    assert.deepEqual(result.snapshotCalls, [[4]]);
+    assert.deepEqual(result.wmiCalls, []);
+    assert.deepEqual(result.signals, [], "a reused pid must never be signalled");
+  }
+
+  // Several unresolved records share one snapshot; the same pid with two births is asked for once.
+  {
+    const result = await reset(
+      [
+        { id: "a", pid: 4, birth: "win32-ft:130000000000000000" },
+        { id: "b", pid: 696, birth: "win32-ft:130000000000000001" },
+        { id: "c", pid: 4, birth: "win32-ft:130000000000000002" },
+        { id: "d", pid: 556, birth: "win32-ft:130000000000000003" },
+      ],
+      new Map<number, { listed: false } | { listed: true; creationTime: string | null }>([
+        [4, { listed: true, creationTime: "134381518010039201" }],
+        [696, { listed: true, creationTime: "134381518101209559" }],
+        [556, { listed: false }],
+      ]),
+    );
+    assert.ok(typeof result.outcome === "string" && result.outcome.includes(".legacy-"), String(result.outcome));
+    assert.equal(result.snapshotCalls.length, 1);
+    assert.deepEqual([...result.snapshotCalls[0]!].sort((a, b) => a - b), [4, 556, 696]);
+    assert.deepEqual(result.wmiCalls, []);
+    assert.deepEqual(result.signals, []);
+  }
+
+  // More than one batch: 300 distinct pids are read as 256 + 44, and a batch that cannot be read leaves only its
+  // pids to WMI.
+  {
+    const env = await tempDir("letagents-win-snapshot-batches-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      const entries = Array.from({ length: 300 }, (_, index) => ({ id: `r${index}`, pid: (index + 1) * 4, birth: "win32-ft:130000000000000000" }));
+      await seed(dbPath, entries);
+      const batches: number[][] = [];
+      const wmiCalls: number[][] = [];
+      const archived = await moveAsideLegacyDaemonStateDatabase(dbPath, {
+        platform: "win32",
+        birthState: () => "unknown",
+        checkWindowsProcessAbsent: () => false,
+        readWindowsProcessBirths: (pids) => {
+          batches.push([...pids]);
+          if (batches.length === 2) return undefined;
+          return new Map(pids.map((pid) => [pid, { listed: false as const }]));
+        },
+        queryWindowsWmiCreations: (pids) => {
+          wmiCalls.push([...pids]);
+          return new Map(pids.map((pid) => [pid, "20261030032839.146576+060"]));
+        },
+        signalProcessTreeOutcome: () => { throw new Error("no record may be signalled"); },
+      });
+      assert.ok(archived && archived.includes(".legacy-"));
+      assert.deepEqual(batches.map((batch) => batch.length), [256, 44]);
+      assert.deepEqual(wmiCalls, [batches[1]], "only the unread batch goes to WMI");
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // A listed equal creation time is the recorded process itself, still unreadable through the helper: unknown,
+  // refused, not signalled, and WMI is not asked to overrule an exact match.
+  {
+    const result = await reset(
+      [{ id: "same", pid: 4, birth: "win32-ft:134381518010039201" }],
+      new Map([[4, { listed: true, creationTime: "134381518010039201" }]]),
+      () => new Map([[4, "20200101000000.000000+000"]]),
+    );
+    refused(result);
+    assert.deepEqual(result.wmiCalls, []);
+    assert.deepEqual(result.signals, []);
+  }
+
+  // A pid one tick away is a different birth: the snapshot is exact to 100 ns, unlike WMI.
+  {
+    const result = await reset(
+      [{ id: "tick", pid: 4, birth: "win32-ft:134381518010039202" }],
+      new Map([[4, { listed: true, creationTime: "134381518010039201" }]]),
+    );
+    assert.ok(typeof result.outcome === "string" && result.outcome.includes(".legacy-"), String(result.outcome));
+    assert.deepEqual(result.signals, []);
+  }
+
+  // A snapshot that cannot be read, or that lists the pid without a positive time, falls through to WMI. With WMI
+  // denied too, the identity stays unknown and the reset is refused; with a WMI answer, WMI decides as before.
+  for (const snapshot of [undefined, new Map([[4, { listed: true as const, creationTime: null }]])]) {
+    const denied = await reset([{ id: "sys", pid: 4, birth: "win32-ft:130000000000000000" }], snapshot);
+    refused(denied);
+    assert.deepEqual(denied.wmiCalls, [[4]]);
+    assert.deepEqual(denied.signals, []);
+    const answered = await reset(
+      [{ id: "sys", pid: 4, birth: "win32-ft:130000000000000000" }],
+      snapshot,
+      () => new Map([[4, "20261030032839.146576+060"]]),
+    );
+    assert.ok(typeof answered.outcome === "string" && answered.outcome.includes(".legacy-"), String(answered.outcome));
+    assert.deepEqual(answered.signals, []);
+  }
+
+  // A recorded birth that is not a Windows birth cannot be compared: only absence resolves it.
+  {
+    const listed = await reset(
+      [{ id: "posix", pid: 4000, birth: "Mon Jan  1 00:00:00 1990" }],
+      new Map([[4000, { listed: true, creationTime: "134381518010039201" }]]),
+    );
+    refused(listed);
+    assert.deepEqual(listed.wmiCalls, []);
+    const unlisted = await reset([{ id: "posix", pid: 4000, birth: "Mon Jan  1 00:00:00 1990" }], new Map([[4000, { listed: false }]]));
+    assert.ok(typeof unlisted.outcome === "string" && unlisted.outcome.includes(".legacy-"), String(unlisted.outcome));
+  }
+
+  // A caller that injects its own birthState without a snapshot reader keeps its exact answer (no default helper run).
+  {
+    const env = await tempDir("letagents-win-snapshot-injected-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seed(dbPath, [{ id: "sys", pid: 4, birth: "win32-ft:134378009191465763" }]);
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+          platform: "win32",
+          birthState: () => "unknown",
+          checkWindowsProcessAbsent: () => false,
+          queryWindowsWmiCreations: () => null,
+        }),
+        /birth identity could not be resolved/i,
+      );
+    } finally {
+      await env.cleanup();
+    }
+  }
+});
+
 test("concurrent fresh database opens converge across the main/WAL observation window while orphan, non-regular, foreign, future, and symlink controls still fail closed", async () => {
   // Helper: delay opener A's initial ENOENT from lstat(dbPath) until caller runs
   // a concurrent action and releases the gate, then record all lstat targets.

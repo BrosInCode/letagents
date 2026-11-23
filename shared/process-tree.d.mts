@@ -90,6 +90,12 @@ export interface WindowsProcessInfo {
 }
 export function windowsProcessInfo(pid: number, options?: ProcessTreeHelperOptions): WindowsProcessInfo | null | undefined;
 
+export const MAX_WINDOWS_BIRTH_PIDS: number;
+/** One pid in a system process list snapshot. creationTime null: listed, but the list gives no positive time. */
+export type WindowsSnapshotBirth = { listed: false } | { listed: true; creationTime: string | null };
+/** One snapshot of the system process list; undefined when it cannot be read. Windows only. */
+export function windowsProcessBirths(pids: readonly number[], options?: ProcessTreeHelperOptions): Map<number, WindowsSnapshotBirth> | undefined;
+
 export interface SignalTreeOptions extends ProcessTreeHelperOptions {
   platform?: NodeJS.Platform;
   /** The recorded birth of `pid`. On Windows a pid this process does not hold is ended only with it. */
