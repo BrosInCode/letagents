@@ -204,6 +204,16 @@ test("daemon policy and projection domains remain extracted", () => {
   for (const file of mainFiles) assert.ok(read(file).split("\n").length < 600, `${file} must stay under 600 lines`);
 });
 
+test("convergence-decision.ts stays pure with zero Node I/O, clock, timer, or network primitives", () => {
+  const source = read("../convergence-decision.ts");
+  assert.doesNotMatch(source, /from\s+["']node:/, "must not import Node built-in modules");
+  assert.doesNotMatch(source, /\bDate\b/, "must not read clocks");
+  assert.doesNotMatch(source, /\b(setTimeout|setInterval|setImmediate|clearTimeout|clearInterval)\b/, "must not schedule timers");
+  assert.doesNotMatch(source, /\bfetch\s*\(/, "must not perform network I/O");
+  assert.doesNotMatch(source, /\bMath\.random\s*\(/, "must be deterministic");
+  assert.doesNotMatch(source, /\bprocess\./, "must not read process globals");
+});
+
 function read(relativePath: string): string {
   return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8");
 }
