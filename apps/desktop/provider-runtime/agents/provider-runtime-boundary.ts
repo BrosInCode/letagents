@@ -1018,6 +1018,9 @@ export class ProviderRuntimeBoundary {
   /**
    * End the daemon's observation of an operation. The native work of the provider is not interrupted. A step that
    * waits ends with a refusal, so the adapter dispatches nothing for it. An unknown id does nothing.
+   * Room turns (`runRoomTurn` and `recoverRoomTurn`) are the exception: their steps stay open after a detach, because
+   * the daemon must still record what the provider already did (for example a turn that started). Only the adapter's
+   * `detachSignal` fires for them.
    */
   detachOperation(operationId: string): void {
     guarded("detachOperation", "operationId", operationId);

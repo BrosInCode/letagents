@@ -180,6 +180,29 @@ test("an answer body survives a JSON transport, and an omitted body stays omitte
   }
 });
 
+test("a disposition with an undefined optional field reaches the adapter without that field", async () => {
+  // delivery-turn.ts once built `evidence: undefined` for a saved reply; the boundary refused it after the daemon
+  // had saved the result (Lukas, #2088 review). The router now leaves undefined properties out, as JSON does.
+  for (const outcome of ["reply", "no_reply"] as const) {
+    const accepted = outcome === "reply"
+      ? { turnId: "turn-1", outcome, text: "done", evidence: undefined }
+      : { turnId: "turn-1", outcome, text: null, evidence: undefined };
+    let seen: unknown = "unset";
+    let thrown: unknown;
+    const { router, handle } = await routed(fakeAdapter(async (_handle, _request, options) => {
+      try { seen = await options!.checkpointTerminalResult!(REPLY); } catch (error) { thrown = error; }
+      return REPLY;
+    }));
+    await router.runRoomTurn(handle, REQUEST, {
+      checkpointTerminalResult: async () => ({ acceptedResult: accepted as ProviderRoomTurnResult, cleanupRecoveryEvidence: true }),
+    });
+    assert.equal(thrown, undefined);
+    const { evidence: _omitted, ...withoutEvidence } = accepted;
+    assert.deepEqual(seen, { acceptedResult: withoutEvidence, cleanupRecoveryEvidence: true });
+    assert.equal(Object.hasOwn((seen as { acceptedResult: object }).acceptedResult, "evidence"), false);
+  }
+});
+
 test("a disposition that is not the contract's shape is refused into the adapter", async () => {
   let thrown: unknown;
   const { router, handle } = await routed(fakeAdapter(async (_handle, _request, options) => {

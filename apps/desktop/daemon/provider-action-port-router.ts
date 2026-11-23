@@ -62,6 +62,23 @@ function roomTurnHandlers(options: RoomTurnCallbacks | undefined): StepHandlers 
   };
 }
 
+/**
+ * A step answer is JSON, and JSON has no `undefined`: `JSON.stringify` leaves such a property out. The daemon's
+ * functions build plain objects, where an optional field can be present with the value `undefined` (for example
+ * `evidence: undefined`). Leave those properties out here, as a JSON transport would, so that the boundary does not
+ * refuse an answer that the daemon has already saved. Arrays and other values stay as they are, so the boundary still
+ * refuses a value that is not data.
+ */
+function withoutUndefinedProperties(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutUndefinedProperties);
+  if (value === null || typeof value !== "object") return value;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([, field]) => field !== undefined)
+    .map(([key, field]) => [key, withoutUndefinedProperties(field)]));
+}
+
 /** The names of the steps that the daemon answers, in the order of the operation's list. */
 function stepNames<S extends ProviderStepName>(handlers: StepHandlers, steps: readonly S[]): S[] {
   return steps.filter((step) => handlers[step] !== undefined);
@@ -891,7 +908,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       }
     };
     // Only a step whose answer has a body forwards the value of the daemon's function; for another step it is ignored.
-    const settled = (step: ProviderStepName, value: unknown) => ({ body: step in PROVIDER_STEP_ANSWER_BODY_SCHEMAS ? value : undefined });
+    const settled = (step: ProviderStepName, value: unknown) => ({ body: step in PROVIDER_STEP_ANSWER_BODY_SCHEMAS ? withoutUndefinedProperties(value) : undefined });
     this.stepHandlers.set(operationId, (event) => {
       let result: unknown;
       try { result = handlers[event.step]?.(event.body); } catch (thrown) { answer(event.seq, { thrown }); return; }

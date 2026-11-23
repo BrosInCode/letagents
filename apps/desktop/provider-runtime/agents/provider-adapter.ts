@@ -587,6 +587,11 @@ export class ProviderContinuationMissingError extends Error {
   }
 }
 
+/**
+ * The daemon's callbacks for one room turn. Each callback is one step of the turn's operation, and only one step can
+ * wait at a time: await each callback before you call the next one. A second callback while one still waits is
+ * refused ("another step of the operation waits").
+ */
 export interface ProviderRoomTurnOptions {
   /** Persist dispatch intent before the first native turn/start side effect. */
   beforeNativeDispatch?: () => Promise<void>;
