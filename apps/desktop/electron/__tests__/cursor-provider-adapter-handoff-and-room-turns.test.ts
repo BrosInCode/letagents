@@ -341,6 +341,70 @@ test("a failed prepared-wrapper idle checkpoint recovers before the inbox item b
   }
 });
 
+test("a prepared wrapper whose retirement keeps failing reports every earlier cause (task_21)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-prepared-retirement-causes-"));
+  const harness = createHarness();
+  try {
+    const dependencies: CursorProviderAdapterDependencies = {
+      ...harness.dependencies,
+      prepareTurnState(path) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+      },
+      launchTurn(input) {
+        const child = harness.dependencies.launchTurn(input);
+        if (input.statePath) {
+          writeFileSync(`${input.statePath}.terminal.json`, JSON.stringify({
+            type: "not_started",
+            error: "Cursor wrapper startup failed: probe startup cause",
+            native_process_group_reaped: true,
+            reap_scope: "native_process_group",
+            remote_authority_revoked: true,
+          }));
+        }
+        return child;
+      },
+    };
+    const adapter = new CursorProviderAdapter({
+      dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir: join(root, "config"),
+        dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const detach = new AbortController();
+    let settlements = 0;
+    const turn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointPreparedTurn: async () => { detach.abort(); },
+      checkpointProviderState: async () => {},
+      // Both retirements (the launch path, then exact-turn recovery) fail, as the capture flush did on Windows.
+      settleLifecycleBeforeIdle: async () => {
+        settlements += 1;
+        throw new Error(`Execution evidence rejected: identity_mismatch (settlement ${settlements}).`);
+      },
+      detachSignal: detach.signal,
+    });
+    await assert.rejects(turn, (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      // Recovery retirement failure, with the not-dispatched cause it was retiring.
+      assert.match(message, /could not retire its exact child birth: Execution evidence rejected: identity_mismatch \(settlement 2\)/);
+      assert.match(message, /original cause: Cursor's prepared wrapper exited before native dispatch/);
+      assert.match(message, /Wrapper cause: Cursor wrapper startup failed: probe startup cause/);
+      // The first (launch-path) retirement failure and its own cause are kept too.
+      assert.match(message, /after launch failure: Cursor prepared wrapper was reaped, but its durable idle-state retirement failed: Execution evidence rejected: identity_mismatch \(settlement 1\)/);
+      assert.match(message, /\(settlement 1\)\. \(original cause: Cursor turn preparation was interrupted before native dispatch\.\)/);
+      return true;
+    });
+    assert.equal(settlements, 2);
+    assert.equal(harness.children.length, 1, "a failed retirement never redispatches the inbox item");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Cursor control during a blocked provider checkpoint can never release deferred native work", async () => {
   const harness = createHarness();
   const adapter = supervisedAdapter(harness);

@@ -89,15 +89,24 @@ export async function runRoomTurn(
       unlinkPreparationDetach();
       // Native work may have completed while its real session checkpoint
       // failed. Re-read only this exact wrapper terminal; never redispatch.
-      return await adapter.recoverRoomTurn(handle, {
-        inboxItemId: request.inboxItemId,
-        providerTurnId: turnId,
-      }, {
-        detachSignal: options.detachSignal,
-        checkpointProviderState: options.checkpointProviderState,
-        settleLifecycleBeforeIdle: options.settleLifecycleBeforeIdle,
-        checkpointTerminalResult: options.checkpointTerminalResult,
-      });
+      try {
+        return await adapter.recoverRoomTurn(handle, {
+          inboxItemId: request.inboxItemId,
+          providerTurnId: turnId,
+        }, {
+          detachSignal: options.detachSignal,
+          checkpointProviderState: options.checkpointProviderState,
+          settleLifecycleBeforeIdle: options.settleLifecycleBeforeIdle,
+          checkpointTerminalResult: options.checkpointTerminalResult,
+        });
+      } catch (recoveryError) {
+        // A failed recovery must not hide the launch failure that started it.
+        // Keep the error object (and its recovery outcome); only extend its text.
+        if (recoveryError instanceof Error && error.message && !recoveryError.message.includes(error.message)) {
+          recoveryError.message = `${recoveryError.message} (after launch failure: ${error.message})`;
+        }
+        throw recoveryError;
+      }
     }
     let terminal = await adapter.awaitRoomTurnTerminal(turn.completion!, options.detachSignal);
     if (turn.lifecycleSettlementDeferred) {
