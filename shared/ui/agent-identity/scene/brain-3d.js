@@ -251,9 +251,12 @@ export async function createBrainPreview(host, { onUnavailable }) {
           float stripe = p.y + .15 * p.z;
           paint = mix(edition_gray, edition_ivory, 1. - smoothstep(.09, .115, abs(stripe + .27)));
         }
+        // The arch keeps its own colours. Filtering mixes its edge with the clear
+        // (black) pixels around it, so the colour is divided by the filtered alpha.
+        vec4 arch = texture2D(edition_antigravityMark, markUv(p, style));
         vec3 markColor = style < .5 ? edition_ink
           : style < 2.5 ? edition_chalk
-          : style < 3.5 ? texture2D(edition_antigravityMark, markUv(p, style)).rgb : edition_chalk;
+          : style < 3.5 ? arch.rgb / max(arch.a, 1e-4) : edition_chalk;
         return mix(paint, markColor, markMask(p, style));
       }
     ` + shader.fragmentShader;

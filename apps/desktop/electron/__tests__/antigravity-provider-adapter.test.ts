@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -905,4 +905,23 @@ test("a sign-in agy keeps in a file reaches the agent's own folder, and leaves i
   assert.equal(ownerAntigravityTokenFileExists(ownerDir), false);
   shareAntigravitySignIn(launches[0]!.args[2]!, ownerDir);
   assert.equal(existsSync(agentToken), false);
+});
+
+
+test("a sign-in file counts only as a non-empty file: an empty or dangling one is not shared", () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-agy-token-"));
+  roots.push(root);
+  const ownerDir = join(root, "owner");
+  const agentDir = join(root, "agent");
+  mkdirSync(join(ownerDir, "antigravity-cli"), { recursive: true });
+  const token = join(ownerDir, "antigravity-cli", "antigravity-oauth-token");
+  writeFileSync(token, "");
+  assert.equal(ownerAntigravityTokenFileExists(ownerDir), false, "an empty file is no sign-in");
+  shareAntigravitySignIn(agentDir, ownerDir);
+  assert.equal(existsSync(join(agentDir, "antigravity-cli", "antigravity-oauth-token")), false);
+  rmSync(token);
+  symlinkSync(join(root, "missing"), token);
+  assert.equal(ownerAntigravityTokenFileExists(ownerDir), false, "a link to nothing is no sign-in");
+  shareAntigravitySignIn(agentDir, ownerDir);
+  assert.equal(existsSync(join(agentDir, "antigravity-cli", "antigravity-oauth-token")), false);
 });

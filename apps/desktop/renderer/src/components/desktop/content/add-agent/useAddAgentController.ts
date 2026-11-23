@@ -217,7 +217,8 @@ let setupActions!: ReturnType<typeof setup.bind>;
 // `open` alone saw the provider of the last opening (or none).
 watch(() => [props.open, props.initialProviderId] as const, ([open, initialProviderId]) => {
   if (open && initialProviderId && selectedProviderId.value !== initialProviderId) {
-    selectedProviderId.value = initialProviderId;
+    // The provider switch resets the last provider's setup check, model and access, as a click does.
+    setupActions.selectProvider(initialProviderId);
   }
 }, { flush: "sync" });
 const {
