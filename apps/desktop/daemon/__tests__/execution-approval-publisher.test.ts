@@ -1572,6 +1572,7 @@ test("real RoomMoveCoordinator rollback preserves approval publish and close ret
     scheduleRecovery: () => {},
     nowIso: () => new Date(f.getNow()).toISOString(),
   });
+  coordinator.attachEffectExecutor(f.executor, f.database, () => {});
 
   // Seed two approvals: req-1 reaches closing+503 retry, req-2 reaches attempted+503 retry.
   const adm1 = admission();
