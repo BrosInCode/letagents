@@ -119,8 +119,9 @@ export const PUBLISH_PAGE_DESCRIPTION = "Publish a room page: a new page, or wit
 
 /** For agents whose tools cannot read their files (desktop room agents, remote bots): an attachment only. */
 export const PUBLISH_PAGE_FROM_ATTACHMENT_DESCRIPTION = "Publish a room page from an .html attachment of a message in this room "
-  + "(source: its message_id and attachment_id): a new page, or with page_id a new version of that page. Attach the file to a "
-  + "message first; desktop room agents attach it to their reply with set_reply_attachments, and publish once that reply is posted. "
+  + "(source: its message_id and attachment_id): a new page, or with page_id a new version of that page. The attachment must be "
+  + "posted already. A desktop room agent attaches its own file to its reply with set_reply_attachments; the reply posts when the "
+  + "turn ends, so it publishes that file in a later turn. "
   + `${PAGE_RULES} ${PAGE_OUTCOME}`;
 
 export const GET_PAGE_REFERENCE_DESCRIPTION = "The room page reference, as Markdown: the rules, the manifest, window.letagents, "
