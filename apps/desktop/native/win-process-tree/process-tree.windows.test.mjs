@@ -513,15 +513,15 @@ test("births refuses bad arguments with the usage exit and reads at most 256 pid
 });
 
 test("births answers only from a list whose every length and offset it checks; anything else is exit 121 and no answer", { skip }, () => {
-  const run = (mode, pids = ["1000", "2000", "3000", "4000"]) => spawnSync(shortListHelper(), ["births", ...pids], {
+  const run = (mode, pids = ["1001", "2001", "3001", "4001"]) => spawnSync(shortListHelper(), ["births", ...pids], {
     encoding: "utf8", windowsHide: true, env: { ...process.env, LETAGENTS_TEST_SNAPSHOT: mode },
   });
   const known = {
     births: [
-      { pid: 1000, listed: true, creationTime: "5" },
-      { pid: 2000, listed: true, creationTime: null },
-      { pid: 3000, listed: true, creationTime: "7" },
-      { pid: 4000, listed: false },
+      { pid: 1001, listed: true, creationTime: "5" },
+      { pid: 2001, listed: true, creationTime: null },
+      { pid: 3001, listed: true, creationTime: "7" },
+      { pid: 4001, listed: false },
     ],
   };
   for (const mode of ["valid", "mismatch-then-valid"]) {
@@ -529,9 +529,9 @@ test("births answers only from a list whose every length and offset it checks; a
     assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
     assert.deepEqual(JSON.parse(result.stdout), known, mode);
   }
-  const negative = run("negative-time", ["1000"]);
+  const negative = run("negative-time", ["1001"]);
   assert.equal(negative.status, 0, negative.stderr);
-  assert.deepEqual(JSON.parse(negative.stdout), { births: [{ pid: 1000, listed: true, creationTime: null }] });
+  assert.deepEqual(JSON.parse(negative.stdout), { births: [{ pid: 1001, listed: true, creationTime: null }] });
   // The last three: the helper's own entry, the anchor that proves the offsets, is missing, wrong or doubled.
   for (const mode of ["truncated", "entry-cut", "over-length", "next-outside", "next-short", "next-misaligned", "wide-pid",
     "duplicate", "status-error", "always-mismatch", "too-large", "self-missing", "self-wrong-time", "self-twice"]) {

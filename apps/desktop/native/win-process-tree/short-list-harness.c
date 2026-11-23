@@ -9,10 +9,11 @@
  *
  * The system process list that `births` reads cannot be made malformed from
  * outside either. With LETAGENTS_TEST_SNAPSHOT set, `births` gets a stand-in
- * NtQuerySystemInformation that writes a known list (pid 1000 created at 5,
- * pid 2000 listed with no creation time, pid 3000 created at 7, and this
+ * NtQuerySystemInformation that writes a known list (pid 1001 created at 5,
+ * pid 2001 listed with no creation time, pid 3001 created at 7, and this
  * helper with its real creation time, the anchor `births` requires) or a
- * broken one, named by the variable's value.
+ * broken one, named by the variable's value. Windows process ids are
+ * multiples of 4, so the made-up ids can never be the helper's own.
  */
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
@@ -72,22 +73,22 @@ static LONG WINAPI fake_query_system(ULONG information, PVOID out, ULONG size, P
   if (wcscmp(mode, L"mismatch-then-valid") == 0 && calls == 1) { *returned = size * 2; return (LONG)0xC0000004L; }
   if (size < 5 * FAKE_ENTRY) { *returned = 5 * FAKE_ENTRY; return (LONG)0xC0000004L; }
   ZeroMemory(base, 5 * FAKE_ENTRY);
-  fake_entry(base, 0, FAKE_ENTRY, 5, 1000);
-  fake_entry(base, FAKE_ENTRY, FAKE_ENTRY, 0, 2000);
-  fake_entry(base, 2 * FAKE_ENTRY, FAKE_ENTRY, 7, 3000);
+  fake_entry(base, 0, FAKE_ENTRY, 5, 1001);
+  fake_entry(base, FAKE_ENTRY, FAKE_ENTRY, 0, 2001);
+  fake_entry(base, 2 * FAKE_ENTRY, FAKE_ENTRY, 7, 3001);
   fake_entry(base, 3 * FAKE_ENTRY, 0, self_time, GetCurrentProcessId());
   if (wcscmp(mode, L"truncated") == 0) used = 60;
   else if (wcscmp(mode, L"entry-cut") == 0) used = 3 * FAKE_ENTRY + 40;
-  else if (wcscmp(mode, L"self-missing") == 0) { fake_entry(base, 2 * FAKE_ENTRY, 0, 7, 3000); used = 3 * FAKE_ENTRY; }
+  else if (wcscmp(mode, L"self-missing") == 0) { fake_entry(base, 2 * FAKE_ENTRY, 0, 7, 3001); used = 3 * FAKE_ENTRY; }
   else if (wcscmp(mode, L"self-wrong-time") == 0) fake_entry(base, 3 * FAKE_ENTRY, 0, self_time + 1, GetCurrentProcessId());
   else if (wcscmp(mode, L"self-twice") == 0) fake_entry(base, 0, FAKE_ENTRY, self_time, GetCurrentProcessId());
   else if (wcscmp(mode, L"over-length") == 0) used = size + 1;
-  else if (wcscmp(mode, L"next-outside") == 0) fake_entry(base, 0, 4096, 5, 1000);
-  else if (wcscmp(mode, L"next-short") == 0) fake_entry(base, 0, 16, 5, 1000);
-  else if (wcscmp(mode, L"next-misaligned") == 0) fake_entry(base, 0, FAKE_ENTRY + 4, 5, 1000);
-  else if (wcscmp(mode, L"wide-pid") == 0) fake_entry(base, 0, FAKE_ENTRY, 5, 0x100000000ULL + 1000);
-  else if (wcscmp(mode, L"duplicate") == 0) fake_entry(base, FAKE_ENTRY, FAKE_ENTRY, 9, 1000);
-  else if (wcscmp(mode, L"negative-time") == 0) fake_entry(base, 0, FAKE_ENTRY, -5, 1000);
+  else if (wcscmp(mode, L"next-outside") == 0) fake_entry(base, 0, 4096, 5, 1001);
+  else if (wcscmp(mode, L"next-short") == 0) fake_entry(base, 0, 16, 5, 1001);
+  else if (wcscmp(mode, L"next-misaligned") == 0) fake_entry(base, 0, FAKE_ENTRY + 4, 5, 1001);
+  else if (wcscmp(mode, L"wide-pid") == 0) fake_entry(base, 0, FAKE_ENTRY, 5, 0x100000000ULL + 1001);
+  else if (wcscmp(mode, L"duplicate") == 0) fake_entry(base, FAKE_ENTRY, FAKE_ENTRY, 9, 1001);
+  else if (wcscmp(mode, L"negative-time") == 0) fake_entry(base, 0, FAKE_ENTRY, -5, 1001);
   *returned = used;
   return 0;
 }
