@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, unlink } from "node:fs/promises";
+import { type FileHandle, lstat, open, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated } from "../../../shared/owner-private-fs.mjs";
@@ -145,37 +145,131 @@ function* snapshot(database: DatabaseSync): Generator<SnapshotRecord> {
   yield { kind: "end", applicationId: Number(database.prepare("PRAGMA application_id").get()!.application_id) };
 }
 
-function parseEnvelope(bytes: Buffer): { header: Header; aad: Buffer; ciphertext: Buffer; tag: Buffer } {
-  const end = bytes.indexOf(10);
-  if (end < 0 || end > HEADER_LIMIT || bytes.length < end + 1 + 16) throw failure();
-  const aad = bytes.subarray(0, end + 1);
+/**
+ * A snapshot of a large state database is larger than one JavaScript string
+ * (about 512 MB) and than one `readFile` (2 GiB): a 1.47 GB database failed
+ * every upgrade with "Cannot create a string longer than 0x1fffffe8
+ * characters". So the envelope is read in bounded pieces, never whole.
+ */
+const READ_CHUNK = 4 * 1_024 * 1_024;
+type Envelope = { header: Header; aad: Buffer; start: number; stop: number; tag: Buffer };
+
+function parseHeader(aad: Buffer): Header {
   const header = JSON.parse(aad.toString("utf8")) as Header;
   if (header.format !== MAGIC || !Number.isSafeInteger(header.sourceVersion) || header.sourceVersion < 1
     || !Number.isSafeInteger(header.targetVersion) || header.targetVersion <= header.sourceVersion
     || !Number.isFinite(Date.parse(header.createdAt)) || typeof header.sealedKey !== "string" || !header.sealedKey
     || typeof header.nonce !== "string" || Buffer.from(header.nonce, "base64").length !== 12) throw failure();
-  return { header, aad, ciphertext: bytes.subarray(end + 1, -16), tag: bytes.subarray(-16) };
+  return header;
 }
 
-async function readEnvelope(path: string): Promise<{ bytes: Buffer; header: Header }> {
+async function readAt(file: FileHandle, buffer: Buffer, position: number): Promise<void> {
+  for (let offset = 0; offset < buffer.length;) {
+    const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, position + offset);
+    if (bytesRead <= 0) throw failure();
+    offset += bytesRead;
+  }
+}
+
+/** The bytes from `start` to `stop`, in bounded pieces. Each piece is reused: consume it before the next. */
+async function* fileChunks(file: FileHandle, start: number, stop: number): AsyncGenerator<Buffer> {
+  const buffer = Buffer.alloc(READ_CHUNK);
+  for (let position = start; position < stop;) {
+    const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, stop - position), position);
+    if (bytesRead <= 0) throw failure();
+    yield buffer.subarray(0, bytesRead);
+    position += bytesRead;
+  }
+}
+
+/** The private envelope, open, with its header and tag read; its ciphertext lies from `start` to `stop`. */
+async function openEnvelope(path: string): Promise<{ file: FileHandle; envelope: Envelope }> {
   await privateDirectory(path);
   if (!await regularFile(path, true)) throw failure();
   const file = await openNoFollow(path, constants.O_RDONLY);
   try {
-    const bytes = await file.readFile();
-    return { bytes, header: parseEnvelope(bytes).header };
+    const { size } = await file.stat();
+    const head = Buffer.alloc(Math.min(size, HEADER_LIMIT + 1));
+    await readAt(file, head, 0);
+    const end = head.indexOf(10);
+    if (end < 0 || end > HEADER_LIMIT || size < end + 1 + 16) throw failure();
+    const aad = Buffer.from(head.subarray(0, end + 1));
+    const tag = Buffer.alloc(16);
+    await readAt(file, tag, size - 16);
+    return { file, envelope: { header: parseHeader(aad), aad, start: end + 1, stop: size - 16, tag } };
+  } catch (error) {
+    await file.close();
+    throw error;
+  }
+}
+
+async function readEnvelope(path: string): Promise<{ header: Header; sha256: string }> {
+  const { file, envelope } = await openEnvelope(path);
+  try {
+    const hash = createHash("sha256");
+    for await (const chunk of fileChunks(file, 0, envelope.stop + 16)) hash.update(chunk);
+    return { header: envelope.header, sha256: hash.digest("hex") };
   } finally { await file.close(); }
 }
 
+/** Splits decrypted bytes into lines as bytes, so no line but the longest row is ever one string. */
+function lineSplitter(onLine: (line: string) => void): { push(bytes: Buffer): void; end(): void; wipe(): void } {
+  // Plaintext held between pieces is zeroed on every path, as the whole plaintext was before.
+  let pending: Buffer[] = [];
+  const wipe = () => {
+    for (const part of pending) part.fill(0);
+    pending = [];
+  };
+  const emit = (parts: Buffer[]) => {
+    const line = Buffer.concat(parts);
+    try { onLine(line.toString("utf8")); } finally { line.fill(0); }
+  };
+  return {
+    push(bytes) {
+      let start = 0;
+      for (let newline = bytes.indexOf(10); newline >= 0; newline = bytes.indexOf(10, start)) {
+        try { emit([...pending, bytes.subarray(start, newline)]); } finally { wipe(); }
+        start = newline + 1;
+      }
+      if (start < bytes.length) pending.push(Buffer.from(bytes.subarray(start)));
+    },
+    end() {
+      try {
+        if (!pending.length) return;
+        const rest = Buffer.concat(pending);
+        // Trailing whitespace after the last record is ignored, as before.
+        try { if (rest.toString("utf8").trim()) emit([rest]); } finally { rest.fill(0); }
+      } finally { wipe(); }
+    },
+    wipe,
+  };
+}
+
 function restoreSnapshot(records: Iterable<SnapshotRecord>, version: number, pageSize = 4096): DatabaseSync {
-  let restored: DatabaseSync | undefined;
+  const restorer = snapshotRestorer(version, pageSize);
   try {
-    restored = new DatabaseSync(":memory:");
+    for (const record of records) restorer.add(record);
+    return restorer.finish();
+  } catch (error) {
+    restorer.abort();
+    throw error;
+  }
+}
+
+/** Rebuilds a snapshot one record at a time, so the records need not all be in memory. */
+function snapshotRestorer(version: number, pageSize = 4096): { add(record: SnapshotRecord): void; finish(): DatabaseSync; abort(): void } {
+  const restored = new DatabaseSync(":memory:");
+  let insert: ReturnType<DatabaseSync["prepare"]> | undefined;
+  let ended = false;
+  try {
     restored.exec(`PRAGMA page_size=${pageSize}`);
     restored.exec("PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=OFF; PRAGMA trusted_schema=OFF; BEGIN");
-    let insert: ReturnType<DatabaseSync["prepare"]> | undefined;
-    let ended = false;
-    for (const record of records) {
+  } catch (error) {
+    try { restored.close(); } catch { /* preserve original error */ }
+    throw error;
+  }
+  return {
+    add(record) {
       if (ended) throw failure();
       switch (record.kind) {
         case "table": {
@@ -205,15 +299,17 @@ function restoreSnapshot(records: Iterable<SnapshotRecord>, version: number, pag
         }
         default: throw failure();
       }
-    }
-    if (!ended) throw failure();
-    checkDatabase(restored);
-    restored.exec("COMMIT; PRAGMA foreign_keys=ON");
-    return restored;
-  } catch (error) {
-    try { restored?.close(); } catch { /* preserve original error */ }
-    throw error;
-  }
+    },
+    finish() {
+      if (!ended) throw failure();
+      checkDatabase(restored);
+      restored.exec("COMMIT; PRAGMA foreign_keys=ON");
+      return restored;
+    },
+    abort() {
+      try { restored.close(); } catch { /* preserve original error */ }
+    },
+  };
 }
 
 /** A compact, typed copy that preserves implicit rowids as well as authority.
@@ -232,26 +328,40 @@ export function cloneStateDatabaseForCompaction(database: DatabaseSync): Databas
  * restore flow must fence the daemon and revoke/remint restored worker credentials.
  */
 export async function decryptStateRecoveryBackup(path: string, key: Buffer): Promise<DatabaseSync> {
-  let restored: DatabaseSync | undefined;
-  let plaintext: Buffer | undefined;
+  let restorer: ReturnType<typeof snapshotRestorer> | undefined;
   try {
-    const { bytes } = await readEnvelope(path);
-    const { header, aad, ciphertext, tag } = parseEnvelope(bytes);
-    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(header.nonce, "base64"));
-    decipher.setAAD(aad);
-    decipher.setAuthTag(tag);
-    // Authenticate completely before interpreting any SQL.
-    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    const lines = plaintext.toString("utf8").trimEnd().split("\n");
-    function* records(): Generator<SnapshotRecord> {
-      for (const line of lines) yield JSON.parse(line) as SnapshotRecord;
-    }
-    restored = restoreSnapshot(records(), header.sourceVersion);
-    return restored;
+    const { file, envelope } = await openEnvelope(path);
+    try {
+      const decipher = () => {
+        const value = createDecipheriv("aes-256-gcm", key, Buffer.from(envelope.header.nonce, "base64"));
+        value.setAAD(envelope.aad);
+        value.setAuthTag(envelope.tag);
+        return value;
+      };
+      // Authenticate completely before interpreting any SQL: this pass only checks the tag.
+      const check = decipher();
+      for await (const chunk of fileChunks(file, envelope.start, envelope.stop)) check.update(chunk).fill(0);
+      check.final();
+      // The second pass reads the same open file and checks the tag again at its end.
+      const plain = decipher();
+      const active = snapshotRestorer(envelope.header.sourceVersion);
+      restorer = active;
+      const lines = lineSplitter((line) => active.add(JSON.parse(line) as SnapshotRecord));
+      try {
+        for await (const chunk of fileChunks(file, envelope.start, envelope.stop)) {
+          const bytes = plain.update(chunk);
+          try { lines.push(bytes); } finally { bytes.fill(0); }
+        }
+        const last = plain.final();
+        try { lines.push(last); } finally { last.fill(0); }
+        lines.end();
+      } finally { lines.wipe(); }
+      return active.finish();
+    } finally { await file.close(); }
   } catch {
-    try { restored?.close(); } catch { /* no database content in errors */ }
+    restorer?.abort();
     throw failure();
-  } finally { plaintext?.fill(0); }
+  }
 }
 
 /**
@@ -377,9 +487,8 @@ export async function markStateRecoveryBackupValidated(
     }
     envelope = await readEnvelope(path);
   } catch { return warn("recovery_snapshot_unreadable"); }
-  const { bytes, header } = envelope;
+  const { sha256: checksum, header } = envelope;
   if (Number(database.prepare("PRAGMA user_version").get()!.user_version) !== header.targetVersion) return warn("recovery_snapshot_schema_mismatch");
-  const checksum = createHash("sha256").update(bytes).digest("hex");
   const matchesReceipt = receipt?.checksum === checksum;
   if (!matchesReceipt || !Number.isFinite(Date.parse(String(receipt?.imported_at)))) {
     if (!authenticated || fresh!.sha256 !== checksum || fresh!.targetVersion !== header.targetVersion) {
@@ -422,9 +531,9 @@ export async function cleanupStateRecoveryBackup(
       return hadCandidate;
     }
     if (!options.clear) {
-      const { bytes } = await readEnvelope(path);
+      const { sha256 } = await readEnvelope(path);
       const receipt = database.prepare("SELECT checksum, imported_at FROM migration_records WHERE migration_key=?").get(RECEIPT_KEY);
-      if (!receipt || receipt.checksum !== createHash("sha256").update(bytes).digest("hex")) return false;
+      if (!receipt || receipt.checksum !== sha256) return false;
       const validatedAt = Date.parse(String(receipt.imported_at));
       const now = (options.now ?? new Date()).getTime();
       if (!Number.isFinite(now)) throw failure();
