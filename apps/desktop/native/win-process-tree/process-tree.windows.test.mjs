@@ -516,6 +516,15 @@ test("births answers only from a list whose every length and offset it checks; a
   const run = (mode, pids = ["1001", "2001", "3001", "4001"]) => spawnSync(shortListHelper(), ["births", ...pids], {
     encoding: "utf8", windowsHide: true, env: { ...process.env, LETAGENTS_TEST_SNAPSHOT: mode },
   });
+  // The harness lists its own real pid beside made-up ones. Windows pids are multiples of 4 and the made-up ones are
+  // not, so the two can never collide, whatever pid Windows gives the harness. Both halves of that rule are checked.
+  for (const made of [1001, 2001, 3001, 4001]) assert.notEqual(made % 4, 0, `${made} could be a real pid`);
+  const real = [process.pid];
+  for (let index = 0; index < 8; index += 1) {
+    const child = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8", windowsHide: true });
+    real.push(Number(child.stdout));
+  }
+  for (const pid of real) assert.equal(pid % 4, 0, `Windows gave pid ${pid}, not a multiple of 4`);
   const known = {
     births: [
       { pid: 1001, listed: true, creationTime: "5" },
