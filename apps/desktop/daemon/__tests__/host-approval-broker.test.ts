@@ -622,6 +622,27 @@ test("host approvals use exact operational turns without capture and commit sele
   }
 });
 
+test("a Codex command that lists cancel and not decline is presented as a deny that also stops the turn", async () => {
+  const f = await fixture();
+  try {
+    assert.equal(f.native.provider, "codex");
+    const cases: Array<[unknown, string]> = [
+      [["accept", "acceptWithExecpolicyAmendment", "cancel"], "request_and_turn"],
+      [["accept", "decline", "cancel"], "request"],
+      [["accept"], "request"],
+      [undefined, "request"],
+    ];
+    for (const [availableDecisions, denyScope] of cases) {
+      const params = { ...(f.native.native.params as Record<string, unknown>), availableDecisions };
+      if (availableDecisions === undefined) delete params.availableDecisions;
+      f.emit([{ provider: "codex", native: { ...f.native.native, params } }]);
+      const [candidate] = await f.broker.list("room"); assert.ok(candidate?.reference);
+      assert.equal(candidate.status, "pending");
+      assert.equal(candidate.presentation.denyScope, denyScope, JSON.stringify(availableDecisions));
+    }
+  } finally { await f.close(); }
+});
+
 test("Codex MCP approvals show the tool proposal and remain host-only with arguments out of durable storage", async () => {
   const f = await fixture();
   try {

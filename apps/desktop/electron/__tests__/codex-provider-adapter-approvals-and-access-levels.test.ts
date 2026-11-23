@@ -1,5 +1,6 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -385,6 +386,73 @@ test("Codex generic permission dispatch refuses a changed or malformed requested
     client.pendingPermissions.delete(candidate.id);
   }
   assert.deepEqual(client.permissionResponses, []);
+});
+
+/** The decisions that the recorded real program (codex-cli 0.162.1) lists for a command approval. */
+function recordedCommandDecisions(): unknown[] {
+  const recording = readFileSync(new URL("../../daemon/__tests__/edge/codex/fixtures/approval.ndjson", import.meta.url), "utf8");
+  for (const line of recording.split("\n")) {
+    if (!line.includes('"emit_inbound"') || !line.includes("item/commandExecution/requestApproval")) continue;
+    const decisions = (JSON.parse(line) as { frame: { params: { availableDecisions?: unknown } } }).frame.params.availableDecisions;
+    assert.ok(Array.isArray(decisions), "the recording lists the decisions");
+    return decisions;
+  }
+  throw new Error("The recording has no command approval request.");
+}
+
+test("Codex Deny is sent as cancel when Codex lists cancel and not decline", async (t) => {
+  const recorded = recordedCommandDecisions();
+  assert.equal(recorded.includes("decline"), false, "the recorded program does not accept decline");
+  assert.equal(recorded.includes("cancel"), true, "the recorded program accepts cancel");
+  const command = "item/commandExecution/requestApproval";
+  const fileChange = "item/fileChange/requestApproval";
+  const sent: Array<{ name: string; method: string; decisions: unknown; expected: string }> = [
+    { name: "the recorded command list", method: command, decisions: recorded, expected: "cancel" },
+    { name: "a file change with cancel only", method: fileChange, decisions: ["accept", "cancel"], expected: "cancel" },
+    { name: "session-only choices", method: command, decisions: ["acceptForSession", "cancel"], expected: "cancel" },
+    { name: "decline and cancel: decline", method: command, decisions: ["accept", "decline", "cancel"], expected: "decline" },
+    { name: "cancel before decline: decline", method: fileChange, decisions: ["cancel", "decline"], expected: "decline" },
+    { name: "no list: decline", method: command, decisions: undefined, expected: "decline" },
+  ];
+  for (const entry of sent) await t.test(entry.name, async () => {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    client.turnStatus = "inProgress";
+    const request = client.askPermission(approvalParams({ availableDecisions: entry.decisions }), 1, entry.method);
+    let checks = 0;
+    const options = {
+      beforeNativeDispatch: async () => {}, assertNativeDispatch: () => { checks++; },
+      ...(entry.method === fileChange ? { expectedFileChanges: client.permissionChanges } : {}),
+    };
+    assert.deepEqual(await adapter.replyPermission(handle, request, "reject", options), { outcome: "sent", scope: "request" });
+    assert.deepEqual(client.permissionResponses, [{ request, result: { decision: entry.expected } }], "one decision, and it is one that Codex accepts");
+    assert.equal(checks, 1);
+    assert.deepEqual(harness.signals, [], "the adapter sends a decision and no signal to the process");
+    assert.equal(client.requests.some(candidate => candidate.method === "turn/interrupt"), false, "the adapter sends no interrupt of its own");
+  });
+
+  // An Allow never becomes another decision, and a Deny is not sent when Codex accepts no decision that denies.
+  const refused: Array<{ name: string; method: string; params: Record<string, unknown>; reply: "once" | "reject" }> = [
+    { name: "Allow with the recorded list minus accept", method: command, params: { availableDecisions: recorded.filter(decision => decision !== "accept") }, reply: "once" },
+    { name: "Deny with accept only", method: command, params: { availableDecisions: ["accept"] }, reply: "reject" },
+    { name: "Deny with a cancel that is not a text", method: command, params: { availableDecisions: ["accept", { cancel: {} }] }, reply: "reject" },
+    { name: "Deny of a generic permission with cancel only", method: "item/permissions/requestApproval", params: { ...genericPermissionParams(), availableDecisions: ["accept", "cancel"] }, reply: "reject" },
+  ];
+  for (const entry of refused) await t.test(entry.name, async () => {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    client.turnStatus = "inProgress";
+    const request = client.askPermission(entry.method === command ? approvalParams(entry.params) : entry.params, 1, entry.method);
+    await assert.rejects(adapter.replyPermission(handle, request, entry.reply, { beforeNativeDispatch: async () => {} }), {
+      name: "CodexPermissionReplyError", outcome: "not_dispatched",
+    });
+    assert.deepEqual(client.permissionResponses, []);
+    assert.equal(client.listPendingRequests()[0], request, "the refusal keeps the request open");
+  });
 });
 
 test("Codex rejects unsupported, stale, malformed, or broader-than-once approval decisions before dispatch", async (t) => {

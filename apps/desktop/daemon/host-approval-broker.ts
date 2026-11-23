@@ -7,6 +7,7 @@ import { EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS } from "../../../shared/
 import type { HostApprovalCandidate, HostApprovalDecision, HostApprovalPresentation, HostApprovalReference, HostApprovalStatus } from "../shared/host-approvals.js";
 import type { CodexPermissionFileChange, ProviderPermissionRequest, ProviderPermissionObservation } from "../shared/provider-permissions.js";
 import { ApprovalExecutionReconciler } from "./approval-execution-reconciler.js";
+import { codexDenyDecision } from "#provider-runtime/agents/codex/deny-decision.js";
 import { ApprovalJournalError, type ApprovalAuthority, type ExecutionApprovalRecord } from "./execution-approval-journal.js";
 import type { ExecutionApprovalProjectionRecord } from "./execution-approval-projection-journal.js";
 import {
@@ -473,7 +474,9 @@ export class HostApprovalBroker {
     const raw = literal(inspectedRequest(native, fileChanges));
     return { agentId: entry.id, displayName: entry.display_name, provider: native.provider, title,
       details: Buffer.byteLength(raw) <= MAX_PRESENTATION_BYTES ? raw : "The request is too large to present safely. No decision can be sent.",
-      denyScope: native.provider === "open-model" ? "session_pending" : "request" };
+      denyScope: native.provider === "open-model" ? "session_pending"
+        : native.provider === "codex" && codexDenyDecision(native.native.method, native.native.params) === "cancel"
+          ? "request_and_turn" : "request" };
   }
 
   private async prepareCore(lane: Lane, native: ProviderPermissionRequest) {

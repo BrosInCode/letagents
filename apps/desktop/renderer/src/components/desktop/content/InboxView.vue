@@ -33,6 +33,7 @@
         <div v-if="selected.record?.response" class="knowledge-answer" role="status"><span><CircleCheck :size="16" /> {{ selected.record.response.closed ? 'Closed' : 'Answer recorded' }}</span><p>{{ selected.record.response.body }}</p><small>{{ selected.record.response.actor.label }} · {{ date(selected.record.response.at) }}</small></div>
         <div v-else-if="selectedApproval" class="knowledge-task-action">
           <p v-if="selectedApproval.status === 'pending' && selectedApproval.presentation.denyScope === 'session_pending'" class="inbox-approval-note">Deny applies to all pending permissions for this agent.</p>
+          <p v-else-if="selectedApproval.status === 'pending' && selectedApproval.presentation.denyScope === 'request_and_turn'" class="inbox-approval-note">{{ HOST_APPROVAL_DENY_ENDS_TURN_HINT }}</p>
           <div v-if="selectedApproval.status === 'pending'" class="knowledge-source-row"><button class="knowledge-button" :disabled="approvalDisabled" @click="decideApproval('deny')">Deny</button><button class="knowledge-button knowledge-primary" :disabled="approvalDisabled" @click="decideApproval('allow_once')">{{ approvalState.busy === selectedApproval.id ? 'Recording…' : hostApprovalAllowLabel(selectedApproval.presentation) }}</button><button v-if="selectedApproval.presentation.alwaysAllow" class="knowledge-button" :disabled="approvalDisabled" :title="HOST_APPROVAL_ALWAYS_ALLOW_HINT" @click="decideApproval('allow_always')">{{ hostApprovalAlwaysAllowLabel(selectedApproval.presentation) }}</button></div>
           <div v-else-if="selectedApproval.retryDecision" class="knowledge-source-row"><button class="knowledge-button knowledge-primary" :disabled="approvalDisabled" @click="decideApproval(selectedApproval.retryDecision)">Retry recorded {{ selectedApproval.retryDecision === 'deny' ? 'denial' : 'approval' }}</button></div>
           <p v-else-if="selectedApproval.status === 'decision_sent' || selectedApproval.status === 'resolved'" class="knowledge-success inbox-approval-result" role="status"><CircleCheck :size="16" aria-hidden="true" />{{ hostApprovalStatusLabel(selectedApproval.status) }}</p>
@@ -81,7 +82,7 @@ import type { KnowledgeRecord } from '../../../../../../../shared/room-knowledge
 import { attentionRecordCategory } from './room-inbox/universal';
 import type { HostApprovalSelection } from '../../../../../shared/host-approvals';
 import { decideHostApproval, hostApprovalRoom, refreshHostApprovals } from './room-chat/host-approvals';
-import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_SETTLE_MS, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalFields, hostApprovalStatusLabel } from './room-chat/host-approval-presentation';
+import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_DENY_ENDS_TURN_HINT, HOST_APPROVAL_SETTLE_MS, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalFields, hostApprovalStatusLabel } from './room-chat/host-approval-presentation';
 import InboxLayout from '../../../../../../../shared/ui/inbox/InboxLayout.vue';
 import InboxResponse from '../../../../../../../shared/ui/inbox/InboxResponse.vue';
 import ChatAvatar from '../../../../../../../shared/ui/ChatAvatar.vue';
