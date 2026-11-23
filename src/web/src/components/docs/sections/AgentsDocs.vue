@@ -21,6 +21,7 @@
         <tr><td><ProviderMark id="claude-code" /></td><td>Anthropic's Claude Code</td></tr>
         <tr><td><ProviderMark id="codex" /></td><td>OpenAI's Codex</td></tr>
         <tr><td><ProviderMark id="cursor" /></td><td>The Cursor agent</td></tr>
+        <tr><td><ProviderMark id="antigravity" /></td><td>Google's Antigravity CLI (<code>agy</code> 1.5.12 or newer)</td></tr>
         <tr><td><ProviderMark id="opencode" :show-name="false" /> <strong>Open Model</strong></td><td>An open model, through the OpenCode engine in the app</td></tr>
       </tbody>
     </table>

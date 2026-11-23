@@ -3,7 +3,7 @@ import { z } from "zod";
 export const lifecycleAuthorityModeSchema = z.enum(["legacy", "typed_shadow", "typed"]);
 export type LifecycleAuthorityMode = z.output<typeof lifecycleAuthorityModeSchema>;
 
-export const lifecycleAuthorityProviderSchema = z.enum(["codex", "claude-code", "cursor", "open-model"]);
+export const lifecycleAuthorityProviderSchema = z.enum(["codex", "claude-code", "cursor", "open-model", "antigravity"]);
 export type LifecycleAuthorityProvider = z.output<typeof lifecycleAuthorityProviderSchema>;
 
 /** Closed release policy. Authority varies only by provider and durable delivery shape. */
@@ -16,6 +16,7 @@ export function lifecycleAuthorityModeForProvider(
     case "claude-code":
     case "cursor":
     case "open-model":
+    case "antigravity":
       return deliveryMode === "daemon_inbox" ? "typed" : "typed_shadow";
   }
 }

@@ -7,8 +7,10 @@ import test from "node:test";
 import { DaemonStateSchema, DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { prepareRoomContext } from "../prepared-room-context.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import { restorePreAntigravityProviderFixture } from "./helpers/pre-antigravity-fixture.js";
 
 function restoreV42Fixture(database: DatabaseSync): void {
+  restorePreAntigravityProviderFixture(database);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_approval_request_closures").get()!.count, 0);
   const closureSql = String(database.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get()!.sql)
     .replace("decision_id TEXT REFERENCES", "decision_id TEXT NOT NULL REFERENCES")

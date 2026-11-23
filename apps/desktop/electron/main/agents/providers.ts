@@ -49,6 +49,7 @@ import {
 } from "./provider-registry.js";
 import { providerSetupConfirmationResult } from "./provider-setup-confirmation.js";
 import { missingExternalRuntimePreflight } from "./external-runtime-preflight.js";
+import { ANTIGRAVITY_MIN_VERSION, antigravityChildEnvironment, antigravityVersionAtLeast, parseAntigravityVersion, resolveAntigravityExecutable } from "./antigravity/launch.js";
 import {
   desktopRuntimeEnvironment,
   desktopShellEnvironmentReady,
@@ -352,6 +353,92 @@ async function claudeCodePreflight(
   };
 }
 
+/**
+ * macOS keeps the Antigravity CLI's Google sign-in in the login keychain
+ * (service "gemini", account "antigravity"). Reading the item's existence
+ * reads no secret. Elsewhere there is no safe read, so the launch says it.
+ */
+async function antigravitySignInKnownMissing(timeoutMs?: number): Promise<boolean> {
+  if (process.platform !== "darwin") return false;
+  const result = await execFileWithTimeout("/usr/bin/security", ["find-generic-password", "-s", "gemini", "-a", "antigravity"], { timeoutMs });
+  // 44 is "The specified item could not be found in the keychain."
+  return !result.ok && /could not be found/i.test(`${result.stderr}\n${result.stdout}`);
+}
+
+async function antigravityPreflight(
+  provider: DesktopAgentProvider,
+  input: DesktopAgentProviderPreflightInput,
+  mcpStatus: DesktopMcpInstallTarget["status"] | null,
+  timeoutMs?: number,
+): Promise<DesktopAgentProviderPreflight> {
+  const runtimeEnv = antigravityChildEnvironment(desktopRuntimeEnvironment());
+  const command = resolveAntigravityExecutable(runtimeEnv);
+  const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
+    execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv }));
+  if (commandMissing(versionResult)) {
+    return missingExternalRuntimePreflight(provider, mcpStatus);
+  }
+  const version = parseAntigravityVersion(`${versionResult.stdout}\n${versionResult.stderr}`);
+  if (!versionResult.ok || !version) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "The Antigravity CLI could not be checked.",
+      detail: firstOutputLine(versionResult) || "The agy command failed before returning a version.",
+      nextAction: null,
+      version: null,
+      mcpStatus,
+    };
+  }
+  if (!antigravityVersionAtLeast(version, ANTIGRAVITY_MIN_VERSION)) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "The Antigravity CLI needs an update.",
+      detail: `This computer has agy ${version}. LetAgents agents need ${ANTIGRAVITY_MIN_VERSION} or newer: run \`agy update\`, then choose Check again.`,
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
+  }
+  if (await antigravitySignInKnownMissing(timeoutMs)) {
+    return {
+      providerId: provider.id,
+      status: "auth_required",
+      canStart: false,
+      message: "The Antigravity CLI needs sign-in.",
+      detail: "Run `agy` in a terminal once and sign in with Google, then choose Check again.",
+      nextAction: "authenticate",
+      version,
+      mcpStatus,
+    };
+  }
+  if (!input.repoRootPath?.trim() && !input.roomOnly) {
+    return {
+      providerId: provider.id,
+      status: "repo_required",
+      canStart: false,
+      message: "Choose a local repository before starting Antigravity.",
+      detail: "A desktop-managed Antigravity agent needs a local repo or worktree for code actions.",
+      nextAction: "choose_repo",
+      version,
+      mcpStatus,
+    };
+  }
+  return {
+    providerId: provider.id,
+    status: "ready",
+    canStart: true,
+    message: "Antigravity is ready to start.",
+    detail: "This desktop supplies the managed LetAgents connection and can start and monitor a local Antigravity agent. It uses your Antigravity CLI sign-in, with its own settings folder.",
+    nextAction: null,
+    version,
+    mcpStatus,
+  };
+}
+
 async function openModelPreflight(
   provider: DesktopAgentProvider,
   input: DesktopAgentProviderPreflightInput,
@@ -565,6 +652,9 @@ export async function runDesktopAgentProviderPreflight(
   }
   if (provider.id === "open-model") {
     return withManagedRuntimeValidation(await openModelPreflight(provider, input, mcpStatus, options.commandTimeoutMs));
+  }
+  if (provider.id === "antigravity") {
+    return withManagedRuntimeValidation(await antigravityPreflight(provider, input, mcpStatus, options.commandTimeoutMs));
   }
 
   return bridgePreflight(provider, mcpStatus);

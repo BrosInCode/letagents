@@ -56,6 +56,8 @@ test("automatic review applies only to a trusted local Open Model agent on Auto,
     for (const change of [{ provider: "codex" }, { provider: "cursor" }, { permission_profile_id: "ask_before_write" },
       { provider: "claude-code", permission_profile_id: "read_only" }, { provider: "claude-code", permission_profile_id: "full_access" },
       { provider: "claude-code", delivery_mode: "mcp_polling" }, { provider: "claude-code", id: "supervised_rental_1" },
+      // Antigravity's requests share Claude's shape, but the Claude rule rests on Claude's own read-only checks.
+      ...["read_only", "ask_before_write", "auto_review", "full_access"].map(permission_profile_id => ({ provider: "antigravity", permission_profile_id })),
       { permission_profile_id: "full_access" }, { permission_profile_id: null }, { delivery_mode: "mcp_polling" }, { id: "supervised_rental_1" }]) {
       const other = { ...f.entry, ...change } as DaemonManifestEntry;
       assert.equal(f.reviewer.applies(other), false, JSON.stringify(change));
@@ -461,6 +463,11 @@ test("a Claude command that only reads runs, and everything else Claude asked ab
     }
     // An Open Model request is never read as Claude's, nor the other way round.
     assert.equal(await f.review(bash("ls") as never), "ask");
+    // Nor is an Antigravity agent's read-only command, though its adapter sends it in Claude's shape.
+    for (const permission_profile_id of ["ask_before_write", "auto_review"]) {
+      assert.equal(await f.reviewer.review({ entry: { ...f.entry, provider: "antigravity", permission_profile_id } as DaemonManifestEntry,
+        request: bash("git status"), signal }), "ask", permission_profile_id);
+    }
     assert.equal(await f.reviewer.review({ entry: { ...f.entry, provider: "claude-code", permission_profile_id: "ask_before_write" } as DaemonManifestEntry,
       request: f.request("bash", ["ls"], { command: "ls" }), signal }), "ask");
     assert.deepEqual(f.asked, [], "a Claude command is decided on this machine and sent nowhere");

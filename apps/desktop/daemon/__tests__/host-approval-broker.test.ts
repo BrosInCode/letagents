@@ -25,7 +25,7 @@ import { WorkerBindingStore } from "../worker-binding-store.js";
 import type { RecordedApprovalDecision } from "../execution-approval-native-application.js";
 import { ManifestStore } from "../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
-import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
+import { antigravityApprovalKind, ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { systemProcessIdentity } from "../process-identity.js";
 import { needsModeBits, needsPosixFilePathReports, WINDOWS_TEST_HELPER } from "../../electron/__tests__/platform.js";
 
@@ -40,6 +40,7 @@ import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/h
 import type { CodexPermissionFileChange, ProviderPermissionObservation, ProviderPermissionRequest } from "../../shared/provider-permissions.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import { WAIT_SCALE } from "./helpers/daemon-fixture.js";
+import { restorePreAntigravityProviderFixture } from "./helpers/pre-antigravity-fixture.js";
 
 // Windows reads when a process started through the process-tree helper; the test run says where the built one is.
 if (WINDOWS_TEST_HELPER && !process.env.LETAGENTS_PROCESS_TREE_HELPER) process.env.LETAGENTS_PROCESS_TREE_HELPER = WINDOWS_TEST_HELPER;
@@ -48,7 +49,7 @@ const secret = "PRIVATE-APPROVAL-CONTENT";
 const now = Date.parse("2026-08-31T00:00:00.000Z");
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-async function fixture(providerId: "codex" | "open-model" | "claude-code" = "codex",
+async function fixture(providerId: "codex" | "open-model" | "claude-code" | "antigravity" = "codex",
   overrides: Partial<Pick<ConstructorParameters<typeof HostApprovalBroker>[0], "exactAuthority" | "fenceCommit" | "hostActorId" | "onPermissionChanged" | "automaticReview" | "automaticReviewTimeoutMs">> = {}, roomWorkspace = false) {
   const root = await mkdtemp(join(tmpdir(), "letagents-approval-broker-"));
   const workAttemptId = roomWorkspace ? "5bff98b0-2ab1-41d7-88c4-e0eb62dff36a" : "workspace";
@@ -61,6 +62,7 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
   const connection = providerId === "codex"
     ? { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "native-birth" }
     : providerId === "claude-code" ? { kind: "claude_cli" as const, pid: 4311, processIdentity: "native-birth" }
+    : providerId === "antigravity" ? { kind: "antigravity_acp" as const, pid: 4311, processIdentity: "native-birth" }
     : { kind: "opencode_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "native-birth", serverAuthPath: "/private/native-auth" };
   const entry: DaemonManifestEntry = { id: "agent", room_id: "room", display_name: "GardenPoint", provider: providerId,
     model: null, charter: "Help", desired_state: "running", observed_state: "working", condition: "none",
@@ -93,6 +95,10 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
       params: { threadId: "continuation", turnId: "native-turn", command: `printf '${secret}'`, reason: "\u001b[31m\u202eFake trusted label" } } }
     : providerId === "claude-code"
       ? { provider: "claude-code", native: { id: "permission", request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: "tool", input: { content: secret } } } }
+    // The adapter maps agy's write tool to Claude's `Write`, with the file it names.
+    : providerId === "antigravity"
+      ? { provider: "antigravity", native: { id: "permission", request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: "tool",
+        input: { file_path: join(workspace, "notes.md"), content: secret } } } }
     : { provider: "open-model", native: { id: "permission", sessionID: "continuation", permission: "bash", patterns: [secret],
       metadata: { command: secret }, always: [], tool: { messageID: "assistant-message", callID: "call" } } };
   const state = { current: true, owned: true, correlation: true, turnId: "native-turn", live: handle as ProviderActionHandle | undefined,
@@ -124,7 +130,8 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
           kind: request.provider === "codex" && request.native.method === "item/fileChange/requestApproval"
             ? "file_change" as const
             : request.provider === "codex" && request.native.method === "item/permissions/requestApproval"
-              ? "network" as const : "command" as const,
+              ? "network" as const
+              : request.provider === "antigravity" ? antigravityApprovalKind(request.native.request.tool_name) : "command" as const,
           ...(state.fileChanges ? { fileChanges: state.fileChanges } : {}) }
       : { outcome: "correlation_unproven" as const },
     replyPermission: async (_handle: ProviderActionHandle, _request: ProviderPermissionRequest, reply: "once" | "reject",
@@ -166,6 +173,8 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
     },
     closed(request: ProviderPermissionRequest = native) {
       if (request.provider === "claude-code") receive!({ type: "request_closed", request,
+        providerContinuationId: "continuation", providerTurnId: state.turnId });
+      else if (request.provider === "antigravity") receive!({ type: "request_closed", request,
         providerContinuationId: "continuation", providerTurnId: state.turnId });
       else {
         assert.equal(request.provider, "codex");
@@ -355,6 +364,7 @@ test("v41 approval history upgrades without inventing a closure or changing a de
     await f.broker.decide(selected);
     const before = f.db.prepare("SELECT * FROM execution_approval_decisions").all();
     await f.store.close();
+    restorePreAntigravityProviderFixture(f.db);
     f.db.exec("DROP TABLE execution_approval_request_closures; PRAGMA user_version=41; UPDATE manifest_metadata SET schema_version=41");
     const upgraded = new ManifestStore(f.path);
     try {
@@ -402,12 +412,18 @@ function fileChangeRequest(native: ProviderPermissionRequest, workspace: string)
 }
 
 test("host approvals use exact operational turns without capture and commit selection and intent before native response", async () => {
-  for (const provider of ["codex", "open-model", "claude-code"] as const) {
+  for (const provider of ["codex", "open-model", "claude-code", "antigravity"] as const) {
     const f = await fixture(provider);
     try {
       assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_turns").get()!.n, 0);
       const [candidate] = await f.broker.list("room"); assert.ok(candidate?.reference, "operational turn must admit an approval without capture");
-      assert.equal(candidate.status, "pending"); assert.equal(candidate.presentation.title, provider === "claude-code" ? "Run a tool" : "Run a command");
+      assert.equal(candidate.status, "pending");
+      assert.equal(candidate.presentation.title, provider === "claude-code" || provider === "antigravity" ? "Run a tool" : "Run a command");
+      assert.equal(candidate.presentation.provider, provider);
+      // Antigravity's file write is a host-only file change: never delegatable, always the host's to answer.
+      assert.deepEqual({ ...f.db.prepare("SELECT kind,risk,delegatable,recovery_boundary FROM execution_approval_requests").get() },
+        { kind: provider === "antigravity" ? "file_change" : "command", risk: "high", delegatable: 0,
+          recovery_boundary: provider === "codex" ? "connection" : "runtime" });
       assert.match(candidate.presentation.details, /PRIVATE-APPROVAL-CONTENT/);
       assert.equal(candidate.presentation.denyScope, provider !== "open-model" ? "request" : "session_pending");
       if (provider === "codex") {
@@ -426,6 +442,54 @@ test("host approvals use exact operational turns without capture and commit sele
       assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()!.n, 0);
     } finally { await f.close(); }
   }
+});
+
+test("Antigravity requests keep Claude's shape, record their own approval kind, and are never delegated", async () => {
+  const f = await fixture("antigravity", { hostActorId: () => "host-owner" });
+  try {
+    const tool = (id: string, tool_name: string, input: Record<string, unknown>): ProviderPermissionRequest =>
+      ({ provider: "antigravity", native: { id, request: { subtype: "can_use_tool", tool_name, tool_use_id: `${id}-tool`, input } } });
+    const requests = [f.native, tool("bash", "Bash", { command: "npm test" }), tool("edit", "Edit",
+      { file_path: join(f.workspace, "a.ts"), old_string: "old", new_string: "new" }),
+    tool("fetch", "WebFetch", { url: "https://example.test/" }), tool("own", "browser_click", { selector: "#go" })];
+    f.emit(requests);
+    const candidates = await f.broker.list("room");
+    assert.equal(candidates.length, requests.length);
+    for (const candidate of candidates) {
+      assert.equal(candidate.status, "pending");
+      assert.equal(candidate.presentation.provider, "antigravity");
+      assert.equal(candidate.presentation.title, "Run a tool", "the card names the tool, as it does for Claude");
+      assert.equal(candidate.presentation.denyScope, "request");
+      assert.equal(candidate.presentation.alwaysAllow?.provider, "antigravity");
+    }
+    const kinds = Object.fromEntries(f.db.prepare("SELECT native_request_id,kind,delegatable FROM execution_approval_requests").all()
+      .map(row => [row.native_request_id, `${row.kind}:${row.delegatable}`]));
+    assert.deepEqual(kinds, { permission: "file_change:0", bash: "command:0", edit: "file_change:0", fetch: "network:0", own: "command:0" });
+    assert.deepEqual(candidates.map(candidate => candidate.presentation.alwaysAllow?.toolId),
+      ["antigravity:Write", "antigravity:Bash", "antigravity:Edit", "antigravity:WebFetch", "antigravity:browser_click"],
+      "a saved rule names Antigravity's tools, never Claude's");
+    assert.deepEqual(await f.broker.admitDelegatable("agent"), [], "only exact Codex file changes may be delegated");
+    assert.deepEqual(f.sends, []);
+  } finally { await f.close(); }
+});
+
+test("an Antigravity request closes on its own process death witness and on no other", async () => {
+  const f = await fixture("antigravity");
+  try {
+    const [candidate] = await f.broker.list("room");
+    const expected = decision(candidate!).expected;
+    const terminal = { ended_at: new Date(now + 20).toISOString(), provider_continuation_id: "continuation",
+      native_runtime_death: { kind: "antigravity_acp", pid: 4311, processIdentity: "native-birth" } };
+    for (const kind of ["claude_cli", "codex_app_server"]) {
+      f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'")
+        .run(JSON.stringify({ ...terminal, native_runtime_death: { ...terminal.native_runtime_death, kind } }));
+      assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 0, kind);
+      assert.equal((await f.store.getExecutionApproval(expected))!.request.closedAtMs, null);
+    }
+    f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'").run(JSON.stringify(terminal));
+    assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 1);
+    assert.equal((await f.store.getExecutionApproval(expected))!.request.closedAtMs, now + 30);
+  } finally { await f.close(); }
 });
 
 test("Codex MCP approvals show the tool proposal and remain host-only with arguments out of durable storage", async () => {
@@ -631,7 +695,7 @@ test("host approval rejects uncorrelated turns, stale presentations and replaced
   } finally { await f.close(); }
 });
 
-for (const provider of ["codex", "claude-code"] as const) test(`${provider} host approval dispatch uncertainty survives request disappearance and broker restart without resend`, async () => {
+for (const provider of ["codex", "claude-code", "antigravity"] as const) test(`${provider} host approval dispatch uncertainty survives request disappearance and broker restart without resend`, async () => {
   const f = await fixture(provider);
   try {
     const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
@@ -650,122 +714,125 @@ for (const provider of ["codex", "claude-code"] as const) test(`${provider} host
   } finally { await f.close(); }
 });
 
-test("Claude successful tool result confirms its exact allowed request after dispatch", async () => {
-  const f = await fixture("claude-code");
-  const fact: NativeExecutionFact = { domain: "execution", kind: "completed", operation: "file_change",
-    providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
-    outcome: "succeeded", sideEffects: "possible" };
-  try {
-    const [candidate] = await f.broker.list("room");
-    const selected = decision(candidate!);
-    f.execution(fact); // An old result must not settle the later response.
-    await f.broker.decide(selected);
-    const uncertain = async () => {
+// Antigravity's adapter reports Claude-shaped tool results: the same exact evidence settles its requests.
+for (const [provider, name] of [["claude-code", "Claude"], ["antigravity", "Antigravity"]] as const) {
+  test(`${name} successful tool result confirms its exact allowed request after dispatch`, async () => {
+    const f = await fixture(provider);
+    const fact: NativeExecutionFact = { domain: "execution", kind: "completed", operation: "file_change",
+      providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+      outcome: "succeeded", sideEffects: "possible" };
+    try {
+      const [candidate] = await f.broker.list("room");
+      const selected = decision(candidate!);
+      f.execution(fact); // An old result must not settle the later response.
+      await f.broker.decide(selected);
+      const uncertain = async () => {
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
+      };
+      await uncertain();
+      for (const changed of [{ executionId: "other" }, { providerTurnId: "other" },
+        { providerContinuationId: "other" }, { operation: "command" as const }]) {
+        f.execution({ ...fact, ...changed });
+        await uncertain();
+      }
+      for (const changed of [{ sourceId: "other" }, { nativeProcessIdentity: "other-birth" },
+        { nativeProcessPid: 1234 }, { sequence: 0 }]) {
+        f.execution(fact, changed);
+        await uncertain();
+      }
+      f.emit([]); // Disappearance alone is not acknowledgment.
+      await uncertain();
+      f.execution(fact);
+      for (let attempt = 0; attempt < 30; attempt++) {
+        if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const record = (await f.store.getExecutionApproval(selected.expected))!;
+      assert.equal(record.request.state, "resolved");
+      assert.equal(record.decision!.dispatchState, "acknowledged");
+      assert.deepEqual(await f.broker.list("room"), []);
+      assert.equal(await f.broker.decide(selected), "resolved");
+      assert.deepEqual(f.sends, ["once"], "confirmation never resends the response");
+    } finally { await f.close(); }
+  });
+
+  test(`${name}'s report that a tool was denied before it started settles its exact denied request`, async () => {
+    const f = await fixture(provider);
+    const fact: NativeExecutionFact = { domain: "execution", kind: "completed", operation: "file_change",
+      providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+      outcome: "denied_before_start", sideEffects: "none" };
+    try {
+      const [candidate] = await f.broker.list("room");
+      const selected = decision(candidate!, { decision: "deny" });
+      f.execution(fact); // An old report must not settle the later response.
+      await f.broker.decide(selected);
+      const unsettled = async () => {
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
+      };
+      await unsettled();
+      for (const changed of [{ executionId: "other" }, { providerTurnId: "other" },
+        { providerContinuationId: "other" }, { operation: "command" as const },
+        // Success, or a generic failure, says nothing about a deny.
+        { outcome: "succeeded" as const, sideEffects: "possible" as const },
+        { outcome: "failed" as const, sideEffects: "possible" as const }]) {
+        f.execution({ ...fact, ...changed });
+        await unsettled();
+      }
+      for (const changed of [{ sourceId: "other" }, { nativeProcessIdentity: "other-birth" },
+        { nativeProcessPid: 1234 }, { sequence: 0 }]) {
+        f.execution(fact, changed);
+        await unsettled();
+      }
+      f.emit([]); // Disappearance alone is not acknowledgment.
+      await unsettled();
+      f.execution(fact);
+      for (let attempt = 0; attempt < 30; attempt++) {
+        if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const record = (await f.store.getExecutionApproval(selected.expected))!;
+      assert.equal(record.request.state, "resolved");
+      assert.equal(record.decision!.dispatchState, "acknowledged");
+      assert.deepEqual(await f.broker.list("room"), []);
+      assert.equal(await f.broker.decide(selected), "resolved");
+      assert.deepEqual(f.sends, ["reject"], "confirmation never resends the response");
+    } finally { await f.close(); }
+  });
+
+  test(`${name}'s denied-before-start report does not settle an allowed request`, async () => {
+    const f = await fixture(provider);
+    try {
+      const [candidate] = await f.broker.list("room");
+      const selected = decision(candidate!);
+      await f.broker.decide(selected);
+      f.execution({ domain: "execution", kind: "completed", operation: "file_change",
+        providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+        outcome: "denied_before_start", sideEffects: "none" });
       await new Promise(resolve => setImmediate(resolve));
       assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
-    };
-    await uncertain();
-    for (const changed of [{ executionId: "other" }, { providerTurnId: "other" },
-      { providerContinuationId: "other" }, { operation: "command" as const }]) {
-      f.execution({ ...fact, ...changed });
-      await uncertain();
-    }
-    for (const changed of [{ sourceId: "other" }, { nativeProcessIdentity: "other-birth" },
-      { nativeProcessPid: 1234 }, { sequence: 0 }]) {
-      f.execution(fact, changed);
-      await uncertain();
-    }
-    f.emit([]); // Disappearance alone is not acknowledgment.
-    await uncertain();
-    f.execution(fact);
-    for (let attempt = 0; attempt < 30; attempt++) {
-      if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
-      await new Promise(resolve => setImmediate(resolve));
-    }
-    const record = (await f.store.getExecutionApproval(selected.expected))!;
-    assert.equal(record.request.state, "resolved");
-    assert.equal(record.decision!.dispatchState, "acknowledged");
-    assert.deepEqual(await f.broker.list("room"), []);
-    assert.equal(await f.broker.decide(selected), "resolved");
-    assert.deepEqual(f.sends, ["once"], "confirmation never resends the response");
-  } finally { await f.close(); }
-});
+      f.emit([]);
+      assert.equal(await f.broker.decide(selected), "uncertain");
+    } finally { await f.close(); }
+  });
 
-test("Claude's report that a tool was denied before it started settles its exact denied request", async () => {
-  const f = await fixture("claude-code");
-  const fact: NativeExecutionFact = { domain: "execution", kind: "completed", operation: "file_change",
-    providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
-    outcome: "denied_before_start", sideEffects: "none" };
-  try {
-    const [candidate] = await f.broker.list("room");
-    const selected = decision(candidate!, { decision: "deny" });
-    f.execution(fact); // An old report must not settle the later response.
-    await f.broker.decide(selected);
-    const unsettled = async () => {
-      await new Promise(resolve => setImmediate(resolve));
-      assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
-    };
-    await unsettled();
-    for (const changed of [{ executionId: "other" }, { providerTurnId: "other" },
-      { providerContinuationId: "other" }, { operation: "command" as const },
-      // Success, or a generic failure, says nothing about a deny.
-      { outcome: "succeeded" as const, sideEffects: "possible" as const },
-      { outcome: "failed" as const, sideEffects: "possible" as const }]) {
-      f.execution({ ...fact, ...changed });
-      await unsettled();
-    }
-    for (const changed of [{ sourceId: "other" }, { nativeProcessIdentity: "other-birth" },
-      { nativeProcessPid: 1234 }, { sequence: 0 }]) {
-      f.execution(fact, changed);
-      await unsettled();
-    }
-    f.emit([]); // Disappearance alone is not acknowledgment.
-    await unsettled();
-    f.execution(fact);
-    for (let attempt = 0; attempt < 30; attempt++) {
-      if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
-      await new Promise(resolve => setImmediate(resolve));
-    }
-    const record = (await f.store.getExecutionApproval(selected.expected))!;
-    assert.equal(record.request.state, "resolved");
-    assert.equal(record.decision!.dispatchState, "acknowledged");
-    assert.deepEqual(await f.broker.list("room"), []);
-    assert.equal(await f.broker.decide(selected), "resolved");
-    assert.deepEqual(f.sends, ["reject"], "confirmation never resends the response");
-  } finally { await f.close(); }
-});
-
-test("Claude's denied-before-start report does not settle an allowed request", async () => {
-  const f = await fixture("claude-code");
-  try {
-    const [candidate] = await f.broker.list("room");
-    const selected = decision(candidate!);
-    await f.broker.decide(selected);
-    f.execution({ domain: "execution", kind: "completed", operation: "file_change",
-      providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
-      outcome: "denied_before_start", sideEffects: "none" });
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
-    f.emit([]);
-    assert.equal(await f.broker.decide(selected), "uncertain");
-  } finally { await f.close(); }
-});
-
-test("Claude completion arriving inside native dispatch is reconciled after the journal is armed", async () => {
-  const f = await fixture("claude-code");
-  try {
-    const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
-    f.state.afterNativeWrite = () => f.execution({ domain: "execution", kind: "completed", operation: "file_change",
-      providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
-      outcome: "succeeded", sideEffects: "possible" });
-    await f.broker.decide(selected);
-    for (let attempt = 0; attempt < 30; attempt++) {
-      if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
-      await new Promise(resolve => setImmediate(resolve));
-    }
-    assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "resolved");
-  } finally { await f.close(); }
-});
+  test(`${name} completion arriving inside native dispatch is reconciled after the journal is armed`, async () => {
+    const f = await fixture(provider);
+    try {
+      const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+      f.state.afterNativeWrite = () => f.execution({ domain: "execution", kind: "completed", operation: "file_change",
+        providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+        outcome: "succeeded", sideEffects: "possible" });
+      await f.broker.decide(selected);
+      for (let attempt = 0; attempt < 30; attempt++) {
+        if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "resolved");
+    } finally { await f.close(); }
+  });
+}
 
 // The owner saved a new permission mode while the running agent had an open
 // request. The runtime keeps the mode it started with until it restarts, so
@@ -1400,7 +1467,7 @@ async function verifyNativeApproval(scenario: "command" | "command_restored_befo
   }
 }
 
-async function savedRuleFixture(provider: "codex" | "claude-code" | "open-model" = "claude-code") {
+async function savedRuleFixture(provider: "codex" | "claude-code" | "open-model" | "antigravity" = "claude-code") {
   return fixture(provider, { hostActorId: () => "host-owner" });
 }
 async function until(check: () => boolean | Promise<boolean>): Promise<void> {
@@ -1413,11 +1480,11 @@ async function until(check: () => boolean | Promise<boolean>): Promise<void> {
 function nextPermission(native: ProviderPermissionRequest, id: string): ProviderPermissionRequest {
   const next = structuredClone(native);
   (next.native as { id: string | number }).id = id;
-  if (next.provider === "claude-code") next.native.request.tool_use_id = id;
+  if (next.provider === "claude-code" || next.provider === "antigravity") next.native.request.tool_use_id = id;
   return next;
 }
 
-for (const provider of ["codex", "claude-code", "open-model"] as const) {
+for (const provider of ["codex", "claude-code", "open-model", "antigravity"] as const) {
   test(`Always allow persists and responds to a later ${provider} tool request with no composer read`, async () => {
     const f = await savedRuleFixture(provider);
     try {
@@ -1430,6 +1497,7 @@ for (const provider of ["codex", "claude-code", "open-model"] as const) {
       f.reinstall();
       const next = nextPermission(f.native, "next-request");
       if (next.provider === "claude-code") next.native.request.input = { content: "Different arguments" };
+      if (next.provider === "antigravity") next.native.request.input = { file_path: join(f.workspace, "other.md"), content: "Different arguments" };
       f.emit([next]);
       await until(() => f.sends.length === 2);
       assert.deepEqual(f.sends, ["once", "once"]);
@@ -1444,7 +1512,7 @@ for (const provider of ["codex", "claude-code", "open-model"] as const) {
   });
 }
 
-for (const provider of ["claude-code", "codex", "open-model"] as const) {
+for (const provider of ["claude-code", "codex", "open-model", "antigravity"] as const) {
   test(`room workspace Always allow persists without a composer read and revokes for ${provider}`, async () => {
     const f = await fixture(provider, { hostActorId: () => "host-owner" }, true);
     try {
@@ -1796,9 +1864,10 @@ async function waitForClosure(f: Awaited<ReturnType<typeof fixture>>, expected: 
   assert.fail("exact closure was not persisted");
 }
 
+for (const [provider, name] of [["claude-code", "Claude"], ["antigravity", "Antigravity"]] as const)
 for (const phase of ["before_selection", "before_dispatch", "after_dispatch", "during_dispatch"] as const) {
-  test(`Claude request closure at ${phase} is durable without claiming application`, async () => {
-    const f = await fixture("claude-code");
+  test(`${name} request closure at ${phase} is durable without claiming application`, async () => {
+    const f = await fixture(provider);
     try {
       const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
       if (phase === "before_dispatch") f.state.beforeBefore = async () => {
@@ -1822,8 +1891,9 @@ for (const phase of ["before_selection", "before_dispatch", "after_dispatch", "d
   });
 }
 
-test("Claude native closure can arrive while request admission returns", async () => {
-  const f = await fixture("claude-code");
+for (const [provider, name] of [["claude-code", "Claude"], ["antigravity", "Antigravity"]] as const)
+test(`${name} native closure can arrive while request admission returns`, async () => {
+  const f = await fixture(provider);
   try {
     const original = f.store.admitExecutionApprovalPlan.bind(f.store);
     f.store.admitExecutionApprovalPlan = async (...args) => {
@@ -1843,8 +1913,9 @@ test("Claude native closure can arrive while request admission returns", async (
   } finally { await f.close(); }
 });
 
-test("Claude closure does not discard later exact success evidence", async () => {
-  const f = await fixture("claude-code");
+for (const [provider, name] of [["claude-code", "Claude"], ["antigravity", "Antigravity"]] as const)
+test(`${name} closure does not discard later exact success evidence`, async () => {
+  const f = await fixture(provider);
   try {
     const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
     f.state.afterNativeWrite = () => {
@@ -1873,6 +1944,7 @@ test("v44 migration preserves Codex closure receipts and refuses a damaged v45 s
     await waitForClosure(f, selected.expected);
     const before = f.db.prepare("SELECT * FROM execution_approval_request_closures").all();
     await f.store.close();
+    restorePreAntigravityProviderFixture(f.db);
     const sql = String(f.db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get()!.sql)
       .replace("decision_id TEXT REFERENCES", "decision_id TEXT NOT NULL REFERENCES")
       .replace("dispatch_id TEXT,", "dispatch_id TEXT NOT NULL,");
@@ -1895,9 +1967,11 @@ test("v44 migration preserves Codex closure receipts and refuses a damaged v45 s
   } finally { await f.close(); }
 });
 
-for (const wrong of ["turn", "tool", "retired", "missing_snapshot"] as const) {
-  test(`Claude ${wrong} evidence cannot close an admitted request`, async () => {
-    const f = await fixture("claude-code");
+for (const [provider, name] of [["claude-code", "Claude"], ["antigravity", "Antigravity"]] as const)
+for (const wrong of ["turn", "tool", "retired", "missing_snapshot", "other_provider"] as const) {
+  if (wrong === "other_provider" && provider === "claude-code") continue;
+  test(`${name} ${wrong} evidence cannot close an admitted request`, async () => {
+    const f = await fixture(provider);
     try {
       const [candidate] = await f.broker.list("room");
       if (wrong === "turn") f.state.turnId = "wrong-turn";
@@ -1905,8 +1979,10 @@ for (const wrong of ["turn", "tool", "retired", "missing_snapshot"] as const) {
       if (wrong === "missing_snapshot") { f.emit([]); f.observationFailure("degraded"); }
       else {
         const native = structuredClone(f.native);
-        if (wrong === "tool" && native.provider === "claude-code") native.native.request.tool_use_id = "wrong-tool";
-        f.closed(native);
+        if (wrong === "tool" && (native.provider === "claude-code" || native.provider === "antigravity")) native.native.request.tool_use_id = "wrong-tool";
+        // The same Claude-shaped payload, closed as another provider's request, is not this request.
+        if (wrong === "other_provider" && native.provider === "antigravity") f.closed({ provider: "claude-code", native: native.native });
+        else f.closed(native);
       }
       await new Promise(resolve => setImmediate(resolve));
       assert.equal((await f.store.getExecutionApproval(candidate!.reference!))!.request.closedAtMs, null);
@@ -1947,7 +2023,7 @@ function terminalTurnWitness(f: Awaited<ReturnType<typeof fixture>>, expected: H
     .run(expected.executionGenerationId, observerRuntime, mode, mode, disposition, disposition === "pending" ? null : now + 25);
 }
 
-for (const provider of ["claude-code", "codex"] as const) {
+for (const provider of ["claude-code", "codex", "antigravity"] as const) {
   for (const phase of ["requested", "selected", "dispatched"] as const) {
     test(`${provider} exact completed turn closes ${phase} approval after reconnect without replay`, async () => {
       const f = await fixture(provider);
@@ -1995,7 +2071,7 @@ function retireRuntime(f: Awaited<ReturnType<typeof fixture>>, how: "replaced" |
   f.emit([]);
 }
 
-for (const provider of ["claude-code", "codex", "open-model"] as const) {
+for (const provider of ["claude-code", "codex", "open-model", "antigravity"] as const) {
   for (const phase of ["requested", "selected", "dispatched"] as const) {
     if (provider === "open-model" && phase === "dispatched") continue; // OpenCode confirms processing; nothing remains.
     // A replaced runtime is known to be gone and closes at once (see below). Without a successor, only expiry retires it.
@@ -2032,7 +2108,7 @@ for (const provider of ["claude-code", "codex", "open-model"] as const) {
 
 // A restart or a recovery put another process in the agent's place. The old runtime's request can no longer be
 // observed, answered or sent, so it closes at once instead of waiting a day for its expiry.
-for (const provider of ["claude-code", "codex", "open-model"] as const) {
+for (const provider of ["claude-code", "codex", "open-model", "antigravity"] as const) {
   for (const phase of ["requested", "selected", "dispatched"] as const) {
     if (provider === "open-model" && phase === "dispatched") continue; // OpenCode confirms processing; nothing remains.
     test(`${provider} ${phase} approval of a replaced runtime closes at once, before it expires`, async () => {
@@ -2212,7 +2288,7 @@ for (const weak of ["projection_only", "missing_receipt", "null_outcome", "unrea
   });
 }
 
-for (const provider of ["claude-code", "codex"] as const) {
+for (const provider of ["claude-code", "codex", "antigravity"] as const) {
   for (const source of ["terminal", "retired_recovery"] as const) {
   for (const phase of ["requested", "selected", "dispatched"] as const) {
     test(`${provider} ${source} process death closes ${phase} approval without acknowledging or replaying`, async () => {
@@ -2225,7 +2301,8 @@ for (const provider of ["claude-code", "codex"] as const) {
         const before = (await f.store.getExecutionApproval(selected.expected))!;
         // This fixture never installs optional execution capture. Its operational
         // origin generation remains valid after recovery into a later generation.
-        const death = { kind: provider === "codex" ? "codex_app_server" : "claude_cli", pid: 4311, processIdentity: "native-birth" };
+        const death = { kind: provider === "codex" ? "codex_app_server" : provider === "antigravity" ? "antigravity_acp" : "claude_cli",
+          pid: 4311, processIdentity: "native-birth" };
         if (source === "terminal") {
           f.db.prepare("INSERT INTO work_attempt_executions VALUES('recovery-generation','workspace',?,'provider',2,?)")
             .run(new Date(now + 15).toISOString(), JSON.stringify({ ended_at: new Date(now + 20).toISOString(),

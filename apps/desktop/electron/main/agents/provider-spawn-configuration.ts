@@ -4,6 +4,7 @@ import type { ProviderSpawnRequest } from "./provider-adapter.js";
 import { assertManagedAgentPermissionProfileAvailable } from "./managed-agent-permission-profiles.js";
 import { isOpenModelReasoningEffort } from "./open-model-efforts.js";
 import { supervisedOpenCodePermissionPolicy, supervisedOpenCodePermissionProfileId } from "./opencode-launch-contract.js";
+import { ANTIGRAVITY_AUTHORITY_KEYS, antigravityAuthorityForProfile, isAntigravityEffort } from "./antigravity/launch.js";
 
 /**
  * Shared final attestation used by every native adapter. The daemon has
@@ -18,7 +19,7 @@ import { supervisedOpenCodePermissionPolicy, supervisedOpenCodePermissionProfile
  * depend on what some earlier writer left in the policy.
  */
 export function attestProviderSpawnPolicy(
-  provider: "codex" | "claude-code" | "cursor" | "open-model",
+  provider: "codex" | "claude-code" | "cursor" | "open-model" | "antigravity",
   request: ProviderSpawnRequest,
 ): Record<string, unknown> {
   const homeHarness = spawnUsesHomeHarness(provider, request);
@@ -98,6 +99,19 @@ export function attestProviderSpawnPolicy(
       requireMatch(policy, key, value, provider);
     }
     if (homeHarness) ownerSetupPolicy = authority;
+  } else if (provider === "antigravity") {
+    // agy reads files and searches the web without asking at every level, so it cannot work for a guest.
+    if (request.supervisorEntryId?.startsWith("supervised_rental_")) {
+      throw new Error("antigravity launch refused: Antigravity does not run for a guest.");
+    }
+    for (const key of Object.keys(policy)) {
+      if (!(ANTIGRAVITY_AUTHORITY_KEYS as readonly string[]).includes(key)) {
+        throw new Error(`antigravity launch policy contains unsupported native option '${key}'.`);
+      }
+    }
+    for (const [key, value] of Object.entries(antigravityAuthorityForProfile(profile))) {
+      requireMatch(policy, key, value, provider);
+    }
   } else if (profile === "read_only") {
     requireMatch(policy, "mode", "ask", provider);
     requireMatch(policy, "force", false, provider);
@@ -110,7 +124,8 @@ export function attestProviderSpawnPolicy(
     if (Object.hasOwn(policy, "mode") && policy.mode !== null) throw new Error(`Cursor ${profile} launch retained a read-only mode.`);
   }
   if (request.reasoningEffort !== null && request.reasoningEffort !== undefined && provider !== "codex" && provider !== "claude-code"
-    && !(provider === "open-model" && isOpenModelReasoningEffort(request.reasoningEffort))) {
+    && !(provider === "open-model" && isOpenModelReasoningEffort(request.reasoningEffort))
+    && !(provider === "antigravity" && isAntigravityEffort(request.reasoningEffort))) {
     throw new Error(`${provider} does not support the selected reasoning effort.`);
   }
   if (!Number.isSafeInteger(request.configurationRevision) || Number(request.configurationRevision) < 1) {
@@ -177,14 +192,14 @@ export const ownerSetupUnusedOptionsSaidOnce = launchNoticeSaidOnce();
  * for it there is refused instead of quietly starting with less.
  */
 export function spawnUsesHomeHarness(
-  provider: "codex" | "claude-code" | "cursor" | "open-model",
+  provider: "codex" | "claude-code" | "cursor" | "open-model" | "antigravity",
   request: Pick<ProviderSpawnRequest, "homeHarness" | "supervisorEntryId" | "deliveryMode">,
 ): boolean {
   if (request.homeHarness !== true) return false;
   if (request.supervisorEntryId?.startsWith("supervised_rental_")) {
     throw new Error(`${provider} launch refused: a rented agent never uses its owner's own setup.`);
   }
-  if (provider !== "codex" && provider !== "claude-code") {
+  if (provider !== "codex" && provider !== "claude-code" && provider !== "antigravity") {
     throw new Error(`${provider} launch refused: this agent app has no owner setup to use.`);
   }
   // Only an agent the daemon delivers room messages to can be held back from

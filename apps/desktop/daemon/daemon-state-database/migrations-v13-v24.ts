@@ -1,7 +1,7 @@
 /** Version transitions v12 to v24. */
 import { applyManagedLaunchContractSchema } from "../managed-launch-contract.js";
 import type { DatabaseSync } from "node:sqlite";
-import { migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20, migrateExecutionStorageV20ToV21, migrateExecutionStorageV21ToV22, migrateExecutionStorageV22ToV23, migrateExecutionStorageV23ToV24, migrateExecutionStorageV24ToV25 } from "../execution-storage-schema.js";
+import { migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20, migrateExecutionStorageV20ToV21, migrateExecutionStorageV21ToV22, migrateExecutionStorageV22ToV23, migrateExecutionStorageV23ToV24, migrateExecutionStorageV24ToV25, migrateExecutionStorageV25ToV26 } from "../execution-storage-schema.js";
 import { applyRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { SCHEMA_VERSION, applyWorkerExecutionBindings, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyDaemonEfficiencyMigration, run, validateTerminalResults, schemaMethods } from "./shared.js";
 
@@ -204,6 +204,7 @@ migrateV18ToV19(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
     this.applyCurrentConfigurationShape(database);
@@ -235,6 +236,7 @@ migrateV19ToV20(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
     this.applyCurrentConfigurationShape(database);
@@ -267,6 +269,7 @@ migrateV20ToV21(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     this.validateV18Shape(database);
     validateTerminalResults(database, 20);
     this.applyCurrentConfigurationShape(database);
@@ -298,6 +301,7 @@ migrateV21ToV22(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     this.validateV18Shape(database);
     validateTerminalResults(database, 20);
     this.applyCurrentConfigurationShape(database);
@@ -327,6 +331,7 @@ migrateV22ToV23(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
@@ -354,6 +359,7 @@ migrateV23ToV24(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);

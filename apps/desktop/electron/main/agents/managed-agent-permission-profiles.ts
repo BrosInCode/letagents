@@ -187,7 +187,56 @@ const OPEN_MODEL_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   },
 ];
 
+const ANTIGRAVITY_PROFILES: DesktopManagedAgentPermissionProfile[] = [
+  {
+    id: "read_only",
+    label: "Read-only",
+    description: "Can read and search files in its workspace, search the web, and use LetAgents room tools.",
+    status: "available",
+    risk: "low",
+    detail: "Antigravity asks before every edit, every command and every read outside its workspace, and LetAgents refuses each one. Reading the workspace, reading the files on the room message, and web search do not ask. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking. Your own Antigravity settings, plugins and MCP servers do not load unless you turn on your own setup.",
+    isDefault: true,
+  },
+  {
+    id: "ask_before_write",
+    label: "Ask before writes",
+    description: "Requires approval before Antigravity can change files or run commands.",
+    status: "available",
+    risk: "medium",
+    detail: "Reading the workspace and LetAgents room tools need no approval. Each edit, each command and each read outside the workspace asks you first, and each approval allows one action. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking.",
+    isDefault: false,
+  },
+  {
+    id: "auto_review",
+    label: "Auto",
+    description: "Lets Antigravity approve edits and safe commands itself.",
+    status: "available",
+    risk: "high",
+    detail: "Antigravity's own review decides. An action it would ask about is refused. Anything a room message asks for counts as approved, including commands that reach outside your project. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking.",
+    isDefault: false,
+  },
+  {
+    id: "full_access",
+    label: "Full access",
+    description: "Can change files and run commands on this computer without asking.",
+    status: "available",
+    risk: "high",
+    detail: "Commands can access files outside the project. Use only for work you trust.",
+    isDefault: false,
+  },
+  {
+    id: "sandboxed_write",
+    label: "Sandboxed writes",
+    description: "Restricted file editing is unavailable for Antigravity here.",
+    status: "unsupported",
+    risk: "medium",
+    detail: "Choose Read-only to prevent changes, or Full access to allow them.",
+    isDefault: false,
+  },
+];
+
 const PROVIDER_PERMISSION_PROFILES: Record<string, DesktopManagedAgentPermissionProfile[]> = {
+  antigravity: ANTIGRAVITY_PROFILES,
   "claude-code": CLAUDE_CODE_PROFILES,
   codex: CODEX_PROFILES,
   cursor: CURSOR_PROFILES,

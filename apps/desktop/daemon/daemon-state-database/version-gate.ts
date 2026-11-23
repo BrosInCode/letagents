@@ -35,7 +35,8 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion >= 36) validateExecutionApprovalPublicationSchema(database);
   if (existingVersion >= 27) validateRoomWorkPublicationSchema(database, existingVersion < 37);
   if (existingVersion >= 28) {
-    if (existingVersion < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
+    if (existingVersion < 32) validateLegacyLifecycleProjectionLedgerSchema(database, "pre_open_model");
+    else if (existingVersion < 53) validateLegacyLifecycleProjectionLedgerSchema(database, "pre_antigravity");
     else validateLifecycleProjectionLedgerSchema(database);
   }
   if (existingVersion >= 25) validatePollingOfferSchema(database, existingVersion >= 26 ? 26 : 25);
@@ -45,7 +46,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
     if (existingVersion === 30) validateRuntimeFailureEffectMigrationSource(database);
     else validateExecutionStorageSchema(database,
       existingVersion === 18 ? 18 : existingVersion < 21 ? 19 : existingVersion === 21 ? 20
-        : existingVersion < 30 ? 21 : existingVersion < 34 ? 23 : existingVersion < 35 ? 24 : 25);
+        : existingVersion < 30 ? 21 : existingVersion < 34 ? 23 : existingVersion < 35 ? 24 : existingVersion < 53 ? 25 : 26);
   }
   if (existingVersion >= 17) validateTerminalResults(database, existingVersion >= 20 ? 20 : undefined);
   if (existingVersion >= 20) {

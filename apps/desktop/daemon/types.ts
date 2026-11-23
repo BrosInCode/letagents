@@ -1,6 +1,6 @@
 import type { AgentAvatar } from "../../../shared/agent-avatar.mjs";
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.285";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.286";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -216,7 +216,8 @@ export type DaemonProviderConnection =
   | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
   | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
   | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null }
-  | { kind: "opencode_server"; url: string; pid: number | null; processIdentity?: string | null; serverAuthPath: string };
+  | { kind: "opencode_server"; url: string; pid: number | null; processIdentity?: string | null; serverAuthPath: string }
+  | { kind: "antigravity_acp"; pid: number | null; processIdentity?: string | null };
 
 export type DaemonProviderRuntimeReference = {
   /** Non-secret worker identity actually installed in this native runtime's MCP environment. */

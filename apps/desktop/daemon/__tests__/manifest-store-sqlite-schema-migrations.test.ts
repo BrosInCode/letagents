@@ -23,6 +23,7 @@ import {
   assertRoomScopedV9DeliveryShape,
 } from "./helpers/manifest-store-sqlite-fixture.js";
 import { assertOwnerPrivate } from "../../electron/__tests__/platform.js";
+import { restorePreAntigravityProviderFixture } from "./helpers/pre-antigravity-fixture.js";
 
 test("SQLite manifest round-trips the flat wire projection from relational domain tables", async () => {
   const env = await fixture();
@@ -840,6 +841,7 @@ test("physical schema 39 gains explicit local routing without changing an existi
     const expected = await original.write(0, [entry]);
     await original.close();
     const old = new DatabaseSync(env.databasePath);
+    restorePreAntigravityProviderFixture(old);
     old.exec("ALTER TABLE agent_room_memberships DROP COLUMN local_room_id; UPDATE manifest_metadata SET schema_version=39; PRAGMA user_version=39");
     old.close();
     const migrated = new ManifestStore(env.databasePath);
@@ -863,6 +865,7 @@ test("v43 saved-permission migration is atomic and current missing authority fai
       .replace("decision_id TEXT REFERENCES", "decision_id TEXT NOT NULL REFERENCES")
       .replace("dispatch_id TEXT,", "dispatch_id TEXT NOT NULL,");
     database.exec(`DROP TABLE execution_approval_request_closures; ${closureSql}`);
+    restorePreAntigravityProviderFixture(database);
     database.exec(`DROP TABLE host_tool_rule_withdrawals; DROP TABLE host_tool_rule_decisions; DROP TABLE host_tool_rules;
       UPDATE manifest_metadata SET schema_version=43; PRAGMA user_version=43`);
     const fail = new DaemonStateSchema(() => { throw new Error("Interrupted permission migration"); });
@@ -910,6 +913,7 @@ test("managed launch receipts survive reopening, reject relabeling, and legacy m
     assert.equal(await store.readManagedLaunchContract(scope), birth.managedLaunchContract);
     await store.close();
     const legacy = new DatabaseSync(env.databasePath);
+    restorePreAntigravityProviderFixture(legacy);
     legacy.exec("DROP TABLE managed_launch_contracts; PRAGMA user_version=45; UPDATE manifest_metadata SET schema_version=45");
     legacy.close();
     store = new ManifestStore(env.databasePath);
@@ -1180,6 +1184,7 @@ test("v47 efficiency migration installs exact read indexes atomically and reject
   try {
     schema.createSchema(database);
     for (const name of names) database.exec(`DROP INDEX ${name}`);
+    restorePreAntigravityProviderFixture(database);
     database.exec("UPDATE manifest_metadata SET schema_version=47; PRAGMA user_version=47");
     new DaemonStateSchema().validateV2Shape(database);
     const interrupted = new DaemonStateSchema(() => { throw new Error("efficiency migration interrupted"); });
@@ -1258,6 +1263,7 @@ test("v51 profile migration preserves identity and stores chosen avatar across r
   try {
     const original = await store.write(0, [entry]); await store.close();
     const old = new DatabaseSync(env.databasePath);
+    restorePreAntigravityProviderFixture(old);
     old.exec("ALTER TABLE agent_profiles DROP COLUMN avatar_json; UPDATE manifest_metadata SET schema_version=51; PRAGMA user_version=51");
     old.close();
     store = new ManifestStore(env.databasePath);

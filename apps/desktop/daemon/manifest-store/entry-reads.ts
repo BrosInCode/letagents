@@ -132,6 +132,7 @@ export const entryReads = storeMethods({
       claude_cli: "claude-code",
       cursor_cli: "cursor",
       opencode_server: "open-model",
+      antigravity_acp: "antigravity",
     } as const;
     const runtimeGenerationId = executionRuntimeStorageIdentity(snapshot.agentId,
       snapshot.executionGenerationId, snapshot.providerConnection.kind,

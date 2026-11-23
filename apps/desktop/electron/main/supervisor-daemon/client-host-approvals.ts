@@ -18,12 +18,12 @@ const hostToolLabel = approvalId.regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u20
 const projectHostToolScope = z.strictObject({
   agentId: approvalId, accountId: approvalId, projectId: approvalSha, projectName: hostToolLabel, sourceRepoPath: z.string().min(1).max(4096),
   canonicalSourcePath: z.string().min(1).max(4096), repository: z.string().min(1).max(4096), remoteUrl: z.string().min(1).max(4096),
-  provider: z.enum(["codex", "claude-code", "open-model"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
+  provider: z.enum(["codex", "claude-code", "open-model", "antigravity"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
 });
 const hostToolScope = z.union([projectHostToolScope, z.strictObject({
   kind: z.literal("room_workspace"), version: z.literal(1), agentId: approvalId, accountId: approvalId, roomId: approvalId,
   workAttemptId: z.string().uuid(), workspacePath: z.string().min(1).max(4096), canonicalWorkspacePath: z.string().min(1).max(4096),
-  provider: z.enum(["codex", "claude-code", "open-model"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
+  provider: z.enum(["codex", "claude-code", "open-model", "antigravity"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
 })]);
 const hostToolRule = z.strictObject({ id: approvalId, revision: z.number().int().positive().safe(), ownerId: approvalId,
   scope: hostToolScope, createdAtMs: z.number().int().nonnegative().safe() });
@@ -33,7 +33,7 @@ const approvalCandidate = z.strictObject({
     turnId: approvalId, providerContinuationId: approvalId, providerTurnId: approvalId, connectionId: approvalId,
     nativeRequestId: z.union([approvalId, z.number().int().nonnegative().safe()]) }).nullable(),
   presentation: z.strictObject({ agentId: approvalId, displayName: z.string().max(256),
-    provider: z.enum(["codex", "open-model", "claude-code"]), title: z.enum(["Run a command", "Run a tool", "Change files", "Grant for this turn", "Approval unavailable"]),
+    provider: z.enum(["codex", "open-model", "claude-code", "antigravity"]), title: z.enum(["Run a command", "Run a tool", "Change files", "Grant for this turn", "Approval unavailable"]),
     details: z.string().max(24 * 1024), denyScope: z.enum(["request", "session_pending"]), alwaysAllow: hostToolScope.optional() }),
   status: approvalStatus, detail: z.string().max(1024).nullable(),
   recordedDecision: z.strictObject({ decisionId: approvalId, actorId: approvalId,

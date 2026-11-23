@@ -15,7 +15,7 @@ export interface InspectorSignal {
 }
 
 export function agentInspectorProviderLabel(provider: string): string {
-  return ({ 'claude-code': 'Claude Code', codex: 'Codex', cursor: 'Cursor', 'open-model': 'Open Model' } as Record<string, string>)[provider] || provider;
+  return ({ 'claude-code': 'Claude Code', codex: 'Codex', cursor: 'Cursor', 'open-model': 'Open Model', antigravity: 'Antigravity' } as Record<string, string>)[provider] || provider;
 }
 
 export function agentInspectorActionErrorMessage(

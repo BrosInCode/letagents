@@ -7,7 +7,7 @@ import { recoveredRuntime } from "./runtime-recovery-journal.js";
 import { isIdleCursorConnection } from "./provider-state-policy.js";
 import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
-import { unavailableLifecycleProjectionDiagnostics, type LifecycleProjectionDiagnostics,
+import { isLifecycleProjectionProvider, unavailableLifecycleProjectionDiagnostics, type LifecycleProjectionDiagnostics,
   type LifecycleCaptureAdmissionStatus, type LifecycleProjectionObservation,
   type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
 import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema,
@@ -61,6 +61,7 @@ function lifecycleProvider(connection: ProviderActionConnectionRef | null | unde
   if (connection?.kind === "claude_cli") return "claude-code";
   if (connection?.kind === "cursor_cli") return "cursor";
   if (connection?.kind === "opencode_server") return "open-model";
+  if (connection?.kind === "antigravity_acp") return "antigravity";
   return null;
 }
 
@@ -444,12 +445,12 @@ export class ExecutionCaptureCoordinator {
   recordLegacyLifecycle(value: LifecycleProjectionObservation): void {
     if (this.closed) return;
     const provider = value?.provider;
-    if (!(provider === "codex" || provider === "claude-code" || provider === "cursor" || provider === "open-model")
+    if (!isLifecycleProjectionProvider(provider)
       || ![value.agentId, value.workAttemptId, value.executionGenerationId, value.nativeEventId]
         .every(identity => executionIdentity.safeParse(identity).success)
       || !(value.phase === "turn_active" || value.phase === "turn_terminal")
       || !(value.state === "working" || value.state === "idle" || value.state === "terminal" || value.state === "failed")) {
-      if (provider === "codex" || provider === "claude-code" || provider === "cursor" || provider === "open-model") {
+      if (isLifecycleProjectionProvider(provider)) {
         this.markLifecycleProjectionUnavailable(provider);
       }
       return;
