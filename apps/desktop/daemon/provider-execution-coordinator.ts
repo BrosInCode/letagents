@@ -25,7 +25,22 @@ import {
 } from "./provider-action-port.js";
 import { deriveProviderConfigurationSnapshot, entryLaunchPolicy, ownerSetupRef } from "./provider-configuration.js";
 import { isCursorChildConnection } from "./provider-state-policy.js";
-import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
+import {
+  clearRecoveryTimerBookkeeping,
+  decide,
+  detachConvergenceBookkeeping,
+  initialVolatileConvergeBookkeeping,
+  isResumableCursorLane,
+  projectPersistedConvergeControl,
+  recordedProcessState,
+  recoveryControlState,
+  RETIREMENT_SETTLEMENT_WAIT_MS,
+  type ConvergeDecision,
+  type ConvergeState,
+  type ExecutionTerminalState,
+  type ScheduleRecoveryCommand,
+  type VolatileConvergeBookkeeping,
+} from "./convergence-decision.js";
 import { DaemonFenceLostError } from "./singleton.js";
 import {
   assertSupervisedPermissionProfileAvailable,
@@ -51,7 +66,7 @@ import type {
   MintedWorkerAuthorization,
 } from "./worker-runtime-custody.js";
 import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
-import type { SupervisedAgentInboxStore, SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
+import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 
 import { ProviderStopError } from "./daemon-error-policy.js";
 import { ACTIVITY_RECORD_CONTINUED_NOTICE, ACTIVITY_RECORD_STOPPED_NOTICE } from "./runtime-recovery-journal.js";
@@ -60,53 +75,13 @@ import type { ConvergencePacing } from "./convergence-pacer.js";
 import { launchProgress } from "./launch-progress.js";
 import { turnStartLatency } from "./turn-start-latency.js";
 
-// A live generation with no attachable handle resolves on its own once the
-// old process exits or answers again. Re-check with capped backoff so the
-// agent is not left blocked until some unrelated event wakes it, while a
-// runtime that stays unattachable costs one cheap check per half hour.
-const UNATTACHABLE_GENERATION_RECHECK_MS = 60_000;
-const UNATTACHABLE_GENERATION_RECHECK_MAX_MS = 30 * 60_000;
-const WORKSPACE_REPOSITORY_RETRY_MS = 5_000;
-const WORKSPACE_REPOSITORY_RETRY_MAX_MS = 5 * 60_000;
-/**
- * How long an ended runtime is left for the turn of its in-flight message to
- * be recorded. A provider reports a failed turn's result moments after the
- * failure; past this the result is not coming and the runtime is retired
- * without it.
- */
-export const RETIREMENT_SETTLEMENT_WAIT_MS = 30_000;
+export { RETIREMENT_SETTLEMENT_WAIT_MS };
 /**
  * The longest a launch waits for the daemon's background check of the bundled
  * MCP runtime. That check only spares the launch its own first hash, which runs
  * regardless; a filesystem that never answers must not hold launches forever.
  */
 const RUNTIME_VERIFY_WAIT_MS = 180_000;
-/**
- * The inbox head has a turn that may still be running and no result saved for
- * it. A started turn handed back to `pending` counts: a delivery lane that
- * lets go of its turn leaves the row that way while the provider works on.
- */
-function turnInFlight(head: Pick<SupervisedInboxItem, "state" | "provider_turn_id" | "outcome"> | null): boolean {
-  return head !== null && (["dispatching", "awaiting_result", "result_recovery"].includes(head.state)
-    || (head.state === "pending" && Boolean(head.provider_turn_id) && !head.outcome));
-}
-const UNATTACHABLE_GENERATION_CAUSE = "durable execution generation remains live without an attachable provider handle";
-const INCOMPLETE_PROCESS_REF_ERROR = "The recorded provider process has a process id and no process birth, so its absence cannot be proved.";
-/**
- * A reference with no process id names no process (a Cursor lane between
- * turns): there is nothing to prove. A process id with no recorded birth is an
- * incomplete reference: no process can be matched to it, so it is never
- * signalled and never treated as gone.
- */
-function recordedProcessState(
-  connection: { pid?: number | null; processIdentity?: string | null } | null | undefined,
-): "none" | "exact" | "incomplete" {
-  if (!connection || connection.pid === null || connection.pid === undefined) return "none";
-  return Number.isSafeInteger(connection.pid) && connection.pid > 0
-    && typeof connection.processIdentity === "string" && connection.processIdentity.trim()
-    ? "exact" : "incomplete";
-}
-const UNPROVEN_PREDECESSOR_CAUSE = "the earlier provider process is not proven gone after its recorded end; no replacement starts until it is";
 
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
@@ -232,6 +207,8 @@ export type ProviderExecutionCoordinatorOptions = {
     condition: DaemonManifestEntry["condition"],
     cause: string,
     actor: string,
+    reconciliation?: DaemonManifestEntry["reconciliation"],
+    expectedVersion?: number,
   ): Promise<void>;
   terminalPayload(terminal: ProviderActionTerminal, actor: string, connection?: ProviderActionHandle["providerConnection"]): ExecutionTerminalPayload;
   settleRuntimeApprovals(entryId: string): Promise<void>;
@@ -323,13 +300,12 @@ type DispatchReservation = {
 export class ProviderExecutionCoordinator {
   private readonly convergenceRequests = new Map<string, Promise<void>>();
   private readonly pendingReminders = new Map<string, symbol>();
-  private readonly failedLaunchAdmissions = new Map<string, string>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** When the wait for an ended runtime's last turn runs out, per runtime. */
-  private readonly retirementDeadlines = new WeakMap<ProviderActionHandle, number>();
-  private readonly recoveryDueAtMs = new Map<string, number>();
-  private readonly unattachableRechecks = new Map<string, number>();
-  private readonly workspaceRepositoryRetries = new Map<string, number>();
+  /** Strictly non-durable per-agent convergence bookkeeping owned in memory. */
+  private readonly volatileByAgent = new Map<string, VolatileConvergeBookkeeping>();
+  /** Monotonic per-handle tokens so each replacement handle gets its own retirement wait. */
+  private readonly handleTokens = new WeakMap<ProviderActionHandle, number>();
+  private nextHandleToken = 1;
   private readonly dispatchReservations = new Map<Promise<void>, string>();
   private readonly activeDispatches = new Map<symbol, DispatchReservation>();
   private fatalDispatchError: unknown = null;
@@ -339,6 +315,82 @@ export class ProviderExecutionCoordinator {
   constructor(private readonly options: ProviderExecutionCoordinatorOptions) {
     this.setRecoveryTimeout = options.setTimeout ?? setTimeout;
     this.clearRecoveryTimeout = options.clearTimeout ?? clearTimeout;
+  }
+
+  private volatileState(entryId: string): VolatileConvergeBookkeeping {
+    return this.volatileByAgent.get(entryId) ?? initialVolatileConvergeBookkeeping();
+  }
+
+  private handleToken(handle: ProviderActionHandle): number {
+    let token = this.handleTokens.get(handle);
+    if (token === undefined) {
+      token = this.nextHandleToken++;
+      this.handleTokens.set(handle, token);
+    }
+    return token;
+  }
+
+  private buildConvergeState(entry: DaemonManifestEntry): ConvergeState {
+    return {
+      persisted: projectPersistedConvergeControl(entry),
+      volatile: this.volatileState(entry.id),
+    };
+  }
+
+  private installRecoveryTimer(entryId: string, command: ScheduleRecoveryCommand): void {
+    const existing = this.recoveryTimers.get(entryId);
+    if (existing) {
+      this.clearRecoveryTimeout(existing);
+      this.recoveryTimers.delete(entryId);
+    }
+    const timer = this.setRecoveryTimeout(() => {
+      this.recoveryTimers.delete(entryId);
+      const current = this.volatileByAgent.get(entryId);
+      if (current) {
+        const fired = decide(recoveryControlState(entryId, current), { kind: "recovery_timer_fired" });
+        this.volatileByAgent.set(entryId, fired.volatile);
+      }
+      this.request(entryId);
+    }, command.delayMs);
+    timer.unref?.();
+    this.recoveryTimers.set(entryId, timer);
+  }
+
+  /**
+   * Commits a pure convergence decision in strict commit-before-commands order:
+   * the durable manifest transition (checked against `expectedVersion` and the
+   * daemon generation fence) runs first; only after it commits are volatile
+   * bookkeeping and local recovery-timer updates applied.
+   */
+  private async commitDecision(
+    entryId: string,
+    expectedVersion: number,
+    decision: ConvergeDecision,
+  ): Promise<ConvergeDecision> {
+    if (decision.transition) {
+      await this.options.transition(
+        entryId,
+        decision.transition.observedState,
+        decision.transition.condition,
+        decision.transition.cause,
+        decision.transition.actor,
+        undefined,
+        expectedVersion,
+      );
+    }
+    this.volatileByAgent.set(entryId, decision.volatile);
+    for (const command of decision.commands) {
+      if (command.kind === "schedule_recovery") {
+        this.installRecoveryTimer(entryId, command);
+      }
+    }
+    return decision;
+  }
+
+  private async loadVersionedEntry(
+    entryId: string,
+  ): Promise<{ entry: DaemonManifestEntry; version: number } | null> {
+    return (await this.options.store.getEntryWithVersion(entryId)) ?? null;
   }
 
   /**
@@ -425,25 +477,30 @@ export class ProviderExecutionCoordinator {
   }
 
   scheduleRecovery(entryId: string, delayMs: number): void {
-    const dueAtMs = this.options.nowMs() + Math.max(1, delayMs);
-    // Keep whichever wake-up is sooner so a slow re-check never delays a
-    // restart that another path scheduled for earlier.
-    const existingDueAtMs = this.recoveryDueAtMs.get(entryId);
-    if (this.recoveryTimers.has(entryId) && (existingDueAtMs === undefined || existingDueAtMs <= dueAtMs)) return;
-    this.clearRecovery(entryId);
-    const timer = this.setRecoveryTimeout(() => {
-      this.recoveryTimers.delete(entryId);
-      this.recoveryDueAtMs.delete(entryId);
-      this.request(entryId);
-    }, Math.max(1, delayMs));
-    timer.unref?.();
-    this.recoveryTimers.set(entryId, timer);
-    this.recoveryDueAtMs.set(entryId, dueAtMs);
+    const decision = decide(
+      recoveryControlState(entryId, this.volatileState(entryId)),
+      {
+        kind: "recovery_schedule_requested",
+        nowMs: this.options.nowMs(),
+        delayMs,
+        hasPendingTimer: this.recoveryTimers.has(entryId),
+      },
+    );
+    this.volatileByAgent.set(entryId, decision.volatile);
+    for (const command of decision.commands) {
+      if (command.kind === "schedule_recovery") {
+        this.installRecoveryTimer(entryId, command);
+      }
+    }
   }
 
   clearRecovery(entryId: string): void {
     const timer = this.recoveryTimers.get(entryId);
-    this.recoveryDueAtMs.delete(entryId);
+    const current = this.volatileByAgent.get(entryId);
+    if (current) {
+      const cleared = decide(recoveryControlState(entryId, current), { kind: "recovery_cleared" });
+      this.volatileByAgent.set(entryId, cleared.volatile);
+    }
     if (!timer) return;
     this.clearRecoveryTimeout(timer);
     this.recoveryTimers.delete(entryId);
@@ -457,15 +514,17 @@ export class ProviderExecutionCoordinator {
   detachConvergence(): void {
     this.convergenceRequests.clear();
     this.pendingReminders.clear();
-    this.failedLaunchAdmissions.clear();
+    for (const [entryId, volatile] of this.volatileByAgent) {
+      this.volatileByAgent.set(entryId, detachConvergenceBookkeeping(volatile));
+    }
   }
 
   clearRecoveryTimers(): void {
     for (const timer of this.recoveryTimers.values()) this.clearRecoveryTimeout(timer);
     this.recoveryTimers.clear();
-    this.recoveryDueAtMs.clear();
-    this.unattachableRechecks.clear();
-    this.workspaceRepositoryRetries.clear();
+    for (const [entryId, volatile] of this.volatileByAgent) {
+      this.volatileByAgent.set(entryId, clearRecoveryTimerBookkeeping(volatile));
+    }
   }
 
   async drainDispatches(entryIds?: readonly string[]): Promise<void> {
@@ -511,14 +570,14 @@ export class ProviderExecutionCoordinator {
   private async launchEntryIfCurrent(
     entryId: string,
     expectedEpoch: number,
-  ): Promise<DaemonManifestEntry | null> {
+  ): Promise<{ entry: DaemonManifestEntry; version: number } | null> {
     if (this.options.authority.isHandoffScheduled()
       || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch) return null;
-    const current = await this.options.store.getEntry(entryId);
+    const loaded = await this.options.store.getEntryWithVersion(entryId);
     if (this.options.authority.isHandoffScheduled()
       || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch
-      || current?.desired_state !== "running") return null;
-    return current;
+      || loaded?.entry.desired_state !== "running") return null;
+    return loaded;
   }
 
   /**
@@ -708,8 +767,9 @@ export class ProviderExecutionCoordinator {
     generation: number,
   ): Promise<boolean> {
     await this.options.authority.serializeManifestMutation(async () => undefined);
-    const current = await this.options.store.getEntry(entryId);
-    if (!current || current.desired_state === "running") return false;
+    const loaded = await this.loadVersionedEntry(entryId);
+    const current = loaded?.entry;
+    if (!loaded || !current || current.desired_state === "running") return false;
     await this.options.delivery.stop(entryId).catch(() => undefined);
     await this.options.transition(
       entryId,
@@ -717,6 +777,8 @@ export class ProviderExecutionCoordinator {
       current.condition,
       `desired state changed to ${current.desired_state} during provider dispatch`,
       "daemon-convergence",
+      undefined,
+      loaded.version,
     );
     const installation = this.options.streams.currentInstallation(entryId);
     const terminal = await this.options.provider.stop(handle, {
@@ -1149,16 +1211,19 @@ export class ProviderExecutionCoordinator {
   async converge(entryId: string, kind: ConvergenceRequestKind = "owned"): Promise<void> {
     if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return;
     // Owned lifecycle/terminal/timer work can retry even identical launch inputs.
-    if (kind === "owned") this.failedLaunchAdmissions.delete(entryId);
+    if (kind === "owned") {
+      const currentVolatile = this.volatileByAgent.get(entryId);
+      if (currentVolatile) this.volatileByAgent.set(entryId, detachConvergenceBookkeeping(currentVolatile));
+    }
     await this.options.settleRuntimeApprovals(entryId);
     if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
-    let entry = await this.options.store.getEntry(entryId);
-    if (!entry) {
-      this.failedLaunchAdmissions.delete(entryId);
-      this.workspaceRepositoryRetries.delete(entryId);
+    let loaded = await this.loadVersionedEntry(entryId);
+    if (!loaded) {
+      this.volatileByAgent.delete(entryId);
       return;
     }
-    let launchControlEpoch = this.options.concurrency.currentControlEpoch(entryId);
+    let { entry, version } = loaded;
+    const launchControlEpoch = this.options.concurrency.currentControlEpoch(entryId);
 
     const historicalControl = entry.turn_control;
     if (historicalControl && historicalControl.status !== "completed"
@@ -1170,18 +1235,23 @@ export class ProviderExecutionCoordinator {
       );
       if (controlledExecution?.terminal) {
         entry = await this.options.completeTurnControlForRuntimeRecovery(entry);
+        loaded = await this.loadVersionedEntry(entryId);
+        if (loaded) ({ entry, version } = loaded);
       }
     }
 
+    const arrival = decide(this.buildConvergeState(entry), {
+      kind: "request_arrived",
+      requestKind: kind,
+    });
+    await this.commitDecision(entry.id, version, arrival);
+
     if (entry.desired_state === "running") {
-      await this.convergeRunning(entry, launchControlEpoch, kind);
+      await this.convergeRunning(entry, version, launchControlEpoch, kind);
       return;
     }
-    this.failedLaunchAdmissions.delete(entryId);
-    // A stopped agent starts its next attempt at the shortest wait.
-    this.workspaceRepositoryRetries.delete(entryId);
     try {
-      await this.convergeStopped(entry);
+      await this.convergeStopped(entry, version);
     } catch (error) {
       // A pause that fails is not a failed stop.
       throw entry.desired_state === "stopped" ? new ProviderStopError(error) : error;
@@ -1190,11 +1260,13 @@ export class ProviderExecutionCoordinator {
 
   private async convergeRunning(
     initialEntry: DaemonManifestEntry,
+    initialVersion: number,
     initialControlEpoch: number,
     kind: ConvergenceRequestKind,
   ): Promise<void> {
     let entry = initialEntry;
-    let launchControlEpoch = initialControlEpoch;
+    let version = initialVersion;
+    const launchControlEpoch = initialControlEpoch;
     if (entry.condition === "quarantined") return;
     if (entry.id.startsWith("supervised_rental_")) {
       const rentalConfiguration = await this.options.store.getAgentConfiguration(entry.id);
@@ -1206,53 +1278,54 @@ export class ProviderExecutionCoordinator {
           entry.id,
         );
       } catch (error) {
-        await this.options.delivery.stop(entry.id).catch(() => undefined);
-        await this.options.transition(
-          entry.id,
-          "failed",
-          "quarantined",
-          error instanceof Error ? error.message : "Unsafe rental permission profile.",
-          "daemon-convergence",
-        );
+        const decision = decide(this.buildConvergeState(entry), {
+          kind: "rental_permission_rejected",
+          reason: error instanceof Error ? error.message : "Unsafe rental permission profile.",
+        });
+        await this.commitDecision(entry.id, version, decision);
+        for (const command of decision.commands) {
+          if (command.kind === "stop_delivery") {
+            await this.options.delivery.stop(entry.id).catch(() => undefined);
+          }
+        }
         return;
       }
     }
-    if (await this.options.host.requiresGrant(entry) && !this.options.host.currentGrant(entry)) return;
-    if (entry.delivery_mode === "daemon_inbox") {
+    const requiresGrant = Boolean(await this.options.host.requiresGrant(entry));
+    const hasGrant = requiresGrant ? Boolean(this.options.host.currentGrant(entry)) : true;
+    let hasMatchingInboxCursor = true;
+    if (hasGrant && entry.delivery_mode === "daemon_inbox") {
       const cursor = await this.options.inbox.cursor(entry.id);
-      if (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id) return;
+      hasMatchingInboxCursor = Boolean(cursor && cursor.agent_id === entry.id && cursor.room_id === entry.room_id);
     }
-    if (await this.options.host.requiresGrant(entry) && !await this.options.host.ensureGrantFresh(entry)) return;
-    const currentAfterGrant = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
-    if (!currentAfterGrant) return;
-    entry = currentAfterGrant;
-    if (entry.desired_state !== "running"
-      || this.options.concurrency.currentControlEpoch(entry.id) !== launchControlEpoch
-      || this.options.authority.isHandoffScheduled()) return;
-    if (entry.observed_state === "failed") {
-      const now = this.options.nowMs();
-      const exitsInWindow = (entry.reconciliation?.exit_timestamps_ms ?? [])
-        .filter((at) => at >= now - CRASH_LOOP_WINDOW_MS).length;
-      if (exitsInWindow >= CRASH_LOOP_EXIT_LIMIT) {
-        await this.options.transition(
-          entry.id,
-          "failed",
-          "quarantined",
-          "crash-loop threshold reached before provider restart",
-          "daemon-convergence",
-        );
-        return;
-      }
-      const restartAt = entry.reconciliation?.next_restart_at_ms;
-      if (typeof restartAt === "number" && restartAt > now) {
-        this.scheduleRecovery(entry.id, restartAt - now);
-        return;
-      }
+    let grantFresh = true;
+    if (hasGrant && hasMatchingInboxCursor && requiresGrant) {
+      grantFresh = Boolean(await this.options.host.ensureGrantFresh(entry));
     }
+    if (hasGrant && hasMatchingInboxCursor && grantFresh) {
+      const currentAfterGrant = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+      if (!currentAfterGrant) return;
+      ({ entry, version } = currentAfterGrant);
+      if (entry.desired_state !== "running"
+        || this.options.concurrency.currentControlEpoch(entry.id) !== launchControlEpoch
+        || this.options.authority.isHandoffScheduled()) return;
+    }
+    const gateDecision = decide(this.buildConvergeState(entry), {
+      kind: "running_gate_checked",
+      nowMs: this.options.nowMs(),
+      requiresGrant,
+      hasGrant,
+      grantFresh,
+      hasMatchingInboxCursor,
+      hasPendingTimer: this.recoveryTimers.has(entry.id),
+    });
+    await this.commitDecision(entry.id, version, gateDecision);
+    if (!gateDecision.commands.some((command) => command.kind === "proceed_running")) return;
+
     entry = await this.ensureWorkAttempt(entry);
     const currentAfterAttempt = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
     if (!currentAfterAttempt) return;
-    entry = currentAfterAttempt;
+    ({ entry, version } = currentAfterAttempt);
     let handle = this.options.streams.get(entry.id) ?? null;
     // The daemon lets go of a runtime the moment its process exits, and
     // records the exit after this pass. Until then the generation has no
@@ -1267,29 +1340,34 @@ export class ProviderExecutionCoordinator {
         if ((error as { providerAttachOutcome?: unknown })?.providerAttachOutcome !== "in_progress") {
           throw error;
         }
-        await this.options.transition(
-          entry.id,
-          "recovering",
-          "none",
-          "exact Cursor turn wrapper is still finishing; retrying without launching a successor",
-          "daemon-convergence",
-        );
-        this.scheduleRecovery(entry.id, 250);
+        const attachDecision = decide(this.buildConvergeState(entry), {
+          kind: "attach_in_progress",
+          nowMs: this.options.nowMs(),
+          hasPendingTimer: this.recoveryTimers.has(entry.id),
+        });
+        await this.commitDecision(entry.id, version, attachDecision);
         return;
       }
-      entry = await this.options.store.getEntry(entry.id) ?? entry;
+      const refreshedAfterAttach = await this.loadVersionedEntry(entry.id);
+      if (refreshedAfterAttach) ({ entry, version } = refreshedAfterAttach);
     }
     if (handle) {
-      await this.convergeAttachedHandle(entry, handle);
+      await this.convergeAttachedHandle(entry, version, handle);
       return;
     }
-    if (kind === "rehydration" && this.failedLaunchAdmissions.has(entry.id)) {
+    if (kind === "rehydration" && this.volatileState(entry.id).failedLaunchAdmissionKey !== null) {
       const configuration = await this.options.store.getAgentConfiguration(entry.id);
       const admission = configuration && await this.launchAdmission(entry, launchControlEpoch, configuration);
-      if (admission && admission === this.failedLaunchAdmissions.get(entry.id)) return;
+      const rehydrationDecision = decide(this.buildConvergeState(entry), {
+        kind: "rehydration_admission_checked",
+        requestKind: kind,
+        admissionKey: admission ?? null,
+      });
+      await this.commitDecision(entry.id, version, rehydrationDecision);
+      if (!rehydrationDecision.commands.some((command) => command.kind === "proceed_launch_setup")) return;
     }
     try {
-      await this.launchProvider(entry, launchControlEpoch);
+      await this.launchProvider(entry, version, launchControlEpoch);
     } catch (error) {
       launchProgress.fail(entry.id, error);
       throw error;
@@ -1329,13 +1407,15 @@ export class ProviderExecutionCoordinator {
 
   private async convergeAttachedHandle(
     initialEntry: DaemonManifestEntry,
+    initialVersion: number,
     handle: ProviderActionHandle,
   ): Promise<void> {
     let entry = initialEntry;
+    let version = initialVersion;
     const grant = this.options.host.currentGrant(entry);
     const daemonGeneration = this.options.authority.currentDaemonGeneration();
     const controlEpoch = this.options.concurrency.currentControlEpoch(entry.id);
-    const requiresGrant = await this.options.host.requiresGrant(entry);
+    const requiresGrant = Boolean(await this.options.host.requiresGrant(entry));
     if (requiresGrant) {
       if (!grant) return;
       const binding = await this.options.bindings.get(entry.id);
@@ -1353,7 +1433,8 @@ export class ProviderExecutionCoordinator {
           minted = await this.options.host.mintSession(entry, executionGenerationId);
           if (minted) {
             await this.options.host.bindMintedSession(entry.id, minted);
-            entry = await this.options.store.getEntry(entry.id) ?? entry;
+            const refreshed = await this.loadVersionedEntry(entry.id);
+            if (refreshed) ({ entry, version } = refreshed);
           }
         } catch (error) {
           if (this.options.authority.isHandoffScheduled()
@@ -1387,7 +1468,8 @@ export class ProviderExecutionCoordinator {
         try {
           await this.options.host.confirmExactBinding(entry.id, () => !this.options.authority.isHandoffScheduled()
             && this.options.concurrency.currentControlEpoch(entry.id) === controlEpoch);
-          entry = await this.options.store.getEntry(entry.id) ?? entry;
+          const refreshed = await this.loadVersionedEntry(entry.id);
+          if (refreshed) ({ entry, version } = refreshed);
         } catch (error) {
           if (this.options.authority.isHandoffScheduled()
             || this.options.authority.currentDaemonGeneration() !== daemonGeneration
@@ -1414,81 +1496,40 @@ export class ProviderExecutionCoordinator {
     const typed = entry.delivery_mode === "daemon_inbox"
       && installation?.handle === handle
       && installation.authorityMode === "typed";
-    if (!typed && entry.observed_state !== handle.observedState) {
-      await this.options.transition(
-        entry.id,
-        handle.observedState,
-        entry.condition,
-        "reattached durable provider handle",
-        "daemon-convergence",
-      );
-    }
-    // A typed lane takes its state from execution facts, not from the handle.
-    // The one exception runs toward failure only: no turn can run on a handle
-    // that itself reports failed or stopped, and the fact that should have
-    // failed the entry can be lost, which left the agent looking alive and
-    // receiving nothing. Cursor is excluded: its handle ends only with a
-    // committed terminal, which the exit path already owns.
-    const typedHandleEnded = typed && entry.provider !== "cursor"
-      && ["failed", "stopped"].includes(handle.observedState);
-    const terminal = (typed && (["failed", "stopped"].includes(entry.observed_state) || typedHandleEnded))
-      || (!typed && (["failed", "stopped"].includes(handle.observedState)
-        || (handle.observedState === "idle" && !requiresGrant)));
-    if (terminal) {
-      if (await this.holdsRetirement(entry, handle, typedHandleEnded)) return;
-      await this.options.streams.fenceTerminalOnce(
-        handle,
-        `manifest:${entry.id}:reattached-terminal:${entry.provider_ref?.execution_generation_id ?? "unknown"}`,
-      );
-      return;
-    }
-    if (entry.desired_state === "running" && entry.delivery_mode === "daemon_inbox") {
-      // A turn an earlier runtime left open, once its message is settled, would
-      // refuse the next turn of this one. It is archived as soon as it is seen.
-      await this.archiveExitedRuntimes(entry.id);
-      await this.options.delivery.start(entry.id, "ensure");
-    }
-  }
-
-  /**
-   * Retiring a runtime stops its process, and two things can make that the
-   * wrong moment.
-   *
-   * Its message is still in flight: the inbox head has a turn started and no
-   * result saved. A stop now would land before the provider finished the turn,
-   * and the next message would wait behind a turn nobody can finish. Leave the
-   * runtime until the result is saved; delivery wakes convergence when it
-   * records one. The inbox is asked rather than the delivery lane, because a
-   * lane that lost its turn (a newly minted session takes its authority to
-   * record it) holds nothing while the provider is still working. The wait is
-   * bounded: a runtime that never reports the result is retired anyway, and
-   * the turn is then recovered from the provider's own record, never run
-   * again.
-   *
-   * The room refuses this agent's bearer: a handle that ended while its entry
-   * did not is left as it is. Replacing it is not what the room's answer asks
-   * for, and the daemon cannot tell an expired bearer from a session a room
-   * admin ended. A bearer that is due is still rotated above, on its
-   * schedule, and an entry that itself ended is still replaced, as both were
-   * before.
-   */
-  private async holdsRetirement(
-    entry: DaemonManifestEntry,
-    handle: ProviderActionHandle,
-    typedHandleEnded: boolean,
-  ): Promise<boolean> {
-    const head = await this.options.inbox.head(entry.id);
-    if (turnInFlight(head)) {
-      const now = this.options.nowMs();
-      const deadline = this.retirementDeadlines.get(handle) ?? now + RETIREMENT_SETTLEMENT_WAIT_MS;
-      this.retirementDeadlines.set(handle, deadline);
-      if (now < deadline) {
-        this.scheduleRecovery(entry.id, deadline - now);
-        return true;
+    const maybeTerminal = handle.observedState === "failed"
+      || handle.observedState === "stopped"
+      || entry.observed_state === "failed"
+      || entry.observed_state === "stopped"
+      || (!typed && handle.observedState === "idle" && !requiresGrant);
+    const head = maybeTerminal ? await this.options.inbox.head(entry.id) : null;
+    const decision = decide(this.buildConvergeState(entry), {
+      kind: "attached_handle_evaluated",
+      nowMs: this.options.nowMs(),
+      handleToken: this.handleToken(handle),
+      handleObservedState: handle.observedState,
+      typed,
+      requiresGrant,
+      inboxHead: head ? {
+        state: head.state,
+        provider_turn_id: head.provider_turn_id ?? null,
+        outcome: head.outcome ?? null,
+      } : null,
+      roomRefusesAccess: this.options.delivery.roomRefusesAccess?.(entry.id) === true,
+      hasPendingTimer: this.recoveryTimers.has(entry.id),
+    });
+    await this.commitDecision(entry.id, version, decision);
+    for (const command of decision.commands) {
+      if (command.kind === "fence_terminal_handle") {
+        await this.options.streams.fenceTerminalOnce(handle, command.actionId);
+        return;
+      }
+      if (command.kind === "ensure_delivery_and_archive") {
+        // A turn an earlier runtime left open, once its message is settled, would
+        // refuse the next turn of this one. It is archived as soon as it is seen.
+        await this.archiveExitedRuntimes(entry.id);
+        await this.options.delivery.start(entry.id, "ensure");
       }
     }
-    return typedHandleEnded && !["failed", "stopped"].includes(entry.observed_state)
-      && this.options.delivery.roomRefusesAccess?.(entry.id) === true;
   }
 
   /** Delivery readiness comes from durable worker authority, never provider polling output. */
@@ -1547,62 +1588,23 @@ export class ProviderExecutionCoordinator {
       && this.options.concurrency.currentControlEpoch(entry.id) === controlEpoch);
   }
 
-  /**
-   * A stored terminal record ends a generation. It does not say that the
-   * process is gone, unless it carries the witnessed death of that exact
-   * process. A daemon that ended between the record and the stop of the
-   * process leaves a record without that witness and a process that still
-   * runs. Before a replacement starts, the adapter proves the recorded
-   * process birth gone: it signals that exact birth if it is alive, and it
-   * never signals a process id that another process now has. False means no
-   * replacement may start in this pass; the entry says why and is checked
-   * again.
-   */
-  private async retireUnprovenPredecessor(entry: DaemonManifestEntry): Promise<boolean> {
-    const ref = entry.provider_ref;
-    const connection = ref?.provider_connection;
-    const recorded = recordedProcessState(connection);
-    if (!ref || recorded === "none") return true;
-    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
-    const execution = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
-    );
-    if (!execution?.terminal || execution.terminal.native_runtime_death) return true;
-    try {
-      if (recorded === "incomplete") throw new Error(INCOMPLETE_PROCESS_REF_ERROR);
-      const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
-      if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return true;
-      await this.options.provider.stopRef(await this.providerRef(entry), {
-        actionId: `manifest:${entry.id}:retire-predecessor:${this.options.nowMs()}`,
-      });
-      return true;
-    } catch (error) {
-      console.warn("[provider_execution] predecessor_not_proven_gone", JSON.stringify({
-        entryId: entry.id, executionGenerationId: ref.execution_generation_id,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      if (entry.observed_state !== "recovering" || entry.condition !== "coordination_blocked"
-        || entry.last_error !== UNPROVEN_PREDECESSOR_CAUSE) {
-        await this.options.transition(
-          entry.id,
-          "recovering",
-          "coordination_blocked",
-          UNPROVEN_PREDECESSOR_CAUSE,
-          "daemon-convergence",
-        );
+  private logPredecessorBlocked(
+    entryId: string,
+    executionGenerationId: string,
+    decision: ConvergeDecision,
+  ): void {
+    for (const command of decision.commands) {
+      if (command.kind === "log_unproven_predecessor") {
+        console.warn("[provider_execution] predecessor_not_proven_gone", JSON.stringify({
+          entryId, executionGenerationId, error: command.message,
+        }));
       }
-      const checks = (this.unattachableRechecks.get(entry.id) ?? 0) + 1;
-      this.unattachableRechecks.set(entry.id, checks);
-      this.scheduleRecovery(entry.id, Math.min(
-        UNATTACHABLE_GENERATION_RECHECK_MS * 2 ** Math.min(checks - 1, 10),
-        UNATTACHABLE_GENERATION_RECHECK_MAX_MS,
-      ));
-      return false;
     }
   }
 
   private async launchProvider(
     initialEntry: DaemonManifestEntry,
+    initialVersion: number,
     initialControlEpoch: number,
   ): Promise<void> {
     // Unresolved native dispatch may recover its exact handle, never replay in a successor.
@@ -1610,52 +1612,93 @@ export class ProviderExecutionCoordinator {
     const launchTiming = turnStartLatency.beginLaunch(initialEntry.id, initialEntry.provider);
     launchProgress.begin(initialEntry.id, () => (this.options.notifyLaunchProgressChanged ?? this.options.notifyProgressChanged)?.());
     let entry = initialEntry;
+    let version = initialVersion;
     let launchControlEpoch = initialControlEpoch;
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id!);
     const activeExecution = attempt.execution_generations.find(
       (candidate) => candidate.terminal === null,
     );
-    const resumableCursorLane = entry.provider === "cursor"
-      && entry.delivery_mode === "daemon_inbox"
-      && entry.provider_ref?.provider_connection?.kind === "cursor_cli";
+    const persistedControl = projectPersistedConvergeControl(entry);
+    const resumableCursorLane = isResumableCursorLane(persistedControl);
+    let inboxHeadBlocked = false;
+    let inboxHeadLastError: string | null = null;
     if (resumableCursorLane && !activeExecution) {
       const head = await this.options.inbox.head(entry.id);
       if (head?.room_id === entry.room_id && head.state === "blocked") {
-        await this.options.transition(
-          entry.id,
-          "recovering",
-          "coordination_blocked",
-          head.last_error ?? "The failed Cursor delivery needs attention before its runtime can recover.",
-          "daemon-convergence",
-        );
+        inboxHeadBlocked = true;
+        inboxHeadLastError = head.last_error ?? null;
+      }
+    }
+    const existingRef = entry.provider_ref;
+    const predecessorExecution = existingRef
+      ? attempt.execution_generations.find(
+          (candidate) => candidate.execution_generation_id === existingRef.execution_generation_id,
+        )
+      : undefined;
+    const predecessorHasTerminalWithoutWitness = Boolean(
+      predecessorExecution?.terminal && !predecessorExecution.terminal.native_runtime_death,
+    );
+    let predecessorExactStopAvailable = false;
+    if (existingRef && (!activeExecution || resumableCursorLane) && !inboxHeadBlocked
+      && recordedProcessState(existingRef.provider_connection) === "exact"
+      && predecessorHasTerminalWithoutWitness) {
+      try {
+        const predecessorCapabilities = await this.options.provider.capabilities(existingRef.work_attempt_id, entry.provider);
+        predecessorExactStopAvailable = Boolean(predecessorCapabilities.exactProcessStop && this.options.provider.stopRef);
+      } catch (error) {
+        const failDecision = decide(this.buildConvergeState(entry), {
+          kind: "predecessor_retire_failed",
+          nowMs: this.options.nowMs(),
+          errorMessage: error instanceof Error ? error.message : String(error),
+          hasPendingTimer: this.recoveryTimers.has(entry.id),
+        });
+        await this.commitDecision(entry.id, version, failDecision);
+        this.logPredecessorBlocked(entry.id, existingRef.execution_generation_id, failDecision);
         return;
       }
     }
-    if (activeExecution && !resumableCursorLane) {
-      // Repeated checks must not rewrite the manifest or append a notice each
-      // time; only the first observation of this state is durable news.
-      if (entry.observed_state !== "recovering" || entry.condition !== "coordination_blocked"
-        || entry.last_error !== UNATTACHABLE_GENERATION_CAUSE) {
-        await this.options.transition(
-          entry.id,
-          "recovering",
-          "coordination_blocked",
-          UNATTACHABLE_GENERATION_CAUSE,
-          "daemon-convergence",
-        );
+    let preconditionDecision = decide(this.buildConvergeState(entry), {
+      kind: "launch_preconditions_checked",
+      nowMs: this.options.nowMs(),
+      hasActiveExecution: Boolean(activeExecution),
+      inboxHeadBlocked,
+      inboxHeadLastError,
+      predecessorHasTerminalWithoutWitness,
+      predecessorExactStopAvailable,
+      hasPendingTimer: this.recoveryTimers.has(entry.id),
+    });
+    await this.commitDecision(entry.id, version, preconditionDecision);
+    this.logPredecessorBlocked(entry.id, existingRef?.execution_generation_id ?? "unknown", preconditionDecision);
+    if (preconditionDecision.commands.some((command) => command.kind === "retire_unproven_predecessor")) {
+      try {
+        await this.options.provider.stopRef!(await this.providerRef(entry), {
+          actionId: `manifest:${entry.id}:retire-predecessor:${this.options.nowMs()}`,
+        });
+        preconditionDecision = decide(this.buildConvergeState(entry), {
+          kind: "predecessor_retired",
+          hasActiveExecution: Boolean(activeExecution),
+        });
+        await this.commitDecision(entry.id, version, preconditionDecision);
+      } catch (error) {
+        const failDecision = decide(this.buildConvergeState(entry), {
+          kind: "predecessor_retire_failed",
+          nowMs: this.options.nowMs(),
+          errorMessage: error instanceof Error ? error.message : String(error),
+          hasPendingTimer: this.recoveryTimers.has(entry.id),
+        });
+        await this.commitDecision(entry.id, version, failDecision);
+        this.logPredecessorBlocked(entry.id, existingRef?.execution_generation_id ?? "unknown", failDecision);
+        return;
       }
-      const checks = (this.unattachableRechecks.get(entry.id) ?? 0) + 1;
-      this.unattachableRechecks.set(entry.id, checks);
-      this.scheduleRecovery(entry.id, Math.min(
-        UNATTACHABLE_GENERATION_RECHECK_MS * 2 ** Math.min(checks - 1, 10),
-        UNATTACHABLE_GENERATION_RECHECK_MAX_MS,
-      ));
-      return;
     }
-    if (!await this.retireUnprovenPredecessor(entry)) return;
-    this.unattachableRechecks.delete(entry.id);
+    const proceedPredecessor = preconditionDecision.commands.find(
+      (command): command is Extract<typeof command, { kind: "proceed_after_predecessor" }> =>
+        command.kind === "proceed_after_predecessor",
+    );
+    if (!proceedPredecessor) return;
+
     await this.archiveExitedRuntimes(entry.id);
-    if (!activeExecution && entry.turn_control && entry.turn_control.status !== "completed") {
+    if (proceedPredecessor.needsTurnControlCompletion) {
       entry = await this.options.completeTurnControlForRuntimeRecovery(entry);
     }
     const priorBinding = entry.provider_ref
@@ -1671,14 +1714,14 @@ export class ProviderExecutionCoordinator {
         }
       : null;
     const ref = entry.provider_ref ? await this.providerRef(entry, await this.frozenLifecycleAuthority(entry) ?? undefined) : null;
-    const requiresGrant = await this.options.host.requiresGrant(entry);
+    const requiresGrant = Boolean(await this.options.host.requiresGrant(entry));
     const mintedAuthorization = requiresGrant
       ? await this.options.host.mintAuthorization(entry)
       : null;
     if (requiresGrant && !mintedAuthorization) return;
     const currentAfterMint = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
     if (!currentAfterMint) return;
-    entry = currentAfterMint;
+    ({ entry, version } = currentAfterMint);
     const capabilities = await this.options.provider.capabilities(
       attempt.work_attempt_id,
       entry.provider,
@@ -1688,24 +1731,28 @@ export class ProviderExecutionCoordinator {
       launchControlEpoch,
     );
     if (!currentAfterCapabilities) return;
-    entry = currentAfterCapabilities;
-    const deliveryMode = entry.delivery_mode ?? "daemon_inbox";
-    if (capabilities.deliveryModes && !capabilities.deliveryModes.includes(deliveryMode)) {
-      await this.options.transition(
-        entry.id,
-        "failed",
-        "coordination_blocked",
-        `${supervisedProviderLabel(entry.provider)} does not support ${deliveryMode} room delivery.`,
-        "daemon-convergence",
-      );
-      return;
-    }
+    ({ entry, version } = currentAfterCapabilities);
+    const capabilitiesDecision = decide(this.buildConvergeState(entry), {
+      kind: "capabilities_evaluated",
+      supportedDeliveryModes: capabilities.deliveryModes ?? null,
+      supportsResume: Boolean(capabilities.resume),
+      providerLabel: supervisedProviderLabel(entry.provider),
+    });
+    await this.commitDecision(entry.id, version, capabilitiesDecision);
+    const prepareWorkspace = capabilitiesDecision.commands.find(
+      (command): command is Extract<typeof command, { kind: "prepare_workspace_and_transition" }> =>
+        command.kind === "prepare_workspace_and_transition",
+    );
+    if (!prepareWorkspace) return;
+
     const requestedAuthorityMode = "typed" as const;
-    const resumed = Boolean(ref && capabilities.resume);
+    const resumed = prepareWorkspace.resumed;
     if (requiresGrant) {
       const grant = this.options.host.currentGrant(entry);
       if (!grant || !await this.options.authority.ownsDaemonGeneration(grant.daemonGeneration)) return;
     }
+    let workspaceOutcome: "ok" | "not_required" | "failed" = "not_required";
+    let workspaceErrorMessage: string | undefined;
     if (isEphemeralWorkspaceMarker(attempt.workspace_identity)) {
       // A room-only workspace made by an older version gets its own
       // repository before any provider starts in it. This runs before the
@@ -1713,40 +1760,28 @@ export class ProviderExecutionCoordinator {
       // leaving the agent starting with nothing to wake it.
       try {
         await this.options.workspace.ephemeral.ensureRepository(attempt.workspace_path);
-        this.workspaceRepositoryRetries.delete(entry.id);
+        workspaceOutcome = "ok";
       } catch (error) {
-        const retries = (this.workspaceRepositoryRetries.get(entry.id) ?? 0) + 1;
-        this.workspaceRepositoryRetries.set(entry.id, retries);
-        const delayMs = Math.min(
-          WORKSPACE_REPOSITORY_RETRY_MS * 2 ** Math.min(retries - 1, 10),
-          WORKSPACE_REPOSITORY_RETRY_MAX_MS,
-        );
-        await this.options.transition(
-          entry.id,
-          "failed",
-          "coordination_blocked",
-          `Could not prepare the agent's room-only workspace (${error instanceof Error ? error.message : String(error)}). Retrying in ${Math.round(delayMs / 1000)} seconds.`,
-          "daemon-convergence",
-        );
-        this.scheduleRecovery(entry.id, delayMs);
-        return;
+        workspaceOutcome = "failed";
+        workspaceErrorMessage = error instanceof Error ? error.message : String(error);
       }
     }
-    await this.options.transition(
-      entry.id,
-      entry.provider_ref ? "recovering" : "starting",
-      "none",
-      entry.provider_ref
-        ? "recovering durable provider continuation"
-        : "starting daemon-owned provider",
-      "daemon-convergence",
-    );
+    const workspaceDecision = decide(this.buildConvergeState(entry), {
+      kind: "workspace_repository_checked",
+      nowMs: this.options.nowMs(),
+      outcome: workspaceOutcome,
+      errorMessage: workspaceErrorMessage,
+      hasPendingTimer: this.recoveryTimers.has(entry.id),
+    });
+    await this.commitDecision(entry.id, version, workspaceDecision);
+    if (!workspaceDecision.commands.some((command) => command.kind === "proceed_spawn")) return;
+
     const currentAfterTransition = await this.launchEntryIfCurrent(
       entry.id,
       launchControlEpoch,
     );
     if (!currentAfterTransition) return;
-    entry = currentAfterTransition;
+    ({ entry, version } = currentAfterTransition);
     if (requiresGrant) {
       const grant = this.options.host.currentGrant(entry);
       if (!grant || !await this.options.authority.ownsDaemonGeneration(grant.daemonGeneration)) return;
@@ -1786,7 +1821,7 @@ export class ProviderExecutionCoordinator {
           !== this.options.authority.currentDaemonGeneration())) {
       throw new Error("Waiting for desktop Open Model credential handoff.");
     }
-    const reusesActiveCursorExecution = Boolean(resumableCursorLane && activeExecution);
+    const reusesActiveCursorExecution = proceedPredecessor.reusesActiveCursorExecution;
     const generationNumber = reusesActiveCursorExecution
       ? activeExecution!.generation
       : attempt.execution_generations.reduce(
@@ -1936,12 +1971,19 @@ export class ProviderExecutionCoordinator {
             launchTiming?.markProcessReturned();
             launchProgress.markProcessReturned(entry.id);
           } catch (error) {
-            if (admission) this.failedLaunchAdmissions.set(entry.id, admission);
+            const failedDecision = decide(this.buildConvergeState(entry), {
+              kind: "launch_failed",
+              admissionKey: admission,
+            });
+            this.volatileByAgent.set(entry.id, failedDecision.volatile);
             throw error;
           } finally {
             releaseLaunchSlot();
           }
-          this.failedLaunchAdmissions.delete(entry.id);
+          const dispatchedDecision = decide(this.buildConvergeState(entry), {
+            kind: "launch_dispatched",
+          });
+          this.volatileByAgent.set(entry.id, dispatchedDecision.volatile);
           providerDispatched = true;
           if (handle.appliedConfigurationRevision !== launchSnapshot.configurationRevision
             // A process started with its owner's setup must say so: that is what later ends it when the owner turns it off.
@@ -2141,91 +2183,140 @@ export class ProviderExecutionCoordinator {
     // resumed agents from carrying exhausted retry budgets into their next
     // failure.
     this.options.host.clearSuccessfulRecovery(entry.id);
+    const postLaunchLoaded = await this.loadVersionedEntry(entry.id);
+    if (!postLaunchLoaded) return;
     if (requiresGrant) {
-      const current = await this.options.store.getEntry(entry.id);
-      if (current) await this.convergeAttachedHandle(current, handle);
+      await this.convergeAttachedHandle(postLaunchLoaded.entry, postLaunchLoaded.version, handle);
       return;
     }
-    await this.options.transition(
-      entry.id,
-      handle.observedState,
-      "none",
-      resumed
-        ? "provider resumed under daemon authority"
-        : "provider launched under daemon authority",
-      "daemon-convergence",
+    await this.commitDecision(
+      postLaunchLoaded.entry.id,
+      postLaunchLoaded.version,
+      decide(this.buildConvergeState(postLaunchLoaded.entry), {
+        kind: "launch_completed_without_grant",
+        handleObservedState: handle.observedState,
+        resumed,
+      }),
     );
   }
 
-  private async convergeStopped(entry: DaemonManifestEntry): Promise<void> {
+  private async convergeStopped(initialEntry: DaemonManifestEntry, initialVersion: number): Promise<void> {
+    let entry = initialEntry;
+    let version = initialVersion;
     let handle = this.options.streams.get(entry.id) ?? null;
-    // The exit being recorded is what stops or pauses this entry.
-    if (!handle && this.options.exitSettling?.(entry.id)) return;
-    const exactCursorRef = entry.provider_ref?.provider_connection?.kind === "cursor_cli"
-      ? entry.provider_ref
-      : null;
-    const exactStopRef = !handle ? exactCursorRef : null;
-    if (exactStopRef && this.options.provider.stopRef) {
-      await this.stopUnattachedExactRef(entry, exactStopRef);
-      return;
+    const exitSettling = !handle && Boolean(this.options.exitSettling?.(entry.id));
+    const hasStopRefCapability = Boolean(this.options.provider.stopRef);
+    let executionTerminal: ExecutionTerminalState = "none";
+    let witnessedDeath: ExecutionTerminalPayload["native_runtime_death"] | undefined;
+    let hasExactProcessStopCapability = false;
+    const ref = entry.provider_ref;
+    if (!handle && !exitSettling && ref && !(ref.provider_connection?.kind === "cursor_cli" && hasStopRefCapability)) {
+      const isOpenModel = entry.provider === "open-model" || ref.provider_connection?.kind === "opencode_server";
+      const recorded = recordedProcessState(ref.provider_connection);
+      if (isOpenModel || recorded !== "none") {
+        const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+        const execution = attempt.execution_generations.find(
+          (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+        );
+        if (!execution) {
+          executionTerminal = "missing_generation";
+        } else if (execution.terminal?.native_runtime_death) {
+          executionTerminal = "witnessed";
+          witnessedDeath = execution.terminal.native_runtime_death;
+        } else if (execution.terminal) {
+          executionTerminal = "unwitnessed";
+        }
+        const needsCapabilities = isOpenModel
+          ? executionTerminal !== "missing_generation" && executionTerminal !== "witnessed"
+          : executionTerminal === "unwitnessed" && recorded === "exact";
+        if (needsCapabilities) {
+          const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
+          hasExactProcessStopCapability = Boolean(capabilities.exactProcessStop);
+        }
+      }
     }
-    if (!handle && entry.provider_ref) {
-      const ref = entry.provider_ref;
-      if (entry.provider === "open-model" || ref.provider_connection?.kind === "opencode_server") {
-        if (await this.stopUnattachedOpenModelRef(entry, ref)) return;
-      } else if (await this.stopEndedUnprovenRef(entry, ref)) {
+    const stopDecision = decide(this.buildConvergeState(entry), {
+      kind: "stop_requested",
+      hasLiveHandle: Boolean(handle),
+      exitSettling,
+      hasStopRefCapability,
+      hasExactProcessStopCapability,
+      executionTerminal,
+    });
+    await this.commitDecision(entry.id, version, stopDecision);
+    for (const command of stopDecision.commands) {
+      if (command.kind === "fail_stop") {
+        throw new Error(command.errorMessage);
+      }
+      if (command.kind === "stop_unattached_exact_ref" && ref) {
+        await this.stopUnattachedExactRef(entry, version, ref, command.alreadySettledTerminal);
         return;
       }
-      try {
-        handle = await this.attachLiveProvider(entry);
-      } catch (error) {
-        if (error instanceof ExecutionProtocolError && error.code === "identity_mismatch") {
-          await this.stopRetiredPreTypedRuntime(entry);
-          return;
+      if (command.kind === "finalize_witnessed_stop" && ref && witnessedDeath) {
+        validatedNativeRuntimeDeath({ nativeRuntimeDeath: witnessedDeath }, ref.provider_connection);
+        await this.options.settleRuntimeApprovals(entry.id);
+        if (entry.desired_state === "stopped") {
+          await this.options.durability.releaseTerminalExecutionFence(
+            ref.work_attempt_id,
+            ref.execution_generation_id,
+          );
         }
-        throw error;
+        await this.commitDecision(
+          entry.id,
+          version,
+          decide(this.buildConvergeState(entry), { kind: "stop_without_provider_converged" }),
+        );
+        return;
+      }
+      if (command.kind === "attach_for_stop") {
+        try {
+          handle = await this.attachLiveProvider(entry);
+        } catch (error) {
+          if (error instanceof ExecutionProtocolError && error.code === "identity_mismatch") {
+            await this.stopRetiredPreTypedRuntime(entry, version);
+            return;
+          }
+          throw error;
+        }
+        const refreshed = await this.loadVersionedEntry(entry.id);
+        if (refreshed) ({ entry, version } = refreshed);
+        const postAttachDecision = decide(this.buildConvergeState(entry), {
+          kind: "stop_after_attach_evaluated",
+          hasLiveHandle: Boolean(handle),
+        });
+        await this.commitDecision(entry.id, version, postAttachDecision);
+        if (handle && postAttachDecision.commands.some((postCmd) => postCmd.kind === "stop_handle")) {
+          await this.options.provider.stop(handle, {
+            actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
+          });
+        }
+        return;
+      }
+      if (command.kind === "stop_handle" && handle) {
+        await this.options.provider.stop(handle, {
+          actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
+        });
+        return;
       }
     }
-    if (handle) {
-      await this.options.transition(
-        entry.id,
-        "stopping",
-        entry.condition,
-        `desired state changed to ${entry.desired_state}`,
-        "daemon-convergence",
-      );
-      await this.options.provider.stop(handle, {
-        actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
-      });
-      return;
-    }
-    await this.options.transition(
-      entry.id,
-      entry.desired_state === "paused" ? "paused" : "stopped",
-      "none",
-      "desired state converged without a live provider",
-      "daemon-convergence",
-    );
   }
 
   private async stopUnattachedExactRef(
     entry: DaemonManifestEntry,
+    version: number,
     ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
     alreadySettledTerminal = false,
   ): Promise<void> {
-    const targetState = entry.desired_state === "paused" ? "paused" : "stopped";
-    const settledAtTarget = alreadySettledTerminal
-      && entry.observed_state === targetState
-      && entry.condition === "none";
-    if (!settledAtTarget) {
-      await this.options.transition(
-        entry.id,
-        "stopping",
-        entry.condition,
-        `desired state changed to ${entry.desired_state}`,
-        "daemon-convergence",
-      );
-    }
+    const prepDecision = decide(this.buildConvergeState(entry), {
+      kind: "stop_unattached_exact_ref_prepared",
+      alreadySettledTerminal,
+    });
+    await this.commitDecision(entry.id, version, prepDecision);
+    const executeCommand = prepDecision.commands.find(
+      (command): command is Extract<typeof command, { kind: "execute_stop_ref" }> =>
+        command.kind === "execute_stop_ref",
+    );
+    const settledAtTarget = executeCommand?.settledAtTarget ?? false;
     const terminal = await this.options.provider.stopRef!(await this.providerRef(entry), {
       actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
     });
@@ -2268,81 +2359,13 @@ export class ProviderExecutionCoordinator {
   }
 
   /**
-   * Stop an unattached Open Model runtime via exact process-birth fencing so
-   * pre-typed sidecars ("legacy" / "typed_shadow"), unresponsive HTTP servers,
-   * or protocol-only terminals without proven native death never release the
-   * fence or report "stopped" before the exact process birth is confirmed gone.
-   */
-  private async stopUnattachedOpenModelRef(
-    entry: DaemonManifestEntry,
-    ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
-  ): Promise<boolean> {
-    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
-    const execution = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
-    );
-    if (!execution) {
-      throw new Error(
-        "Provider exact-reference stop has no matching durable execution generation.",
-      );
-    }
-    if (execution.terminal?.native_runtime_death) {
-      validatedNativeRuntimeDeath(
-        { nativeRuntimeDeath: execution.terminal.native_runtime_death },
-        ref.provider_connection,
-      );
-      await this.options.settleRuntimeApprovals(entry.id);
-      if (entry.desired_state === "stopped") {
-        await this.options.durability.releaseTerminalExecutionFence(
-          ref.work_attempt_id,
-          ref.execution_generation_id,
-        );
-      }
-      await this.options.transition(
-        entry.id,
-        entry.desired_state === "paused" ? "paused" : "stopped",
-        "none",
-        "desired state converged without a live provider",
-        "daemon-convergence",
-      );
-      return true;
-    }
-    const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
-    if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return false;
-    await this.stopUnattachedExactRef(entry, ref, Boolean(execution.terminal));
-    return true;
-  }
-
-  /**
-   * Stop or pause of an entry whose generation has a stored terminal record
-   * with no witnessed process death. The record is not proof that the process
-   * is gone, so the entry is not reported stopped until the adapter has
-   * proved the recorded process birth gone. A generation with no terminal
-   * record keeps the ordinary path: attach, then stop the handle.
-   */
-  private async stopEndedUnprovenRef(
-    entry: DaemonManifestEntry,
-    ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
-  ): Promise<boolean> {
-    const recorded = recordedProcessState(ref.provider_connection);
-    if (recorded === "none") return false;
-    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
-    const execution = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
-    );
-    if (!execution?.terminal || execution.terminal.native_runtime_death) return false;
-    if (recorded === "incomplete") throw new Error(INCOMPLETE_PROCESS_REF_ERROR);
-    const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
-    if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return false;
-    await this.stopUnattachedExactRef(entry, ref, true);
-    return true;
-  }
-
-  /**
    * Stop a pre-upgrade runtime whose frozen authority_mode is not "typed"
    * without promoting it into typed observation or delivery.
    */
-  private async stopRetiredPreTypedRuntime(entry: DaemonManifestEntry): Promise<void> {
+  private async stopRetiredPreTypedRuntime(
+    entry: DaemonManifestEntry,
+    version: number,
+  ): Promise<void> {
     const ref = entry.provider_ref;
     if (!ref) return;
     const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
@@ -2361,18 +2384,16 @@ export class ProviderExecutionCoordinator {
           ref.execution_generation_id,
         );
       }
-      await this.options.transition(
+      await this.commitDecision(
         entry.id,
-        entry.desired_state === "paused" ? "paused" : "stopped",
-        "none",
-        "desired state converged without a live provider",
-        "daemon-convergence",
+        version,
+        decide(this.buildConvergeState(entry), { kind: "stop_without_provider_converged" }),
       );
       return;
     }
     const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
     if (capabilities.exactProcessStop && this.options.provider.stopRef) {
-      await this.stopUnattachedExactRef(entry, ref);
+      await this.stopUnattachedExactRef(entry, version, ref);
       return;
     }
     const attachment = await this.options.provider.attach(await this.providerRef(entry));
@@ -2383,12 +2404,13 @@ export class ProviderExecutionCoordinator {
     if (this.isAttachTerminal(attachment)) {
       terminal = attachment.terminal;
     } else {
-      await this.options.transition(
+      await this.commitDecision(
         entry.id,
-        "stopping",
-        entry.condition,
-        `desired state changed to ${entry.desired_state}`,
-        "daemon-convergence",
+        version,
+        decide(this.buildConvergeState(entry), {
+          kind: "stop_after_attach_evaluated",
+          hasLiveHandle: true,
+        }),
       );
       terminal = await this.options.provider.stop(attachment, {
         actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,

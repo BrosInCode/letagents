@@ -106,7 +106,7 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
           serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
         },
         updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
-        transition: (entryId, state, condition, detail, actor) => this.transition(entryId, state, condition, detail, actor),
+        transition: (entryId, state, condition, detail, actor, reconciliation, expectedVersion) => this.transition(entryId, state, condition, detail, actor, reconciliation, expectedVersion),
         terminalPayload: (terminal, actor, connection) => this.providerTerminals.terminalPayload(terminal, actor, connection),
         observeProviderExit: (entryId, terminal, actor, executionGenerationId, handle) =>
           this.observeProviderExitOnce(entryId, terminal, actor, executionGenerationId, handle),

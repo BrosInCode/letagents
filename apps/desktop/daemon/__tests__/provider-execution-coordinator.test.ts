@@ -6,9 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "../../../../shared/provider-acquisition-evidence.mjs";
+import { ManifestConflictError } from "../manifest-store.js";
 import { validatedNativeRuntimeDeath } from "../provider-action-port.js";
 import { advanceReconciliationState } from "../reconciler-state.js";
-import { RETIREMENT_SETTLEMENT_WAIT_MS } from "../provider-execution-coordinator.js";
+import { DaemonFenceLostError } from "../singleton.js";
 import { ActivityWriteBatcher } from "../activity-write-batcher.js";
 import { SupervisedAgentDelivery, SupervisedRoomAuthorizationError } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
@@ -294,13 +295,19 @@ function harness(input: {
       agentVersion += 1;
       return manifestEntry;
     },
-    transition: async (_entryId, observedState, condition, cause) => {
+    transition: async (entryId, observedState, condition, cause, _actor, _reconciliation, expectedVersion) => {
+      if (expectedVersion !== undefined && expectedVersion !== agentVersion) {
+        throw new ManifestConflictError(
+          `Daemon manifest entry ${entryId} changed from version ${expectedVersion} to ${agentVersion}.`,
+        );
+      }
       manifestEntry = {
         ...manifestEntry,
         observed_state: observedState,
         condition,
         last_error: condition === "none" ? null : cause,
       };
+      agentVersion += 1;
     },
     terminalPayload: (value, actor) => ({
       ...(value.nativeRuntimeDeath ? { native_runtime_death: value.nativeRuntimeDeath } : {}),
@@ -364,7 +371,7 @@ function harness(input: {
     checkpoints,
     executionGenerations,
     entry: () => manifestEntry,
-    setEntry: (next: DaemonManifestEntry) => { manifestEntry = next; },
+    setEntry: (next: DaemonManifestEntry) => { manifestEntry = next; agentVersion += 1; },
     setHandoff: (next: boolean) => { handoff = next; },
     bumpControlEpoch: () => { controlEpoch += 1; },
   };
@@ -1111,7 +1118,7 @@ for (const { label, entryPatch, workspaceIdentity, expectedWorkspaceKind } of [
   });
 }
 
-test("a room-only workspace whose repository cannot be written reports it, never says starting, and retries", async () => {
+test("a room-only workspace whose repository cannot be written reports it, never says starting, and launches once prepared", async () => {
   let launches = 0;
   const runtime = harness({
     entry: { ...baseEntry(), source_repo_path: null },
@@ -1126,29 +1133,23 @@ test("a room-only workspace whose repository cannot be written reports it, never
     if (failures-- > 0) throw new Error("EROFS: read-only file system");
     return "created";
   };
-  const timers: Array<{ callback: () => void; delay: number }> = [];
-  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
-    setTimeout: ((callback: () => void, delay: number) => {
-      timers.push({ callback, delay });
-      return { unref() {} };
-    }) as unknown as typeof setTimeout,
-    clearTimeout: (() => {}) as typeof clearTimeout,
-  });
 
-  await coordinator.converge("agent-1");
+  try {
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(launches, 0);
+    assert.equal(runtime.executionGenerations.length, 0, "no execution generation starts for a launch that cannot happen");
+    assert.deepEqual(states, ["failed"], "the entry never claims to be starting");
+    assert.equal(runtime.entry().observed_state, "failed");
+    assert.equal(runtime.entry().condition, "coordination_blocked");
+    assert.equal(runtime.entry().last_error,
+      "Could not prepare the agent's room-only workspace (EROFS: read-only file system). Retrying in 5 seconds.");
 
-  assert.equal(launches, 0);
-  assert.equal(runtime.executionGenerations.length, 0, "no execution generation starts for a launch that cannot happen");
-  assert.deepEqual(states, ["failed"], "the entry never claims to be starting");
-  assert.equal(runtime.entry().observed_state, "failed");
-  assert.equal(runtime.entry().condition, "coordination_blocked");
-  assert.equal(runtime.entry().last_error,
-    "Could not prepare the agent's room-only workspace (EROFS: read-only file system). Retrying in 5 seconds.");
-  assert.deepEqual(timers.map((timer) => timer.delay), [5_000]);
-
-  timers[0].callback();
-  await coordinator.drainConvergence();
-  assert.equal(launches, 1, "the retry launches once the workspace can be prepared");
+    // Full 5s..300s retry backoff & reset rules are covered in convergence-decision.test.ts.
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(launches, 1, "the retry launches once the workspace can be prepared");
+  } finally {
+    runtime.coordinator.clearRecoveryTimers();
+  }
 });
 
 for (const { label, providerId, handle } of [
@@ -1511,45 +1512,29 @@ test("a runtime that ended while its room refused the agent is replaced in the o
 const inboxHead = (state: string, turn: { provider_turn_id: string | null; outcome: string | null } = { provider_turn_id: "turn-1", outcome: null }) =>
   (async () => ({ state, source_message_id: "1", ...turn })) as unknown as ProviderExecutionCoordinatorOptions["inbox"]["head"];
 
-test("an ended runtime is retired only once its in-flight message is recorded, or its bounded wait has run out", async () => {
-  // A typed lane whose entry no fact told (`working`), one whose entry a fact
-  // did tell (`failed`), and a lane born before typed lifecycle, which takes
-  // its state from the handle. In each a stop now would land before the
-  // provider's result for the turn is saved.
+test("an ended runtime is held while its in-flight message is unrecorded and retired once recorded", async () => {
+  // Timed expiry and per-handle token lifetimes are covered without clocks/timers
+  // in convergence-decision.test.ts; this verifies coordinator wiring across lane modes.
   for (const [authorityMode, entryState] of [["typed", "working"], ["typed", "failed"], ["typed_shadow", "working"]] as const) {
-    for (const ending of ["the turn is recorded", "the result never comes"] as const) {
-      const label = `${authorityMode} lane, ${entryState} entry, ${ending}`;
-      let nowMs = 10_000_000;
-      let stopCalls = 0;
-      let head = inboxHead("awaiting_result");
-      const delays: number[] = [];
-      const runtime = typedLaneHarness({
-        handle: { ...returnedHandle, observedState: "failed" },
-        port: { stop: async current => { stopCalls += 1; return terminal(current); } },
-        authorityMode,
-      });
-      runtime.setEntry({ ...runtime.entry(), observed_state: entryState });
-      const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
-        nowMs: () => nowMs,
-        inbox: { ...runtime.options.inbox, head: (entryId) => head(entryId) },
-        setTimeout: ((_callback: () => void, delay: number) => { delays.push(delay); return { unref() {} }; }) as unknown as typeof setTimeout,
-        clearTimeout: (() => {}) as typeof clearTimeout,
-      });
-
-      await coordinator.converge("agent-1");
+    const label = `${authorityMode} lane, ${entryState} entry`;
+    let stopCalls = 0;
+    let head = inboxHead("awaiting_result");
+    const runtime = typedLaneHarness({
+      handle: { ...returnedHandle, observedState: "failed" },
+      port: { stop: async current => { stopCalls += 1; return terminal(current); } },
+      authorityMode,
+    });
+    runtime.setEntry({ ...runtime.entry(), observed_state: entryState });
+    runtime.options.inbox.head = (entryId) => head(entryId);
+    try {
+      await runtime.coordinator.converge("agent-1");
       assert.equal(stopCalls, 0, `${label}: the runtime is left while its turn is not recorded`);
-      assert.deepEqual(delays, [RETIREMENT_SETTLEMENT_WAIT_MS], `${label}: convergence comes back when the wait runs out`);
 
-      // A pass inside the wait, as each heartbeat hand-off is, extends nothing.
-      nowMs += RETIREMENT_SETTLEMENT_WAIT_MS - 1;
-      await coordinator.converge("agent-1");
-      assert.equal(stopCalls, 0, `${label}: still inside the one wait`);
-
-      // Recorded: the failed message is settled and the next one is at the head.
-      if (ending === "the turn is recorded") head = inboxHead("pending", { provider_turn_id: null, outcome: null });
-      else nowMs += 1;
-      await coordinator.converge("agent-1");
-      assert.equal(stopCalls, 1, `${label}: the runtime is retired`);
+      head = inboxHead("pending", { provider_turn_id: null, outcome: null });
+      await runtime.coordinator.converge("agent-1");
+      assert.equal(stopCalls, 1, `${label}: the runtime is retired once recorded`);
+    } finally {
+      runtime.coordinator.clearRecoveryTimers();
     }
   }
 });
@@ -1584,34 +1569,6 @@ test("only a message whose turn has no saved result holds an ended runtime", asy
   }
 });
 
-test("the wait for an ended runtime's turn belongs to that runtime, not to its agent", async () => {
-  let nowMs = 10_000_000;
-  let stopCalls = 0;
-  const runtime = typedLaneHarness({
-    handle: { ...returnedHandle, observedState: "failed" },
-    port: { stop: async current => { stopCalls += 1; return terminal(current); } },
-  });
-  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
-    nowMs: () => nowMs,
-    inbox: { ...runtime.options.inbox, head: inboxHead("dispatching") },
-    setTimeout: (() => ({ unref() {} })) as unknown as typeof setTimeout,
-    clearTimeout: (() => {}) as typeof clearTimeout,
-  });
-  await coordinator.converge("agent-1");
-  nowMs += RETIREMENT_SETTLEMENT_WAIT_MS;
-  await coordinator.converge("agent-1");
-  assert.equal(stopCalls, 1, "the first runtime's wait ran out");
-
-  // Its replacement ends too, much later, again while holding a turn.
-  runtime.liveHandles.set("agent-1", { ...returnedHandle, observedState: "failed" });
-  nowMs += 10 * RETIREMENT_SETTLEMENT_WAIT_MS;
-  await coordinator.converge("agent-1");
-  assert.equal(stopCalls, 1, "it gets its own wait, not the one that already ran out");
-  nowMs += RETIREMENT_SETTLEMENT_WAIT_MS;
-  await coordinator.converge("agent-1");
-  assert.equal(stopCalls, 2, "and is retired when that one runs out");
-});
-
 test("a typed lane keeps a live handle that works, and Cursor's ended handle stays with its exit path", async () => {
   for (const candidate of [
     { name: "working Codex", provider: "codex" as const, handle: { ...returnedHandle, observedState: "working" as const } },
@@ -1638,69 +1595,36 @@ test("a typed lane keeps a live handle that works, and Cursor's ended handle sta
   }
 });
 
-// Coordinator rules only: this harness has no execution capture. With real
-// capture a replacement can stop earlier, visibly blocked on its readiness
-// evidence. A provider that merely refuses a turn never comes here at all;
-// its runtime does not end.
-test("a typed runtime that keeps ending is replaced once per ending, after its backoff, until the crash-loop limit", async () => {
-  let nowMs = 10_000_000;
+test("coordinator fences a failed typed handle and quarantines entries at the crash-loop limit", async () => {
+  // Full 5-ending stepped-clock backoff & crash-loop window rules are covered
+  // purely in convergence-decision.test.ts; this verifies coordinator wiring.
   let stopCalls = 0;
   let launches = 0;
-  const birth = (n: number): ProviderActionHandle => ({
-    ...returnedHandle, pid: 5000 + n, observedState: "idle",
-    providerConnection: { kind: "codex_app_server", url: `http://127.0.0.1:${5000 + n}`, pid: 5000 + n, processIdentity: `birth-${5000 + n}` },
-  });
-  const launch = async () => { launches += 1; return birth(launches); };
   const runtime = typedLaneHarness({
-    handle: birth(0),
+    handle: { ...returnedHandle, observedState: "failed" },
     port: {
-      capabilities: async () => ({ deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false,
-        transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
-      attach: async () => null,
       stop: async current => { stopCalls += 1; return terminal(current); },
-      resume: launch,
-      spawn: launch,
+      resume: async () => { launches += 1; return returnedHandle; },
+      spawn: async () => { launches += 1; return returnedHandle; },
     },
   });
-  runtime.options.nowMs = () => nowMs;
-  runtime.setEntry({ ...runtime.entry(), observed_state: "idle" });
-
-  // Each round is one ended runtime: its handle reports failed with no fact
-  // reaching the entry, convergence fences it, and its exit is observed as a
-  // failed edge the same way the terminal coordinator records one.
-  for (let ending = 1; ending <= 5; ending += 1) {
-    const live = runtime.liveHandles.get("agent-1")!;
-    (live as { observedState: ProviderActionHandle["observedState"] }).observedState = "failed";
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(stopCalls, ending, "each failed runtime is stopped exactly once");
-    runtime.liveHandles.delete("agent-1");
-    for (const generation of runtime.executionGenerations) {
-      generation.terminal ??= runtime.options.terminalPayload(terminal(live), "test");
-    }
-    runtime.setEntry({ ...runtime.entry(), observed_state: "failed",
-      reconciliation: advanceReconciliationState(runtime.entry().reconciliation, "failed", nowMs) });
-
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(launches, ending - 1, "no replacement starts before the restart backoff elapses");
-
-    nowMs += 10_000;
-    await runtime.coordinator.converge("agent-1");
-    if (ending < 5) {
-      assert.equal(launches, ending, "one replacement per failed runtime");
-      assert.equal(runtime.liveHandles.get("agent-1")?.pid, 5000 + ending);
-      runtime.setEntry({ ...runtime.entry(), observed_state: "idle",
-        reconciliation: advanceReconciliationState(runtime.entry().reconciliation, "idle", nowMs) });
-    }
-  }
-
-  assert.equal(launches, 4, "the fifth failure inside the window starts nothing");
-  assert.equal(runtime.liveHandles.size, 0);
-  assert.equal(runtime.entry().observed_state, "failed");
-  assert.equal(runtime.entry().condition, "quarantined", "the owner sees a failed, quarantined agent");
-  nowMs += 60_000;
   await runtime.coordinator.converge("agent-1");
-  assert.equal(launches, 4, "a quarantined agent is not restarted again");
-  assert.equal(stopCalls, 5);
+  assert.equal(stopCalls, 1, "failed typed handle is fenced once");
+  runtime.liveHandles.delete("agent-1");
+
+  let reconciliation = runtime.entry().reconciliation;
+  for (let ending = 0; ending < 5; ending += 1) {
+    reconciliation = advanceReconciliationState(
+      advanceReconciliationState(reconciliation, "idle", 900 + ending),
+      "failed",
+      900 + ending,
+    );
+  }
+  runtime.setEntry({ ...runtime.entry(), observed_state: "failed", condition: "none", reconciliation });
+  await runtime.coordinator.converge("agent-1");
+  assert.equal(launches, 0, "fifth failure inside window launches nothing");
+  assert.equal(runtime.entry().observed_state, "failed");
+  assert.equal(runtime.entry().condition, "quarantined");
 });
 
 test("handoff during native dispatch journals the exact returned provider without installing listeners", async () => {
@@ -1994,16 +1918,14 @@ test("a Cursor lane that ended on a protocol error after its turn settled as los
   assert.notEqual(runtime.entry().condition, "coordination_blocked");
 });
 
-test("a Cursor lane that keeps ending on protocol errors stops restarting at the crash-loop limit", async () => {
+test("a Cursor lane at the crash-loop limit stops restarting and quarantines", async () => {
   const runtime = ownedRecoveryHarness();
-  const nowMs = 20_000_000;
-  runtime.options.nowMs = () => nowMs;
   const ended = { ...terminal(returnedHandle), exitCode: 1, terminalCause: "protocol_error" as const };
   runtime.executionGenerations[0]!.terminal = runtime.options.terminalPayload(ended, "test");
   const idle = { kind: "cursor_cli" as const, pid: null, processIdentity: null };
   let reconciliation = runtime.entry().reconciliation;
   for (let ending = 0; ending < 5; ending += 1) {
-    reconciliation = advanceReconciliationState(advanceReconciliationState(reconciliation, "idle", nowMs - 60_000 + ending), "failed", nowMs - 60_000 + ending);
+    reconciliation = advanceReconciliationState(advanceReconciliationState(reconciliation, "idle", 900 + ending), "failed", 900 + ending);
   }
   runtime.setEntry({
     ...runtime.entry(), provider: "cursor", observed_state: "failed", condition: "none", reconciliation,
@@ -2021,7 +1943,8 @@ test("a Cursor lane that keeps ending on protocol errors stops restarting at the
   assert.equal(runtime.entry().condition, "quarantined", "the owner sees a quarantined agent, not an endless restart loop");
 });
 
-test("a live generation without an attachable handle re-checks with capped backoff and one durable write", async () => {
+test("a live generation without an attachable handle blocks once without launching a successor", async () => {
+  // Full 60s..30m backoff schedule is verified purely in convergence-decision.test.ts.
   const runtime = ownedRecoveryHarness();
   let attaches = 0;
   runtime.options.provider.attach = async () => { attaches++; return null; };
@@ -2031,27 +1954,18 @@ test("a live generation without an attachable handle re-checks with capped backo
   const transition = runtime.options.transition;
   let transitions = 0;
   runtime.options.transition = async (...args) => { transitions++; return transition(...args); };
-  const timers: Array<{ callback: () => void; delay: number }> = [];
-  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
-    setTimeout: ((callback: () => void, delay: number) => {
-      timers.push({ callback, delay });
-      return { unref() {} };
-    }) as unknown as typeof setTimeout,
-    clearTimeout: (() => {}) as typeof clearTimeout,
-  });
 
-  await coordinator.converge("agent-1");
-  for (let fired = 0; fired < 6; fired++) {
-    timers.at(-1)!.callback();
-    await coordinator.drainConvergence();
+  try {
+    await runtime.coordinator.converge("agent-1");
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(runtime.entry().condition, "coordination_blocked");
+    assert.equal(runtime.entry().last_error, "durable execution generation remains live without an attachable provider handle");
+    assert.equal(launches, 0, "an unproven old runtime never gets a competing successor");
+    assert.equal(attaches, 2, "each pass re-runs attach");
+    assert.equal(transitions, 1, "repeated checks of an unchanged state do not rewrite the manifest");
+  } finally {
+    runtime.coordinator.clearRecoveryTimers();
   }
-
-  assert.equal(runtime.entry().condition, "coordination_blocked");
-  assert.equal(runtime.entry().last_error, "durable execution generation remains live without an attachable provider handle");
-  assert.equal(launches, 0, "an unproven old runtime never gets a competing successor");
-  assert.equal(attaches, 7, "each timer really re-runs attach");
-  assert.deepEqual(timers.map(timer => timer.delay), [60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, 1_800_000]);
-  assert.equal(transitions, 1, "repeated checks of an unchanged state do not rewrite the manifest");
 });
 
 for (const desired of ["running", "paused"] as const) test(`while a ${desired} entry's exit is being settled, a pass neither attaches its exited runtime nor starts or stops anything`, async () => {
@@ -2078,24 +1992,6 @@ for (const desired of ["running", "paused"] as const) test(`while a ${desired} e
   settling = false;
   await coordinator.converge("agent-1");
   assert.equal(calls[0], "attach");
-});
-
-test("a sooner recovery replaces a pending later one and never the reverse", async () => {
-  const runtime = harness({});
-  const scheduled: number[] = [];
-  const cleared: number[] = [];
-  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
-    setTimeout: ((_callback: () => void, delay: number) => {
-      scheduled.push(delay);
-      return { unref() {}, delay };
-    }) as unknown as typeof setTimeout,
-    clearTimeout: ((timer: { delay: number }) => { cleared.push(timer.delay); }) as unknown as typeof clearTimeout,
-  });
-  coordinator.scheduleRecovery("agent-1", 60_000);
-  coordinator.scheduleRecovery("agent-1", 5_000);
-  coordinator.scheduleRecovery("agent-1", 60_000);
-  assert.deepEqual(scheduled, [60_000, 5_000]);
-  assert.deepEqual(cleared, [60_000]);
 });
 
 test("resume after a crashed generation names the frozen lifecycle authority of the saved birth", async () => {
@@ -2604,51 +2500,6 @@ test("failed attach closure is retried from durable terminal without reattaching
   assert.equal(await runtime.coordinator.attachLiveProvider(entry), null);
   assert.equal(closes, 2); assert.equal(attaches, 1); assert.equal(runtime.terminalWrites.length, 1);
   assert.equal(releases, 1, "retry completes the release interrupted by the failed closure");
-});
-
-test("room-only workspace retries back off, cap at five minutes, and start over after success or Stop", async () => {
-  const runtime = harness({
-    entry: { ...baseEntry(), source_repo_path: null },
-    workspaceIdentity: scratchWorkspaceIdentity,
-    // The provider never comes up, so every convergence tries a fresh launch.
-    provider: provider({ spawn: async () => { throw new Error("provider bootstrap failed"); } }),
-  });
-  let failing = true;
-  runtime.options.workspace.ephemeral.ensureRepository = async () => {
-    if (failing) throw new Error("EACCES");
-    return "present";
-  };
-  const delays: number[] = [];
-  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
-    setTimeout: ((_callback: () => void, delay: number) => { delays.push(delay); return { unref() {} }; }) as unknown as typeof setTimeout,
-    clearTimeout: (() => {}) as typeof clearTimeout,
-  });
-  const attempt = async () => {
-    coordinator.clearRecovery("agent-1");
-    await coordinator.converge("agent-1").catch(() => {});
-  };
-
-  for (let index = 0; index < 9; index++) await attempt();
-  assert.deepEqual(delays, [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000, 300_000]);
-  assert.match(runtime.entry().last_error ?? "", /Retrying in 300 seconds\.$/);
-
-  // A success starts the count over.
-  failing = false;
-  await attempt();
-  failing = true;
-  delays.length = 0;
-  await attempt();
-  assert.deepEqual(delays, [5_000]);
-
-  // So does Stop.
-  await attempt();
-  assert.deepEqual(delays, [5_000, 10_000]);
-  runtime.setEntry({ ...runtime.entry(), desired_state: "stopped" });
-  await coordinator.converge("agent-1");
-  runtime.setEntry({ ...runtime.entry(), desired_state: "running" });
-  delays.length = 0;
-  await attempt();
-  assert.deepEqual(delays, [5_000]);
 });
 
 test("a provider's launch notices are recorded in the agent's activity", async () => {
@@ -3460,5 +3311,71 @@ test("Stop of a Codex entry never reports stopped while the process of its ended
     assert.equal(attaches, 0, "an ended generation is not attached again");
   } finally {
     clearInterval(keepAlive);
+  }
+});
+
+test("rejected convergence transition on ManifestConflictError or DaemonFenceLostError applies zero commands and zero volatile updates", async () => {
+  // 1. Concurrent manifest mutation between snapshot read and transition commit:
+  //    rental permission rejection throws ManifestConflictError and never stops delivery.
+  {
+    const rental = harness({
+      entry: { ...baseEntry(), id: "supervised_rental_cas", provider: "codex", permission_profile_id: "full_access" },
+    });
+    const getConfig = rental.options.store.getAgentConfiguration;
+    rental.options.store.getAgentConfiguration = async (entryId) => {
+      const cfg = await getConfig(entryId);
+      // Concurrent mutation advances row version before decide() commits.
+      rental.setEntry({ ...rental.entry(), desired_state: "stopped" });
+      return cfg;
+    };
+    await assert.rejects(() => rental.coordinator.converge("supervised_rental_cas"), ManifestConflictError);
+    assert.deepEqual(rental.stoppedDelivery, [], "rejected decision must not execute stop_delivery");
+    assert.equal(rental.entry().desired_state, "stopped", "concurrent update stays intact");
+    assert.notEqual(rental.entry().condition, "quarantined");
+  }
+
+  // 2. Concurrent manifest mutation during room-only workspace failure:
+  //    throws ManifestConflictError, installs no timer, and leaves workspaceRepositoryRetries at 0.
+  {
+    const ws = harness({
+      entry: { ...baseEntry(), source_repo_path: null },
+      workspaceIdentity: scratchWorkspaceIdentity,
+    });
+    let mutateOnce = true;
+    ws.options.workspace.ephemeral.ensureRepository = async () => {
+      if (mutateOnce) {
+        mutateOnce = false;
+        ws.setEntry({ ...ws.entry(), updated_at: "2099-01-01T00:00:00.000Z" });
+      }
+      throw new Error("EROFS");
+    };
+    try {
+      await assert.rejects(() => ws.coordinator.converge("agent-1"), ManifestConflictError);
+      // Next uncontested pass still starts at the first 5-second backoff, proving
+      // the rejected commit never incremented workspaceRepositoryRetries.
+      await ws.coordinator.converge("agent-1");
+      assert.equal(
+        ws.entry().last_error,
+        "Could not prepare the agent's room-only workspace (EROFS). Retrying in 5 seconds.",
+      );
+    } finally {
+      ws.coordinator.clearRecoveryTimers();
+    }
+  }
+
+  // 3. Lost daemon generation fence during transition commit executes zero commands and zero volatile updates.
+  {
+    let stopCalls = 0;
+    const fenced = typedLaneHarness({
+      handle: { ...returnedHandle, observedState: "failed" },
+      port: { stop: async current => { stopCalls += 1; return terminal(current); } },
+      authorityMode: "typed_shadow",
+    });
+    fenced.setEntry({ ...fenced.entry(), observed_state: "working" });
+    fenced.options.transition = async () => {
+      throw new DaemonFenceLostError("daemon generation superseded");
+    };
+    await assert.rejects(() => fenced.coordinator.converge("agent-1"), DaemonFenceLostError);
+    assert.equal(stopCalls, 0, "fence-lost transition must never fence or stop the provider handle");
   }
 });

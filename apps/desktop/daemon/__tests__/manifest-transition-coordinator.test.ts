@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { ManifestTransitionCoordinator } from "../manifest-transition-coordinator.js";
 import type { DaemonActivityEvent, DaemonManifestEntry } from "../types.js";
 
@@ -108,4 +112,88 @@ test("another provider is left to its runtime fact", async () => {
   Object.assign(full, { provider: "codex", observed_state: "starting" });
   await coordinator.transition("agent-1", "idle", "none", "reattached durable provider handle", "daemon-convergence");
   assert.equal(replaced.at(-1)?.ready_reached_at, undefined);
+});
+
+test("transition rejects stale expectedVersion on real ManifestStore without nested locks or audit writes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "letagents-transition-cas-"));
+  const store = new ManifestStore(join(dir, "daemon-state.sqlite"));
+  try {
+    await store.load();
+    await store.createEntry({
+      id: "agent-1",
+      room_id: "room-1",
+      display_name: "Agent",
+      provider: "codex",
+      model: null,
+      charter: "Help",
+      desired_state: "running",
+      observed_state: "absent",
+      condition: "none",
+      permission_profile_id: "full_access",
+      provider_launch_policy: {},
+      created_by: "test",
+      created_at: "2026-08-26T00:00:00.000Z",
+    });
+    const auditEvents: Array<{ entry_id: string; to: string }> = [];
+    let lockDepth = 0;
+    const coordinator = new ManifestTransitionCoordinator({
+      store,
+      authority: {
+        assertCurrent: async () => {},
+        serializeMutation: async (operation) => {
+          lockDepth += 1;
+          assert.equal(lockDepth, 1, "expectedVersion check must never nest serializeMutation");
+          try { return await operation(); } finally { lockDepth -= 1; }
+        },
+        serializeCommit: async (operation) => operation(),
+        fenceCommit: async (commit) => commit(),
+      },
+      audit: { append: async (event) => { auditEvents.push({ entry_id: event.entry_id, to: event.to }); } },
+      nowMs: () => 1_000,
+    });
+
+    const snapshot = await store.getEntryWithVersion("agent-1");
+    assert.ok(snapshot);
+    // Simulate a concurrent manifest update after snapshot read.
+    await coordinator.updateEntry("agent-1", (current) => ({ ...current, desired_state: "stopped" }));
+    const afterConcurrent = await store.getEntryWithVersion("agent-1");
+    assert.ok(afterConcurrent);
+    assert.notEqual(afterConcurrent.version, snapshot.version);
+
+    await assert.rejects(
+      () => coordinator.transition(
+        "agent-1",
+        "failed",
+        "quarantined",
+        "stale convergence decision",
+        "daemon-convergence",
+        undefined,
+        snapshot.version,
+      ),
+      ManifestConflictError,
+    );
+    const unchanged = await store.getEntryWithVersion("agent-1");
+    assert.equal(unchanged?.version, afterConcurrent.version);
+    assert.equal(unchanged?.entry.desired_state, "stopped");
+    assert.equal(unchanged?.entry.observed_state, "absent");
+    assert.deepEqual(auditEvents, [], "a rejected transition appends no audit entry");
+
+    // Matching version commits normally and appends one audit entry.
+    await coordinator.transition(
+      "agent-1",
+      "stopped",
+      "none",
+      "desired state converged without a live provider",
+      "daemon-convergence",
+      undefined,
+      afterConcurrent.version,
+    );
+    const committed = await store.getEntryWithVersion("agent-1");
+    assert.equal(committed?.entry.observed_state, "stopped");
+    assert.equal(committed?.version, afterConcurrent.version + 1);
+    assert.deepEqual(auditEvents, [{ entry_id: "agent-1", to: "stopped" }]);
+  } finally {
+    await store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
