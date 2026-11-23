@@ -396,7 +396,9 @@ test("a prepared wrapper whose retirement keeps failing reports every earlier ca
       // The first (launch-path) retirement failure and its own cause are kept too.
       assert.match(message, /after launch failure: Cursor prepared wrapper was reaped, but its durable idle-state retirement failed: Execution evidence rejected: identity_mismatch \(settlement 1\)/);
       assert.match(message, /\(settlement 1\)\. \(original cause: Cursor turn preparation was interrupted before native dispatch\.\)/);
-      assert.match(String((error as Error).stack ?? ""), /after launch failure: Cursor prepared wrapper was reaped/, "a logged stack shows the causes too");
+      const stack = String((error as Error).stack ?? "");
+      assert.equal(message.split("after launch failure:").length - 1, 1, "the launch failure appears once in the message");
+      assert.equal(stack.split("after launch failure:").length - 1, 1, "a logged stack shows the launch failure exactly once");
       return true;
     });
     assert.equal(settlements, 2);

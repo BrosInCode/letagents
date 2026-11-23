@@ -104,10 +104,13 @@ export async function runRoomTurn(
         // Keep the error object (and its recovery outcome); only extend its text.
         if (recoveryError instanceof Error && error.message && !recoveryError.message.includes(error.message)) {
           const previous = recoveryError.message;
+          // Read the stack first: V8 formats it on first read, so reading it after the
+          // message change would already include the new text and the replace would
+          // add it twice. One read before the change gives one path for both cases.
+          const previousStack = recoveryError.stack;
           recoveryError.message = `${previous} (after launch failure: ${error.message})`;
-          // The stack's first line was captured at construction; keep it in step for logs that print the stack.
-          if (typeof recoveryError.stack === "string" && previous && recoveryError.stack.includes(previous)) {
-            recoveryError.stack = recoveryError.stack.replace(previous, recoveryError.message);
+          if (typeof previousStack === "string" && previous && previousStack.includes(previous)) {
+            recoveryError.stack = previousStack.replace(previous, recoveryError.message);
           }
         }
         throw recoveryError;
