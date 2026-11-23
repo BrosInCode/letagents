@@ -5,6 +5,11 @@
   "builds": {
     "x64": [
       {
+        "sha256": "9832fff5bfd3c35070d3e92dc6411952d86f583dc8be5ecebd9a0645a7abc2ad",
+        "vcToolsVersion": "14.51.36231",
+        "windowsSdkVersion": "10.0.26100.0"
+      },
+      {
         "sha256": "575c3cdb257e5a1b7bf4f8c1553db7a9e0d2fa39312ca42384a9bb932fc2c781",
         "vcToolsVersion": "14.52.37025",
         "windowsSdkVersion": "10.0.26100.0"
