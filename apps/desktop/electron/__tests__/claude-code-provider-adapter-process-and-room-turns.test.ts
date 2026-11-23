@@ -501,9 +501,9 @@ test("daemon-owned Claude receives the included room images as labelled base64 b
     attachments: [
       { index: 1, fileName: "notes.zip", mimeType: "application/zip", sizeBytes: 500, status: "unsupported_type", category: "file" },
       { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: pngBytes.length, status: "image",
-        image: { mimeType: "image/png", data: backing.subarray(2, 2 + pngBytes.length) } },
+        image: { mimeType: "image/png", base64: Buffer.from(backing.subarray(2, 2 + pngBytes.length)).toString("base64") } },
       { index: 3, fileName: "photo.jpg", mimeType: "image/jpeg", sizeBytes: jpegBytes.length, status: "image",
-        image: { mimeType: "image/jpeg", data: jpegBytes } },
+        image: { mimeType: "image/jpeg", base64: Buffer.from(jpegBytes).toString("base64") } },
     ],
   }, {
     beforeNativeDispatch: async () => {},

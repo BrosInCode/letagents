@@ -10,10 +10,10 @@ import { NO_REPLY_SENTINEL } from "./types.js";
  * one before it is saved with the session. Each image follows a short label.
  */
 export function roomTurnImageParts(request: ProviderRoomTurnRequest): Array<Record<string, unknown>> {
-  return includedRoomTurnImages(request.attachments).flatMap(image => image.data ? [
+  return includedRoomTurnImages(request.attachments).flatMap(image => image.base64 ? [
     { type: "text", text: roomTurnImageLabel(image) },
     { type: "file", mime: image.mimeType, filename: image.fileName,
-      url: `data:${image.mimeType};base64,${Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString("base64")}` },
+      url: `data:${image.mimeType};base64,${image.base64}` },
   ] : []);
 }
 

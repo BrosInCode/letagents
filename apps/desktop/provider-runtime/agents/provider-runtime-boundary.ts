@@ -14,8 +14,9 @@
 // connects one sink, a subscription is data, and each event reaches the sink
 // as an envelope. Step 4d-3a moves five operations that waited on functions
 // of the daemon: each wait is a `step` envelope, and the daemon answers it
-// with data. The operations in TRANSITIONAL_OPERATIONS still take a callback
-// or an AbortSignal beside the reference; step 4d-3b replaces those.
+// with data. Step 4d-3b moves the room turn and its recovery the same way,
+// and gives the images of a turn as base64 text. No operation takes a callback
+// or an AbortSignal of the daemon now; the event sink is the one transport.
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -23,6 +24,9 @@ import { assertPlainWireValue, assertWireBoundarySchema, jsonValueSchema } from 
 import type { ControlProbeResult, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest } from "../../shared/provider-permissions.js";
 import type { ProviderUsage } from "../../shared/provider-usage.js";
+import {
+  ROOM_TURN_IMAGE_MAX_BYTES, ROOM_TURN_IMAGES_MAX_TOTAL_BYTES, ROOM_TURN_RECENT_IMAGE_LIMIT, ROOM_TURN_RECENT_IMAGES_MAX_BYTES,
+} from "./provider-adapter.js";
 import type {
   ProviderAdapterCapabilities,
   ProviderContinuationRef,
@@ -31,6 +35,7 @@ import type {
   ProviderExactTurnControlResult,
   ProviderHandle,
   ProviderNativePermissionRequest,
+  ProviderRoomTurnCheckpointDisposition,
   ProviderRoomTurnOptions,
   ProviderRoomTurnRecoveryRequest,
   ProviderRoomTurnRequest,
@@ -126,10 +131,12 @@ export type ProviderBoundaryStopOptions = z.output<typeof providerStopOptionsSch
 export const PROVIDER_EVENT_KINDS = ["exit", "stream", "execution", "permissions"] as const;
 export type ProviderEventKind = (typeof PROVIDER_EVENT_KINDS)[number];
 
-/** The points where an operation of step 4d-3a waits for the daemon. */
+/** The points where an operation of steps 4d-3a and 4d-3b waits for the daemon. */
 export const PROVIDER_STEP_NAMES = [
   "checkpoint_turn_started", "mark_dispatched", "checkpoint_target_turn", "before_native_dispatch",
   "assert_native_dispatch", "assert_current", "checkpoint_replacement",
+  "checkpoint_prepared_turn", "checkpoint_provider_state", "settle_lifecycle_before_idle", "mark_durable_turn_started",
+  "checkpoint_terminal_result",
 ] as const;
 export type ProviderStepName = (typeof PROVIDER_STEP_NAMES)[number];
 
@@ -181,6 +188,34 @@ export function providerErrorFromData(data: ProviderErrorData): Error {
 }
 
 const stepIdentifier = z.string().min(1).max(4096);
+const publicationContract = z.enum(["structured_room_turn_v1", "legacy_cursor_aggregate_v0"]);
+const resultText = z.string().max(16 * 1024 * 1024);
+/** A turn that ended with a native failure or interruption: exact native terminal proof. */
+const endedTurnFields = {
+  turnId: stepIdentifier, providerContinuationId: stepIdentifier, text: z.null(),
+  evidence: z.enum(["transcript", "stream"]), error: resultText.optional(), refusal: z.literal(true).optional(),
+  unrecognizedResult: z.literal(true).optional(),
+  claudeApiFailure: z.strictObject({
+    status: z.number().int().nullable(), terminalReason: z.string().max(4096).nullable(), category: z.string().max(4096).nullable(),
+    usageLimit: z.literal(true).optional(), promptTooLong: z.literal(true).optional(),
+  }).optional(),
+  authorityUnproven: z.literal(true).optional(), publicationContract: publicationContract.optional(),
+};
+/** The result of a room turn, as each adapter returns it. */
+export const providerRoomTurnResultSchema = z.discriminatedUnion("outcome", [
+  z.strictObject({ turnId: stepIdentifier, outcome: z.literal("reply"), text: resultText, evidence: z.enum(["transcript", "stream"]).optional(), publicationContract: publicationContract.optional() }),
+  z.strictObject({ turnId: stepIdentifier, outcome: z.literal("no_reply"), text: z.null(), evidence: z.enum(["transcript", "stream"]).optional(), publicationContract: publicationContract.optional() }),
+  z.strictObject({ ...endedTurnFields, outcome: z.literal("failed") }),
+  z.strictObject({ ...endedTurnFields, outcome: z.literal("interrupted") }),
+  z.strictObject({ turnId: stepIdentifier, outcome: z.literal("unreadable"), text: z.null(), evidence: z.literal("none").optional(), publicationContract: publicationContract.optional() }),
+]);
+/** What the daemon recorded for a terminal result: the result it accepts, and whether recovery evidence may go. */
+export const providerRoomTurnCheckpointDispositionSchema = z.strictObject({
+  acceptedResult: providerRoomTurnResultSchema,
+  cleanupRecoveryEvidence: z.boolean(),
+});
+const providerStateBody = { providerContinuationId: stepIdentifier, providerConnection: providerConnectionRefSchema };
+
 /** The body of each step. A step whose body is not this shape is refused before it reaches the sink. */
 export const PROVIDER_STEP_BODY_SCHEMAS = {
   checkpoint_turn_started: z.strictObject({ turnId: stepIdentifier }),
@@ -190,7 +225,30 @@ export const PROVIDER_STEP_BODY_SCHEMAS = {
   assert_native_dispatch: z.null(),
   assert_current: z.null(),
   checkpoint_replacement: z.strictObject({ providerContinuationId: stepIdentifier }),
+  checkpoint_prepared_turn: z.strictObject({ providerTurnId: stepIdentifier, ...providerStateBody }),
+  checkpoint_provider_state: z.strictObject(providerStateBody),
+  settle_lifecycle_before_idle: z.null(),
+  mark_durable_turn_started: z.null(),
+  checkpoint_terminal_result: z.strictObject({ result: providerRoomTurnResultSchema }),
 } as const satisfies Record<ProviderStepName, z.ZodType>;
+
+/**
+ * The body of an answer, for the steps whose answer carries one. An answer with no body is `undefined` for the
+ * adapter, not `null` and not `{}`: for a terminal result that means "no disposition", as a callback that returned
+ * nothing did before.
+ */
+export const PROVIDER_STEP_ANSWER_BODY_SCHEMAS = {
+  checkpoint_terminal_result: providerRoomTurnCheckpointDispositionSchema,
+} as const satisfies Partial<Record<ProviderStepName, z.ZodType>>;
+
+/** The steps of a room turn. The daemon names the steps that it answers; the adapter sees no function for the others. */
+export const ROOM_TURN_STEP_NAMES = [
+  "before_native_dispatch", "checkpoint_turn_started", "checkpoint_prepared_turn", "checkpoint_provider_state",
+  "settle_lifecycle_before_idle", "mark_durable_turn_started", "checkpoint_terminal_result",
+] as const satisfies readonly ProviderStepName[];
+export const ROOM_TURN_RECOVERY_STEP_NAMES = [
+  "checkpoint_provider_state", "settle_lifecycle_before_idle", "checkpoint_terminal_result",
+] as const satisfies readonly ProviderStepName[];
 
 export const providerStepAnswerSchema = z.discriminatedUnion("ok", [
   z.strictObject({ ok: z.literal(true), body: jsonValueSchema.optional() }),
@@ -210,6 +268,26 @@ export const providerTurnControlOptionsSchema = z.strictObject({
   detached: z.literal(true).optional(),
 });
 export const providerPermissionReplyOptionsSchema = z.strictObject({ operationId: boundedText, expectedFileChanges: jsonValueSchema.optional() });
+export const providerRoomTurnOptionsSchema = z.strictObject({
+  operationId: boundedText,
+  detached: z.literal(true).optional(),
+  steps: z.array(z.enum(ROOM_TURN_STEP_NAMES)).max(ROOM_TURN_STEP_NAMES.length),
+});
+export const providerRoomTurnRecoveryOptionsSchema = z.strictObject({
+  operationId: boundedText,
+  detached: z.literal(true).optional(),
+  steps: z.array(z.enum(ROOM_TURN_RECOVERY_STEP_NAMES)).max(ROOM_TURN_RECOVERY_STEP_NAMES.length),
+});
+export type ProviderRoomTurnBoundaryOptions = z.output<typeof providerRoomTurnOptionsSchema>;
+export type ProviderRoomTurnRecoveryBoundaryOptions = z.output<typeof providerRoomTurnRecoveryOptionsSchema>;
+
+const ROOM_TURN_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+/** The number of bytes that a base64 text holds, or null when the text is not base64. */
+function base64Bytes(text: string): number | null {
+  if (text.length % 4 !== 0 || !BASE64.test(text)) return null;
+  return text.length / 4 * 3 - (text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0);
+}
 /** The name of a permission request in place of the request: a token of a permission event. */
 export const providerPermissionTokenSchema = z.strictObject({ token: boundedText });
 export type ProviderPermissionToken = z.output<typeof providerPermissionTokenSchema>;
@@ -309,6 +387,10 @@ export const PROVIDER_BOUNDARY_SCHEMAS = {
   providerTurnControlOptions: providerTurnControlOptionsSchema,
   providerPermissionReplyOptions: providerPermissionReplyOptionsSchema,
   providerPermissionToken: providerPermissionTokenSchema,
+  providerRoomTurnOptions: providerRoomTurnOptionsSchema,
+  providerRoomTurnRecoveryOptions: providerRoomTurnRecoveryOptionsSchema,
+  providerRoomTurnResult: providerRoomTurnResultSchema,
+  providerRoomTurnCheckpointDisposition: providerRoomTurnCheckpointDispositionSchema,
   ...Object.fromEntries(Object.entries(PROVIDER_STEP_BODY_SCHEMAS).map(([step, schema]) => [`providerStepBody:${step}`, schema])),
 } as const;
 for (const schema of Object.values(PROVIDER_BOUNDARY_SCHEMAS)) assertWireBoundarySchema(schema);
@@ -324,14 +406,15 @@ export const DATA_OPERATIONS = [
   "correlatePermissionTurn", "inspectPermissionFileChanges", "inspectPermissionProfile",
   "inspectPermissionMcpToolCall", "stop", "stopRef", "subscribe", "unsubscribe", "subscriptionPosition",
   "controlTurn", "controlExactTurn", "repairContinuation", "acknowledgeRepairNotices", "stopIdle", "replyPermission",
-  "answerStep", "detachOperation",
+  "runRoomTurn", "recoverRoomTurn", "answerStep", "detachOperation",
 ] as const;
 
 /**
- * The steps of each operation of step 4d-3a. A step with `sync` is a check that the daemon answers inside the
- * delivery of the envelope. That works because the sink is called in the same process and on the same stack. A
- * transport between processes cannot answer in the same call: it needs a fence value that the adapter can compare
- * itself. That part of the contract is not process-neutral yet.
+ * The steps of each operation of steps 4d-3a and 4d-3b. A step with `sync` is a check that the daemon answers inside
+ * the delivery of the envelope, on the same stack: the adapter's next line runs only after the answer. That works
+ * because the sink is called in the same process and on the same stack. A transport between processes cannot answer
+ * in the same call: it needs a fence value that the adapter can compare itself. That part of the contract is not
+ * process-neutral yet.
  */
 export const OPERATION_STEPS = {
   controlTurn: ["checkpoint_turn_started", "mark_dispatched"],
@@ -339,23 +422,16 @@ export const OPERATION_STEPS = {
   repairContinuation: ["checkpoint_replacement"],
   stopIdle: ["assert_current (sync)"],
   replyPermission: ["before_native_dispatch", "assert_native_dispatch (sync)"],
+  runRoomTurn: [
+    "before_native_dispatch", "checkpoint_turn_started", "checkpoint_prepared_turn", "checkpoint_provider_state",
+    "settle_lifecycle_before_idle", "mark_durable_turn_started (sync)", "checkpoint_terminal_result",
+  ],
+  recoverRoomTurn: ["checkpoint_provider_state", "settle_lifecycle_before_idle", "checkpoint_terminal_result"],
 } as const;
 
 /** The one place where the daemon gives the boundary a function: the transport for events. */
 export const TRANSPORT_OPERATIONS = ["connectEventSink"] as const;
 
-/**
- * Operations that name the runtime by data but still take a callback or an
- * AbortSignal. The part that is not data is named for each.
- */
-export const TRANSITIONAL_OPERATIONS = {
-  runRoomTurn: [
-    "beforeNativeDispatch", "checkpointTurnStarted", "checkpointPreparedTurn", "checkpointProviderState",
-    "settleLifecycleBeforeIdle", "markDurableTurnStarted", "checkpointTerminalResult", "detachSignal",
-    "markDispatched", "request.attachments[].image.data (Uint8Array)",
-  ],
-  recoverRoomTurn: ["detachSignal", "checkpointProviderState", "settleLifecycleBeforeIdle", "checkpointTerminalResult"],
-} as const;
 
 /** The reference names a runtime that this boundary does not hold. Nothing was sent to a provider. */
 export class StaleProviderRuntimeRefError extends Error {
@@ -401,6 +477,12 @@ type OpenOperation = {
   /** The step that waits now. */
   open: { seq: number; sync: boolean; answer?: ProviderStepAnswer; closed?: true; settle?: (answer: ProviderStepAnswer) => void } | null;
   detach: AbortController;
+  /**
+   * A detach refuses the steps of this operation: a step that waits, and each later step. A room turn sets this to
+   * false: its detach ends only the adapter's own signal, and its steps still reach the daemon, which decides each one
+   * (an admitted turn must still record its recovery key while a handoff drains the daemon).
+   */
+  detachRefusesSteps: boolean;
   /** The errors that this boundary threw into the adapter for a refused step, by step. */
   refusals: WeakMap<object, number>;
 };
@@ -444,6 +526,43 @@ function conforming<T>(operation: string, schema: z.ZodType, value: T): T {
     throw new ProviderBoundaryValueError(operation, `${issue?.path.join(".") || "$"}: ${issue?.code ?? "invalid"}`);
   }
   return value;
+}
+
+/**
+ * Check a room turn request: plain data, and each image within the limits of a turn, counted in bytes of the image
+ * and not of its base64 text. An error names the attachment and the rule, never the image.
+ */
+function roomTurnRequest(request: ProviderRoomTurnRequest): void {
+  guarded("runRoomTurn", "request", request);
+  const refuse = (index: number, detail: string) => {
+    throw new ProviderBoundaryValueError("runRoomTurn", `request.attachments.${index}.image: ${detail}`);
+  };
+  let total = 0;
+  let recentCount = 0;
+  let recentBytes = 0;
+  (request.attachments ?? []).forEach((attachment, index) => {
+    const image = attachment.image;
+    if (image === undefined) return;
+    if (attachment.status !== "image") refuse(index, "only an included image has an image");
+    if (!(ROOM_TURN_IMAGE_MIME_TYPES as readonly string[]).includes(image.mimeType)) refuse(index, "the image type is not supported");
+    if (image.base64 !== undefined && image.path !== undefined) refuse(index, "an image is base64 text or a file, not both");
+    if (image.base64 === undefined) {
+      if (typeof image.path !== "string" || image.path.length === 0 || image.path.length > 4096) refuse(index, "an image needs base64 text or a file");
+      return;
+    }
+    const bytes = typeof image.base64 === "string" ? base64Bytes(image.base64) : null;
+    if (bytes === null) return refuse(index, "the image is not base64 text");
+    if (bytes === 0) refuse(index, "the image is empty");
+    if (bytes > ROOM_TURN_IMAGE_MAX_BYTES) refuse(index, "the image is larger than the limit of one image");
+    total += bytes;
+    if (total > ROOM_TURN_IMAGES_MAX_TOTAL_BYTES) refuse(index, "the images are larger than the limit of a turn");
+    if (attachment.origin !== undefined) {
+      recentCount += 1;
+      recentBytes += bytes;
+      if (recentCount > ROOM_TURN_RECENT_IMAGE_LIMIT) refuse(index, "more images from recent messages than a turn takes");
+      if (recentBytes > ROOM_TURN_RECENT_IMAGES_MAX_BYTES) refuse(index, "the images from recent messages are larger than their limit");
+    }
+  });
 }
 
 function isAttachTerminal(value: ProviderHandle | { state: "terminal" }): value is { state: "terminal"; terminal: ProviderTerminalPayload; notices?: readonly string[] } {
@@ -734,23 +853,71 @@ export class ProviderRuntimeBoundary {
     return this.terminal("stopRef", await this.required("stopRef")(continuation, options));
   }
 
-  // The operations below are transitional: see TRANSITIONAL_OPERATIONS.
-
-  runRoomTurn(ref: ProviderRuntimeRef, request: ProviderRoomTurnRequest, options?: ProviderRoomTurnOptions): Promise<ProviderRoomTurnResult> {
-    const handle = this.held(ref);
-    return this.required("runRoomTurn")(handle, request, options);
-  }
-
-  recoverRoomTurn(
-    ref: ProviderRuntimeRef,
-    request: ProviderRoomTurnRecoveryRequest,
-    options?: Pick<ProviderRoomTurnOptions, "detachSignal" | "checkpointProviderState" | "settleLifecycleBeforeIdle" | "checkpointTerminalResult">,
-  ): Promise<ProviderRoomTurnResult> {
-    const handle = this.held(ref);
-    return this.required("recoverRoomTurn")(handle, request, options);
-  }
-
   // The operations below have steps: see OPERATION_STEPS. Each waits for the daemon with a `step` envelope.
+
+  /**
+   * Run one room turn. The adapter gets a function only for each step that `options.steps` names; for another step
+   * it sees none, as when the daemon left a callback out before. An adapter decides on that presence.
+   *
+   * A detach ends the adapter's own signal and nothing else: the steps still reach the daemon, as the callbacks did
+   * before. The daemon decides each step. An admitted turn whose native start answers after a detach must still
+   * record its exact turn id, and a checkpoint that runs when the detach comes is joined, not cut off.
+   */
+  async runRoomTurn(ref: ProviderRuntimeRef, request: ProviderRoomTurnRequest, options: ProviderRoomTurnBoundaryOptions): Promise<ProviderRoomTurnResult> {
+    const handle = this.held(ref);
+    roomTurnRequest(request);
+    conforming("runRoomTurn", providerRoomTurnOptionsSchema, guarded("runRoomTurn", "options", options));
+    const run = this.required("runRoomTurn");
+    const steps = new Set<string>(options.steps);
+    return this.operation("runRoomTurn", ref, options.operationId, options.detached === true, async (operation, record) => this.roomTurnResult("runRoomTurn",
+      await run(handle, request, {
+        ...this.roomTurnSteps(operation, steps),
+        ...(steps.has("before_native_dispatch") ? { beforeNativeDispatch: async () => { await this.step(operation, "before_native_dispatch", null); } } : {}),
+        ...(steps.has("checkpoint_turn_started") ? { checkpointTurnStarted: async (turnId: string) => { await this.step(operation, "checkpoint_turn_started", { turnId }); } } : {}),
+        ...(steps.has("checkpoint_prepared_turn") ? {
+          checkpointPreparedTurn: async (state: Parameters<NonNullable<ProviderRoomTurnOptions["checkpointPreparedTurn"]>>[0]) => {
+            await this.step(operation, "checkpoint_prepared_turn", {
+              providerTurnId: state.providerTurnId, providerContinuationId: state.providerContinuationId, providerConnection: state.providerConnection,
+            });
+          },
+        } : {}),
+        ...(steps.has("mark_durable_turn_started") ? { markDurableTurnStarted: () => { this.check(operation, "mark_durable_turn_started", null); } } : {}),
+        detachSignal: record.detach.signal,
+      })), false);
+  }
+
+  /** Recover one persisted native turn. The steps work as for `runRoomTurn`. */
+  async recoverRoomTurn(ref: ProviderRuntimeRef, request: ProviderRoomTurnRecoveryRequest, options: ProviderRoomTurnRecoveryBoundaryOptions): Promise<ProviderRoomTurnResult> {
+    const handle = this.held(ref);
+    guarded("recoverRoomTurn", "request", request);
+    conforming("recoverRoomTurn", providerRoomTurnRecoveryOptionsSchema, guarded("recoverRoomTurn", "options", options));
+    const run = this.required("recoverRoomTurn");
+    const steps = new Set<string>(options.steps);
+    return this.operation("recoverRoomTurn", ref, options.operationId, options.detached === true, async (operation, record) => this.roomTurnResult("recoverRoomTurn",
+      await run(handle, request, { ...this.roomTurnSteps(operation, steps), detachSignal: record.detach.signal })), false);
+  }
+
+  /** The functions of the steps that a turn and its recovery share. */
+  private roomTurnSteps(operation: string, steps: ReadonlySet<string>): Pick<ProviderRoomTurnOptions, "checkpointProviderState" | "settleLifecycleBeforeIdle" | "checkpointTerminalResult"> {
+    return {
+      ...(steps.has("checkpoint_provider_state") ? {
+        checkpointProviderState: async (state: Parameters<NonNullable<ProviderRoomTurnOptions["checkpointProviderState"]>>[0]) => {
+          await this.step(operation, "checkpoint_provider_state", { providerContinuationId: state.providerContinuationId, providerConnection: state.providerConnection });
+        },
+      } : {}),
+      ...(steps.has("settle_lifecycle_before_idle") ? { settleLifecycleBeforeIdle: async () => { await this.step(operation, "settle_lifecycle_before_idle", null); } } : {}),
+      ...(steps.has("checkpoint_terminal_result") ? {
+        checkpointTerminalResult: async (result: ProviderRoomTurnResult) =>
+          await this.step(operation, "checkpoint_terminal_result", { result }) as ProviderRoomTurnCheckpointDisposition | undefined,
+      } : {}),
+    };
+  }
+
+  private roomTurnResult(operation: string, result: ProviderRoomTurnResult): ProviderRoomTurnResult {
+    guarded(operation, "result", result);
+    conforming(operation, providerRoomTurnResultSchema, result);
+    return result;
+  }
 
   async controlTurn(ref: ProviderRuntimeRef, correction: string | null | undefined, options: { operationId: string; targetTurnId?: string | null }): Promise<ProviderTurnControlResult> {
     const handle = this.held(ref);
@@ -851,6 +1018,9 @@ export class ProviderRuntimeBoundary {
   /**
    * End the daemon's observation of an operation. The native work of the provider is not interrupted. A step that
    * waits ends with a refusal, so the adapter dispatches nothing for it. An unknown id does nothing.
+   * Room turns (`runRoomTurn` and `recoverRoomTurn`) are the exception: their steps stay open after a detach, because
+   * the daemon must still record what the provider already did (for example a turn that started). Only the adapter's
+   * `detachSignal` fires for them.
    */
   detachOperation(operationId: string): void {
     guarded("detachOperation", "operationId", operationId);
@@ -858,18 +1028,21 @@ export class ProviderRuntimeBoundary {
     if (!record) return;
     record.detach.abort();
     const open = record.open;
-    if (open && !open.sync && open.answer === undefined) {
+    if (record.detachRefusesSteps && open && !open.sync && open.answer === undefined) {
       open.answer = this.refusal("the operation was detached");
       open.settle?.(open.answer);
     }
   }
 
   /** Run one operation that has steps. An error leaves as its data form, built again as an error. */
-  private async operation<T>(name: string, ref: ProviderRuntimeRef, operationId: string, detached: boolean, run: (operationId: string, record: OpenOperation) => Promise<T>): Promise<T> {
+  private async operation<T>(
+    name: string, ref: ProviderRuntimeRef, operationId: string, detached: boolean,
+    run: (operationId: string, record: OpenOperation) => Promise<T>, detachRefusesSteps = true,
+  ): Promise<T> {
     if (this.openOperations.has(operationId)) throw new ProviderBoundaryValueError(name, "the operation id is in use");
     const record: OpenOperation = {
       ref: { provider: ref.provider, workAttemptId: ref.workAttemptId, runtimeId: ref.runtimeId },
-      seq: 0, open: null, detach: new AbortController(), refusals: new WeakMap(),
+      seq: 0, open: null, detach: new AbortController(), detachRefusesSteps, refusals: new WeakMap(),
     };
     if (detached) record.detach.abort();
     this.openOperations.set(operationId, record);
@@ -892,11 +1065,11 @@ export class ProviderRuntimeBoundary {
   private async step(operationId: string, step: ProviderStepName, body: unknown): Promise<unknown> {
     const { record, open } = this.openStep(operationId, step, body, false);
     const answered = new Promise<ProviderStepAnswer>((resolve) => { open.settle = resolve; });
-    if (record.detach.signal.aborted) open.answer = this.refusal("the operation was detached");
+    if (record.detach.signal.aborted && record.detachRefusesSteps) open.answer = this.refusal("the operation was detached");
     else if (!this.sendStep(operationId, record, step, open, body)) open.answer = this.refusal("the event sink did not take the step");
     const answer = open.answer ?? await answered;
     record.open = null;
-    return this.answered(record, open.seq, answer);
+    return this.answered(record, open.seq, answer, step);
   }
 
   /**
@@ -905,11 +1078,11 @@ export class ProviderRuntimeBoundary {
    */
   private check(operationId: string, step: ProviderStepName, body: unknown): void {
     const { record, open } = this.openStep(operationId, step, body, true);
-    const delivered = !record.detach.signal.aborted && this.sendStep(operationId, record, step, open, body);
+    const delivered = !(record.detach.signal.aborted && record.detachRefusesSteps) && this.sendStep(operationId, record, step, open, body);
     const answer = delivered && open.answer ? open.answer : this.refusal(delivered ? "the check got no answer" : "the event sink did not take the check");
     // A later answer finds no open step.
     record.open = null;
-    this.answered(record, open.seq, answer);
+    this.answered(record, open.seq, answer, step);
   }
 
   private refusal(detail: string): ProviderStepAnswer {
@@ -940,8 +1113,16 @@ export class ProviderRuntimeBoundary {
     }
   }
 
-  private answered(record: OpenOperation, seq: number, answer: ProviderStepAnswer): unknown {
-    if (answer.ok) return answer.body ?? null;
+  /**
+   * The body of an answer, or a refusal thrown into the adapter. An answer with no body gives `undefined`. A step
+   * whose answer has a body checks it with its schema; a step whose answer has no body ignores one.
+   */
+  private answered(record: OpenOperation, seq: number, answer: ProviderStepAnswer, step: ProviderStepName): unknown {
+    if (answer.ok) {
+      const schema = (PROVIDER_STEP_ANSWER_BODY_SCHEMAS as Partial<Record<ProviderStepName, z.ZodType>>)[step];
+      if (!schema || answer.body === undefined) return undefined;
+      return conforming(`answer of step ${step}`, schema, answer.body);
+    }
     const refusal = providerErrorFromData(answer.error);
     record.refusals.set(refusal, seq);
     throw refusal;

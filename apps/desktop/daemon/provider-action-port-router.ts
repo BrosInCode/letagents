@@ -22,12 +22,17 @@ import type {
   RoomTurnFileAccess,
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
+import { assertPlainWireValue } from "#daemon-contract/index.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
 import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
 import type { SupervisedProviderAdapter } from "#provider-runtime/agents/provider-adapter.js";
-import { ProviderRuntimeBoundary, providerErrorData, type ProviderEventEnvelope, type ProviderEventKind, type ProviderPermissionToken, type ProviderRuntimeRef, type ProviderRuntimeSnapshot, type ProviderStepName } from "#provider-runtime/agents/provider-runtime-boundary.js";
+import {
+  ProviderRuntimeBoundary, providerErrorData, PROVIDER_STEP_ANSWER_BODY_SCHEMAS, ROOM_TURN_RECOVERY_STEP_NAMES, ROOM_TURN_STEP_NAMES, type ProviderEventEnvelope, type ProviderEventKind,
+  type ProviderPermissionToken, type ProviderRuntimeRef, type ProviderRuntimeSnapshot, type ProviderStepName,
+} from "#provider-runtime/agents/provider-runtime-boundary.js";
+import type { ProviderRoomTurnRequest as ProviderBoundaryRoomTurnRequest } from "#provider-runtime/agents/provider-adapter.js";
 import type { ProviderNativePermissionEvent } from "#provider-runtime/agents/provider-adapter.js";
 
 /** What the router keeps for a work attempt: the provider, its data boundary and the reference of the installed runtime. */
@@ -36,6 +41,78 @@ type Installed = Remembered & { runtime: ProviderRuntimeRef };
 type StepEnvelope = Extract<ProviderEventEnvelope, { kind: "step" }>;
 /** What the daemon does at each step of one operation. A step with no entry is answered at once. */
 type StepHandlers = Partial<Record<ProviderStepName, (body: unknown) => unknown>>;
+type ProviderConnection = NonNullable<ProviderActionHandle["providerConnection"]>;
+/** The daemon's functions that a room turn and its recovery share. */
+type RoomTurnCallbacks = {
+  detachSignal?: AbortSignal;
+  checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: ProviderConnection }) => Promise<void>;
+  settleLifecycleBeforeIdle?: () => Promise<void>;
+  checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>;
+};
+
+/** The steps that a room turn and its recovery share. Only a function that the daemon gave makes a step. */
+function roomTurnHandlers(options: RoomTurnCallbacks | undefined): StepHandlers {
+  return {
+    ...(options?.checkpointProviderState ? {
+      checkpoint_provider_state: (body: unknown) => options.checkpointProviderState!({ providerContinuationId: stepText(body, "providerContinuationId"), providerConnection: stepConnection(body) }),
+    } : {}),
+    ...(options?.settleLifecycleBeforeIdle ? { settle_lifecycle_before_idle: () => options.settleLifecycleBeforeIdle!() } : {}),
+    ...(options?.checkpointTerminalResult ? {
+      checkpoint_terminal_result: (body: unknown) => options.checkpointTerminalResult!((body as { result: ProviderRoomTurnResult }).result),
+    } : {}),
+  };
+}
+
+/**
+ * A step answer is JSON, and JSON has no `undefined`: `JSON.stringify` leaves such a property out. The daemon's
+ * functions build plain objects, where an optional field can be present with the value `undefined` (for example
+ * `evidence: undefined`). Leave those properties out here, as a JSON transport would, so that the boundary does not
+ * refuse an answer that the daemon has already saved.
+ *
+ * Call this only on a value that `assertPlainWireValue` (with `allowUndefinedProperties`) accepted: that check reads
+ * no getter and refuses accessors, symbol keys, other prototypes and cycles. This copy then only drops the
+ * `undefined` properties of plain objects.
+ */
+function withoutUndefinedProperties(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutUndefinedProperties);
+  if (value === null || typeof value !== "object") return value;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([, field]) => field !== undefined)
+    .map(([key, field]) => [key, withoutUndefinedProperties(field)]));
+}
+
+/** The names of the steps that the daemon answers, in the order of the operation's list. */
+function stepNames<S extends ProviderStepName>(handlers: StepHandlers, steps: readonly S[]): S[] {
+  return steps.filter((step) => handlers[step] !== undefined);
+}
+
+/** The connection of a step body, as the boundary checked it. */
+function stepConnection(body: unknown): NonNullable<ProviderActionHandle["providerConnection"]> {
+  const value = typeof body === "object" && body !== null ? (body as Record<string, unknown>).providerConnection : undefined;
+  if (typeof value !== "object" || value === null) throw new Error("The provider step has no 'providerConnection'.");
+  return value as NonNullable<ProviderActionHandle["providerConnection"]>;
+}
+
+/**
+ * The room turn request as the boundary takes it: an image in memory crosses as base64 text. The daemon encodes
+ * each image one time, here; the adapters that read images in memory gave base64 text to their provider before too.
+ */
+function boundaryRoomTurnRequest(request: ProviderRoomTurnRequest): ProviderBoundaryRoomTurnRequest {
+  if (!request.attachments) return request as ProviderBoundaryRoomTurnRequest;
+  return {
+    ...request,
+    attachments: request.attachments.map(({ image, ...attachment }) => image === undefined ? attachment : {
+      ...attachment,
+      image: {
+        mimeType: image.mimeType,
+        ...(image.data ? { base64: Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString("base64") } : {}),
+        ...(image.path !== undefined ? { path: image.path } : {}),
+      },
+    }),
+  } as ProviderBoundaryRoomTurnRequest;
+}
 
 /** One text field of a step body. The boundary checks the body; the daemon does not act on a value it cannot read. */
 function stepText(body: unknown, field: string): string {
@@ -506,11 +583,27 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     throw Object.assign(new Error("Permission dispatch returned unexpected evidence."), { outcome: "uncertain" });
   }
 
-  async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointPreparedTurn?: (state: { providerTurnId: string; providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; settleLifecycleBeforeIdle?: () => Promise<void>; markDurableTurnStarted?: () => void; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult> {
+  async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: RoomTurnCallbacks & { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointPreparedTurn?: (state: { providerTurnId: string; providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; markDurableTurnStarted?: () => void; markDispatched?: () => Promise<void> }): Promise<ProviderRoomTurnResult> {
     const remembered = this.required(handle);
     const boundary = await this.boundary(remembered.provider);
     if (!boundary.has("runRoomTurn")) throw new Error(`Provider '${remembered.provider}' does not support bounded room turns.`);
-    return boundary.runRoomTurn(remembered.runtime, request, options);
+    // The adapters call `beforeNativeDispatch`; the old name is the same point.
+    const beforeNativeDispatch = options?.beforeNativeDispatch ?? options?.markDispatched;
+    const handlers: StepHandlers = {
+      ...roomTurnHandlers(options),
+      ...(beforeNativeDispatch ? { before_native_dispatch: () => beforeNativeDispatch() } : {}),
+      ...(options?.checkpointTurnStarted ? { checkpoint_turn_started: (body: unknown) => options.checkpointTurnStarted!(stepText(body, "turnId")) } : {}),
+      ...(options?.checkpointPreparedTurn ? {
+        checkpoint_prepared_turn: (body: unknown) => options.checkpointPreparedTurn!({
+          providerTurnId: stepText(body, "providerTurnId"), providerContinuationId: stepText(body, "providerContinuationId"), providerConnection: stepConnection(body),
+        }),
+      } : {}),
+      ...(options?.markDurableTurnStarted ? { mark_durable_turn_started: () => options.markDurableTurnStarted!() } : {}),
+    };
+    const boundaryRequest = boundaryRoomTurnRequest(request);
+    return this.withSteps(boundary, handlers, options?.detachSignal, (operation) => boundary.runRoomTurn(remembered.runtime, boundaryRequest, {
+      ...operation, steps: stepNames(handlers, ROOM_TURN_STEP_NAMES),
+    }));
   }
 
   /** Asked for one turn only; an unknown or replaced handle takes no images. */
@@ -529,11 +622,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     return boundary.has("roomTurnFileAccess") ? boundary.roomTurnFileAccess(remembered.runtime) ?? null : null;
   }
 
-  async recoverRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; settleLifecycleBeforeIdle?: () => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void> }): Promise<ProviderRoomTurnResult> {
+  async recoverRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: RoomTurnCallbacks): Promise<ProviderRoomTurnResult> {
     const remembered = this.required(handle);
     const boundary = await this.boundary(remembered.provider);
     if (!boundary.has("recoverRoomTurn")) throw new Error(`Provider '${remembered.provider}' does not support bounded room-turn recovery.`);
-    return boundary.recoverRoomTurn(remembered.runtime, request, options);
+    const handlers = roomTurnHandlers(options);
+    return this.withSteps(boundary, handlers, options?.detachSignal, (operation) => boundary.recoverRoomTurn(remembered.runtime, request, {
+      ...operation, steps: stepNames(handlers, ROOM_TURN_RECOVERY_STEP_NAMES),
+    }));
   }
 
   async repairContinuation(handle: ProviderActionHandle, request: ProviderContinuationRepairRequest, options: { checkpointReplacement: (providerContinuationId: string) => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderContinuationRepairResult> {
@@ -801,17 +897,37 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   ): Promise<T> {
     const operationId = randomUUID();
     const refusals = new Map<number, unknown>();
-    const answer = (seq: number, error?: { thrown: unknown }) => {
-      if (error) refusals.set(seq, error.thrown);
+    const answer = (seq: number, outcome: { thrown: unknown } | { body: unknown }) => {
+      if ("thrown" in outcome) refusals.set(seq, outcome.thrown);
       try {
-        boundary.answerStep(operationId, seq, error ? { ok: false, error: providerErrorData(error.thrown) } : { ok: true });
-      } catch { /* The operation ended or was detached; its step took a refusal already. */ }
+        boundary.answerStep(operationId, seq, "thrown" in outcome
+          ? { ok: false, error: providerErrorData(outcome.thrown) }
+          : outcome.body === undefined ? { ok: true } : { ok: true, body: outcome.body as never });
+      } catch (error) {
+        // The operation ended or was detached, and its step took a refusal already; or the body was not data, and
+        // the step is refused with that error.
+        if ("thrown" in outcome || outcome.body === undefined) return;
+        refusals.set(seq, error);
+        try { boundary.answerStep(operationId, seq, { ok: false, error: providerErrorData(error) }); } catch { /* as above */ }
+      }
+    };
+    // Only a step whose answer has a body forwards the value of the daemon's function; for another step it is ignored.
+    // A body is checked as plain data first, without reading a getter; a value that is not data refuses the step
+    // here, so no error can escape the promise handler below and leave the step without an answer.
+    const settled = (step: ProviderStepName, value: unknown): { thrown: unknown } | { body: unknown } => {
+      if (!(step in PROVIDER_STEP_ANSWER_BODY_SCHEMAS) || value === undefined) return { body: undefined };
+      try {
+        assertPlainWireValue(value, { path: `answer of ${step}`, allowUndefinedProperties: true });
+        return { body: withoutUndefinedProperties(value) };
+      } catch (thrown) {
+        return { thrown };
+      }
     };
     this.stepHandlers.set(operationId, (event) => {
       let result: unknown;
       try { result = handlers[event.step]?.(event.body); } catch (thrown) { answer(event.seq, { thrown }); return; }
-      if (event.sync || !(result instanceof Promise)) { answer(event.seq); return; }
-      result.then(() => answer(event.seq), (thrown: unknown) => answer(event.seq, { thrown }));
+      if (event.sync || !(result instanceof Promise)) { answer(event.seq, settled(event.step, event.sync ? undefined : result)); return; }
+      result.then((value) => answer(event.seq, settled(event.step, value)), (thrown: unknown) => answer(event.seq, { thrown }));
     });
     const detach = () => boundary.detachOperation(operationId);
     detachSignal?.addEventListener("abort", detach, { once: true });

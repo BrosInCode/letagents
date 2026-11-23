@@ -34,16 +34,15 @@ import type { SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
  * only when its owner says its model reads images.
  */
 
-export const ROOM_TURN_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
-export const ROOM_TURN_IMAGES_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 /**
- * Images from recent messages share the turn's budget after the activating
- * message's own: at most one full message's worth (the server takes four
- * files per message) and half the turn's bytes. Each is sent once per
- * conversation, so this bounds a single turn.
+ * The image limits are part of the provider boundary, which checks them too. Images from recent messages share the
+ * turn's budget after the activating message's own: at most one full message's worth (the server takes four files
+ * per message) and half the turn's bytes. Each is sent once per conversation, so this bounds a single turn.
  */
-export const ROOM_TURN_RECENT_IMAGE_LIMIT = 4;
-export const ROOM_TURN_RECENT_IMAGES_MAX_BYTES = 10 * 1024 * 1024;
+import {
+  ROOM_TURN_IMAGE_MAX_BYTES, ROOM_TURN_IMAGES_MAX_TOTAL_BYTES, ROOM_TURN_RECENT_IMAGE_LIMIT, ROOM_TURN_RECENT_IMAGES_MAX_BYTES,
+} from "#provider-runtime/agents/provider-adapter.js";
+export { ROOM_TURN_IMAGE_MAX_BYTES, ROOM_TURN_IMAGES_MAX_TOTAL_BYTES, ROOM_TURN_RECENT_IMAGE_LIMIT, ROOM_TURN_RECENT_IMAGES_MAX_BYTES };
 /** Recent-message images described in one prompt, shown or not; the context still lists every file. */
 const RECENT_DESCRIBED_LIMIT = 8;
 /** The room messages just before the activating one, and the replies of its thread, that are searched for images. */
