@@ -602,7 +602,6 @@
   display: -webkit-box;
   overflow: hidden;
   color: color-mix(in srgb, var(--chat-foreground, var(--text)) 82%, transparent);
-  font-size: .8125rem;
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;

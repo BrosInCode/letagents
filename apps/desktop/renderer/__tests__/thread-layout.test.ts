@@ -33,6 +33,17 @@ describe("inline room thread layout", () => {
     assert.match(latest, /visibility:\s*hidden/);
     assert.match(panel, /<button type="button" class="room-thread-latest"[^>]*:disabled="!isScrolledUp"[^>]*:aria-hidden="!isScrolledUp"/);
   });
+  it("uses room message and composer typography for inline replies", () => {
+    const body = styles.match(/\.is-thread-context \.desktop-long-message-html\s*\{([^}]*)\}/)?.[1] ?? "";
+    const quote = styles.match(/\.room-thread-panel \.room-message-reply-text\s*\{([^}]*)\}/)?.[1] ?? "";
+    const input = styles.match(/\.room-thread-composer textarea\s*\{([^}]*)\}/)?.[1] ?? "";
+    for (const rule of [body, quote, input]) {
+      assert.ok(rule);
+      assert.doesNotMatch(rule, /(?:font(?:-size)?|line-height):/);
+    }
+    const composer = readFileSync(new URL("../src/styles/composer-agent-reasoning/composer-controls.css", import.meta.url), "utf8");
+    assert.match(composer, /\.desktop-composer-input,\s*\.room-thread-composer textarea\s*\{[^}]*font-size:[^}]*line-height:/);
+  });
   it("leaves horizontal code scrolling available and honors reduced motion", () => {
     assert.doesNotMatch(styles, /overflow-x:\s*(?:hidden|clip)/);
     const transition = readFileSync(new URL("../../../../shared/ui/ThreadTransition.vue", import.meta.url), "utf8");
