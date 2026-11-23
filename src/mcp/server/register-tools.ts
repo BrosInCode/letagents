@@ -65,8 +65,11 @@ export function registerTools(
   registerWakeRuleTools(tools);
   registerJobTools(tools);
   registerApiTools(tools);
-  // publish_page reads a workspace file, like message attachments.
-  registerPageTools(tools, { publish: surface.messageFileAttachments && !options.remote });
+  // publish_page takes a message attachment for every agent, and a workspace
+  // file where the agent's files can be read: the npm package's own folder, or
+  // the workspace the desktop daemon runs a room agent's tool calls in.
+  const pageFiles = !options.remote && (surface.messageFileAttachments || profile === "supervised_room_turn");
+  registerPageTools(tools, { publish: pageFiles ? "file" : "attachment" });
   registerStatusTools(tools);
   if (profile === "autonomous_mcp_worker" || profile === "interactive_desktop") registerWorkspaceTools(tools);
   registerTaskTools(tools);

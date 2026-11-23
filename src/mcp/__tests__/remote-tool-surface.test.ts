@@ -50,6 +50,31 @@ test("the remote surface is exactly the allow list, and every stdio tool is clas
   assert.ok(remote.has("read_attachment"), "remote bots read attachments");
 });
 
+test("publish_page: npm and desktop room agents publish from a file or an attachment; remote bots from an attachment", () => {
+  const inputs = (profile: Parameters<typeof registerTools>[1], options: Parameters<typeof registerTools>[3]) => {
+    let schema: Record<string, unknown> | undefined;
+    const server = {
+      tool(name: string, ...registration: unknown[]) {
+        // The input shape is the object argument that names page_id; wrappers may add annotations.
+        if (name === "publish_page") {
+          schema = registration.find((part): part is Record<string, unknown> =>
+            typeof part === "object" && part !== null && Object.hasOwn(part, "page_id"));
+        }
+        return {};
+      },
+    } as unknown as McpServer;
+    registerTools(server, profile, null, options);
+    // Only where the page may come from; the worker wrapper adds worker_id to some kinds.
+    return Object.keys(schema ?? {}).filter((field) => field === "path" || field === "source").sort();
+  };
+  assert.deepEqual(inputs("autonomous_mcp_worker", {}), ["path", "source"]);
+  assert.deepEqual(inputs("autonomous_mcp_worker", { remote: true }), ["source"]);
+  // The agent's own MCP process and the daemon that runs its tool calls (and reads the file) register the same input.
+  assert.deepEqual(inputs("supervised_room_turn", {}), ["path", "source"]);
+  assert.deepEqual(inputs("supervised_room_turn", { executionOwner: "daemon" }), ["path", "source"]);
+  assert.deepEqual(inputs("supervised_mcp_polling", {}), ["source"]);
+});
+
 test("the remote proxy strips cwd from registerTool and refuses shapes it does not know", () => {
   const calls: unknown[][] = [];
   const base = {

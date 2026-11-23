@@ -1,3 +1,6 @@
+import { realpath } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
+
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
@@ -6,6 +9,7 @@ import { getApiMethod } from "../../../../shared/api/index.mjs";
 import { PAGE_SURFACES } from "../../../../shared/api/manifest.mjs";
 import { PAGE_HTML_MAX_BYTES, pageReference } from "../../../../shared/api/page-reference.mjs";
 import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
+import { isFileSystemRoot, readWorkspaceAttachmentFile, type WorkspaceAttachmentFile } from "../../../../shared/workspace-attachment-files.mjs";
 import { getApiUrl } from "../runtime/api.js";
 import { getDaemonToolExecutionContext } from "../runtime/daemon-tool-context.js";
 import { readMessageAttachmentFiles } from "../runtime/message-attachments.js";
@@ -14,8 +18,11 @@ import { apiToolError, callApiMethod, PAGE_DATA_DESCRIPTION, untrustedPageOutput
 import { jsonToolResponse } from "./tasks/response.js";
 
 // Room pages for agents: the plan's tool names over the pages methods of the
-// LetAgents API. publish_page reads the page from the agent's workspace with
-// the checks message attachments use, so it is local only, like attachments.
+// LetAgents API. publish_page takes the page from an HTML attachment of a room
+// message (source), which needs no files, so every agent kind can publish. Where
+// the agent's workspace can be read, it also takes a file path, read with the
+// checks message attachments use: the npm package reads it in its own folder,
+// and the desktop daemon in the workspace it runs the agent's tool calls in.
 
 const roomId = z.string().optional().describe("Exact room ID. Defaults to this worker’s room.");
 const pageId = z.string().min(1).max(80).describe("The page id, such as page_ab12; list_pages shows them.");
@@ -57,26 +64,74 @@ function cappedDiagnostics(output: { entries?: Array<{ message?: unknown }> }) {
 
 const NOTHING_PUBLISHED = "Nothing was published.";
 
-/** Refuse where this process cannot read the agent's files, as for message attachments. */
+/** Local rooms keep no pages, whatever the page is made from. */
+function assertRoomHasPages(): void {
+  if (!currentSessionScope() && isLocalRoomApi(getApiUrl())) throw new Error(`Local rooms have no pages. ${NOTHING_PUBLISHED}`);
+}
+
+const FROM_AN_ATTACHMENT = "Attach the .html file to a room message, then call publish_page with source (its message_id and attachment_id).";
+
+/**
+ * Refuse where no one can read the agent's files: the remote endpoint, and a
+ * desktop agent's own MCP process, whose tool calls the daemon runs instead.
+ */
 function assertPagePublishingAvailable(): void {
   if (currentSessionScope()) {
-    throw new Error(`The remote LetAgents MCP endpoint cannot read files on your computer. Publish pages through the npm package (npx letagents). ${NOTHING_PUBLISHED}`);
+    throw new Error(`The remote LetAgents MCP endpoint cannot read files on your computer. ${FROM_AN_ATTACHMENT} ${NOTHING_PUBLISHED}`);
   }
   const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
-  if (getDaemonToolExecutionContext() || profile === "supervised_room_turn" || profile === "supervised_mcp_polling") {
-    throw new Error(`Desktop room agents cannot publish a page from a file yet. ${NOTHING_PUBLISHED}`);
+  if (!getDaemonToolExecutionContext() && (profile === "supervised_room_turn" || profile === "supervised_mcp_polling")) {
+    throw new Error(`This agent's tools cannot read its workspace here. ${FROM_AN_ATTACHMENT} ${NOTHING_PUBLISHED}`);
   }
-  if (isLocalRoomApi(getApiUrl())) throw new Error(`Local rooms have no pages. ${NOTHING_PUBLISHED}`);
+  assertRoomHasPages();
+}
+
+// A hung network mount or cloud placeholder file must not hold the tool call forever.
+const DAEMON_PAGE_READ_DEADLINE_MS = 30_000;
+
+/**
+ * A desktop agent's page file, read by the daemon in the workspace it runs the
+ * agent's tool calls in: the folder, and the shared reader, its reply
+ * attachments use (inside the workspace, no link, never a credential file).
+ */
+async function readDaemonWorkspacePage(workspacePath: string, path: string): Promise<WorkspaceAttachmentFile> {
+  if (!workspacePath || !isAbsolute(workspacePath)) {
+    throw new Error(`Publishing a page from a file needs this agent's workspace folder. ${FROM_AN_ATTACHMENT} ${NOTHING_PUBLISHED}`);
+  }
+  const workspace = await realpath(workspacePath).catch(() => null);
+  if (!workspace || isFileSystemRoot(workspace)) {
+    throw new Error(`This agent's workspace folder cannot be read. ${FROM_AN_ATTACHMENT} ${NOTHING_PUBLISHED}`);
+  }
+  // The agent names files through its own workspace path, which may pass through a link (macOS /var is /private/var).
+  const roots = { workspace, aliases: [resolve(workspacePath)] };
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`Reading ${path} took too long. ${NOTHING_PUBLISHED}`)), DAEMON_PAGE_READ_DEADLINE_MS);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([
+      readWorkspaceAttachmentFile(roots, path, { maxBytes: PAGE_HTML_MAX_BYTES }).catch((error: Error) => {
+        throw new Error(`${error.message} ${NOTHING_PUBLISHED} The workspace is ${workspace}.`);
+      }),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The page's HTML from a workspace file: inside the workspace, never a credential file, HTML, UTF-8, at most 2 MB. */
 export async function readPageFile(path: string): Promise<string> {
   assertPagePublishingAvailable();
+  const daemon = getDaemonToolExecutionContext();
   // The size is checked before any byte is read.
-  const [file] = await readMessageAttachmentFiles([path], { maxFileBytes: PAGE_HTML_MAX_BYTES, nothingDone: NOTHING_PUBLISHED });
-  if (file!.mimeType !== "text/html") throw new Error(`${path} is not an .html file. ${NOTHING_PUBLISHED}`);
+  const file = daemon
+    ? await readDaemonWorkspacePage(daemon.cwd, path)
+    : (await readMessageAttachmentFiles([path], { maxFileBytes: PAGE_HTML_MAX_BYTES, nothingDone: NOTHING_PUBLISHED }))[0]!;
+  if (file.mimeType !== "text/html") throw new Error(`${path} is not an .html file. ${NOTHING_PUBLISHED}`);
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(file!.bytes);
+    return new TextDecoder("utf-8", { fatal: true }).decode(file.bytes);
   } catch {
     throw new Error(`${path} is not UTF-8 text. ${NOTHING_PUBLISHED}`);
   }
@@ -95,19 +150,42 @@ export function pageHtmlPart(html: string, offset = 0): { page_html: string; off
 
 // The reference is about 17 KB. In publish_page's description it was sent on
 // every turn; get_page_reference sends it when an agent writes a page.
-export const PUBLISH_PAGE_DESCRIPTION = "Publish a room page from an HTML file in your workspace: a new page, or with page_id a new version "
-  + "of that page. Call get_page_reference before you write or change a page: it has the manifest, the window.letagents API, "
+const PAGE_RULES = "Call get_page_reference before you write or change a page: it has the manifest, the window.letagents API, "
   + `the capabilities and every method a page can call. The page is one self-contained .html file of at most ${PAGE_HTML_MAX_BYTES / (1024 * 1024)} MB `
-  + "with a manifest script, inline CSS and JavaScript, no network. The file is read with the checks message attachments use (inside your "
-  + "workspace, never a credential file). Whether it goes live at once or waits for a room admin follows the room's rules; the answer says "
+  + "with a manifest script, inline CSS and JavaScript, no network.";
+const PAGE_OUTCOME = "Whether it goes live at once or waits for a room admin follows the room's rules; the answer says "
   + "which. draft: true shows it only to room admins and you. A room admin pins it as a tab. "
   + `After people use it, read its errors with read_page_diagnostics. ${PAGE_DATA_DESCRIPTION}`;
+
+/** For agents whose workspace can be read (npm package, desktop room agents): a file path, or an attachment. */
+export const PUBLISH_PAGE_DESCRIPTION = "Publish a room page: a new page, or with page_id a new version of that page. "
+  + "Give the HTML as path (a file in your workspace, read with the checks message attachments use: inside your workspace, "
+  + "never a credential file) or as source (an .html attachment of a message in this room), not both. "
+  + `${PAGE_RULES} ${PAGE_OUTCOME}`;
+
+/** For agents whose files no one can read (remote bots): an attachment only. */
+export const PUBLISH_PAGE_FROM_ATTACHMENT_DESCRIPTION = "Publish a room page from an .html attachment of a message in this room "
+  + "(source: its message_id and attachment_id): a new page, or with page_id a new version of that page. Send the file "
+  + "in a message first. "
+  + `${PAGE_RULES} ${PAGE_OUTCOME}`;
 
 export const GET_PAGE_REFERENCE_DESCRIPTION = "The room page reference, as Markdown: the rules, the manifest, window.letagents, "
   + "the capabilities and every API method a page can call with its input and output. Read it before you write or change a page "
   + "for publish_page. Reads only.";
 
-export function registerPageTools(server: McpServer, options: { publish: boolean }): void {
+/**
+ * Where publish_page may take the page from: "file" adds a workspace path
+ * (where the agent's files can be read), "attachment" is a message
+ * attachment only, null leaves publishing out.
+ */
+export type PagePublishing = "file" | "attachment" | null;
+
+const pageSource = z.object({
+  message_id: z.string().regex(/^msg_\d+$/).describe("The message that holds the attachment, such as msg_12."),
+  attachment_id: z.string().regex(/^att_\d+$/).describe("The .html attachment of that message, such as att_1."),
+}).strict();
+
+export function registerPageTools(server: McpServer, options: { publish: PagePublishing }): void {
   server.tool(
     "list_pages",
     "List the room's pages with their live version. With surface, only the pages pinned there, in tab order (surface: room.tab). "
@@ -147,20 +225,38 @@ export function registerPageTools(server: McpServer, options: { publish: boolean
     content: [{ type: "text" as const, text: pageReference() }],
   }));
 
+  const fromFile = options.publish === "file";
+  const common = {
+    page_id: pageId.optional().describe("Publish a new version of this page. Without it, a new page."),
+    draft: z.boolean().optional().describe("Keep it visible only to room admins and you."),
+    room_id: roomId,
+  };
   server.tool(
     "publish_page",
-    PUBLISH_PAGE_DESCRIPTION,
-    {
-      path: z.string().min(1).describe("The page's .html file, relative to your workspace or absolute inside it."),
-      page_id: pageId.optional().describe("Publish a new version of this page. Without it, a new page."),
-      draft: z.boolean().optional().describe("Keep it visible only to room admins and you."),
-      room_id: roomId,
-    },
-    async ({ path, page_id, draft, room_id }) => {
+    fromFile ? PUBLISH_PAGE_DESCRIPTION : PUBLISH_PAGE_FROM_ATTACHMENT_DESCRIPTION,
+    fromFile
+      ? {
+        path: z.string().min(1).optional().describe("The page's .html file, relative to your workspace or absolute inside it."),
+        source: pageSource.optional().describe("An .html attachment of a message in this room, instead of path."),
+        ...common,
+      }
+      : { source: pageSource.describe("The .html attachment of a message in this room that holds the page."), ...common },
+    async ({ path, source, page_id, draft, room_id }: {
+      path?: string; source?: z.infer<typeof pageSource>; page_id?: string; draft?: boolean; room_id?: string;
+    }) => {
       try {
+        if ((path === undefined) === (source === undefined)) {
+          throw new Error(`Give the page as path or as source: one of them, not both. ${NOTHING_PUBLISHED}`);
+        }
         const method = pagesMethod(page_id === undefined ? "pages.create" : "pages.publishVersion");
-        const html = await readPageFile(path);
-        const input = page_id === undefined ? { html, draft } : { pageId: page_id, html, draft };
+        let body: Record<string, unknown>;
+        if (source) {
+          assertRoomHasPages();
+          body = { source: { messageId: source.message_id, attachmentId: source.attachment_id } };
+        } else {
+          body = { html: await readPageFile(path!) };
+        }
+        const input = page_id === undefined ? { ...body, draft } : { pageId: page_id, ...body, draft };
         return jsonToolResponse(untrustedPageOutput(await callApiMethod(method, input, room_id)));
       } catch (error) {
         return apiToolError(error);
