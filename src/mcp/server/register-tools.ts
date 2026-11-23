@@ -65,8 +65,9 @@ export function registerTools(
   registerWakeRuleTools(tools);
   registerJobTools(tools);
   registerApiTools(tools);
-  // publish_page reads a workspace file, like message attachments.
-  registerPageTools(tools, { publish: surface.messageFileAttachments && !options.remote });
+  // publish_page takes a message attachment for every agent; a workspace file
+  // only where this process reads the agent's files, like message attachments.
+  registerPageTools(tools, { publish: surface.messageFileAttachments && !options.remote ? "file" : "attachment" });
   registerStatusTools(tools);
   if (profile === "autonomous_mcp_worker" || profile === "interactive_desktop") registerWorkspaceTools(tools);
   registerTaskTools(tools);
