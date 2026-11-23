@@ -33,7 +33,13 @@ const originalFetch = globalThis.fetch;
 
 test.after(() => {
   globalThis.fetch = originalFetch;
-  rmSync(tempDir, { recursive: true, force: true });
+  try {
+    rmSync(tempDir, { recursive: true, force: true });
+  } catch (error) {
+    // Windows keeps the open local chat database locked until this process exits
+    // (EBUSY); the runner's temp directory is cleaned up with the job.
+    if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+  }
 });
 
 test.afterEach(() => {
