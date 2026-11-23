@@ -43,7 +43,8 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
           || (!parsed.data.reference && parsed.data.status !== "unavailable")
           || (parsed.data.presentation.title === "Approval unavailable" && parsed.data.status !== "unavailable"
             && !(parsed.data.status === "uncertain" && parsed.data.reference && parsed.data.recordedDecision))
-          || (parsed.data.presentation.provider === "open-model") !== (parsed.data.presentation.denyScope === "session_pending")) {
+          || (parsed.data.presentation.provider === "open-model") !== (parsed.data.presentation.denyScope === "session_pending")
+          || (parsed.data.presentation.denyScope === "request_and_turn" && parsed.data.presentation.provider !== "codex")) {
           throw new Error("Invalid approval presentation.");
         }
       }

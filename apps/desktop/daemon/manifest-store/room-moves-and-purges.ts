@@ -12,8 +12,13 @@ import {
   failPreparedJoinRoomEffectInTransaction,
   retireExecutionApprovalEffectsForPurgeInTransaction,
   retireExecutionApprovalEffectsForRoomMoveInTransaction,
+  retireRoomMoveEffectsForOperationInTransaction,
+  retireRoomMoveEffectsForPurgeInTransaction,
   retireRoomWorkEffectsForPurgeInTransaction,
   retireRoomWorkEffectsInTransaction,
+  retireRuntimeRecoveryEffectsForPurgeInTransaction,
+  ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+  ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
   rowToBoundedMcpEffect,
 } from "../effect-journal/index.js";
 import { cancelInterruptedSupervisedTurn, pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
@@ -165,6 +170,16 @@ export const roomMovesAndPurges = storeMethods({
               }
             }
           }
+          if (input.to === "rollback_required") {
+            retireRoomMoveEffectsForOperationInTransaction(database, {
+              agentId: input.agentId,
+              operationId: input.operationId,
+              expectedEpoch: updated.daemon_generation,
+              kinds: [ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND, ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND],
+              error: "room_move_rollback_required",
+              nowIso: updatedAt,
+            });
+          }
           if (input.to === "active") {
             retireRoomWorkEffectsInTransaction(database, {
               agentId: input.agentId,
@@ -182,6 +197,13 @@ export const roomMovesAndPurges = storeMethods({
             });
           }
           if (input.to === "active" || input.to === "failed") {
+            retireRoomMoveEffectsForOperationInTransaction(database, {
+              agentId: input.agentId,
+              operationId: input.operationId,
+              expectedEpoch: updated.daemon_generation,
+              error: input.to === "active" ? "room_move_active" : "room_move_failed",
+              nowIso: updatedAt,
+            });
             // Reaching a terminal room-move phase releases the compensation rows
             // protected by the shared retention policy. Compact only after the
             // exact effect reached the same terminal boundary.
@@ -238,6 +260,16 @@ export const roomMovesAndPurges = storeMethods({
           nowIso: now,
         });
         retireExecutionApprovalEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
+        retireRoomMoveEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
+        retireRuntimeRecoveryEffectsForPurgeInTransaction(database, {
           agentId: input.agentId,
           expectedEpoch: input.daemonGeneration,
           nowIso: now,
@@ -451,6 +483,16 @@ export const roomMovesAndPurges = storeMethods({
             nowIso: commitNow,
           });
           retireExecutionApprovalEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
+          retireRoomMoveEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
+          retireRuntimeRecoveryEffectsForPurgeInTransaction(database, {
             agentId: input.agentId,
             expectedEpoch: input.daemonGeneration,
             nowIso: commitNow,

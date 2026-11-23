@@ -13,7 +13,7 @@ import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { schedulerErrorDetail } from "../daemon-error-policy.js";
 import { DaemonStateWatch, STATE_WATCH_NOTIFICATION_COALESCE_MS } from "../daemon-state-watch.js";
-import { AsyncRpcEffectCoordinator } from "../effect-journal/index.js";
+import { AsyncRpcEffectCoordinator, EffectFenceError } from "../effect-journal/index.js";
 import { WorkDurabilityStore } from "../durability-store.js";
 import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
@@ -214,6 +214,15 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       deleteAgentStream: (entryId) => { this.agentStreamRegistry.delete(entryId); this.liveRoomShare.forget(entryId); },
       reconcileRoomWorkForPurge: (entryId) => { this.roomWorkPublisher?.recoverInactiveExecutingForAgent(entryId); },
       reconcileApprovalPublicationsForPurge: (entryId) => { this.executionDelegations?.recoverInactiveApprovalPublicationsForPurge(entryId); },
+      reconcileRoomMovesForPurge: (entryId) => { this.roomMoves?.recoverInactiveExecutingForAgent?.(entryId); },
+      reconcileRuntimeRecoveriesForPurge: (entryId) => { this.runtimeRecovery?.recoverInactiveExecutingForAgent?.(entryId); },
+      retireStaleRuntimeRecoveryEffects: (entryId) => {
+        try {
+          this.runtimeRecovery?.retireStalePreparedEffects?.(entryId);
+        } catch (error) {
+          if (!(error instanceof EffectFenceError)) throw error;
+        }
+      },
       ephemeralProvisioner: this.ephemeralProvisioner,
       nowMs: () => this.nowMs(),
     });

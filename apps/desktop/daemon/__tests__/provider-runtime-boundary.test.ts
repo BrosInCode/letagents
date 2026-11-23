@@ -15,7 +15,6 @@ import {
   PROVIDER_STEP_BODY_SCHEMAS,
   PROVIDER_STEP_NAMES,
   StaleProviderRuntimeRefError,
-  TRANSITIONAL_OPERATIONS,
   TRANSPORT_OPERATIONS,
   providerEventEnvelopeSchema,
   providerRuntimeSnapshotSchema,
@@ -265,10 +264,11 @@ test("the boundary reports the optional operations of its adapter as data", () =
   assert.equal(boundary.has("stopIdle"), false);
 });
 
-test("each public operation of the boundary is listed as a data operation or as a transitional operation", () => {
+test("each public operation of the boundary is listed as a data operation or as the transport", () => {
   const internal = new Set(["constructor", "has", "inspectIfHeld", "required", "matches", "held", "continuation", "terminal", "installed", "snapshot", "reference", "stopOptions", "deliver", "startHints", "send",
-    "operation", "step", "check", "openStep", "sendStep", "answered", "refusal", "permissionRequest", "connectionKey", "tokensOf"]);
-  const listed = new Set<string>([...DATA_OPERATIONS, ...TRANSPORT_OPERATIONS, ...Object.keys(TRANSITIONAL_OPERATIONS)]);
+    "operation", "step", "check", "openStep", "sendStep", "answered", "refusal", "permissionRequest", "connectionKey", "tokensOf",
+    "roomTurnSteps", "roomTurnResult"]);
+  const listed = new Set<string>([...DATA_OPERATIONS, ...TRANSPORT_OPERATIONS]);
   const actual = Object.getOwnPropertyNames(ProviderRuntimeBoundary.prototype).filter((name) => !internal.has(name));
   assert.deepEqual(actual.filter((name) => !listed.has(name)), [], "an operation that is in no list");
   assert.deepEqual([...listed].filter((name) => !actual.includes(name)), [], "a listed operation that the boundary does not have");
@@ -1091,6 +1091,10 @@ test("the body of a step is checked before it is an envelope, and each step shap
   const samples: Record<(typeof PROVIDER_STEP_NAMES)[number], unknown> = {
     checkpoint_turn_started: { turnId: "turn-9" }, mark_dispatched: null, checkpoint_target_turn: { turnId: "turn-9" },
     before_native_dispatch: null, assert_native_dispatch: null, assert_current: null, checkpoint_replacement: { providerContinuationId: "thread-2" },
+    checkpoint_prepared_turn: { providerTurnId: "turn-9", providerContinuationId: "thread-2", providerConnection: { kind: "cursor_cli", pid: 7, processIdentity: "birth-7" } },
+    checkpoint_provider_state: { providerContinuationId: "thread-2", providerConnection: { kind: "cursor_cli", pid: 7, processIdentity: "birth-7" } },
+    settle_lifecycle_before_idle: null, mark_durable_turn_started: null,
+    checkpoint_terminal_result: { result: { turnId: "turn-9", outcome: "no_reply", text: null } },
   };
   for (const step of PROVIDER_STEP_NAMES) {
     const envelope = JSON.parse(JSON.stringify({ kind: "step", operationId: "op-1", ref: runtime.ref, step, seq: 1, order: 1, body: samples[step] }));

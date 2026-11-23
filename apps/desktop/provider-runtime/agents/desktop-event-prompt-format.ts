@@ -100,11 +100,11 @@ function inTurnOrder(attachments: readonly ProviderRoomTurnAttachment[] | undefi
 
 /** The images an adapter gives the provider, numbered in the order the notes name them. */
 export function includedRoomTurnImages(attachments: readonly ProviderRoomTurnAttachment[] | undefined): Array<{
-  number: number; fileName: string; mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string;
+  number: number; fileName: string; mimeType: RoomTurnImageMimeType; base64?: string; path?: string;
   /** For an image from a recent message: "from msg_41 by "Alice"", to follow the file name in a label. */
   origin?: string;
 }> {
-  return inTurnOrder(attachments).filter(file => file.status === "image" && file.image && (file.image.data || file.image.path))
+  return inTurnOrder(attachments).filter(file => file.status === "image" && file.image && (file.image.base64 || file.image.path))
     .map((file, position) => ({ number: position + 1, fileName: file.fileName, ...file.image!,
       ...(file.origin ? { origin: `from ${file.origin.messageId} by ${JSON.stringify(file.origin.sender)}` } : {}) }));
 }
@@ -133,7 +133,7 @@ export function formatRoomTurnAttachments(attachments: readonly ProviderRoomTurn
     const name = `${where}: ${JSON.stringify(file.fileName)}${facts ? ` (${facts})` : ""}.`;
     if (file.category === "file") return `- ${name} ${fileNote(file)}${demoNote(file)}`;
     // An image the adapter has nothing to give is described as unavailable, so the numbering matches what is sent.
-    const status = file.status === "image" && !(file.image?.data || file.image?.path) ? "unavailable" : file.status;
+    const status = file.status === "image" && !(file.image?.base64 || file.image?.path) ? "unavailable" : file.status;
     switch (status) {
       case "image": {
         image += 1;

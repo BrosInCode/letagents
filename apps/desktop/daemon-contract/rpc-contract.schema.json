@@ -2573,6 +2573,7 @@
             "denyScope": {
               "enum": [
                 "request",
+                "request_and_turn",
                 "session_pending"
               ],
               "type": "string"

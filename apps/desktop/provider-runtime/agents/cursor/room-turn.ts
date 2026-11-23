@@ -65,7 +65,7 @@ export async function runRoomTurn(
     unlinkPreparationDetach();
   };
   try {
-    await (options.beforeNativeDispatch ?? options.markDispatched)?.();
+    await options.beforeNativeDispatch?.();
     handle.activeRoomTurnId = turnId;
     let turn: LiveTurn;
     try {

@@ -7,6 +7,7 @@
  */
 import type { ProcessIdentity } from "../process-identity.js";
 import type { DatabaseSync } from "node:sqlite";
+import { retireRuntimeRecoveryEffectsForOperationInTransaction } from "../effect-journal/index.js";
 import { sameProviderActionConnectionSnapshot } from "../provider-action-port.js";
 import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, archiveExitedRuntimes, exitedRuntimesToArchive, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, readRuntimeRecovery, recordInterruptedCursorRecovery, type RuntimeRestartRequest, type RuntimeRecoveryRecord } from "../runtime-recovery-journal.js";
 import { cancelInterruptedSupervisedTurn } from "../supervised-agent-history-retention.js";
@@ -281,7 +282,11 @@ export const entriesAndRecovery = storeMethods({
     return this.writeOperationalJournal(current => archiveExitedRuntimes(current, this.readEntryFromDatabase(current, agentId), identity), commitFence);
   },
 
-  async completeRuntimeRecovery(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>) {
+  async completeRuntimeRecovery(
+    operationId: string,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+    daemonGeneration: number,
+  ) {
     return this.writeOperationalJournal(database => {
       const record = readRuntimeRecovery(database, operationId);
       if (!record || record.phase === "prepared") throw new Error("The old runtime has not been proven stopped.");
@@ -290,8 +295,16 @@ export const entriesAndRecovery = storeMethods({
         || (record.mode === "fresh" ? entry.provider_ref != null : entry.provider_ref?.execution_generation_id !== record.execution_generation_id)) {
         throw new Error("The replacement runtime intent changed before recovery completed.");
       }
+      const completedAt = new Date().toISOString();
       database.prepare("UPDATE agent_runtime_recoveries SET phase='complete',updated_at=? WHERE operation_id=?")
-        .run(new Date().toISOString(), operationId);
+        .run(completedAt, operationId);
+      retireRuntimeRecoveryEffectsForOperationInTransaction(database, {
+        agentId: record.agent_id,
+        operationId,
+        expectedEpoch: daemonGeneration,
+        error: "runtime_recovery_complete",
+        nowIso: completedAt,
+      });
     }, commitFence);
   },
 });

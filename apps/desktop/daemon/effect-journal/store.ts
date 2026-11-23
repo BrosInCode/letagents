@@ -534,6 +534,58 @@ export function failEffect(
   );
 }
 
+/** Transitions an `executing` effect back to `prepared` inside an existing fenced SQLite transaction. */
+export function rescheduleEffectForRetryInTransaction(
+  database: DatabaseSync,
+  input: {
+    id: string;
+    expectedEpoch: number;
+    expectedAttemptCount: number;
+    nextAttemptAtMs: number;
+    error: string;
+    nowIso?: string;
+  },
+): EffectRecord {
+  if (!database.isTransaction) {
+    throw new EffectFenceError(
+      "rescheduleEffectForRetryInTransaction requires an active fenced SQLite transaction.",
+    );
+  }
+  const expectedEpoch = assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
+  const expectedAttemptCount = assertPositiveEpoch(input.expectedAttemptCount, "expectedAttemptCount");
+  const nextAttemptAtMs = assertNonNegativeTimestampMs(input.nextAttemptAtMs);
+  if (nextAttemptAtMs === null) {
+    throw new EffectValidationError("Rescheduled retry requires a non-negative nextAttemptAtMs.");
+  }
+  const errorText = truncateEffectError(input.error);
+  const nowIso = input.nowIso ?? new Date().toISOString();
+  const row = database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row | undefined;
+  if (!row) throw new EffectFenceError(`Unknown effect ${input.id}.`);
+  const current = rowToEffectRecord(row);
+  if (current.state !== "executing" || current.epoch !== expectedEpoch || current.attempt_count !== expectedAttemptCount) {
+    throw describeSettleFenceError(database, input.id, "prepared", expectedEpoch, expectedAttemptCount);
+  }
+  if (!current.retryable) {
+    throw new EffectFenceError(`Non-retryable effect ${input.id} cannot be rescheduled for retry.`);
+  }
+  if (current.attempt_count >= current.max_attempts) {
+    throw new EffectFenceError(`Effect ${input.id} cannot retry past max_attempts (${current.max_attempts}).`);
+  }
+  const result = database.prepare(`
+    UPDATE ${TABLE}
+    SET state = 'prepared',
+        outcome = NULL,
+        next_attempt_at_ms = ?,
+        last_error = ?,
+        updated_at = ?
+    WHERE id = ? AND state = 'executing' AND retryable = 1 AND epoch = ? AND attempt_count = ?
+  `).run(nextAttemptAtMs, errorText, nowIso, input.id, expectedEpoch, expectedAttemptCount);
+  if (Number(result.changes) !== 1) {
+    throw describeSettleFenceError(database, input.id, "prepared", expectedEpoch, expectedAttemptCount);
+  }
+  return rowToEffectRecord(database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row);
+}
+
 /** Transitions an `executing` effect back to `prepared` with a retry backoff deadline. */
 export function rescheduleEffectForRetry(
   database: DatabaseSync,
@@ -547,41 +599,9 @@ export function rescheduleEffectForRetry(
     nowIso?: string;
   },
 ): EffectRecord {
-  const expectedEpoch = assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
-  const expectedAttemptCount = assertPositiveEpoch(input.expectedAttemptCount, "expectedAttemptCount");
-  const nextAttemptAtMs = assertNonNegativeTimestampMs(input.nextAttemptAtMs);
-  if (nextAttemptAtMs === null) {
-    throw new EffectValidationError("Rescheduled retry requires a non-negative nextAttemptAtMs.");
-  }
-  const errorText = truncateEffectError(input.error);
-  const nowIso = input.nowIso ?? new Date().toISOString();
-  return withFencedEffectTransaction(database, assertWriteFence, () => {
-    const row = database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row | undefined;
-    if (!row) throw new EffectFenceError(`Unknown effect ${input.id}.`);
-    const current = rowToEffectRecord(row);
-    if (current.state !== "executing" || current.epoch !== expectedEpoch || current.attempt_count !== expectedAttemptCount) {
-      throw describeSettleFenceError(database, input.id, "prepared", expectedEpoch, expectedAttemptCount);
-    }
-    if (!current.retryable) {
-      throw new EffectFenceError(`Non-retryable effect ${input.id} cannot be rescheduled for retry.`);
-    }
-    if (current.attempt_count >= current.max_attempts) {
-      throw new EffectFenceError(`Effect ${input.id} cannot retry past max_attempts (${current.max_attempts}).`);
-    }
-    const result = database.prepare(`
-      UPDATE ${TABLE}
-      SET state = 'prepared',
-          outcome = NULL,
-          next_attempt_at_ms = ?,
-          last_error = ?,
-          updated_at = ?
-      WHERE id = ? AND state = 'executing' AND retryable = 1 AND epoch = ? AND attempt_count = ?
-    `).run(nextAttemptAtMs, errorText, nowIso, input.id, expectedEpoch, expectedAttemptCount);
-    if (Number(result.changes) !== 1) {
-      throw describeSettleFenceError(database, input.id, "prepared", expectedEpoch, expectedAttemptCount);
-    }
-    return rowToEffectRecord(database.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).get(input.id) as Row);
-  });
+  return withFencedEffectTransaction(database, assertWriteFence, () =>
+    rescheduleEffectForRetryInTransaction(database, input),
+  );
 }
 
 /** Transitions an `executing` effect to `uncertain` when its external outcome cannot be proven. */

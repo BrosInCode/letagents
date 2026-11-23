@@ -406,6 +406,14 @@ export interface ProviderStreamEvent {
 export type RoomTurnImageDelivery = "memory" | "file" | null;
 /** An image type every image-capable provider accepts. */
 export type RoomTurnImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+/** The largest image of a turn, in bytes of the image (not of its base64 text). */
+export const ROOM_TURN_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+/** All images of one turn together, in bytes of the images. */
+export const ROOM_TURN_IMAGES_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+/** The most images that a turn takes from recent messages before the activating one. */
+export const ROOM_TURN_RECENT_IMAGE_LIMIT = 4;
+/** The images from recent messages together, in bytes of the images. */
+export const ROOM_TURN_RECENT_IMAGES_MAX_BYTES = 10 * 1024 * 1024;
 /**
  * Which staged room files a running provider's agent can open with its own
  * tools, by kind. Null: none (it cannot read this machine's files).
@@ -424,7 +432,7 @@ export type RoomTurnAttachmentOrigin = {
 /**
  * One file on the activating room message or on a recent message before it,
  * as the daemon prepared it for this turn. The daemon alone downloads; an
- * adapter never sees a bearer or a storage address, only bytes in memory or
+ * adapter never sees a bearer or a storage address, only the bytes as base64 text or
  * a daemon-owned file path.
  */
 export type ProviderRoomTurnAttachment = {
@@ -452,8 +460,13 @@ export type ProviderRoomTurnAttachment = {
     | "context_limit"
     /** Recent messages only: an earlier turn of this agent already received it, so it is not sent again. */
     | "earlier_turn";
-  /** Only for status "image": the bytes in memory, or a daemon-owned file the provider's own process reads. */
-  image?: { mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string };
+  /** Only for status "image": the bytes as base64 text, or a daemon-owned file the provider's own process reads. */
+  image?: {
+    mimeType: RoomTurnImageMimeType;
+    /** The bytes as base64 text. The daemon encodes them one time; the adapter gives this text to its provider. */
+    base64?: string;
+    path?: string;
+  };
   /** A file that is not an image: its notes say "file", not "image". */
   category?: "file";
   /** An HTML demo on the LetAgents server: people may have pinned notes or drawn on it, which read_demo_marks reads. */
@@ -574,6 +587,11 @@ export class ProviderContinuationMissingError extends Error {
   }
 }
 
+/**
+ * The daemon's callbacks for one room turn. Each callback is one step of the turn's operation, and only one step can
+ * wait at a time: await each callback before you call the next one. A second callback while one still waits is
+ * refused ("another step of the operation waits").
+ */
 export interface ProviderRoomTurnOptions {
   /** Persist dispatch intent before the first native turn/start side effect. */
   beforeNativeDispatch?: () => Promise<void>;
@@ -598,8 +616,6 @@ export interface ProviderRoomTurnOptions {
   checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>;
   /** Detach this observer only; never interrupt the provider-native turn. */
   detachSignal?: AbortSignal;
-  /** @deprecated compatibility alias; new adapters must call beforeNativeDispatch. */
-  markDispatched?: () => Promise<void>;
 }
 
 export interface ProviderAdapter {
@@ -734,8 +750,8 @@ export type ProviderNativePermissionEvent =
  * calls ProviderRuntimeBoundary (provider-runtime-boundary.ts), which keeps
  * the handles of this interface inside the package and gives the daemon a
  * runtime reference that is plain data. The callbacks and AbortSignals here
- * still pass through that boundary; its TRANSITIONAL_OPERATIONS list names
- * each one.
+ * do not cross it: the boundary makes them, inside the package, from the
+ * `step` envelopes and the detach of OPERATION_STEPS.
  */
 export interface SupervisedProviderAdapter extends ProviderAdapter {
   controlTurn(handle: ProviderHandle, correction?: string | null, options?: ProviderTurnControlOptions): Promise<ProviderTurnControlResult>;

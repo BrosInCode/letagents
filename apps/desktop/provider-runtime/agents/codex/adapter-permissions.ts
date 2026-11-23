@@ -10,6 +10,7 @@ import { type CodexPermissionObservation, CodexPermissionReplyError } from "./ty
 import { CodexProviderHandle } from "./handle.js";
 import { exactPermissionItemKey, exactTurnKey, recordValue } from "./notifications.js";
 import { permissionFileChanges, permissionParams, permissionProfile } from "./permission-requests.js";
+import { codexDenyDecision } from "./deny-decision.js";
 
 export abstract class CodexAdapterPermissions extends CodexAdapterAttach {
   protected permissionAuthority(
@@ -145,7 +146,9 @@ export abstract class CodexAdapterPermissions extends CodexAdapterAttach {
     const expectedMcpParams = mcpToolCall && params ? structuredClone(params) : null;
     const expectedChanges = fileChange ? permissionFileChanges(options?.expectedFileChanges) : null;
     const requestedPermissions = genericPermission ? structuredClone(permissionProfile(params?.permissions)) : null;
-    const decision = reply === "once" ? "accept" : reply === "reject" ? "decline" : null;
+    // The broker shows the same rule before the click (`denyScope: "request_and_turn"`).
+    const decision = reply === "once" ? "accept"
+      : reply === "reject" ? codexDenyDecision(expectedRequest?.method, params) : null;
     if (!params || params.threadId !== continuation || !decision || (fileChange && !expectedChanges)
       || (genericPermission && !requestedPermissions)
       || (decision === "accept" && expectedRequest.method === "item/fileChange/requestApproval" && params.grantRoot != null)

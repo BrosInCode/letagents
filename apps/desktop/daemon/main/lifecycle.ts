@@ -93,6 +93,8 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
         },
         recordStopped: (agentId) => this.providerExecution?.noteRecordStopped(agentId),
       });
+      this.runtimeRecovery.attachEffectExecutor(this.effectExecutor, database, writeFence);
+      this.roomMoves.attachEffectExecutor(this.effectExecutor, database, writeFence);
       this.executionDelegations.attachApprovalPublisher();
     }
     const effectRecovery = await this.effectExecutor?.recoverOnStartup();

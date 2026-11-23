@@ -323,7 +323,7 @@ test("Codex bounded room turn passes included images as labelled local image pat
 test("Codex bounded room turn adds nothing for an image without a file path or for a turn without images", async () => {
   const withoutPath = await codexRoomTurnInput([
     { index: 1, fileName: "inline.png", mimeType: "image/png", sizeBytes: 3, status: "image",
-      image: { mimeType: "image/png", data: new Uint8Array([1, 2, 3]) } },
+      image: { mimeType: "image/png", base64: Buffer.from([1, 2, 3]).toString("base64") } },
     { index: 2, fileName: "huge.png", mimeType: "image/png", sizeBytes: 11 * 1024 * 1024, status: "too_large" },
   ]);
   assert.equal(withoutPath.input.length, 1, "bytes in memory are not an input Codex reads; only the prompt text is sent");
