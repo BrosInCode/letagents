@@ -16,6 +16,7 @@ import {
   retireRoomMoveEffectsForPurgeInTransaction,
   retireRoomWorkEffectsForPurgeInTransaction,
   retireRoomWorkEffectsInTransaction,
+  retireRuntimeRecoveryEffectsForPurgeInTransaction,
   ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
   ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
   rowToBoundedMcpEffect,
@@ -268,6 +269,11 @@ export const roomMovesAndPurges = storeMethods({
           expectedEpoch: input.daemonGeneration,
           nowIso: now,
         });
+        retireRuntimeRecoveryEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
         const attachment = this.assertPurgePreconditions(database, input.agentId);
         const phase: DaemonPurgePhase = input.externalRevokeRequired
           ? input.workerSessionAttestation === "unknown" ? "reprepare_credentials" : "revoking_credentials"
@@ -482,6 +488,11 @@ export const roomMovesAndPurges = storeMethods({
             nowIso: commitNow,
           });
           retireRoomMoveEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
+          retireRuntimeRecoveryEffectsForPurgeInTransaction(database, {
             agentId: input.agentId,
             expectedEpoch: input.daemonGeneration,
             nowIso: commitNow,

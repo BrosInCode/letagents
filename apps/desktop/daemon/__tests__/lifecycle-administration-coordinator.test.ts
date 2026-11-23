@@ -883,7 +883,7 @@ test("workspace recovery reports an orphan whose ephemeral attempt cleanup throw
   assert.deepEqual(h.orphanRetainedSets, [[orphan]]);
 });
 
-test("purgeAgent reconciles inactive room-work, approval-publication, and room-move executions before preparePurge", async () => {
+test("purgeAgent reconciles inactive room-work, approval-publication, room-move, and runtime-recovery executions before preparePurge", async () => {
   const h = harness();
   h.setEntry(entry({ desired_state: "stopped", observed_state: "stopped", room_id: "local-room", local_room_id: "local-room" }));
   const order: string[] = [];
@@ -901,6 +901,9 @@ test("purgeAgent reconciles inactive room-work, approval-publication, and room-m
   h.ports.reconcileRoomMovesForPurge = (entryId) => {
     order.push(`reconcile-room-moves:${entryId}`);
   };
+  h.ports.reconcileRuntimeRecoveriesForPurge = (entryId) => {
+    order.push(`reconcile-runtime-recoveries:${entryId}`);
+  };
 
   const result = await h.subject.purgeAgent("agent-1", 7, null, true);
   assert.deepEqual(result, { outcome: "purged" });
@@ -908,6 +911,27 @@ test("purgeAgent reconciles inactive room-work, approval-publication, and room-m
     "reconcile-room-work:agent-1",
     "reconcile-approval-publications:agent-1",
     "reconcile-room-moves:agent-1",
+    "reconcile-runtime-recoveries:agent-1",
     "prepare:agent-1",
+  ]);
+});
+
+test("retireAgent retires stale runtime-recovery effects after committing retirement", async () => {
+  const h = harness();
+  const order: string[] = [];
+  const originalUpdate = h.ports.updateManifestEntry;
+  h.ports.updateManifestEntry = async (entryId, update) => {
+    order.push(`update:${entryId}`);
+    return originalUpdate(entryId, update);
+  };
+  h.ports.retireStaleRuntimeRecoveryEffects = (entryId) => {
+    order.push(`retire-stale-runtime-recoveries:${entryId}`);
+  };
+
+  const result = await h.subject.retireAgent("agent-1", 7, null, true);
+  assert.equal(result.outcome, "retired");
+  assert.deepEqual(order, [
+    "update:agent-1",
+    "retire-stale-runtime-recoveries:agent-1",
   ]);
 });

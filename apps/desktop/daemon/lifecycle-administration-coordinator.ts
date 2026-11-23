@@ -91,6 +91,8 @@ export type LifecycleAdministrationPorts = {
   reconcileRoomWorkForPurge?(entryId: string): void;
   reconcileApprovalPublicationsForPurge?(entryId: string): void;
   reconcileRoomMovesForPurge?(entryId: string): void;
+  reconcileRuntimeRecoveriesForPurge?(entryId: string): void;
+  retireStaleRuntimeRecoveryEffects?(entryId: string): void;
   ephemeralProvisioner: {
     garbageCollectOrphans(retainedAttemptIds: ReadonlySet<string>): Promise<string[]>;
   };
@@ -231,6 +233,7 @@ export class LifecycleAdministrationCoordinator {
             detail: "Retired agent has no active room worker session.",
           },
         }));
+        this.ports.retireStaleRuntimeRecoveryEffects?.(entryId);
         return {
           outcome: "retired",
           entry: await this.ports.entryWithDerivedLiveness(entry),
@@ -330,6 +333,7 @@ export class LifecycleAdministrationCoordinator {
         this.ports.reconcileRoomWorkForPurge?.(entryId);
         this.ports.reconcileApprovalPublicationsForPurge?.(entryId);
         this.ports.reconcileRoomMovesForPurge?.(entryId);
+        this.ports.reconcileRuntimeRecoveriesForPurge?.(entryId);
         if (!purge) {
           try {
             const externalRevokeRequired = await this.requiresHostGrant(entry);
