@@ -210,6 +210,10 @@ createSchemaForVersion(database: DatabaseSync): void {
     this.migrateAntigravityProviderStorage(database);
     return;
   }
+  if (existingVersion === 53) {
+    this.migrateReviewArchiveStorage(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }

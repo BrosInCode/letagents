@@ -418,9 +418,12 @@ export class RoomWorkPublisher {
     this.running = true;
     let more = false;
     let failed = false;
+    let archiveWork = false;
     try {
       await this.options.assertCurrent();
       if (this.unavailable()) return;
+      try { archiveWork = this.workspaces.maintainArchives(this.now()); }
+      catch { this.report("storage_unavailable"); }
       // Give changed agents the next pass, alternating with the recovery sweep
       // so continuous live output cannot starve missed hints or retry work.
       // Still only one agent (at most 10k pins/facts) per pass.
@@ -514,7 +517,7 @@ export class RoomWorkPublisher {
       this.running = false;
       // A failed pass may not have consumed its hint. Preserve it, but replace
       // even a wake queued during the failure so lost authority cannot spin.
-      this.schedule(failed ? RETRY_MS : this.settledAgents.size ? 0 : more || this.changedAgents.size ? COALESCE_MS : RETRY_MS, failed);
+      this.schedule(failed ? RETRY_MS : this.settledAgents.size ? 0 : more || archiveWork || this.changedAgents.size ? COALESCE_MS : RETRY_MS, failed);
     }
   }
 }

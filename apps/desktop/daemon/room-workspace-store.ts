@@ -1,4 +1,5 @@
 import { encodeWorkspaceReview, REVIEW_PAGE_SIZE, type WorkspaceReview, type WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
+import { archiveWorkspaceReview, pruneUnreferencedReviewArchives, readArchivedReviewPage, reviewArchiveReference } from '../../../shared/workspace-review-archive.mjs';
 import type { DatabaseSync } from 'node:sqlite';
 import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from '../../../shared/room-agent-work.mjs';
 
@@ -38,7 +39,15 @@ export type WorkspaceCaptureIdentity = { agentId: string; roomId: string; source
 const keys = (key: WorkspaceCaptureIdentity) => [key.agentId, key.roomId, key.sourceMessageId, key.workAttemptId, key.inboxItemId];
 export class RoomWorkspaceStore {
   private readonly reviewSizeSql: 'octet_length(data)' | 'length(data)';
+  private readonly databasePath: string | null;
+  private lastArchiveRow = 0;
+  private finishedArchiveMigration = false;
+  private pruneAfter = 0;
   constructor(private readonly db: DatabaseSync) {
+    // In-memory inspection/test databases are self-contained. Only a fenced
+    // v54+ on-disk supervisor may commit an external archive reference.
+    const file = db.prepare("SELECT file FROM pragma_database_list WHERE name='main'").get()?.file;
+    this.databasePath = file && Number(db.prepare('PRAGMA user_version').get()?.user_version) >= 54 ? String(file) : null;
     // Reviews are gzip/base64 ASCII. In UTF-8, byte length comes from SQLite's
     // record metadata, without reading an already-uploaded archive again.
     // Other database encodings retain the original character-count semantics.
@@ -75,20 +84,59 @@ export class RoomWorkspaceStore {
     catch (error) { if (!(error instanceof RangeError)) throw error; } // Optional archive capacity must never discard a valid preview.
     this.db.exec('SAVEPOINT workspace_review');
     try {
-    const result = this.db.prepare('UPDATE room_workspace_captures SET settled_json=? WHERE agent_id=? AND room_id=? AND source_message_id=? AND work_attempt_id=? AND inbox_item_id=? AND settled_json IS NULL').run(JSON.stringify(parsed), ...keys(key));
-    if (result.changes && encoded) this.db.prepare('INSERT INTO room_workspace_reviews(agent_id,room_id,source_message_id,digest,data) VALUES(?,?,?,?,?)')
-      .run(...keys(key).slice(0, 3), encoded.digest, encoded.data);
-    this.db.exec('RELEASE workspace_review');
+      const result = this.db.prepare('UPDATE room_workspace_captures SET settled_json=? WHERE agent_id=? AND room_id=? AND source_message_id=? AND work_attempt_id=? AND inbox_item_id=? AND settled_json IS NULL').run(JSON.stringify(parsed), ...keys(key));
+      if (result.changes && encoded) {
+        const data = this.databasePath ? archiveWorkspaceReview(this.databasePath, encoded.data, encoded.digest) : encoded.data;
+        this.db.prepare('INSERT INTO room_workspace_reviews(agent_id,room_id,source_message_id,digest,data) VALUES(?,?,?,?,?)')
+          .run(...keys(key).slice(0, 3), encoded.digest, data);
+      }
+      this.db.exec('RELEASE workspace_review');
     } catch (error) { this.db.exec('ROLLBACK TO workspace_review; RELEASE workspace_review'); throw error; }
   }
+
+  /** After startup, move one historical review per publisher pass. The original
+   * row remains authoritative until its fsynced archive has been read back. */
+  maintainArchives(now: number): boolean {
+    if (!this.databasePath || (this.finishedArchiveMigration && now < this.pruneAfter)) return false;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (!this.finishedArchiveMigration) {
+        const row = this.db.prepare(`SELECT rowid,digest,data FROM room_workspace_reviews
+          WHERE rowid>? AND (${this.reviewSizeSql}>90 OR data NOT GLOB '@review1:*') ORDER BY rowid LIMIT 1`).get(this.lastArchiveRow);
+        if (row) {
+          this.lastArchiveRow = Number(row.rowid);
+          const data = archiveWorkspaceReview(this.databasePath, String(row.data), String(row.digest));
+          this.db.prepare('UPDATE room_workspace_reviews SET data=? WHERE rowid=?').run(data, row.rowid);
+          this.db.exec('COMMIT');
+          return true;
+        }
+        this.finishedArchiveMigration = true;
+      }
+      this.pruneAfter = now + 24 * 60 * 60 * 1000;
+      pruneUnreferencedReviewArchives(this.databasePath, this.db.prepare(`SELECT data FROM room_workspace_reviews
+        WHERE ${this.reviewSizeSql}<=90 AND data GLOB '@review1:*'`).iterate());
+      this.db.exec('COMMIT');
+      return false;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
   pendingPage(agentId: string, roomId: string, sourceMessageId: string): WorkspaceReviewPage | null {
+    // A v1 reference fits in 90 bytes. The length guard avoids fetching a
+    // completed legacy archive just to find out which representation it uses.
     const row = this.db.prepare(`SELECT digest,uploaded_pages,${this.reviewSizeSql} AS size,
-      CASE WHEN uploaded_pages*? < ${this.reviewSizeSql}
-        THEN substr(data,uploaded_pages*?+1,?) END AS page
+      CASE WHEN ${this.reviewSizeSql}<=90 THEN data
+        WHEN uploaded_pages*? < ${this.reviewSizeSql} THEN substr(data,uploaded_pages*?+1,?) END AS page
       FROM room_workspace_reviews WHERE agent_id=? AND room_id=? AND source_message_id=?`)
       .get(REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, agentId, roomId, sourceMessageId);
-    if (!row || Number(row.uploaded_pages) * REVIEW_PAGE_SIZE >= Number(row.size)) return null;
-    return { digest: String(row.digest), index: Number(row.uploaded_pages), total: Math.ceil(Number(row.size) / REVIEW_PAGE_SIZE), data: String(row.page) };
+    if (!row) return null;
+    const index = Number(row.uploaded_pages);
+    const reference = reviewArchiveReference(row.page);
+    const size = reference?.size ?? Number(row.size);
+    if (index * REVIEW_PAGE_SIZE >= size) return null;
+    const digest = String(row.digest);
+    if (reference && !this.databasePath) throw new Error('Workspace review archive location is unavailable.');
+    const data = reference ? readArchivedReviewPage(this.databasePath!, reference, digest, index) : String(row.page);
+    return { digest, index, total: Math.ceil(size / REVIEW_PAGE_SIZE), data };
   }
   acknowledgePage(agentId: string, roomId: string, sourceMessageId: string, page: WorkspaceReviewPage): void {
     this.db.prepare('UPDATE room_workspace_reviews SET uploaded_pages=uploaded_pages+1 WHERE agent_id=? AND room_id=? AND source_message_id=? AND digest=? AND uploaded_pages=?')

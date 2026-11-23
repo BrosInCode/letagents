@@ -3,7 +3,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { compactSupervisedTerminalHistory } from "../supervised-agent-history-retention.js";
 import type { DaemonStateSchema } from "./schema.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 53;
+export const DAEMON_STATE_SCHEMA_VERSION = 54;
 export const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 export const workerExecutionBindingsSql = `CREATE TABLE worker_execution_bindings (
   entry_id TEXT NOT NULL, room_id TEXT NOT NULL, api_url TEXT NOT NULL,

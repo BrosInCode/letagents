@@ -2563,7 +2563,7 @@ function insertAntigravityCutover(database: DatabaseSync, extra: Record<string, 
 }
 
 test("v53 admits Antigravity without rewriting any runtime birth, cutover or reference to them", async () => {
-  assert.equal(DAEMON_STATE_SCHEMA_VERSION, 53);
+  assert.ok(DAEMON_STATE_SCHEMA_VERSION >= 53);
   const env = await fixture();
   try {
     seedLegacyEvidence(env.database); seedV18Evidence(env.database); seedDormantCutovers(env.database);

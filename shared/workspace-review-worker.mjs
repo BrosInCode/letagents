@@ -1,5 +1,6 @@
 import { parentPort } from 'node:worker_threads';
 import { DatabaseSync } from 'node:sqlite';
+import { readArchivedReview, reviewArchiveReference } from './workspace-review-archive.mjs';
 import { decodeWorkspaceReview, parseWorkspaceReviewPage } from './workspace-review.mjs';
 import { createWorkspaceDiffIndex, readWorkspaceDiffPage } from './workspace-diff.mjs';
 
@@ -17,7 +18,11 @@ parentPort.on('message', ({ id, method, input }) => {
         const row = db.prepare(`SELECT r.data,r.digest FROM room_workspace_reviews r JOIN room_work_publications p
           USING(agent_id,room_id,source_message_id) WHERE p.room_id=? AND p.agent_key=? AND p.source_message_id=? AND p.api_origin=? AND p.state='open'`)
           .get(input.roomId, input.agentKey, input.sourceMessageId, input.apiOrigin);
-        if (row) review = decodeWorkspaceReview(String(row.data), String(row.digest));
+        if (row) {
+          const reference = reviewArchiveReference(row.data);
+          const data = reference ? readArchivedReview(input.databasePath, reference, row.digest) : row.data;
+          review = decodeWorkspaceReview(data, row.digest);
+        }
       } catch { review = null; } finally { db?.close(); }
       result = review ? describe() : null;
     } else if (method === 'append') {
