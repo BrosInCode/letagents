@@ -2526,6 +2526,16 @@ test("real RoomMoveCoordinator rollback preserves source-room retries across int
     scheduleRecovery: () => {},
     nowIso: () => new Date(now).toISOString(),
   });
+  const moveExecutor = new EffectExecutor({
+    getDatabase: () => (f.db.isOpen ? f.db : null),
+    currentDaemonGeneration: () => 1,
+    assertCurrent: async () => {},
+    assertWriteFence: () => {},
+    isClosing: () => false,
+    nowMs: () => now,
+  });
+  t.after(() => moveExecutor.fence());
+  coordinator.attachEffectExecutor(moveExecutor, f.db, () => {});
 
   // 1. Fail both summary upload and grouped peer report at t=0 -> both prepared with 30s backoff.
   f.captureMessage(1);
