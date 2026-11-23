@@ -532,8 +532,9 @@ test("births answers only from a list whose every length and offset it checks; a
   const negative = run("negative-time", ["1000"]);
   assert.equal(negative.status, 0, negative.stderr);
   assert.deepEqual(JSON.parse(negative.stdout), { births: [{ pid: 1000, listed: true, creationTime: null }] });
+  // The last three: the helper's own entry, the anchor that proves the offsets, is missing, wrong or doubled.
   for (const mode of ["truncated", "entry-cut", "over-length", "next-outside", "next-short", "next-misaligned", "wide-pid",
-    "duplicate", "status-error", "always-mismatch", "too-large"]) {
+    "duplicate", "status-error", "always-mismatch", "too-large", "self-missing", "self-wrong-time", "self-twice"]) {
     const result = run(mode);
     assert.equal(result.status, 121, `${mode}: exit ${result.status}`);
     assert.equal(result.stdout, "", `${mode} printed an answer`);

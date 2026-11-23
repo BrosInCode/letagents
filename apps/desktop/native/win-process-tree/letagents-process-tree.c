@@ -61,9 +61,13 @@
  *       pid. At most 256 pids. Microsoft documents that this call and its
  *       structures may change, so the helper resolves it at run time, reads
  *       only the 64-bit layout (64-bit builds only), and checks every length
- *       and entry offset; any layout it does not know, a failed call, or a
- *       list that keeps growing past its bounded retries is exit 121, never a
- *       partial answer. Exit 0; 120: usage; 121: error.
+ *       and entry offset. Every snapshot must also list this helper itself
+ *       exactly once, with the creation time GetProcessTimes gives it: that
+ *       proves on each call that the process id and creation time are read
+ *       at the right offsets, and that the list is not empty or partial. Any
+ *       layout it does not know, a failed call, or a list that keeps growing
+ *       past its bounded retries is exit 121, never a partial answer. Exit 0;
+ *       120: usage; 121: error.
  *
  * Build: apps/desktop/native/win-process-tree/build.mjs (MSVC, /MT /Brepro).
  */
@@ -788,10 +792,14 @@ static BYTE *take_process_snapshot(ULONG *length) {
    0 when the snapshot is not the layout this helper knows: an entry or an
    offset outside the bytes written, an offset shorter than an entry or not
    8-byte aligned, a process id wider than 32 bits, a wanted pid listed twice,
-   or more entries than any real list holds. */
-static int read_snapshot_births(const BYTE *buffer, ULONG length, birth_entry *wanted, DWORD count) {
+   more entries than any real list holds, or this helper (self_pid) not listed
+   exactly once with its own creation time (self_created): the anchor that
+   proves the id and time offsets against the documented API on every call. */
+static int read_snapshot_births(const BYTE *buffer, ULONG length, birth_entry *wanted, DWORD count,
+                                DWORD self_pid, u64 self_created) {
   ULONG offset = 0;
   DWORD index, entries = 0;
+  int self_seen = 0;
   for (index = 0; index < count; index++) {
     wanted[index].listed = 0;
     wanted[index].creation = 0;
@@ -805,6 +813,10 @@ static int read_snapshot_births(const BYTE *buffer, ULONG length, birth_entry *w
     memcpy(&created, buffer + offset + SPI_CREATE_TIME, sizeof created);
     memcpy(&id, buffer + offset + SPI_UNIQUE_PROCESS_ID, sizeof id);
     if (id > 0xffffffffULL) return 0;
+    if ((DWORD)id == self_pid) {
+      if (self_seen || created <= 0 || (u64)created != self_created) return 0;
+      self_seen = 1;
+    }
     for (index = 0; index < count; index++) {
       if (wanted[index].pid != (DWORD)id) continue;
       if (wanted[index].listed) return 0;
@@ -812,7 +824,7 @@ static int read_snapshot_births(const BYTE *buffer, ULONG length, birth_entry *w
       wanted[index].creation = created > 0 ? (u64)created : 0;
     }
     if (++entries > SNAPSHOT_MAX_ENTRIES) return 0;
-    if (next == 0) return 1;
+    if (next == 0) return self_seen;
     if (next < SPI_MIN_ENTRY || (next & 7u) != 0 || next > length - offset) return 0;
     offset += next;
   }
@@ -821,6 +833,7 @@ static int read_snapshot_births(const BYTE *buffer, ULONG length, birth_entry *w
 static int run_births(int argc, wchar_t **argv) {
   static birth_entry wanted[MAX_BIRTH_PIDS];
   static char out[MAX_BIRTH_PIDS * 80 + 32];
+  FILETIME self_created, exit_time, kernel, user;
   DWORD count = 0, index;
   ULONG length = 0;
   BYTE *snapshot;
@@ -831,12 +844,16 @@ static int run_births(int argc, wchar_t **argv) {
     if (!parse_decimal(argv[argument], 0xffffffffULL, &value) || value == 0) return EXIT_USAGE;
     wanted[count++].pid = (DWORD)value;
   }
+  if (!GetProcessTimes(GetCurrentProcess(), &self_created, &exit_time, &kernel, &user)) {
+    fail_message("cannot read this helper's creation time", GetLastError());
+    return EXIT_FAILED;
+  }
   snapshot = take_process_snapshot(&length);
   if (!snapshot) {
     fail_message("cannot read the system process list", GetLastError());
     return EXIT_FAILED;
   }
-  if (!read_snapshot_births(snapshot, length, wanted, count)) {
+  if (!read_snapshot_births(snapshot, length, wanted, count, GetCurrentProcessId(), filetime_value(self_created))) {
     HeapFree(GetProcessHeap(), 0, snapshot);
     fail_message("the system process list has a layout this helper does not know", ERROR_INVALID_DATA);
     return EXIT_FAILED;
