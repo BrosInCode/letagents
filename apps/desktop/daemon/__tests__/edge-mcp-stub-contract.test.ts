@@ -28,11 +28,16 @@ function wrapperCompletionValidator(platform: NodeJS.Platform): CompletionValida
   return new Function(`${match[0]}\nreturn hasRequiredCompletionContract;`)() as CompletionValidator;
 }
 
-/** Start the materialized stand-in, then send the wrapper's initialize and tools/list. */
-async function standInToolsList(contract: EdgeDevMcpCompletionContract): Promise<unknown> {
-  const root = await mkdtemp(join(tmpdir(), `letagents-edge-mcp-stub-${contract}-`));
+/**
+ * Start the materialized stand-in, then send the wrapper's initialize and tools/list.
+ * With no contract, the stand-in is built exactly as startEdgeDaemon builds it for
+ * every existing caller: with the harness's default.
+ */
+async function standInToolsList(contract?: EdgeDevMcpCompletionContract): Promise<unknown> {
+  const root = await mkdtemp(join(tmpdir(), `letagents-edge-mcp-stub-${contract ?? "default"}-`));
   try {
-    const entry = await materializeDevMcpPackage(join(root, "dev-mcp"), contract);
+    const dir = join(root, "dev-mcp");
+    const entry = contract === undefined ? await materializeDevMcpPackage(dir) : await materializeDevMcpPackage(dir, contract);
     const child = spawn(process.execPath, [entry], { stdio: ["pipe", "pipe", "pipe"] });
     const exited = new Promise<void>((resolve) => {
       child.once("exit", () => resolve());
@@ -82,7 +87,8 @@ async function standInToolsList(contract: EdgeDevMcpCompletionContract): Promise
 for (const platform of ["darwin", "win32"] as const) {
   test(`the Cursor wrapper (${platform}) accepts the edge stand-in's default completion contract`, async () => {
     const validator = wrapperCompletionValidator(platform);
-    const response = await standInToolsList("product");
+    // No contract argument: this is the default that startEdgeDaemon uses (the cr8 case).
+    const response = await standInToolsList();
     assert.equal(validator(response), true);
     const tools = (response as { result: { tools: Array<{ name: string; inputSchema: unknown }> } }).result.tools;
     const completion = tools.filter((tool) => tool.name === "complete_room_turn");
