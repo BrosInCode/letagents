@@ -110,7 +110,9 @@ export async function runRoomTurn(
           const previousStack = recoveryError.stack;
           recoveryError.message = `${previous} (after launch failure: ${error.message})`;
           if (typeof previousStack === "string" && previous && previousStack.includes(previous)) {
-            recoveryError.stack = previousStack.replace(previous, recoveryError.message);
+            const extended = recoveryError.message;
+            // A function replacement keeps `$&`-style text in a launch error literal.
+            recoveryError.stack = previousStack.replace(previous, () => extended);
           }
         }
         throw recoveryError;
