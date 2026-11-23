@@ -8,10 +8,13 @@ import test from "node:test";
 import { DaemonStateSchema } from "../daemon-state-database.js";
 import {
   LifecycleProjectionLedger,
+  resetLegacyLifecycleProjectionLedgerSchema,
+  validateLegacyLifecycleProjectionLedgerSchema,
   validateLifecycleProjectionLedgerSchema,
   type LifecycleProjectionObservation,
   type LifecycleTypedProjectionObservation,
 } from "../lifecycle-projection-ledger.js";
+import { restorePreAntigravityLifecycleProjectionFixture } from "./helpers/pre-antigravity-fixture.js";
 
 const base = {
   agentId: "agent",
@@ -327,5 +330,58 @@ test("a capped agent cannot consume new lanes or starve another agent", async ()
     assert.equal(env.database.prepare("SELECT observation_count FROM lifecycle_projection_lanes WHERE agent_id='another-agent'").get()!.observation_count, 1);
     assert.equal(ledger.diagnostics().providers.codex.observationUnavailable, 1_023);
     validateLifecycleProjectionLedgerSchema(env.database);
+  } finally { await env.cleanup(); }
+});
+
+test("an Antigravity lane pairs typed and legacy witnesses like every other provider", async () => {
+  const env = await fixture();
+  try {
+    const ledger = new LifecycleProjectionLedger(env.database, () => 100);
+    const antigravity = { ...base, provider: "antigravity" as const };
+    for (const observation of [
+      { ...antigravity, nativeEventId: "agy-active", phase: "turn_active" as const, state: "working" as const },
+      { ...antigravity, nativeEventId: "agy-terminal", phase: "turn_terminal" as const, state: "terminal" as const },
+    ]) {
+      ledger.recordLegacy(observation);
+      recordTyped(env.database, ledger, observation);
+    }
+    assert.deepEqual(ledger.diagnostics().providers.antigravity, {
+      comparedSegments: 1, matched: 2, missingInTyped: 0, missingInLegacy: 0,
+      pairedButDifferent: 0, conflicts: 0, observationUnavailable: 0,
+    });
+    assert.equal(ledger.diagnostics().providers.codex.comparedSegments, 0, "evidence stays with its own provider");
+    ledger.recordUnavailable("antigravity");
+    assert.equal(ledger.diagnostics().providers.antigravity.observationUnavailable, 1);
+    validateLifecycleProjectionLedgerSchema(env.database);
+  } finally { await env.cleanup(); }
+});
+
+test("a four-provider ledger validates only as its own provider set and resets to a fresh five-provider epoch", async () => {
+  const env = await fixture();
+  try {
+    const ledger = new LifecycleProjectionLedger(env.database, () => 100);
+    for (const observation of [
+      { ...base, nativeEventId: "active", phase: "turn_active" as const, state: "working" as const },
+      { ...base, nativeEventId: "terminal", phase: "turn_terminal" as const, state: "terminal" as const },
+    ]) {
+      ledger.recordLegacy(observation);
+      recordTyped(env.database, ledger, observation);
+    }
+    assert.throws(() => validateLegacyLifecycleProjectionLedgerSchema(env.database, "pre_antigravity"), /invalid or missing schema/);
+    restorePreAntigravityLifecycleProjectionFixture(env.database);
+    validateLegacyLifecycleProjectionLedgerSchema(env.database, "pre_antigravity");
+    assert.throws(() => validateLifecycleProjectionLedgerSchema(env.database), /invalid or missing schema/);
+    assert.throws(() => validateLegacyLifecycleProjectionLedgerSchema(env.database), /invalid or missing schema/,
+      "the default legacy set is still the three-provider ledger");
+    assert.throws(() => resetLegacyLifecycleProjectionLedgerSchema(env.database, "pre_antigravity"), /schema migration transaction/);
+    env.database.exec("BEGIN IMMEDIATE");
+    assert.throws(() => resetLegacyLifecycleProjectionLedgerSchema(env.database, "pre_open_model"), /invalid or missing schema/);
+    resetLegacyLifecycleProjectionLedgerSchema(env.database, "pre_antigravity");
+    env.database.exec("COMMIT");
+    validateLifecycleProjectionLedgerSchema(env.database);
+    assert.deepEqual(env.database.prepare("SELECT * FROM lifecycle_projection_pairs").all(), []);
+    assert.deepEqual(env.database.prepare("SELECT provider,compared_segments FROM lifecycle_projection_totals ORDER BY provider")
+      .all().map((row) => ({ ...row })), ["antigravity", "claude-code", "codex", "cursor", "open-model"]
+      .map((provider) => ({ provider, compared_segments: 0 })));
   } finally { await env.cleanup(); }
 });

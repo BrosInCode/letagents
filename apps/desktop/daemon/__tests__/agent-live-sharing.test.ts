@@ -14,6 +14,7 @@ import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/
 import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { restorePreAntigravityProviderFixture } from "./helpers/pre-antigravity-fixture.js";
 
 /**
  * A real daemon on its own socket and database. An agent's tools hold the
@@ -200,6 +201,7 @@ test("a schema 50 database gains the live sharing column off for every existing 
     await original.close();
     const old = new DatabaseSync(databasePath);
     // Schema v50 has the image input column and no live sharing column.
+    restorePreAntigravityProviderFixture(old);
     old.exec("ALTER TABLE agent_configurations DROP COLUMN live_sharing; UPDATE manifest_metadata SET schema_version=50; PRAGMA user_version=50");
     old.exec("UPDATE agent_configurations SET image_input=1 WHERE agent_id='agent_1'");
     old.close();

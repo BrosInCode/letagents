@@ -66,7 +66,8 @@ freezeLegacyActiveRuntimeBirths(database: DatabaseSync): void {
         AND ((c.provider='codex' AND d.provider_connection_kind='codex_app_server')
           OR (c.provider='claude-code' AND d.provider_connection_kind='claude_cli')
           OR (c.provider='cursor' AND d.provider_connection_kind='cursor_cli')
-          OR (c.provider='open-model' AND d.provider_connection_kind='opencode_server'))
+          OR (c.provider='open-model' AND d.provider_connection_kind='opencode_server')
+          OR (c.provider='antigravity' AND d.provider_connection_kind='antigravity_acp'))
       ORDER BY d.agent_id`).all() as Row[];
   for (const candidate of candidates) {
     const agentId = String(candidate.agent_id);
@@ -84,7 +85,7 @@ freezeLegacyActiveRuntimeBirths(database: DatabaseSync): void {
         connectionPid,
         processIdentity,
       ),
-      provider: String(candidate.provider) as "codex" | "claude-code" | "cursor" | "open-model",
+      provider: String(candidate.provider) as "codex" | "claude-code" | "cursor" | "open-model" | "antigravity",
       authorityMode: "legacy",
       configRevision: Number(candidate.config_revision),
       createdAtMs: 0,

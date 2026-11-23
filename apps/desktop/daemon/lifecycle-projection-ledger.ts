@@ -3,7 +3,11 @@ import { DatabaseSync } from "node:sqlite";
 
 import { executionIdentity } from "./execution-protocol.js";
 
-export type LifecycleProjectionProvider = "codex" | "claude-code" | "cursor" | "open-model";
+export const lifecycleProjectionProviders = ["codex", "claude-code", "cursor", "open-model", "antigravity"] as const;
+export type LifecycleProjectionProvider = typeof lifecycleProjectionProviders[number];
+export function isLifecycleProjectionProvider(value: unknown): value is LifecycleProjectionProvider {
+  return (lifecycleProjectionProviders as readonly unknown[]).includes(value);
+}
 export type LifecycleCaptureAdmissionStatus = "pending" | "ready" | "unavailable";
 export type LifecycleCaptureAdmissionDiagnostics = Record<LifecycleProjectionProvider, LifecycleCaptureAdmissionStatus>;
 export type LifecycleProjectionPhase = "turn_active" | "turn_terminal";
@@ -49,19 +53,28 @@ export type LifecycleProjectionDiagnostics = {
 export function unavailableLifecycleProjectionDiagnostics(): LifecycleProjectionDiagnostics {
   const empty = () => ({ comparedSegments: 0, matched: 0, missingInTyped: 0, missingInLegacy: 0,
     pairedButDifferent: 0, conflicts: 0, observationUnavailable: 0 });
-  return { available: false, providers: { codex: empty(), "claude-code": empty(), cursor: empty(), "open-model": empty() } };
+  return { available: false, providers: { codex: empty(), "claude-code": empty(), cursor: empty(), "open-model": empty(),
+    antigravity: empty() } };
 }
 
 type Row = Record<string, string | number | null>;
 const MAX_LANES = 1_024;
 const MAX_OBSERVATIONS_PER_AGENT = 10_000;
-const providers = ["codex", "claude-code", "cursor", "open-model"] as const;
-const legacyProviders = ["codex", "claude-code", "cursor"] as const;
+const providers = lifecycleProjectionProviders;
+/**
+ * Earlier ledgers admitted fewer providers. Daemon state v28 to v31 carries
+ * the three-provider ledger; v32 to v52 carries the four-provider ledger.
+ */
+export type LegacyLifecycleProjectionProviderSet = "pre_open_model" | "pre_antigravity";
+const legacyProviders: Record<LegacyLifecycleProjectionProviderSet, readonly string[]> = {
+  pre_open_model: ["codex", "claude-code", "cursor"],
+  pre_antigravity: ["codex", "claude-code", "cursor", "open-model"],
+};
 const schema = [
   `CREATE TABLE lifecycle_projection_lanes (
     lane_id TEXT PRIMARY KEY CHECK(length(lane_id)=48 AND lane_id GLOB 'lpl1:*'),
     agent_id TEXT NOT NULL CHECK(length(agent_id) BETWEEN 1 AND 512),
-    provider TEXT NOT NULL CHECK(provider IN ('codex','claude-code','cursor','open-model')),
+    provider TEXT NOT NULL CHECK(provider IN ('codex','claude-code','cursor','open-model','antigravity')),
     work_attempt_id TEXT NOT NULL CHECK(length(work_attempt_id) BETWEEN 1 AND 512),
     execution_generation_id TEXT NOT NULL CHECK(length(execution_generation_id) BETWEEN 1 AND 512),
     typed_sequence INTEGER NOT NULL DEFAULT 0 CHECK(typed_sequence BETWEEN 0 AND 9007199254740991),
@@ -104,7 +117,7 @@ const schema = [
   `CREATE UNIQUE INDEX lifecycle_projection_pairs_legacy_sequence ON lifecycle_projection_pairs(lane_id,legacy_sequence)
     WHERE legacy_sequence IS NOT NULL`,
   `CREATE TABLE lifecycle_projection_totals (
-    provider TEXT PRIMARY KEY CHECK(provider IN ('codex','claude-code','cursor','open-model')),
+    provider TEXT PRIMARY KEY CHECK(provider IN ('codex','claude-code','cursor','open-model','antigravity')),
     compared_segments INTEGER NOT NULL DEFAULT 0 CHECK(compared_segments BETWEEN 0 AND 9007199254740991),
     matched INTEGER NOT NULL DEFAULT 0 CHECK(matched BETWEEN 0 AND 9007199254740991),
     missing_in_typed INTEGER NOT NULL DEFAULT 0 CHECK(missing_in_typed BETWEEN 0 AND 9007199254740991),
@@ -156,7 +169,11 @@ const schema = [
   `CREATE TRIGGER lifecycle_projection_total_no_delete BEFORE DELETE ON lifecycle_projection_totals
     BEGIN SELECT RAISE(ABORT,'Lifecycle projection totals cannot be deleted'); END`,
 ];
-const legacySchema = schema.map((definition) => definition.replaceAll(",'open-model'", ""));
+const preAntigravitySchema = schema.map((definition) => definition.replaceAll(",'antigravity'", ""));
+const legacySchemas: Record<LegacyLifecycleProjectionProviderSet, readonly string[]> = {
+  pre_open_model: preAntigravitySchema.map((definition) => definition.replaceAll(",'open-model'", "")),
+  pre_antigravity: preAntigravitySchema,
+};
 
 function normalizedSql(sql: string): string {
   return (sql.match(/'(?:''|[^'])*'|[^']+/g) ?? []).map(part => part.startsWith("'") ? part
@@ -203,9 +220,16 @@ export function validateLifecycleProjectionLedgerSchema(database: DatabaseSync):
   validateLifecycleProjectionLedger(database, schema, providers);
 }
 
-/** Validate the exact three-provider ledger shipped before Open Model shadow capture. */
-export function validateLegacyLifecycleProjectionLedgerSchema(database: DatabaseSync): void {
-  validateLifecycleProjectionLedger(database, legacySchema, legacyProviders);
+/**
+ * Validate one exact earlier ledger: by default the three-provider ledger
+ * shipped before Open Model shadow capture, or the four-provider ledger
+ * shipped before Antigravity.
+ */
+export function validateLegacyLifecycleProjectionLedgerSchema(
+  database: DatabaseSync,
+  providerSet: LegacyLifecycleProjectionProviderSet = "pre_open_model",
+): void {
+  validateLifecycleProjectionLedger(database, legacySchemas[providerSet], legacyProviders[providerSet]);
 }
 
 /**
@@ -213,9 +237,12 @@ export function validateLegacyLifecycleProjectionLedgerSchema(database: Database
  * change starts a fresh evidence epoch instead of translating incomparable
  * soak counters. The caller owns the schema-migration transaction.
  */
-export function resetLegacyLifecycleProjectionLedgerSchema(database: DatabaseSync): void {
+export function resetLegacyLifecycleProjectionLedgerSchema(
+  database: DatabaseSync,
+  providerSet: LegacyLifecycleProjectionProviderSet = "pre_open_model",
+): void {
   if (!database.isTransaction) throw new Error("Lifecycle projection reset requires the schema migration transaction.");
-  validateLegacyLifecycleProjectionLedgerSchema(database);
+  validateLegacyLifecycleProjectionLedgerSchema(database, providerSet);
   database.exec(`DROP TABLE lifecycle_projection_pairs;
     DROP TABLE lifecycle_projection_lanes;
     DROP TABLE lifecycle_projection_totals;`);

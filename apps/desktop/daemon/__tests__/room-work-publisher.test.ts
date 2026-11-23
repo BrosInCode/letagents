@@ -19,6 +19,7 @@ import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { restorePreAntigravityProviderFixture } from "./helpers/pre-antigravity-fixture.js";
 
 /**
  * The publisher arms its own flush timer (1 s after a change, at once after a settled hint). When that
@@ -29,7 +30,7 @@ import { removeTestDirectory } from "../../electron/__tests__/harness.js";
  * the stores' own bounded waits (for example a busy SQLite open on Windows) still need. Tests that drive
  * the publisher's timers themselves, or that need real time, pass realTimers.
  */
-async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex", { realTimers = false } = {}) {
+async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" | "antigravity" = "codex", { realTimers = false } = {}) {
   if (!realTimers) t.mock.method(RoomWorkPublisher.prototype as unknown as { schedule(): void }, "schedule", () => {});
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
   const workspacePath = await mkdtemp(join(tmpdir(), 'publisher-workspace-'));
@@ -792,7 +793,7 @@ test("HTTP publication validates exact receipts, both clear responses, and never
   }
 });
 
-for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const) {
+for (const provider of ["codex", "claude-code", "cursor", "open-model", "antigravity"] as const) {
   test(`${provider} settles unchanged work without a workspace publication across restart`, async t => {
     const f = await fixture(t, provider);
     f.options.workspaceLocation = async () => f.location;
@@ -1262,6 +1263,7 @@ test('v36 upgrades existing publication receipts to store real diffs without los
   f.db.exec(String(definitions[0].sql).replaceAll('524288', '2048'));
   f.db.exec('INSERT INTO room_work_publications SELECT * FROM saved_publications; DROP TABLE saved_publications');
   for (const definition of definitions.slice(1)) f.db.exec(String(definition.sql));
+  restorePreAntigravityProviderFixture(f.db);
   f.db.exec('PRAGMA user_version=36; UPDATE manifest_metadata SET schema_version=36');
   new DaemonStateSchema().createSchema(f.db);
   f.restart();
@@ -1403,6 +1405,7 @@ test('v38 migrates additively to full reviews without changing existing captured
   f.captureMessage(); await f.publisher.flush();
   const before = f.row();
   f.publisher.close();
+  restorePreAntigravityProviderFixture(f.db);
   f.db.exec('DROP TABLE room_workspace_reviews; PRAGMA user_version=38; UPDATE manifest_metadata SET schema_version=38');
   new DaemonStateSchema().createSchema(f.db);
   f.restart();

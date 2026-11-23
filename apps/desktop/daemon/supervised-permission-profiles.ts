@@ -137,6 +137,39 @@ const cursorProfiles: readonly SupervisedPermissionProfile[] = [
   },
 ];
 
+const antigravityProfiles: readonly SupervisedPermissionProfile[] = [
+  {
+    id: "read_only", label: "Read-only",
+    description: "Can read and search files in its workspace, search the web, and use LetAgents room tools.",
+    status: "available", risk: "low",
+    detail: "Antigravity asks before every edit, every command and every read outside its workspace, and LetAgents refuses each one. Reading the workspace, reading the files on the room message, and web search do not ask. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking. Your own Antigravity settings, plugins and MCP servers do not load unless you turn on your own setup.", isDefault: true,
+  },
+  {
+    id: "ask_before_write", label: "Ask before writes",
+    description: "Requires approval before Antigravity can change files or run commands.",
+    status: "available", risk: "medium",
+    detail: "Reading the workspace and LetAgents room tools need no approval. Each edit, each command and each read outside the workspace asks you first, and each approval allows one action. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking.", isDefault: false,
+  },
+  {
+    id: "auto_review", label: "Auto",
+    description: "Lets Antigravity approve edits and safe commands itself.",
+    status: "available", risk: "high",
+    detail: "Antigravity's own review decides. An action it would ask about is refused. Anything a room message asks for counts as approved, including commands that reach outside your project. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking.", isDefault: false,
+  },
+  {
+    id: "full_access", label: "Full access",
+    description: "Can change files and run commands on this computer without asking.",
+    status: "available", risk: "high",
+    detail: "Commands can access files outside the project. Use only for work you trust.", isDefault: false,
+  },
+  {
+    id: "sandboxed_write", label: "Sandboxed writes",
+    description: "Restricted file editing is unavailable for Antigravity here.",
+    status: "unsupported", risk: "medium",
+    detail: "Choose another available access level.", isDefault: false,
+  },
+];
+
 /**
  * Why Codex has no Read-only access on Windows. Read-only promises that a
  * command cannot read the owner's Codex sign-in file, and Codex 0.166.0 on
@@ -156,7 +189,9 @@ export function supervisedPermissionProfilesForProvider(providerId: string): Sup
       ? codexProfiles
       : provider === "cursor"
         ? cursorProfiles
-        : [];
+        : provider === "antigravity"
+          ? antigravityProfiles
+          : [];
   return profiles.map((profile) => ({ ...profile }));
 }
 
@@ -181,6 +216,19 @@ const OWNER_SETUP_DESCRIPTIONS: Readonly<Record<string, Readonly<Record<string, 
     },
     full_access: {
       detail: "Commands can access files outside your project. Use only for work you trust. While your own setup is on, the project's own Claude settings, hooks, skills, commands and MCP servers are not loaded. Its CLAUDE.md still is.",
+    },
+  },
+  antigravity: {
+    // agy runs a plugin's hooks with no request to answer, at every level (verified on agy 1.5.15).
+    read_only: {
+      description: "Can read and search files in its workspace, search the web, and use LetAgents room tools. Your plugins' hooks run as you set them up.",
+      detail: "Its own tools cannot change files or run commands, and your MCP tools are refused too: LetAgents refuses each request. Your plugins' hooks run without asking. Nothing asks you.",
+    },
+    ask_before_write: {
+      detail: "Reading the workspace and LetAgents room tools need no approval. Each edit, each command, each read outside the workspace and each of your MCP tools asks you first. Your plugins' hooks run without asking.",
+    },
+    auto_review: {
+      detail: "Antigravity's own review decides, and what it would ask about is refused. Anything a room message asks for counts as approved. Your plugins' hooks run without asking.",
     },
   },
   codex: {

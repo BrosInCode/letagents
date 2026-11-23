@@ -15,6 +15,7 @@ import {
   seedApprovalJournalTurn,
   admitApproval,
   approvalJournalRequest,
+  entry,
   fixture,
 } from "./helpers/manifest-store-sqlite-fixture.js";
 
@@ -334,6 +335,57 @@ test("approval journal accepts exact Codex execution evidence but never a socket
   } finally { database.close(); await store.close(); await env.cleanup(); }
 });
 
+for (const provider of ["claude-code", "antigravity"] as const) {
+  test(`approval journal settles ${provider} requests only by exact execution or prompt closure, never by a send`, async () => {
+    const env = await fixture(); const store = new ManifestStore(env.databasePath);
+    await store.load(); const database = new DatabaseSync(env.databasePath);
+    try {
+      const authority = await seedApprovalJournalTurn(env, store, database, provider);
+      // Each provider's authority names its own native connection, never the other Claude-shaped one's.
+      const other = provider === "claude-code" ? "antigravity_acp" as const : "claude_cli" as const;
+      const { input, expected } = approvalJournalRequest("request", "permission", provider);
+      const runtime = { ...input, recoveryBoundary: "runtime" as const };
+      await assert.rejects(admitApproval(store, runtime, { ...authority, providerConnection: { kind: other, pid: 4311, processIdentity: "birth" } },
+        async commit => commit()), { code: "missing_turn" });
+      const admitted = await admitApproval(store, runtime, authority, async commit => commit());
+      assert.equal(admitted.approval.request.state, "requested");
+      assert.equal(database.prepare("SELECT provider FROM execution_runtime_generations WHERE runtime_generation_id=?")
+        .get(expected.runtimeGenerationId)!.provider, provider);
+      const selection = { authority, expected, decisionId: "decision", actorId: "owner", decision: "deny" as const,
+        projectionSha256: "b".repeat(64), atMs: 110 };
+      await store.selectHostApproval(selection, async commit => commit());
+      await store.beginExecutionApprovalDispatch({ authority, expected, decisionId: "decision", dispatchId: "dispatch",
+        projectionSha256: selection.projectionSha256, atMs: 120 }, async commit => commit());
+      const outcome = { expected, decisionId: "decision", dispatchId: "dispatch", atMs: 130 };
+      const sent = await store.recordExecutionApprovalOutcome({ ...outcome, evidence: "sent_unacknowledged" }, async commit => commit());
+      assert.equal(sent.decision!.dispatchState, "uncertain", "a send alone proves nothing");
+      for (const evidence of ["native_processed", "native_request_closed"] as const) {
+        await assert.rejects(store.recordExecutionApprovalOutcome({ ...outcome, evidence }, async commit => commit()),
+          { code: "invalid_transition" }, evidence);
+      }
+      // The native prompt closes independently of the decision; the decision stays unconfirmed.
+      const closed = await store.closeExecutionApprovalRequest(expected, () => 135, async commit => commit());
+      assert.equal(closed.request.closedAtMs, 135);
+      assert.equal(closed.decision!.dispatchState, "uncertain");
+      const resolved = await store.recordExecutionApprovalOutcome({ ...outcome, evidence: "exact_native_execution", atMs: 140 },
+        async commit => commit());
+      assert.equal(resolved.request.state, "resolved");
+      assert.equal(resolved.decision!.dispatchState, "acknowledged");
+    } finally { database.close(); await store.close(); await env.cleanup(); }
+  });
+}
+
+test("approval journal closes only a Claude-shaped provider's prompt on native closure", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  await store.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    const authority = await seedApprovalJournalTurn(env, store, database);
+    const { input, expected } = approvalJournalRequest();
+    await admitApproval(store, input, authority, async commit => commit());
+    await assert.rejects(store.closeExecutionApprovalRequest(expected, () => 130, async commit => commit()), { code: "invalid_transition" });
+  } finally { database.close(); await store.close(); await env.cleanup(); }
+});
+
 test("approval journal records impossible pre-dispatch loss and refuses expiry without silently denying", async () => {
   const env = await fixture(); const store = new ManifestStore(env.databasePath);
   await store.load(); const database = new DatabaseSync(env.databasePath);
@@ -437,6 +489,28 @@ test("approval journal materializes atomically without capture and preserves lag
   } finally { database.close(); await other.close(); await store.close(); await env.cleanup(); }
 });
 
+test("an Antigravity ACP connection survives a manifest write and reload", async () => {
+  const env = await fixture(); let store = new ManifestStore(env.databasePath);
+  try {
+    const providerConnection = { kind: "antigravity_acp", pid: 4321, processIdentity: "agy-birth" } as const;
+    await store.write(0, [{ ...entry, provider: "antigravity", delivery_mode: "daemon_inbox",
+      provider_ref: { ...entry.provider_ref!, provider_connection: providerConnection } }]);
+    await store.close(); store = new ManifestStore(env.databasePath);
+    const persisted = (await store.load()).entries[0]!;
+    assert.equal(persisted.provider, "antigravity");
+    assert.deepEqual(persisted.provider_ref?.provider_connection, providerConnection,
+      "the connection is read back, not silently dropped to null");
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      assert.deepEqual({ ...database.prepare(`SELECT provider_connection_kind,provider_connection_url,provider_server_auth_path,
+        provider_connection_pid,provider_process_identity FROM runtime_deployments`).get() }, {
+        provider_connection_kind: "antigravity_acp", provider_connection_url: null, provider_server_auth_path: null,
+        provider_connection_pid: 4321, provider_process_identity: "agy-birth",
+      });
+    } finally { database.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
 test("runtime lifecycle authority lookup reads only the exact frozen native birth", async () => {
   const env = await fixture(); let store = new ManifestStore(env.databasePath);
   await store.load(); const database = new DatabaseSync(env.databasePath);
@@ -446,7 +520,8 @@ test("runtime lifecycle authority lookup reads only the exact frozen native birt
     { providerConnection: { kind: "claude_cli", pid: 4312, processIdentity: "claude-birth" }, provider: "claude-code", mode: "typed_shadow" },
     { providerConnection: { kind: "cursor_cli", pid: 4313, processIdentity: "cursor-birth-a" }, provider: "cursor", mode: "typed" },
     { providerConnection: { kind: "opencode_server", url: "http://127.0.0.1:4314", pid: 4314, processIdentity: "opencode-birth", serverAuthPath: "/test/auth" }, provider: "open-model", mode: "typed_shadow" },
-  ] as const satisfies ReadonlyArray<{ providerConnection: DaemonProviderConnection; provider: "codex" | "claude-code" | "cursor" | "open-model"; mode: "legacy" | "typed_shadow" | "typed" }>;
+    { providerConnection: { kind: "antigravity_acp", pid: 4315, processIdentity: "agy-birth" }, provider: "antigravity", mode: "typed" },
+  ] as const satisfies ReadonlyArray<{ providerConnection: DaemonProviderConnection; provider: "codex" | "claude-code" | "cursor" | "open-model" | "antigravity"; mode: "legacy" | "typed_shadow" | "typed" }>;
   const input = { ...base, providerConnection: births[2].providerConnection };
   try {
     const shadow = new ExecutionShadowStore(database);

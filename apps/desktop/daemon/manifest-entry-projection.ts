@@ -183,6 +183,9 @@ export function composeDaemonManifestEntry(projection: DaemonManifestDomainProje
     ...(profile.avatar ? { avatar: profile.avatar } : {}),
     provider: configuration.provider,
     model: configuration.model,
+    // The effort chosen when the agent is added; without it a new agent was saved with the provider default.
+    // No effort is stored as null, so an entry without one keeps its shape.
+    ...(configuration.reasoning_effort != null ? { reasoning_effort: configuration.reasoning_effort } : {}),
     charter: configuration.charter,
     desired_state: launchIntent.desired_state,
     observed_state: runtime.observed_state,

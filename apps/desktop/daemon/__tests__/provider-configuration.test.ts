@@ -854,12 +854,13 @@ test("a change to the access level is recorded against its revision, and tells a
   assert.deepEqual(derived(changed), derived(native));
 });
 
-test("the owner's own setup is offered only for an owner's Codex and Claude Code agents, never a rental", () => {
+test("the owner's own setup is offered only for an owner's Codex, Claude Code and Antigravity agents, never a rental", () => {
   assert.equal(homeHarnessAvailability(agentOn("supervised_abc", "codex")), "available");
   assert.equal(homeHarnessAvailability(agentOn("supervised_abc", "claude-code")), "available");
   assert.equal(homeHarnessAvailability(agentOn("supervised_abc", "cursor")), "unsupported");
   assert.equal(homeHarnessAvailability(agentOn("supervised_abc", "open-model")), "unsupported");
-  for (const provider of ["codex", "claude-code", "cursor", "open-model"]) {
+  assert.equal(homeHarnessAvailability(agentOn("supervised_abc", "antigravity")), "available");
+  for (const provider of ["codex", "claude-code", "cursor", "open-model", "antigravity"]) {
     assert.equal(homeHarnessAvailability(agentOn("supervised_rental_abc", provider)), "rental");
   }
   const stored = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, ...OWN_SETUP };
@@ -1041,4 +1042,102 @@ test("the daemon starts no rented or given Cursor or Codex on Windows, and a giv
   assert.equal(assertSupervisedRentalPermissionProfileAvailable("codex", "read_only", given, "darwin"), "read_only");
   assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "read_only", given, "win32"), /verified workspace-rooted/);
   assert.equal(assertSupervisedRentalPermissionProfileAvailable("claude-code", "read_only", given, "win32"), "read_only");
+});
+
+const antigravitySelection = {
+  provider: "antigravity", model: "gemini-3-pro-high", reasoningEffort: null, configurationRevision: 4,
+} as const;
+
+test("Antigravity profiles: Read-only by default, Ask before writes, Auto and Full access available, no sandbox", () => {
+  const profiles = supervisedPermissionProfilesForProvider("antigravity");
+  assert.deepEqual(profiles.map(({ id, label, status, isDefault }) => ({ id, label, status, isDefault })), [
+    { id: "read_only", label: "Read-only", status: "available", isDefault: true },
+    { id: "ask_before_write", label: "Ask before writes", status: "available", isDefault: false },
+    { id: "auto_review", label: "Auto", status: "available", isDefault: false },
+    { id: "full_access", label: "Full access", status: "available", isDefault: false },
+    { id: "sandboxed_write", label: "Sandboxed writes", status: "unsupported", isDefault: false },
+  ]);
+  const profile = (id: string) => profiles.find((candidate) => candidate.id === id)!;
+  assert.equal(profile("read_only").description, "Can read and search files in its workspace, search the web, and use LetAgents room tools.");
+  assert.equal(profile("read_only").detail,
+    "Antigravity asks before every edit, every command and every read outside its workspace, and LetAgents refuses each one. Reading the workspace, reading the files on the room message, and web search do not ask. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking. Your own Antigravity settings, plugins and MCP servers do not load unless you turn on your own setup.");
+  assert.equal(profile("auto_review").description, "Lets Antigravity approve edits and safe commands itself.");
+  assert.equal(profile("auto_review").detail,
+    "Antigravity's own review decides. An action it would ask about is refused. Anything a room message asks for counts as approved, including commands that reach outside your project. A workspace with Antigravity hooks, plugins or MCP servers is refused: agy runs them without asking.");
+  assert.equal(profile("full_access").description, "Can change files and run commands on this computer without asking.");
+  assert.equal(profile("full_access").detail, "Commands can access files outside the project. Use only for work you trust.");
+  assert.equal(profile("ask_before_write").description, "Requires approval before Antigravity can change files or run commands.");
+
+  assert.equal(assertSupervisedPermissionProfileAvailable("antigravity", null), "read_only");
+  for (const id of ["read_only", "ask_before_write", "auto_review", "full_access"]) {
+    assert.equal(assertSupervisedPermissionProfileAvailable("antigravity", id), id);
+  }
+  assert.throws(() => assertSupervisedPermissionProfileAvailable("antigravity", "sandboxed_write"), /unavailable for supervised antigravity/);
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("antigravity", "read_only", "supervised_rental_ask_0123", "darwin"),
+    /verified workspace-rooted permission profile/, "rentals stay limited to the verified providers");
+});
+
+test("Antigravity launch authority is exact for each profile and survives a profile switch", () => {
+  const expected = {
+    read_only: { agentMode: "default", dangerouslySkipPermissions: false, hostDecision: "reject" },
+    auto_review: { agentMode: "auto", dangerouslySkipPermissions: false, hostDecision: "reject" },
+    full_access: { agentMode: "default", dangerouslySkipPermissions: true, hostDecision: "allow" },
+  } as const;
+  for (const [permissionProfileId, launchPolicy] of Object.entries(expected)) {
+    const resolved = resolveProviderConfigurationSnapshot({ ...antigravitySelection, permissionProfileId, launchPolicy: {} });
+    assert.deepEqual(resolved, {
+      provider: "antigravity", model: "gemini-3-pro-high", reasoningEffort: null, permissionProfileId,
+      launchPolicy, configurationRevision: 4,
+    });
+    assert.deepEqual(resolveProviderConfigurationSnapshot({ ...antigravitySelection, permissionProfileId, launchPolicy }).launchPolicy,
+      launchPolicy, "an attested policy resolves to itself");
+    for (const [from, stored] of Object.entries(expected)) {
+      assert.deepEqual(deriveProviderConfigurationSnapshot({ ...antigravitySelection, permissionProfileId }, {
+        ...stored, [permissionChangeKey(3)]: false,
+      }).launchPolicy, launchPolicy, `${from} -> ${permissionProfileId}`);
+    }
+  }
+  assert.equal(resolveProviderConfigurationSnapshot({ ...antigravitySelection, permissionProfileId: null, launchPolicy: {} })
+    .permissionProfileId, "read_only");
+  assert.equal(resolveProviderConfigurationSnapshot({ ...antigravitySelection, provider: " Antigravity ", permissionProfileId: null,
+    launchPolicy: {} }).provider, "antigravity");
+});
+
+test("Antigravity refuses unknown native options and conflicting authority; it takes agy's thinking levels, approvals and owner setup", () => {
+  const resolve = (overrides: Record<string, unknown>) => resolveProviderConfigurationSnapshot({
+    ...antigravitySelection, permissionProfileId: "read_only", launchPolicy: {}, ...overrides,
+  } as Parameters<typeof resolveProviderConfigurationSnapshot>[0]);
+  for (const key of ["yolo", "approvalMode", "permissionMode", "tools", "mcpServers", "settings", "sandbox"]) {
+    assert.throws(() => resolve({ launchPolicy: { [key]: true } }), new RegExp(`unsupported native option '${key}'`));
+  }
+  assert.throws(() => resolve({ launchPolicy: { dangerouslySkipPermissions: true } }),
+    /conflicts with permission-profile authority at 'dangerouslySkipPermissions'/);
+  assert.throws(() => resolve({ launchPolicy: { hostDecision: "allow" } }), /conflicts with permission-profile authority at 'hostDecision'/);
+  assert.throws(() => resolve({ permissionProfileId: "auto_review", launchPolicy: { agentMode: "default" } }),
+    /conflicts with permission-profile authority at 'agentMode'/);
+  for (const reasoningEffort of ["low", "medium", "high", "xhigh"] as const) {
+    assert.equal(resolve({ reasoningEffort }).reasoningEffort, reasoningEffort);
+    assert.equal(providerAcceptsReasoningEffort("antigravity", reasoningEffort), true);
+  }
+  assert.throws(() => resolve({ reasoningEffort: "max" }), /does not take reasoning effort 'max'/);
+  assert.equal(providerAcceptsReasoningEffort("antigravity", "max"), false);
+  assert.equal(providerAcceptsReasoningEffort("antigravity", null), true);
+  assert.deepEqual(resolve({ permissionProfileId: "ask_before_write" }).launchPolicy,
+    { agentMode: "default", dangerouslySkipPermissions: false, hostDecision: "ask" });
+  assert.throws(() => resolve({ permissionProfileId: "sandboxed_write" }), /Permission profile '.*' is unavailable for provider 'antigravity'/);
+  // LetAgents' own keys are never native options; the owner's setup rides beside the authority.
+  const owned = resolve({ launchPolicy: { ...HOME_HARNESS_ON, [permissionChangeKey(2)]: false } });
+  assert.deepEqual(owned.launchPolicy, { agentMode: "default", dangerouslySkipPermissions: false, hostDecision: "reject" });
+  assert.equal(owned.homeHarness, true);
+  assert.equal(homeHarnessAvailability({ id: "supervised_abc", provider: "antigravity", deliveryMode: "daemon_inbox" }), "available");
+});
+
+test("Antigravity never runs for a guest: its file reads and web searches cannot be limited", () => {
+  const guest = { ...antigravitySelection, supervisorEntryId: "supervised_rental_ask_0123" };
+  for (const permissionProfileId of ["read_only", "ask_before_write", "auto_review", "full_access"]) {
+    assert.throws(() => deriveProviderConfigurationSnapshot({ ...guest, permissionProfileId }, {}), /does not run for a guest/);
+    assert.throws(() => resolveProviderConfigurationSnapshot({ ...guest, permissionProfileId, launchPolicy: {} }), /does not run for a guest/);
+  }
+  assert.equal(deriveProviderConfigurationSnapshot({ ...antigravitySelection, supervisorEntryId: "supervised_owner_agent",
+    permissionProfileId: "full_access" }, {}).permissionProfileId, "full_access", "an owner's own agent is not a guest");
 });

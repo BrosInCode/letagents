@@ -63,7 +63,7 @@ export function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaem
   };
 }
 
-const lifecycleProjectionProviders = ["codex", "claude-code", "cursor", "open-model"] as const;
+const lifecycleProjectionProviders = ["codex", "claude-code", "cursor", "open-model", "antigravity"] as const;
 const lifecycleProjectionCounterKeys = [
   "comparedSegments",
   "matched",

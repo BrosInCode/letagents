@@ -791,7 +791,7 @@ function recentOutcome(entry: DesktopSupervisorManifestEntry): AgentInspectorPro
 }
 
 function providerTurnControlCapability(entry: DesktopSupervisorManifestEntry): AgentInspectorTurnControlProjection["capability"] {
-  if (["codex", "claude-code", "open-model"].includes(entry.provider)) return "native_interrupt";
+  if (["codex", "claude-code", "open-model", "antigravity"].includes(entry.provider)) return "native_interrupt";
   if (entry.provider === "cursor") return "restart_resume";
   return "unsupported";
 }

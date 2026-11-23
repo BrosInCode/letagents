@@ -30,13 +30,13 @@
             @update:model-value="chooseModel"
           />
           <DesktopModelPicker
-            v-if="canEditEffort"
+            v-if="canEditEffort && effortChoices.length > 1"
             id="agent-inspector-effort"
             class="agent-inspector-picker"
             label="Reasoning effort"
             select-only
             :model-value="resource.draft.reasoningEffort || ''"
-            :options="inspectorEffortOptions"
+            :options="effortChoices"
             :disabled="busy || !settingsEditable"
             @update:model-value="chooseEffort"
           />
@@ -229,7 +229,7 @@ import {
   configurationHasRuntimeLag,
   IMAGE_INPUT_DESCRIPTION,
   IMAGE_INPUT_TITLE,
-  inspectorEffortOptions,
+  inspectorEffortChoices,
   permissionTimingNote,
   roomMovePresentation,
   type AgentInspectorConfigurationDraft,
@@ -305,11 +305,26 @@ async function loadModels(): Promise<void> {
 }
 function chooseModel(value: string): void {
   customModel.value = value === "custom";
-  if (!customModel.value) patch({ model: value ? value.slice("model:".length) : null });
+  if (customModel.value) {
+    // A typed Antigravity id names its own thinking level, and no effort picker shows for it: a saved level would be hidden.
+    if (props.resource.configuration?.provider === "antigravity" && props.resource.draft?.reasoningEffort) patch({ reasoningEffort: null });
+    return;
+  }
+  const model = value ? value.slice("model:".length) : null;
+  // An Antigravity model offers its own thinking levels: a saved level it lacks goes back to its default.
+  const effort = props.resource.draft?.reasoningEffort ?? null;
+  const supported = modelOptions.value.find((option) => option.id === model)?.supportedEfforts;
+  const keepEffort = props.resource.configuration?.provider !== "antigravity" || !effort || Boolean(supported?.includes(effort));
+  patch(keepEffort ? { model } : { model, reasoningEffort: null });
 }
 
+const effortChoices = computed(() => inspectorEffortChoices(
+  props.resource.configuration?.provider,
+  modelOptions.value.find((option) => option.id === props.resource.draft?.model) ?? null,
+  props.resource.draft?.reasoningEffort,
+));
 function chooseEffort(value: string): void {
-  const effort = inspectorEffortOptions.find((option) => option.value === value);
+  const effort = effortChoices.value.find((option) => option.value === value);
   if (effort) patch({ reasoningEffort: effort.value || null });
 }
 watch(() => [props.entryId, props.resource.configuration?.provider, props.workspacePath] as const, () => {

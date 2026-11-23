@@ -13,6 +13,7 @@ import type {
 } from "../../ipc-types.js";
 import { claudeCodeVersionAtLeast, inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
+import { ANTIGRAVITY_EFFORTS, antigravityChildEnvironment, resolveAntigravityExecutable, splitAntigravityModelId } from "./antigravity/launch.js";
 import { DEFAULT_CURSOR_MCP_POLICY, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
 import { resolveOpenModelEffortCatalog } from "./open-model-efforts.js";
@@ -167,6 +168,9 @@ export async function listDesktopAgentProviderModels(
   }
   if (providerId === "open-model") {
     return listOpenModelModels(input);
+  }
+  if (providerId === "antigravity") {
+    return listAntigravityModels(input);
   }
   return modelResult(providerId, "unavailable", [], null, "Model selection is only available for desktop-managed agents.");
 }
@@ -468,6 +472,82 @@ export function openModelModelsResult(
   return modelResult("open-model", "ready", models, settings.model || null, null);
 }
 
+/**
+ * The models this Antigravity account offers, from `agy models`. Each id
+ * carries its thinking level (`gemini-4-neon-high`), so there is no separate
+ * effort. Without a choice the agent runs on Antigravity's own default.
+ */
+async function listAntigravityModels(
+  input: DesktopAgentProviderPreflightInput,
+): Promise<DesktopAgentProviderModelsResult> {
+  const runtimeEnv = antigravityChildEnvironment(desktopRuntimeEnvironment());
+  const command = resolveAntigravityExecutable(runtimeEnv);
+  const cacheKey = `antigravity:${command}`;
+  const forceRefresh = Boolean(input.refreshModels);
+  const cached = modelListCache.get(cacheKey);
+  if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
+    return cloneModelResult(cached.result);
+  }
+  const result = await execFileWithTimeout(command, ["models"], { env: runtimeEnv });
+  const models = parseAntigravityModelsOutput(result.stdout);
+  const next = result.ok && models.length
+    ? modelResult("antigravity", "ready", models, null, null)
+    : modelResult(
+      "antigravity",
+      result.ok ? "unavailable" : "error",
+      [],
+      null,
+      firstNonEmptyLine(result.stderr) || result.error || "Antigravity did not return any models.",
+    );
+  if (!forceRefresh && next.status !== "ready" && cached?.result.status === "ready") {
+    return refreshStaleReadyModelCache(cacheKey, cached);
+  }
+  cacheModelListResult(cacheKey, next);
+  return cloneModelResult(next);
+}
+
+/**
+ * `agy models` prints one `<id>\t<name>` line per model and thinking level
+ * (`gemini-4-neon-high\tGemini 4 Neon (High)`). They are grouped into one
+ * option per model, which lists its levels as efforts. A model offered at a
+ * single level keeps its own id and has no effort setting.
+ */
+export function parseAntigravityModelsOutput(output: string): DesktopAgentProviderModelOption[] {
+  const rows: Array<{ id: string; label: string }> = [];
+  const seen = new Set<string>();
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, "").trim();
+    const match = /^([a-z0-9][a-z0-9._-]*)\t+(.+)$/i.exec(line) ?? /^([a-z0-9][a-z0-9._-]*)\s{2,}(.+)$/i.exec(line);
+    if (!match) continue;
+    const id = match[1]!.trim();
+    const label = match[2]!.trim();
+    if (!id || !label || seen.has(id)) continue;
+    seen.add(id);
+    rows.push({ id, label });
+  }
+  const families = new Map<string, { label: string; efforts: DesktopManagedAgentEffort[]; ids: string[] }>();
+  for (const row of rows) {
+    const { family, effort } = splitAntigravityModelId(row.id);
+    const entry = families.get(family) ?? { label: row.label.replace(/\s*\((?:Low|Medium|High|XHigh|Extra(?: high)?)\)\s*$/i, "").trim() || family, efforts: [], ids: [] };
+    if (effort && !entry.efforts.includes(effort)) entry.efforts.push(effort);
+    entry.ids.push(row.id);
+    families.set(family, entry);
+  }
+  const order: readonly string[] = ANTIGRAVITY_EFFORTS;
+  const models: DesktopAgentProviderModelOption[] = [];
+  for (const [family, entry] of families) {
+    if (entry.efforts.length >= 2) {
+      models.push({ id: family, label: entry.label, source: "provider",
+        supportedEfforts: [...entry.efforts].sort((a, b) => order.indexOf(a) - order.indexOf(b)) });
+    } else {
+      // One level only (for example `gpt-oss-120b-medium`): the full id is the model.
+      const row = rows.find((candidate) => candidate.id === entry.ids[0])!;
+      models.push({ id: row.id, label: row.label, source: "provider" });
+    }
+  }
+  return models;
+}
+
 export function parseCursorModelsOutput(output: string): DesktopAgentProviderModelOption[] {
   const models: DesktopAgentProviderModelOption[] = [];
   const seen = new Set<string>();
@@ -620,5 +700,6 @@ function providerLabel(providerId: DesktopAgentProviderId): string {
   if (providerId === "cursor") return "Cursor";
   if (providerId === "codex") return "Codex";
   if (providerId === "open-model") return "Open Model";
+  if (providerId === "antigravity") return "Antigravity";
   return "Agent";
 }

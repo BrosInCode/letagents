@@ -270,7 +270,7 @@ test("the Inbox re-lists only rooms with an agent mid-turn or an approval still 
   seen.length = 0; peak = 0;
   oldRoomAsking = false;
   const busyRooms = Array.from({ length: 8 }, (_, index) => responding({ id: `busy_${index}`, roomId: `room-busy-${index}`, provider: "codex" }));
-  const accountRooms = [...busyRooms.map(entry => entry.roomId), "room-old", "room-idle", "room-paused", "room-cursor"]
+  const accountRooms = [...busyRooms.map(entry => entry.roomId), "room-old", "room-idle", "room-paused", "room-cursor", "room-antigravity"]
     .map(roomIdentifier => ({ roomIdentifier, displayName: roomIdentifier, records: [], tasks: [], truncated: false }));
   const data = ref<DesktopNeedsYou | null>(needsYou({ rooms: accountRooms, agents: [
     responding({ id: "elsewhere", roomId: "room-of-another-account", provider: "codex" }),
@@ -278,9 +278,11 @@ test("the Inbox re-lists only rooms with an agent mid-turn or an approval still 
     agent({ id: "idle", roomId: "room-idle", provider: "claude-code" }),
     { ...responding({ id: "paused", roomId: "room-paused", provider: "open-model" }), desiredState: "paused" as const, roomAgentState: agent().roomAgentState },
     responding({ id: "cursor", roomId: "room-cursor", provider: "cursor" }),
+    // Antigravity asks the host before its edits and commands, as Claude Code does.
+    responding({ id: "antigravity", roomId: "room-antigravity", provider: "antigravity" }),
   ] }));
   await withAttention(data, attention => attention.refreshApprovals());
-  assert.deepEqual(seen.sort(), [...busyRooms.map(entry => entry.roomId), "room-old"].sort(),
+  assert.deepEqual(seen.sort(), [...busyRooms.map(entry => entry.roomId), "room-old", "room-antigravity"].sort(),
     "idle, paused, non-approval and other accounts' agents are not asked");
   assert.ok(peak <= 4, `at most four listings at once (saw ${peak})`);
   assert.equal(hostApprovalRooms().get("room-old")?.approvals.length, 0, "an approval that went away leaves the count");

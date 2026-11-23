@@ -324,7 +324,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const notify = (event: ProviderPermissionObservation) => { try { listener(event); } catch { /* Observer cannot control providers. */ } };
     const adapter = await this.adapter(remembered.provider);
     if (signal.aborted) return;
-    if (!current() || !["codex", "open-model", "claude-code"].includes(remembered.provider) || !adapter.observePermissions) { notify({ type: "unavailable" }); return; }
+    if (!current() || !["codex", "open-model", "claude-code", "antigravity"].includes(remembered.provider) || !adapter.observePermissions) { notify({ type: "unavailable" }); return; }
     await adapter.observePermissions(remembered.handle, event => {
       if (signal.aborted) return;
       if (!current()) { notify({ type: "unavailable" }); return; }
@@ -333,6 +333,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
           notify({ type: "request_closed", request: { provider: "codex", native: event.request } });
         else if (remembered.provider === "claude-code" && "providerTurnId" in event && "request" in event.request)
           notify({ type: "request_closed", request: { provider: "claude-code", native: event.request },
+            providerContinuationId: event.providerContinuationId, providerTurnId: event.providerTurnId });
+        else if (remembered.provider === "antigravity" && "providerTurnId" in event && "request" in event.request)
+          notify({ type: "request_closed", request: { provider: "antigravity", native: event.request },
             providerContinuationId: event.providerContinuationId, providerTurnId: event.providerTurnId });
         return;
       }
@@ -351,7 +354,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         ? { provider: "codex", native: native as CodexNativePermissionRequest }
         : remembered.provider === "claude-code"
           ? { provider: "claude-code", native: structuredClone(native as ClaudeNativePermissionRequest) }
-          : { provider: "open-model", native: structuredClone(native as OpenCodeNativePermissionRequest) });
+          : remembered.provider === "antigravity"
+            ? { provider: "antigravity", native: structuredClone(native as ClaudeNativePermissionRequest) }
+            : { provider: "open-model", native: structuredClone(native as OpenCodeNativePermissionRequest) });
       notify({ type: "snapshot", requests, connectionId });
     }, signal);
   }
@@ -398,6 +403,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       }
       const expected = structuredClone(request.native);
       const kind = request.provider === "claude-code" ? "command"
+        : request.provider === "antigravity" ? antigravityApprovalKind(request.native.request.tool_name)
         : (expected as OpenCodeNativePermissionRequest).permission === "bash" ? "command"
           : (expected as OpenCodeNativePermissionRequest).permission === "edit" ? "file_change" : null;
       if (!kind) return { outcome: "correlation_unproven" };
@@ -430,7 +436,8 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       throw error;
     });
     if (!admitted || !current()) throw Object.assign(new Error("Permission dispatch cannot be confirmed."), { outcome: "uncertain" });
-    if ((request.provider === "codex" || request.provider === "claude-code") && result.outcome === "sent") return { outcome: "sent_unacknowledged", nativeScope: "request" };
+    if ((request.provider === "codex" || request.provider === "claude-code" || request.provider === "antigravity")
+      && result.outcome === "sent") return { outcome: "sent_unacknowledged", nativeScope: "request" };
     if (request.provider === "open-model" && result.outcome === "processed") return { outcome: "native_processed", nativeScope: result.nativeScope };
     throw Object.assign(new Error("Permission dispatch returned unexpected evidence."), { outcome: "uncertain" });
   }
@@ -672,6 +679,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         const module = await import(new URL("../dist-electron/main/agents/open-model-provider-adapter.js", import.meta.url).href) as { OpenModelProviderAdapter?: new () => NativeProviderAdapter };
         if (module.OpenModelProviderAdapter) return new module.OpenModelProviderAdapter();
       }
+      if (provider === "antigravity") {
+        const module = await import(new URL("../dist-electron/main/agents/antigravity-provider-adapter.js", import.meta.url).href) as { AntigravityProviderAdapter?: new () => NativeProviderAdapter };
+        if (module.AntigravityProviderAdapter) return new module.AntigravityProviderAdapter();
+      }
       throw new Error(`No supervised native adapter is available for ${provider}.`);
     })();
     this.adapters.set(provider, loaded);
@@ -724,10 +735,23 @@ function isAttachTerminal(value: NativeHandle | ProviderActionAttachTerminal): v
   return "state" in value && value.state === "terminal";
 }
 
-function providerFromConnection(connection: ProviderActionRef["providerConnection"]): string | null {
+/**
+ * What an Antigravity request asks for. Its adapter names agy's tools as
+ * Claude Code names them; a tool it does not map keeps agy's own name and
+ * counts as a command, the kind that never delegates.
+ */
+export function antigravityApprovalKind(toolName: string): "command" | "file_change" | "network" {
+  if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(toolName)) return "file_change";
+  if (["WebFetch", "WebSearch"].includes(toolName)) return "network";
+  return "command";
+}
+
+/** The provider a durable connection kind belongs to; null for a missing or unknown connection. */
+export function providerFromConnection(connection: ProviderActionRef["providerConnection"]): string | null {
   if (connection?.kind === "codex_app_server") return "codex";
   if (connection?.kind === "claude_cli") return "claude-code";
   if (connection?.kind === "cursor_cli") return "cursor";
   if (connection?.kind === "opencode_server") return "open-model";
+  if (connection?.kind === "antigravity_acp") return "antigravity";
   return null;
 }

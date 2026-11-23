@@ -26,7 +26,7 @@ import { setTurnStartLatencyReporter, turnStartLatency, type StartLatencyRecord 
 
 const cleanLifecycleProjection = () => ({
   available: true,
-  providers: Object.fromEntries(["codex", "claude-code", "cursor", "open-model"].map((provider) => [provider, {
+  providers: Object.fromEntries(["codex", "claude-code", "cursor", "open-model", "antigravity"].map((provider) => [provider, {
     comparedSegments: 1,
     matched: 1,
     missingInTyped: 0,
@@ -34,7 +34,7 @@ const cleanLifecycleProjection = () => ({
     pairedButDifferent: 0,
     conflicts: 0,
     observationUnavailable: 0,
-  }])) as Record<"codex" | "claude-code" | "cursor" | "open-model", {
+  }])) as Record<"codex" | "claude-code" | "cursor" | "open-model" | "antigravity", {
     comparedSegments: number; matched: number; missingInTyped: number; missingInLegacy: number;
     pairedButDifferent: number; conflicts: number; observationUnavailable: number;
   }>,
@@ -44,17 +44,18 @@ const captureAdmission = (status: "pending" | "ready" | "unavailable" = "ready")
   "claude-code": status,
   cursor: status,
   "open-model": status,
+  antigravity: status,
 });
 
 test("local lifecycle conformance requires present clean evidence and clean daemon-owned wait authority", () => {
   assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 0, captureAdmission()), {
-    codex: true, "claude-code": true, cursor: true, "open-model": true,
+    codex: true, "claude-code": true, cursor: true, "open-model": true, antigravity: true,
   });
   assert.deepEqual(lifecycleLocalConformanceEligibility({ ...cleanLifecycleProjection(), available: false }, 0, captureAdmission()), {
-    codex: false, "claude-code": false, cursor: false, "open-model": false,
+    codex: false, "claude-code": false, cursor: false, "open-model": false, antigravity: false,
   });
   assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 1, captureAdmission()), {
-    codex: false, "claude-code": false, cursor: false, "open-model": false,
+    codex: false, "claude-code": false, cursor: false, "open-model": false, antigravity: false,
   });
   const empty = cleanLifecycleProjection();
   empty.providers.codex.comparedSegments = 0;
@@ -75,7 +76,7 @@ test("local lifecycle conformance requires present clean evidence and clean daem
     const projection = cleanLifecycleProjection();
     projection.providers.codex[field] = 1;
     assert.deepEqual(lifecycleLocalConformanceEligibility(projection, 0, captureAdmission()), {
-      codex: false, "claude-code": true, cursor: true, "open-model": true,
+      codex: false, "claude-code": true, cursor: true, "open-model": true, antigravity: true,
     }, `${field} blocks only its provider`);
   }
 
@@ -86,7 +87,7 @@ test("local lifecycle conformance requires present clean evidence and clean daem
   }
   for (const status of ["pending", "unavailable"] as const) {
     assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 0, captureAdmission(status)), {
-      codex: false, "claude-code": false, cursor: false, "open-model": false,
+      codex: false, "claude-code": false, cursor: false, "open-model": false, antigravity: false,
     });
   }
 });
@@ -159,7 +160,7 @@ function coordinatorHarness(input: {
   observeExecution?: (installation: ProviderInstallationToken) => () => void;
   advanceExecution?: (installation: ProviderInstallationToken) => void;
   observeLegacyLifecycle?: (observation: LifecycleProjectionObservation) => void;
-  markLifecycleProjectionUnavailable?: (provider: "codex" | "claude-code" | "cursor" | "open-model") => void;
+  markLifecycleProjectionUnavailable?: (provider: "codex" | "claude-code" | "cursor" | "open-model" | "antigravity") => void;
   lifecycleProjectionDiagnostics?: () => ReturnType<typeof cleanLifecycleProjection>;
   captureAdmission?: (installation: ProviderInstallationToken) => "pending" | "ready" | "unavailable";
   typedLifecycleAdmission?: (installation: ProviderInstallationToken) => "pending" | "ready" | "unavailable";
@@ -310,7 +311,7 @@ test("recovery diagnostics require every exact live provider lane to be capture-
   });
   await harness.coordinator.install("agent-1", handle, "generation-2");
   assert.deepEqual(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission, {
-    codex: "pending", "claude-code": "unavailable", cursor: "unavailable", "open-model": "unavailable",
+    codex: "pending", "claude-code": "unavailable", cursor: "unavailable", "open-model": "unavailable", antigravity: "unavailable",
   });
   assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_local_conformance_eligible.codex, false);
 
@@ -1735,6 +1736,66 @@ test("Open Model projection-only frames feed comparison evidence and no operatio
   });
   assert.deepEqual(activity, ["item/agentMessage/delta"],
     "ordinary Open Model stream frames retain the existing operational path");
+  await harness.coordinator.disposeAll();
+});
+
+test("Antigravity projection-only turn frames feed comparison evidence and no operational path", async () => {
+  const observations: LifecycleProjectionObservation[] = [];
+  const unavailable: string[] = [];
+  const activity: string[] = [];
+  let publications = 0;
+  let deliveries = 0;
+  const antigravityHandle: ProviderActionHandle = {
+    ...handle,
+    providerConnection: { kind: "antigravity_acp", pid: 42, processIdentity: "agy:42" },
+  };
+  const harness = coordinatorHarness({
+    observeLegacyLifecycle: observation => observations.push(observation),
+    markLifecycleProjectionUnavailable: provider => unavailable.push(provider),
+    appendActivity: async method => { activity.push(method); },
+    publishNativeActivity: async () => { publications += 1; },
+    startDelivery: async () => { deliveries += 1; },
+  });
+  harness.setManifest({ ...entry(), provider: "antigravity", provider_ref: {
+    ...entry().provider_ref!, provider_connection: { ...antigravityHandle.providerConnection! },
+  } });
+  await harness.coordinator.install("agent-1", antigravityHandle, "generation-2");
+  const baseline = { activity: activity.length, publications, deliveries,
+    manifest: harness.getManifest(), stop: harness.stopCalls() };
+
+  for (const [sequence, method, phase] of [
+    [1, "turn/started", "turn_active"],
+    [2, "turn/completed", "turn_terminal"],
+  ] as const) {
+    await harness.coordinator.enqueue("agent-1", antigravityHandle, {
+      ...streamEvent(sequence, method),
+      provider: "antigravity",
+      kind: "turn_lifecycle",
+      nativeEventId: `antigravity-${phase}`,
+      nativeLifecyclePhase: phase,
+      lifecycleProjectionOnly: true,
+    });
+  }
+  assert.deepEqual(observations, [{
+    agentId: "agent-1", provider: "antigravity", workAttemptId: "attempt-1",
+    executionGenerationId: "generation-2", nativeEventId: "antigravity-turn_active",
+    phase: "turn_active", state: "working",
+  }, {
+    agentId: "agent-1", provider: "antigravity", workAttemptId: "attempt-1",
+    executionGenerationId: "generation-2", nativeEventId: "antigravity-turn_terminal",
+    phase: "turn_terminal", state: "terminal",
+  }]);
+  assert.deepEqual(unavailable, []);
+  assert.deepEqual({ activity: activity.length, publications, deliveries,
+    manifest: harness.getManifest(), stop: harness.stopCalls() }, baseline,
+  "comparison evidence cannot mutate delivery, activity, manifest, or provider lifecycle");
+
+  await harness.coordinator.enqueue("agent-1", antigravityHandle, {
+    ...streamEvent(3, "turn/completed"), provider: "antigravity", kind: "turn_lifecycle",
+    nativeEventId: "mismatched", nativeLifecyclePhase: "turn_active", lifecycleProjectionOnly: true,
+  });
+  assert.deepEqual(unavailable, ["antigravity"], "a frame whose method and phase disagree is unavailable evidence");
+  assert.equal(observations.length, 2);
   await harness.coordinator.disposeAll();
 });
 

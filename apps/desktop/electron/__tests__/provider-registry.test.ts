@@ -11,7 +11,7 @@ createElectronTestEnv({ prefix: "letagents-provider-registry-", paths: [] });
 
 const { cursorRuntimeInstallCommand, listDesktopAgentProviders } = await import("../main/agents/provider-registry.js");
 
-test("listDesktopAgentProviders excludes antigravity", () => {
+test("listDesktopAgentProviders lists every desktop-managed provider", () => {
   const providers = listDesktopAgentProviders();
   const codex = providers.find((provider) => provider.id === "codex");
   assert.equal(
@@ -29,9 +29,18 @@ test("listDesktopAgentProviders excludes antigravity", () => {
     true,
     "only the LetAgents-managed Open Model engine remains installable",
   );
-  assert.ok(
-    !providers.some((p) => p.id === "antigravity"),
-    "antigravity should not appear in the Add Agent UI provider list",
+  const antigravity = providers.find((provider) => provider.id === "antigravity");
+  assert.ok(antigravity, "Antigravity is offered as a desktop-managed agent");
+  assert.equal(antigravity.runtimeCommand, "agy");
+  assert.equal(antigravity.supervisedDeliveryMode, "daemon_inbox");
+  assert.ok(antigravity.capabilities.includes("supervised_runtime"));
+  assert.ok(antigravity.capabilities.includes("turn_control"));
+  assert.equal(antigravity.capabilities.includes("installable_runtime"), false, "LetAgents does not install agy");
+  assert.match(antigravity.runtimeInstallCommand || "", /antigravity\.google\/cli\/install/);
+  assert.equal(antigravity.defaultPermissionProfileId, "read_only");
+  assert.deepEqual(
+    antigravity.permissionProfiles.filter((profile) => profile.status === "available").map((profile) => profile.id),
+    ["read_only", "ask_before_write", "auto_review", "full_access"],
   );
 });
 

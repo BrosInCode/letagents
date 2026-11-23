@@ -5,6 +5,8 @@ import { applyPreparedRoomContextSchema, validatePreparedRoomContextSchema } fro
 import type { DatabaseSync } from "node:sqlite";
 import { applyRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { applyApprovalRequestClosureSchema } from "../execution-approval-journal.js";
+import { migrateExecutionStorageV25ToV26 } from "../execution-storage-schema.js";
+import { resetLegacyLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { SCHEMA_VERSION, applyWorkerExecutionBindings, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyDaemonEfficiencyMigration, type Row, run, schemaMethods } from "./shared.js";
 
 export const migrationsV1ToV12 = schemaMethods({
@@ -12,6 +14,8 @@ migrateHostToolRules(database: DatabaseSync): void {
   this.repairAndValidateCurrentShape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
+    migrateExecutionStorageV25ToV26(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database, "pre_antigravity");
     applyHostToolRuleSchema(database);
     applyApprovalRequestClosureSchema(database);
     this.schemaInitializationHook?.(database);
@@ -32,6 +36,8 @@ migratePreparedRoomContext(database: DatabaseSync): void {
   this.repairAndValidateCurrentShape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
+    migrateExecutionStorageV25ToV26(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database, "pre_antigravity");
     applyPreparedRoomContextSchema(database);
     applyHostToolRuleSchema(database);
     applyApprovalRequestClosureSchema(database);
