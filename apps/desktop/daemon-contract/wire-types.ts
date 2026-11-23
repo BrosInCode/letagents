@@ -928,7 +928,7 @@ export const hostApprovalCandidateSchema = z.strictObject({
     provider: z.enum(["codex", "open-model", "claude-code"]),
     title: z.enum(["Run a command", "Run a tool", "Change files", "Grant for this turn", "Approval unavailable"]),
     details: z.string().max(24 * 1024),
-    denyScope: z.enum(["request", "session_pending"]),
+    denyScope: z.enum(["request", "request_and_turn", "session_pending"]),
     alwaysAllow: hostToolScopeSchema.optional(),
   }),
   status: hostApprovalStatusSchema,

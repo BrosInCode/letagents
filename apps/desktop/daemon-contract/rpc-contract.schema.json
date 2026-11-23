@@ -2573,6 +2573,7 @@
             "denyScope": {
               "enum": [
                 "request",
+                "request_and_turn",
                 "session_pending"
               ],
               "type": "string"
@@ -3722,7 +3723,7 @@
       "retireAgentMs": 60000
     },
     "defaultMaxRequestBytes": 65536,
-    "implementationVersion": "2.0.284-modern.21",
+    "implementationVersion": "2.0.284-modern.22",
     "localBoardMaxFrameBytes": 16777216,
     "protocolVersion": 3,
     "stateActivitySummaryLimit": 16,

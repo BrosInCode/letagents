@@ -10,6 +10,7 @@ import { type CodexPermissionObservation, CodexPermissionReplyError } from "./ty
 import { CodexProviderHandle } from "./handle.js";
 import { exactPermissionItemKey, exactTurnKey, recordValue } from "./notifications.js";
 import { permissionFileChanges, permissionParams, permissionProfile } from "./permission-requests.js";
+import { codexDenyDecision } from "./deny-decision.js";
 
 export abstract class CodexAdapterPermissions extends CodexAdapterAttach {
   protected permissionAuthority(
@@ -145,14 +146,9 @@ export abstract class CodexAdapterPermissions extends CodexAdapterAttach {
     const expectedMcpParams = mcpToolCall && params ? structuredClone(params) : null;
     const expectedChanges = fileChange ? permissionFileChanges(options?.expectedFileChanges) : null;
     const requestedPermissions = genericPermission ? structuredClone(permissionProfile(params?.permissions)) : null;
-    // Codex names the decisions that it accepts for this request. A command or a file change can list `cancel`
-    // and not `decline` (codex-cli 0.162.1 does for a command): both deny the request, and `cancel` also ends
-    // the turn. A Deny is then sent as `cancel`; `decline` is used whenever Codex accepts it.
-    const listed = params && Array.isArray(params.availableDecisions) ? params.availableDecisions : null;
-    const cancelDenies = expectedRequest?.method === "item/commandExecution/requestApproval" || fileChange;
+    // The broker shows the same rule before the click (`denyScope: "request_and_turn"`).
     const decision = reply === "once" ? "accept"
-      : reply !== "reject" ? null
-      : listed && cancelDenies && !listed.includes("decline") && listed.includes("cancel") ? "cancel" : "decline";
+      : reply === "reject" ? codexDenyDecision(expectedRequest?.method, params) : null;
     if (!params || params.threadId !== continuation || !decision || (fileChange && !expectedChanges)
       || (genericPermission && !requestedPermissions)
       || (decision === "accept" && expectedRequest.method === "item/fileChange/requestApproval" && params.grantRoot != null)
