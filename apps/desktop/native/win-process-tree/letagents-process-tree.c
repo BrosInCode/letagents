@@ -49,6 +49,22 @@
  *       string; it is the process's birth identity. Exit 0; 2: no such
  *       process; 3: the process exists but cannot be opened; 121: error.
  *
+ *   births <pid> [<pid> ...]
+ *       Read one snapshot of the system process list
+ *       (NtQuerySystemInformation, SystemProcessInformation). It opens no
+ *       process, so it also reads processes that `info` cannot open (System,
+ *       csrss, services of other accounts) without elevation. Print one JSON
+ *       line: {"births":[...]} with one entry per <pid>, in order:
+ *       {"pid","listed":true,"creationTime"} where creationTime is the
+ *       FILETIME as a decimal string, or null when the list gives no positive
+ *       time; or {"pid","listed":false} when the snapshot does not list the
+ *       pid. At most 256 pids. Microsoft documents that this call and its
+ *       structures may change, so the helper resolves it at run time, reads
+ *       only the 64-bit layout (64-bit builds only), and checks every length
+ *       and entry offset; any layout it does not know, a failed call, or a
+ *       list that keeps growing past its bounded retries is exit 121, never a
+ *       partial answer. Exit 0; 120: usage; 121: error.
+ *
  * Build: apps/desktop/native/win-process-tree/build.mjs (MSVC, /MT /Brepro).
  */
 #define WIN32_LEAN_AND_MEAN
@@ -690,6 +706,161 @@ static int run_info(DWORD pid) {
   return 0;
 }
 
+/* births: the 64-bit SYSTEM_PROCESS_INFORMATION fields it reads, at their
+   fixed offsets: NextEntryOffset (ULONG), CreateTime (LARGE_INTEGER) and
+   UniqueProcessId (HANDLE). An entry is at least SPI_MIN_ENTRY bytes; the
+   thread array that follows it is not read. */
+#define SYSTEM_PROCESS_INFORMATION_CLASS 5
+#define STATUS_INFO_LENGTH_MISMATCH_CODE ((LONG)0xC0000004L)
+#define SPI_NEXT_ENTRY_OFFSET 0
+#define SPI_CREATE_TIME 32
+#define SPI_UNIQUE_PROCESS_ID 80
+#define SPI_MIN_ENTRY 88
+#define SNAPSHOT_FIRST_BYTES (1u << 20)
+#define SNAPSHOT_MAX_BYTES (64u << 20)
+#define SNAPSHOT_TRIES 4
+#define SNAPSHOT_MAX_ENTRIES (1u << 20)
+#define MAX_BIRTH_PIDS 256
+typedef LONG (WINAPI *query_system_fn)(ULONG, PVOID, ULONG, PULONG);
+
+typedef struct {
+  DWORD pid;
+  int listed;
+  u64 creation; /* 0: listed without a positive creation time */
+} birth_entry;
+
+/* One snapshot of the system process list, or NULL (the reason in the last
+   error). *length is the number of bytes the call wrote. Free with HeapFree. */
+static BYTE *take_process_snapshot(ULONG *length) {
+#if defined(_WIN64)
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  query_system_fn query;
+  ULONG size = SNAPSHOT_FIRST_BYTES;
+  int tries;
+  if (!ntdll) return NULL;
+  query = (query_system_fn)(void *)GetProcAddress(ntdll, "NtQuerySystemInformation");
+  if (!query) return NULL;
+  for (tries = 0; tries < SNAPSHOT_TRIES; tries++) {
+    ULONG needed = 0;
+    u64 grown;
+    LONG status;
+    BYTE *buffer = (BYTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
+    if (!buffer) {
+      SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+      return NULL;
+    }
+    status = query(SYSTEM_PROCESS_INFORMATION_CLASS, buffer, size, &needed);
+    if (status >= 0) {
+      /* A success must say how much it wrote, and no more than it was given. */
+      if (needed < SPI_MIN_ENTRY || needed > size) {
+        HeapFree(GetProcessHeap(), 0, buffer);
+        SetLastError(ERROR_INVALID_DATA);
+        return NULL;
+      }
+      *length = needed;
+      return buffer;
+    }
+    HeapFree(GetProcessHeap(), 0, buffer);
+    if (status != STATUS_INFO_LENGTH_MISMATCH_CODE) {
+      SetLastError(ERROR_GEN_FAILURE);
+      return NULL;
+    }
+    /* Processes start between two calls: ask for more than was named, and
+       never less than the last try, within the bound. */
+    grown = (u64)(needed > size ? needed : size);
+    grown = grown + grown / 4 + 65536;
+    if (grown > SNAPSHOT_MAX_BYTES) {
+      SetLastError(ERROR_BUFFER_OVERFLOW);
+      return NULL;
+    }
+    size = (ULONG)grown;
+  }
+  SetLastError(ERROR_BUFFER_OVERFLOW);
+  return NULL;
+#else
+  (void)length;
+  SetLastError(ERROR_NOT_SUPPORTED);
+  return NULL;
+#endif
+}
+
+/* Mark each wanted pid that the snapshot lists, with its creation time.
+   0 when the snapshot is not the layout this helper knows: an entry or an
+   offset outside the bytes written, an offset shorter than an entry or not
+   8-byte aligned, a process id wider than 32 bits, a wanted pid listed twice,
+   or more entries than any real list holds. */
+static int read_snapshot_births(const BYTE *buffer, ULONG length, birth_entry *wanted, DWORD count) {
+  ULONG offset = 0;
+  DWORD index, entries = 0;
+  for (index = 0; index < count; index++) {
+    wanted[index].listed = 0;
+    wanted[index].creation = 0;
+  }
+  for (;;) {
+    ULONG next = 0;
+    u64 id = 0;
+    LONGLONG created = 0;
+    if (offset > length || length - offset < SPI_MIN_ENTRY) return 0;
+    memcpy(&next, buffer + offset + SPI_NEXT_ENTRY_OFFSET, sizeof next);
+    memcpy(&created, buffer + offset + SPI_CREATE_TIME, sizeof created);
+    memcpy(&id, buffer + offset + SPI_UNIQUE_PROCESS_ID, sizeof id);
+    if (id > 0xffffffffULL) return 0;
+    for (index = 0; index < count; index++) {
+      if (wanted[index].pid != (DWORD)id) continue;
+      if (wanted[index].listed) return 0;
+      wanted[index].listed = 1;
+      wanted[index].creation = created > 0 ? (u64)created : 0;
+    }
+    if (++entries > SNAPSHOT_MAX_ENTRIES) return 0;
+    if (next == 0) return 1;
+    if (next < SPI_MIN_ENTRY || (next & 7u) != 0 || next > length - offset) return 0;
+    offset += next;
+  }
+}
+
+static int run_births(int argc, wchar_t **argv) {
+  static birth_entry wanted[MAX_BIRTH_PIDS];
+  static char out[MAX_BIRTH_PIDS * 80 + 32];
+  DWORD count = 0, index;
+  ULONG length = 0;
+  BYTE *snapshot;
+  int argument;
+  if (argc < 3 || argc - 2 > MAX_BIRTH_PIDS) return EXIT_USAGE;
+  for (argument = 2; argument < argc; argument++) {
+    u64 value = 0;
+    if (!parse_decimal(argv[argument], 0xffffffffULL, &value) || value == 0) return EXIT_USAGE;
+    wanted[count++].pid = (DWORD)value;
+  }
+  snapshot = take_process_snapshot(&length);
+  if (!snapshot) {
+    fail_message("cannot read the system process list", GetLastError());
+    return EXIT_FAILED;
+  }
+  if (!read_snapshot_births(snapshot, length, wanted, count)) {
+    HeapFree(GetProcessHeap(), 0, snapshot);
+    fail_message("the system process list has a layout this helper does not know", ERROR_INVALID_DATA);
+    return EXIT_FAILED;
+  }
+  HeapFree(GetProcessHeap(), 0, snapshot);
+  strcpy_s(out, sizeof out, "{\"births\":[");
+  for (index = 0; index < count; index++) {
+    size_t used = strlen(out);
+    if (!wanted[index].listed) {
+      _snprintf_s(out + used, sizeof out - used, _TRUNCATE, "%s{\"pid\":%lu,\"listed\":false}",
+        index ? "," : "", (unsigned long)wanted[index].pid);
+    } else if (wanted[index].creation == 0) {
+      _snprintf_s(out + used, sizeof out - used, _TRUNCATE, "%s{\"pid\":%lu,\"listed\":true,\"creationTime\":null}",
+        index ? "," : "", (unsigned long)wanted[index].pid);
+    } else {
+      _snprintf_s(out + used, sizeof out - used, _TRUNCATE, "%s{\"pid\":%lu,\"listed\":true,\"creationTime\":\"%llu\"}",
+        index ? "," : "", (unsigned long)wanted[index].pid, wanted[index].creation);
+    }
+  }
+  strcat_s(out, sizeof out, "]}\n");
+  write_text(GetStdHandle(STD_OUTPUT_HANDLE), out);
+  return 0;
+}
+
 static int parse_identity(int argc, wchar_t **argv, DWORD *pid, u64 *creation) {
   u64 value = 0;
   if (argc < 4 || !parse_decimal(argv[2], 0xffffffffULL, &value) || value == 0) return 0;
@@ -726,5 +897,6 @@ int wmain(int argc, wchar_t **argv) {
     if (argc != 3 || !parse_decimal(argv[2], 0xffffffffULL, &value) || value == 0) return EXIT_USAGE;
     return run_info((DWORD)value);
   }
+  if (wcscmp(argv[1], L"births") == 0) return run_births(argc, argv);
   return EXIT_USAGE;
 }

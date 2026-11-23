@@ -26,6 +26,7 @@ import {
   terminateTree,
   terminateTreeOutcome,
   windowsCommandLine,
+  windowsProcessBirths,
   windowsProcessInfo,
   windowsTreeSize,
 } from "../../../../shared/process-tree.mjs";
@@ -181,6 +182,62 @@ test("Windows: a process birth is the helper's creation time; absent is null; an
   assert.equal(windowsProcessInfo(31, { helperPath: HELPER, runHelper: wrong.runHelper }), undefined);
   // No helper: nothing to read, and the kill(0) probe decides absence alone.
   assert.equal(processBirth(31, { platform: "win32", helperPath: null, probe: () => {} }), undefined);
+});
+
+test("Windows: births reads one system process list snapshot, and anything but one exact entry per pid is unread", () => {
+  const births = (entries: unknown[]) => ({ status: 0, stdout: `${JSON.stringify({ births: entries })}\n` });
+  const helper = recordingHelper({
+    "births 4 8 12": births([
+      { pid: 4, listed: true, creationTime: "134381518010039201" },
+      { pid: 8, listed: true, creationTime: null },
+      { pid: 12, listed: false },
+    ]),
+  });
+  const options = { helperPath: HELPER, runHelper: helper.runHelper };
+  // A pid named twice is asked for once, in first-seen order.
+  assert.deepEqual(windowsProcessBirths([4, 8, 4, 12], options), new Map<number, unknown>([
+    [4, { listed: true, creationTime: "134381518010039201" }],
+    [8, { listed: true, creationTime: null }],
+    [12, { listed: false }],
+  ]));
+  assert.deepEqual(helper.calls, [[HELPER, ["births", "4", "8", "12"]]]);
+
+  // Bad input never reaches the helper.
+  const unused = recordingHelper({});
+  for (const pids of [[], [0], [-4], [1.5], [2 ** 32], Array.from({ length: 257 }, (_, index) => index + 1)]) {
+    assert.equal(windowsProcessBirths(pids, { helperPath: HELPER, runHelper: unused.runHelper }), undefined, JSON.stringify(pids).slice(0, 40));
+  }
+  assert.equal(unused.calls.length, 0);
+  assert.equal(windowsProcessBirths([4], { helperPath: null }), undefined, "no helper: nothing to read");
+
+  // A failed snapshot, an older helper without `births` (usage, 120), or output that is not one exact entry per pid.
+  const unread: Array<[string, { status: number; stdout?: string }]> = [
+    ["failed", { status: 121 }],
+    ["older helper", { status: 120 }],
+    ["not json", { status: 0, stdout: "births" }],
+    ["no list", { status: 0, stdout: "{}" }],
+    ["too few", births([])],
+    ["too many", births([{ pid: 4, listed: false }, { pid: 8, listed: false }])],
+    ["another pid", births([{ pid: 8, listed: false }])],
+    ["listed without a time key", births([{ pid: 4, listed: true }])],
+    ["unlisted with a time", births([{ pid: 4, listed: false, creationTime: "5" }])],
+    ["an extra key", births([{ pid: 4, listed: true, creationTime: "5", exited: false }])],
+    ["zero", births([{ pid: 4, listed: true, creationTime: "0" }])],
+    ["leading zero", births([{ pid: 4, listed: true, creationTime: "05" }])],
+    ["negative", births([{ pid: 4, listed: true, creationTime: "-5" }])],
+    ["past 64 bits", births([{ pid: 4, listed: true, creationTime: "18446744073709551616" }])],
+    ["a number, not a decimal string", births([{ pid: 4, listed: true, creationTime: 5 }])],
+    ["listed not a boolean", births([{ pid: 4, listed: "false" }])],
+    ["a null entry", births([null])],
+  ];
+  for (const [name, answer] of unread) {
+    const each = recordingHelper({ "births 4": answer });
+    assert.equal(windowsProcessBirths([4], { helperPath: HELPER, runHelper: each.runHelper }), undefined, name);
+  }
+  // The largest FILETIME is still a creation time; exact digits survive as a string.
+  const largest = recordingHelper({ "births 4": births([{ pid: 4, listed: true, creationTime: "18446744073709551615" }]) });
+  assert.deepEqual(windowsProcessBirths([4], { helperPath: HELPER, runHelper: largest.runHelper }),
+    new Map([[4, { listed: true, creationTime: "18446744073709551615" }]]));
 });
 
 test("Windows: a pid this process does not hold is ended only through its recorded birth", () => {

@@ -4,7 +4,10 @@ import { lstat, mkdir, open } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isOwnerPrivate, ownerPrivatePlatform, protectOwnerPrivate, windowsToolPaths } from "../../../../shared/owner-private-fs.mjs";
-import { isBirthEvidence, signalTree, signalTreeOutcome, windowsProcessInfo, type TreeSignalOutcome } from "../../../../shared/process-tree.mjs";
+import {
+  isBirthEvidence, signalTree, signalTreeOutcome, windowsProcessBirths, windowsProcessInfo,
+  type TreeSignalOutcome, type WindowsSnapshotBirth,
+} from "../../../../shared/process-tree.mjs";
 import { renameWithRetryAsync } from "../../../../shared/rename-retry.mjs";
 import { processBirthState, sameProcessBirthIdentity } from "../process-identity.js";
 import { DaemonStateSchema, validateDaemonStateShapeForVersion } from "./schema.js";
@@ -95,6 +98,8 @@ export type MoveAsideLegacyOptions = {
   probePid?: (pid: number) => void;
   readPosixBirth?: (pid: number) => PosixBirthReadResult;
   queryWindowsWmiCreations?: (pids: readonly number[]) => Map<number, string> | null;
+  /** One snapshot of the Windows system process list (`windowsProcessBirths`); undefined when it cannot be read. */
+  readWindowsProcessBirths?: (pids: readonly number[]) => Map<number, WindowsSnapshotBirth> | undefined;
   checkWindowsProcessAbsent?: (pid: number) => boolean;
   signalProcessTree?: typeof signalTree;
   signalProcessTreeOutcome?: typeof signalTreeOutcome;
@@ -239,11 +244,18 @@ function isPidAbsentByProbe(pid: number, probe: (target: number) => void): boole
  * - POSIX (`EPERM` on `kill(0)`): reads `/bin/ps -p <pid> -o lstart=` directly;
  *   only a verified different birth (or `ps` absent + `ESRCH` re-probe) proves
  *   `"gone"`. Equal birth, `ps` timeout/error, or unreadable output stays `"unknown"`.
- * - Windows (helper access-denied in non-elevated desktop sessions): performs
- *   one batched WMI `Win32_Process.CreationDate` query for all unresolved PIDs
- *   and compares raw CIM_DATETIME UTC offsets against recorded `win32-ft:` at
- *   microsecond precision (diff > 10 ticks). Compatible timestamps, malformed
- *   output, and query failures stay `"unknown"`.
+ * - Windows (helper access-denied in non-elevated desktop sessions): first one
+ *   snapshot of the system process list (`letagents-process-tree.exe births`),
+ *   which opens no process and needs neither elevation nor WMI. A pid the
+ *   snapshot does not list is `"gone"`; a listed exact 100-ns creation time
+ *   that differs from the recorded `win32-ft:` is `"gone"` (the pid names
+ *   another process, which is never signalled); an equal one stays
+ *   `"unknown"` and refuses the reset, as before. A failed or unknown snapshot,
+ *   or a listed pid without a positive time, falls through to one batched WMI
+ *   `Win32_Process.CreationDate` query, which compares raw CIM_DATETIME UTC
+ *   offsets against the recorded birth at microsecond precision (diff > 10
+ *   ticks). Compatible timestamps, malformed output, and query failures stay
+ *   `"unknown"`.
  */
 function resolveLegacyRuntimeStates(
   targets: readonly LegacyLiveRuntime[],
@@ -296,18 +308,40 @@ function resolveLegacyRuntimeStates(
     return results;
   }
 
-  if (hasCustomBirthState && !options.queryWindowsWmiCreations && !options.checkWindowsProcessAbsent) {
+  if (hasCustomBirthState && !options.queryWindowsWmiCreations && !options.checkWindowsProcessAbsent
+    && !options.readWindowsProcessBirths) {
     return results;
   }
   const isWindowsAbsent = options.checkWindowsProcessAbsent
     ?? ((pid: number) => isPidAbsentByProbe(pid, probe) || windowsProcessInfo(pid) === null);
-  const wmiCandidates: Array<{ key: string; pid: number; recordedFiletime: bigint }> = [];
+  // A caller that injects its own birthState gets the snapshot only when it injects it too.
+  const readSnapshot = options.readWindowsProcessBirths
+    ?? (hasCustomBirthState ? undefined : (pids: readonly number[]) => windowsProcessBirths(pids));
+  const remaining: Array<{ key: string; pid: number; birth: string }> = [];
   for (const item of unresolved) {
     if (isWindowsAbsent(item.pid)) {
       results.set(item.key, "gone");
       continue;
     }
+    remaining.push(item);
+  }
+  if (remaining.length === 0) return results;
+
+  const snapshot = readSnapshot ? readSnapshot([...new Set(remaining.map((item) => item.pid))]) : undefined;
+  const wmiCandidates: Array<{ key: string; pid: number; recordedFiletime: bigint }> = [];
+  for (const item of remaining) {
     const recordedFiletime = parseWindowsBirthFiletime(item.birth);
+    const listed = snapshot?.get(item.pid);
+    if (listed?.listed === false) {
+      // A fresh, successful snapshot that does not list the pid: the recorded process is gone.
+      results.set(item.key, "gone");
+      continue;
+    }
+    if (listed?.listed === true && listed.creationTime !== null && recordedFiletime !== null) {
+      // Exact kernel creation time: a different one is another process; an equal one stays unknown.
+      if (BigInt(listed.creationTime) !== recordedFiletime) results.set(item.key, "gone");
+      continue;
+    }
     if (recordedFiletime !== null) {
       wmiCandidates.push({ key: item.key, pid: item.pid, recordedFiletime });
     }

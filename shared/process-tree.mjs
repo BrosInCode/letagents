@@ -387,6 +387,50 @@ export function windowsProcessInfo(pid, options = {}) {
   }
 }
 
+/** At most this many pids in one `births` call. */
+export const MAX_WINDOWS_BIRTH_PIDS = 256;
+
+/**
+ * Creation times from one snapshot of the Windows system process list
+ * (`letagents-process-tree.exe births`). It opens no process, so it also reads
+ * processes that `windowsProcessInfo` cannot open without elevation (System,
+ * csrss, services of other accounts). A Map from each pid to
+ * `{ listed: false }` (the snapshot does not list it) or
+ * `{ listed: true, creationTime }` (a FILETIME decimal string, or null when the
+ * list gives no positive time). undefined when the list cannot be read: no
+ * helper, a helper without `births`, a refused or unknown layout, or output
+ * that is not exactly one entry per pid in order. Windows only.
+ */
+export function windowsProcessBirths(pids, options = {}) {
+  if (!Array.isArray(pids)) return undefined;
+  const wanted = [...new Set(pids)];
+  if (wanted.length === 0 || wanted.length > MAX_WINDOWS_BIRTH_PIDS) return undefined;
+  if (!wanted.every((pid) => Number.isSafeInteger(pid) && pid >= 1 && pid <= 0xffffffff)) return undefined;
+  const helper = options.helperPath === undefined ? processTreeHelperPath({ platform: "win32", env: options.helperEnv }) : options.helperPath;
+  if (!helper) return undefined;
+  const result = runHelper(helper, ["births", ...wanted.map(String)], options);
+  if (!result || result.error || result.status !== 0) return undefined;
+  try {
+    const parsed = JSON.parse(String(result.stdout).trim());
+    if (!Array.isArray(parsed?.births) || parsed.births.length !== wanted.length) return undefined;
+    const births = new Map();
+    for (const [index, entry] of parsed.births.entries()) {
+      if (entry === null || typeof entry !== "object" || entry.pid !== wanted[index]) return undefined;
+      if (entry.listed === false && Object.keys(entry).length === 2) {
+        births.set(entry.pid, { listed: false });
+      } else if (entry.listed === true && Object.keys(entry).length === 3
+        && (entry.creationTime === null || (typeof entry.creationTime === "string" && isCreationTime(entry.creationTime)))) {
+        births.set(entry.pid, { listed: true, creationTime: entry.creationTime });
+      } else {
+        return undefined;
+      }
+    }
+    return births;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Send `signal` to the process tree led by `pid`.
  *
