@@ -121,6 +121,12 @@ Update metadata must continue to use HTTPS and immutable versioned asset URLs. D
 
 Do not replace an existing GitHub release asset with different bytes after it has been announced. If a release is faulty, publish a higher patch version; clients and Squirrel.Mac are designed to move forward to a newer version, not silently downgrade. Stable and beta channels should use separate feed locations so pre-release metadata cannot reach stable clients.
 
+### Supervisor review archives (schema 54)
+
+Schema 54 stores large workspace reviews in the owner-private `daemon-state.sqlite.reviews` folder beside the supervisor database. The publisher moves existing inline reviews in the background and preserves each upload cursor. Older Desktop versions refuse a database that has advanced to schema 54.
+
+For a recovery envelope created **from schema 54 or later**, preserve `daemon-state.sqlite.recovery.enc` together with the sibling `daemon-state.sqlite.reviews-recovery` directory and the original OS secure storage used to seal the recovery key. The envelope contains the keys and references for archived reviews. The recovery directory contains a separately verified encrypted copy of each payload, written at capture. Recovery envelopes created from earlier schemas carry their inline review data.
+
 
 ## Room team and expression trial (desktop 0.1.119)
 

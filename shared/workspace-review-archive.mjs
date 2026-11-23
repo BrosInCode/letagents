@@ -93,22 +93,40 @@ export function archiveWorkspaceReview(databasePath, data, digest) {
   // The independent recovery copy is made once at capture. A v54+ supervisor
   // snapshot contains the envelope/key and refers to the sibling recovery
   // directory; later provider upgrades do not have to copy this object again.
-  for (const directory of folders(databasePath)) {
-    try { createPrivateDirSync(directory); syncDirectorySync(dirname(directory)); }
-    catch (error) { if (error.code !== 'EEXIST') throw error; }
-    assertOwnerPrivateSync(directory, { kind: 'directory' });
-    writePrivateFileAtomicallySync(join(directory, filename(key)), bytes);
-    const ref = { size: data.length, key };
-    const verified = withArchive(directory, ref, descriptor => {
-      const hash = createHash('sha256');
-      for (let i = 0; i < pages; i++) hash.update(readPage(descriptor, ref, digest, i));
-      return hash.digest('hex');
-    });
-    if (verified !== digest) invalid();
+  const reference = prefix + data.length + ':' + key.toString('hex');
+  try {
+    for (const directory of folders(databasePath)) {
+      try { createPrivateDirSync(directory); syncDirectorySync(dirname(directory)); }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+      assertOwnerPrivateSync(directory, { kind: 'directory' });
+      writePrivateFileAtomicallySync(join(directory, filename(key)), bytes);
+      const ref = { size: data.length, key };
+      const verified = withArchive(directory, ref, descriptor => {
+        const hash = createHash('sha256');
+        for (let i = 0; i < pages; i++) hash.update(readPage(descriptor, ref, digest, i));
+        return hash.digest('hex');
+      });
+      if (verified !== digest) invalid();
+    }
+  } catch (error) {
+    discardUncommittedReviewArchive(databasePath, reference);
+    throw error;
   }
-  return prefix + data.length + ':' + key.toString('hex');
+  return reference;
 }
 
+/** Only the originating writer knows this fresh envelope. Call after a
+ * confirmed rollback, or before returning an envelope to SQLite. */
+export function discardUncommittedReviewArchive(databasePath, value) {
+  const reference = reviewArchiveReference(value);
+  if (!reference) return;
+  for (const directory of folders(databasePath)) {
+    try {
+      assertOwnerPrivateSync(directory, { kind: 'directory' });
+      unlinkSync(join(directory, filename(reference.key)));
+    } catch { /* An unavailable volume can be swept once recovery releases it. */ }
+  }
+}
 /** Caller holds the supervisor database write lock. A retained or interrupted
  * recovery point may reference objects since cleared from live history. Keep
  * their ciphertext through its entire lifetime, including unvalidated backups. */

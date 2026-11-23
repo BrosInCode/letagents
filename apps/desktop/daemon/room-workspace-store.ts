@@ -1,5 +1,5 @@
-import { encodeWorkspaceReview, REVIEW_PAGE_SIZE, type WorkspaceReview, type WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
-import { archiveWorkspaceReview, pruneUnreferencedReviewArchives, readArchivedReviewPage, reviewArchiveReference } from '../../../shared/workspace-review-archive.mjs';
+import { encodeWorkspaceReview, REVIEW_LIMIT, REVIEW_PAGE_SIZE, type WorkspaceReview, type WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
+import { archiveWorkspaceReview, discardUncommittedReviewArchive, pruneUnreferencedReviewArchives, readArchivedReviewPage, reviewArchiveReference } from '../../../shared/workspace-review-archive.mjs';
 import type { DatabaseSync } from 'node:sqlite';
 import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from '../../../shared/room-agent-work.mjs';
 
@@ -13,15 +13,18 @@ const schema = `CREATE TABLE room_workspace_captures (
 ) STRICT`;
 const reviewSchema = `CREATE TABLE IF NOT EXISTS room_workspace_reviews (
   agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
-  digest TEXT NOT NULL, data TEXT NOT NULL CHECK(length(data)<=134217728),
+  digest TEXT NOT NULL, data TEXT NOT NULL CHECK(length(data)<=${REVIEW_LIMIT}),
   uploaded_pages INTEGER NOT NULL DEFAULT 0 CHECK(uploaded_pages>=0),
   PRIMARY KEY(agent_id,room_id,source_message_id),
   FOREIGN KEY(agent_id,room_id,source_message_id) REFERENCES room_workspace_captures(agent_id,room_id,source_message_id)
 ) STRICT`;
-export function validateRoomWorkspaceReviewSchema(db: DatabaseSync): void {
+export function hasWorkspaceReviewSchema(db: DatabaseSync): boolean {
   const sql = String(db.prepare("SELECT sql FROM sqlite_master WHERE name='room_workspace_reviews'").get()?.sql ?? '');
   const normalize = (value: string) => value.replace('IF NOT EXISTS ', '').replace(/\s+/g, ' ').trim();
-  if (normalize(sql) !== normalize(reviewSchema)) throw new Error('Invalid full workspace review schema.');
+  return normalize(sql) === normalize(reviewSchema);
+}
+export function validateRoomWorkspaceReviewSchema(db: DatabaseSync): void {
+  if (!hasWorkspaceReviewSchema(db)) throw new Error('Invalid full workspace review schema.');
 }
 export function applyRoomWorkspaceSchema(db: DatabaseSync): void {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='room_workspace_captures'").get()) db.exec(schema);
@@ -43,6 +46,7 @@ export class RoomWorkspaceStore {
   private lastArchiveRow = 0;
   private finishedArchiveMigration = false;
   private pruneAfter = 0;
+  private archiveRetryAt = 0;
   constructor(private readonly db: DatabaseSync) {
     // In-memory inspection/test databases are self-contained. Only a fenced
     // v54+ on-disk supervisor may commit an external archive reference.
@@ -82,30 +86,47 @@ export class RoomWorkspaceStore {
     let encoded: ReturnType<typeof encodeWorkspaceReview> | null = null;
     try { encoded = review ? encodeWorkspaceReview(review) : null; }
     catch (error) { if (!(error instanceof RangeError)) throw error; } // Optional archive capacity must never discard a valid preview.
+    let newArchive: string | undefined;
     this.db.exec('SAVEPOINT workspace_review');
     try {
       const result = this.db.prepare('UPDATE room_workspace_captures SET settled_json=? WHERE agent_id=? AND room_id=? AND source_message_id=? AND work_attempt_id=? AND inbox_item_id=? AND settled_json IS NULL').run(JSON.stringify(parsed), ...keys(key));
       if (result.changes && encoded) {
-        const data = this.databasePath ? archiveWorkspaceReview(this.databasePath, encoded.data, encoded.digest) : encoded.data;
+        let data = encoded.data;
+        if (this.databasePath) {
+          try {
+            newArchive = archiveWorkspaceReview(this.databasePath, data, encoded.digest);
+            data = newArchive;
+          } catch {
+            // Preserve the original durable capture while the archive volume is
+            // unavailable. The publisher retries externalization after startup.
+            this.finishedArchiveMigration = false;
+            this.lastArchiveRow = 0;
+          }
+        }
         this.db.prepare('INSERT INTO room_workspace_reviews(agent_id,room_id,source_message_id,digest,data) VALUES(?,?,?,?,?)')
           .run(...keys(key).slice(0, 3), encoded.digest, data);
       }
       this.db.exec('RELEASE workspace_review');
-    } catch (error) { this.db.exec('ROLLBACK TO workspace_review; RELEASE workspace_review'); throw error; }
+    } catch (error) {
+      this.db.exec('ROLLBACK TO workspace_review; RELEASE workspace_review');
+      if (this.databasePath && newArchive) discardUncommittedReviewArchive(this.databasePath, newArchive);
+      throw error;
+    }
   }
 
   /** After startup, move one historical review per publisher pass. The original
    * row remains authoritative until its fsynced archive has been read back. */
   maintainArchives(now: number): boolean {
-    if (!this.databasePath || (this.finishedArchiveMigration && now < this.pruneAfter)) return false;
+    if (!this.databasePath || now < this.archiveRetryAt || (this.finishedArchiveMigration && now < this.pruneAfter)) return false;
+    let newArchive: string | undefined;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (!this.finishedArchiveMigration) {
         const row = this.db.prepare(`SELECT rowid,digest,data FROM room_workspace_reviews
           WHERE rowid>? AND (${this.reviewSizeSql}>90 OR data NOT GLOB '@review1:*') ORDER BY rowid LIMIT 1`).get(this.lastArchiveRow);
         if (row) {
-          const data = archiveWorkspaceReview(this.databasePath, String(row.data), String(row.digest));
-          this.db.prepare('UPDATE room_workspace_reviews SET data=? WHERE rowid=?').run(data, row.rowid);
+          newArchive = archiveWorkspaceReview(this.databasePath, String(row.data), String(row.digest));
+          this.db.prepare('UPDATE room_workspace_reviews SET data=? WHERE rowid=?').run(newArchive, row.rowid);
           this.db.exec('COMMIT');
           this.lastArchiveRow = Number(row.rowid);
           return true;
@@ -117,7 +138,12 @@ export class RoomWorkspaceStore {
         WHERE ${this.reviewSizeSql}<=90 AND data GLOB '@review1:*'`).iterate());
       this.db.exec('COMMIT');
       return false;
-    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      if (newArchive) discardUncommittedReviewArchive(this.databasePath, newArchive);
+      this.archiveRetryAt = now + 30_000;
+      throw error;
+    }
   }
 
   private pendingReview(agentId: string, roomId: string, sourceMessageId: string, readInlinePage: boolean) {

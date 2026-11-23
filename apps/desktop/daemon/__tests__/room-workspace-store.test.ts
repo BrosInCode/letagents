@@ -61,12 +61,25 @@ test('historical reviews move durably, resume the same page and survive clear th
   let store = new RoomWorkspaceStore(db);
   assert.deepEqual(store.pendingPage('a','r','m'), { digest, index: 1, total: 3, data: 'B'.repeat(REVIEW_PAGE_SIZE) });
 
+  writeFileSync(path + '.recovery.enc', 'retained snapshot');
+  writeFileSync(path + '.reviews-recovery', 'unavailable mirror');
+  for (const now of [0, 30_001]) {
+    assert.throws(() => store.maintainArchives(now));
+    assert.deepEqual(readdirSync(folder), [], 'failed mirror cannot accumulate completed primary files');
+    assert.equal(db.prepare('SELECT data FROM room_workspace_reviews').get()!.data, data);
+  }
+  unlinkSync(path + '.reviews-recovery');
   db.exec("CREATE TRIGGER fail_commit BEFORE UPDATE ON room_workspace_reviews BEGIN SELECT RAISE(ABORT,'interrupt'); END;");
-  assert.throws(() => store.maintainArchives(0), /interrupt/);
-  assert.equal(db.prepare('SELECT data FROM room_workspace_reviews').get()!.data, data);
+  for (const now of [60_002, 90_003]) {
+    assert.throws(() => store.maintainArchives(now), /interrupt/);
+    assert.deepEqual(readdirSync(folder), []);
+    assert.deepEqual(readdirSync(path + '.reviews-recovery'), [], 'confirmed rollback frees both newly created files');
+    assert.equal(db.prepare('SELECT data FROM room_workspace_reviews').get()!.data, data);
+  }
   db.exec('DROP TRIGGER fail_commit');
-  assert.equal(store.maintainArchives(0), true, 'same process retries the interrupted move');
-  assert.equal(store.maintainArchives(1), false);
+  assert.equal(store.maintainArchives(90_004), false, 'failed storage gets a bounded retry delay');
+  assert.equal(store.maintainArchives(120_004), true, 'same process retries the interrupted move');
+  assert.equal(store.maintainArchives(120_005), false);
   const files = readdirSync(folder);
   assert.equal(files.length, 1, 'uncommitted candidate was discarded');
   const blob = join(folder, files[0]);
