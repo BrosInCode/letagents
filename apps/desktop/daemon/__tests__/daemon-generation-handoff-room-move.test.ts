@@ -439,7 +439,9 @@ test("ambiguous destination join retries when the server commits before the resp
     workerBindings: WorkerBindingStore;
     reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, deliveryHttp);
+  let now = Date.parse("2026-08-27T09:00:00.000Z");
+  const clock = { nowMs: () => now };
+  const daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, clock, deliveryHttp);
   try {
     await daemon.start();
     const generation = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
@@ -478,6 +480,12 @@ test("ambiguous destination join retries when the server commits before the resp
     assert.match(move.error ?? "", /ambiguous and will retry/);
     assert.equal((await internals.store.getEntry(moving.id))?.room_id, "source-room");
 
+    // Durable retry backoff blocks immediate replay before the retry deadline.
+    move = await internals.reconcileRoomMove(move);
+    assert.equal(joinAttempts, 1);
+    assert.equal(move.phase, "joining_destination");
+
+    now += 1_000;
     move = await internals.reconcileRoomMove(move);
     assert.equal(joinAttempts, 2);
     assert.equal(move.phase, "rotating_credentials");
@@ -946,7 +954,9 @@ test("room-move rollback replays every external and local crash edge across daem
       agent_session_token: `secret_${roomId}`, api_url: "https://letagents.test",
     });
   };
-  let daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, deliveryHttp);
+  let now = Date.parse("2026-08-27T09:30:00.000Z");
+  const clock = { nowMs: () => now };
+  let daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, clock, deliveryHttp);
   try {
     await daemon.start();
     const generation = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
@@ -990,12 +1000,17 @@ test("room-move rollback replays every external and local crash edge across daem
 
     // A successor adopts only the journal generation. It cannot invent the
     // failed external acknowledgement and waits for a freshly supplied bearer.
-    daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, deliveryHttp);
+    daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, clock, deliveryHttp);
     await daemon.start();
     internals = daemon as unknown as Internals;
     assert.equal((await internals.store.getRoomMove("move_rollback"))?.phase, "rollback_required");
     await bind(daemon, "destination-room");
     rejectSourceJoin = false;
+
+    // Durable retry deadline survives daemon restart and prevents immediate replay at the same timestamp.
+    await internals.reconcileRoomMove((await internals.store.getRoomMove("move_rollback"))!);
+    assert.equal(joinCalls, 1);
+    now += 1_000;
 
     // Crash after the idempotent external source rejoin but before local
     // membership mutation: the journal remains rollback_required.
