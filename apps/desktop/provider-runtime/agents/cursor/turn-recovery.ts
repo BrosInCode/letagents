@@ -88,8 +88,10 @@ export async function recoverOwnedRoomTurn(adapter: CursorProviderAdapter, provi
           options.checkpointProviderState,
         );
       } catch (recoveryError) {
+        // Keep the original not-dispatched cause: the retirement failure alone
+        // hides why the wrapper never reached native dispatch.
         throw new CursorRoomTurnRecoveryError(
-          `Cursor prepared-wrapper recovery could not retire its exact child birth: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+          `Cursor prepared-wrapper recovery could not retire its exact child birth: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)} (original cause: ${error.message})`,
         );
       }
     }
@@ -290,8 +292,11 @@ export function readDurableTurnTerminal(
       workspaceGenerationSettlement = settlement;
     }
     if (raw.type === "not_started") {
+      // The wrapper records why it never released native work (for example a
+      // startup failure). Keep that cause, redacted, bounded and on one line.
+      const wrapperCause = safeCursorTerminalErrorDetail(raw.error);
       throw new CursorRoomTurnNotDispatchedError(
-        "Cursor's prepared wrapper exited before native dispatch; the exact inbox item is safe to retry.",
+        `Cursor's prepared wrapper exited before native dispatch; the exact inbox item is safe to retry.${wrapperCause ? ` Wrapper cause: ${wrapperCause}` : ""}`,
         turnId, workspaceGenerationManifestPath, workspaceGenerationSettlement,
       );
     }

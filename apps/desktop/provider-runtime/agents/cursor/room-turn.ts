@@ -89,15 +89,34 @@ export async function runRoomTurn(
       unlinkPreparationDetach();
       // Native work may have completed while its real session checkpoint
       // failed. Re-read only this exact wrapper terminal; never redispatch.
-      return await adapter.recoverRoomTurn(handle, {
-        inboxItemId: request.inboxItemId,
-        providerTurnId: turnId,
-      }, {
-        detachSignal: options.detachSignal,
-        checkpointProviderState: options.checkpointProviderState,
-        settleLifecycleBeforeIdle: options.settleLifecycleBeforeIdle,
-        checkpointTerminalResult: options.checkpointTerminalResult,
-      });
+      try {
+        return await adapter.recoverRoomTurn(handle, {
+          inboxItemId: request.inboxItemId,
+          providerTurnId: turnId,
+        }, {
+          detachSignal: options.detachSignal,
+          checkpointProviderState: options.checkpointProviderState,
+          settleLifecycleBeforeIdle: options.settleLifecycleBeforeIdle,
+          checkpointTerminalResult: options.checkpointTerminalResult,
+        });
+      } catch (recoveryError) {
+        // A failed recovery must not hide the launch failure that started it.
+        // Keep the error object (and its recovery outcome); only extend its text.
+        if (recoveryError instanceof Error && error.message && !recoveryError.message.includes(error.message)) {
+          const previous = recoveryError.message;
+          // Read the stack first: V8 formats it on first read, so reading it after the
+          // message change would already include the new text and the replace would
+          // add it twice. One read before the change gives one path for both cases.
+          const previousStack = recoveryError.stack;
+          recoveryError.message = `${previous} (after launch failure: ${error.message})`;
+          if (typeof previousStack === "string" && previous && previousStack.includes(previous)) {
+            const extended = recoveryError.message;
+            // A function replacement keeps `$&`-style text in a launch error literal.
+            recoveryError.stack = previousStack.replace(previous, () => extended);
+          }
+        }
+        throw recoveryError;
+      }
     }
     let terminal = await adapter.awaitRoomTurnTerminal(turn.completion!, options.detachSignal);
     if (turn.lifecycleSettlementDeferred) {
