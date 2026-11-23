@@ -16,7 +16,9 @@ import type { DatabaseSync } from "node:sqlite";
 import { EFFECT_JOURNAL_TABLE } from "./schema.js";
 import {
   failEffectInTransaction,
+  getEffectByIdempotencyKey,
   listEffectsForAgent,
+  prepareEffectInTransaction,
   pruneTerminalEffectsByKindsInTransaction,
 } from "./store.js";
 import {
@@ -24,6 +26,7 @@ import {
   EffectFenceError,
   type EffectBackoffPolicy,
   type EffectRecord,
+  type PrepareEffectResult,
 } from "./types.js";
 
 export const RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND = "runtime_recovery_end_worker_session" as const;
@@ -66,13 +69,27 @@ export function runtimeRecoveryEndWorkerSessionIdempotencyKey(input: {
   return `rrews:v1:${hash}`;
 }
 
-const PERMANENT_RUNTIME_RECOVERY_HTTP_STATUSES = new Set([400, 404, 405, 410, 422]);
+const RECOVERABLE_NULL_OPERATION_REFUSALS = new Set([
+  "agent_stopped",
+  "agent_missing",
+  "recovery_pending",
+  "worker_session_absent",
+]);
 
 /**
  * Classifies a runtime-recovery outbound HTTP failure into a strictly allowlisted,
  * bounded error code suitable for durable storage in `effects.last_error`.
  * Arbitrary `Error.message`, `cause`, or server response fragments are never
  * persisted into the `effects` journal.
+ *
+ * All outbound `endWorkerSession` HTTP errors (including `400`/`404`/`405`/`410`/`422`
+ * as well as `401`/`403`/`408`/`409`/`429`/`5xx`) remain explicitly retryable
+ * (`prepared`, `autoPump: false`, exponential backoff) and never settle `completed`
+ * or sticky `failed`: the live server route (`POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/end`)
+ * queries with `include_ended: true` and returns HTTP 200 when a session is already
+ * ended, so `404` never proves retirement, while a sticky `failed` receipt would
+ * permanently trap a paused `agent_runtime_recoveries` row even after a transient
+ * routing/proxy fault recovers.
  */
 export function classifyRuntimeRecoveryEffectError(error: unknown): string {
   if (error && typeof error === "object" && "status" in error) {
@@ -92,22 +109,13 @@ export function classifyRuntimeRecoveryEffectError(error: unknown): string {
 }
 
 /**
- * Returns true when an outbound `endWorkerSession` HTTP failure is a permanent
- * non-auth, non-fence 4xx rejection (`400`, `404`, `405`, `410`, `422`) that
- * must settle `failed` rather than retry or be treated as `completed`.
- *
- * The live server route (`POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/end`)
- * queries with `include_ended: true` and returns HTTP 200 when a session is
- * already ended (so `404` never proves retirement), and returns `401`/`403`/`409`
- * for expired or stale host-grant generations/fences that can recover once the
- * desktop installs a renewed grant under the same recovery operation.
+ * Returns true ONLY for temporary null-operation lifecycle/binding refusals
+ * (`agent_stopped`, `agent_missing`, `recovery_pending`, `worker_session_absent`)
+ * that reflect "not currently authorized" rather than completed recovery, purge
+ * retirement (`agent_purged`), non-null-operation refusals, or malformed payloads.
  */
-export function isPermanentRuntimeRecoveryEffectError(error: unknown): boolean {
-  if (!error || typeof error !== "object" || !("status" in error)) return false;
-  const status = (error as { status?: unknown }).status;
-  return typeof status === "number"
-    && Number.isInteger(status)
-    && PERMANENT_RUNTIME_RECOVERY_HTTP_STATUSES.has(status);
+export function isRecoverableNullOperationRuntimeRecoveryRefusal(error: string | null): boolean {
+  return error !== null && RECOVERABLE_NULL_OPERATION_REFUSALS.has(error);
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -284,7 +292,7 @@ export function retireRuntimeRecoveryEffectsForOperationInTransaction(
   input: {
     agentId: string;
     operationId: string;
-    expectedEpoch?: number;
+    expectedEpoch: number;
     error: string;
     nowIso?: string;
   },
@@ -294,12 +302,10 @@ export function retireRuntimeRecoveryEffectsForOperationInTransaction(
       "retireRuntimeRecoveryEffectsForOperationInTransaction requires an active fenced SQLite transaction.",
     );
   }
-  const explicitEpoch = input.expectedEpoch !== undefined
-    ? assertPositiveEpoch(input.expectedEpoch, "expectedEpoch")
-    : undefined;
+  const epoch = assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
   const nowIso = input.nowIso ?? new Date().toISOString();
   const preparedRows = database.prepare(`
-    SELECT id, epoch FROM ${EFFECT_JOURNAL_TABLE}
+    SELECT id FROM ${EFFECT_JOURNAL_TABLE}
     WHERE agent_id = ?
       AND kind = ?
       AND state = 'prepared'
@@ -309,11 +315,11 @@ export function retireRuntimeRecoveryEffectsForOperationInTransaction(
     input.agentId,
     RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
     input.operationId,
-  ) as Array<{ id: string; epoch: number }>;
+  ) as Array<{ id: string }>;
   for (const row of preparedRows) {
     failEffectInTransaction(database, {
       id: String(row.id),
-      expectedEpoch: explicitEpoch ?? Math.max(1, Number(row.epoch)),
+      expectedEpoch: epoch,
       error: input.error,
       nowIso,
     });
@@ -322,6 +328,96 @@ export function retireRuntimeRecoveryEffectsForOperationInTransaction(
     pruneTerminalRuntimeRecoveryEffectsInTransaction(database, input.agentId);
   }
   return preparedRows.length;
+}
+
+/**
+ * Atomically replaces a superseded terminal `failed` null-operation
+ * (`operation_id === null`) runtime-recovery row inside a single active fenced
+ * `BEGIN IMMEDIATE` SQLite transaction ONLY when:
+ * 1. The existing row's persisted payload parses as the exact matching
+ *    null-operation payload (malformed or mismatched rows fail closed).
+ * 2. Its `last_error` is a temporary lifecycle/binding refusal
+ *    (`agent_stopped`, `agent_missing`, `recovery_pending`, `worker_session_absent`)
+ *    — NEVER `agent_purged`, `invalid_payload`, or any non-null `operation_id` refusal.
+ * 3. Its `epoch <= expectedEpoch` (future-epoch rows fail closed with `EffectFenceError`).
+ * 4. `checkRuntimeRecoveryPhaseInTransaction` returns `null` inside this same
+ *    transaction (durable agent state and retained worker session are valid again).
+ *
+ * Schema v3's `effects_immutable_identity` trigger forbids `UPDATE` on rows whose
+ * `OLD.state IN ('completed', 'failed')`, so this helper performs `DELETE` and
+ * `prepareEffectInTransaction` atomically within the caller's single fenced
+ * `BEGIN IMMEDIATE` transaction (leaving zero concurrency gap between delete and
+ * insert). Replacing the superseded row purposefully resets `attempt_count` to `0`
+ * (the next authorized dispatch runs as attempt `1`), rather than carrying over
+ * attempt history from the superseded pre-stop refusal.
+ *
+ * Returns the freshly prepared effect result when replaced, or `null` when the
+ * row does not exist, is not a matching recoverable null-op refusal, or durable
+ * state is still ineligible.
+ */
+export function resetRecoverableNullOperationRuntimeRecoveryEffectInTransaction(
+  database: DatabaseSync,
+  input: {
+    agentId: string;
+    idempotencyKey: string;
+    payload: RuntimeRecoveryEndWorkerSessionEffectPayload;
+    expectedEpoch: number;
+    nowIso?: string;
+  },
+): PrepareEffectResult | null {
+  if (!database.isTransaction) {
+    throw new EffectFenceError(
+      "resetRecoverableNullOperationRuntimeRecoveryEffectInTransaction requires an active fenced SQLite transaction.",
+    );
+  }
+  if (input.payload.operation_id !== null) return null;
+  const epoch = assertPositiveEpoch(input.expectedEpoch, "expectedEpoch");
+  const existing = getEffectByIdempotencyKey(
+    database,
+    input.agentId,
+    RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+    input.idempotencyKey,
+  );
+  if (!existing || existing.state !== "failed") return null;
+  const existingPayload = parseRuntimeRecoveryEndWorkerSessionPayload(existing.payload);
+  if (!existingPayload
+    || existingPayload.operation_id !== null
+    || existingPayload.room_id !== input.payload.room_id
+    || existingPayload.execution_generation_id !== input.payload.execution_generation_id
+    || existingPayload.session_id !== input.payload.session_id) {
+    return null;
+  }
+  if (!isRecoverableNullOperationRuntimeRecoveryRefusal(existing.last_error)) return null;
+  if (existing.epoch > epoch) {
+    throw new EffectFenceError(
+      `Stale daemon generation ${epoch} cannot reset runtime-recovery effect ${existing.id} owned by epoch ${existing.epoch}.`,
+    );
+  }
+  const currentRefusal = checkRuntimeRecoveryPhaseInTransaction(database, {
+    operationId: null,
+    agentId: input.agentId,
+    executionGenerationId: input.payload.execution_generation_id,
+    sessionId: input.payload.session_id,
+  });
+  if (currentRefusal !== null) return null;
+  const deleted = database.prepare(`
+    DELETE FROM ${EFFECT_JOURNAL_TABLE}
+    WHERE id = ? AND state = 'failed' AND epoch = ?
+  `).run(existing.id, existing.epoch);
+  if (Number(deleted.changes) !== 1) {
+    throw new EffectFenceError(
+      `Runtime-recovery effect ${existing.id} lost its recoverable-refusal reset fence.`,
+    );
+  }
+  return prepareEffectInTransaction(database, {
+    agent_id: input.agentId,
+    kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+    idempotency_key: input.idempotencyKey,
+    epoch,
+    payload: input.payload,
+    retryable: true,
+    max_attempts: RUNTIME_RECOVERY_EFFECT_MAX_ATTEMPTS,
+  }, input.nowIso ?? new Date().toISOString());
 }
 
 /**

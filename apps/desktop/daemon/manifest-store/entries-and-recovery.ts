@@ -285,7 +285,7 @@ export const entriesAndRecovery = storeMethods({
   async completeRuntimeRecovery(
     operationId: string,
     commitFence: (commit: () => Promise<void>) => Promise<void>,
-    daemonGeneration?: number,
+    daemonGeneration: number,
   ) {
     return this.writeOperationalJournal(database => {
       const record = readRuntimeRecovery(database, operationId);

@@ -12,11 +12,12 @@ import {
   EffectFenceError,
   failEffectInTransaction,
   getEffectByIdempotencyKey,
-  isPermanentRuntimeRecoveryEffectError,
+  isRecoverableNullOperationRuntimeRecoveryRefusal,
   listActiveRuntimeRecoveryEffectsForAgent,
   parseRuntimeRecoveryEndWorkerSessionPayload,
   pruneTerminalRuntimeRecoveryEffectsInTransaction,
   rescheduleEffectForRetryInTransaction,
+  resetRecoverableNullOperationRuntimeRecoveryEffectInTransaction,
   retireStaleRuntimeRecoveryEffectsInTransaction,
   RUNTIME_RECOVERY_EFFECT_BACKOFF,
   RUNTIME_RECOVERY_EFFECT_MAX_ATTEMPTS,
@@ -804,11 +805,10 @@ export class RuntimeRecoveryCoordinator {
           this.pendingSettlementGrant.delete(claimed.id);
           if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
           this.recordSanitizedDiagnostic(claimed.id, error);
-          const errorCode = classifyRuntimeRecoveryEffectError(error);
-          if (isPermanentRuntimeRecoveryEffectError(error)) {
-            return { status: "failed", error: errorCode };
-          }
-          return { status: "retry", error: errorCode };
+          // Every HTTP failure (including 400/404/405/410/422) remains explicitly
+          // retryable (`prepared`, `autoPump: false`, durable backoff) and never
+          // settles `completed` or permanently traps a paused runtime recovery.
+          return { status: "retry", error: classifyRuntimeRecoveryEffectError(error) };
         }
       },
       settle: async (claimed, executionResult, defaultSettle) => {
@@ -1051,7 +1051,31 @@ export class RuntimeRecoveryCoordinator {
         return { effect: recovered, diagnostic: null, backedOff: recovered.state === "prepared" };
       }
     }
-    const prepared = await executor.prepare({
+    let prepared: Awaited<ReturnType<EffectExecutor["prepare"]>> | null = null;
+    if (existing?.state === "failed"
+      && input.payload.operation_id === null
+      && isRecoverableNullOperationRuntimeRecoveryRefusal(existing.last_error)) {
+      if (executor.isFenced) {
+        throw new EffectFenceError("Effect executor is fenced for shutdown or handoff.");
+      }
+      await this.assertExternalAuthority();
+      if (executor.isFenced) {
+        throw new EffectFenceError("Effect executor is fenced for shutdown or handoff.");
+      }
+      prepared = withFencedEffectTransaction(database, this.effectWriteFence, () => {
+        if (executor.isFenced || this.authority.isHandoffScheduled()) {
+          throw new EffectFenceError("Supervisor handoff fenced runtime-recovery effect reset.");
+        }
+        return resetRecoverableNullOperationRuntimeRecoveryEffectInTransaction(database, {
+          agentId: input.agentId,
+          idempotencyKey: input.idempotencyKey,
+          payload: input.payload,
+          expectedEpoch: this.authority.currentDaemonGeneration(),
+          nowIso: this.nowIso(),
+        });
+      });
+    }
+    prepared ??= await executor.prepare({
       agent_id: input.agentId,
       kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
       idempotency_key: input.idempotencyKey,

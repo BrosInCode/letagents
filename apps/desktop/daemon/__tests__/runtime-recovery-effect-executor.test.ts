@@ -8,11 +8,13 @@ import test from "node:test";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import { SupervisorGrantRequestError, type SupervisorGrantHttp } from "../cloud-http.js";
 import { DaemonStateDatabase } from "../daemon-state-database.js";
+import { DesiredStateCoordinator } from "../desired-state-coordinator.js";
 import {
   applyEffectJournalSchema,
   EffectClaimRefusedError,
   EffectExecutor,
   EffectFenceError,
+  EffectIdempotencyConflictError,
   getEffect,
   listEffectsForAgent,
   RUNTIME_RECOVERY_EFFECT_RETRY_DELAY_MS,
@@ -20,6 +22,7 @@ import {
   RUNTIME_RECOVERY_RETAINED_TERMINAL_EFFECTS_PER_AGENT,
   runtimeRecoveryEndWorkerSessionIdempotencyKey,
 } from "../effect-journal/index.js";
+import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import { LifecycleAdministrationCoordinator } from "../lifecycle-administration-coordinator.js";
 import { ManifestStore } from "../manifest-store.js";
 import { RuntimeRecoveryCoordinator, type RuntimeRecoveryCoordinatorOptions } from "../runtime-recovery-coordinator.js";
@@ -590,47 +593,50 @@ test("allowlisted error hygiene and durable nonzero EffectExecutor backoff hold 
   assert.doesNotMatch(dumped, /RAW_SERVER_RESPONSE_BODY|PRIVATE_ERROR_EXCERPT|RAW_VAULT_SECRET|SUPER_SECRET_SUPERVISOR_GRANT_TOKEN|grant-secret-id-1/);
 });
 
-test("permanent 4xx endWorkerSession statuses settle failed without retrying or falsely completing, while 401/403/409/5xx remain retryable", async () => {
-  for (const status of [400, 404, 405, 410, 422] as const) {
+test("HTTP 4xx and 5xx endWorkerSession statuses stay explicitly retryable without auto-polling or false completion, and recover on later 200", async () => {
+  for (const status of [400, 404, 405, 410, 422, 401, 403, 409, 408, 429, 503] as const) {
     const h = createHarness();
     let calls = 0;
     h.setEndWorkerSession(async () => {
       calls += 1;
-      throw new SupervisorGrantRequestError(status, "Supervisor worker session end");
+      if (calls <= 2) throw new SupervisorGrantRequestError(status, "Supervisor worker session end");
     });
 
-    await assert.rejects(() => h.callEndSession({ sessionId: `sess-perm-${status}` }), new RegExp(`HTTP ${status}`));
-    const [row] = listEffectsForAgent(h.effectDb, "agent-1", { kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND });
-    assert.equal(row?.state, "failed", `HTTP ${status} must settle failed (never prepared or completed)`);
-    assert.equal(row?.last_error, `http_${status}`);
-    assert.equal(row?.attempt_count, 1);
-    assert.equal(row?.next_attempt_at_ms, null);
+    const t0 = h.nowMs();
+    await assert.rejects(() => h.callEndSession({ sessionId: `sess-http-${status}` }), new RegExp(`HTTP ${status}`));
+    const [pending1] = listEffectsForAgent(h.effectDb, "agent-1", { kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND });
+    assert.equal(pending1?.state, "prepared", `HTTP ${status} must stay prepared (never completed or sticky failed)`);
+    assert.equal(pending1?.last_error, `http_${status}`);
+    assert.equal(pending1?.attempt_count, 1);
+    assert.equal(pending1?.next_attempt_at_ms, t0 + RUNTIME_RECOVERY_EFFECT_RETRY_DELAY_MS);
 
-    // Repeating past backoff and after startup recovery issues ZERO additional HTTP calls.
-    h.advanceNow(24 * 60 * 60 * 1_000);
+    // Before backoff deadline (and across startup recovery), no duplicate HTTP runs.
+    await assert.rejects(() => h.callEndSession({ sessionId: `sess-http-${status}` }), /backing off/);
     await h.executor.recoverOnStartup();
-    await assert.rejects(() => h.callEndSession({ sessionId: `sess-perm-${status}` }), new RegExp(`http_${status}`));
-    assert.equal(calls, 1, `HTTP ${status} must not replay on repeated recovery calls`);
-  }
+    assert.equal(calls, 1, `HTTP ${status} must not auto-poll or bypass backoff`);
 
-  for (const status of [401, 403, 409, 408, 429, 503] as const) {
-    const h = createHarness();
-    let calls = 0;
-    h.setEndWorkerSession(async () => {
-      calls += 1;
-      if (calls === 1) throw new SupervisorGrantRequestError(status, "Supervisor worker session end");
-    });
-
-    await assert.rejects(() => h.callEndSession({ sessionId: `sess-retry-${status}` }), new RegExp(`HTTP ${status}`));
-    const [pending] = listEffectsForAgent(h.effectDb, "agent-1", { kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND });
-    assert.equal(pending?.state, "prepared", `HTTP ${status} must remain retryable`);
-    assert.equal(pending?.last_error, `http_${status}`);
-    assert.equal(pending?.next_attempt_at_ms, h.nowMs() + RUNTIME_RECOVERY_EFFECT_RETRY_DELAY_MS);
-
+    // Explicit second retry after backoff sends a new HTTP request and doubles backoff while staying prepared.
     h.advanceNow(RUNTIME_RECOVERY_EFFECT_RETRY_DELAY_MS);
-    await h.callEndSession({ sessionId: `sess-retry-${status}` });
+    const t1 = h.nowMs();
+    await assert.rejects(() => h.callEndSession({ sessionId: `sess-http-${status}` }), new RegExp(`HTTP ${status}`));
+    const pending2 = getEffect(h.effectDb, pending1!.id);
     assert.equal(calls, 2);
-    assert.equal(getEffect(h.effectDb, pending!.id)?.state, "completed");
+    assert.equal(pending2?.state, "prepared");
+    assert.equal(pending2?.last_error, `http_${status}`);
+    assert.equal(pending2?.attempt_count, 2);
+    assert.equal(pending2?.next_attempt_at_ms, t1 + 2 * RUNTIME_RECOVERY_EFFECT_RETRY_DELAY_MS);
+
+    // Once the server recovers (200 OK), a subsequent explicit retry past backoff completes cleanly.
+    h.advanceNow(2 * RUNTIME_RECOVERY_EFFECT_RETRY_DELAY_MS);
+    await h.callEndSession({ sessionId: `sess-http-${status}` });
+    assert.equal(calls, 3);
+    const completed = getEffect(h.effectDb, pending1!.id);
+    assert.equal(completed?.state, "completed");
+    assert.equal(completed?.attempt_count, 3);
+
+    // Repeating after completion reuses the durable receipt with zero additional HTTP.
+    await h.callEndSession({ sessionId: `sess-http-${status}` });
+    assert.equal(calls, 3);
   }
 });
 
@@ -963,57 +969,62 @@ test("real ManifestStore + RuntimeRecoveryCoordinator + LifecycleAdministrationC
     assert.equal(getEffect(db, prepOp.effect.id)?.last_error, "runtime_recovery_complete");
     assert.equal(getEffect(db, prepOther.effect.id)?.state, "prepared", "unrelated agent effect must stay untouched");
 
-    // 2. Refused endWorkerSession (HTTP 403 -> prepared) -> stop + purge succeeds with 0 post-purge HTTP past +24h & startup recovery.
-    const grantStopPurge = custody.installHostGrant(makeGrant({ entryId: "agent-stop-purge" }));
-    await store.createEntry(manifestEntry("agent-stop-purge", {
-      desired_state: "running",
-      observed_state: "idle",
-      last_worker_binding: {
-        agent_session_id: "sess-stop-purge",
-        work_attempt_id: "att-sp",
-        execution_generation_id: "exec-sp",
-        updated_at: NOW_ISO,
-      },
-    }));
-    endWorkerSessionFn = async () => {
-      httpCalls += 1;
-      throw new SupervisorGrantRequestError(403, "Supervisor worker session end");
-    };
-    await assert.rejects(
-      () => callEndSession({
-        agentId: "agent-stop-purge",
-        roomId: "room-1",
-        operationId: null,
-        executionGenerationId: "exec-sp",
-        sessionId: "sess-stop-purge",
-        grant: grantStopPurge,
-      }),
-      /HTTP 403/,
-    );
-    const [spEffect] = listEffectsForAgent(db, "agent-stop-purge", { kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND });
-    assert.equal(spEffect?.state, "prepared");
-    assert.equal(spEffect?.last_error, "http_403");
-    assert.equal(httpCalls, 1);
+    // 2. Refused endWorkerSession (HTTP 403 and 404 -> prepared) -> stop + purge succeeds with 0 post-purge HTTP past +24h & startup recovery.
+    for (const status of [403, 404] as const) {
+      const spAgentId = `agent-stop-purge-${status}`;
+      const spSessionId = `sess-stop-purge-${status}`;
+      const grantStopPurge = custody.installHostGrant(makeGrant({ entryId: spAgentId }));
+      await store.createEntry(manifestEntry(spAgentId, {
+        desired_state: "running",
+        observed_state: "idle",
+        last_worker_binding: {
+          agent_session_id: spSessionId,
+          work_attempt_id: `att-sp-${status}`,
+          execution_generation_id: `exec-sp-${status}`,
+          updated_at: NOW_ISO,
+        },
+      }));
+      const callsBefore = httpCalls;
+      endWorkerSessionFn = async () => {
+        httpCalls += 1;
+        throw new SupervisorGrantRequestError(status, "Supervisor worker session end");
+      };
+      await assert.rejects(
+        () => callEndSession({
+          agentId: spAgentId,
+          roomId: "room-1",
+          operationId: null,
+          executionGenerationId: `exec-sp-${status}`,
+          sessionId: spSessionId,
+          grant: grantStopPurge,
+        }),
+        new RegExp(`HTTP ${status}`),
+      );
+      const [spEffect] = listEffectsForAgent(db, spAgentId, { kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND });
+      assert.equal(spEffect?.state, "prepared");
+      assert.equal(spEffect?.last_error, `http_${status}`);
+      assert.equal(httpCalls, callsBefore + 1);
 
-    // Non-stopped agent refuses purge and leaves prepared row untouched.
-    const refusedRunning = await lifecycle.purgeAgent("agent-stop-purge", GENERATION, "sess-stop-purge", false);
-    assert.equal(refusedRunning.outcome, "invalid");
-    assert.equal(getEffect(db, spEffect!.id)?.state, "prepared");
+      // Non-stopped agent refuses purge and leaves prepared row untouched.
+      const refusedRunning = await lifecycle.purgeAgent(spAgentId, GENERATION, spSessionId, false);
+      assert.equal(refusedRunning.outcome, "invalid");
+      assert.equal(getEffect(db, spEffect!.id)?.state, "prepared");
 
-    // Stop the agent (clearing last_worker_binding) -> purge succeeds cleanly.
-    const spLoaded = await store.getEntryWithVersion("agent-stop-purge");
-    await store.replaceEntry(spLoaded!.version, {
-      ...spLoaded!.entry,
-      desired_state: "stopped",
-      observed_state: "stopped",
-      last_worker_binding: null,
-    });
-    const purged = await lifecycle.purgeAgent("agent-stop-purge", GENERATION, "sess-stop-purge", false);
-    assert.deepEqual(purged, { outcome: "purged" });
-    currentNowMs += 24 * 60 * 60 * 1_000;
-    await executor.recoverOnStartup();
-    assert.equal(listEffectsForAgent(db, "agent-stop-purge").length, 0);
-    assert.equal(httpCalls, 1, "zero post-purge HTTP calls past retry deadline and startup recovery");
+      // Stop the agent (clearing last_worker_binding) -> purge succeeds cleanly.
+      const spLoaded = await store.getEntryWithVersion(spAgentId);
+      await store.replaceEntry(spLoaded!.version, {
+        ...spLoaded!.entry,
+        desired_state: "stopped",
+        observed_state: "stopped",
+        last_worker_binding: null,
+      });
+      const purged = await lifecycle.purgeAgent(spAgentId, GENERATION, spSessionId, false);
+      assert.deepEqual(purged, { outcome: "purged" });
+      currentNowMs += 24 * 60 * 60 * 1_000;
+      await executor.recoverOnStartup();
+      assert.equal(listEffectsForAgent(db, spAgentId).length, 0);
+      assert.equal(httpCalls, callsBefore + 1, `HTTP ${status}: zero post-purge HTTP calls past retry deadline and startup recovery`);
+    }
 
     // 3. retireAgent immediately retires stale prepared runtime-recovery effects even before purgeAgent.
     const grantRetire = custody.installHostGrant(makeGrant({ entryId: "agent-retire" }));
@@ -1027,6 +1038,10 @@ test("real ManifestStore + RuntimeRecoveryCoordinator + LifecycleAdministrationC
         updated_at: NOW_ISO,
       },
     }));
+    endWorkerSessionFn = async () => {
+      httpCalls += 1;
+      throw new SupervisorGrantRequestError(404, "Supervisor worker session end");
+    };
     await assert.rejects(
       () => callEndSession({
         agentId: "agent-retire",
@@ -1036,7 +1051,7 @@ test("real ManifestStore + RuntimeRecoveryCoordinator + LifecycleAdministrationC
         sessionId: "sess-retire",
         grant: grantRetire,
       }),
-      /HTTP 403/,
+      /HTTP 404/,
     );
     const [retireEff] = listEffectsForAgent(db, "agent-retire", { kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND });
     assert.equal(retireEff?.state, "prepared");
@@ -1227,6 +1242,300 @@ test("real ManifestStore + RuntimeRecoveryCoordinator + LifecycleAdministrationC
     const purgedAfterInactive = await lifecycle.purgeAgent("agent-blockers", GENERATION, null, true);
     assert.deepEqual(purgedAfterInactive, { outcome: "purged" });
     assert.equal(listEffectsForAgent(db, "agent-blockers").length, 0);
+  } finally {
+    await store.close();
+    await bindings.close();
+    stateDb.close();
+    await removeTestDirectory(root);
+  }
+});
+
+test("sequential Stop -> startup reconciliation -> Resume restores null-operation recovery while keeping invalid_payload, malformed payloads, agent_purged, non-null op refusals, and future-epoch rows sticky", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-rr-restore-"));
+  const dbPath = join(root, "daemon-state.sqlite");
+  const stateDb = await DaemonStateDatabase.open(dbPath);
+  const db = stateDb.connection;
+  const store = new ManifestStore(dbPath);
+  const bindings = new WorkerBindingStore(join(root, "worker-bindings.json"), undefined, dbPath);
+  store.attachDatabase(db);
+  bindings.attachDatabase(db);
+
+  let currentNowMs = Date.parse(NOW_ISO);
+  let httpCalls = 0;
+  let endWorkerSessionFn: NonNullable<SupervisorGrantHttp["endWorkerSession"]> = async () => {
+    httpCalls += 1;
+  };
+  const custody = new WorkerRuntimeCustody();
+  const entryConcurrency = new EntryConcurrencyGate({ isHandoffScheduled: () => false });
+  const executor = new EffectExecutor({
+    getDatabase: () => db,
+    currentDaemonGeneration: () => GENERATION,
+    assertCurrent: async () => {},
+    assertWriteFence: () => {},
+    isClosing: () => false,
+    nowMs: () => currentNowMs,
+    nowIso: () => new Date(currentNowMs).toISOString(),
+  });
+  const coordinator = new RuntimeRecoveryCoordinator({
+    settleRuntimeApprovals: async () => {},
+    store,
+    durability: {} as RuntimeRecoveryCoordinatorOptions["durability"],
+    inbox: {} as RuntimeRecoveryCoordinatorOptions["inbox"],
+    bindings,
+    workerAuthority: {
+      currentHostGrant: (entry: DaemonManifestEntry) =>
+        custody.currentHostGrant({ entryId: entry.id, roomId: entry.room_id }, GENERATION, false),
+    } as unknown as RuntimeRecoveryCoordinatorOptions["workerAuthority"],
+    runtimeCustody: custody,
+    delivery: null,
+    supervisorGrantHttp: {
+      endWorkerSession: (input) => endWorkerSessionFn(input),
+    } as unknown as SupervisorGrantHttp,
+    streams: {
+      currentInstallation: () => undefined,
+      install: async () => {},
+      remove: () => {},
+    },
+    liveHandles: new Map(),
+    authority: {
+      currentDaemonGeneration: () => GENERATION,
+      isHandoffScheduled: () => false,
+      assertCurrent: async () => {},
+      serializeManifest: async (op) => op(),
+      fenceCommit: async (commit) => commit(),
+    },
+    beginLifecycle: (entryId) => entryConcurrency.beginLifecycle(entryId),
+    bumpControlEpoch: (entryId) => entryConcurrency.bumpControlEpoch(entryId),
+    clearRecovery: () => {},
+    serializeEntry: async (_entryId, op) => op(),
+    updateEntry: async (entryId, update) => {
+      const loaded = await store.getEntryWithVersion(entryId);
+      return (await store.replaceEntry(loaded!.version, update(loaded!.entry))).entry;
+    },
+    requestConvergence: () => {},
+    entryWithDerivedLiveness: async (e) => e as never,
+    nowMs: () => currentNowMs,
+  });
+  coordinator.attachEffectExecutor(executor, db, () => {});
+
+  const desired = new DesiredStateCoordinator({
+    store,
+    entryConcurrency,
+    delivery: null,
+    authority: {
+      assertCurrent: async () => {},
+      serializeManifest: async (op) => op(),
+      fenceCommit: async (commit) => commit(),
+    },
+    waitForActiveRoomMove: async () => {},
+    clearRecovery: () => {},
+    restartDeliveryOrConverge: async () => {},
+    requestConvergence: () => {},
+  });
+
+  const callEndSession = (input: EndSessionCallInput) =>
+    (coordinator as unknown as { endWorkerSessionForRestart(i: EndSessionCallInput): Promise<void> })
+      .endWorkerSessionForRestart(input);
+
+  try {
+    // 1. Real sequential Stop -> startup reconciliation -> Resume -> public recoverAgentRuntime() succeeds with HTTP count 2.
+    const grant = custody.installHostGrant(makeGrant({ entryId: "agent-seq-restore" }));
+    await store.createEntry(manifestEntry("agent-seq-restore", {
+      desired_state: "running",
+      observed_state: "idle",
+      last_worker_binding: {
+        agent_session_id: "sess-seq-1",
+        work_attempt_id: "att-seq-1",
+        execution_generation_id: "exec-seq-1",
+        updated_at: NOW_ISO,
+      },
+    }));
+    endWorkerSessionFn = async () => {
+      httpCalls += 1;
+      throw new SupervisorGrantRequestError(503, "Supervisor worker session end");
+    };
+    await assert.rejects(() => coordinator.recoverAgentRuntime("agent-seq-restore", GENERATION), /HTTP 503/);
+    assert.equal(httpCalls, 1);
+    const [backedOffRow] = listEffectsForAgent(db, "agent-seq-restore", { kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND });
+    assert.equal(backedOffRow?.state, "prepared");
+    assert.equal(backedOffRow?.last_error, "http_503");
+    assert.equal(backedOffRow?.attempt_count, 1);
+
+    // Stop via public DesiredStateCoordinator.set() (retaining last_worker_binding), then run production startup reconciliation.
+    await desired.set("agent-seq-restore", "stopped");
+    await executor.recoverOnStartup();
+    await coordinator.recoverTurnControls();
+    const afterStartup = getEffect(db, backedOffRow!.id);
+    assert.equal(afterStartup?.state, "failed");
+    assert.equal(afterStartup?.last_error, "agent_stopped");
+    assert.equal(afterStartup?.attempt_count, 1);
+
+    // While STILL stopped, calling endWorkerSessionForRestart leaves the failed row untouched (no reset churn, no HTTP).
+    await assert.rejects(
+      () => callEndSession({
+        agentId: "agent-seq-restore",
+        roomId: "room-1",
+        operationId: null,
+        executionGenerationId: null,
+        sessionId: "sess-seq-1",
+        grant,
+      }),
+      /agent_stopped/,
+    );
+    assert.equal(getEffect(db, backedOffRow!.id)?.state, "failed");
+    assert.equal(httpCalls, 1);
+
+    // Resume via public DesiredStateCoordinator.set(), advance +60s, restore HTTP -> public recoverAgentRuntime() succeeds!
+    await desired.set("agent-seq-restore", "running");
+    currentNowMs += 60_000;
+    endWorkerSessionFn = async () => { httpCalls += 1; };
+    const recovered = await coordinator.recoverAgentRuntime("agent-seq-restore", GENERATION);
+    assert.equal(recovered.outcome, "recovering");
+    assert.equal(httpCalls, 2, "restored agent must dispatch a fresh endWorkerSession HTTP call");
+    assert.equal((await store.getEntry("agent-seq-restore"))?.last_worker_binding ?? null, null, "retained session must be cleared");
+    const [completedRow] = listEffectsForAgent(db, "agent-seq-restore", { kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND });
+    assert.equal(completedRow?.state, "completed");
+    assert.notEqual(completedRow?.id, backedOffRow?.id, "atomic reset replaces the superseded failed row");
+    assert.equal(completedRow?.attempt_count, 1, "purposeful reset starts fresh attempt accounting at 0 -> 1 on next dispatch");
+
+    // Completed receipt still deduplicates with ZERO additional HTTP.
+    await callEndSession({
+      agentId: "agent-seq-restore",
+      roomId: "room-1",
+      operationId: null,
+      executionGenerationId: null,
+      sessionId: "sess-seq-1",
+      grant,
+    });
+    assert.equal(httpCalls, 2);
+
+    // 2. Temporary worker_session_absent and recovery_pending refusals also recover once restored.
+    for (const refusal of ["worker_session_absent", "recovery_pending"] as const) {
+      const agentId = `agent-${refusal}`;
+      const sessionId = `sess-${refusal}`;
+      const g = custody.installHostGrant(makeGrant({ entryId: agentId }));
+      await store.createEntry(manifestEntry(agentId, {
+        desired_state: "running",
+        observed_state: "idle",
+        last_worker_binding: {
+          agent_session_id: sessionId,
+          work_attempt_id: `att-${refusal}`,
+          execution_generation_id: `exec-${refusal}`,
+          updated_at: NOW_ISO,
+        },
+      }));
+      const key = runtimeRecoveryEndWorkerSessionIdempotencyKey({
+        operationId: null,
+        roomId: "room-1",
+        executionGenerationId: `exec-${refusal}`,
+        sessionId,
+      });
+      db.prepare(`
+        INSERT INTO effects (
+          id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+          retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'failed', ?, NULL, 1, 0, 1000000, NULL, ?, ?, ?)
+      `).run(
+        `eff-${refusal}`,
+        agentId,
+        RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+        key,
+        GENERATION,
+        JSON.stringify({
+          execution_generation_id: `exec-${refusal}`,
+          operation_id: null,
+          restarting: true,
+          room_id: "room-1",
+          session_id: sessionId,
+        }),
+        refusal,
+        NOW_ISO,
+        NOW_ISO,
+      );
+      const beforeCalls = httpCalls;
+      await callEndSession({
+        agentId,
+        roomId: "room-1",
+        operationId: null,
+        executionGenerationId: `exec-${refusal}`,
+        sessionId,
+        grant: g,
+      });
+      assert.equal(httpCalls, beforeCalls + 1, `${refusal} must recover once state is restored`);
+      const [after] = listEffectsForAgent(db, agentId, { kind: RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND });
+      assert.equal(after?.state, "completed");
+    }
+
+    // 3. Fail-closed guards: future-epoch agent_stopped, invalid_payload, malformed stored payload, agent_purged, and non-null op refusal NEVER reopen.
+    const guardGrant = custody.installHostGrant(makeGrant({ entryId: "agent-guards" }));
+    await store.createEntry(manifestEntry("agent-guards", {
+      desired_state: "running",
+      observed_state: "idle",
+      last_worker_binding: {
+        agent_session_id: "sess-guard",
+        work_attempt_id: "att-guard",
+        execution_generation_id: "exec-guard",
+        updated_at: NOW_ISO,
+      },
+    }));
+    const guardCases: Array<{
+      id: string;
+      operationId: string | null;
+      epoch: number;
+      lastError: string;
+      malformedPayload?: string;
+      expected: RegExp | typeof EffectFenceError | typeof EffectIdempotencyConflictError;
+    }> = [
+      { id: "eff-guard-future", operationId: null, epoch: GENERATION + 2, lastError: "agent_stopped", expected: EffectFenceError },
+      { id: "eff-guard-invalid-payload", operationId: null, epoch: GENERATION, lastError: "invalid_payload", expected: /invalid_payload/ },
+      { id: "eff-guard-malformed", operationId: null, epoch: GENERATION, lastError: "agent_stopped", malformedPayload: '{"bad":true}', expected: EffectIdempotencyConflictError },
+      { id: "eff-guard-purged", operationId: null, epoch: GENERATION, lastError: "agent_purged", expected: /agent_purged/ },
+      { id: "eff-guard-op", operationId: "op-guard-done", epoch: GENERATION, lastError: "recovery_phase_disallowed", expected: /recovery_phase_disallowed/ },
+    ];
+    for (const c of guardCases) {
+      const execGen = `exec-${c.id}`;
+      const key = runtimeRecoveryEndWorkerSessionIdempotencyKey({
+        operationId: c.operationId,
+        roomId: "room-1",
+        executionGenerationId: execGen,
+        sessionId: "sess-guard",
+      });
+      db.prepare(`
+        INSERT INTO effects (
+          id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+          retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+        ) VALUES (?, 'agent-guards', ?, ?, ?, 'failed', ?, NULL, 1, 1, 1000000, NULL, ?, ?, ?)
+      `).run(
+        c.id,
+        RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+        key,
+        c.epoch,
+        c.malformedPayload ?? JSON.stringify({
+          execution_generation_id: execGen,
+          operation_id: c.operationId,
+          restarting: true,
+          room_id: "room-1",
+          session_id: "sess-guard",
+        }),
+        c.lastError,
+        NOW_ISO,
+        NOW_ISO,
+      );
+      const before = httpCalls;
+      await assert.rejects(
+        () => callEndSession({
+          agentId: "agent-guards",
+          roomId: "room-1",
+          operationId: c.operationId,
+          executionGenerationId: execGen,
+          sessionId: "sess-guard",
+          grant: guardGrant,
+        }),
+        c.expected,
+      );
+      assert.equal(httpCalls, before, `${c.id} must not dispatch HTTP`);
+      assert.equal(getEffect(db, c.id)?.state, "failed", `${c.id} must remain failed untouched`);
+    }
   } finally {
     await store.close();
     await bindings.close();
