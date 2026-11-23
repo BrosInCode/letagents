@@ -242,6 +242,151 @@ test("Cursor identity retirement synchronously captures the exact child tail", a
   } finally { f.capture.close(); }
 });
 
+/**
+ * task_21: the exact Cursor child's facts through runtime exit are committed,
+ * then its lane is installed again on the same source (crash/recovery). The
+ * new lane has no observer and cannot bind one to the exited runtime.
+ */
+async function exitedCursorChildReinstalled() {
+  let source = new ProviderExecutionObserver(() => now);
+  let positionMode: "valid" | "malformed" | "throws" | "ahead" = "valid";
+  let gapOnSubscribe = false;
+  const f = fixture("cursor_cli", (_handle, listener, onGap) => {
+    const subscription = source.subscribe(listener);
+    if (gapOnSubscribe) onGap?.();
+    return Promise.resolve({ ...subscription, position: () => {
+      if (positionMode === "throws") throw new Error("injected position failure");
+      const current = subscription.position();
+      if (positionMode === "malformed") return { firstRetainedSequence: current.latestSequence + 2, latestSequence: current.latestSequence };
+      return positionMode === "ahead" ? { ...current, latestSequence: current.latestSequence + 1 } : current;
+    } });
+  }, undefined, new DatabaseSync(":memory:"), "typed");
+  const emit = (fact: NativeExecutionFact) => source.emit(fact, "birth-secret", 42);
+  f.bindTurn();
+  await f.install();
+  emit(active); emit(terminal);
+  emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
+  await flush();
+  assert.equal(f.facts().length, 3, "three facts through runtime exit are committed");
+  assert.deepEqual({ ...f.position() }, { last_source_sequence: 3, max_observed_sequence: 3 });
+  assert.equal(f.db.prepare("SELECT runtime_state FROM execution_runtime_generations").get()!.runtime_state, "exited");
+  assert.deepEqual(f.diagnostics, []);
+  const handle = { ...f.handle };
+  const epoch = () => Number(f.db.prepare("SELECT observer_epoch FROM execution_observers").get()!.observer_epoch);
+  return {
+    f, handle, emit, epoch,
+    setPosition(mode: typeof positionMode) { positionMode = mode; },
+    replaceSource() { source = new ProviderExecutionObserver(() => now); },
+    gapOnNextSubscribe() { gapOnSubscribe = true; },
+    async reinstall() {
+      f.handles.set("agent", handle);
+      await f.install(handle); await flush();
+      return f.tokenFor(handle);
+    },
+  };
+}
+
+test("Cursor retirement settles an exited child whose lane was reinstalled on the same source (task_21)", async () => {
+  const r = await exitedCursorChildReinstalled();
+  try {
+    const epoch = r.epoch();
+    const token = await r.reinstall();
+    assert.equal(r.epoch(), epoch, "the reinstalled lane never re-binds an observer to the exited runtime");
+    assert.deepEqual(r.f.diagnostics, ["invalid_observation"], "the reinstalled lane still reports that its record stopped");
+    r.f.capture.flush(token);
+    r.f.capture.flush(token);
+    assert.equal(r.f.facts().length, 3, "retirement adds no fact");
+    assert.deepEqual({ ...r.f.position() }, { last_source_sequence: 3, max_observed_sequence: 3 });
+    assert.equal(r.epoch(), epoch);
+    assert.equal(r.f.capture.captureAdmission(token), "unavailable",
+      "the exited runtime is never delivery-ready after its retirement");
+    assert.equal(r.f.capture.typedLifecycleAdmission(token), "unavailable");
+    assert.equal(r.f.capture.recordBlock(token), "invalid_observation", "retirement clears no capture failure");
+    assert.throws(() => r.f.capture.flush(r.f.tokenFor({ ...r.handle })), /identity_mismatch/,
+      "retirement cannot settle a copied or successor handle");
+    r.emit(ready); await flush();
+    assert.equal(r.f.facts().length, 3, "the retired lane captures nothing more");
+    assert.throws(() => r.f.capture.flush(token), /identity_mismatch/,
+      "a source that moved past the durable cursor is no longer a settled tail");
+  } finally { r.f.capture.close(); }
+});
+
+test("Cursor exited-child retirement refuses every changed or unsettled boundary (task_21)", async () => {
+  type Reinstalled = Awaited<ReturnType<typeof exitedCursorChildReinstalled>>;
+  const otherRuntime = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "other-birth");
+  const registerOther = (r: Reinstalled) => new ExecutionShadowStore(r.f.db).registerRuntime({ agentId: "agent",
+    executionGenerationId: "generation", runtimeGenerationId: otherRuntime, provider: "cursor", authorityMode: "typed",
+    configRevision: 2, createdAtMs: Date.parse(now) });
+  const cases: Array<{ name: string; before?: (r: Reinstalled) => void; after?: (r: Reinstalled) => void;
+    token?: (r: Reinstalled, token: ProviderInstallationToken) => ProviderInstallationToken }> = [
+    { name: "a token for another birth", token: r => r.f.tokenFor({ ...r.handle,
+      providerConnection: { ...r.handle.providerConnection!, processIdentity: "other-birth" } }) },
+    { name: "a durable observer for another birth", after: (r) => {
+      registerOther(r);
+      r.f.db.prepare("UPDATE execution_observers SET runtime_generation_id=?,observer_runtime_generation_id=?").run(otherRuntime, otherRuntime);
+    } },
+    { name: "a runtime row that is not exited", after: r => r.f.db.prepare(
+      "UPDATE execution_runtime_generations SET runtime_state='ready',ended_at_ms=NULL").run() },
+    { name: "a reinstall on another source", before: r => r.replaceSource() },
+    { name: "a durable observer on another source", after: (r) => {
+      r.f.db.prepare("INSERT INTO execution_observer_sources VALUES('agent','other-source')").run();
+      r.f.db.prepare("UPDATE execution_observers SET source_id='other-source'").run();
+    } },
+    { name: "a changed observer epoch", after: r => r.f.db.prepare("UPDATE execution_observers SET observer_epoch=observer_epoch+1").run() },
+    { name: "a changed daemon generation", after: r => r.f.db.prepare("UPDATE execution_observers SET daemon_generation_id='2'").run() },
+    { name: "a missing source registration", after: r => r.f.db.prepare("DELETE FROM execution_observer_sources").run() },
+    { name: "a source advanced before reinstall", before: r => r.emit(ready) },
+    { name: "a source advanced after reinstall", after: r => r.emit(ready) },
+    { name: "a source ahead of the durable cursor", after: r => r.setPosition("ahead") },
+    { name: "a malformed source position", after: r => r.setPosition("malformed") },
+    { name: "an unreadable source position", after: r => r.setPosition("throws") },
+    { name: "a durable cursor behind its observed maximum", after: r => r.f.db.prepare(
+      "UPDATE execution_observers SET last_source_sequence=2").run() },
+    { name: "pending lifecycle work", after: r => r.f.db.prepare(
+      "UPDATE execution_observers SET pending_lifecycle_fact_id='pending-fact'").run() },
+    { name: "a queued observation", after: (r) => {
+      // No callback can enqueue into a suspended lane; this guards the invariant directly.
+      const lane = (r.f.capture as unknown as { lanes: Map<string, { pending: Map<number, unknown>; bytes: number }> }).lanes.get("agent")!;
+      lane.pending.set(4, { event: {}, bytes: 1 }); lane.bytes += 1;
+    } },
+    { name: "an overflowed lane", before: r => r.gapOnNextSubscribe() },
+  ];
+  for (const boundary of cases) {
+    const r = await exitedCursorChildReinstalled();
+    try {
+      boundary.before?.(r);
+      const installed = await r.reinstall();
+      boundary.after?.(r);
+      const token = boundary.token?.(r, installed) ?? installed;
+      assert.throws(() => r.f.capture.flush(token), /identity_mismatch/, boundary.name);
+      assert.notEqual(r.f.capture.captureAdmission(installed), "ready", boundary.name);
+    } finally { r.f.capture.close(); }
+  }
+
+  // A lane suspended for a source gap is not an exited-runtime retirement, even once its source looks settled.
+  let ahead = false;
+  const observer = new ProviderExecutionObserver(() => now);
+  const gapped = fixture("cursor_cli", (_handle, listener) => {
+    const subscription = observer.subscribe(listener);
+    return Promise.resolve({ ...subscription, position: () => {
+      const current = subscription.position();
+      return ahead ? { ...current, latestSequence: current.latestSequence + 1 } : current;
+    } });
+  }, undefined, new DatabaseSync(":memory:"), "typed");
+  try {
+    gapped.bindTurn();
+    await gapped.install();
+    ahead = true;
+    observer.emit(active, "birth-secret", 42); await flush();
+    assert.equal(gapped.diagnostics.at(-1), "source_gap", "the live lane is suspended for a gap");
+    assert.equal(gapped.facts().length, 1);
+    ahead = false;
+    gapped.db.prepare("UPDATE execution_observers SET max_observed_sequence=last_source_sequence").run();
+    assert.throws(() => gapped.capture.flush(gapped.tokenFor()), /identity_mismatch/,
+      "a gap-suspended lane never retires through the exited-runtime path");
+  } finally { gapped.capture.close(); }
+});
+
 test("drain remembers a found runtime birth but never a missing one", async (t) => {
   const f = fixture();
   try {

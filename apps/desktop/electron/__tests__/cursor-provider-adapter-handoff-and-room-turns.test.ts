@@ -11,6 +11,7 @@ import {
   type CursorProviderAdapterDependencies,
 } from "#provider-runtime/agents/cursor-provider-adapter.js";
 import type { NativeExecutionObservation } from "#provider-runtime/agents/provider-adapter.js";
+import { ProviderExecutionObserver } from "#provider-runtime/agents/provider-execution-observer.js";
 import { expectedCursorSandbox } from "./platform.js";
 import {
   argValue,
@@ -404,6 +405,133 @@ test("a prepared wrapper whose retirement keeps failing reports every earlier ca
     assert.equal(settlements, 2);
     assert.equal(harness.children.length, 1, "a failed retirement never redispatches the inbox item");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The real execution capture in the reviewer's task_21 state: the exact
+ * child's facts through runtime exit are committed, then its lane is
+ * reinstalled on the same source after recovery. That lane cannot bind an
+ * observer to the exited runtime.
+ */
+async function exitedChildCaptureReinstalled() {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { DaemonStateSchema } = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
+  const { ExecutionCaptureCoordinator } = await import(new URL("../../daemon/execution-capture-coordinator.ts", import.meta.url).href);
+  const { ExecutionShadowStore, executionRuntimeStorageIdentity } = await import(new URL("../../daemon/execution-shadow-store.ts", import.meta.url).href);
+  const at = "2026-08-31T00:00:00.000Z";
+  const birth = { kind: "cursor_cli" as const, pid: 42, processIdentity: "exited-child-birth" };
+  const db = new DatabaseSync(":memory:");
+  db.exec("PRAGMA foreign_keys=ON");
+  new DaemonStateSchema().createSchema(db);
+  db.exec(`INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+      VALUES('wa-cursor','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','${at}');
+    INSERT INTO work_attempt_executions VALUES('generation','wa-cursor','${at}','test',1,NULL);`);
+  db.prepare(`INSERT INTO agents(agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,config_revision,runtime_configuration_revision,desired_state,observed_state,condition,work_attempt_id,provider_work_attempt_id,provider_continuation_id,provider_execution_generation_id,provider_connection_json)
+    VALUES('agent',0,1,'owner',?,'Agent','room','cursor','charter',1,1,'running','working','none','wa-cursor','wa-cursor','continuation','generation',?)`)
+    .run(at, JSON.stringify(birth));
+  new ExecutionShadowStore(db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
+    runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", birth.pid, birth.processIdentity),
+    provider: "cursor", authorityMode: "typed", configRevision: 1, createdAtMs: Date.parse(at) });
+  const source = new ProviderExecutionObserver(() => at);
+  let current = { workAttemptId: "wa-cursor", pid: birth.pid, providerContinuationId: "continuation",
+    observedState: "working" as const, providerConnection: birth, appliedConfigurationRevision: 1 };
+  const diagnostics: string[] = [];
+  const capture = new ExecutionCaptureCoordinator(db, {
+    provider: { onExecution: async (_handle: object, listener: (event: NativeExecutionObservation) => void) => source.subscribe(listener) },
+    currentHandle: () => current, daemonGeneration: () => 1, diagnostic: (_id: string, code: string) => diagnostics.push(code),
+  });
+  const install = () => {
+    const token = Object.freeze({ nonce: Symbol("installation"), listenerLeaseNonce: Symbol("lease"), entryId: "agent",
+      handle: current, executionGenerationId: "generation", workAttemptId: "wa-cursor", providerContinuationId: "continuation",
+      providerConnection: { ...birth }, configurationRevision: 1, authorityMode: "typed" as const });
+    capture.install(token);
+    return token;
+  };
+  install();
+  source.emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" }, birth.processIdentity, birth.pid);
+  source.emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence: "process_exit", sideEffects: "none" },
+    birth.processIdentity, birth.pid);
+  source.emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" },
+    birth.processIdentity, birth.pid);
+  const facts = () => Number(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()!.n);
+  for (let wait = 0; wait < 100 && facts() < 3; wait++) await flush();
+  assert.equal(facts(), 3, "three facts through runtime exit are committed");
+  current = { ...current };
+  const token = install();
+  // The predecessor lane retires first; then the reinstalled lane drains.
+  for (let wait = 0; wait < 100 && !diagnostics.length; wait++) await flush();
+  assert.deepEqual(diagnostics, ["invalid_observation"], "the reinstalled lane cannot bind the exited runtime");
+  return {
+    flush: () => capture.flush(token),
+    admission: () => capture.captureAdmission(token),
+    facts,
+    close: () => { capture.close(); db.close(); },
+  };
+}
+
+test("a not-started Cursor turn retires through the real capture after its lane was reinstalled, and Stop stays available (task_21)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-not-started-capture-retirement-"));
+  const harness = createHarness();
+  const capture = await exitedChildCaptureReinstalled();
+  try {
+    const dependencies: CursorProviderAdapterDependencies = {
+      ...harness.dependencies,
+      prepareTurnState(path) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+      },
+      launchTurn(input) {
+        const child = harness.dependencies.launchTurn(input);
+        if (input.statePath) {
+          writeFileSync(`${input.statePath}.terminal.json`, JSON.stringify({
+            type: "not_started",
+            error: "Cursor wrapper startup failed: probe startup cause",
+            native_process_group_reaped: true,
+            reap_scope: "native_process_group",
+            remote_authority_revoked: true,
+          }));
+        }
+        return child;
+      },
+    };
+    const adapter = new CursorProviderAdapter({
+      dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir: join(root, "config"),
+        dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const detach = new AbortController();
+    let settlements = 0;
+    const turn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointPreparedTurn: async () => { detach.abort(); },
+      checkpointProviderState: async () => {},
+      // What the daemon wires: ProviderStreamCoordinator.settleCursorLifecycleBeforeIdle -> capture.flush(installation).
+      settleLifecycleBeforeIdle: async () => { settlements += 1; capture.flush(); },
+      detachSignal: detach.signal,
+    });
+    await assert.rejects(turn, (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.equal((error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome, "not_dispatched", message);
+      assert.doesNotMatch(message, /could not retire|retirement failed|identity_mismatch/);
+      return true;
+    });
+    assert.ok(settlements >= 1);
+    assert.equal(handle.pid, null, "the retired turn is no longer retained on the handle");
+    assert.equal(handle.observedState(), "idle");
+    assert.equal(capture.facts(), 3, "retirement adds no fact");
+    assert.equal(capture.admission(), "unavailable", "the exited child never becomes deliverable");
+    const stopped = await adapter.controlTurn(handle, null);
+    assert.equal(stopped.state, "idle", "Stop finds no retained turn and needs no settlement owner");
+    assert.equal(stopped.interrupted, false);
+    assert.equal(harness.children.length, 1, "retirement never redispatches the inbox item");
+  } finally {
+    capture.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

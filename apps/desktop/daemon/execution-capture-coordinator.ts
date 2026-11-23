@@ -50,7 +50,19 @@ type Lane = {
   knownRuntimes: Map<string, Runtime>;
   /** The last source ID this lane's enqueue already validated. */
   validatedSourceId: string | null;
+  /**
+   * Why the lane is suspended, when the only reason is that its exact runtime
+   * had already exited with a settled tail: the durable observer it found.
+   * Every other suspension clears it. It permits retirement, never admission.
+   */
+  suspendedForExit: ExitedRuntimeObserver | null;
 };
+/** The durable observer record of an exited runtime whose source tail is fully committed. */
+type ExitedRuntimeObserver = Readonly<{
+  executionGenerationId: string; runtimeGenerationId: string;
+  observerExecutionGenerationId: string; observerRuntimeGenerationId: string;
+  daemonGenerationId: string; epoch: number; sourceId: string; sequence: number;
+}>;
 export type PreparedRuntime = {
   agentId: string; executionGenerationId: string; handle: ProviderActionHandle;
   /** Supplied only by the successful exact prepared-wrapper checkpoint. */
@@ -122,7 +134,7 @@ export class ExecutionCaptureCoordinator {
       pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
       detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0,
       expectedAuthorityMode: installation.authorityMode, pendingChange: true, notifiedAdmission: null,
-      storageRetry: null, storageRetryAttempts: 0, knownRuntimes: new Map(), validatedSourceId: null };
+      storageRetry: null, storageRetryAttempts: 0, knownRuntimes: new Map(), validatedSourceId: null, suspendedForExit: null };
     this.lanes.set(agentId, lane);
     let pending: Promise<NativeExecutionSubscription>;
     try {
@@ -193,8 +205,13 @@ export class ExecutionCaptureCoordinator {
     const lane = this.lanes.get(installation.entryId);
     if (!lane || !this.current(lane) || lane.installation !== installation
       || lane.handle !== installation.handle || lane.generation !== installation.executionGenerationId
-      || !lane.subscription || lane.detached || lane.suspended || lane.subscriptionFailed || lane.overflow) {
+      || !lane.subscription || lane.detached || lane.subscriptionFailed || lane.overflow) {
       throw new ExecutionProtocolError("identity_mismatch");
+    }
+    if (lane.suspended) {
+      // Retirement only: the lane stays suspended and unavailable for delivery.
+      if (!this.retiresExitedRuntime(lane, installation)) throw new ExecutionProtocolError("identity_mismatch");
+      return;
     }
     this.dirty.delete(lane);
     while (this.drain(lane)) { /* bounded batches drain the retained source synchronously */ }
@@ -225,6 +242,72 @@ export class ExecutionCaptureCoordinator {
       || Number(durable.max_observed_sequence) !== position.latestSequence) {
       throw new ExecutionProtocolError("source_gap");
     }
+  }
+
+  /**
+   * A lane reinstalled on the source of a runtime that had already exited has
+   * no observer: an exited runtime cannot be bound again. Its tail can still
+   * be proven durable. Only the exact installed birth, the exact durable
+   * observer record this lane found at suspension, and the same caught-up
+   * source with nothing queued or pending can retire it.
+   */
+  private retiresExitedRuntime(lane: Lane, installation: ProviderInstallationToken): boolean {
+    const found = lane.suspendedForExit;
+    if (!found || lane.observer || lane.diagnostic !== "invalid_observation") return false;
+    try {
+      const runtime = this.knownRuntime(lane, installation.providerConnection.pid ?? undefined,
+        installation.providerConnection.processIdentity ?? undefined);
+      if (!runtime || runtime.authorityMode !== installation.authorityMode) return false;
+      const current = this.settledExitedObserver(lane, runtime);
+      return Boolean(current) && (Object.keys(found) as Array<keyof ExitedRuntimeObserver>)
+        .every(key => current![key] === found[key]);
+    } catch { return false; }
+  }
+
+  /**
+   * The durable observer record of `runtime`, only when that exact runtime has
+   * exited, the record names it as observer on this lane's registered source
+   * and daemon generation, and the source is fully committed with nothing
+   * queued on the lane and no lifecycle projection pending.
+   */
+  private settledExitedObserver(lane: Lane, runtime: Runtime): ExitedRuntimeObserver | null {
+    if (!lane.subscription || lane.detached || lane.overflow || lane.subscriptionFailed
+      || lane.pending.size || lane.bytes !== 0 || lane.checkpoints.size) return null;
+    let position;
+    try { position = lane.subscription.position(); } catch { return null; }
+    if (!position || !Number.isSafeInteger(position.latestSequence) || !Number.isSafeInteger(position.firstRetainedSequence)
+      || position.latestSequence < 0 || position.firstRetainedSequence < 1
+      || position.firstRetainedSequence > position.latestSequence + 1) return null;
+    const row = this.row(`SELECT o.execution_generation_id,o.runtime_generation_id,o.observer_execution_generation_id,
+      o.observer_runtime_generation_id,o.daemon_generation_id,o.observer_epoch,o.source_id,o.last_source_sequence,
+      o.max_observed_sequence,o.pending_lifecycle_fact_id,r.runtime_state,s.source_id AS registered_source_id
+      FROM execution_observers o
+      JOIN execution_runtime_generations r ON r.agent_id=o.agent_id
+        AND r.execution_generation_id=o.observer_execution_generation_id
+        AND r.runtime_generation_id=o.observer_runtime_generation_id
+      LEFT JOIN execution_observer_sources s ON s.agent_id=o.agent_id AND s.source_id=o.source_id
+      WHERE o.agent_id=?`, lane.agentId);
+    const epoch = Number(row?.observer_epoch);
+    if (!row || row.runtime_state !== "exited"
+      || row.observer_runtime_generation_id !== runtime.id || row.observer_execution_generation_id !== runtime.generation
+      || row.daemon_generation_id !== String(this.options.daemonGeneration())
+      || typeof row.source_id !== "string" || row.source_id !== lane.subscription.sourceId
+      || row.registered_source_id !== row.source_id
+      || Number(row.last_source_sequence) !== position.latestSequence
+      || Number(row.max_observed_sequence) !== position.latestSequence
+      || row.pending_lifecycle_fact_id !== null
+      || !Number.isSafeInteger(epoch) || epoch < 1) return null;
+    return Object.freeze({
+      executionGenerationId: String(row.execution_generation_id), runtimeGenerationId: String(row.runtime_generation_id),
+      observerExecutionGenerationId: runtime.generation, observerRuntimeGenerationId: runtime.id,
+      daemonGenerationId: String(row.daemon_generation_id), epoch, sourceId: String(row.source_id), sequence: position.latestSequence,
+    });
+  }
+
+  /** Any suspension other than the exited-runtime one forfeits retirement. */
+  private suspend(lane: Lane): void {
+    lane.suspended = true;
+    lane.suspendedForExit = null;
   }
 
   /** A post-COMMIT hint only schedules work; it cannot reject that checkpoint. */
@@ -264,7 +347,7 @@ export class ExecutionCaptureCoordinator {
           next.storageRetryAttempts = 0;
         }
         catch (error) {
-          if (error instanceof ExecutionProtocolError) next.suspended = true;
+          if (error instanceof ExecutionProtocolError) this.suspend(next);
           this.report(next, error instanceof ExecutionProtocolError && error.code === "retention_limit"
             ? "retention_limit" : error instanceof ExecutionProtocolError && error.code === "source_gap"
               ? "source_gap" : error instanceof ExecutionProtocolError ? "invalid_observation" : "storage_unavailable");
@@ -799,6 +882,18 @@ export class ExecutionCaptureCoordinator {
       }
       this.report(lane, "identity_unavailable"); return false;
     }
+    if (!lane.observer) {
+      // bindObserver refuses an exited runtime. When its tail is already
+      // durable on this same source, do not try: suspend the lane as the
+      // failed bind would, and keep the exact record it may still retire.
+      const exited = this.settledExitedObserver(lane, initial);
+      if (exited) {
+        this.suspend(lane);
+        lane.suspendedForExit = exited;
+        this.report(lane, "invalid_observation");
+        return false;
+      }
+    }
     let token = lane.observer ?? this.bind(lane, initial, initial);
     const position = lane.subscription!.position();
     if (!Number.isSafeInteger(position.latestSequence) || !Number.isSafeInteger(position.firstRetainedSequence)
@@ -815,14 +910,14 @@ export class ExecutionCaptureCoordinator {
     // Queued live observations can precede the helper's bounded retained suffix.
     const firstAvailable = lane.pending.keys().next().value ?? position.firstRetainedSequence;
     if (lane.overflow || firstAvailable > cursor + 1) {
-      lane.suspended = true; lane.pending.clear(); lane.bytes = 0; this.report(lane, "source_gap"); return false;
+      this.suspend(lane); lane.pending.clear(); lane.bytes = 0; this.report(lane, "source_gap"); return false;
     }
     let processed = 0;
     for (const [sequence, queued] of lane.pending) {
       if (processed++ >= BATCH_FACTS) return true;
       const event = queued.event;
       if (event.sourceId !== lane.subscription!.sourceId || sequence !== cursor + 1) {
-        lane.suspended = true; this.report(lane, "source_gap"); return false;
+        this.suspend(lane); this.report(lane, "source_gap"); return false;
       }
       let runtime = this.knownRuntime(lane, event.nativeProcessPid, event.nativeProcessIdentity);
       if (!runtime && (event.fact.domain === "turn" || event.fact.domain === "execution")) {
@@ -842,7 +937,7 @@ export class ExecutionCaptureCoordinator {
         sourceSequence: sequence, observedAtMs: event.observedAtMs } as ExecutionFact;
       const result = this.store.ingest(event.sourceId, token, ingestedFact, { liveInstallation });
       if (result.status !== "accepted" && result.status !== "duplicate") {
-        lane.suspended = true; this.report(lane, result.status === "gap" ? "source_gap" : "retention_limit"); return false;
+        this.suspend(lane); this.report(lane, result.status === "gap" ? "source_gap" : "retention_limit"); return false;
       }
       if (result.status === "accepted" || lane.diagnostic !== null) lane.pendingChange = true;
       cursor = sequence; lane.pending.delete(sequence); lane.bytes -= queued.bytes; lane.diagnostic = null;
@@ -851,7 +946,7 @@ export class ExecutionCaptureCoordinator {
         catch { /* optional observation */ }
       }
     }
-    if (cursor < position.latestSequence) { lane.suspended = true; this.report(lane, "source_gap"); }
+    if (cursor < position.latestSequence) { this.suspend(lane); this.report(lane, "source_gap"); }
     else if (lane.diagnostic === "storage_unavailable") {
       // A successful exact source/epoch check also revalidates an empty source.
       lane.diagnostic = null; lane.pendingChange = true;
