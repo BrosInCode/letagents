@@ -50,6 +50,7 @@ const expectedControlMethods = [
   "supervisor.get_agent_inspector_detail",
   "supervisor.get_current_room_move",
   "supervisor.get_room_move",
+  "supervisor.get_rpc_effect",
   "supervisor.host_approval_challenge",
   "supervisor.host_approval_request",
   "supervisor.install_host_grant",

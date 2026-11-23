@@ -248,30 +248,38 @@ export class RoomWorkPublicationStore {
       return this.get(key.agentId, key.roomId, key.sourceMessageId)!;
     });
   }
+  acknowledgeInTransaction(sent: RoomWorkPublication): boolean {
+    if (!this.database.isTransaction) throw new Error("acknowledgeInTransaction requires an active fenced transaction.");
+    const key = identity(sent);
+    if (!Number.isSafeInteger(sent.revision) || sent.revision < 1 || !sent.digest || !sent.attemptId) invalid();
+    const current = this.get(key.agentId, key.roomId, key.sourceMessageId);
+    if (!current || !sameIdentity(current, key) || current.state !== "open" || current.attemptId !== sent.attemptId
+      || current.revision !== sent.revision || current.digest !== sent.digest) return false;
+    this.database.prepare(`UPDATE ${table} SET acknowledged_revision=revision WHERE agent_id=? AND room_id=? AND source_message_id=?`)
+      .run(key.agentId, key.roomId, key.sourceMessageId);
+    return true;
+  }
   acknowledge(sent: RoomWorkPublication): boolean {
     const key = identity(sent);
     if (!Number.isSafeInteger(sent.revision) || sent.revision < 1 || !sent.digest || !sent.attemptId) invalid();
-    return this.transaction(() => {
-      const current = this.get(key.agentId, key.roomId, key.sourceMessageId);
-      if (!current || !sameIdentity(current, key) || current.state !== "open" || current.attemptId !== sent.attemptId
-        || current.revision !== sent.revision || current.digest !== sent.digest) return false;
-      this.database.prepare(`UPDATE ${table} SET acknowledged_revision=revision WHERE agent_id=? AND room_id=? AND source_message_id=?`)
-        .run(key.agentId, key.roomId, key.sourceMessageId);
-      return true;
-    });
+    return this.transaction(() => this.acknowledgeInTransaction(sent));
+  }
+  stopInTransaction(sent: RoomWorkPublication, state: "cleared" | "conflict"): void {
+    if (!this.database.isTransaction) throw new Error("stopInTransaction requires an active fenced transaction.");
+    const key = identity(sent);
+    if (!["cleared", "conflict"].includes(state) || !Number.isSafeInteger(sent.revision) || sent.revision < 1 || !sent.digest || !sent.attemptId) invalid();
+    const current = this.get(key.agentId, key.roomId, key.sourceMessageId);
+    if (!current || !sameIdentity(current, key) || current.attemptId !== sent.attemptId || sent.revision > current.revision) invalid();
+    if (sent.revision === current.revision && sent.digest !== current.digest) invalid();
+    if (current.state !== "open") return;
+    this.database.prepare(`UPDATE ${table} SET state=?,summary_json=CASE WHEN ?='cleared' THEN NULL ELSE summary_json END
+      WHERE agent_id=? AND room_id=? AND source_message_id=?`).run(state, state, key.agentId, key.roomId, key.sourceMessageId);
+    if (state === 'cleared') this.database.prepare('DELETE FROM room_workspace_reviews WHERE agent_id=? AND room_id=? AND source_message_id=?')
+      .run(key.agentId, key.roomId, key.sourceMessageId);
   }
   stop(sent: RoomWorkPublication, state: "cleared" | "conflict"): void {
     const key = identity(sent);
     if (!["cleared", "conflict"].includes(state) || !Number.isSafeInteger(sent.revision) || sent.revision < 1 || !sent.digest || !sent.attemptId) invalid();
-    this.transaction(() => {
-      const current = this.get(key.agentId, key.roomId, key.sourceMessageId);
-      if (!current || !sameIdentity(current, key) || current.attemptId !== sent.attemptId || sent.revision > current.revision) invalid();
-      if (sent.revision === current.revision && sent.digest !== current.digest) invalid();
-      if (current.state !== "open") return;
-      this.database.prepare(`UPDATE ${table} SET state=?,summary_json=CASE WHEN ?='cleared' THEN NULL ELSE summary_json END
-        WHERE agent_id=? AND room_id=? AND source_message_id=?`).run(state, state, key.agentId, key.roomId, key.sourceMessageId);
-      if (state === 'cleared') this.database.prepare('DELETE FROM room_workspace_reviews WHERE agent_id=? AND room_id=? AND source_message_id=?')
-        .run(key.agentId, key.roomId, key.sourceMessageId);
-    });
+    this.transaction(() => this.stopInTransaction(sent, state));
   }
 }

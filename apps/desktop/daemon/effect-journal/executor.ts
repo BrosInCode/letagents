@@ -122,7 +122,14 @@ export class EffectExecutor {
     return this.handlers.has(kind);
   }
 
-  /** Returns whether `effectId` currently has an in-flight execution or reconciliation promise in this process. */
+  /** Reads a durable effect row from the executor's attached database, if open. */
+  getEffect(effectId: string): EffectRecord | null {
+    const database = this.options.getDatabase();
+    if (!database || !database.isOpen) return null;
+    return getEffect(database, effectId);
+  }
+
+  /** True while `effectId` has an active in-flight `runEffect` or `reconcileUncertain` execution. */
   isEffectActive(effectId: string): boolean {
     return this.activeById.has(effectId);
   }

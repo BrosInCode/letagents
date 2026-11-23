@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import {
   productionSupervisedDeliveryHttp,
   SupervisorGrantRequestError,
 } from "../cloud-http.js";
+import { DaemonStateDatabase } from "../daemon-state-database.js";
 import {
   applyEffectJournalSchema,
   EffectClaimRefusedError,
@@ -23,19 +28,22 @@ import {
   roomMoveRollbackSourceIdempotencyKey,
 } from "../effect-journal/index.js";
 import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
+import { LifecycleAdministrationCoordinator } from "../lifecycle-administration-coordinator.js";
+import { ManifestStore } from "../manifest-store.js";
 import {
   RoomMoveCoordinator,
   type RoomMoveCoordinatorPorts,
   type RoomMoveInboxPort,
   type RoomMoveStorePort,
 } from "../room-move-coordinator.js";
-import type {
-  SupervisedEffectRecord,
-  SupervisedInboxItem,
-  SupervisedProviderTurnBinding,
+import {
+  SupervisedAgentInboxStore,
+  type SupervisedEffectRecord,
+  type SupervisedInboxItem,
+  type SupervisedProviderTurnBinding,
 } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry, DaemonRoomMoveRecord } from "../types.js";
-import type { WorkerSessionBinding } from "../worker-binding-store.js";
+import { WorkerBindingStore, type WorkerSessionBinding } from "../worker-binding-store.js";
 import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
 
 const GENERATION = 7;
@@ -1459,4 +1467,615 @@ test("durable EffectExecutor retry backoff blocks immediate replay across direct
   assert.equal(calls, 2);
   assert.equal(second.phase, "rotating_credentials");
   assert.equal(getEffect(h.effectDb, eff!.id)?.state, "completed");
+});
+
+test("real ManifestStore + RoomMoveCoordinator + LifecycleAdministrationCoordinator retire prepared join/tail/rollback effects on rollback/failure so purge succeeds with zero post-purge HTTP", async () => {
+  async function createRealHarness() {
+    const root = await mkdtemp(join(tmpdir(), "letagents-rm-real-"));
+    const dbPath = join(root, "daemon-state.sqlite");
+    const stateDb = await DaemonStateDatabase.open(dbPath);
+    const db = stateDb.connection;
+    let now = Date.parse(NOW_ISO);
+    const store = new ManifestStore(dbPath);
+    const inbox = new SupervisedAgentInboxStore(dbPath);
+    const bindings = new WorkerBindingStore(join(root, "bindings.json"), undefined, dbPath);
+    store.attachDatabase(db, () => {});
+    inbox.attachDatabase(db, () => {});
+    bindings.attachDatabase(db, () => {});
+    await store.load();
+    const runtimeCustody = new WorkerRuntimeCustody();
+    const executor = new EffectExecutor({
+      getDatabase: () => (db.isOpen ? db : null),
+      currentDaemonGeneration: () => GENERATION,
+      assertCurrent: async () => {},
+      assertWriteFence: () => {},
+      isClosing: () => false,
+      nowMs: () => now,
+    });
+    let joinCalls = 0;
+    let latestCalls = 0;
+    let joinRoomImpl: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["joinRoom"]> = async ({ roomId }) => {
+      joinCalls += 1;
+      return { roomId: roomId === "destination-alias" ? "canonical-destination" : roomId };
+    };
+    let latestImpl: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["latest"]> = async () => {
+      latestCalls += 1;
+      return { messages: [{ id: "msg_dest_1" }] };
+    };
+    const updateManifestEntry = async (
+      entryId: string,
+      update: (current: DaemonManifestEntry) => DaemonManifestEntry,
+    ): Promise<DaemonManifestEntry> => {
+      const loaded = await store.getEntryWithVersion(entryId);
+      assert.ok(loaded, `expected entry ${entryId}`);
+      const next = update(loaded.entry);
+      const saved = await store.replaceEntry(loaded.version, next);
+      return saved.entry;
+    };
+    const coordinator = new RoomMoveCoordinator({
+      store,
+      inbox,
+      bindings,
+      runtimeCustody,
+      deliveryHttp: {
+        joinRoom: (input) => joinRoomImpl(input),
+        latest: (input) => latestImpl(input),
+      },
+      authority: {
+        currentGeneration: () => GENERATION,
+        isHandoffScheduled: () => false,
+        assertCurrent: async () => {},
+        ownsDaemonGeneration: async (expected) => expected === GENERATION,
+        fenceCommit: async (commit) => { await commit(); },
+      },
+      entryConcurrency: new EntryConcurrencyGate({ isHandoffScheduled: () => false }),
+      serializeEntry: async (_entryId, op) => op(),
+      updateManifestEntry,
+      currentHandle: () => null,
+      pauseIngress: () => {},
+      restartDelivery: async () => {},
+      scheduleRecovery: () => {},
+      nowMs: () => now,
+      nowIso: () => new Date(now).toISOString(),
+    });
+    coordinator.attachEffectExecutor(executor, db, () => {});
+    const lifecycle = new LifecycleAdministrationCoordinator({
+      store,
+      bindings,
+      durability: {
+        getAttempt: async () => { throw new Error("unexpected attempt lookup"); },
+        listAttempts: async () => [],
+        recordTerminal: async () => {},
+        releaseTerminalExecutionFence: async () => {},
+        concludeAttempt: async () => { throw new Error("unexpected concludeAttempt"); },
+        garbageCollectEphemeralAttempt: async () => false,
+      },
+      authority: {
+        currentDaemonGeneration: () => GENERATION,
+        assertCurrent: async () => {},
+        fenceCommit: async (commit) => { await commit(); },
+        serializeManifestMutation: async (op) => op(),
+      },
+      beginLifecycle: () => () => {},
+      serializeEntry: async (_entryId, op) => op(),
+      setDesiredStateExclusive: async (entryId, desiredState) => updateManifestEntry(entryId, (c) => ({ ...c, desired_state: desiredState })),
+      updateManifestEntry,
+      entryWithDerivedLiveness: async (current) => current,
+      stopDelivery: async () => {},
+      hasLiveHandle: () => false,
+      runtimeCustody,
+      deleteAgentStream: () => {},
+      reconcileRoomMovesForPurge: (entryId) => { coordinator.recoverInactiveExecutingForAgent(entryId); },
+      ephemeralProvisioner: { garbageCollectOrphans: async () => [] },
+      nowMs: () => now,
+    });
+    const seedRunningAgent = async (roomId = "source-room") => {
+      await store.write([entry(roomId)]);
+      await bindings.bind({
+        entry_id: "agent-1",
+        room_id: roomId,
+        api_url: "https://letagents.test",
+        agent_session_id: "session-1",
+        agent_session_token: "worker-secret",
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "execution-1",
+      });
+    };
+    const stopAndUnbindForPurge = async () => {
+      const currentBinding = await bindings.get("agent-1");
+      if (currentBinding) {
+        await bindings.unbind("agent-1", currentBinding.agent_session_id, currentBinding.execution_generation_id);
+      }
+      await updateManifestEntry("agent-1", (current) => ({
+        ...current,
+        desired_state: "stopped",
+        observed_state: "stopped",
+        workspace_path: null,
+        work_attempt_id: null,
+        provider_ref: null,
+        last_worker_binding: {
+          agent_session_id: "session-1",
+          work_attempt_id: "attempt-1",
+          execution_generation_id: "execution-1",
+          updated_at: new Date(now).toISOString(),
+        },
+      }));
+    };
+    return {
+      db,
+      store,
+      bindings,
+      executor,
+      coordinator,
+      lifecycle,
+      seedRunningAgent,
+      stopAndUnbindForPurge,
+      advanceNow: (ms: number) => { now += ms; },
+      setJoinRoom: (fn: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["joinRoom"]>) => { joinRoomImpl = fn; },
+      setLatest: (fn: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["latest"]>) => { latestImpl = fn; },
+      getJoinCalls: () => joinCalls,
+      getLatestCalls: () => latestCalls,
+      cleanup: async () => {
+        executor.fence();
+        await store.close().catch(() => undefined);
+        await inbox.close().catch(() => undefined);
+        await bindings.close().catch(() => undefined);
+        stateDb.close();
+        removeTestDirectory(root);
+      },
+    };
+  }
+
+  // Case 1: Refused room_move_join_destination -> operator rollback -> rollback_source succeeds -> purge succeeds with 0 post-purge HTTP.
+  {
+    const h = await createRealHarness();
+    try {
+      await h.seedRunningAgent("source-room");
+      const { move } = await h.store.prepareRoomMove({
+        operation_id: "move-join-rb",
+        request_id: "req-join-rb",
+        agent_id: "agent-1",
+        source_room_id: "source-room",
+        destination_room_id: "destination-alias",
+        daemon_generation: GENERATION,
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "execution-1",
+        agent_session_id: "session-1",
+        activating_inbox_item_id: null,
+        provider_turn_id: null,
+        effect_id: null,
+        phase: "prepared",
+      });
+      let failDest = true;
+      h.setJoinRoom(async ({ roomId }) => {
+        if (roomId === "destination-alias" && failDest) throw new Error("destination 503");
+        return { roomId };
+      });
+      const retrying = await h.coordinator.reconcile(move);
+      assert.equal(retrying.phase, "joining_destination");
+      const [joinBeforeRollback] = listEffectsForAgent(h.db, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND });
+      assert.equal(joinBeforeRollback?.state, "prepared");
+
+      const rolledBack = await h.coordinator.rollbackInspector({
+        operationId: move.operation_id,
+        entryId: "agent-1",
+        detail: "operator cancelled move",
+        daemonGeneration: GENERATION,
+      });
+      assert.equal(rolledBack.phase, "rollback_required");
+      assert.equal(getEffect(h.db, joinBeforeRollback!.id)?.state, "failed");
+      assert.equal(getEffect(h.db, joinBeforeRollback!.id)?.last_error, "room_move_rollback_required");
+
+      const terminal = await h.coordinator.reconcile(rolledBack);
+      assert.equal(terminal.phase, "failed");
+      const [rbEffect] = listEffectsForAgent(h.db, "agent-1", { kind: ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND });
+      assert.equal(rbEffect?.state, "completed");
+
+      await h.stopAndUnbindForPurge();
+      const revokePrompt = await h.lifecycle.purgeAgent("agent-1", GENERATION);
+      assert.equal(revokePrompt.outcome, "revocation_required");
+      const purged = await h.lifecycle.purgeAgent("agent-1", GENERATION, "session-1", false);
+      assert.deepEqual(purged, { outcome: "purged" });
+      assert.equal(Number((h.db.prepare("SELECT COUNT(*) AS n FROM effects WHERE agent_id='agent-1'").get() as { n: number }).n), 0);
+      assert.equal(Number((h.db.prepare("SELECT COUNT(*) AS n FROM agent_room_moves WHERE agent_id='agent-1'").get() as { n: number }).n), 0);
+
+      let postPurgeCalls = 0;
+      h.setJoinRoom(async ({ roomId }) => { postPurgeCalls += 1; return { roomId }; });
+      h.advanceNow(24 * 60 * 60 * 1000);
+      await h.executor.recoverOnStartup();
+      await h.coordinator.reconcilePrepared();
+      assert.equal(postPurgeCalls, 0);
+    } finally {
+      await h.cleanup();
+    }
+  }
+
+  // Case 2: Refused room_move_bootstrap_tail -> operator rollback -> rollback_source succeeds -> purge succeeds.
+  {
+    const h = await createRealHarness();
+    try {
+      await h.seedRunningAgent("canonical-destination");
+      const { move } = await h.store.prepareRoomMove({
+        operation_id: "move-tail-rb",
+        request_id: "req-tail-rb",
+        agent_id: "agent-1",
+        source_room_id: "source-room",
+        destination_room_id: "destination-alias",
+        daemon_generation: GENERATION,
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "execution-1",
+        agent_session_id: "session-1",
+        activating_inbox_item_id: null,
+        provider_turn_id: null,
+        effect_id: null,
+        phase: "prepared",
+      });
+      const inTail = await h.store.advanceRoomMove({
+        operationId: move.operation_id,
+        agentId: "agent-1",
+        expectedDaemonGeneration: GENERATION,
+        expectedExecutionGenerationId: "execution-1",
+        from: ["prepared"],
+        to: "bootstrapping_destination_tail",
+        remoteRoomId: "canonical-destination",
+        sourceCredentialsRevoked: true,
+      });
+      h.setLatest(async () => { throw new Error("tail 503"); });
+      const retryingTail = await h.coordinator.reconcile(inTail);
+      assert.equal(retryingTail.phase, "bootstrapping_destination_tail");
+      const [tailEffect] = listEffectsForAgent(h.db, "agent-1", { kind: ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND });
+      assert.equal(tailEffect?.state, "prepared");
+
+      const rolledBack = await h.coordinator.rollbackInspector({
+        operationId: move.operation_id,
+        entryId: "agent-1",
+        detail: "operator rolled back during tail bootstrap",
+        daemonGeneration: GENERATION,
+      });
+      assert.equal(rolledBack.phase, "rollback_required");
+      assert.equal(getEffect(h.db, tailEffect!.id)?.state, "failed");
+      assert.equal(getEffect(h.db, tailEffect!.id)?.last_error, "room_move_rollback_required");
+
+      h.setJoinRoom(async ({ roomId }) => ({ roomId }));
+      const terminal = await h.coordinator.reconcile(rolledBack);
+      assert.equal(terminal.phase, "failed");
+
+      await h.stopAndUnbindForPurge();
+      assert.equal((await h.lifecycle.purgeAgent("agent-1", GENERATION)).outcome, "revocation_required");
+      assert.deepEqual(await h.lifecycle.purgeAgent("agent-1", GENERATION, "session-1", false), { outcome: "purged" });
+      assert.equal(Number((h.db.prepare("SELECT COUNT(*) AS n FROM effects WHERE agent_id='agent-1'").get() as { n: number }).n), 0);
+    } finally {
+      await h.cleanup();
+    }
+  }
+
+  // Case 3: Refused room_move_rollback_source in backoff -> superseded by operator room change -> failed -> purge succeeds.
+  {
+    const h = await createRealHarness();
+    try {
+      await h.seedRunningAgent("canonical-destination");
+      const { move } = await h.store.prepareRoomMove({
+        operation_id: "move-rb-superseded",
+        request_id: "req-rb-superseded",
+        agent_id: "agent-1",
+        source_room_id: "source-room",
+        destination_room_id: "destination-alias",
+        daemon_generation: GENERATION,
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "execution-1",
+        agent_session_id: "session-1",
+        activating_inbox_item_id: null,
+        provider_turn_id: null,
+        effect_id: null,
+        phase: "prepared",
+      });
+      const inRollback = await h.store.advanceRoomMove({
+        operationId: move.operation_id,
+        agentId: "agent-1",
+        expectedDaemonGeneration: GENERATION,
+        expectedExecutionGenerationId: "execution-1",
+        from: ["prepared"],
+        to: "rollback_required",
+        remoteRoomId: "canonical-destination",
+      });
+      h.setJoinRoom(async () => { throw new Error("source rejoin 503"); });
+      const retryingRb = await h.coordinator.reconcile(inRollback);
+      assert.equal(retryingRb.phase, "rollback_required");
+      const [rbEffect] = listEffectsForAgent(h.db, "agent-1", { kind: ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND });
+      assert.equal(rbEffect?.state, "prepared");
+
+      // Operator moves agent to a third room, superseding rollback compensation.
+      const loaded = await h.store.getEntryWithVersion("agent-1");
+      await h.store.replaceEntry(loaded!.version, { ...loaded!.entry, room_id: "third-room" });
+      const superseded = await h.coordinator.reconcile(retryingRb);
+      assert.equal(superseded.phase, "failed");
+      assert.equal(getEffect(h.db, rbEffect!.id)?.state, "failed");
+      assert.equal(getEffect(h.db, rbEffect!.id)?.last_error, "room_move_failed");
+
+      await h.stopAndUnbindForPurge();
+      assert.equal((await h.lifecycle.purgeAgent("agent-1", GENERATION)).outcome, "revocation_required");
+      assert.deepEqual(await h.lifecycle.purgeAgent("agent-1", GENERATION, "session-1", false), { outcome: "purged" });
+    } finally {
+      await h.cleanup();
+    }
+  }
+});
+
+test("racing retry settlement fences against saga transition, live executing blocks purge, inactive executing recovers, and startup reconcilePrepared heals orphaned prepared rows", async () => {
+  // 1. Racing in-flight executing join_destination getting a transport retry after saga moved to rollback_required
+  //    must settle as failed (saga_phase_disallowed) instead of resurrecting a prepared row.
+  const race = harness();
+  const raceMove = roomMove({ phase: "joining_destination" });
+  race.setMove(raceMove);
+  race.effectDb.exec(`
+    CREATE TABLE agent_room_moves (
+      operation_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      phase TEXT NOT NULL,
+      work_attempt_id TEXT,
+      execution_generation_id TEXT
+    );
+    INSERT INTO agent_room_moves (operation_id, agent_id, phase, work_attempt_id, execution_generation_id)
+    VALUES ('move-1', 'agent-1', 'joining_destination', 'attempt-1', 'execution-1');
+  `);
+  race.setJoinRoom(async () => {
+    race.effectDb.prepare("UPDATE agent_room_moves SET phase = 'rollback_required' WHERE operation_id = 'move-1'").run();
+    throw new Error("transient network error during concurrent rollback");
+  });
+  await race.coordinator.reconcile(raceMove);
+  const [racedEffect] = listEffectsForAgent(race.effectDb, "agent-1", { kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND });
+  assert.equal(racedEffect?.state, "failed");
+  assert.equal(racedEffect?.last_error, "saga_phase_disallowed");
+  assert.equal(racedEffect?.next_attempt_at_ms, null);
+
+  // 2. Real DB: live executing room-move effect blocks purge & rolls back prepared retirement;
+  //    once inactive on a terminal move, reconcileRoomMovesForPurge fails it and purge succeeds;
+  //    startup recoverOnStartup + reconcilePrepared heals orphaned prepared rows immediately.
+  const root = await mkdtemp(join(tmpdir(), "letagents-rm-exec-"));
+  const dbPath = join(root, "daemon-state.sqlite");
+  const stateDb = await DaemonStateDatabase.open(dbPath);
+  const db = stateDb.connection;
+  const store = new ManifestStore(dbPath);
+  const inbox = new SupervisedAgentInboxStore(dbPath);
+  const bindings = new WorkerBindingStore(join(root, "bindings.json"), undefined, dbPath);
+  try {
+    store.attachDatabase(db, () => {});
+    inbox.attachDatabase(db, () => {});
+    bindings.attachDatabase(db, () => {});
+    await store.load();
+    const now = Date.parse(NOW_ISO);
+    const runtimeCustody = new WorkerRuntimeCustody();
+    const executor = new EffectExecutor({
+      getDatabase: () => (db.isOpen ? db : null),
+      currentDaemonGeneration: () => GENERATION,
+      assertCurrent: async () => {},
+      assertWriteFence: () => {},
+      isClosing: () => false,
+      nowMs: () => now,
+    });
+    let releaseLiveJoin!: () => void;
+    let markLiveStarted!: () => void;
+    const liveStarted = new Promise<void>((resolve) => { markLiveStarted = resolve; });
+    const coordinator = new RoomMoveCoordinator({
+      store,
+      inbox,
+      bindings,
+      runtimeCustody,
+      deliveryHttp: {
+        joinRoom: async () => {
+          markLiveStarted();
+          await new Promise<void>((resolve) => { releaseLiveJoin = resolve; });
+          throw new Error("connection aborted");
+        },
+        latest: async () => ({ messages: [] }),
+      },
+      authority: {
+        currentGeneration: () => GENERATION,
+        isHandoffScheduled: () => false,
+        assertCurrent: async () => {},
+        ownsDaemonGeneration: async (expected) => expected === GENERATION,
+        fenceCommit: async (commit) => { await commit(); },
+      },
+      entryConcurrency: new EntryConcurrencyGate({ isHandoffScheduled: () => false }),
+      serializeEntry: async (_entryId, op) => op(),
+      updateManifestEntry: async (entryId, update) => {
+        const loaded = await store.getEntryWithVersion(entryId);
+        const saved = await store.replaceEntry(loaded!.version, update(loaded!.entry));
+        return saved.entry;
+      },
+      currentHandle: () => null,
+      pauseIngress: () => {},
+      restartDelivery: async () => {},
+      scheduleRecovery: () => {},
+      nowMs: () => now,
+      nowIso: () => NOW_ISO,
+    });
+    coordinator.attachEffectExecutor(executor, db, () => {});
+    const lifecycle = new LifecycleAdministrationCoordinator({
+      store,
+      bindings,
+      durability: {
+        getAttempt: async () => { throw new Error("unexpected attempt lookup"); },
+        listAttempts: async () => [],
+        recordTerminal: async () => {},
+        releaseTerminalExecutionFence: async () => {},
+        concludeAttempt: async () => { throw new Error("unexpected concludeAttempt"); },
+        garbageCollectEphemeralAttempt: async () => false,
+      },
+      authority: {
+        currentDaemonGeneration: () => GENERATION,
+        assertCurrent: async () => {},
+        fenceCommit: async (commit) => { await commit(); },
+        serializeManifestMutation: async (op) => op(),
+      },
+      beginLifecycle: () => () => {},
+      serializeEntry: async (_entryId, op) => op(),
+      setDesiredStateExclusive: async (entryId, desiredState) => {
+        const loaded = await store.getEntryWithVersion(entryId);
+        const saved = await store.replaceEntry(loaded!.version, { ...loaded!.entry, desired_state: desiredState });
+        return saved.entry;
+      },
+      updateManifestEntry: async (entryId, update) => {
+        const loaded = await store.getEntryWithVersion(entryId);
+        const saved = await store.replaceEntry(loaded!.version, update(loaded!.entry));
+        return saved.entry;
+      },
+      entryWithDerivedLiveness: async (current) => current,
+      stopDelivery: async () => {},
+      hasLiveHandle: () => false,
+      runtimeCustody,
+      deleteAgentStream: () => {},
+      reconcileRoomMovesForPurge: (entryId) => { coordinator.recoverInactiveExecutingForAgent(entryId); },
+      ephemeralProvisioner: { garbageCollectOrphans: async () => [] },
+      nowMs: () => now,
+    });
+
+    await store.write([entry("source-room")]);
+    await bindings.bind({
+      entry_id: "agent-1",
+      room_id: "source-room",
+      api_url: "https://letagents.test",
+      agent_session_id: "session-1",
+      agent_session_token: "worker-secret",
+      work_attempt_id: "attempt-1",
+      execution_generation_id: "execution-1",
+    });
+    await store.prepareRoomMove({
+      operation_id: "move-live",
+      request_id: "req-live",
+      agent_id: "agent-1",
+      source_room_id: "source-room",
+      destination_room_id: "destination-alias",
+      daemon_generation: GENERATION,
+      work_attempt_id: "attempt-1",
+      execution_generation_id: "execution-1",
+      agent_session_id: "session-1",
+      activating_inbox_item_id: null,
+      provider_turn_id: null,
+      effect_id: null,
+      phase: "prepared",
+    });
+    await store.advanceRoomMove({
+      operationId: "move-live",
+      agentId: "agent-1",
+      expectedDaemonGeneration: GENERATION,
+      expectedExecutionGenerationId: "execution-1",
+      from: ["prepared"],
+      to: "joining_destination",
+    });
+    const preparedLive = await executor.prepare({
+      agent_id: "agent-1",
+      kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+      idempotency_key: roomMoveJoinDestinationIdempotencyKey({ operationId: "move-live", destinationRoomId: "destination-alias" }),
+      payload: {
+        operation_id: "move-live",
+        source_room_id: "source-room",
+        destination_room_id: "destination-alias",
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "execution-1",
+      },
+      retryable: true,
+      max_attempts: 1_000_000,
+    });
+    const liveRun = executor.runEffect(preparedLive.effect.id);
+    await liveStarted;
+    assert.equal(executor.isEffectActive(preparedLive.effect.id), true);
+
+    // Move reaches failed and agent stops while live HTTP is still in flight; also seed an extra prepared row.
+    await store.advanceRoomMove({
+      operationId: "move-live",
+      agentId: "agent-1",
+      expectedDaemonGeneration: GENERATION,
+      expectedExecutionGenerationId: "execution-1",
+      from: ["joining_destination"],
+      to: "failed",
+      error: "aborted",
+    });
+    db.prepare(`
+      INSERT INTO effects (
+        id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+        retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+      ) VALUES ('eff-extra-prep', 'agent-1', ?, 'rmt:v1:extra', ?, 'prepared', ?, NULL, 1, 1, 1000000, ?, 'transport_error', ?, ?)
+    `).run(
+      ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+      GENERATION,
+      JSON.stringify({ operation_id: "move-live", destination_room_id: "destination-alias", work_attempt_id: "attempt-1", execution_generation_id: "execution-1" }),
+      now + 5_000,
+      NOW_ISO,
+      NOW_ISO,
+    );
+    await bindings.unbind("agent-1", "session-1", "execution-1");
+    const loadedStopped = await store.getEntryWithVersion("agent-1");
+    await store.replaceEntry(loadedStopped!.version, {
+      ...loadedStopped!.entry,
+      desired_state: "stopped",
+      observed_state: "stopped",
+      workspace_path: null,
+      work_attempt_id: null,
+      provider_ref: null,
+      last_worker_binding: {
+        agent_session_id: "session-1",
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "execution-1",
+        updated_at: NOW_ISO,
+      },
+    });
+
+    // Live executing effect must block purge and roll back eff-extra-prep retirement.
+    const blocked = await lifecycle.purgeAgent("agent-1", GENERATION);
+    assert.equal(blocked.outcome, "invalid");
+    assert.equal(getEffect(db, preparedLive.effect.id)?.state, "executing");
+    assert.equal(getEffect(db, "eff-extra-prep")?.state, "prepared");
+
+    // Let live execution finish -> racing retry settles cleanly as failed (saga_phase_disallowed).
+    releaseLiveJoin();
+    const liveSettled = await liveRun;
+    assert.equal(liveSettled.state, "failed");
+    assert.equal(liveSettled.last_error, "saga_phase_disallowed");
+
+    // Seed an interrupted predecessor executing row on already-failed move-live -> recoverOnStartup + reconcilePrepared heals it immediately.
+    db.prepare(`
+      INSERT INTO effects (
+        id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+        retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+      ) VALUES ('eff-crash-orphan', 'agent-1', ?, 'rmj:v1:crash-orphan', ?, 'executing', ?, NULL, 1, 1, 1000000, NULL, NULL, ?, ?)
+    `).run(
+      ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+      GENERATION - 1,
+      JSON.stringify({ operation_id: "move-live", source_room_id: "source-room", destination_room_id: "destination-alias", work_attempt_id: "attempt-1", execution_generation_id: "execution-1" }),
+      NOW_ISO,
+      NOW_ISO,
+    );
+    await executor.recoverOnStartup();
+    assert.equal(getEffect(db, "eff-crash-orphan")?.state, "prepared");
+    await coordinator.reconcilePrepared();
+    assert.equal(getEffect(db, "eff-crash-orphan")?.state, "failed");
+    assert.equal(getEffect(db, "eff-crash-orphan")?.last_error, "saga_phase_disallowed");
+    assert.equal(getEffect(db, "eff-extra-prep")?.state, "failed");
+    assert.equal(getEffect(db, "eff-extra-prep")?.last_error, "saga_phase_disallowed");
+
+    // Seed an inactive in-process executing row (same generation, !isEffectActive) -> reconcileRoomMovesForPurge fails it and purge succeeds.
+    db.prepare(`
+      INSERT INTO effects (
+        id, agent_id, kind, idempotency_key, epoch, state, payload, outcome,
+        retryable, attempt_count, max_attempts, next_attempt_at_ms, last_error, created_at, updated_at
+      ) VALUES ('eff-inactive-exec', 'agent-1', ?, 'rmr:v1:inactive-exec', ?, 'executing', ?, NULL, 1, 1, 1000000, NULL, NULL, ?, ?)
+    `).run(
+      ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
+      GENERATION,
+      JSON.stringify({ operation_id: "move-live", source_room_id: "source-room", destination_room_id: "destination-alias", work_attempt_id: "attempt-1", execution_generation_id: "execution-1" }),
+      NOW_ISO,
+      NOW_ISO,
+    );
+    assert.equal((await lifecycle.purgeAgent("agent-1", GENERATION)).outcome, "revocation_required");
+    assert.equal(getEffect(db, "eff-inactive-exec")?.state, "failed");
+    assert.equal(getEffect(db, "eff-inactive-exec")?.last_error, "saga_phase_disallowed");
+    assert.deepEqual(await lifecycle.purgeAgent("agent-1", GENERATION, "session-1", false), { outcome: "purged" });
+  } finally {
+    await store.close().catch(() => undefined);
+    await inbox.close().catch(() => undefined);
+    await bindings.close().catch(() => undefined);
+    stateDb.close();
+    removeTestDirectory(root);
+  }
 });

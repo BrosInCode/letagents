@@ -55,12 +55,28 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     if (this.maintenance) { await this.socket.start(); return; }
     if (!this.handoffScheduled && this.stateDatabase) {
       const database = this.stateDatabase.connection;
+      this.effectExecutor = new EffectExecutor({
+        getDatabase: () => this.stateDatabase?.connection ?? null,
+        currentDaemonGeneration: () => this.singleton.currentGeneration,
+        assertCurrent: () => this.singleton.assertCurrent(),
+        assertWriteFence: writeFence,
+        isClosing: () => this.handoffScheduled,
+        notifyStateChanged: () => this.notifyStateChanged(),
+        nowMs: () => this.nowMs(),
+      });
+      this.effectExecutor.registerHandler(
+        BOUNDED_MCP_EFFECT_KIND,
+        this.boundedEffects.createExecutorHandler(),
+      );
+      this.asyncRpcEffects.registerHandlers(this.effectExecutor);
       this.roomWorkPublisher = RoomWorkPublisher.attach(database, {
         workspaceLocation: (id) => this.durability.getAttempt(id).then(({ workspace_path: path, workspace_identity }) =>
           ({ path, revision: workspace_identity.resolved_revision, remote: recordedRemote(workspace_identity) })),
         custody: this.workerRuntimeCustody, daemonGeneration: () => this.singleton.currentGeneration,
         isClosing: () => this.handoffScheduled, assertCurrent: () => this.singleton.assertCurrent(),
         assertWriteFence: writeFence,
+        effectExecutor: this.effectExecutor,
+        startImmediately: false,
       });
       this.executionCapture = ExecutionCaptureCoordinator.attach(database, this.providerPort, {
         currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
@@ -77,23 +93,12 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
         },
         recordStopped: (agentId) => this.providerExecution?.noteRecordStopped(agentId),
       });
-      this.effectExecutor = new EffectExecutor({
-        getDatabase: () => this.stateDatabase?.connection ?? null,
-        currentDaemonGeneration: () => this.singleton.currentGeneration,
-        assertCurrent: () => this.singleton.assertCurrent(),
-        assertWriteFence: writeFence,
-        isClosing: () => this.handoffScheduled,
-        notifyStateChanged: () => this.notifyStateChanged(),
-        nowMs: () => this.nowMs(),
-      });
-      this.effectExecutor.registerHandler(
-        BOUNDED_MCP_EFFECT_KIND,
-        this.boundedEffects.createExecutorHandler(),
-      );
       this.roomMoves.attachEffectExecutor(this.effectExecutor, database, writeFence);
-      this.executionDelegations.start();
+      this.executionDelegations.attachApprovalPublisher();
     }
     const effectRecovery = await this.effectExecutor?.recoverOnStartup();
+    this.roomWorkPublisher?.start();
+    this.executionDelegations.start();
     if (effectRecovery && effectRecovery.uncertainAgentIds.length > 0) {
       await this.supervisedInbox.pruneAgentsAfterEffectRecovery(effectRecovery.uncertainAgentIds);
     }
@@ -140,6 +145,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
       () => this.supervisedDelivery?.fenceAndDrain(),
       () => this.fenceAndDrainRoomMoveReconciliations(),
       () => this.effectExecutor?.fenceAndDrain(),
+      () => this.asyncRpcEffects.dispose(),
       () => this.boundedEffects.drainJournalReservations(),
       () => this.providerExecution?.clearRecoveryTimers(),
       () => this.providerReconciliation?.disposeAll(),
@@ -192,6 +198,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     // persisted before the shared stores are closed for successor attach.
     await this.providerExecution?.drainDispatches();
     try { await this.effectExecutor?.fenceAndDrain(); } catch (error) { failures.push(error); }
+    captureSync(() => this.asyncRpcEffects.dispose());
     await this.boundedEffects.drainJournalReservations();
     captureSync(() => this.providerStreams.detachAll());
     // Complete every local cleanup step even if one fails. The process-level
@@ -247,6 +254,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     await this.providerExecution?.drainDispatches();
     await this.boundedEffects.drainExternalExecutions();
     await this.effectExecutor?.fenceAndDrain();
+    this.asyncRpcEffects.dispose();
     await this.boundedEffects.drainJournalReservations();
     await this.providerTerminals.drainAndClose(() => {
       try { this.providerStreams.detachAll(); } catch (error) { this.handoffCleanupFailures.push(error); }

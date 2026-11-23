@@ -18,6 +18,7 @@ export {
   migrateV2ToV3,
   runNumberedMigrations,
   validateDaemonStateShape,
+  validateDaemonStateShapeForVersion,
   type SchemaMigration,
 } from "./schema.js";
 export {
@@ -29,5 +30,6 @@ export {
   parseWindowsBirthFiletime,
   parseWindowsCimDateTimeToFiletimeUtc,
   type MoveAsideLegacyOptions,
+  type OpenDaemonStateDatabaseOptions,
   type PosixBirthReadResult,
 } from "./connection.js";

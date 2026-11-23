@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { EffectExecutor } from "./effect-journal/index.js";
 import type { ExecutionDelegationDecisionCoordinatorOptions } from "./execution-delegation-decision-coordinator.js";
 import { ExecutionDelegationDecisionCoordinator } from "./execution-delegation-decision-coordinator.js";
 import type { ExecutionDelegationSyncOptions } from "./execution-delegation-sync-coordinator.js";
@@ -9,8 +10,9 @@ import {
 } from "./execution-approval-publisher.js";
 import type { InstallHostGrantInput, WorkerAuthorityCoordinator } from "./worker-authority-coordinator.js";
 
-type ApprovalPublicationOptions = Omit<ExecutionApprovalPublisherOptions, "approvals" | "entries" | "authority"> & {
+type ApprovalPublicationOptions = Omit<ExecutionApprovalPublisherOptions, "approvals" | "entries" | "authority" | "effectExecutor"> & {
   database: () => DatabaseSync | null;
+  effectExecutor?: () => EffectExecutor | null;
 };
 
 type Options = {
@@ -30,6 +32,7 @@ export class ExecutionDelegationCoordinator {
   private readonly grants: ExecutionDelegationSyncCoordinator;
   private readonly decisions: ExecutionDelegationDecisionCoordinator;
   private approvalPublisher: ExecutionApprovalPublisher | null | undefined;
+  private started = false;
   private fenced = false;
 
   constructor(private readonly options: Options) {
@@ -70,18 +73,36 @@ export class ExecutionDelegationCoordinator {
     this.approvalPublicationChanged(entryId);
   }
 
-  start(): void {
+  /**
+   * Attaches the approval publisher and registers its EffectExecutor handlers
+   * without arming its flush timer yet so daemon startup can complete
+   * `effectExecutor.recoverOnStartup()` before any approval flush runs.
+   */
+  attachApprovalPublisher(): void {
     const options = this.options.approvalPublication;
     if (this.fenced || !options || this.approvalPublisher !== undefined) return;
     const database = options.database();
     if (!database) return;
-    const { database: _database, ...publisherOptions } = options;
+    const { database: _database, effectExecutor, ...publisherOptions } = options;
     this.approvalPublisher = ExecutionApprovalPublisher.attach(database, {
       ...publisherOptions,
+      effectExecutor: effectExecutor?.() ?? undefined,
       approvals: this.options.approvals,
       entries: this.options.entries,
       authority: this.options.authority,
+      startImmediately: false,
     });
+  }
+
+  start(): void {
+    if (this.fenced) return;
+    this.started = true;
+    this.attachApprovalPublisher();
+    this.approvalPublisher?.start?.();
+  }
+
+  recoverInactiveApprovalPublicationsForPurge(entryId: string): number {
+    return this.approvalPublisher?.recoverInactiveExecutingForAgent?.(entryId) ?? 0;
   }
 
   async installHostGrant(input: InstallHostGrantInput): ReturnType<WorkerAuthorityCoordinator["installHostGrant"]> {
@@ -98,7 +119,8 @@ export class ExecutionDelegationCoordinator {
 
   private approvalPublicationChanged(entryId: string): void {
     if (this.fenced || !this.options.approvalPublication) return;
-    this.start();
+    this.attachApprovalPublisher();
+    if (this.started) this.approvalPublisher?.start?.();
     this.approvalPublisher?.changed(entryId);
   }
 }

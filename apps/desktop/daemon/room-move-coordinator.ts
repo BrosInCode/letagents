@@ -13,21 +13,24 @@ import {
   EffectClaimRefusedError,
   EffectExecutor,
   EffectFenceError,
-  failEffect,
   failEffectInTransaction,
   getEffectByIdempotencyKey,
+  listActiveRoomMoveEffectsForAgent,
   parseRoomMoveBootstrapTailPayload,
   parseRoomMoveJoinDestinationPayload,
   parseRoomMoveRollbackSourcePayload,
   pruneTerminalRoomMoveEffectsInTransaction,
-  rescheduleEffectForRetry,
+  rescheduleEffectForRetryInTransaction,
+  retireStaleRoomMoveEffectsInTransaction,
   ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
   ROOM_MOVE_EFFECT_BACKOFF,
   ROOM_MOVE_EFFECT_MAX_ATTEMPTS,
+  ROOM_MOVE_EFFECT_MAX_RETRY_DELAY_MS,
   ROOM_MOVE_EFFECT_RETRY_DELAY_MS,
   ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
   ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
   roomMoveBootstrapTailIdempotencyKey,
+  roomMoveEffectSagaCheck,
   roomMoveJoinDestinationIdempotencyKey,
   roomMoveRollbackSourceIdempotencyKey,
   withFencedEffectTransaction,
@@ -36,6 +39,7 @@ import {
   type RoomMoveBootstrapTailEffectPayload,
   type RoomMoveJoinDestinationEffectPayload,
   type RoomMoveRollbackSourceEffectPayload,
+  type RoomMoveSagaPhaseCheck,
 } from "./effect-journal/index.js";
 import type { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
 import type { ManifestStore } from "./manifest-store.js";
@@ -206,6 +210,7 @@ export class RoomMoveCoordinator {
   }
 
   async reconcilePrepared(agentId?: string): Promise<void> {
+    this.retireStalePreparedEffects(agentId);
     // Effect-first repair is required because terminal moves are omitted from
     // pendingRoomMoves even when their prepared join effect was not settled.
     for (const effect of await this.ports.inbox.preparedRoomMoves(agentId)) {
@@ -217,6 +222,73 @@ export class RoomMoveCoordinator {
       await this.reconcile(move).catch(() => {
         this.ports.scheduleRecovery(move.agent_id, 1_000);
       });
+    }
+  }
+
+  /**
+   * Recovers any inactive in-process `executing` room-move HTTP effects for
+   * `agentId` before purge preflight. Live in-flight executions
+   * (`isEffectActive === true`) and future-epoch rows are left untouched so
+   * purge fails closed against them.
+   */
+  recoverInactiveExecutingForAgent(agentId: string): number {
+    if (!this.effectExecutor
+      || !this.effectDatabase
+      || !this.effectDatabase.isOpen
+      || this.ports.authority.isHandoffScheduled()) {
+      return 0;
+    }
+    const currentGeneration = this.ports.authority.currentGeneration();
+    let recovered = 0;
+    for (const effect of listActiveRoomMoveEffectsForAgent(this.effectDatabase, agentId)) {
+      if (effect.state !== "executing") continue;
+      if (this.effectExecutor.isEffectActive(effect.id)) continue;
+      if (effect.epoch > currentGeneration) continue;
+      if (effect.attempt_count < 1) continue;
+      const check = roomMoveEffectSagaCheck(effect);
+      try {
+        const next = this.rescheduleExecutingEffectSafe(
+          effect,
+          "recovered_inactive_executing_effect",
+          undefined,
+          check?.ok ? check.sagaCheck : null,
+          check && !check.ok ? check.error : null,
+        );
+        if (next.state !== "executing") recovered += 1;
+      } catch (error) {
+        if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) {
+          if (this.ports.authority.isHandoffScheduled()) break;
+          throw error;
+        }
+        // Fail closed on unexpected storage errors: leave row executing so purge refuses.
+      }
+    }
+    return recovered;
+  }
+
+  private retireStalePreparedEffects(agentId?: string): void {
+    if (!this.effectDatabase
+      || !this.effectDatabase.isOpen
+      || this.ports.authority.isHandoffScheduled()) {
+      return;
+    }
+    try {
+      withFencedEffectTransaction(this.effectDatabase, this.effectWriteFence, () => {
+        if (this.ports.authority.isHandoffScheduled()) {
+          throw new EffectFenceError("Supervisor handoff fenced stale room-move effect retirement.");
+        }
+        retireStaleRoomMoveEffectsInTransaction(this.effectDatabase!, {
+          agentId,
+          expectedEpoch: this.ports.authority.currentGeneration(),
+          nowIso: this.nowIso(),
+        });
+      });
+    } catch (error) {
+      if (this.ports.authority.isHandoffScheduled()
+        && (error instanceof DaemonFenceLostError || error instanceof EffectFenceError)) {
+        return;
+      }
+      throw error;
     }
   }
 
@@ -377,6 +449,9 @@ export class RoomMoveCoordinator {
           expectedExecutionGenerationId: move.execution_generation_id,
           from: [move.phase],
           to: "rollback_required",
+          ...(input.daemonGeneration > move.daemon_generation
+            ? { adoptDaemonGeneration: input.daemonGeneration }
+            : {}),
           error: `Destination credential preparation failed: ${schedulerErrorDetail(new Error(input.detail))}`,
         }, this.commitFence);
       }
@@ -1312,19 +1387,13 @@ export class RoomMoveCoordinator {
     claimed: EffectRecord,
     executionResult: Parameters<NonNullable<EffectHandler["settle"]>>[1],
     defaultSettle: () => EffectRecord,
-    sagaCheck: {
-      operationId: string;
-      agentId: string;
-      workAttemptId: string | null;
-      executionGenerationId: string | null;
-      allowedPhases: readonly string[];
-    } | null,
+    sagaCheck: RoomMoveSagaPhaseCheck | null,
   ): EffectRecord {
     if (this.ports.authority.isHandoffScheduled()) {
       throw new EffectFenceError("Supervisor handoff fenced a stale room-move effect settlement.");
     }
     const { database } = this.requireEffectHost();
-    if (executionResult.status === "retry" || executionResult.status === "uncertain") {
+    if (executionResult.status === "uncertain") {
       try {
         return defaultSettle();
       } catch (error) {
@@ -1340,37 +1409,65 @@ export class RoomMoveCoordinator {
         const phaseRefusal = sagaCheck
           ? checkRoomMoveSagaPhaseInTransaction(database, sagaCheck)
           : null;
-        const settled = phaseRefusal !== null
-          ? failEffectInTransaction(database, {
+        if (phaseRefusal !== null) {
+          const failed = failEffectInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            error: phaseRefusal,
+            outcome: null,
+            nowIso: this.nowIso(),
+          });
+          pruneTerminalRoomMoveEffectsInTransaction(database, claimed.agent_id);
+          return failed;
+        }
+        if (executionResult.status === "retry") {
+          if (claimed.attempt_count >= claimed.max_attempts) {
+            const failed = failEffectInTransaction(database, {
               id: claimed.id,
               expectedEpoch: claimed.epoch,
               expectedAttemptCount: claimed.attempt_count,
-              error: phaseRefusal,
-              outcome: null,
+              error: executionResult.error,
+              nowIso: this.nowIso(),
+            });
+            pruneTerminalRoomMoveEffectsInTransaction(database, claimed.agent_id);
+            return failed;
+          }
+          const computed = computeEffectBackoffMs(claimed.attempt_count, ROOM_MOVE_EFFECT_BACKOFF);
+          const delayMs = executionResult.retryAfterMs !== undefined
+            ? Math.max(0, Math.min(ROOM_MOVE_EFFECT_MAX_RETRY_DELAY_MS, Math.round(executionResult.retryAfterMs)))
+            : computed;
+          return rescheduleEffectForRetryInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            nextAttemptAtMs: Math.max(0, this.nowMs()) + delayMs,
+            error: executionResult.error,
+            nowIso: this.nowIso(),
+          });
+        }
+        const settled = executionResult.status === "completed"
+          ? completeEffectInTransaction(database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              outcome: executionResult.outcome,
               nowIso: this.nowIso(),
             })
-          : executionResult.status === "completed"
-            ? completeEffectInTransaction(database, {
-                id: claimed.id,
-                expectedEpoch: claimed.epoch,
-                expectedAttemptCount: claimed.attempt_count,
-                outcome: executionResult.outcome,
-                nowIso: this.nowIso(),
-              })
-            : failEffectInTransaction(database, {
-                id: claimed.id,
-                expectedEpoch: claimed.epoch,
-                expectedAttemptCount: claimed.attempt_count,
-                error: executionResult.error,
-                outcome: executionResult.outcome,
-                nowIso: this.nowIso(),
-              });
+          : failEffectInTransaction(database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              error: executionResult.error,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            });
         pruneTerminalRoomMoveEffectsInTransaction(database, claimed.agent_id);
         return settled;
       });
     } catch (error) {
       if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
-      return this.rescheduleExecutingEffectSafe(claimed, "settlement_write_failed", error);
+      return this.rescheduleExecutingEffectSafe(claimed, "settlement_write_failed", error, sagaCheck);
     }
   }
 
@@ -1378,29 +1475,52 @@ export class RoomMoveCoordinator {
     claimed: EffectRecord,
     errorCode: string,
     originalError?: unknown,
+    sagaCheck: RoomMoveSagaPhaseCheck | null = null,
+    immediateFailureCode: string | null = null,
   ): EffectRecord {
     const { database } = this.requireEffectHost();
     try {
-      if (claimed.attempt_count < claimed.max_attempts) {
-        const retryDelayMs = computeEffectBackoffMs(
-          Math.max(1, claimed.attempt_count),
-          ROOM_MOVE_EFFECT_BACKOFF,
-        );
-        return rescheduleEffectForRetry(database, this.effectWriteFence, {
+      return withFencedEffectTransaction(database, this.effectWriteFence, () => {
+        if (this.ports.authority.isHandoffScheduled()) {
+          throw new EffectFenceError("Supervisor handoff fenced a stale room-move effect recovery.");
+        }
+        const phaseRefusal = immediateFailureCode
+          ?? (sagaCheck ? checkRoomMoveSagaPhaseInTransaction(database, sagaCheck) : null);
+        if (phaseRefusal !== null) {
+          const failed = failEffectInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            error: phaseRefusal,
+            outcome: null,
+            nowIso: this.nowIso(),
+          });
+          pruneTerminalRoomMoveEffectsInTransaction(database, claimed.agent_id);
+          return failed;
+        }
+        if (claimed.attempt_count < claimed.max_attempts) {
+          const retryDelayMs = computeEffectBackoffMs(
+            Math.max(1, claimed.attempt_count),
+            ROOM_MOVE_EFFECT_BACKOFF,
+          );
+          return rescheduleEffectForRetryInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            nextAttemptAtMs: Math.max(0, this.nowMs()) + retryDelayMs,
+            error: errorCode,
+            nowIso: this.nowIso(),
+          });
+        }
+        const failed = failEffectInTransaction(database, {
           id: claimed.id,
           expectedEpoch: claimed.epoch,
           expectedAttemptCount: claimed.attempt_count,
-          nextAttemptAtMs: Math.max(0, this.nowMs()) + retryDelayMs,
           error: errorCode,
           nowIso: this.nowIso(),
         });
-      }
-      return failEffect(database, this.effectWriteFence, {
-        id: claimed.id,
-        expectedEpoch: claimed.epoch,
-        expectedAttemptCount: claimed.attempt_count,
-        error: errorCode,
-        nowIso: this.nowIso(),
+        pruneTerminalRoomMoveEffectsInTransaction(database, claimed.agent_id);
+        return failed;
       });
     } catch (retryError) {
       if (retryError instanceof DaemonFenceLostError || retryError instanceof EffectFenceError) throw retryError;
@@ -1434,8 +1554,15 @@ export class RoomMoveCoordinator {
         );
       }
       if (existing.attempt_count >= 1) {
-        const recovered = this.rescheduleExecutingEffectSafe(existing, "recovered_inactive_executing_effect");
-        return { effect: recovered, diagnostic: null, backedOff: true };
+        const check = roomMoveEffectSagaCheck(existing);
+        const recovered = this.rescheduleExecutingEffectSafe(
+          existing,
+          "recovered_inactive_executing_effect",
+          undefined,
+          check?.ok ? check.sagaCheck : null,
+          check && !check.ok ? check.error : null,
+        );
+        return { effect: recovered, diagnostic: null, backedOff: recovered.state === "prepared" };
       }
     }
     const prepared = await executor.prepare({

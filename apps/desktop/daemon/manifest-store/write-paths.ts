@@ -10,6 +10,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   BOUNDED_MCP_EFFECT_KIND,
   failPreparedJoinRoomEffectInTransaction,
+  retireRoomMoveEffectsForOperationInTransaction,
   rowToBoundedMcpEffect,
 } from "../effect-journal/index.js";
 import { pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
@@ -119,6 +120,13 @@ export const writePaths = storeMethods({
       if (Number(changed.changes) !== 1) {
         throw new ManifestConflictError("Pre-membership room-move phase changed during lifecycle cancellation.");
       }
+      retireRoomMoveEffectsForOperationInTransaction(database, {
+        agentId: input.agentId,
+        operationId: String(row.operation_id),
+        expectedEpoch: Number(row.daemon_generation),
+        error: "room_move_cancelled",
+        nowIso: timestamp,
+      });
     }
     pruneSupervisedAgentHistory(database, input.agentId, () => timestamp);
   },

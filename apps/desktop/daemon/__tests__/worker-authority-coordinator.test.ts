@@ -6,7 +6,7 @@ import { NativeActivityRejectedError, SupervisorGrantRequestError } from "../clo
 import { ConvergencePacerClosedError } from "../convergence-pacer.js";
 import { cursorLaneRetirementSchema } from "../runtime-recovery-journal.js";
 import { WorkerCredentialMintError } from "../daemon-error-policy.js";
-import { BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS } from "../../electron/main/supervisor-daemon.js";
+import { DAEMON_RPC_TIMEOUTS, resolveDaemonRpcTimeoutMs } from "#daemon-contract/index.js";
 import {
   BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS,
   boundAnnouncementStatus,
@@ -873,10 +873,11 @@ test("a bootstrap that queues and then meets a slow server still ends before the
   admit();
   await assert.rejects(bootstrapping, /failed after 3 attempts/);
   // Mint attempts and backoff end with the room-tail reserve still left
-  // before the request limit, which itself ends before the desktop's timeout.
+  // before the daemon's internal bootstrap request limit, while the RPC socket
+  // itself acknowledges immediately under the short default timeout.
   assert.ok(harness.nowMs - receivedAt <= BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS - 8_000,
     `the mint ran until ${harness.nowMs - receivedAt} ms after receipt`);
-  assert.ok(BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS < BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS);
+  assert.equal(resolveDaemonRpcTimeoutMs("supervisor.bootstrap_room_ingress"), DAEMON_RPC_TIMEOUTS.defaultMs);
   assert.deepEqual(harness.timerDelays.filter((delay) => delay <= 10_000), [10_000, 1_000, 10_000, 3_000, 1_000]);
 });
 

@@ -10,6 +10,14 @@ import {
   BOUNDED_MCP_EFFECT_KIND,
   completePreparedEffectAtomicallyInTransaction,
   failPreparedJoinRoomEffectInTransaction,
+  retireExecutionApprovalEffectsForPurgeInTransaction,
+  retireExecutionApprovalEffectsForRoomMoveInTransaction,
+  retireRoomMoveEffectsForOperationInTransaction,
+  retireRoomMoveEffectsForPurgeInTransaction,
+  retireRoomWorkEffectsForPurgeInTransaction,
+  retireRoomWorkEffectsInTransaction,
+  ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+  ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
   rowToBoundedMcpEffect,
 } from "../effect-journal/index.js";
 import { cancelInterruptedSupervisedTurn, pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
@@ -161,7 +169,40 @@ export const roomMovesAndPurges = storeMethods({
               }
             }
           }
+          if (input.to === "rollback_required") {
+            retireRoomMoveEffectsForOperationInTransaction(database, {
+              agentId: input.agentId,
+              operationId: input.operationId,
+              expectedEpoch: updated.daemon_generation,
+              kinds: [ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND, ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND],
+              error: "room_move_rollback_required",
+              nowIso: updatedAt,
+            });
+          }
+          if (input.to === "active") {
+            retireRoomWorkEffectsInTransaction(database, {
+              agentId: input.agentId,
+              expectedEpoch: updated.daemon_generation,
+              roomId: updated.source_room_id,
+              error: "room_moved",
+              nowIso: updatedAt,
+            });
+            retireExecutionApprovalEffectsForRoomMoveInTransaction(database, {
+              agentId: input.agentId,
+              expectedEpoch: updated.daemon_generation,
+              roomId: updated.source_room_id,
+              error: "room_moved",
+              nowIso: updatedAt,
+            });
+          }
           if (input.to === "active" || input.to === "failed") {
+            retireRoomMoveEffectsForOperationInTransaction(database, {
+              agentId: input.agentId,
+              operationId: input.operationId,
+              expectedEpoch: updated.daemon_generation,
+              error: input.to === "active" ? "room_move_active" : "room_move_failed",
+              nowIso: updatedAt,
+            });
             // Reaching a terminal room-move phase releases the compensation rows
             // protected by the shared retention policy. Compact only after the
             // exact effect reached the same terminal boundary.
@@ -212,6 +253,21 @@ export const roomMovesAndPurges = storeMethods({
         }
         const now = new Date().toISOString();
         this.settleGivenAgentInboxForPurge(database, input.agentId, now);
+        retireRoomWorkEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
+        retireExecutionApprovalEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
+        retireRoomMoveEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
         const attachment = this.assertPurgePreconditions(database, input.agentId);
         const phase: DaemonPurgePhase = input.externalRevokeRequired
           ? input.workerSessionAttestation === "unknown" ? "reprepare_credentials" : "revoking_credentials"
@@ -413,13 +469,30 @@ export const roomMovesAndPurges = storeMethods({
           const purge = purgeFromRow(purgeRow);
           if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.daemonGeneration || purge.phase !== "local_commit") throw new ManifestConflictError("Purge is not authorized for local commit.");
           // A message that reached the stopped guest after preparation is settled here as well; otherwise the commit would refuse for good.
-          this.settleGivenAgentInboxForPurge(database, input.agentId, new Date().toISOString());
+          const commitNow = new Date().toISOString();
+          this.settleGivenAgentInboxForPurge(database, input.agentId, commitNow);
+          retireRoomWorkEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
+          retireExecutionApprovalEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
+          retireRoomMoveEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
           const attachment = this.assertPurgePreconditions(database, input.agentId);
           if (attachment.attachedWorkAttemptId !== purge.attached_work_attempt_id || attachment.preservedWorkspacePath !== purge.preserved_workspace_path) {
             throw new ManifestConflictError("Purge target attachment changed after preparation.");
           }
           for (const [table, column] of [
-            ["effects", "agent_id"], ["effect_tombstones", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
+            ["effects", "agent_id"], ["effect_tombstones", "agent_id"], ["execution_approval_publications", "agent_id"],
+            ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
             ["supervised_agent_ingress_cursors", "agent_id"], ["supervised_agent_history_boundaries", "agent_id"], ["supervised_agent_pruned_sources", "agent_id"],
             ["supervised_worker_mint_states", "agent_id"], ["supervised_worker_sessions", "agent_id"], ["inbox_items", "agent_id"], ["worker_binding_publications", "entry_id"],
             ["worker_generation_verifications", "entry_id"], ["worker_binding_watermarks", "entry_id"], ["worker_session_bindings", "entry_id"],

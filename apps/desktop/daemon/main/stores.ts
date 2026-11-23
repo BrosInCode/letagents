@@ -13,6 +13,7 @@ import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { schedulerErrorDetail } from "../daemon-error-policy.js";
 import { DaemonStateWatch, STATE_WATCH_NOTIFICATION_COALESCE_MS } from "../daemon-state-watch.js";
+import { AsyncRpcEffectCoordinator } from "../effect-journal/index.js";
 import { WorkDurabilityStore } from "../durability-store.js";
 import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
@@ -61,6 +62,7 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
   protected readonly replyAttachmentSpool: ReplyAttachmentSpool;
   /** Images on the message that wakes an agent, staged for one turn under the daemon's own folder. */
   protected readonly roomTurnAttachments: RoomTurnAttachmentStager;
+  protected readonly asyncRpcEffects: AsyncRpcEffectCoordinator;
   protected readonly stateWatch: DaemonStateWatch;
   protected readonly entryConcurrency: EntryConcurrencyGate;
   protected readonly agentStreamRegistry: AgentStreamRegistry;
@@ -150,9 +152,15 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       updateEntry: (entryId, update, options) => this.updateManifestEntry(entryId, update, undefined, options),
       startDelivery: (entryId) => this.startSupervisedDelivery(entryId),
     }, { heartbeatIntervalMs: this.nativeHeartbeatIntervalMs });
+    this.asyncRpcEffects = new AsyncRpcEffectCoordinator({
+      getExecutor: () => this.effectExecutor,
+      notifyImmediate: () => this.stateWatch.notifyImmediate(),
+    });
     this.stateWatch = new DaemonStateWatch({
       ...daemonAuthority, coalesceMs: STATE_WATCH_NOTIFICATION_COALESCE_MS,
       entries: async () => this.readModel.entriesWithDerivedLiveness((await this.store.loadForStateWatch()).entries, { reuseUnchangedInboxInputs: true }),
+      rpcEffects: (generation) => this.asyncRpcEffects.listForGeneration(generation),
+      rpcEffectEvictionVersion: (generation) => this.asyncRpcEffects.evictionVersion(generation),
     });
     this.agentStreamRegistry = new AgentStreamRegistry({
       isHandoffScheduled: () => this.handoffScheduled,
@@ -204,6 +212,9 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       ...(providerPort ? { provider: providerPort } : {}),
       runtimeCustody: this.workerRuntimeCustody,
       deleteAgentStream: (entryId) => { this.agentStreamRegistry.delete(entryId); this.liveRoomShare.forget(entryId); },
+      reconcileRoomWorkForPurge: (entryId) => { this.roomWorkPublisher?.recoverInactiveExecutingForAgent(entryId); },
+      reconcileApprovalPublicationsForPurge: (entryId) => { this.executionDelegations?.recoverInactiveApprovalPublicationsForPurge(entryId); },
+      reconcileRoomMovesForPurge: (entryId) => { this.roomMoves?.recoverInactiveExecutingForAgent?.(entryId); },
       ephemeralProvisioner: this.ephemeralProvisioner,
       nowMs: () => this.nowMs(),
     });

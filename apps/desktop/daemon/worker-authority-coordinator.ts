@@ -49,11 +49,9 @@ const HOST_GRANT_TTL_MS = 24 * 60 * 60 * 1_000;
 const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
 const BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS = 40_000;
 /**
- * The desktop gives up on a bootstrap request 45 s after sending it
- * (BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS in electron/main/supervisor-daemon/constants.ts)
- * and then treats the new agent's claim as failed. Whatever the queue did,
- * the daemon finishes or fails the bootstrap this long after receiving it,
- * so it never commits a room boundary for a claim the desktop has abandoned.
+ * Bound a single room-ingress bootstrap execution internally so it never hangs
+ * indefinitely in the background after the RPC socket has already acknowledged
+ * `{ effect_id, daemon_generation }` under the short default socket timeout.
  */
 export const BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS = 43_000;
 // Time kept for reading the room tail after the mint, so a late mint fails
