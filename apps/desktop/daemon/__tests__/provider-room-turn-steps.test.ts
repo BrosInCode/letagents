@@ -203,6 +203,44 @@ test("a disposition with an undefined optional field reaches the adapter without
   }
 });
 
+test("an answer that is not plain data refuses its step before any copy: no getter runs, no key is dropped, a cycle does not hang", async () => {
+  // ReviewAstra, #2088 review: the clean-up of undefined fields must not read getters, drop symbol keys or recurse
+  // into a cycle, and an async answer that is not data must refuse its step, not leave it waiting.
+  let getterReads = 0;
+  const withGetter = { turnId: "turn-1", outcome: "reply", get text() { getterReads += 1; return "done"; } };
+  const withSymbol = { turnId: "turn-1", outcome: "reply", text: "done", [Symbol("hidden")]: () => "fn" };
+  const cyclic: Record<string, unknown> = { turnId: "turn-1", outcome: "reply", text: "done" };
+  cyclic.publicationContract = cyclic;
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    for (const [name, accepted, expected] of [
+      ["accessor", withGetter, /accessor/],
+      ["symbol key", withSymbol, /symbol keys/],
+      ["cycle", cyclic, /circular reference/],
+    ] as const) {
+      let thrown: unknown;
+      const { router, handle } = await routed(fakeAdapter(async (_handle, _request, options) => {
+        try { await options!.checkpointTerminalResult!(REPLY); } catch (error) { thrown = error; }
+        return REPLY;
+      }));
+      const turn = router.runRoomTurn(handle, REQUEST, {
+        checkpointTerminalResult: async () => ({ acceptedResult: accepted as never, cleanupRecoveryEvidence: true }),
+      });
+      const timeout = new Promise<"timeout">((resolve) => { setTimeout(() => resolve("timeout"), 2_000).unref(); });
+      assert.notEqual(await Promise.race([turn.then(() => "done" as const), timeout]), "timeout", `${name}: the step must get an answer`);
+      assert.ok(thrown instanceof Error, `${name}: the adapter must see a refusal`);
+      assert.match((thrown as Error).message, expected, name);
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(getterReads, 0, "the check must not read a getter");
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
 test("a disposition that is not the contract's shape is refused into the adapter", async () => {
   let thrown: unknown;
   const { router, handle } = await routed(fakeAdapter(async (_handle, _request, options) => {

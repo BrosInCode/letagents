@@ -22,6 +22,7 @@ import type {
   RoomTurnFileAccess,
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
+import { assertPlainWireValue } from "#daemon-contract/index.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
 import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
@@ -66,8 +67,11 @@ function roomTurnHandlers(options: RoomTurnCallbacks | undefined): StepHandlers 
  * A step answer is JSON, and JSON has no `undefined`: `JSON.stringify` leaves such a property out. The daemon's
  * functions build plain objects, where an optional field can be present with the value `undefined` (for example
  * `evidence: undefined`). Leave those properties out here, as a JSON transport would, so that the boundary does not
- * refuse an answer that the daemon has already saved. Arrays and other values stay as they are, so the boundary still
- * refuses a value that is not data.
+ * refuse an answer that the daemon has already saved.
+ *
+ * Call this only on a value that `assertPlainWireValue` (with `allowUndefinedProperties`) accepted: that check reads
+ * no getter and refuses accessors, symbol keys, other prototypes and cycles. This copy then only drops the
+ * `undefined` properties of plain objects.
  */
 function withoutUndefinedProperties(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(withoutUndefinedProperties);
@@ -908,7 +912,17 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       }
     };
     // Only a step whose answer has a body forwards the value of the daemon's function; for another step it is ignored.
-    const settled = (step: ProviderStepName, value: unknown) => ({ body: step in PROVIDER_STEP_ANSWER_BODY_SCHEMAS ? withoutUndefinedProperties(value) : undefined });
+    // A body is checked as plain data first, without reading a getter; a value that is not data refuses the step
+    // here, so no error can escape the promise handler below and leave the step without an answer.
+    const settled = (step: ProviderStepName, value: unknown): { thrown: unknown } | { body: unknown } => {
+      if (!(step in PROVIDER_STEP_ANSWER_BODY_SCHEMAS) || value === undefined) return { body: undefined };
+      try {
+        assertPlainWireValue(value, { path: `answer of ${step}`, allowUndefinedProperties: true });
+        return { body: withoutUndefinedProperties(value) };
+      } catch (thrown) {
+        return { thrown };
+      }
+    };
     this.stepHandlers.set(operationId, (event) => {
       let result: unknown;
       try { result = handlers[event.step]?.(event.body); } catch (thrown) { answer(event.seq, { thrown }); return; }
