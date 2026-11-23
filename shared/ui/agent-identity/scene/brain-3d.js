@@ -172,6 +172,8 @@ export async function createBrainPreview(host, { onUnavailable }) {
   ].map(url => textureLoader.load(url, () => requestDraw()));
   // The Antigravity arch keeps its own colours, so its texture is read as colour, not only as a mask.
   textures[3].colorSpace = THREE.SRGBColorSpace;
+  // Premultiplied on upload, so filtered edge texels divide back to the arch's own colour.
+  textures[3].premultiplyAlpha = true;
 
   // Full-surface edition paint. These original panel layouts use the official
   // palette, while the supplied provider marks retain their own proportions.
