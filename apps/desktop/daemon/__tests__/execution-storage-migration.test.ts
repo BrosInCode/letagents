@@ -2562,6 +2562,21 @@ function insertAntigravityCutover(database: DatabaseSync, extra: Record<string, 
     VALUES(${Object.keys(values).map(() => "?").join(",")})`).run(...Object.values(values));
 }
 
+test("v54 fences older writers before reviews can move outside the supervisor database", async () => {
+  const env = await fixture();
+  try {
+    env.database.exec("PRAGMA user_version=53; UPDATE manifest_metadata SET schema_version=53");
+    const old = versionPair(env.database);
+    assert.throws(() => new DaemonStateSchema(() => { throw new Error("interrupt archive upgrade"); })
+      .createSchema(env.database), /interrupt archive upgrade/);
+    assert.deepEqual(versionPair(env.database), old);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 54);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 54);
+    new DaemonStateSchema().validateCurrentShape(env.database);
+  } finally { await env.cleanup(); }
+});
+
 test("v53 admits Antigravity without rewriting any runtime birth, cutover or reference to them", async () => {
   assert.ok(DAEMON_STATE_SCHEMA_VERSION >= 53);
   const env = await fixture();

@@ -9,7 +9,7 @@ import { REVIEW_LIMIT, REVIEW_PAGE_SIZE } from './workspace-review.mjs';
 
 const prefix = '@review1:';
 const tagSize = 16;
-const folder = databasePath => databasePath + '.reviews';
+const folders = databasePath => [databasePath + '.reviews', databasePath + '.reviews-recovery'];
 const filename = key => createHash('sha256').update(key).digest('hex') + '.review';
 function invalid() { throw new Error('Invalid workspace review archive.'); }
 
@@ -26,8 +26,7 @@ function nonce(index) {
   return bytes; // Every archive gets an independent, random 256-bit key.
 }
 
-function withArchive(databasePath, reference, callback) {
-  const directory = folder(databasePath);
+function withArchive(directory, reference, callback) {
   assertOwnerPrivateSync(directory, { kind: 'directory' });
   const descriptor = openNoFollowSync(join(directory, filename(reference.key)), constants.O_RDONLY);
   try {
@@ -56,12 +55,18 @@ function readPage(descriptor, reference, digest, index) {
   return plaintext;
 }
 
+function readArchive(databasePath, reference, read) {
+  const [primary, recovery] = folders(databasePath);
+  try { return withArchive(primary, reference, read); }
+  catch { return withArchive(recovery, reference, read); }
+}
+
 export function readArchivedReviewPage(databasePath, reference, digest, index) {
-  return withArchive(databasePath, reference, descriptor => readPage(descriptor, reference, digest, index).toString('ascii'));
+  return readArchive(databasePath, reference, descriptor => readPage(descriptor, reference, digest, index).toString('ascii'));
 }
 
 export function readArchivedReview(databasePath, reference, digest) {
-  return withArchive(databasePath, reference, descriptor => {
+  return readArchive(databasePath, reference, descriptor => {
     const data = Buffer.allocUnsafe(reference.size);
     for (let i = 0; i * REVIEW_PAGE_SIZE < reference.size; i++) {
       readPage(descriptor, reference, digest, i).copy(data, i * REVIEW_PAGE_SIZE);
@@ -73,10 +78,6 @@ export function readArchivedReview(databasePath, reference, digest) {
 export function archiveWorkspaceReview(databasePath, data, digest) {
   if (typeof data !== 'string' || !data.length || data.length > REVIEW_LIMIT
     || createHash('sha256').update(data).digest('hex') !== digest || Buffer.byteLength(data) !== data.length) invalid();
-  const directory = folder(databasePath);
-  try { createPrivateDirSync(directory); syncDirectorySync(dirname(directory)); }
-  catch (error) { if (error.code !== 'EEXIST') throw error; }
-  assertOwnerPrivateSync(directory, { kind: 'directory' });
   const key = randomBytes(32);
   const pages = Math.ceil(data.length / REVIEW_PAGE_SIZE);
   const bytes = Buffer.allocUnsafe(data.length + tagSize * pages);
@@ -89,16 +90,22 @@ export function archiveWorkspaceReview(databasePath, data, digest) {
     cipher.final();
     offset += cipher.getAuthTag().copy(bytes, offset);
   }
-  writePrivateFileAtomicallySync(join(directory, filename(key)), bytes);
-  // Verify the actual file before replacing even one inline copy or committing
-  // a new reference. Never trust existence or matching file length alone.
-  const ref = { size: data.length, key };
-  const verified = withArchive(databasePath, ref, descriptor => {
-    const hash = createHash('sha256');
-    for (let i = 0; i < pages; i++) hash.update(readPage(descriptor, ref, digest, i));
-    return hash.digest('hex');
-  });
-  if (verified !== digest) invalid();
+  // The independent recovery copy is made once at capture. A v54+ supervisor
+  // snapshot contains the envelope/key and refers to the sibling recovery
+  // directory; later provider upgrades do not have to copy this object again.
+  for (const directory of folders(databasePath)) {
+    try { createPrivateDirSync(directory); syncDirectorySync(dirname(directory)); }
+    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    assertOwnerPrivateSync(directory, { kind: 'directory' });
+    writePrivateFileAtomicallySync(join(directory, filename(key)), bytes);
+    const ref = { size: data.length, key };
+    const verified = withArchive(directory, ref, descriptor => {
+      const hash = createHash('sha256');
+      for (let i = 0; i < pages; i++) hash.update(readPage(descriptor, ref, digest, i));
+      return hash.digest('hex');
+    });
+    if (verified !== digest) invalid();
+  }
   return prefix + data.length + ':' + key.toString('hex');
 }
 
@@ -106,19 +113,24 @@ export function archiveWorkspaceReview(databasePath, data, digest) {
  * recovery point may reference objects since cleared from live history. Keep
  * their ciphertext through its entire lifetime, including unvalidated backups. */
 export function pruneUnreferencedReviewArchives(databasePath, references) {
-  for (const path of [databasePath + '.recovery.enc', databasePath + '.recovery.enc.pending']) {
-    try { lstatSync(path); return; }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
-  }
-  const directory = folder(databasePath);
-  try { assertOwnerPrivateSync(directory, { kind: 'directory' }); }
-  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  const snapshotPresent = ['.recovery.enc', '.recovery.enc.pending'].some(suffix => {
+    try { lstatSync(databasePath + suffix); return true; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; return false; }
+  });
   const retained = new Set();
-  for (const row of references) {
-    const ref = reviewArchiveReference(row.data);
-    if (ref) retained.add(filename(ref.key));
+  if (!snapshotPresent) {
+    for (const row of references()) {
+      const ref = reviewArchiveReference(row.data);
+      if (ref) retained.add(filename(ref.key));
+    }
   }
-  for (const name of readdirSync(directory)) {
-    if (/^[a-f0-9]{64}\.review$/.test(name) && !retained.has(name)) unlinkSync(join(directory, name));
+  for (const directory of folders(databasePath)) {
+    try { assertOwnerPrivateSync(directory, { kind: 'directory' }); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    for (const name of readdirSync(directory)) {
+      const abandonedWrite = /^\.[0-9a-f-]{36}\.[a-f0-9]{64}\.review\.tmp$/.test(name);
+      const unreferenced = !snapshotPresent && /^[a-f0-9]{64}\.review$/.test(name) && !retained.has(name);
+      if (abandonedWrite || unreferenced) unlinkSync(join(directory, name));
+    }
   }
 }

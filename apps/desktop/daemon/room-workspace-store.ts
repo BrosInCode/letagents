@@ -104,39 +104,49 @@ export class RoomWorkspaceStore {
         const row = this.db.prepare(`SELECT rowid,digest,data FROM room_workspace_reviews
           WHERE rowid>? AND (${this.reviewSizeSql}>90 OR data NOT GLOB '@review1:*') ORDER BY rowid LIMIT 1`).get(this.lastArchiveRow);
         if (row) {
-          this.lastArchiveRow = Number(row.rowid);
           const data = archiveWorkspaceReview(this.databasePath, String(row.data), String(row.digest));
           this.db.prepare('UPDATE room_workspace_reviews SET data=? WHERE rowid=?').run(data, row.rowid);
           this.db.exec('COMMIT');
+          this.lastArchiveRow = Number(row.rowid);
           return true;
         }
         this.finishedArchiveMigration = true;
       }
       this.pruneAfter = now + 24 * 60 * 60 * 1000;
-      pruneUnreferencedReviewArchives(this.databasePath, this.db.prepare(`SELECT data FROM room_workspace_reviews
+      pruneUnreferencedReviewArchives(this.databasePath, () => this.db.prepare(`SELECT data FROM room_workspace_reviews
         WHERE ${this.reviewSizeSql}<=90 AND data GLOB '@review1:*'`).iterate());
       this.db.exec('COMMIT');
       return false;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
-  pendingPage(agentId: string, roomId: string, sourceMessageId: string): WorkspaceReviewPage | null {
+  private pendingReview(agentId: string, roomId: string, sourceMessageId: string, readInlinePage: boolean) {
     // A v1 reference fits in 90 bytes. The length guard avoids fetching a
     // completed legacy archive just to find out which representation it uses.
     const row = this.db.prepare(`SELECT digest,uploaded_pages,${this.reviewSizeSql} AS size,
       CASE WHEN ${this.reviewSizeSql}<=90 THEN data
-        WHEN uploaded_pages*? < ${this.reviewSizeSql} THEN substr(data,uploaded_pages*?+1,?) END AS page
+        WHEN ? AND uploaded_pages*? < ${this.reviewSizeSql} THEN substr(data,uploaded_pages*?+1,?) END AS page
       FROM room_workspace_reviews WHERE agent_id=? AND room_id=? AND source_message_id=?`)
-      .get(REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, agentId, roomId, sourceMessageId);
+      .get(Number(readInlinePage), REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, agentId, roomId, sourceMessageId);
     if (!row) return null;
     const index = Number(row.uploaded_pages);
     const reference = reviewArchiveReference(row.page);
     const size = reference?.size ?? Number(row.size);
-    if (index * REVIEW_PAGE_SIZE >= size) return null;
-    const digest = String(row.digest);
+    return index * REVIEW_PAGE_SIZE < size
+      ? { digest: String(row.digest), index, total: Math.ceil(size / REVIEW_PAGE_SIZE), reference, inline: row.page } : null;
+  }
+
+  hasPendingPage(agentId: string, roomId: string, sourceMessageId: string): boolean {
+    return !!this.pendingReview(agentId, roomId, sourceMessageId, false);
+  }
+
+  pendingPage(agentId: string, roomId: string, sourceMessageId: string): WorkspaceReviewPage | null {
+    const pending = this.pendingReview(agentId, roomId, sourceMessageId, true);
+    if (!pending) return null;
+    const { digest, index, total, reference, inline } = pending;
     if (reference && !this.databasePath) throw new Error('Workspace review archive location is unavailable.');
-    const data = reference ? readArchivedReviewPage(this.databasePath!, reference, digest, index) : String(row.page);
-    return { digest, index, total: Math.ceil(size / REVIEW_PAGE_SIZE), data };
+    const data = reference ? readArchivedReviewPage(this.databasePath!, reference, digest, index) : String(inline);
+    return { digest, index, total, data };
   }
   acknowledgePage(agentId: string, roomId: string, sourceMessageId: string, page: WorkspaceReviewPage): void {
     this.db.prepare('UPDATE room_workspace_reviews SET uploaded_pages=uploaded_pages+1 WHERE agent_id=? AND room_id=? AND source_message_id=? AND digest=? AND uploaded_pages=?')

@@ -453,7 +453,8 @@ export class RoomWorkPublisher {
       if (this.unavailable()) return;
       const grouped = this.pendingGroupedReports(agentId);
       const pending = this.store.list(agentId)
-        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision || this.pendingReviewPage(record)))
+        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision
+          || (hasReviewableRoomContribution(record.summary) && this.workspaces.hasPendingPage(record.agentId, record.roomId, record.sourceMessageId))))
         .sort((a, b) => (this.attemptedAt.get(key(a)) ?? -Infinity) - (this.attemptedAt.get(key(b)) ?? -Infinity));
       const eligible: Array<{ record: RoomWorkPublication; authority: NonNullable<ReturnType<RoomWorkPublisher["authority"]>> }> = [];
       for (const record of pending) {
@@ -483,7 +484,7 @@ export class RoomWorkPublisher {
             this.store.acknowledge(record);
             if (reviewPage) {
               this.workspaces.acknowledgePage(record.agentId, record.roomId, record.sourceMessageId, reviewPage);
-              more = more || !!this.pendingReviewPage(record);
+              more = more || this.workspaces.hasPendingPage(record.agentId, record.roomId, record.sourceMessageId);
             }
             this.attemptedAt.delete(key(record));
           }
