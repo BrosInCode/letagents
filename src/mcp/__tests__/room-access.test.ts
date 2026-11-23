@@ -11,6 +11,8 @@ process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 process.env.LETAGENTS_API_URL = "http://127.0.0.1:39998";
 process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
 process.env.LETAGENTS_CHAT_STORAGE = "cloud";
+// Keep this suite off the local chat database in the home folder.
+process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
 delete process.env.LETAGENTS_TOKEN;
 delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
 
@@ -93,6 +95,36 @@ function refusingServer(body: Record<string, unknown>, status = 403) {
     return json(body, status);
   };
   return requests;
+}
+
+const INVALID_BEARER = "The bearer credential is invalid or expired. Reconnect with a current credential.";
+
+/**
+ * A server that answers as the real routes do for a sign-in it rejects:
+ * a request WITH a bearer gets the invalid-bearer 401 (http/middleware.ts),
+ * a request WITHOUT one gets `auth_required` (rooms/access.ts). `holdDeviceStart`
+ * keeps `/auth/device/start` open until `release()` is called.
+ */
+function rejectedTokenServer(options: { holdDeviceStart?: boolean } = {}) {
+  const requests: Array<{ method: string; path: string; authorization: string | null }> = [];
+  let release!: () => void;
+  const released = options.holdDeviceStart ? new Promise<void>((resolve) => { release = resolve; }) : Promise.resolve();
+  let deviceStartSeen!: () => void;
+  const deviceStartRequested = new Promise<void>((resolve) => { deviceStartSeen = resolve; });
+  globalThis.fetch = async (url, init) => {
+    const parsed = new URL(String(url));
+    const authorization = new Headers(init?.headers).get("authorization");
+    requests.push({ method: init?.method ?? "GET", path: parsed.pathname, authorization });
+    if (parsed.pathname.endsWith("/presence")) return new Response(null, { status: 204 });
+    if (parsed.pathname === "/auth/device/start") {
+      deviceStartSeen();
+      await released;
+      return json({ request_id: "device_1", user_code: "ABCD-EFGH", verification_uri: "https://github.com/login/device", expires_in: 900, interval: 5 });
+    }
+    if (authorization) return json({ error: INVALID_BEARER }, 401);
+    return json({ error: "auth_required", code: "NOT_AUTHENTICATED", message: "Sign in to LetAgents to open this room", room_id: "room_adhoc" }, 401);
+  };
+  return { requests, deviceStartRequested, release: () => release?.() };
 }
 
 function withEnv<T>(values: Record<string, string | undefined>, callback: () => Promise<T>): Promise<T> {
@@ -281,7 +313,7 @@ test("a saved sign-in the room rejects starts the device flow in the same call",
   setStoredAuth({ token: "revoked-token", stored_at: new Date().toISOString(), source: "device_flow" });
   rememberRoom(toRoomState({ room_id: "room_adhoc", display_name: "Ad hoc", joined_via: "join_code" }));
   clearPendingDeviceAuth();
-  const requests = refusingServer({ error: "The bearer credential is invalid or expired. Reconnect with a current credential." }, 401);
+  const requests = refusingServer({ error: INVALID_BEARER }, 401);
   const read = await call("read_messages", {});
   assert.equal(read.error, "auth_required", JSON.stringify(read));
   assert.equal(read.next_step, "poll_device_auth");
@@ -295,9 +327,43 @@ test("calls that meet a rejected saved token at the same time all start the devi
   setStoredAuth({ token: "revoked-token", stored_at: new Date().toISOString(), source: "device_flow" });
   rememberRoom(toRoomState({ room_id: "room_adhoc", display_name: "Ad hoc", joined_via: "join_code" }));
   clearPendingDeviceAuth();
-  refusingServer({ error: "The bearer credential is invalid or expired. Reconnect with a current credential." }, 401);
+  rejectedTokenServer();
   const results = await Promise.all([call("read_messages", {}), call("get_board", {})]);
   assert.deepEqual(results.map((result) => result.error), ["auth_required", "auth_required"], JSON.stringify(results));
+});
+
+test("a call that starts after the rejected saved token is forgotten also starts the device flow", async () => {
+  setStoredAuth({ token: "revoked-token", stored_at: new Date().toISOString(), source: "device_flow" });
+  rememberRoom(toRoomState({ room_id: "room_adhoc", display_name: "Ad hoc", joined_via: "join_code" }));
+  clearPendingDeviceAuth();
+  const server = rejectedTokenServer({ holdDeviceStart: true });
+  try {
+    // The first call sends the saved token, forgets it on the 401, and then waits in the device start.
+    const first = call("read_messages", {});
+    await server.deviceStartRequested;
+    assert.equal(getStoredAuth(), null, "the first call forgot the rejected sign-in");
+    // The second call starts now, so it reads no saved sign-in and sends no bearer.
+    const second = call("get_board", {});
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 5_000;
+      const check = () => {
+        if (server.requests.some((request) => request.path.endsWith("/tasks"))) resolve();
+        else if (Date.now() > deadline) reject(new Error(`no board request: ${JSON.stringify(server.requests)}`));
+        else setTimeout(check, 5);
+      };
+      check();
+    });
+    server.release();
+    const results = await Promise.all([first, second]);
+    assert.deepEqual(results.map((result) => result.error), ["auth_required", "auth_required"], JSON.stringify(results));
+    assert.deepEqual(results.map((result) => result.next_step), ["poll_device_auth", "poll_device_auth"], JSON.stringify(results));
+    const board = server.requests.filter((request) => request.path.endsWith("/tasks"));
+    assert.equal(board.length, 1, JSON.stringify(server.requests));
+    assert.equal(board[0]!.authorization, null, "the second call carried no bearer");
+    assert.equal(server.requests.find((request) => request.path === "/auth/device/start")!.authorization, null);
+  } finally {
+    server.release();
+  }
 });
 
 test("initialize_repo keeps the config and gives the next step when the room refuses the auto-join", async () => {
