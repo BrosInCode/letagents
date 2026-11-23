@@ -109,6 +109,12 @@ type Options = {
 const AUTOMATIC_REVIEW_TIMEOUT_MS = 10_000;
 const MAX_REQUESTS = 32;
 const MAX_PRESENTATION_BYTES = 24 * 1024;
+/** Providers whose permission requests this broker presents and answers. */
+const APPROVAL_PROVIDERS: readonly string[] = ["codex", "open-model", "claude-code", "antigravity"] satisfies readonly HostApprovalPresentation["provider"][];
+/** Native connections that carry those requests. */
+const APPROVAL_CONNECTIONS: readonly string[] = ["codex_app_server", "opencode_server", "claude_cli", "antigravity_acp"];
+/** Connections whose approvals settle only on exact native execution or closure evidence. */
+const RECONCILED_CONNECTIONS: readonly string[] = ["codex_app_server", "claude_cli", "antigravity_acp"];
 const SAVED_EDIT_WAITING = "You saved new settings for this agent. It keeps its old settings until it restarts. Your answer applies to this request only.";
 const CODEX_FILE_CHANGE_UNAVAILABLE = "Codex has requested file changes, but the actual edits are not available to inspect here. Decisions are disabled until those exact edits can be shown.";
 class ApprovalPreparationUnavailableError extends Error {}
@@ -185,12 +191,12 @@ export class HostApprovalBroker {
     if (previous) previous.requests = [];
     const provider = this.options.provider;
     if (!provider?.observePermissions || !handle.providerConnection
-      || !["codex_app_server", "opencode_server", "claude_cli"].includes(handle.providerConnection.kind)) return () => {};
+      || !APPROVAL_CONNECTIONS.includes(handle.providerConnection.kind)) return () => {};
     const lane: Lane = { agentId, generation, handle, connection: { ...handle.providerConnection },
       controller: new AbortController(), revision: 0, state: "degraded", connectionId: null, requests: [],
       approvalExecutions: null, activityEpoch: 0, activeDecisions: 0, reviewed: new WeakSet(), reviewing: new Set() };
     this.lanes.set(agentId, lane);
-    if (["codex_app_server", "claude_cli"].includes(handle.providerConnection.kind)) {
+    if (RECONCILED_CONNECTIONS.includes(handle.providerConnection.kind)) {
       lane.approvalExecutions = new ApprovalExecutionReconciler({ provider, handle, store: this.options.store,
         isCurrent: () => this.current(lane), fenceCommit: this.options.fenceCommit,
         onChanged: () => this.options.onPermissionChanged?.(lane.agentId), nowMs: this.now });
@@ -287,7 +293,7 @@ export class HostApprovalBroker {
       // A missing observation is not a verified empty pending-request list.
       // Keep failure visible even when no native request reached this lane.
       if (!lane.requests.length && (lane.state !== "pending" || !this.current(lane))
-        && ["codex", "open-model", "claude-code"].includes(entry.provider) && result.length < 64) {
+        && APPROVAL_PROVIDERS.includes(entry.provider) && result.length < 64) {
         result.push({ reference: null, recordedDecision: null, status: "unavailable",
           presentation: { agentId: entry.id, displayName: entry.display_name,
             provider: entry.provider as HostApprovalPresentation["provider"], title: "Approval unavailable",
@@ -326,9 +332,9 @@ export class HostApprovalBroker {
       if (shown.has(record.request.requestId) || underReview.has(record.request.requestId) || record.request.closedAtMs != null
         || !["requested", "decision_recorded", "dispatching", "lost"].includes(record.request.state)) continue;
       const entry = await this.options.store.getEntry(record.request.agentId);
-      if (!entry || entry.room_id !== roomId || !["codex", "open-model", "claude-code"].includes(entry.provider)) continue;
+      if (!entry || entry.room_id !== roomId || !APPROVAL_PROVIDERS.includes(entry.provider)) continue;
       result.push({ reference: reference(record), recordedDecision: recordedDecision(record),
-        presentation: { agentId: entry.id, displayName: entry.display_name, provider: entry.provider as "codex" | "open-model" | "claude-code",
+        presentation: { agentId: entry.id, displayName: entry.display_name, provider: entry.provider as HostApprovalPresentation["provider"],
           title: "Approval unavailable", details: "The native request is no longer available to inspect on this connection.",
           denyScope: entry.provider === "open-model" ? "session_pending" : "request" },
         status: record.decision?.dispatchId && record.request.applicationCertainty !== "impossible" ? "uncertain" : "unavailable",
@@ -573,7 +579,7 @@ export class HostApprovalBroker {
   private async prepare(lane: Lane, native: ProviderPermissionRequest) {
     const prepared = await this.prepareCore(lane, native);
     const presentation = this.presentation(prepared.entry, native,
-      native.provider === "claude-code"
+      native.provider === "claude-code" || native.provider === "antigravity"
         || (native.provider === "codex" && native.native.method === "mcpServer/elicitation/request") ? "Run a tool"
         : prepared.kind === "command" ? "Run a command"
         : prepared.kind === "file_change" ? "Change files" : "Grant for this turn", prepared.fileChanges);

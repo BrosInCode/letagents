@@ -137,6 +137,39 @@ const cursorProfiles: readonly SupervisedPermissionProfile[] = [
   },
 ];
 
+const antigravityProfiles: readonly SupervisedPermissionProfile[] = [
+  {
+    id: "read_only", label: "Read-only",
+    description: "Can read and search files, search the web, and use LetAgents room tools.",
+    status: "available", risk: "low",
+    detail: "Antigravity asks before every edit and command, and LetAgents refuses each one. Reading files and web search do not ask. Your own Antigravity settings, plugins and MCP servers do not load unless you turn on your own setup.", isDefault: true,
+  },
+  {
+    id: "ask_before_write", label: "Ask before writes",
+    description: "Requires approval before Antigravity can change files or run commands.",
+    status: "available", risk: "medium",
+    detail: "Reading files and LetAgents room tools need no approval. Each edit and each command asks you first, and each approval allows one action.", isDefault: false,
+  },
+  {
+    id: "auto_review", label: "Auto",
+    description: "Lets Antigravity approve edits and safe commands itself.",
+    status: "available", risk: "high",
+    detail: "Antigravity's own review decides. An action it would ask about is refused. Anything a room message asks for counts as approved, including commands that reach outside your project.", isDefault: false,
+  },
+  {
+    id: "full_access", label: "Full access",
+    description: "Can change files and run commands on this computer without asking.",
+    status: "available", risk: "high",
+    detail: "Commands can access files outside the project. Use only for work you trust.", isDefault: false,
+  },
+  {
+    id: "sandboxed_write", label: "Sandboxed writes",
+    description: "Restricted file editing is unavailable for Antigravity here.",
+    status: "unsupported", risk: "medium",
+    detail: "Choose another available access level.", isDefault: false,
+  },
+];
+
 /**
  * Why Codex has no Read-only access on Windows. Read-only promises that a
  * command cannot read the owner's Codex sign-in file, and Codex 0.166.0 on
@@ -156,7 +189,9 @@ export function supervisedPermissionProfilesForProvider(providerId: string): Sup
       ? codexProfiles
       : provider === "cursor"
         ? cursorProfiles
-        : [];
+        : provider === "antigravity"
+          ? antigravityProfiles
+          : [];
   return profiles.map((profile) => ({ ...profile }));
 }
 

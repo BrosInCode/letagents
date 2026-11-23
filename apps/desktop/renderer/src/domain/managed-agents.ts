@@ -55,7 +55,7 @@ export function hasSupervisedRuntime(
 export function visibleDesktopAgentProviders(
   providers: DesktopAgentProvider[],
 ): DesktopAgentProvider[] {
-  return providers.filter((provider) => provider.id !== "antigravity");
+  return [...providers];
 }
 
 export function preferredManagedAgentRepoRootPath(
@@ -771,6 +771,12 @@ const SUPERVISED_PERMISSION_PROFILE_LIMITS: Partial<Record<
     full_access: NOTHING_BLOCKED,
     ask_before_write: "Can't run commands or change files until you approve each one.",
     auto_review: "Can't open files outside the project. Commands that delete, publish, install or reach the network ask you first.",
+  },
+  antigravity: {
+    read_only: "Can't change files or run commands: Antigravity asks first, and LetAgents refuses. Web search does not ask.",
+    ask_before_write: "Can't change files or run commands until you approve each one.",
+    auto_review: "Blocks only what Antigravity's own review won't approve. It doesn't ask you first.",
+    full_access: NOTHING_BLOCKED,
   },
   // Only Cursor's restricted profiles use the outer macOS sandbox.
   cursor: {

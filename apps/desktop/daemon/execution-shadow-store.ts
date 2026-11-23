@@ -6,16 +6,17 @@ import { parseRoomAgentWorkSummary, ROOM_WORK_OPERATION_OUTCOMES, type RoomAgent
 
 import { combineSideEffects, executionIdentity as id, ExecutionProtocolError, nativeTurnIdentity, parseExecutionFact, type ExecutionFact, type SideEffectState } from "./execution-protocol.js";
 import { emptyExecutionProjection, reduceParsedExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
-import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema, type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
+import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema, lifecycleAuthorityProviderSchema, type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
 import { executionRecordWindowStart, hasRuntimeRecoveryBoundary, recoveredRuntime, runtimeRecoveryStorageAvailable } from "./runtime-recovery-journal.js";
-import { LifecycleProjectionLedger, type LifecycleProjectionDiagnostics, type LifecycleProjectionObservation,
+import { isLifecycleProjectionProvider, LifecycleProjectionLedger,
+  type LifecycleProjectionDiagnostics, type LifecycleProjectionObservation,
   type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
 
 type Row = Record<string, string | number | null>;
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const runtimeInput = z.strictObject({
   agentId: id, executionGenerationId: id, runtimeGenerationId: id,
-  provider: z.enum(["codex", "claude-code", "cursor", "open-model"]), authorityMode: lifecycleAuthorityModeSchema,
+  provider: lifecycleAuthorityProviderSchema, authorityMode: lifecycleAuthorityModeSchema,
   configRevision: time.min(1), createdAtMs: time,
 });
 const attemptInput = z.strictObject({ agentId: id, roomId: id, sourceMessageId: id, executionGenerationId: id, workspaceId: id, createdAtMs: time });
@@ -773,13 +774,13 @@ export class ExecutionShadowStore {
     if (fact.domain !== "turn" || fact.nativeEventId === undefined
       || (fact.state !== "active" && fact.state !== "terminal") || !retainedTurn || !retainedRuntime) return;
     const provider = String(retainedRuntime.provider);
-    if (!(["codex", "claude-code", "cursor", "open-model"] as const).includes(provider as LifecycleProjectionProvider)) return;
+    if (!isLifecycleProjectionProvider(provider)) return;
     const generation = this.required(`SELECT workspace_id FROM execution_attempt_generations
       WHERE attempt_id=? AND execution_generation_id=? AND agent_id=?`, retainedTurn.attempt_id,
     fact.executionGenerationId, fact.agentId);
     this.lifecycleProjection.recordTypedInCurrentTransaction({
       agentId: fact.agentId,
-      provider: provider as LifecycleProjectionProvider,
+      provider,
       workAttemptId: String(generation.workspace_id),
       executionGenerationId: fact.executionGenerationId,
       nativeEventId: fact.nativeEventId,

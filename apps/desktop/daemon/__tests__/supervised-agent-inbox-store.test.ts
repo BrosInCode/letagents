@@ -13,6 +13,7 @@ import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import { RETAINED_TERMINAL_TIMELINE_EVENTS, RETAINED_TERMINAL_CONTINUATION_REPAIRS, settleCapturedExecutionAttempts } from "../supervised-agent-history-retention.js";
 import type { DaemonManifestEntry } from "../types.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { restorePreAntigravityProviderFixture } from "./helpers/pre-antigravity-fixture.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt",
@@ -4239,6 +4240,7 @@ test("settled child history converges on migration and settlement, retaining exa
     const latest = await store.latestContinuationRepair("large-history");
     const maxSequence = database.prepare("SELECT MAX(event_sequence) AS n FROM supervised_agent_inbox_events WHERE inbox_item_id=?").get(item!.inbox_item_id)!.n;
     await store.close();
+    restorePreAntigravityProviderFixture(database);
     database.exec(`DROP INDEX provider_continuation_repairs_agent_created; DROP INDEX provider_continuation_repairs_inbox_created;
       DROP INDEX activity_events_summary; UPDATE manifest_metadata SET schema_version=47; PRAGMA user_version=47`);
     store = new SupervisedAgentInboxStore(env.database);

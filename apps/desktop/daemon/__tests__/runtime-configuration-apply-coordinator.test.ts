@@ -1761,8 +1761,8 @@ test("only a process that still has a setup its owner turned off is held back or
 });
 
 test("an agent whose process was not started with its owner's setup is admitted whatever is stored about that setup, even when nothing can be read", async () => {
-  // Every agent that never had the setup: Codex, Claude Code, Cursor, Open Model, whatever is stored for it.
-  for (const provider of ["codex", "claude-code", "cursor", "open-model"]) {
+  // Every agent that never had the setup: Codex, Claude Code, Cursor, Open Model, Antigravity, whatever is stored for it.
+  for (const provider of ["codex", "claude-code", "cursor", "open-model", "antigravity"]) {
     for (const policy of [{}, changedAt(2), { ...OWNER_SETUP_ON, ...changedAt(2) }]) {
       for (const unreadable of [false, true]) {
         const env = applyHarness({ head: pendingHead, configurationUnreadable: () => unreadable });

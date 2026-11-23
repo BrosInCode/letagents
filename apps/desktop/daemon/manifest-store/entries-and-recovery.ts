@@ -243,6 +243,7 @@ export const entriesAndRecovery = storeMethods({
         claude_cli: "claude-code",
         cursor_cli: "cursor",
         opencode_server: "open-model",
+        antigravity_acp: "antigravity",
       } as const;
       if (!provider.success || provider.data !== expectedProvider[snapshot.providerConnection.kind]) {
         throw new ManifestConflictError("Provider birth connection does not match its provider.");

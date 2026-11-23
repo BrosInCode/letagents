@@ -13,17 +13,40 @@
  */
 import { applyManagedLaunchContractSchema } from "../managed-launch-contract.js";
 import type { DatabaseSync } from "node:sqlite";
-import { migrateExecutionStorageV21ToV22, migrateExecutionStorageV22ToV23, migrateExecutionStorageV23ToV24, migrateExecutionStorageV24ToV25, validateRuntimeFailureEffectMigrationSource } from "../execution-storage-schema.js";
+import { migrateExecutionStorageV21ToV22, migrateExecutionStorageV22ToV23, migrateExecutionStorageV23ToV24, migrateExecutionStorageV24ToV25, migrateExecutionStorageV25ToV26, validateRuntimeFailureEffectMigrationSource } from "../execution-storage-schema.js";
 import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { applyExecutionApprovalPublicationSchema, validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
 import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { SCHEMA_VERSION, applyAgentAvatarColumn, applyWorkerExecutionBindings, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyDaemonEfficiencyMigration, run, schemaMethods } from "./shared.js";
 
 export const storageMigrations = schemaMethods({
+/**
+ * Admit the Antigravity provider. Runtime births, cutovers and every row that
+ * points at them are kept; only the provider CHECK lists widen. Comparator
+ * evidence starts a fresh epoch, as at every earlier provider-set change.
+ */
+migrateAntigravityProviderStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV25ToV26(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database, "pre_antigravity");
+    this.schemaInitializationHook?.(database);
+    validateLifecycleProjectionLedgerSchema(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+},
 migrateAgentAvatarStorage(database: DatabaseSync): void {
   this.repairAndValidateCurrentShape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
+    migrateExecutionStorageV25ToV26(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database, "pre_antigravity");
     applyAgentAvatarColumn(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -42,6 +65,7 @@ migratePollingOfferStorage(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
@@ -69,6 +93,7 @@ migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     applyRoomWorkPublicationSchema(database);
     applyLifecycleProjectionLedgerSchema(database);
     this.freezeLegacyActiveRuntimeBirths(database);
@@ -101,6 +126,7 @@ migrateLifecycleProjectionStorage(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     applyLifecycleProjectionLedgerSchema(database);
     this.freezeLegacyActiveRuntimeBirths(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
@@ -131,6 +157,7 @@ migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     this.freezeLegacyActiveRuntimeBirths(database);
     resetLegacyLifecycleProjectionLedgerSchema(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
@@ -160,6 +187,7 @@ migrateLifecycleEffectStorage(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     resetLegacyLifecycleProjectionLedgerSchema(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
@@ -187,6 +215,7 @@ migrateRuntimeFailureEffectStorage(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     resetLegacyLifecycleProjectionLedgerSchema(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
@@ -213,6 +242,8 @@ migrateIncompatibleCodexRuntimeBirths(database: DatabaseSync): void {
   try {
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database, "pre_antigravity");
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
@@ -238,6 +269,7 @@ migrateLifecycleProjectionProviderSet(database: DatabaseSync): void {
   try {
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
     resetLegacyLifecycleProjectionLedgerSchema(database);
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
@@ -265,6 +297,8 @@ migrateExecutionDelegationAuthorityStorage(database: DatabaseSync): void {
   try {
     migrateExecutionStorageV23ToV24(database);
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database, "pre_antigravity");
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
@@ -288,6 +322,8 @@ migrateExecutionApprovalProjectionStorage(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     migrateExecutionStorageV24ToV25(database);
+    migrateExecutionStorageV25ToV26(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database, "pre_antigravity");
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
@@ -310,6 +346,8 @@ migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void {
   this.repairAndValidateCurrentShape(database, 25);
   database.exec("BEGIN IMMEDIATE");
   try {
+    migrateExecutionStorageV25ToV26(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database, "pre_antigravity");
     applyExecutionApprovalPublicationSchema(database);
     this.schemaInitializationHook?.(database);
     validateExecutionApprovalPublicationSchema(database);

@@ -274,7 +274,7 @@ repairAndValidateV17Shape(database: DatabaseSync): void {
   }
 },
 
-applyV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageSchemaVersion = 25): void {
+applyV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageSchemaVersion = 26): void {
   const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'")
     .get() as Row | undefined;
   const sql = String(definition?.sql ?? "");
@@ -328,7 +328,7 @@ applyV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageS
   applyExecutionStorageSchema(database, executionStorageVersion);
 },
 
-validateV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageSchemaVersion = 25): void {
+validateV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageSchemaVersion = 26): void {
   this.validateV17Shape(database);
   const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as Row | undefined;
   if (INBOX_STATE_CONSTRAINT.exec(String(definition?.sql))?.[1]?.replace(/\s/g, "") !== `${INBOX_STATES_V17},'acknowledged_failed'`) {
@@ -361,14 +361,16 @@ validateV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStora
   if (database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v18 failed foreign-key validation.");
 },
 
-repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 19 | 20 | 21 | 22 | 23 | 24 | 25): void {
+repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26): void {
   const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
   if (version >= 46) validateManagedLaunchContractSchema(database);
   if (version >= 47) validateWorkerExecutionBindings(database);
-  const storageVersion = executionStorageVersion ?? (version >= 35 ? 25 : version >= 34 ? 24 : version >= 31 ? 23 : version >= 30 ? 22 : 21);
+  const storageVersion = executionStorageVersion
+    ?? (version >= 53 ? 26 : version >= 35 ? 25 : version >= 34 ? 24 : version >= 31 ? 23 : version >= 30 ? 22 : 21);
   if (version >= 36) validateExecutionApprovalPublicationSchema(database);
   if (version >= 28) {
-    if (version < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
+    if (version < 32) validateLegacyLifecycleProjectionLedgerSchema(database, "pre_open_model");
+    else if (version < 53) validateLegacyLifecycleProjectionLedgerSchema(database, "pre_antigravity");
     else validateLifecycleProjectionLedgerSchema(database);
   }
   if (version >= 41) validateRuntimeRecoverySchema(database);

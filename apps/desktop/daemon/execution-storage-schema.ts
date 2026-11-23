@@ -546,7 +546,28 @@ const cutoverNativeTriggers = {
     BEGIN SELECT RAISE(ABORT,'Cutover native target cannot be replaced.'); END`,
 };
 
-export type ExecutionStorageSchemaVersion = 18 | 19 | 20 | 21 | 22 | 23 | 24 | 25;
+/** A schema change must find its exact source text, or the module refuses to load. */
+function replaceExactlyOnce(sql: string, from: string, to: string): string {
+  const at = sql.indexOf(from);
+  if (at < 0 || sql.indexOf(from, at + from.length) >= 0) throw new Error("Execution storage schema derivation is ambiguous.");
+  return sql.slice(0, at) + to + sql.slice(at + from.length);
+}
+
+// V26 admits Antigravity and its headless ACP child. Widening the CHECK lists
+// is the whole change: existing rows already satisfy the wider constraints.
+const executionRuntimeGenerationsV26 = replaceExactlyOnce(tables.execution_runtime_generations,
+  "provider IN ('codex','claude-code','cursor','open-model')",
+  "provider IN ('codex','claude-code','cursor','open-model','antigravity')");
+const cutoverNativeTableV26 = [
+  ["provider IN ('codex','claude-code','cursor','open-model')",
+    "provider IN ('codex','claude-code','cursor','open-model','antigravity')"],
+  ["native_connection_kind IN ('codex_app_server','claude_cli','cursor_cli','opencode_server')",
+    "native_connection_kind IN ('codex_app_server','claude_cli','cursor_cli','opencode_server','antigravity_acp')"],
+  ["OR (provider='open-model' AND native_connection_kind='opencode_server')",
+    "OR (provider='open-model' AND native_connection_kind='opencode_server')\n        OR (provider='antigravity' AND native_connection_kind='antigravity_acp')"],
+].reduce((sql, [from, to]) => replaceExactlyOnce(sql, from!, to!), cutoverNativeTable);
+
+export type ExecutionStorageSchemaVersion = 18 | 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26;
 
 function schemaFor(version: ExecutionStorageSchemaVersion): {
   tables: Record<string, string>; indexes: Record<string, string>; triggers: Record<string, string>;
@@ -583,11 +604,15 @@ function schemaFor(version: ExecutionStorageSchemaVersion): {
     schema.tables.execution_approval_projections = executionApprovalProjectionsV25;
     Object.assign(schema.triggers, executionApprovalProjectionTriggersV25);
   }
+  if (version >= 26) {
+    schema.tables.execution_runtime_generations = executionRuntimeGenerationsV26;
+    schema.tables.execution_cutover_v2 = cutoverNativeTableV26;
+  }
   return schema;
 }
 
 /** Caller owns the migration transaction. Existing evidence is never rewritten. */
-export function applyExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 25): void {
+export function applyExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 26): void {
   const schema = schemaFor(version);
   for (const statement of Object.values(schema.tables)) database.exec(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "));
   for (const statement of Object.values(schema.indexes)) database.exec(statement.replace(/CREATE (UNIQUE )?INDEX /, "CREATE $1INDEX IF NOT EXISTS "));
@@ -816,6 +841,77 @@ export function migrateExecutionStorageV24ToV25(database: DatabaseSync): void {
   validateExecutionStorageSchema(database, 25);
 }
 
+/**
+ * The two rebuilt tables may carry only the dependencies this module owns.
+ * Every table that references the runtime table must use plain deferred
+ * enforcement: a cascading or restricting key would act on the rebuild's
+ * implicit delete instead of waiting for the rows to return.
+ */
+function validateProviderSetV26MigrationDependencies(database: DatabaseSync): void {
+  const allowedObjects = new Map<string, Set<string>>([
+    ["execution_runtime_generations", new Set()],
+    ["execution_cutover_v2", new Set(["execution_cutover_one_unresolved", ...Object.keys(cutoverNativeTriggers)])],
+  ]);
+  for (const [table, allowed] of allowedObjects) {
+    const extra = (database.prepare(`SELECT name FROM sqlite_master
+      WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL`).all(table))
+      .find((row) => !allowed.has(String(row.name)));
+    if (extra) throw new Error("Unexpected execution provider storage dependency.");
+  }
+  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
+    const name = String(row.name);
+    for (const key of database.prepare(`PRAGMA foreign_key_list("${name.replaceAll('"', '""')}")`).all()) {
+      if (key.table === "execution_cutover_v2" && name !== "execution_cutover_v2") {
+        throw new Error("Unexpected execution provider storage dependency.");
+      }
+      if ((key.table === "execution_runtime_generations" || key.table === "execution_cutover_v2")
+        && (key.on_delete !== "NO ACTION" || key.on_update !== "NO ACTION")) {
+        throw new Error("Unexpected execution provider storage dependency.");
+      }
+    }
+  }
+}
+
+/**
+ * Admit Antigravity rows. Only CHECK lists widen; every runtime birth and
+ * cutover row, its rowid, and every reference to it is kept as it was.
+ * Caller owns the migration transaction.
+ */
+export function migrateExecutionStorageV25ToV26(database: DatabaseSync): void {
+  if (!database.isTransaction) throw new Error("Execution provider storage migration requires a transaction.");
+  validateExecutionStorageSchema(database, 25);
+  validateProviderSetV26MigrationDependencies(database);
+  const columns = (table: string) => database.prepare(`PRAGMA table_info(${table})`).all()
+    .map((column) => String(column.name)).join(",");
+  const runtimeColumns = columns("execution_runtime_generations");
+  const cutoverColumns = columns("execution_cutover_v2");
+  // Children keep pointing at these table names; with deferred keys the drop's
+  // implicit delete is settled when the same rows are inserted again below.
+  database.exec(`
+    PRAGMA defer_foreign_keys=ON;
+    CREATE TEMP TABLE execution_runtime_generation_v26_migration AS
+      SELECT rowid AS original_rowid,* FROM execution_runtime_generations;
+    CREATE TEMP TABLE execution_cutover_v26_migration AS
+      SELECT rowid AS original_rowid,* FROM execution_cutover_v2;
+    DROP TABLE execution_cutover_v2;
+    DROP TABLE execution_runtime_generations;
+    ${executionRuntimeGenerationsV26};
+    ${cutoverNativeTableV26};
+    INSERT INTO execution_runtime_generations(rowid,${runtimeColumns})
+      SELECT original_rowid,${runtimeColumns} FROM execution_runtime_generation_v26_migration;
+    INSERT INTO execution_cutover_v2(rowid,${cutoverColumns})
+      SELECT original_rowid,${cutoverColumns} FROM execution_cutover_v26_migration;
+    DROP TABLE execution_runtime_generation_v26_migration;
+    DROP TABLE execution_cutover_v26_migration;
+    ${indexes.execution_cutover_one_unresolved};
+  `);
+  for (const statement of Object.values(cutoverNativeTriggers)) database.exec(statement);
+  validateExecutionStorageSchema(database, 26);
+  if (database.prepare("PRAGMA foreign_key_check").get()) {
+    throw new Error("Execution provider storage migration broke ownership.");
+  }
+}
+
 function normalizedSchema(sql: string): string {
   // SQL keywords/spacing are insensitive, but quoted CHECK values are not.
   return (sql.match(/'(?:''|[^'])*'|[^']+/g) ?? []).map((part) => part.startsWith("'") ? part
@@ -823,7 +919,7 @@ function normalizedSchema(sql: string): string {
 }
 
 /** Fail closed on weakened CHECKs, ownership FKs, indexes, or incompatible DDL. */
-export function validateExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 25): void {
+export function validateExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 26): void {
   const schema = schemaFor(version);
   for (const [name, statement] of Object.entries({ ...schema.tables, ...schema.indexes, ...schema.triggers })) {
     const row = database.prepare("SELECT sql FROM sqlite_master WHERE name=? AND type IN ('table','index','trigger')").get(name) as { sql: string } | undefined;

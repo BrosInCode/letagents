@@ -300,7 +300,7 @@ test("runtime authority freezes on first exact materialization and successor bir
 });
 
 test("the closed release policy gives supported daemon-owned provider births typed authority", () => {
-  for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const) {
+  for (const provider of ["codex", "claude-code", "cursor", "open-model", "antigravity"] as const) {
     assert.equal(lifecycleAuthorityModeForProvider(provider, "daemon_inbox"), "typed");
     assert.equal(lifecycleAuthorityModeForProvider(provider, "mcp_polling"), "typed_shadow");
   }

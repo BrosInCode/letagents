@@ -216,8 +216,8 @@ export function useComposerAgentDraft(options: {
     const provider = providerById(providerId);
     if (!provider) return [];
     const readiness = readinessFor(providerId);
-    // Cursor is listed only once it can start; otherwise "Set up another agent…" covers it.
-    if (providerId === "cursor" && readiness.state !== "ready") return [];
+    // Cursor and Antigravity are listed only once they can start; otherwise "Set up another agent…" covers them.
+    if ((providerId === "cursor" || providerId === "antigravity") && readiness.state !== "ready") return [];
     const model = remembered.get(providerId)?.model;
     const detail = readiness.state === "not_set_up" ? "Not set up" : model ?? "Default";
     const hint = readiness.state === "setup" ? readiness.word

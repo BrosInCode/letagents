@@ -170,7 +170,7 @@ export function useAddAgentPresentation(
     return "External app";
   });
   const bridgeLabel = computed(() => {
-    if (selectedProviderId.value === "claude-code" || selectedProviderId.value === "codex") {
+    if (selectedProviderId.value === "claude-code" || selectedProviderId.value === "codex" || selectedProviderId.value === "antigravity") {
       return "Managed at launch";
     }
     if (preflight.value?.mcpStatus === "installed") return "Installed";
@@ -281,7 +281,7 @@ export function useAddAgentPresentation(
   const showEffortSelector = computed(() =>
     selectedProviderId.value === "codex"
     || selectedProviderId.value === "claude-code"
-    || (selectedProviderId.value === "open-model" && effortOptions.value.length > 0)
+    || ((selectedProviderId.value === "open-model" || selectedProviderId.value === "antigravity") && effortOptions.value.length > 0)
   );
   const effortSelectOptions = computed<DesktopSelectOption[]>(() => [
     { value: "", label: "Use provider default" },
@@ -428,8 +428,8 @@ export function modelCliUpdateNote(
 
 /**
  * Codex takes every shared effort, and Claude Code also Max. An Open Model agent takes exactly the
- * efforts its endpoint lists for the model, so a model without that list has
- * no effort setting at all.
+ * efforts its endpoint lists for the model, and an Antigravity agent the thinking levels agy lists
+ * for it, so a model without that list has no effort setting at all.
  */
 export function managedAgentEffortOptionsForProvider(
   providerId: DesktopAgentProviderId | null,
@@ -441,7 +441,7 @@ export function managedAgentEffortOptionsForProvider(
     { value: "high", label: "High" },
     { value: "xhigh", label: "Extra high" },
   ];
-  if (providerId === "open-model") {
+  if (providerId === "open-model" || providerId === "antigravity") {
     const supported = model?.supportedEfforts ?? [];
     return shared.filter((option) => supported.some((effort) => effort === option.value));
   }

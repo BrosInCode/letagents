@@ -15,6 +15,7 @@ import {
   fixture,
   seedTerminalAttempt,
 } from "./helpers/manifest-store-sqlite-fixture.js";
+import { restorePreAntigravityProviderFixture } from "./helpers/pre-antigravity-fixture.js";
 
 test("polling custody is internal, survives every manifest replacement and does not depend on cutover history", async () => {
   const env = await fixture();
@@ -125,6 +126,7 @@ test("a schema 49 database without image input migrates to schema 50 with every 
     const expected = await original.write(0, [entry, { ...entry, id: "agent_2", display_name: "SecondAgent", work_attempt_id: undefined, provider_ref: undefined, turn_control: undefined, reconciliation: undefined }]);
     await original.close();
     const old = new DatabaseSync(env.databasePath);
+    restorePreAntigravityProviderFixture(old);
     old.exec("ALTER TABLE agent_configurations DROP COLUMN image_input; UPDATE manifest_metadata SET schema_version=49; PRAGMA user_version=49");
     assert.equal(old.prepare("SELECT 1 FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get(), undefined);
     old.close();
@@ -157,6 +159,7 @@ test("a schema 39 database without image input gains the column through the olde
     await original.write(0, [entry]);
     await original.close();
     const old = new DatabaseSync(env.databasePath);
+    restorePreAntigravityProviderFixture(old);
     old.exec("ALTER TABLE agent_configurations DROP COLUMN image_input; ALTER TABLE agent_room_memberships DROP COLUMN local_room_id; UPDATE manifest_metadata SET schema_version=39; PRAGMA user_version=39");
     old.close();
     const migrated = new ManifestStore(env.databasePath);

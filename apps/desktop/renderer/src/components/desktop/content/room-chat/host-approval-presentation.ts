@@ -24,6 +24,11 @@ function valueText(value: unknown, depth = 0): string {
   return String(value);
 }
 
+/** Claude Code's requests, and Antigravity's, which its adapter maps to Claude's shape. */
+function claudeShaped(presentation: HostApprovalPresentation): boolean {
+  return presentation.provider === "claude-code" || presentation.provider === "antigravity";
+}
+
 function payloadOf(presentation: HostApprovalPresentation): Record<string, unknown> | null {
   try { return record(JSON.parse(presentation.details)); }
   catch { return null; }
@@ -45,7 +50,7 @@ export function hostApprovalTitle(presentation: HostApprovalPresentation): strin
   if (presentation.title !== "Run a tool") return presentation.title;
   const payload = payloadOf(presentation);
   const request = record(payload?.request) ?? payload;
-  if (presentation.provider === "claude-code" && request) {
+  if (claudeShaped(presentation) && request) {
     const input = record(request.input);
     if (["Read", "Write", "Edit"].includes(String(request.tool_name)) && typeof input?.file_path === "string") {
       return `${request.tool_name} ${text(localPathBasename(input.file_path) || input.file_path)}`;
@@ -237,7 +242,7 @@ export function hostApprovalFields(presentation: HostApprovalPresentation): Fiel
   if (!payload) return [{ label: "Request", value: valueText(parsed) }];
   const fields = (input: Record<string, unknown>): Field[] => Object.entries(input)
     .map(([key, value]) => ({ label: label(key), value: valueText(value) }));
-  if (presentation.provider === "claude-code") {
+  if (claudeShaped(presentation)) {
     const request = record(payload.request);
     const input = record(request?.input);
     if (request && input) return [{ label: "Tool", value: valueText(request.tool_name) }, ...fields(input),

@@ -203,7 +203,7 @@ normalizeLegacyPresenceEncodings(database: DatabaseSync): void {
         provider_connection_pid = NULL, provider_process_identity_present = 0,
         provider_process_identity = NULL
     WHERE provider_connection_kind IS NOT NULL
-      AND (provider_connection_kind NOT IN ('codex_app_server', 'claude_cli', 'cursor_cli', 'opencode_server')
+      AND (provider_connection_kind NOT IN ('codex_app_server', 'claude_cli', 'cursor_cli', 'opencode_server', 'antigravity_acp')
         OR (provider_connection_kind IN ('codex_app_server', 'opencode_server') AND provider_connection_url IS NULL));
     UPDATE runtime_deployments SET provider_process_identity = NULL
     WHERE provider_process_identity_present = 0;

@@ -17,6 +17,7 @@ import type { ExecutionDelegationHostAuthority, RemoteExecutionDelegationRevisio
 import { executionRuntimeStorageIdentity, executionStorageIdentity } from "../../execution-shadow-store.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../../execution-storage-schema.js";
 import { validateLegacyLifecycleProjectionLedgerSchema } from "../../lifecycle-projection-ledger.js";
+import { restorePreAntigravityExecutionStorageFixture, restorePreAntigravityLifecycleProjectionFixture } from "./pre-antigravity-fixture.js";
 import { removeTestDirectory } from "../../../electron/__tests__/harness.js";
 
 export const TEST_PROVIDER_TURN_AUTHORITY = {
@@ -26,6 +27,7 @@ export const TEST_PROVIDER_TURN_AUTHORITY = {
 } as const;
 
 export function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync): void {
+  restorePreAntigravityLifecycleProjectionFixture(database);
   const noDelete = String(database.prepare(
     "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='lifecycle_projection_total_no_delete'",
   ).get()!.sql);
@@ -43,6 +45,7 @@ export function restoreThreeProviderLifecycleProjectionFixture(database: Databas
 }
 
 export function restoreEmptyExecutionDelegationV23Fixture(database: DatabaseSync): void {
+  restorePreAntigravityExecutionStorageFixture(database);
   database.exec("DROP TABLE IF EXISTS host_tool_rule_withdrawals; DROP TABLE IF EXISTS host_tool_rule_decisions; DROP TABLE IF EXISTS host_tool_rules");
   database.exec("DROP TABLE IF EXISTS execution_approval_request_closures");
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 0);
@@ -61,10 +64,16 @@ export function restoreEmptyExecutionDelegationV23Fixture(database: DatabaseSync
   validateExecutionStorageSchema(database, 23);
 }
 
+type ApprovalJournalProvider = "codex" | "open-model" | "claude-code" | "antigravity";
+const APPROVAL_JOURNAL_CONNECTION_KIND = { codex: "codex_app_server", "open-model": "opencode_server",
+  "claude-code": "claude_cli", antigravity: "antigravity_acp" } as const;
+
 export async function seedApprovalJournalTurn(env: Awaited<ReturnType<typeof fixture>>, store: ManifestStore, database: DatabaseSync,
-  provider: "codex" | "open-model" = "codex"): Promise<ApprovalAuthority> {
+  provider: ApprovalJournalProvider = "codex"): Promise<ApprovalAuthority> {
   const providerConnection: ApprovalAuthority["providerConnection"] = provider === "codex"
     ? { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "birth" }
+    : provider === "claude-code" ? { kind: "claude_cli", pid: 4311, processIdentity: "birth" }
+    : provider === "antigravity" ? { kind: "antigravity_acp", pid: 4311, processIdentity: "birth" }
     : { kind: "opencode_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "birth", serverAuthPath: "/test/auth" };
   await store.write(0, [{ ...entry, id: "agent", room_id: "room", provider, condition: "none", turn_control: undefined,
     reconciliation: undefined, reconciliation_notices: undefined, delivery_mode: "daemon_inbox", work_attempt_id: "workspace",
@@ -93,11 +102,11 @@ export function admitApproval(store: ManifestStore, input: AdmitExecutionApprova
   );
 }
 
-export function approvalJournalRequest(requestId = "request", nativeRequestId: string | number = 1, provider: "codex" | "open-model" = "codex"): { expected: ApprovalReference; input: AdmitExecutionApproval } {
+export function approvalJournalRequest(requestId = "request", nativeRequestId: string | number = 1, provider: ApprovalJournalProvider = "codex"): { expected: ApprovalReference; input: AdmitExecutionApproval } {
   const expected: ApprovalReference = {
     requestId, requestVersion: 1, requestSha256: "a".repeat(64), agentId: "agent", roomId: "room",
     executionGenerationId: "generation", runtimeGenerationId: executionRuntimeStorageIdentity(
-      "agent", "generation", provider === "codex" ? "codex_app_server" : "opencode_server", 4311, "birth",
+      "agent", "generation", APPROVAL_JOURNAL_CONNECTION_KIND[provider], 4311, "birth",
     ), turnId: executionStorageIdentity("turn", "agent", "continuation", "native-turn"),
     providerContinuationId: "continuation", providerTurnId: "native-turn", connectionId: "connection", nativeRequestId,
   };

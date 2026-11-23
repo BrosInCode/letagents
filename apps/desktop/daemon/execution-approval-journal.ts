@@ -18,12 +18,18 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const processBirth = z.string().min(1).max(512);
 const connection = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("claude_cli"), pid: time.min(1), processIdentity: processBirth }),
+  z.strictObject({ kind: z.literal("antigravity_acp"), pid: time.min(1), processIdentity: processBirth }),
   z.strictObject({ kind: z.literal("codex_app_server"), url: z.string().min(1).max(4096), pid: time.min(1), processIdentity: processBirth }),
   z.strictObject({ kind: z.literal("opencode_server"), url: z.string().min(1).max(4096), pid: time.min(1), processIdentity: processBirth, serverAuthPath: z.string().min(1).max(4096) }),
 ]);
 const authority = z.strictObject({ inboxItemId: executionIdentity, workAttemptId: executionIdentity,
-  executionGenerationId: executionIdentity, provider: z.enum(["codex", "open-model", "claude-code"]),
+  executionGenerationId: executionIdentity, provider: z.enum(["codex", "open-model", "claude-code", "antigravity"]),
   providerConnection: connection, configurationRevision: time.min(1) });
+/** The one native connection kind each approving provider runs on. */
+const PROVIDER_CONNECTION = { codex: "codex_app_server", "open-model": "opencode_server", "claude-code": "claude_cli",
+  antigravity: "antigravity_acp" } as const satisfies Record<z.infer<typeof authority>["provider"], z.infer<typeof connection>["kind"]>;
+/** Providers whose prompts close on a native closure and whose decisions settle on an exact tool result. */
+const CLAUDE_SHAPED_PROVIDERS: readonly unknown[] = ["claude-code", "antigravity"];
 const reference = z.strictObject({
   requestId: executionIdentity, requestVersion: time.min(1), requestSha256: digest,
   agentId: executionIdentity, roomId: executionIdentity, executionGenerationId: executionIdentity,
@@ -196,7 +202,7 @@ function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agent
     || current.work_attempt_id !== owned.workAttemptId || current.provider_ref?.work_attempt_id !== owned.workAttemptId
     || current.provider_ref.execution_generation_id !== owned.executionGenerationId
     || current.provider_ref.provider_continuation_id !== expected.providerContinuationId
-    || owned.providerConnection.kind !== (owned.provider === "codex" ? "codex_app_server" : owned.provider === "claude-code" ? "claude_cli" : "opencode_server")
+    || owned.providerConnection.kind !== PROVIDER_CONNECTION[owned.provider]
     || !sameProviderActionConnectionIdentity(current.provider_ref.provider_connection, owned.providerConnection)) reject("missing_turn");
   // The applied revision must be the one this runtime started with. The saved
   // revision may be ahead of it: an owner's edit (a new permission mode, for
@@ -377,12 +383,12 @@ export function beginExecutionApprovalDispatch(db: DatabaseSync, input: Dispatch
   return { dispatch: true, approval: exact(db, value.expected) };
 }
 
-/** Exact Claude cancellation/completion closes the prompt independently of any decision. */
+/** Exact Claude (or Antigravity) cancellation/completion closes the prompt independently of any decision. */
 export function closeExecutionApprovalRequest(db: DatabaseSync, input: CloseExecutionApprovalRequest): ExecutionApprovalRecord {
   const value = parse(loss, input); const current = exact(db, value.expected); const d = current.decision;
   const provider = db.prepare("SELECT provider FROM execution_runtime_generations WHERE runtime_generation_id=? AND agent_id=? AND execution_generation_id=?")
     .get(value.expected.runtimeGenerationId, value.expected.agentId, value.expected.executionGenerationId)?.provider;
-  if (provider !== "claude-code" || !["requested", "decision_recorded", "dispatching", "resolved"].includes(current.request.state)) reject("invalid_transition");
+  if (!CLAUDE_SHAPED_PROVIDERS.includes(provider) || !["requested", "decision_recorded", "dispatching", "resolved"].includes(current.request.state)) reject("invalid_transition");
   if (current.request.closedAtMs != null) return current;
   if (value.atMs < (d?.dispatchStartedAtMs ?? d?.decidedAtMs ?? current.request.createdAtMs)) reject("invalid_input");
   db.prepare(`INSERT INTO execution_approval_request_closures
@@ -410,7 +416,7 @@ export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: stri
     JOIN execution_lifecycle_effects e ON e.fact_id=f.fact_id AND e.fact_sequence=f.sequence
       AND e.agent_id=f.agent_id AND e.observer_epoch=f.observer_epoch
       AND e.observer_execution_generation_id=r.execution_generation_id AND e.observer_runtime_generation_id=r.runtime_generation_id
-    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND t.state='terminal'
+    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex','antigravity') AND t.state='terminal'
       AND t.ended_at_ms>=r.created_at_ms AND f.domain='turn' AND f.kind='state_changed' AND f.state='terminal'
       AND f.turn_outcome IN ('completed','failed','interrupted') AND f.observed_at_ms>=r.created_at_ms
       AND e.subject_authority_mode='typed' AND e.observer_authority_mode='typed'
@@ -424,7 +430,7 @@ export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: stri
       AND g.execution_generation_id=r.execution_generation_id AND g.agent_id=r.agent_id
     JOIN work_attempt_executions origin ON origin.execution_generation_id=r.execution_generation_id
     JOIN work_attempt_executions t ON t.work_attempt_id=origin.work_attempt_id
-    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND t.terminal_json IS NOT NULL
+    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex','antigravity') AND t.terminal_json IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
         WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
   // Explicit legacy recovery retains its independently verified death witness
@@ -439,7 +445,7 @@ export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: stri
     JOIN work_attempt_executions origin ON origin.execution_generation_id=r.execution_generation_id
     JOIN agent_runtime_recoveries recovery ON recovery.agent_id=r.agent_id AND recovery.room_id=r.room_id
       AND recovery.execution_generation_id=r.execution_generation_id AND recovery.runtime_generation_id=r.runtime_generation_id
-    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND recovery.phase='complete'
+    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex','antigravity') AND recovery.phase='complete'
       AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
         WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
   for (const row of recovered) {
@@ -457,7 +463,7 @@ export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: stri
   for (const row of rows) {
     const terminal = JSON.parse(String(row.terminal_json));
     const death = nativeRuntimeDeathSchema.safeParse(terminal?.native_runtime_death);
-    if (!death.success || death.data.kind !== (row.provider === "codex" ? "codex_app_server" : "claude_cli")
+    if (!death.success || death.data.kind !== PROVIDER_CONNECTION[row.provider as "codex" | "claude-code" | "antigravity"]
       || terminal.provider_continuation_id !== row.provider_continuation_id
       || !Number.isSafeInteger(Date.parse(terminal.ended_at))
       || Date.parse(terminal.ended_at) < Number(row.created_at_ms)) continue;
@@ -549,13 +555,13 @@ export function recordExecutionApprovalOutcome(db: DatabaseSync, input: RecordEx
     return exact(db, value.expected);
   }
   if (value.evidence === "native_processed" || value.evidence === "exact_native_execution") {
-    // OpenCode confirms processing in its reply endpoint. Codex and Claude require a
+    // OpenCode confirms processing in its reply endpoint. Codex, Claude and Antigravity require a
     // later exact tool execution fact; a socket send or serverRequest/resolved
     // alone still proves no chosen decision.
     const provider = db.prepare("SELECT provider FROM execution_runtime_generations WHERE runtime_generation_id=? AND agent_id=? AND execution_generation_id=?")
       .get(value.expected.runtimeGenerationId, value.expected.agentId, value.expected.executionGenerationId)?.provider;
     if ((value.evidence === "native_processed" && provider !== "open-model")
-      || (value.evidence === "exact_native_execution" && provider !== "codex" && provider !== "claude-code")) reject("invalid_transition");
+      || (value.evidence === "exact_native_execution" && provider !== "codex" && !CLAUDE_SHAPED_PROVIDERS.includes(provider))) reject("invalid_transition");
     if (current.request.state === "resolved" && d.dispatchState === "acknowledged") return current;
   }
   if (current.request.state !== "dispatching" || !["dispatching", "uncertain"].includes(d.dispatchState)) reject("invalid_transition");

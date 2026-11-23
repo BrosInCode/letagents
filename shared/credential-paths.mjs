@@ -29,7 +29,7 @@ export function executionApprovalProjectionPathsAreSafe(paths) {
 /** Folder names that hold credentials or an agent tool's private configuration, wherever they are. */
 export const CREDENTIAL_FOLDER_NAMES = new Set([
   ".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".docker", ".terraform",
-  ".codex", ".claude", ".cursor", ".letagents", ".vscode", ".idea", "secrets", "credentials",
+  ".codex", ".claude", ".cursor", ".gemini", ".letagents", ".vscode", ".idea", "secrets", "credentials",
 ]);
 const SECRET_NAMES = [
   /^\.env/, /^\.dev\.vars/, /^\.letagents/, /^\.mcp\.json$/,

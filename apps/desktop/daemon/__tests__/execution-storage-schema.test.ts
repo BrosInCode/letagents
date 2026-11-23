@@ -3,7 +3,8 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { applyExecutionStorageSchema, migrateExecutionStorageV20ToV21, migrateExecutionStorageV21ToV22,
-  migrateExecutionStorageV22ToV23, migrateExecutionStorageV24ToV25, validateExecutionStorageSchema } from "../execution-storage-schema.js";
+  migrateExecutionStorageV22ToV23, migrateExecutionStorageV24ToV25, migrateExecutionStorageV25ToV26,
+  validateExecutionStorageSchema } from "../execution-storage-schema.js";
 
 type Values = Record<string, string | number | null>;
 const digest = "a".repeat(64);
@@ -140,6 +141,77 @@ test("approval projection storage is additive, exact-request-owned, immutable, a
     }), /CHECK/);
     db.exec("DELETE FROM execution_approval_requests WHERE request_id='request'");
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_approval_projections").get()?.count, 0);
+    validateExecutionStorageSchema(db, 25);
+  } finally { db.close(); }
+});
+
+function authorityCutover(db: DatabaseSync, extra: Values = {}): void {
+  insert(db, "execution_cutover_v2", {
+    operation_id: "antigravity-cutover", request_id: "antigravity-request", agent_id: "agent",
+    execution_generation_id: "generation", from_mode: "mcp_polling", to_mode: "daemon_inbox", strategy: "drain",
+    phase: "complete", created_at_ms: 300, updated_at_ms: 300, authority_version: 1, room_id: "room",
+    work_attempt_id: "attempt", provider: "antigravity", native_continuation_id: "continuation",
+    native_connection_kind: "antigravity_acp", native_connection_sha256: digest, native_pid: 4242,
+    native_process_identity: "agy:4242", ...extra,
+  });
+}
+
+test("v26 admits only the exact Antigravity connection and keeps every runtime, cutover and reference", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys=ON");
+    applyExecutionStorageSchema(db, 25);
+    seed(db); fact(db);
+    db.exec(`INSERT INTO execution_cutover_v2(rowid,operation_id,request_id,agent_id,execution_generation_id,target_turn_id,
+      predecessor_operation_id,from_mode,to_mode,strategy,phase,created_at_ms,updated_at_ms)
+      VALUES(71,'legacy','legacy-request','agent','generation','turn',NULL,'mcp_polling','daemon_inbox','force','uncertain',100,101)`);
+    assert.throws(() => runtime(db, { runtime_generation_id: "antigravity-runtime", provider: "antigravity" }), /CHECK/,
+      "v25 refuses the provider before this migration");
+    const rows = () => Object.fromEntries(["execution_runtime_generations", "execution_cutover_v2", "execution_turns", "execution_facts"]
+      .map((table) => [table, db.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all()]));
+    const before = rows();
+    assert.throws(() => migrateExecutionStorageV25ToV26(db), /requires a transaction/);
+    db.exec("BEGIN IMMEDIATE");
+    migrateExecutionStorageV25ToV26(db);
+    db.exec("COMMIT");
+    assert.deepEqual(rows(), before);
+    validateExecutionStorageSchema(db, 26);
+    validateExecutionStorageSchema(db);
+    assert.throws(() => validateExecutionStorageSchema(db, 25), /execution_runtime_generations/);
+    assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.throws(() => db.exec("DELETE FROM execution_runtime_generations WHERE runtime_generation_id='runtime'"), /FOREIGN KEY/,
+      "references to a rebuilt runtime birth are still enforced");
+
+    runtime(db, { runtime_generation_id: "antigravity-runtime", provider: "antigravity" });
+    authorityCutover(db);
+    assert.throws(() => authorityCutover(db, { operation_id: "mismatched", request_id: "mismatched-request",
+      native_connection_kind: "claude_cli" }), /CHECK/, "Antigravity runs only as its own ACP child");
+    assert.throws(() => authorityCutover(db, { operation_id: "borrowed", request_id: "borrowed-request",
+      provider: "claude-code" }), /CHECK/, "no other provider may claim the Antigravity connection kind");
+    assert.throws(() => runtime(db, { runtime_generation_id: "unknown-runtime", provider: "gemini" }), /CHECK/);
+    assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+  } finally { db.close(); }
+});
+
+test("v26 refuses a cascading reference to runtime births before it rebuilds anything", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys=ON");
+    applyExecutionStorageSchema(db, 25);
+    seed(db);
+    db.exec(`CREATE TABLE unexpected_runtime_child(
+      agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, runtime_generation_id TEXT NOT NULL,
+      FOREIGN KEY(agent_id,execution_generation_id,runtime_generation_id)
+        REFERENCES execution_runtime_generations(agent_id,execution_generation_id,runtime_generation_id) ON DELETE CASCADE
+    ) STRICT;
+    INSERT INTO unexpected_runtime_child VALUES('agent','generation','runtime')`);
+    const schema = db.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all();
+    db.exec("BEGIN IMMEDIATE");
+    assert.throws(() => migrateExecutionStorageV25ToV26(db), /Unexpected execution provider storage dependency/);
+    db.exec("ROLLBACK");
+    assert.deepEqual(db.prepare("SELECT * FROM unexpected_runtime_child").all().map((row) => ({ ...row })),
+      [{ agent_id: "agent", execution_generation_id: "generation", runtime_generation_id: "runtime" }]);
+    assert.deepEqual(db.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(), schema);
     validateExecutionStorageSchema(db, 25);
   } finally { db.close(); }
 });
