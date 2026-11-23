@@ -103,7 +103,12 @@ export async function runRoomTurn(
         // A failed recovery must not hide the launch failure that started it.
         // Keep the error object (and its recovery outcome); only extend its text.
         if (recoveryError instanceof Error && error.message && !recoveryError.message.includes(error.message)) {
-          recoveryError.message = `${recoveryError.message} (after launch failure: ${error.message})`;
+          const previous = recoveryError.message;
+          recoveryError.message = `${previous} (after launch failure: ${error.message})`;
+          // The stack's first line was captured at construction; keep it in step for logs that print the stack.
+          if (typeof recoveryError.stack === "string" && previous && recoveryError.stack.includes(previous)) {
+            recoveryError.stack = recoveryError.stack.replace(previous, recoveryError.message);
+          }
         }
         throw recoveryError;
       }
