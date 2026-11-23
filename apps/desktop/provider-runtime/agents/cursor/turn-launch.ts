@@ -500,7 +500,7 @@ export async function beginTurn(
             // through exact-turn recovery so the dead birth is retired before
             // delivery can classify this inbox item as safe to rerun.
             throw new CursorPostDispatchCheckpointError(
-              `Cursor prepared wrapper was reaped, but its durable idle-state retirement failed: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
+              `Cursor prepared wrapper was reaped, but its durable idle-state retirement failed: ${retirementError instanceof Error ? retirementError.message : String(retirementError)} (original cause: ${safeCursorTerminalErrorDetail(error instanceof Error ? error.message : String(error)) ?? "unknown"})`,
             );
           }
         } else {
