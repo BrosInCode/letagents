@@ -200,6 +200,7 @@ type ActiveOnDemandExecution = {
   liveResult: unknown;
   thrownError: unknown;
   hasThrownError: boolean;
+  uncertainUnrecorded: boolean;
 };
 
 async function raceWithAbortSignal<T>(
@@ -380,7 +381,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
             const detail = "The daemon shut down while the read-only tool was executing.";
             invocation.thrownError = new Error(detail);
             invocation.hasThrownError = true;
-            return { status: "retry", delayMs: 0, error: detail };
+            return { status: "retry", retryAfterMs: 0, error: detail };
           }
           invocation.roomId = context.entry.room_id;
           invocation.liveResult = raced.value.liveResult;
@@ -401,7 +402,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
             };
           }
           if (ctx.signal.aborted) {
-            return { status: "retry", delayMs: 0, error: detail };
+            return { status: "retry", retryAfterMs: 0, error: detail };
           }
           return { status: "failed", error: detail };
         }
@@ -438,6 +439,9 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
           } catch {
             // Preserve the execution error. An unconfirmed journal completion is
             // deliberately never redriven as a mutation by the same request id.
+            if (result.status === "uncertain") {
+              invocation.uncertainUnrecorded = true;
+            }
           }
           return this.options.getEffect?.(claimed.id) ?? {
             ...claimed,
@@ -525,6 +529,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
         liveResult: undefined,
         thrownError: undefined,
         hasThrownError: false,
+        uncertainUnrecorded: false,
       };
       this.activeOnDemand.set(effectId, invocation);
       let settled: EffectRecord;
@@ -542,6 +547,9 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
         return this.uncertainToolResponse(roomId, effectId, settled.last_error);
       }
       if (invocation.hasThrownError) {
+        if (invocation.uncertainUnrecorded) {
+          throw this.unrecordedUncertainError(invocation.thrownError);
+        }
         throw invocation.thrownError;
       }
       if (settled.state === "failed") {
@@ -620,6 +628,9 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       }
       if (settledUncertain) {
         return this.uncertainToolResponse(context.entry.room_id, prepared.effect_id as string, detail);
+      }
+      if (uncertain) {
+        throw this.unrecordedUncertainError(error);
       }
       throw error;
     }
@@ -865,6 +876,14 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
   private activeExecutor(): Pick<EffectExecutor, "runEffect" | "hasHandler"> | null {
     const candidate = this.options.executor?.() ?? null;
     return candidate && candidate.hasHandler(BOUNDED_MCP_EFFECT_KIND) ? candidate : null;
+  }
+
+  private unrecordedUncertainError(original: unknown): Error {
+    const detail = original instanceof Error ? original.message : String(original);
+    return new Error(
+      `${detail} (Outcome is uncertain and could not be recorded in the effect journal; verify external state before repeating it.)`,
+      { cause: original },
+    );
   }
 
   private uncertainToolResponse(roomId: string, effectId: string, detail: unknown): Record<string, unknown> {

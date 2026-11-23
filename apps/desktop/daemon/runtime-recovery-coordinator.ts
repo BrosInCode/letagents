@@ -10,21 +10,26 @@ import {
   computeEffectBackoffMs,
   EffectExecutor,
   EffectFenceError,
-  failEffect,
   failEffectInTransaction,
   getEffectByIdempotencyKey,
+  isPermanentRuntimeRecoveryEffectError,
+  listActiveRuntimeRecoveryEffectsForAgent,
   parseRuntimeRecoveryEndWorkerSessionPayload,
   pruneTerminalRuntimeRecoveryEffectsInTransaction,
-  rescheduleEffectForRetry,
+  rescheduleEffectForRetryInTransaction,
+  retireStaleRuntimeRecoveryEffectsInTransaction,
   RUNTIME_RECOVERY_EFFECT_BACKOFF,
   RUNTIME_RECOVERY_EFFECT_MAX_ATTEMPTS,
+  RUNTIME_RECOVERY_EFFECT_MAX_RETRY_DELAY_MS,
   RUNTIME_RECOVERY_EFFECT_RETRY_DELAY_MS,
   RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+  runtimeRecoveryEffectPhaseCheck,
   runtimeRecoveryEndWorkerSessionIdempotencyKey,
   withFencedEffectTransaction,
   type EffectHandler,
   type EffectRecord,
   type RuntimeRecoveryEndWorkerSessionEffectPayload,
+  type RuntimeRecoveryPhaseCheck,
 } from "./effect-journal/index.js";
 import type { ManifestStore } from "./manifest-store.js";
 import { DaemonFenceLostError } from "./singleton.js";
@@ -98,13 +103,6 @@ export type RuntimeRecoveryCoordinatorOptions = {
 };
 
 type RuntimeRecoveryHostGrant = NonNullable<ReturnType<WorkerAuthorityCoordinator["currentHostGrant"]>>;
-
-class RuntimeRecoveryCustodyChangedError extends Error {
-  constructor() {
-    super("Host grant custody changed before worker session retirement settled.");
-    this.name = "RuntimeRecoveryCustodyChangedError";
-  }
-}
 
 class RuntimeRecoverySettlementStorageError extends Error {
   constructor(cause: unknown) {
@@ -186,6 +184,80 @@ export class RuntimeRecoveryCoordinator {
       RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
       this.createEndWorkerSessionHandler(),
     );
+  }
+
+  /**
+   * Retires any stale `prepared` runtime-recovery HTTP effects whose durable
+   * recovery operation or worker binding no longer exists (for example after
+   * crash recovery requeues an interrupted `executing` row to `prepared`, or
+   * after a binding was removed by another path). Live `executing` rows are
+   * never touched.
+   */
+  retireStalePreparedEffects(agentId?: string): number {
+    if (!this.effectDatabase
+      || !this.effectDatabase.isOpen
+      || this.authority.isHandoffScheduled()) {
+      return 0;
+    }
+    try {
+      return withFencedEffectTransaction(this.effectDatabase, this.effectWriteFence, () => {
+        if (this.authority.isHandoffScheduled()) {
+          throw new EffectFenceError("Supervisor handoff fenced stale runtime-recovery effect retirement.");
+        }
+        return retireStaleRuntimeRecoveryEffectsInTransaction(this.effectDatabase!, {
+          agentId,
+          expectedEpoch: this.authority.currentDaemonGeneration(),
+          nowIso: this.nowIso(),
+        });
+      });
+    } catch (error) {
+      if (this.authority.isHandoffScheduled()
+        && (error instanceof DaemonFenceLostError || error instanceof EffectFenceError)) {
+        return 0;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Recovers any inactive in-process `executing` runtime-recovery HTTP effects
+   * for `agentId` before purge preflight. Live in-flight executions
+   * (`isEffectActive === true`) and future-epoch rows are left untouched so
+   * purge fails closed against them.
+   */
+  recoverInactiveExecutingForAgent(agentId: string): number {
+    if (!this.effectExecutor
+      || !this.effectDatabase
+      || !this.effectDatabase.isOpen
+      || this.authority.isHandoffScheduled()) {
+      return 0;
+    }
+    const currentGeneration = this.authority.currentDaemonGeneration();
+    let recovered = 0;
+    for (const effect of listActiveRuntimeRecoveryEffectsForAgent(this.effectDatabase, agentId)) {
+      if (effect.state !== "executing") continue;
+      if (this.effectExecutor.isEffectActive(effect.id)) continue;
+      if (effect.epoch > currentGeneration) continue;
+      if (effect.attempt_count < 1) continue;
+      const check = runtimeRecoveryEffectPhaseCheck(effect);
+      try {
+        const next = this.rescheduleExecutingEffectSafe(
+          effect,
+          "recovered_inactive_executing_effect",
+          undefined,
+          check?.ok ? check.phaseCheck : null,
+          check && !check.ok ? check.error : null,
+        );
+        if (next.state !== "executing") recovered += 1;
+      } catch (error) {
+        if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) {
+          if (this.authority.isHandoffScheduled()) break;
+          throw error;
+        }
+        // Fail closed on unexpected storage errors: leave row executing so purge refuses.
+      }
+    }
+    return recovered;
   }
 
   async recoverTurnControls(): Promise<void> {
@@ -324,6 +396,7 @@ export class RuntimeRecoveryCoordinator {
         manifest.versions,
       );
     });
+    this.retireStalePreparedEffects();
   }
 
   async completeTurnControl(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
@@ -565,7 +638,11 @@ export class RuntimeRecoveryCoordinator {
         native_liveness: { state: "unknown", observed_at: new Date(this.nowMs()).toISOString(),
           detail: input.mode === "resume" ? "Restarting the saved conversation." : "Starting a new conversation in the existing workspace." },
       }));
-      await this.store.completeRuntimeRecovery(record.operation_id, commit => this.authority.fenceCommit(commit));
+      await this.store.completeRuntimeRecovery(
+        record.operation_id,
+        commit => this.authority.fenceCommit(commit),
+        daemonGeneration,
+      );
       return updated;
     });
     return { outcome: "recovering", entry: await this.entryWithDerivedLiveness(entry) };
@@ -670,6 +747,7 @@ export class RuntimeRecoveryCoordinator {
           operationId: payload.operation_id,
           agentId: effect.agent_id,
           executionGenerationId: payload.execution_generation_id,
+          sessionId: payload.session_id,
         });
       },
       execute: async (claimed, context) => {
@@ -726,7 +804,11 @@ export class RuntimeRecoveryCoordinator {
           this.pendingSettlementGrant.delete(claimed.id);
           if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
           this.recordSanitizedDiagnostic(claimed.id, error);
-          return { status: "retry", error: classifyRuntimeRecoveryEffectError(error) };
+          const errorCode = classifyRuntimeRecoveryEffectError(error);
+          if (isPermanentRuntimeRecoveryEffectError(error)) {
+            return { status: "failed", error: errorCode };
+          }
+          return { status: "retry", error: errorCode };
         }
       },
       settle: async (claimed, executionResult, defaultSettle) => {
@@ -758,7 +840,7 @@ export class RuntimeRecoveryCoordinator {
       throw new EffectFenceError("Supervisor handoff fenced a stale runtime-recovery effect settlement.");
     }
     const { database } = this.requireEffectHost();
-    if (executionResult.status === "retry" || executionResult.status === "uncertain") {
+    if (executionResult.status === "uncertain") {
       try {
         return defaultSettle();
       } catch (error) {
@@ -766,22 +848,22 @@ export class RuntimeRecoveryCoordinator {
         throw new RuntimeRecoverySettlementStorageError(error);
       }
     }
-    if (executionResult.status === "completed" && payload && expectedGrant
-      && !this.matchesDispatchGrant(claimed.agent_id, payload.room_id, expectedGrant)) {
-      return this.rescheduleExecutingEffectSafe(claimed, "grant_authority_changed");
-    }
+    const phaseCheck: RuntimeRecoveryPhaseCheck | null = payload
+      ? {
+          operationId: payload.operation_id,
+          agentId: claimed.agent_id,
+          executionGenerationId: payload.execution_generation_id,
+          sessionId: payload.session_id,
+        }
+      : null;
     try {
       return withFencedEffectTransaction(database, this.effectWriteFence, () => {
         if (this.authority.isHandoffScheduled()) {
           throw new EffectFenceError("Supervisor handoff fenced a stale runtime-recovery effect settlement.");
         }
-        const phaseRefusal = payload
-          ? checkRuntimeRecoveryPhaseInTransaction(database, {
-              operationId: payload.operation_id,
-              agentId: claimed.agent_id,
-              executionGenerationId: payload.execution_generation_id,
-            })
-          : null;
+        const phaseRefusal = phaseCheck
+          ? checkRuntimeRecoveryPhaseInTransaction(database, phaseCheck)
+          : "invalid_payload";
         if (phaseRefusal !== null) {
           const failed = failEffectInTransaction(database, {
             id: claimed.id,
@@ -795,7 +877,57 @@ export class RuntimeRecoveryCoordinator {
         }
         if (executionResult.status === "completed" && payload && expectedGrant
           && !this.matchesDispatchGrant(claimed.agent_id, payload.room_id, expectedGrant)) {
-          throw new RuntimeRecoveryCustodyChangedError();
+          if (claimed.attempt_count < claimed.max_attempts) {
+            const retryDelayMs = computeEffectBackoffMs(
+              Math.max(1, claimed.attempt_count),
+              RUNTIME_RECOVERY_EFFECT_BACKOFF,
+            );
+            return rescheduleEffectForRetryInTransaction(database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              nextAttemptAtMs: Math.max(0, this.nowMs()) + retryDelayMs,
+              error: "grant_authority_changed",
+              nowIso: this.nowIso(),
+            });
+          }
+          const failed = failEffectInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            error: "grant_authority_changed",
+            nowIso: this.nowIso(),
+          });
+          pruneTerminalRuntimeRecoveryEffectsInTransaction(database, claimed.agent_id);
+          return failed;
+        }
+        if (executionResult.status === "retry") {
+          if (claimed.attempt_count >= claimed.max_attempts) {
+            const failed = failEffectInTransaction(database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              error: executionResult.error,
+              nowIso: this.nowIso(),
+            });
+            pruneTerminalRuntimeRecoveryEffectsInTransaction(database, claimed.agent_id);
+            return failed;
+          }
+          const computed = computeEffectBackoffMs(
+            Math.max(1, claimed.attempt_count),
+            RUNTIME_RECOVERY_EFFECT_BACKOFF,
+          );
+          const delayMs = executionResult.retryAfterMs !== undefined
+            ? Math.max(0, Math.min(RUNTIME_RECOVERY_EFFECT_MAX_RETRY_DELAY_MS, Math.round(executionResult.retryAfterMs)))
+            : computed;
+          return rescheduleEffectForRetryInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            nextAttemptAtMs: Math.max(0, this.nowMs()) + delayMs,
+            error: executionResult.error,
+            nowIso: this.nowIso(),
+          });
         }
         const settled = executionResult.status === "completed"
           ? completeEffectInTransaction(database, {
@@ -818,10 +950,13 @@ export class RuntimeRecoveryCoordinator {
       });
     } catch (error) {
       if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
-      if (error instanceof RuntimeRecoveryCustodyChangedError) {
-        return this.rescheduleExecutingEffectSafe(claimed, "grant_authority_changed");
-      }
-      return this.rescheduleExecutingEffectSafe(claimed, "settlement_write_failed", error);
+      return this.rescheduleExecutingEffectSafe(
+        claimed,
+        "settlement_write_failed",
+        error,
+        phaseCheck,
+        phaseCheck ? null : "invalid_payload",
+      );
     }
   }
 
@@ -829,29 +964,51 @@ export class RuntimeRecoveryCoordinator {
     claimed: EffectRecord,
     errorCode: string,
     originalError?: unknown,
+    phaseCheck: RuntimeRecoveryPhaseCheck | null = null,
+    immediateFailureCode: string | null = null,
   ): EffectRecord {
     const { database } = this.requireEffectHost();
     try {
-      if (claimed.attempt_count < claimed.max_attempts) {
-        const retryDelayMs = computeEffectBackoffMs(
-          Math.max(1, claimed.attempt_count),
-          RUNTIME_RECOVERY_EFFECT_BACKOFF,
-        );
-        return rescheduleEffectForRetry(database, this.effectWriteFence, {
+      return withFencedEffectTransaction(database, this.effectWriteFence, () => {
+        if (this.authority.isHandoffScheduled()) {
+          throw new EffectFenceError("Supervisor handoff fenced a stale runtime-recovery effect recovery.");
+        }
+        const phaseRefusal = immediateFailureCode
+          ?? (phaseCheck ? checkRuntimeRecoveryPhaseInTransaction(database, phaseCheck) : null);
+        if (phaseRefusal !== null) {
+          const failed = failEffectInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            error: phaseRefusal,
+            nowIso: this.nowIso(),
+          });
+          pruneTerminalRuntimeRecoveryEffectsInTransaction(database, claimed.agent_id);
+          return failed;
+        }
+        if (claimed.attempt_count < claimed.max_attempts) {
+          const retryDelayMs = computeEffectBackoffMs(
+            Math.max(1, claimed.attempt_count),
+            RUNTIME_RECOVERY_EFFECT_BACKOFF,
+          );
+          return rescheduleEffectForRetryInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            nextAttemptAtMs: Math.max(0, this.nowMs()) + retryDelayMs,
+            error: errorCode,
+            nowIso: this.nowIso(),
+          });
+        }
+        const failed = failEffectInTransaction(database, {
           id: claimed.id,
           expectedEpoch: claimed.epoch,
           expectedAttemptCount: claimed.attempt_count,
-          nextAttemptAtMs: Math.max(0, this.nowMs()) + retryDelayMs,
           error: errorCode,
           nowIso: this.nowIso(),
         });
-      }
-      return failEffect(database, this.effectWriteFence, {
-        id: claimed.id,
-        expectedEpoch: claimed.epoch,
-        expectedAttemptCount: claimed.attempt_count,
-        error: errorCode,
-        nowIso: this.nowIso(),
+        pruneTerminalRuntimeRecoveryEffectsInTransaction(database, claimed.agent_id);
+        return failed;
       });
     } catch (retryError) {
       if (retryError instanceof DaemonFenceLostError || retryError instanceof EffectFenceError) throw retryError;
@@ -883,8 +1040,15 @@ export class RuntimeRecoveryCoordinator {
         );
       }
       if (existing.attempt_count >= 1) {
-        const recovered = this.rescheduleExecutingEffectSafe(existing, "recovered_inactive_executing_effect");
-        return { effect: recovered, diagnostic: null, backedOff: true };
+        const check = runtimeRecoveryEffectPhaseCheck(existing);
+        const recovered = this.rescheduleExecutingEffectSafe(
+          existing,
+          "recovered_inactive_executing_effect",
+          undefined,
+          check?.ok ? check.phaseCheck : null,
+          check && !check.ok ? check.error : null,
+        );
+        return { effect: recovered, diagnostic: null, backedOff: recovered.state === "prepared" };
       }
     }
     const prepared = await executor.prepare({
@@ -1145,6 +1309,11 @@ export class RuntimeRecoveryCoordinator {
         }
         return committed.entry;
       });
+      try {
+        this.retireStalePreparedEffects(entryId);
+      } catch (error) {
+        if (!(error instanceof EffectFenceError)) throw error;
+      }
       return entry;
     });
     this.requestConvergence(entryId);

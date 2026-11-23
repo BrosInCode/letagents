@@ -88,6 +88,7 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
       pauseIngress: (entryId) => this.supervisedDelivery?.pauseIngress(entryId),
       restartDelivery: (entryId) => this.startSupervisedDelivery(entryId),
       scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
+      nowMs: () => this.nowMs(),
     });
     this.providerCheckpoints = new ProviderCheckpointCoordinator({
       observePreparedRuntime: (runtime) => this.executionCapture?.prepared(runtime),

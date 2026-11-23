@@ -685,3 +685,57 @@ test("v2 -> v3 preserves tied-timestamp rowid order for GIF and attachment-clear
     await env.cleanup();
   }
 });
+
+test("foreign-shape database wearing an older modern user_version (v1/v2) fails with clear schema mismatch before backup or migration and leaves no recovery copy", async () => {
+  for (const fakeVersion of [1, 2]) {
+    const env = await tempDir(`letagents-r8-foreign-v${fakeVersion}-`);
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      const seed = new DatabaseSync(dbPath);
+      try {
+        seed.exec(`
+          PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID};
+          PRAGMA user_version = ${toSqliteUserVersion(fakeVersion)};
+          CREATE TABLE foreign_alpha (id TEXT PRIMARY KEY);
+          CREATE TABLE foreign_beta (id TEXT PRIMARY KEY);
+          INSERT INTO foreign_alpha VALUES ('keep');
+        `);
+      } finally {
+        seed.close();
+      }
+      const bytesBefore = await readFile(dbPath);
+      let backupKeyCalls = 0;
+
+      await assert.rejects(
+        () => withProtectedStateUpgrade(
+          dbPath,
+          async () => "should-not-run",
+          {
+            getBackupKey: async () => {
+              backupKeyCalls += 1;
+              return { key: randomBytes(32), sealedKey: "sealed-should-not-be-used" };
+            },
+          },
+        ),
+        /Daemon state schema mismatch on/i,
+      );
+      assert.equal(backupKeyCalls, 0, "backup key must not be requested for a foreign-shape older modern DB");
+      const filesAfterProtected = await readdir(env.root);
+      assert.equal(
+        filesAfterProtected.some((name) => name.includes(".recovery.enc")),
+        false,
+        `no recovery copy may remain after rejecting foreign-shape v${fakeVersion} DB`,
+      );
+      assert.deepEqual(await readFile(dbPath), bytesBefore, "foreign-shape DB bytes must remain untouched");
+
+      // Direct DaemonStateDatabase.open also validates source shape before running migrations.
+      await assert.rejects(
+        () => DaemonStateDatabase.open(dbPath),
+        /Daemon state schema mismatch on/i,
+      );
+      assert.deepEqual(await readFile(dbPath), bytesBefore);
+    } finally {
+      await env.cleanup();
+    }
+  }
+});

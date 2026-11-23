@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtemp, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -20,6 +20,7 @@ import {
   areWindowsFiletimesCompatibleAtWmiPrecision,
   fromSqliteUserVersion,
   moveAsideLegacyDaemonStateDatabase,
+  openDaemonStateDatabase,
   parseWindowsBirthFiletime,
   parseWindowsCimDateTimeToFiletimeUtc,
   runNumberedMigrations,
@@ -27,6 +28,14 @@ import {
   validateDaemonStateShape,
 } from "../daemon-state-database.js";
 import { WorkDurabilityStore } from "../durability-store.js";
+import {
+  EXECUTION_APPROVAL_CLOSE_EFFECT_KIND,
+  EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND,
+  ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+  ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+  ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
+  RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
+} from "../effect-journal/index.js";
 import { ExecutionApprovalPublicationStore } from "../execution-approval-publication-store.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import { SupervisorDaemon } from "../main.js";
@@ -398,10 +407,11 @@ test("SupervisorDaemon owns one shared SQLite connection across all stores and p
         workerBindings: { database: DatabaseSync | null };
         supervisedInbox: { database: DatabaseSync | null };
         executionCapture: { database: DatabaseSync } | null;
-        roomWorkPublisher: { database: DatabaseSync } | null;
-        executionDelegations: { approvalPublisher?: { database: DatabaseSync } | null };
-        effectExecutor: { hasHandler?: (kind: string) => boolean; handlers?: Map<string, unknown> } | null;
-        runtimeRecovery: { effectDatabase?: DatabaseSync | null; effectExecutor?: unknown };
+        roomWorkPublisher: { database: DatabaseSync; executor: unknown } | null;
+        effectExecutor: { hasHandler(kind: string): boolean } | null;
+        roomMoves: { effectExecutor: unknown; effectDatabase: DatabaseSync | null };
+        runtimeRecovery: { effectExecutor: unknown; effectDatabase: DatabaseSync | null };
+        executionDelegations: { approvalPublisher?: { database: DatabaseSync; executor: unknown } | null };
       };
       shared = internals.stateDatabase?.connection;
       assert.ok(shared && shared.isOpen, "daemon must own an open shared connection");
@@ -411,10 +421,25 @@ test("SupervisorDaemon owns one shared SQLite connection across all stores and p
       assert.equal(internals.supervisedInbox.database, shared, "SupervisedAgentInboxStore must share the single connection");
       assert.equal(internals.executionCapture?.database, shared, "ExecutionCaptureCoordinator must share the single connection");
       assert.equal(internals.roomWorkPublisher?.database, shared, "RoomWorkPublisher must share the single connection");
+      assert.equal(internals.roomWorkPublisher?.executor, internals.effectExecutor, "RoomWorkPublisher must share the daemon EffectExecutor");
+      assert.equal(internals.effectExecutor?.hasHandler("room_work_publish"), true, "daemon EffectExecutor must register room_work_publish");
+      assert.equal(internals.effectExecutor?.hasHandler("room_work_grouped_no_reply"), true, "daemon EffectExecutor must register room_work_grouped_no_reply");
       assert.equal(internals.executionDelegations.approvalPublisher?.database, shared, "ExecutionApprovalPublisher must share the single connection");
       assert.equal(internals.runtimeRecovery.effectDatabase, shared, "RuntimeRecoveryCoordinator must share the single connection");
       assert.equal(internals.runtimeRecovery.effectExecutor, internals.effectExecutor, "RuntimeRecoveryCoordinator must share the process-wide EffectExecutor");
-      assert.equal(internals.effectExecutor?.handlers?.has("runtime_recovery_end_worker_session"), true);
+      assert.equal(internals.effectExecutor?.hasHandler(RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND), true);
+      assert.equal(internals.roomMoves.effectDatabase, shared, "RoomMoveCoordinator must share the single connection");
+      assert.equal(internals.roomMoves.effectExecutor, internals.effectExecutor, "RoomMoveCoordinator must share the process-wide EffectExecutor");
+      assert.equal(internals.effectExecutor?.hasHandler(ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND), true);
+      assert.equal(internals.effectExecutor?.hasHandler(ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND), true);
+      assert.equal(internals.effectExecutor?.hasHandler(ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND), true);
+      assert.equal(
+        internals.executionDelegations.approvalPublisher?.executor,
+        internals.effectExecutor,
+        "ExecutionApprovalPublisher must share the process-wide EffectExecutor",
+      );
+      assert.equal(internals.effectExecutor?.hasHandler(EXECUTION_APPROVAL_PUBLISH_EFFECT_KIND), true);
+      assert.equal(internals.effectExecutor?.hasHandler(EXECUTION_APPROVAL_CLOSE_EFFECT_KIND), true);
     } finally {
       await daemon.stop().catch(() => undefined);
     }
@@ -1443,6 +1468,280 @@ test("legacy DB move-aside Windows WMI fallback preserves UTC offsets and micros
       });
       assert.ok(archived && archived.includes(".legacy-"));
     } finally {
+      await env.cleanup();
+    }
+  }
+});
+
+test("concurrent fresh database opens converge across the main/WAL observation window while orphan, non-regular, foreign, future, and symlink controls still fail closed", async () => {
+  // Helper: delay opener A's initial ENOENT from lstat(dbPath) until caller runs
+  // a concurrent action and releases the gate, then record all lstat targets.
+  function createDelayedMissingMainHook(dbPath: string): {
+    lstatFile: typeof lstat;
+    sawMissingMain: Promise<void>;
+    releaseMissingMain: () => void;
+    observedCalls: string[];
+  } {
+    let signalMissing!: () => void;
+    let releaseMissing!: () => void;
+    const sawMissingMain = new Promise<void>((resolve) => { signalMissing = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseMissing = resolve; });
+    const observedCalls: string[] = [];
+    let delayedOnce = false;
+    const lstatFile = (async (target: Parameters<typeof lstat>[0], ...rest: unknown[]) => {
+      const targetPath = String(target);
+      observedCalls.push(targetPath);
+      if (!delayedOnce && targetPath === dbPath) {
+        delayedOnce = true;
+        try {
+          return await (lstat as (...args: unknown[]) => ReturnType<typeof lstat>)(target, ...rest);
+        } catch (error) {
+          signalMissing();
+          await gate;
+          throw error;
+        }
+      }
+      return (lstat as (...args: unknown[]) => ReturnType<typeof lstat>)(target, ...rest);
+    }) as typeof lstat;
+    return { lstatFile, sawMissingMain, releaseMissingMain: releaseMissing, observedCalls };
+  }
+
+  // 1. Controlled interleaving with a real second opener on a fresh path:
+  // Opener A observes ENOENT on main, Opener B finishes openDaemonStateDatabase
+  // leaving a live non-empty -wal, and Opener A rechecks main and converges.
+  {
+    const env = await tempDir("letagents-concurrent-wal-race-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    let openerA: DaemonStateDatabase | null = null;
+    let openerB: DaemonStateDatabase | null = null;
+    try {
+      const hook = createDelayedMissingMainHook(dbPath);
+      const openerAPromise = DaemonStateDatabase.open(dbPath, undefined, { lstatFile: hook.lstatFile });
+      await hook.sawMissingMain;
+
+      openerB = await DaemonStateDatabase.open(dbPath);
+      const walSize = (await stat(`${dbPath}-wal`)).size;
+      assert.ok(walSize > 0, "expected real second opener to leave a non-empty active -wal file");
+
+      hook.releaseMissingMain();
+      openerA = await openerAPromise;
+
+      assert.deepEqual(hook.observedCalls.slice(0, 3), [dbPath, `${dbPath}-wal`, dbPath]);
+      assert.equal(
+        Number((openerA.connection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version),
+        DAEMON_STATE_USER_VERSION,
+      );
+      assert.equal(
+        Number((openerB.connection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version),
+        DAEMON_STATE_USER_VERSION,
+      );
+      // Both handles share the exact same WAL database and observe each other's committed writes.
+      openerB.connection.prepare(
+        "INSERT INTO daemon_maintenance_state(key, value_json, updated_at) VALUES (?, ?, ?)",
+      ).run("task16_canary", JSON.stringify({ ok: true }), "2026-11-22T00:00:00.000Z");
+      const observed = openerA.connection.prepare(
+        "SELECT value_json FROM daemon_maintenance_state WHERE key = ?",
+      ).get("task16_canary") as { value_json: string } | undefined;
+      assert.equal(observed?.value_json, JSON.stringify({ ok: true }));
+    } finally {
+      openerA?.close();
+      openerB?.close();
+      await env.cleanup();
+    }
+  }
+
+  // 2. Real parallel fresh openers converge without errors.
+  {
+    const env = await tempDir("letagents-parallel-fresh-open-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    const handles: DatabaseSync[] = [];
+    try {
+      const opened = await Promise.all([
+        openDaemonStateDatabase(dbPath),
+        openDaemonStateDatabase(dbPath),
+        openDaemonStateDatabase(dbPath),
+      ]);
+      handles.push(...opened);
+      for (const db of handles) {
+        assert.equal(
+          Number((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version),
+          DAEMON_STATE_USER_VERSION,
+        );
+      }
+    } finally {
+      for (const db of handles) db.close();
+      await env.cleanup();
+    }
+  }
+
+  // 3. Genuine orphaned non-empty -wal (no main file even on recheck) still fails closed untouched.
+  {
+    const env = await tempDir("letagents-real-orphan-wal-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await writeFile(`${dbPath}-wal`, Buffer.from("stranded-wal-bytes-must-not-be-deleted", "utf8"));
+      const before = await readFile(`${dbPath}-wal`);
+      await assert.rejects(
+        () => DaemonStateDatabase.open(dbPath),
+        /orphaned non-empty -wal/i,
+      );
+      assert.deepEqual(await readFile(`${dbPath}-wal`), before);
+      assert.equal(await stat(dbPath).catch(() => null), null, "main DB must not be created on orphan refusal");
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 4. Non-regular -wal (directory, cross-platform) still fails closed even if main DB appears concurrently.
+  {
+    const env = await tempDir("letagents-nonregular-wal-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      const hook = createDelayedMissingMainHook(dbPath);
+      const openerAPromise = DaemonStateDatabase.open(dbPath, undefined, { lstatFile: hook.lstatFile });
+      await hook.sawMissingMain;
+
+      // Place a valid main DB (closed so no real -wal) and a directory at `${dbPath}-wal`.
+      const seeded = await DaemonStateDatabase.open(dbPath);
+      seeded.close();
+      await mkdir(`${dbPath}-wal`);
+
+      hook.releaseMissingMain();
+      await assert.rejects(openerAPromise, /orphaned non-empty -wal/i);
+      assert.equal((await lstat(`${dbPath}-wal`)).isDirectory(), true);
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 5. Foreign database with active non-empty -wal appearing mid-race still fails closed untouched.
+  {
+    const env = await tempDir("letagents-concurrent-foreign-db-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    let foreign: DatabaseSync | null = null;
+    try {
+      const hook = createDelayedMissingMainHook(dbPath);
+      const openerAPromise = DaemonStateDatabase.open(dbPath, undefined, { lstatFile: hook.lstatFile });
+      await hook.sawMissingMain;
+
+      foreign = new DatabaseSync(dbPath);
+      foreign.exec("PRAGMA journal_mode = WAL; PRAGMA application_id = 305419896; CREATE TABLE foreign_tbl(x TEXT); INSERT INTO foreign_tbl VALUES ('keep');");
+      assert.ok((await stat(`${dbPath}-wal`)).size > 0);
+
+      hook.releaseMissingMain();
+      await assert.rejects(openerAPromise, /Unsupported SQLite database application_id 305419896/i);
+      assert.equal((foreign.prepare("SELECT x FROM foreign_tbl").get() as { x: string }).x, "keep");
+    } finally {
+      foreign?.close();
+      await env.cleanup();
+    }
+  }
+
+  // 6. Future modern schema database with active non-empty -wal appearing mid-race still fails closed untouched.
+  {
+    const env = await tempDir("letagents-concurrent-future-db-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    let future: DatabaseSync | null = null;
+    try {
+      const hook = createDelayedMissingMainHook(dbPath);
+      const openerAPromise = DaemonStateDatabase.open(dbPath, undefined, { lstatFile: hook.lstatFile });
+      await hook.sawMissingMain;
+
+      future = new DatabaseSync(dbPath);
+      future.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID};
+        PRAGMA user_version = ${toSqliteUserVersion(DAEMON_STATE_SCHEMA_VERSION + 1)};
+        CREATE TABLE future_tbl(x TEXT);
+        INSERT INTO future_tbl VALUES ('keep_future');
+      `);
+      assert.ok((await stat(`${dbPath}-wal`)).size > 0);
+
+      hook.releaseMissingMain();
+      await assert.rejects(openerAPromise, /Unsupported daemon state schema version/i);
+      assert.equal((future.prepare("SELECT x FROM future_tbl").get() as { x: string }).x, "keep_future");
+    } finally {
+      future?.close();
+      await env.cleanup();
+    }
+  }
+
+  // 7. Symlink main file or symlink -wal appearing mid-race still fails closed (POSIX / symlink-enabled hosts).
+  {
+    const env = await tempDir("letagents-concurrent-symlink-db-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    const realTarget = join(env.root, "real-target.sqlite");
+    try {
+      await writeFile(realTarget, Buffer.from("target-bytes", "utf8"));
+      let symlinkSupported = true;
+      try {
+        await symlink(realTarget, join(env.root, "probe-link"));
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (process.platform === "win32" && (code === "EPERM" || code === "EACCES")) {
+          symlinkSupported = false;
+        } else {
+          throw error;
+        }
+      }
+      if (symlinkSupported) {
+        // 7a: symlink main file appearing alongside a non-empty regular -wal.
+        const hookMain = createDelayedMissingMainHook(dbPath);
+        const openerMain = DaemonStateDatabase.open(dbPath, undefined, { lstatFile: hookMain.lstatFile });
+        await hookMain.sawMissingMain;
+        await symlink(realTarget, dbPath);
+        await writeFile(`${dbPath}-wal`, Buffer.from("non-empty-wal", "utf8"));
+        hookMain.releaseMissingMain();
+        await assert.rejects(openerMain, /regular file/i);
+
+        // 7b: symlink -wal appearing even when a valid main file exists.
+        const dbPath2 = join(env.root, "daemon-state-2.sqlite");
+        const hookWal = createDelayedMissingMainHook(dbPath2);
+        const openerWal = DaemonStateDatabase.open(dbPath2, undefined, { lstatFile: hookWal.lstatFile });
+        await hookWal.sawMissingMain;
+        const seeded = await DaemonStateDatabase.open(dbPath2);
+        seeded.close();
+        await symlink(realTarget, `${dbPath2}-wal`);
+        hookWal.releaseMissingMain();
+        await assert.rejects(openerWal, /orphaned non-empty -wal/i);
+      }
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 8. Legacy database with uncheckpointed non-empty -wal appearing mid-race still checkpoints and moves aside cleanly.
+  {
+    const env = await tempDir("letagents-concurrent-legacy-wal-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    let opened: DaemonStateDatabase | null = null;
+    try {
+      const hook = createDelayedMissingMainHook(dbPath);
+      const openerPromise = DaemonStateDatabase.open(dbPath, undefined, { lstatFile: hook.lstatFile });
+      await hook.sawMissingMain;
+
+      createSigkilledUncheckpointedLegacyDb(dbPath);
+      assert.ok((await stat(`${dbPath}-wal`)).size > 0);
+      await protectOwnerPrivate(dbPath, "file", { force: true });
+
+      hook.releaseMissingMain();
+      opened = await openerPromise;
+      assert.equal(
+        Number((opened.connection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version),
+        DAEMON_STATE_USER_VERSION,
+      );
+      const entries = await readdir(env.root);
+      const archived = entries.filter((name) => /^daemon-state\.sqlite\.legacy-.*Z(?:-\d+)?$/.test(name));
+      assert.equal(archived.length, 1);
+      const verify = new DatabaseSync(join(env.root, archived[0]!), { readOnly: true });
+      try {
+        assert.equal(Number(verify.prepare("SELECT COUNT(*) AS n FROM canary").get()?.n), 3);
+        assert.equal(Number(verify.prepare("SELECT COUNT(*) AS n FROM notes").get()?.n), 2);
+      } finally {
+        verify.close();
+      }
+    } finally {
+      opened?.close();
       await env.cleanup();
     }
   }

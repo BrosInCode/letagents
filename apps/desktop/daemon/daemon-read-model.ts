@@ -118,6 +118,7 @@ export class DaemonReadModel {
         agent_runtime_recovery_v2: true,
         agent_state_subscription_v1: true,
         agent_activity_stream_v1: true,
+        async_rpc_effects_v1: true,
       },
       generation: this.ports.currentDaemonGeneration(),
       pid: process.pid,

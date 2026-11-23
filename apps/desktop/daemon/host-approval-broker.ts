@@ -205,14 +205,19 @@ export class HostApprovalBroker {
         return;
       }
       if (event.type === "snapshot" && event.requests.length <= MAX_REQUESTS) {
-        if (lane.state !== "pending" || lane.connectionId !== event.connectionId) lane.revision += 1;
+        // A snapshot after a lost lane or on another connection starts a new authority. The requests that it
+        // names are the only ones that can be answered; an equal request of the earlier authority is not kept.
+        const sameAuthority = lane.state === "pending" && lane.connectionId === event.connectionId;
+        if (!sameAuthority) lane.revision += 1;
         lane.state = "pending";
         lane.connectionId = event.connectionId;
-        // An unrelated new request or an identical OpenCode re-list does not
-        // revoke this request. Codex callbacks retain exact object identity;
+        // Under one authority, an unrelated new request or an identical OpenCode
+        // re-list does not revoke this request. Codex callbacks retain exact object identity;
         // a new callback with a reused JSON-RPC ID is never the old request.
-        lane.requests = event.requests.map(request => lane.requests.find(previous => previous.provider === request.provider
-          && (request.provider === "codex" ? previous.native === request.native : isDeepStrictEqual(previous.native, request.native))) ?? request);
+        lane.requests = sameAuthority
+          ? event.requests.map(request => lane.requests.find(previous => previous.provider === request.provider
+            && (request.provider === "codex" ? previous.native === request.native : isDeepStrictEqual(previous.native, request.native))) ?? request)
+          : [...event.requests];
       } else {
         lane.revision += 1;
         lane.state = event.type === "unavailable" ? "unavailable" : "degraded";

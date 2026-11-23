@@ -379,6 +379,35 @@
       ],
       "type": "object"
     },
+    "DaemonAsyncRpcAccepted": {
+      "properties": {
+        "daemon_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "effect_id": {
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "effect_id",
+        "daemon_generation"
+      ],
+      "type": "object"
+    },
+    "DaemonAsyncRpcEffectKind": {
+      "enum": [
+        "rpc_apply_agent_configuration",
+        "rpc_recover_agent_runtime",
+        "rpc_bootstrap_room_ingress",
+        "rpc_install_host_grant",
+        "rpc_retire_agent"
+      ],
+      "type": "string"
+    },
     "DaemonAttemptDetail": {
       "properties": {
         "activity": {
@@ -442,6 +471,29 @@
       ],
       "type": "object"
     },
+    "DaemonBootstrapRoomIngressResult": {
+      "properties": {
+        "last_observed_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "enum": [
+            "bootstrapped",
+            "existing",
+            "stale"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "last_observed_message_id"
+      ],
+      "type": "object"
+    },
     "DaemonCapabilities": {
       "properties": {
         "agent_activity_stream_v1": {
@@ -466,6 +518,9 @@
           "type": "boolean"
         },
         "agent_state_subscription_v1": {
+          "type": "boolean"
+        },
+        "async_rpc_effects_v1": {
           "type": "boolean"
         },
         "provider_continuation_repair": {
@@ -659,6 +714,25 @@
         "timeline",
         "items",
         "history_boundary"
+      ],
+      "type": "object"
+    },
+    "DaemonInstallHostGrantResult": {
+      "properties": {
+        "agent_session_id": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "installed",
+            "stale",
+            "provider_unavailable"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
       ],
       "type": "object"
     },
@@ -1314,6 +1388,22 @@
         }
       ]
     },
+    "DaemonRecoverAgentRuntimeResult": {
+      "properties": {
+        "entry": {
+          "$ref": "#/$defs/DaemonManifestEntryView"
+        },
+        "outcome": {
+          "const": "recovering",
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome",
+        "entry"
+      ],
+      "type": "object"
+    },
     "DaemonRequestEnvelope": {
       "properties": {
         "id": {
@@ -1570,6 +1660,69 @@
       ],
       "type": "object"
     },
+    "DaemonRpcEffectState": {
+      "enum": [
+        "prepared",
+        "executing",
+        "completed",
+        "failed",
+        "uncertain"
+      ],
+      "type": "string"
+    },
+    "DaemonRpcEffectView": {
+      "properties": {
+        "agent_id": {
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+          "type": "string"
+        },
+        "daemon_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "effect_id": {
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/DaemonAsyncRpcEffectKind"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/DaemonRpcEffectState"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "effect_id",
+        "agent_id",
+        "kind",
+        "daemon_generation",
+        "state",
+        "updated_at"
+      ],
+      "type": "object"
+    },
     "DaemonStateWatchChanges": {
       "properties": {
         "complete": {
@@ -1596,6 +1749,12 @@
         "removed_entry_ids": {
           "items": {
             "type": "string"
+          },
+          "type": "array"
+        },
+        "rpc_effects": {
+          "items": {
+            "$ref": "#/$defs/DaemonRpcEffectView"
           },
           "type": "array"
         },
@@ -1635,6 +1794,12 @@
         "entries": {
           "items": {
             "$ref": "#/$defs/DaemonManifestEntryView"
+          },
+          "type": "array"
+        },
+        "rpc_effects": {
+          "items": {
+            "$ref": "#/$defs/DaemonRpcEffectView"
           },
           "type": "array"
         },
@@ -3549,21 +3714,24 @@
   "$id": "https://letagents.chat/schemas/daemon-rpc-contract.v3.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": {
+    "asyncWaitTimeouts": {
+      "applyAgentConfigurationMs": 0,
+      "bootstrapRoomIngressMs": 45000,
+      "installHostGrantMs": 60000,
+      "recoverAgentRuntimeMs": 30000,
+      "retireAgentMs": 60000
+    },
     "defaultMaxRequestBytes": 65536,
-    "implementationVersion": "2.0.284-modern.21",
+    "implementationVersion": "2.0.284-modern.20",
     "localBoardMaxFrameBytes": 16777216,
     "protocolVersion": 3,
     "stateActivitySummaryLimit": 16,
     "timeouts": {
-      "bootstrapIngressMs": 45000,
       "defaultMs": 3000,
-      "installHostGrantMs": 60000,
       "localBoardMs": 30000,
       "longPollDefaultWaitMs": 25000,
       "longPollMaxWaitMs": 30000,
       "noneMs": 0,
-      "recoveryMs": 30000,
-      "retireMs": 60000,
       "richReadMs": 15000,
       "roomMoveCommitMs": 15000,
       "turnControlMs": 15000
@@ -4906,6 +5074,13 @@
       "versionAgnostic": false
     },
     "supervisor.apply_agent_configuration": {
+      "asyncEffect": {
+        "kind": "rpc_apply_agent_configuration",
+        "outcome": {
+          "$ref": "#/$defs/DaemonAgentConfigurationApplyResult"
+        },
+        "waitTimeoutMs": 0
+      },
       "handoffDrainAllowed": false,
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
@@ -4936,10 +5111,12 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "$ref": "#/$defs/DaemonAgentConfigurationApplyResult"
+        "$ref": "#/$defs/DaemonAsyncRpcAccepted"
       },
       "timeout": {
-        "kind": "none"
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
       },
       "versionAgnostic": false
     },
@@ -5011,6 +5188,13 @@
       "versionAgnostic": false
     },
     "supervisor.bootstrap_room_ingress": {
+      "asyncEffect": {
+        "kind": "rpc_bootstrap_room_ingress",
+        "outcome": {
+          "$ref": "#/$defs/DaemonBootstrapRoomIngressResult"
+        },
+        "waitTimeoutMs": 45000
+      },
       "handoffDrainAllowed": false,
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
@@ -5034,32 +5218,12 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "properties": {
-          "last_observed_message_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "status": {
-            "enum": [
-              "bootstrapped",
-              "existing",
-              "stale"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "status",
-          "last_observed_message_id"
-        ],
-        "type": "object"
+        "$ref": "#/$defs/DaemonAsyncRpcAccepted"
       },
       "timeout": {
-        "class": "bootstrap_ingress",
+        "class": "default",
         "kind": "fixed",
-        "ms": 45000
+        "ms": 3000
       },
       "versionAgnostic": false
     },
@@ -5509,6 +5673,47 @@
       },
       "versionAgnostic": false
     },
+    "supervisor.get_rpc_effect": {
+      "handoffDrainAllowed": true,
+      "handoffLifecycle": true,
+      "maxRequestBytes": 65536,
+      "params": {
+        "properties": {
+          "daemon_generation": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "effect_id": {
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "effect_id",
+          "daemon_generation"
+        ],
+        "type": "object"
+      },
+      "requiresLiveConnection": false,
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/DaemonRpcEffectView"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "timeout": {
+        "class": "default",
+        "kind": "fixed",
+        "ms": 3000
+      },
+      "versionAgnostic": false
+    },
     "supervisor.host_approval_challenge": {
       "handoffDrainAllowed": true,
       "handoffLifecycle": false,
@@ -5561,6 +5766,13 @@
       "versionAgnostic": false
     },
     "supervisor.install_host_grant": {
+      "asyncEffect": {
+        "kind": "rpc_install_host_grant",
+        "outcome": {
+          "$ref": "#/$defs/DaemonInstallHostGrantResult"
+        },
+        "waitTimeoutMs": 60000
+      },
       "handoffDrainAllowed": true,
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
@@ -5635,28 +5847,12 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "properties": {
-          "agent_session_id": {
-            "type": "string"
-          },
-          "status": {
-            "enum": [
-              "installed",
-              "stale",
-              "provider_unavailable"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "status"
-        ],
-        "type": "object"
+        "$ref": "#/$defs/DaemonAsyncRpcAccepted"
       },
       "timeout": {
-        "class": "install_host_grant",
+        "class": "default",
         "kind": "fixed",
-        "ms": 60000
+        "ms": 3000
       },
       "versionAgnostic": false
     },
@@ -5959,6 +6155,13 @@
       "versionAgnostic": false
     },
     "supervisor.recover_agent_runtime": {
+      "asyncEffect": {
+        "kind": "rpc_recover_agent_runtime",
+        "outcome": {
+          "$ref": "#/$defs/DaemonRecoverAgentRuntimeResult"
+        },
+        "waitTimeoutMs": 30000
+      },
       "handoffDrainAllowed": false,
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
@@ -6096,25 +6299,12 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "properties": {
-          "entry": {
-            "$ref": "#/$defs/DaemonManifestEntryView"
-          },
-          "outcome": {
-            "const": "recovering",
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome",
-          "entry"
-        ],
-        "type": "object"
+        "$ref": "#/$defs/DaemonAsyncRpcAccepted"
       },
       "timeout": {
-        "class": "recovery",
+        "class": "default",
         "kind": "fixed",
-        "ms": 30000
+        "ms": 3000
       },
       "versionAgnostic": false
     },
@@ -6178,6 +6368,13 @@
       "versionAgnostic": false
     },
     "supervisor.retire_agent": {
+      "asyncEffect": {
+        "kind": "rpc_retire_agent",
+        "outcome": {
+          "$ref": "#/$defs/DaemonRetireAgentResult"
+        },
+        "waitTimeoutMs": 60000
+      },
       "handoffDrainAllowed": false,
       "handoffLifecycle": false,
       "maxRequestBytes": 65536,
@@ -6241,12 +6438,12 @@
       },
       "requiresLiveConnection": false,
       "result": {
-        "$ref": "#/$defs/DaemonRetireAgentResult"
+        "$ref": "#/$defs/DaemonAsyncRpcAccepted"
       },
       "timeout": {
-        "class": "retire",
+        "class": "default",
         "kind": "fixed",
-        "ms": 60000
+        "ms": 3000
       },
       "versionAgnostic": false
     },

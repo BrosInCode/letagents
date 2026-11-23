@@ -899,19 +899,8 @@ export async function codexDaemonFixture(options: {
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
   };
-  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
-    const socket = connectDaemon(paths.socketPath);
-    let received = "";
-    socket.setEncoding("utf8");
-    socket.once("error", reject);
-    socket.on("data", (chunk: string) => {
-      received += chunk;
-      if (!received.includes("\n")) return;
-      socket.end();
-      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
-    });
-    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
-  });
+  const { daemonSocketRequest } = await import("./daemon-socket-request.js");
+  const request = (method: string, params?: unknown) => daemonSocketRequest(paths.socketPath, method, params);
   const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = DAEMON_WAIT_MS) => {
     const deadline = Date.now() + timeoutMs;
     while (!await check()) {
