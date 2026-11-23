@@ -516,8 +516,9 @@ test("births answers only from a list whose every length and offset it checks; a
   const run = (mode, pids = ["1001", "2001", "3001", "4001"]) => spawnSync(shortListHelper(), ["births", ...pids], {
     encoding: "utf8", windowsHide: true, env: { ...process.env, LETAGENTS_TEST_SNAPSHOT: mode },
   });
-  // The harness lists its own real pid beside made-up ones. Windows pids are multiples of 4 and the made-up ones are
-  // not, so the two can never collide, whatever pid Windows gives the harness. Both halves of that rule are checked.
+  // The harness lists its own real pid beside made-up ones. On current Windows pids are multiples of 4 (an NT
+  // implementation detail, not an API guarantee) and the made-up ones are not, so the two cannot collide. Both halves
+  // of that assumption are checked here, so a Windows that changes it fails this test instead of a harness case.
   for (const made of [1001, 2001, 3001, 4001]) assert.notEqual(made % 4, 0, `${made} could be a real pid`);
   const real = [process.pid];
   for (let index = 0; index < 8; index += 1) {

@@ -12,8 +12,10 @@
  * NtQuerySystemInformation that writes a known list (pid 1001 created at 5,
  * pid 2001 listed with no creation time, pid 3001 created at 7, and this
  * helper with its real creation time, the anchor `births` requires) or a
- * broken one, named by the variable's value. Windows process ids are
- * multiples of 4, so the made-up ids can never be the helper's own.
+ * broken one, named by the variable's value. On current Windows, process ids
+ * are multiples of 4 (an implementation detail, not an API guarantee, which
+ * the native test checks on each run), so the made-up ids, which are not,
+ * cannot be the helper's own.
  */
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
