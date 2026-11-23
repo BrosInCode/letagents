@@ -11,6 +11,7 @@ import type { ProviderSpawnRequest } from "../provider-adapter.js";
 import { antigravityChildEnvironment, antigravityRoomServer } from "./launch.js";
 import { readAntigravityLastStepError } from "./turn-errors.js";
 import { prepareAntigravityOwnerSetup } from "./owner-setup.js";
+import { shareAntigravitySignIn } from "./sign-in.js";
 import { antigravityWorkspaceRefusal } from "./workspace-customizations.js";
 import { withoutRoomAuthority } from "../room-authority-environment.js";
 
@@ -42,6 +43,8 @@ export interface AntigravityProviderAdapterDependencies {
   readLastStepError(databasePath: string): Promise<string | null>;
   /** Place the owner's own setup in the agent's folder, or take it out. */
   prepareOwnerSetup(agentDir: string, enabled: boolean): { notices: string[] };
+  /** Mirror the owner's file sign-in (agy's token file) into the agent's folder. */
+  shareSignIn(agentDir: string): void;
   /** Why an agent below Full access must not run in this workspace (hooks, plugins, MCP servers agy runs unasked), or null. */
   workspaceRefusal(cwd: string, when: "start" | "turn"): string | null;
   launchChild(input: { agyBin: string; args: string[]; cwd: string; env: Record<string, string> }): AntigravityChild;
@@ -176,6 +179,7 @@ export const DEFAULT_ANTIGRAVITY_DEPENDENCIES: AntigravityProviderAdapterDepende
   readQuota: defaultReadQuota,
   readLastStepError: readAntigravityLastStepError,
   prepareOwnerSetup: (agentDir, enabled) => prepareAntigravityOwnerSetup(agentDir, enabled),
+  shareSignIn: (agentDir) => shareAntigravitySignIn(agentDir),
   workspaceRefusal: antigravityWorkspaceRefusal,
   launchChild: defaultLaunchChild,
   roomServer: (req, roomServerEnvironment) => {

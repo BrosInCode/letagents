@@ -157,6 +157,8 @@ export abstract class AntigravityAdapterBase {
     const geminiDir = antigravityAgentDataDir(this.dataRoot, req.supervisorEntryId?.trim() || req.workAttemptId);
     // The owner's own setup is placed in (or taken out of) the agent's folder before agy reads it.
     const ownerSetup = this.deps.prepareOwnerSetup(geminiDir, homeHarness);
+    // A sign-in agy keeps in a file is in the owner's folder only; the agent's folder needs it too.
+    this.deps.shareSignIn(geminiDir);
     const child = this.deps.launchChild({
       agyBin: this.agyBin,
       args: antigravityAcpArgs({ geminiDir, authority }),

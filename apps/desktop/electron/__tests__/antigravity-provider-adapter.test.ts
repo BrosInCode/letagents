@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -9,6 +9,7 @@ import { AntigravityProviderAdapter, type AntigravityChild, type AntigravityProv
 import { classifyAntigravityTurn } from "../main/agents/antigravity/turn-results.js";
 import { antigravityToolDisplay } from "../main/agents/antigravity/tool-display.js";
 import { prepareAntigravityOwnerSetup } from "../main/agents/antigravity/owner-setup.js";
+import { ownerAntigravityTokenFileExists, shareAntigravitySignIn } from "../main/agents/antigravity/sign-in.js";
 import { antigravityPermissionTool } from "../main/agents/antigravity/permissions.js";
 import { antigravityWorkspaceCommandCustomizations, antigravityWorkspaceRefusal } from "../main/agents/antigravity/workspace-customizations.js";
 import { antigravityAuthorityFromPolicy, antigravityAuthorityForProfile, antigravityVersionAtLeast, isRoomServerToolCall, parseAntigravityVersion } from "../main/agents/antigravity/launch.js";
@@ -199,6 +200,7 @@ function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastSt
     readQuota: async () => over.quota ?? QUOTA_JSON,
     readLastStepError: async () => over.lastStepError ?? null,
     prepareOwnerSetup: (agentDir, enabled) => prepareAntigravityOwnerSetup(agentDir, enabled, ownerDir),
+    shareSignIn: (agentDir) => shareAntigravitySignIn(agentDir, ownerDir),
     workspaceRefusal: (cwd, when) => over.workspaceRefusal?.(cwd, when) ?? null,
     launchChild: (input) => { launches.push(input); return agy; },
     roomServer: (_req, env) => ({ name: "letagents", command: "/electron", args: ["/mcp/server.js"], env: Object.entries(env).map(([name, value]) => ({ name, value })) }),
@@ -884,4 +886,42 @@ test("own setup that failed halfway is still taken out when it is turned off", (
   assert.ok(lstatSync(join(agentDir, "GEMINI.md")).isSymbolicLink());
   prepareAntigravityOwnerSetup(agentDir, false, ownerDir);
   assert.equal(existsSync(join(agentDir, "GEMINI.md")), false);
+});
+
+
+test("a sign-in agy keeps in a file reaches the agent's own folder, and leaves it when the owner has none", async () => {
+  const { adapter, launches, ownerDir } = harness();
+  const token = join(ownerDir, "antigravity-cli", "antigravity-oauth-token");
+  // The keychain did not answer in time, so agy keeps the sign-in in this file (agy 1.5.15).
+  mkdirSync(join(ownerDir, "antigravity-cli"), { recursive: true });
+  writeFileSync(token, "{\"refresh_token\":\"owner\"}");
+  assert.equal(ownerAntigravityTokenFileExists(ownerDir), true);
+  const handle = await adapter.spawn(spawnRequest("read_only"));
+  const agentToken = join(launches[0]!.args[2]!, "antigravity-cli", "antigravity-oauth-token");
+  assert.equal(readFileSync(agentToken, "utf8"), "{\"refresh_token\":\"owner\"}");
+  await adapter.stop(handle);
+  // Signed out (or back on the keychain): the agent's folder holds no sign-in of its own.
+  rmSync(token);
+  assert.equal(ownerAntigravityTokenFileExists(ownerDir), false);
+  shareAntigravitySignIn(launches[0]!.args[2]!, ownerDir);
+  assert.equal(existsSync(agentToken), false);
+});
+
+
+test("a sign-in file counts only as a non-empty file: an empty or dangling one is not shared", () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-agy-token-"));
+  roots.push(root);
+  const ownerDir = join(root, "owner");
+  const agentDir = join(root, "agent");
+  mkdirSync(join(ownerDir, "antigravity-cli"), { recursive: true });
+  const token = join(ownerDir, "antigravity-cli", "antigravity-oauth-token");
+  writeFileSync(token, "");
+  assert.equal(ownerAntigravityTokenFileExists(ownerDir), false, "an empty file is no sign-in");
+  shareAntigravitySignIn(agentDir, ownerDir);
+  assert.equal(existsSync(join(agentDir, "antigravity-cli", "antigravity-oauth-token")), false);
+  rmSync(token);
+  symlinkSync(join(root, "missing"), token);
+  assert.equal(ownerAntigravityTokenFileExists(ownerDir), false, "a link to nothing is no sign-in");
+  shareAntigravitySignIn(agentDir, ownerDir);
+  assert.equal(existsSync(join(agentDir, "antigravity-cli", "antigravity-oauth-token")), false);
 });
