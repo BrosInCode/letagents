@@ -73,10 +73,15 @@ export function antigravityWorkspaceCommandCustomizations(cwd: string): string[]
   return found.map((path) => relative(root, path) || path);
 }
 
-/** The owner-facing reason a non-Full-access agent does not run in this workspace, or null. */
-export function antigravityWorkspaceRefusal(cwd: string): string | null {
+/**
+ * The owner-facing reason a non-Full-access agent does not run in this
+ * workspace, or null. A refused start says "LetAgents will not start", the
+ * wording the desktop shows as the reason a start was refused.
+ */
+export function antigravityWorkspaceRefusal(cwd: string, when: "start" | "turn" = "start"): string | null {
   const found = antigravityWorkspaceCommandCustomizations(cwd);
   if (!found.length) return null;
   const named = `${found.slice(0, 4).join(", ")}${found.length > 4 ? ` and ${found.length - 4} more` : ""}`;
-  return `This workspace has Antigravity hooks, plugins or MCP servers (${named}). Antigravity runs them without asking at every access level, so this agent does not run here. Remove them from the workspace, or give the agent Full access.`;
+  const refusal = when === "start" ? "so LetAgents will not start this agent here" : "so LetAgents did not run this turn";
+  return `This workspace has Antigravity hooks, plugins or MCP servers (${named}). Antigravity runs them without asking at every access level, ${refusal}. Remove them from the workspace, or give the agent Full access.`;
 }

@@ -178,7 +178,7 @@ const QUOTA_JSON = JSON.stringify({ status: "SUCCESS", response: "", command: { 
   ] },
 ] } } });
 
-function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastStepError?: string | null; backgroundQuietMs?: number; workspaceRefusal?: (cwd: string) => string | null } = {}) {
+function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastStepError?: string | null; backgroundQuietMs?: number; workspaceRefusal?: (cwd: string, when: "start" | "turn") => string | null } = {}) {
   const agy = over.agy ?? new FakeAgy();
   const launches: Array<{ agyBin: string; args: string[]; cwd: string; env: Record<string, string> }> = [];
   const signals: Array<[number, NodeJS.Signals]> = [];
@@ -199,7 +199,7 @@ function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastSt
     readQuota: async () => over.quota ?? QUOTA_JSON,
     readLastStepError: async () => over.lastStepError ?? null,
     prepareOwnerSetup: (agentDir, enabled) => prepareAntigravityOwnerSetup(agentDir, enabled, ownerDir),
-    workspaceRefusal: (cwd) => over.workspaceRefusal?.(cwd) ?? null,
+    workspaceRefusal: (cwd, when) => over.workspaceRefusal?.(cwd, when) ?? null,
     launchChild: (input) => { launches.push(input); return agy; },
     roomServer: (_req, env) => ({ name: "letagents", command: "/electron", args: ["/mcp/server.js"], env: Object.entries(env).map(([name, value]) => ({ name, value })) }),
     resolveCommitEnvironment: async () => ({ GIT_AUTHOR_NAME: "Agent" }),
@@ -800,6 +800,9 @@ test("the workspace check finds what agy runs: customization folders up to the r
     join("_agent", "mcp_config.json"),
   ].sort());
   assert.match(antigravityWorkspaceRefusal(cwd) ?? "", /give the agent Full access/);
+  // The desktop shows a refused start's own reason only when it says LetAgents will not start.
+  assert.match(antigravityWorkspaceRefusal(cwd, "start") ?? "", /so LetAgents will not start this agent here/);
+  assert.match(antigravityWorkspaceRefusal(cwd, "turn") ?? "", /so LetAgents did not run this turn/);
 
   // Outside a repository, agy loads the working folder's own customizations and no parent's.
   const loose = join(root, "loose");

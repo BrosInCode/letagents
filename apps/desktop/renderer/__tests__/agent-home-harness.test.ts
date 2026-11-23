@@ -235,6 +235,10 @@ test("a start refused over the owner's setup is shown as the launch said it, and
   const stuck = "LetAgents could not restart this agent to stop it running with your own setup, so its messages are waiting. "
     + "Pause the agent and resume it to finish switching your setup off; cause: native stop failed";
   assert.equal(startRefusalReason(`convergence scheduler failure: ${stuck}`), stuck);
+  // Antigravity refuses a workspace whose hooks agy would run unasked; its reason is shown, with the files it names.
+  const workspace = "This workspace has Antigravity hooks, plugins or MCP servers (.agents/hooks.json). Antigravity runs them without asking at every access level, "
+    + "so LetAgents will not start this agent here. Remove them from the workspace, or give the agent Full access.";
+  assert.equal(startRefusalReason(`convergence scheduler failure: ${workspace}`), workspace);
   for (const other of [null, undefined, "", "convergence scheduler failure: The saved OpenCode process is no longer running.",
     "convergence scheduler failure: Claude CLI did not report its stream-json init message (deadline). This agent starts with your own Claude Code setup, so one of your MCP servers or hooks may be holding the start up."]) {
     assert.equal(startRefusalReason(other), null, String(other));

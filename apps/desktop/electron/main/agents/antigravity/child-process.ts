@@ -43,7 +43,7 @@ export interface AntigravityProviderAdapterDependencies {
   /** Place the owner's own setup in the agent's folder, or take it out. */
   prepareOwnerSetup(agentDir: string, enabled: boolean): { notices: string[] };
   /** Why an agent below Full access must not run in this workspace (hooks, plugins, MCP servers agy runs unasked), or null. */
-  workspaceRefusal(cwd: string): string | null;
+  workspaceRefusal(cwd: string, when: "start" | "turn"): string | null;
   launchChild(input: { agyBin: string; args: string[]; cwd: string; env: Record<string, string> }): AntigravityChild;
   /** The room's MCP server for this agent's sessions. `roomServerEnvironment` holds its supervisor coordinates. */
   roomServer(req: ProviderSpawnRequest, roomServerEnvironment: Record<string, string>): AntigravityRoomServerSpec;

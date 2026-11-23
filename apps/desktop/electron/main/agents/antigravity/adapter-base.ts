@@ -130,7 +130,7 @@ export abstract class AntigravityAdapterBase {
     requireSupportedAntigravityVersion(await this.deps.readVersion(this.agyBin));
     // agy runs a workspace's hooks, plugins and MCP servers at session start, with no request to answer.
     if (!authority.dangerouslySkipPermissions) {
-      const refusal = this.deps.workspaceRefusal(req.cwd);
+      const refusal = this.deps.workspaceRefusal(req.cwd, "start");
       if (refusal) throw new Error(refusal);
     }
 

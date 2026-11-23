@@ -222,7 +222,7 @@ export class AntigravityProviderAdapter extends AntigravityAdapterBase implement
     await options.checkpointTurnStarted?.(turnId);
     const context = handle.roomContext.prepare(request, handle.providerContinuationId);
     // Hooks or plugins added to the workspace since launch would run with this prompt, unasked.
-    const workspaceRefusal = handle.authority.dangerouslySkipPermissions || !handle.cwd ? null : this.deps.workspaceRefusal(handle.cwd);
+    const workspaceRefusal = handle.authority.dangerouslySkipPermissions || !handle.cwd ? null : this.deps.workspaceRefusal(handle.cwd, "turn");
     const prompt = workspaceRefusal ? Promise.resolve({ stopReason: null, error: workspaceRefusal }) : handle.connection.request<Record<string, unknown> | null>("session/prompt", {
       sessionId: handle.providerContinuationId,
       prompt: antigravityPromptBlocks(boundedAntigravityRoomTurnPrompt(request, context.lines, handle.authority), request),
