@@ -168,16 +168,20 @@ export async function createBrainPreview(host, { onUnavailable }) {
     new URL('./assets/providers/openai-mark.svg', import.meta.url).href,
     new URL('./assets/providers/claude-mark.svg', import.meta.url).href,
     new URL('./assets/providers/cursor-mark.svg', import.meta.url).href,
+    new URL('./assets/providers/antigravity-mark.svg', import.meta.url).href,
   ].map(url => textureLoader.load(url, () => requestDraw()));
+  // The Antigravity arch keeps its own colours, so its texture is read as colour, not only as a mask.
+  textures[3].colorSpace = THREE.SRGBColorSpace;
 
   // Full-surface edition paint. These original panel layouts use the official
   // palette, while the supplied provider marks retain their own proportions.
   const edition = {
     from: { value: 0 }, to: { value: 0 }, blend: { value: 0 },
-    openai: { value: textures[0] }, claude: { value: textures[1] }, cursorMark: { value: textures[2] },
+    openai: { value: textures[0] }, claude: { value: textures[1] }, cursorMark: { value: textures[2] }, antigravityMark: { value: textures[3] },
     ink: { value: new THREE.Color('#141413') }, ivory: { value: new THREE.Color('#faf9f5') },
     orange: { value: new THREE.Color('#d97757') }, cursor: { value: new THREE.Color('#1b1913') },
     chalk: { value: new THREE.Color('#edecec') }, gray: { value: new THREE.Color('#999999') },
+    space: { value: new THREE.Color('#202124') }, blue: { value: new THREE.Color('#4285f4') }, skyline: { value: new THREE.Color('#8ab4f8') },
   };
   // Steam is an illustrative effort cue, never a live model-activity reading.
   const steamState = { level: { value: 0 }, phase: { value: 0 }, cortexMatrix: { value: new THREE.Matrix4() } };
@@ -200,19 +204,24 @@ export async function createBrainPreview(host, { onUnavailable }) {
       vec3 neuralInk;
       uniform float edition_from, edition_to, edition_blend;
       uniform vec3 edition_ink, edition_ivory, edition_orange, edition_cursor, edition_chalk, edition_gray;
-      uniform sampler2D edition_openai, edition_claude, edition_cursorMark;
-      float markMask(vec3 p, float style) {
+      uniform vec3 edition_space, edition_blue, edition_skyline;
+      uniform sampler2D edition_openai, edition_claude, edition_cursorMark, edition_antigravityMark;
+      vec2 markUv(vec3 p, float style) {
         // A three-quarter projection keeps the complete silhouette readable
         // at the resting angle, while its shading still follows every fold.
         vec2 surface = vec2(.62 * abs(p.x) - .78 * p.z,
           .95 * p.y - .31 * (.78 * abs(p.x) + .62 * p.z));
-        vec2 center = style < .5 ? vec2(.16, .16) : style < 1.5 ? vec2(.16, .09) : vec2(.20, -.06);
-        vec2 size = style < .5 ? vec2(.94) : style < 1.5 ? vec2(1.08) : vec2(.84 * 466.73 / 532.09, .84);
-        vec2 uv = (surface - center) / size + .5;
+        vec2 center = style < .5 ? vec2(.16, .16) : style < 1.5 ? vec2(.16, .09) : style < 2.5 ? vec2(.20, -.06) : vec2(.16, .09);
+        vec2 size = style < .5 ? vec2(.94) : style < 1.5 ? vec2(1.08) : style < 2.5 ? vec2(.84 * 466.73 / 532.09, .84) : vec2(1.45);
+        return (surface - center) / size + .5;
+      }
+      float markMask(vec3 p, float style) {
+        vec2 uv = markUv(p, style);
         float inside = step(0., uv.x) * step(uv.x, 1.) * step(0., uv.y) * step(uv.y, 1.);
         float alpha = style < .5 ? texture2D(edition_openai, uv).a
           : style < 1.5 ? texture2D(edition_claude, uv).a
-          : style < 2.5 ? texture2D(edition_cursorMark, uv).a : 0.;
+          : style < 2.5 ? texture2D(edition_cursorMark, uv).a
+          : style < 3.5 ? texture2D(edition_antigravityMark, uv).a : 0.;
         return alpha * inside * editionSide * smoothstep(.18, .38, abs(p.x));
       }
       vec3 editionPaint(vec3 p, float style) {
@@ -233,11 +242,18 @@ export async function createBrainPreview(host, { onUnavailable }) {
           float chevron = p.y - .48 * abs(p.z - .18) + .12;
           paint = mix(edition_cursor, edition_chalk, smoothstep(.72, .75, chevron));
           paint = mix(paint, edition_chalk, (1. - smoothstep(.012, .027, abs(chevron - .60))) * .8);
+        } else if (style < 3.5) {
+          // Night graphite with a Google-blue orbit and a pale sky pinstripe.
+          float orbit = p.y - .22 * p.z + .14 * p.z * p.z + .52;
+          paint = mix(edition_space, edition_blue, 1. - smoothstep(.15, .175, abs(orbit)));
+          paint = mix(paint, edition_skyline, (1. - smoothstep(.008, .018, abs(orbit + .25))) * .85);
         } else {
           float stripe = p.y + .15 * p.z;
           paint = mix(edition_gray, edition_ivory, 1. - smoothstep(.09, .115, abs(stripe + .27)));
         }
-        vec3 markColor = style < .5 ? edition_ink : edition_chalk;
+        vec3 markColor = style < .5 ? edition_ink
+          : style < 2.5 ? edition_chalk
+          : style < 3.5 ? texture2D(edition_antigravityMark, markUv(p, style)).rgb : edition_chalk;
         return mix(paint, markColor, markMask(p, style));
       }
     ` + shader.fragmentShader;
@@ -404,6 +420,7 @@ export async function createBrainPreview(host, { onUnavailable }) {
     { rim: '#ffffff', metalness: .08 },
     { rim: '#faf9f5', metalness: .04 },
     { rim: '#edecec', metalness: .12 },
+    { rim: '#e8f0fe', metalness: .10 },
     { rim: '#ffffff', metalness: .08 },
   ].map(palette => ({ ...palette, rim: new THREE.Color(palette.rim) }));
   let position = 0, active = false, animate = true, frame = 0, last = 0, time = 0, disposed = false, failed = false;

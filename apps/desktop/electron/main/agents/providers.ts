@@ -57,6 +57,7 @@ import {
 } from "../desktop-shell-environment.js";
 import { supervisorDaemonClient } from "../supervisor-daemon.js";
 import { supervisorDaemonAllowed } from "../platform-capabilities.js";
+import { ownerAntigravityTokenFileExists } from "./antigravity/sign-in.js";
 
 export { listDesktopAgentProviders } from "./provider-registry.js";
 
@@ -359,6 +360,8 @@ async function claudeCodePreflight(
  * reads no secret. Elsewhere there is no safe read, so the launch says it.
  */
 async function antigravitySignInKnownMissing(timeoutMs?: number): Promise<boolean> {
+  // When the keychain does not answer in time, agy keeps the sign-in in a file instead.
+  if (ownerAntigravityTokenFileExists()) return false;
   if (process.platform !== "darwin") return false;
   const result = await execFileWithTimeout("/usr/bin/security", ["find-generic-password", "-s", "gemini", "-a", "antigravity"], { timeoutMs });
   // 44 is "The specified item could not be found in the keychain."

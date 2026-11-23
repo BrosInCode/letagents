@@ -16,10 +16,6 @@
       message="Check the agent app and selected project, then choose Check again."
       tone="error"
     />
-    <details v-if="error || preflight?.status === 'error'">
-      <summary tabindex="0">Technical details</summary>
-      <p>{{ error || statusDescription }}</p>
-    </details>
 
     <details
       class="desktop-add-agent-setup-details"

@@ -212,10 +212,12 @@ const {
 } = useAddAgentPresentation(props, setup, configuration);
 let setupActions!: ReturnType<typeof setup.bind>;
 // Registered before the setup watchers so the provider is chosen before the
-// window loads its providers; that load keeps a provider it still lists.
-watch(() => props.open, (open) => {
-  if (open && props.initialProviderId && selectedProviderId.value !== props.initialProviderId) {
-    selectedProviderId.value = props.initialProviderId;
+// window loads its providers; that load keeps a provider it still lists. Both
+// props are watched: Vue sets `open` before `initialProviderId`, so a watch on
+// `open` alone saw the provider of the last opening (or none).
+watch(() => [props.open, props.initialProviderId] as const, ([open, initialProviderId]) => {
+  if (open && initialProviderId && selectedProviderId.value !== initialProviderId) {
+    selectedProviderId.value = initialProviderId;
   }
 }, { flush: "sync" });
 const {

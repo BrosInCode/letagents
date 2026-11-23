@@ -306,6 +306,7 @@ const requiredAppFiles = [
   "dist-electron/main/agents/antigravity/launch.js",
   "dist-electron/main/agents/antigravity/owner-setup.js",
   "dist-electron/main/agents/antigravity/permissions.js",
+  "dist-electron/main/agents/antigravity/sign-in.js",
   "dist-electron/main/agents/antigravity/tool-display.js",
   "dist-electron/main/agents/antigravity/turn-errors.js",
   "dist-electron/main/agents/antigravity/turn-results.js",

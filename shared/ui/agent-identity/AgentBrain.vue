@@ -20,7 +20,7 @@ function sync() {
   const animate = props.animate && !media?.matches;
   const provider = props.provider || '';
   preview?.setState({ active: props.active, animate });
-  preview?.setSelection(({ codex: 0, 'claude-code': 1, cursor: 2 } as Record<string, number>)[provider] ?? 3);
+  preview?.setSelection(({ codex: 0, 'claude-code': 1, cursor: 2, antigravity: 3 } as Record<string, number>)[provider] ?? 4);
   preview?.setCapability(editions[provider]?.[props.model.replace(/^option:/, '')] ?? null, { immediate: !animate });
   preview?.setEffort(props.effort, { immediate: !animate });
 }
