@@ -34,9 +34,15 @@ async function standInToolsList(contract: EdgeDevMcpCompletionContract): Promise
   try {
     const entry = await materializeDevMcpPackage(join(root, "dev-mcp"), contract);
     const child = spawn(process.execPath, [entry], { stdio: ["pipe", "pipe", "pipe"] });
+    const exited = new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+      child.once("error", () => resolve());
+    });
+    let deadline: NodeJS.Timeout | undefined;
     try {
       return await new Promise((resolve, reject) => {
         let buffer = "";
+        deadline = setTimeout(() => reject(new Error("the stand-in did not answer tools/list within 15 s")), 15_000);
         child.once("error", reject);
         child.once("exit", (code, signal) => reject(new Error(`the stand-in exited early (${code ?? signal})`)));
         child.stdout.setEncoding("utf8");
@@ -63,7 +69,10 @@ async function standInToolsList(contract: EdgeDevMcpCompletionContract): Promise
         })}\n`);
       });
     } finally {
-      child.kill();
+      clearTimeout(deadline);
+      // Wait for the exit before the folder is removed: Windows keeps a running entry's folder busy.
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await exited;
     }
   } finally {
     await rm(root, { recursive: true, force: true });
