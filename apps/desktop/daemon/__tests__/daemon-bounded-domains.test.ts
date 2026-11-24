@@ -204,6 +204,13 @@ test("daemon policy and projection domains remain extracted", () => {
   for (const file of mainFiles) assert.ok(read(file).split("\n").length < 600, `${file} must stay under 600 lines`);
 });
 
+test("convergence-policy remains a pure, zero-I/O module with no clocks, timers, or process access", () => {
+  const source = read("../convergence-policy.ts");
+  assert.doesNotMatch(source, /from\s+["']node:/, "convergence-policy must not import Node built-ins");
+  assert.doesNotMatch(source, /\bDate\b|\bsetTimeout\b|\bsetInterval\b|\bsetImmediate\b|\bfetch\b|\bMath\.random\b|\bprocess\./,
+    "convergence-policy must not access clocks, timers, randomness, network, or process globals");
+});
+
 function read(relativePath: string): string {
   return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8");
 }

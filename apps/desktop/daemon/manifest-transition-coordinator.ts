@@ -1,4 +1,5 @@
 import { redactCredentialText } from "./credential-redaction.js";
+import { ManifestConflictError } from "./manifest-store.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import { advanceReconciliationState } from "./reconciler-state.js";
 import type {
@@ -97,9 +98,21 @@ export class ManifestTransitionCoordinator {
     cause: string,
     actor: string,
     reconciliation?: DaemonManifestEntry["reconciliation"],
+    expectedVersion?: number,
   ): Promise<void> {
     return this.ports.authority.serializeMutation(() =>
-      this.transitionOnce(entryId, to, condition, cause, actor, reconciliation));
+      this.transitionOnce(
+        entryId,
+        to,
+        condition,
+        cause,
+        actor,
+        reconciliation,
+        undefined,
+        undefined,
+        undefined,
+        expectedVersion,
+      ));
   }
 
   async transitionOnce(
@@ -112,10 +125,14 @@ export class ManifestTransitionCoordinator {
     notice?: ReconciliationNotice["kind"],
     terminal?: ExecutionTerminalPayload,
     commitFence?: CommitFence,
+    expectedVersion?: number,
   ): Promise<void> {
     await this.ports.authority.assertCurrent();
     const loaded = await this.ports.store.getEntryWithVersion(entryId);
     if (!loaded) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+    if (expectedVersion !== undefined && loaded.version !== expectedVersion) {
+      throw new ManifestConflictError(`Agent ${entryId} version ${loaded.version} does not match expected ${expectedVersion}.`);
+    }
     const entry = loaded.entry;
     const safeCause = redactCredentialText(cause).value;
     const safeActor = redactCredentialText(actor).value;
@@ -168,7 +185,7 @@ export class ManifestTransitionCoordinator {
       reconciliation_notices: notices.slice(-32),
     };
     const next = await this.ports.store.replaceEntry(
-      loaded.version,
+      expectedVersion ?? loaded.version,
       updated,
       commitFence ?? this.ports.authority.fenceCommit,
     );
