@@ -3717,8 +3717,8 @@ async function realSqliteSchedulerHarness(input: {
     schedulerFailures,
     scheduledRecoveryDelays,
     transitionCalls: () => transitionCalls,
-    cleanup: () => {
-      store.close();
+    cleanup: async () => {
+      await store.close();
       rmSync(dir, { recursive: true, force: true });
     },
   };
@@ -3765,7 +3765,7 @@ test("request() recovers from a real concurrent manifest write on the running pa
       assert.equal(progress?.attempt, 1, "retryable conflict must not inflate launch attempt counter");
       assert.equal(progress?.failure, null);
     } finally {
-      env.cleanup();
+      await env.cleanup();
     }
   });
 
@@ -3803,7 +3803,7 @@ test("request() recovers from a real concurrent manifest write on the running pa
       assert.equal(final?.observed_state, "stopped");
       assert.equal(final?.condition, "none");
     } finally {
-      flippedEnv.cleanup();
+      await flippedEnv.cleanup();
     }
   });
 });
@@ -3843,7 +3843,7 @@ test("request() recovers from a real concurrent manifest write on the stopped pa
       assert.equal(final?.observed_state, "stopping");
       assert.equal(final?.condition, "none");
     } finally {
-      stoppedEnv.cleanup();
+      await stoppedEnv.cleanup();
     }
   });
 
@@ -3881,7 +3881,7 @@ test("request() recovers from a real concurrent manifest write on the stopped pa
       assert.equal(final?.observed_state, "working");
       assert.equal(final?.condition, "none");
     } finally {
-      flippedEnv.cleanup();
+      await flippedEnv.cleanup();
     }
   });
 });
@@ -3959,7 +3959,7 @@ test("retireUnprovenPredecessor re-reads the entry version after provider.stopRe
     assert.match(final?.last_error ?? "", /earlier provider process is not proven gone/i);
     assert.equal(env.scheduledRecoveryDelays.length, 1);
   } finally {
-    env.cleanup();
+    await env.cleanup();
   }
 });
 
@@ -4014,7 +4014,7 @@ test("request() bounds persistent concurrent conflicts on both running and stopp
         new RegExp(`Convergence conflict retry limit \\(${CONVERGENCE_CONFLICT_RETRY_LIMIT}\\) exhausted`),
       );
     } finally {
-      env.cleanup();
+      await env.cleanup();
     }
   }
 });
@@ -4046,7 +4046,7 @@ test("request() never treats DaemonFenceLostError as a conflict retry and execut
     assert.equal(final?.observed_state, "absent");
     assert.equal(final?.condition, "none");
   } finally {
-    env.cleanup();
+    await env.cleanup();
   }
 });
 
@@ -4084,7 +4084,7 @@ test("unsafe rental permission profile stops delivery fail-closed before quarant
     assert.equal(env.schedulerFailures.length, 1);
     assert.ok(env.schedulerFailures[0] instanceof ConvergenceConflictExhaustedError);
   } finally {
-    env.cleanup();
+    await env.cleanup();
   }
 });
 
@@ -4110,6 +4110,6 @@ test("request() bounds persistent ManifestConflictError thrown during post-conve
     assert.ok(env.schedulerFailures[0] instanceof ProviderStopError);
     assert.ok(env.schedulerFailures[0].cause instanceof ConvergenceConflictExhaustedError);
   } finally {
-    env.cleanup();
+    await env.cleanup();
   }
 });

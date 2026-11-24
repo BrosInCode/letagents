@@ -206,7 +206,7 @@ test("expectedVersion CAS on real SQLite ManifestStore rejects stale transitions
     assert.equal(auditEvents.length, 1);
     assert.equal(maxLockDepth, 1);
   } finally {
-    store.close();
+    await store.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
