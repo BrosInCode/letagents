@@ -1,6 +1,7 @@
 import { statfs } from "node:fs/promises";
 import { backup, DatabaseSync } from "node:sqlite";
 import { DaemonStateSchema } from "./daemon-state-database.js";
+import { hasWorkspaceReviewSchema } from "./room-workspace-store.js";
 import { cloneStateDatabaseForCompaction } from "./state-recovery-backup.js";
 
 const MIN_RECLAIM_BYTES = 64 * 1024 * 1024;
@@ -33,6 +34,13 @@ export async function compactDaemonStateDatabase(
     }
     return "not_needed";
   }
+  // Background conversion releases inline review pages in batches. Compacting
+  // halfway through would copy the remaining archives back into RAM at startup,
+  // then repeat the same work as the publisher frees more pages. An encrypted
+  // reference fits in 180 bytes even in UTF-16. octet_length reads record sizes.
+  if (hasWorkspaceReviewSchema(database) && Number(database.prepare(
+    "SELECT sum(octet_length(data)) AS bytes FROM room_workspace_reviews WHERE octet_length(data)>180",
+  ).get()?.bytes) >= MIN_RECLAIM_BYTES) return "not_needed";
   await assertCurrent();
   // The compact copy lives in memory. Leave room for its destination journal
   // and checkpoint, as well as unrelated host writes while startup completes.

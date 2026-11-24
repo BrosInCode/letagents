@@ -418,9 +418,12 @@ export class RoomWorkPublisher {
     this.running = true;
     let more = false;
     let failed = false;
+    let archiveWork = false;
     try {
       await this.options.assertCurrent();
       if (this.unavailable()) return;
+      try { archiveWork = this.workspaces.maintainArchives(this.now()); }
+      catch { this.report("storage_unavailable"); }
       // Give changed agents the next pass, alternating with the recovery sweep
       // so continuous live output cannot starve missed hints or retry work.
       // Still only one agent (at most 10k pins/facts) per pass.
@@ -450,7 +453,8 @@ export class RoomWorkPublisher {
       if (this.unavailable()) return;
       const grouped = this.pendingGroupedReports(agentId);
       const pending = this.store.list(agentId)
-        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision || this.pendingReviewPage(record)))
+        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision
+          || (hasReviewableRoomContribution(record.summary) && this.workspaces.hasPendingPage(record.agentId, record.roomId, record.sourceMessageId))))
         .sort((a, b) => (this.attemptedAt.get(key(a)) ?? -Infinity) - (this.attemptedAt.get(key(b)) ?? -Infinity));
       const eligible: Array<{ record: RoomWorkPublication; authority: NonNullable<ReturnType<RoomWorkPublisher["authority"]>> }> = [];
       for (const record of pending) {
@@ -480,7 +484,7 @@ export class RoomWorkPublisher {
             this.store.acknowledge(record);
             if (reviewPage) {
               this.workspaces.acknowledgePage(record.agentId, record.roomId, record.sourceMessageId, reviewPage);
-              more = more || !!this.pendingReviewPage(record);
+              more = more || this.workspaces.hasPendingPage(record.agentId, record.roomId, record.sourceMessageId);
             }
             this.attemptedAt.delete(key(record));
           }
@@ -514,7 +518,7 @@ export class RoomWorkPublisher {
       this.running = false;
       // A failed pass may not have consumed its hint. Preserve it, but replace
       // even a wake queued during the failure so lost authority cannot spin.
-      this.schedule(failed ? RETRY_MS : this.settledAgents.size ? 0 : more || this.changedAgents.size ? COALESCE_MS : RETRY_MS, failed);
+      this.schedule(failed ? RETRY_MS : this.settledAgents.size ? 0 : more || archiveWork || this.changedAgents.size ? COALESCE_MS : RETRY_MS, failed);
     }
   }
 }

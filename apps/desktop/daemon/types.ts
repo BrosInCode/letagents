@@ -1,6 +1,6 @@
 import type { AgentAvatar } from "../../../shared/agent-avatar.mjs";
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.287";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.288";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";

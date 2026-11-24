@@ -119,6 +119,7 @@
             />
             <AddAgentSupervisedLaunch
               :controller="supervisedUi"
+              :supervisor-error-shown="preflight?.blockedBySupervisor"
             />
 
             <AddAgentFeedback v-if="setupMessage" :message="setupMessage" :tone="setupMessageTone" />

@@ -5,7 +5,7 @@ import { forceStopDaemon, waitForConfirmedDaemonExit } from "../force-daemon-res
 import type { DesktopSupervisorDaemonStatus } from "../../ipc-types.js";
 import { desktopShellEnvironmentReady } from "../desktop-shell-environment.js";
 import { SupervisedAgentsUnsupportedError, supervisorDaemonAllowed } from "../platform-capabilities.js";
-import { prepareSupervisorState } from "../supervisor-state-recovery.js";
+import { prepareSupervisorState, SupervisorPreparationPendingError } from "../supervisor-state-recovery.js";
 import {
   HANDOFF_DRAIN_REQUEST_TIMEOUT_MS,
   MANIFEST_LIST_REQUEST_TIMEOUT_MS,
@@ -189,7 +189,10 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
         supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
     } catch (error) {
       // An absent daemon will inherit this environment when explicitly started.
-      if (isConnectionUnavailable(error)) return true;
+      if (isConnectionUnavailable(error)) {
+        if (this.ownedDaemon && !this.ownedDaemon.ready) throw new SupervisorPreparationPendingError();
+        return true;
+      }
       throw error;
     }
   }

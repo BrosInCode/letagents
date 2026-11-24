@@ -83,6 +83,8 @@ export interface DesktopAgentProviderPreflight {
   nextAction: DesktopAgentProviderSetupAction | "install_external_runtime" | "authenticate" | "choose_repo" | "choose_worktree" | null;
   version: string | null;
   mcpStatus: "not_installed" | "installed" | "needs_attention" | null;
+  /** Provider probes succeeded, but the shared local supervisor could not be checked. */
+  blockedBySupervisor?: true;
   branchMismatch?: {
     expectedBranch: string;
     currentBranch: string | null;

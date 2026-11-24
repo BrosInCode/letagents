@@ -20,6 +20,20 @@ import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLed
 import { SCHEMA_VERSION, applyAgentAvatarColumn, applyWorkerExecutionBindings, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyDaemonEfficiencyMigration, run, schemaMethods } from "./shared.js";
 
 export const storageMigrations = schemaMethods({
+/** v54 can read both inline review bytes and sealed archive references.
+ * Fence older writers before the publisher starts moving historical rows. */
+migrateReviewArchiveStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version=? WHERE singleton=1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version=${SCHEMA_VERSION}; COMMIT`);
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+},
 /**
  * Admit the Antigravity provider. Runtime births, cutovers and every row that
  * points at them are kept; only the provider CHECK lists widen. Comparator

@@ -277,7 +277,12 @@ export function useAddAgentSetup() {
         await loadProviders();
         return;
       }
+      const version = currentVersion();
+      const retrySupervisor = preflight.value?.blockedBySupervisor === true;
       await refreshSelectedProvider({ forceModels: true, refreshEnvironment: true });
+      if (retrySupervisor && isCurrentRequest(version) && preflight.value?.canStart) {
+        bindings.onDetectRecoverableLaunch();
+      }
     }
 
     function selectProvider(providerId: DesktopAgentProviderId): void {

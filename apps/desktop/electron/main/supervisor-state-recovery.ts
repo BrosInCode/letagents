@@ -3,6 +3,14 @@ import { createRequire } from "node:module";
 import type { ChildProcess } from "node:child_process";
 import { loadHostApprovalSigner } from "./host-approval-auth.js";
 
+/** Contains only bootstrap diagnostics written by Desktop. */
+export class SupervisorStatePreparationError extends Error {}
+export class SupervisorPreparationPendingError extends SupervisorStatePreparationError {
+  constructor() {
+    super("The supervisor has not confirmed database preparation yet. It may still be preparing; retry shortly or check the local service diagnostics. The upgrade has not been cancelled.");
+  }
+}
+
 type SecretStorage = {
   isEncryptionAvailable(): boolean;
   encryptString(value: string): Buffer;
@@ -64,9 +72,9 @@ export function prepareSupervisorState(
       child.off("disconnect", exited);
       if (error) reject(error); else resolve();
     };
-    const exited = () => finish(new Error(keyUnavailable
+    const exited = () => finish(new SupervisorStatePreparationError(keyUnavailable
       ? "Secure storage is unavailable. Unlock it and retry the Desktop database upgrade."
-      : "The supervisor could not prepare its database. Existing state has not been replaced; check the local service diagnostics."));
+      : "The supervisor could not prepare its database. Check the local service diagnostics before retrying."));
     const receive = (message: unknown) => {
       if (!message || typeof message !== "object") return;
       const value = message as Record<string, unknown>;
@@ -103,12 +111,9 @@ export function prepareSupervisorState(
         material?.key.fill(0);
       }
     };
-    // Bound the caller's wait, not the work. A slow snapshot keeps its singleton
-    // and may finish normally; a later request can attach once the socket opens.
-    // Never kill the child or cancel its SQLite transaction on this deadline.
-    const timer = setTimeout(() => finish(new Error(
-      "The supervisor has not confirmed database preparation yet. It may still be preparing; retry shortly or check the local service diagnostics. The upgrade has not been cancelled.",
-    )), callerWaitMs);
+    // A slow migration keeps its singleton and may request the key after the
+    // caller times out. Keep serving this child until readiness, exit or disconnect.
+    const timer = setTimeout(() => reject(new SupervisorPreparationPendingError()), callerWaitMs);
     child.on("message", receive);
     child.once("error", exited);
     child.once("exit", exited);

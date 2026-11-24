@@ -757,14 +757,24 @@ test("secure-storage failure reaches bootstrap caller without leaking original e
   await assert.rejects(prepared, /Unlock it/);
 });
 
-test("silent bootstrap bounds caller wait without killing work and ignores late readiness", async () => {
+test("a caller deadline keeps serving the original child's late one-time key request", async () => {
   const child = new EventEmitter() as ChildProcess;
-  child.send = (() => true) as ChildProcess["send"];
+  Object.defineProperty(child, "connected", { value: true });
+  const replies: Array<{ type: string }> = [];
+  child.send = ((message: { type: string }, callback: () => void) => {
+    replies.push(message); callback(); return true;
+  }) as ChildProcess["send"];
   child.kill = () => { assert.fail("a caller deadline cannot terminate migration"); };
-  const prepared = prepareSupervisorState(child, undefined, 5);
+  const key = Buffer.alloc(32, 3);
+  const prepared = prepareSupervisorState(child, () => ({ key, sealedKey: "sealed" }), 5);
   await assert.rejects(prepared, /may still be preparing.*has not been cancelled/);
-  for (const event of ["message", "error", "exit", "disconnect"]) assert.equal(child.listenerCount(event), 0);
+  const request = { type: "state_recovery_key_request", id: "00000000-0000-4000-8000-000000000000" };
+  child.emit("message", request);
+  child.emit("message", request);
+  assert.deepEqual(replies.map(reply => reply.type), ["state_recovery_key"]);
+  assert.ok(key.equals(Buffer.alloc(32)));
   child.emit("message", { type: "state_recovery_ready" });
+  for (const event of ["message", "error", "exit", "disconnect"]) assert.equal(child.listenerCount(event), 0);
 });
 
 test("a silent bootstrap retains child ownership across caller timeouts until later readiness", async () => {
@@ -789,6 +799,7 @@ test("a silent bootstrap retains child ownership across caller timeouts until la
     await didSpawn;
     const updateCheck = assert.rejects(client.prepareForApplicationUpdate(), /has not confirmed database preparation/);
     await Promise.all([startCheck, updateCheck]);
+    await assert.rejects(client.isRuntimeEnvironmentCurrent(), /not confirmed database preparation/);
     // IPC disconnection is not process exit. Retrying before the socket opens
     // must not launch a contender or let an update bypass the live child.
     child.emit("disconnect");
@@ -3691,7 +3702,7 @@ test("desktop replaces the pre-avatar implementation and accepts only the new ex
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.287");
+    assert.equal(status.implementationVersion, "2.0.288");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
