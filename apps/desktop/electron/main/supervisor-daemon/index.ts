@@ -14,6 +14,7 @@ export { SupervisorDaemonProtocolMismatchError } from "./errors.js";
 export { defaultInspectDaemonProcess } from "./process-identity.js";
 export {
   supervisorCompatibilityFingerprint,
+  supervisorDaemonSpawnArguments,
   supervisorDaemonSpawnEnvironment,
   supervisorRuntimeEnvironmentFingerprint,
 } from "./spawn-environment.js";

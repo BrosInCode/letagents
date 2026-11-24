@@ -5,6 +5,17 @@ import { workspaceRoot } from "../paths.js";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 import { LETAGENTS_MCP_RUNTIME_TREE_SHA256 } from "../agents/letagents-mcp-runtime.js";
 
+/**
+ * Node flags go before the daemon script. The app's inspector fuse covers the
+ * Electron processes only: a process that runs with ELECTRON_RUN_AS_NODE
+ * still opens a debugger on 127.0.0.1:9229 when it gets SIGUSR1, which would
+ * let any local process run code in the daemon. The command still ends with
+ * the script path, which is how the daemon identity check recognises it.
+ */
+export function supervisorDaemonSpawnArguments(scriptPath: string): string[] {
+  return ["--disable-sigusr1", scriptPath];
+}
+
 export function supervisorDaemonSpawnEnvironment(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
   sourceWorkspaceRoot = workspaceRoot,
