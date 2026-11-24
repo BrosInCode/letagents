@@ -95,7 +95,7 @@ function fakeCodex(): { bin: string; report: string; calls: () => Array<{ args: 
     "  const letagents = { name: 'letagents', enabled: true, transport: { type: 'stdio', command: 'npx', args: steered ? ['./evil.js'] : ['-y', 'letagents'], env: null } };",
     "  // A project that adds its own server, listed off only once the launch names it.",
     "  const project = process.env.FAKE_CODEX_PROJECT_SERVER === '1' && inProject",
-    "    ? [{ name: 'repo_evil', enabled: !overrides.includes('\"repo_evil\" = { enabled = false }') }] : [];",
+    "    ? [{ name: 'repo_evil', enabled: !overrides.includes('\"repo_evil\" = { command = \"letagents-disabled\", enabled = false }') }] : [];",
     "  process.stdout.write(JSON.stringify([{ name: 'owner_browser' }, { name: 'owner.dotted' }, letagents, ...project]));",
     "}",
     "// The short-lived app-server a launch with the owner's setup asks about the project.",
@@ -207,6 +207,15 @@ test("Codex override builders disable named skills and every MCP server but LetA
   assert.equal(
     codexMcpServerDisableOverride(["owner.dotted", "letagents", "owner_browser", "owner_browser"]),
     'mcp_servers={ "owner.dotted" = { enabled = false }, "owner_browser" = { enabled = false } }',
+  );
+  assert.equal(
+    codexMcpServerDisableOverride([
+      "owner_browser",
+      { name: "repo_only", inertTransport: "stdio" },
+      { name: "repo_http", inertTransport: "streamable_http" },
+      "letagents",
+    ]),
+    'mcp_servers={ "owner_browser" = { enabled = false }, "repo_http" = { url = "http://127.0.0.1:0/disabled", enabled = false }, "repo_only" = { command = "letagents-disabled", enabled = false } }',
   );
   assert.deepEqual([...CODEX_OWNER_FEATURE_OVERRIDES], [
     "features.plugins=false",
@@ -489,8 +498,15 @@ test("the installed Codex loads none of the owner's plugins, personal skills or 
   const project = realpathSync(githubRepo("contract-project"));
   appendFileSync(join(codexHome, "config.toml"), `\n[projects.${JSON.stringify(project)}]\ntrust_level = "trusted"\n`);
   mkdirSync(join(project, ".codex"));
-  writeFileSync(join(project, ".codex", "config.toml"),
-    `[mcp_servers.repo_only]\ncommand = "node"\nargs = [${JSON.stringify(fakeMcp)}]\n`);
+  writeFileSync(join(project, ".codex", "config.toml"), [
+    "[mcp_servers.repo_only]",
+    'command = "node"',
+    `args = [${JSON.stringify(fakeMcp)}]`,
+    "",
+    "[mcp_servers.repo_http]",
+    'url = "http://127.0.0.1:9/repo"',
+    "",
+  ].join("\n"));
   writeSkill(join(project, ".agents", "skills", "repo-skill"), "repo-skill");
 
   const serverUrl = await freeLoopbackUrl();
@@ -522,7 +538,8 @@ test("the installed Codex loads none of the owner's plugins, personal skills or 
   assert.deepEqual(servers.get("letagents"), ["owner_tool"], "the room's own server still starts");
   assert.deepEqual(servers.get("owner_browser"), []);
   assert.deepEqual(servers.get("owner.dotted"), []);
-  assert.deepEqual(servers.get("repo_only"), [], "a trusted project's own server is off too, and the launch still starts");
+  assert.deepEqual(servers.get("repo_only"), [], "a trusted project's own stdio server is off too, and the launch still starts");
+  assert.deepEqual(servers.get("repo_http"), [], "a trusted project's own HTTP server is off too, and the launch still starts");
 
   const commandEnv = await client.request<{ stdout: string }>("command/exec", {
     command: ["/usr/bin/env"], cwd: project, sandboxPolicy: { type: "dangerFullAccess" },
@@ -808,7 +825,10 @@ async function homeHarnessDecision(project: {
       if (options.cwd === "/") return outside as never[];
       return (project.servers ?? outside).map((server) => ({
         ...server,
-        enabled: options.configOverrides.some((override) => override.includes(`${JSON.stringify(server.name)} = { enabled = false }`))
+        enabled: options.configOverrides.some((override) =>
+          override.includes(`${JSON.stringify(server.name)} = { enabled = false }`)
+          || override.includes(`${JSON.stringify(server.name)} = { command = "letagents-disabled", enabled = false }`)
+          || override.includes(`${JSON.stringify(server.name)} = { url = "http://127.0.0.1:0/disabled", enabled = false }`))
           && project.stuck?.server !== server.name ? false : server.enabled,
       })) as never[];
     },
@@ -848,12 +868,18 @@ test("a launch with the owner's own setup adds nothing when the project contribu
 
 test("a server only the project defines is turned off by name, and the launch checks that it is", async () => {
   const decision = await homeHarnessDecision({
-    servers: [ownerServer("owner_browser"), roomServer, ownerServer("repo_evil"), ownerServer("repo.dotted")],
-    // A second server the listing did not show, named only in the project's own layer.
-    layers: [{ dotCodexFolder: "/work/attempt/.codex", config: { mcp_servers: { repo_evil: {}, repo_quiet: {} } } }],
+    servers: [
+      ownerServer("owner_browser"),
+      roomServer,
+      ownerServer("repo_evil"),
+      ownerServer("repo.dotted"),
+      ownerServer("repo_http", { transport: { type: "streamable_http", url: "https://example.invalid/mcp" } }),
+    ],
+    // Two servers the listing did not show, named only in the project's own layer.
+    layers: [{ dotCodexFolder: "/work/attempt/.codex", config: { mcp_servers: { repo_evil: {}, repo_quiet: {}, repo_quiet_http: { url: "https://example.invalid/quiet" } } } }],
   });
   assert.deepEqual(decision.overrides, [
-    'mcp_servers={ "repo.dotted" = { enabled = false }, "repo_evil" = { enabled = false }, "repo_quiet" = { enabled = false } }',
+    'mcp_servers={ "repo.dotted" = { command = "letagents-disabled", enabled = false }, "repo_evil" = { command = "letagents-disabled", enabled = false }, "repo_http" = { url = "http://127.0.0.1:0/disabled", enabled = false }, "repo_quiet" = { command = "letagents-disabled", enabled = false }, "repo_quiet_http" = { url = "http://127.0.0.1:0/disabled", enabled = false } }',
   ]);
   assert.equal(decision.listed.length, 3, "the servers are listed again with the override");
   assert.deepEqual(decision.listed[2], ["/work/attempt", 'model="m"', decision.overrides[0]]);
@@ -1142,7 +1168,7 @@ test("with the owner's own setup a project's server and hooks are turned off for
     },
   });
   assert.deepEqual(overridesOf(launched.server!.args).slice(-3), [
-    'mcp_servers={ "repo_evil" = { enabled = false } }',
+    'mcp_servers={ "repo_evil" = { command = "letagents-disabled", enabled = false } }',
     codexHookDisableOverride([projectHook.key, labelledOwners.key]),
     'model="caller-model"',
   ]);
@@ -1246,7 +1272,7 @@ test("a running Codex is known to have its owner's setup by what it was started 
   assert.equal(codexProcessKeepsOwnerSetup(isolated.replace("-c features.hooks=false ", "")), true, "one missing override is not an isolated launch");
   assert.equal(codexProcessKeepsOwnerSetup(""), true, "an unreadable command line is not assumed isolated");
 
-  const serverOff = 'mcp_servers={ "repo_evil" = { enabled = false } }';
+  const serverOff = 'mcp_servers={ "repo_evil" = { command = "letagents-disabled", enabled = false } }';
   const hookOff = codexHookDisableOverride(["/work/attempt/.codex/hooks.json:session_start:0:0"])!;
   const projectHook = { key: "/work/attempt/.codex/hooks.json:session_start:0:0", source: "project" };
   const check = (commandLine: string, project: { servers?: string[]; hooks?: boolean; refuses?: boolean; fails?: boolean; cwd?: string | null }) => {
@@ -1256,7 +1282,10 @@ test("a running Codex is known to have its owner's setup by what it was started 
         if (project.fails) throw new Error("Codex could not list its MCP servers");
         const owner = [ownerServer("owner_browser")];
         if (options.cwd === "/") return owner as never[];
-        return [...owner, ...names.map((name) => ({ ...ownerServer(name), enabled: !options.configOverrides.some((override) => override.includes(`"${name}" = { enabled = false }`)) })),
+        return [...owner, ...names.map((name) => ({ ...ownerServer(name), enabled: !options.configOverrides.some((override) =>
+          override.includes(`"${name}" = { enabled = false }`)
+          || override.includes(`"${name}" = { command = "letagents-disabled", enabled = false }`)
+          || override.includes(`"${name}" = { url = "http://127.0.0.1:0/disabled", enabled = false }`)) })),
           ...(project.refuses ? [] : [])] as never[];
       },
       inspect: async (_bin: string, options: { configOverrides: readonly string[] }) => ({
@@ -1831,11 +1860,15 @@ test("the installed Codex reloads a trusted project's config in a running proces
   assert.equal(existsSync(attach.ran("late-server")), false, "nothing of the project's has run: reading and resuming a live conversation, and a turn, do not reload the project");
 
   // What that avoids. The re-attach every agent got before, and every agent without the setup still
-  // gets, lists the MCP servers: on this same process that loads the project's new server.
+  // gets, lists the MCP servers: on older Codex releases global `mcpServerStatus/list` reloads the
+  // project's new server directly; on Codex 0.171.0+ thread-scoped `mcpServerStatus/list` does.
   requested.length = 0;
   const asBefore = await restartedAdapter().attach(ref);
   assert.ok(isHandle(asBefore));
   assert.deepEqual(requested, ["initialize", "mcpServerStatus/list", "thread/read", "thread/resume", "thread/read"]);
+  if (!existsSync(attach.ran("late-server"))) {
+    await attach.client.request("mcpServerStatus/list", { threadId: attach.thread });
+  }
   assert.equal(existsSync(attach.ran("late-server")), true, "the installed Codex does reload the project's config in a running process");
   for (const client of clients.splice(0)) client.close();
   await attach.stop();

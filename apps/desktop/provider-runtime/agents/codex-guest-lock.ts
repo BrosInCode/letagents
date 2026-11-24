@@ -10,14 +10,17 @@ import { signalTree, spawnTree } from "../../../../shared/process-tree.mjs";
 
 /**
  * A guest Codex (an agent given to someone else's room) runs with no tool
- * that reaches this Mac: no shell, no image reading, no web, no apps, and none
- * of the owner's MCP servers. Its code work goes through LetAgents' room tools.
- * Read-only's sandbox and sign-in deny stay underneath as a second layer.
+ * that reaches this Mac: no shell, no image reading, no web, no apps, no
+ * sub-agent spawning, and none of the owner's MCP servers. Its code work goes
+ * through LetAgents' room tools. Read-only's sandbox and sign-in deny stay
+ * underneath as a second layer.
  *
- * Found on codex-cli 0.160.1 by pointing Codex at a local fake model server
- * and reading the tools it offers, then confirmed with a real turn on a
- * code-mode model: it could not read a file in the owner's home ("filesystem
- * imports are unsupported; fetch is unavailable").
+ * Verified on codex-cli 0.171.0 by pointing Codex at a local fake model server
+ * and reading the tools it offers, and confirmed live against code-mode models
+ * (`gpt-6.2-sol`, `gpt-6-astra`): `functions.exec` runs in a V8 isolate with no
+ * filesystem or network access and exposes only its declared nested tools;
+ * `features.multi_agent_v2.disable_native_tools=true` removes `collaboration.*`
+ * (preventing `spawn_agent` from switching to an unprobed model).
  */
 export const CODEX_GUEST_TOOL_OVERRIDES: readonly string[] = Object.freeze([
   ...CODEX_OWNER_FEATURE_OVERRIDES,
@@ -25,6 +28,7 @@ export const CODEX_GUEST_TOOL_OVERRIDES: readonly string[] = Object.freeze([
   "features.view_image=false",
   "features.goals=false",
   "features.multi_agent=false",
+  "features.multi_agent_v2.disable_native_tools=true",
   "features.image_generation=false",
   "features.in_app_browser=false",
   "features.js_repl=false",
@@ -36,12 +40,15 @@ export const CODEX_GUEST_TOOL_OVERRIDES: readonly string[] = Object.freeze([
  * tools. Code-mode models get them in namespaces: `functions.exec` runs
  * JavaScript in an isolate with no file or network access, over the nested
  * tools named in its description (checked separately below).
+ * Strict allowlist: any newly added or unknown tool (including `collaboration.*`)
+ * is refused.
  */
 const HARMLESS_TOOLS = new Set([
   "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource", "request_user_input",
-  "functions.exec", "functions.wait", "functions.request_user_input", "functions.request_user_input_async", "clock.sleep",
+  "functions.exec", "functions.wait", "functions.request_user_input", "functions.request_user_input_async",
+  "functions.send_message_to_user_async", "clock.sleep",
 ]);
-const HARMLESS_PREFIXES = ["mcp__letagents__", "collaboration.", "functions.mcp__letagents__"];
+const HARMLESS_PREFIXES = ["mcp__letagents__", "functions.mcp__letagents__"];
 /**
  * Tools code mode may nest under `exec`: the room's tools and ones that read
  * nothing on this Mac. An allowlist, so a tool Codex adds later is refused.
@@ -51,21 +58,35 @@ const HARMLESS_NESTED = new Set(["apply_patch", "clock__curr_time", "list_mcp_re
   "request_user_input", "request_user_input_async"]);
 
 export type CodexGuestProbe = { tools: string[]; nestedText: string };
+export type DisallowedGuestCodexTools = {
+  tools: string[];
+  nested: string[];
+  unparsedCodeMode: boolean;
+};
 
 /** The tools code mode nests under `exec`, from the headings that declare them (the description's examples don't count). */
 export function nestedCodeModeTools(nestedText: string): string[] {
   return [...nestedText.matchAll(/^###\s+`([^`]+)`/gm)].map(match => match[1]!);
 }
 
-export function isGuestCodexToolSet(probe: CodexGuestProbe | string[]): boolean {
+/** Reports the exact top-level or code-mode nested tools that violate the guest allowlist. */
+export function disallowedGuestCodexTools(probe: CodexGuestProbe | string[]): DisallowedGuestCodexTools {
   const { tools, nestedText } = Array.isArray(probe) ? { tools: probe, nestedText: "" } : probe;
-  if (!tools.length) return false;
-  const allowed = tools.every(tool => HARMLESS_TOOLS.has(tool) || HARMLESS_PREFIXES.some(prefix => tool.startsWith(prefix)));
-  if (!allowed) return false;
-  if (!tools.includes("functions.exec")) return true;
+  const disallowedTools = tools.filter(tool => !HARMLESS_TOOLS.has(tool) && !HARMLESS_PREFIXES.some(prefix => tool.startsWith(prefix)));
+  if (!tools.includes("functions.exec")) {
+    return { tools: disallowedTools, nested: [], unparsedCodeMode: false };
+  }
   // Code mode: its nested tools must parse, and every one must be allowed.
   const nested = nestedCodeModeTools(nestedText);
-  return nested.length > 0 && nested.every(tool => HARMLESS_NESTED.has(tool) || tool.startsWith("mcp__letagents__"));
+  const disallowedNested = nested.filter(tool => !HARMLESS_NESTED.has(tool) && !tool.startsWith("mcp__letagents__"));
+  return { tools: disallowedTools, nested: disallowedNested, unparsedCodeMode: nested.length === 0 };
+}
+
+export function isGuestCodexToolSet(probe: CodexGuestProbe | string[]): boolean {
+  const { tools } = Array.isArray(probe) ? { tools: probe } : probe;
+  if (!tools.length) return false;
+  const disallowed = disallowedGuestCodexTools(probe);
+  return disallowed.tools.length === 0 && disallowed.nested.length === 0 && !disallowed.unparsedCodeMode;
 }
 
 const PROBE_TIMEOUT_MS = 45_000;
