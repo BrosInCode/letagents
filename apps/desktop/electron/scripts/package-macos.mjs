@@ -8,6 +8,7 @@ import { notarize } from "@electron/notarize";
 import { sign } from "@electron/osx-sign";
 
 import { createDifferentialBlockmap } from "./differential-blockmap.mjs";
+import { assertPackagedElectronFuses } from "./electron-fuses.mjs";
 import { notarizeWithStapleRecovery, validateStapledTicket } from "./notarization-staple-recovery.mjs";
 import { describeArtifact } from "./release-artifacts.mjs";
 import {
@@ -100,6 +101,8 @@ if (!skipSigning) {
   });
   await execFileAsync("codesign", ["--verify", "--deep", "--strict", "--verbose=2", packagedApp]);
 }
+// The fuses package-artifact.mjs flipped are in the binary that ships.
+await assertPackagedElectronFuses({ bundle: packagedApp, platform: "darwin" });
 
 const credentials = skipNotarization ? undefined : notarizationCredentials();
 if (credentials) {

@@ -9,6 +9,7 @@ import previewIsolation from "./preview-isolation.cjs";
 
 import { npmInvocation } from "../../../../scripts/npm-command.mjs";
 import { assertSquareImageDimensions, parseSipsDimensions } from "./packaging-validation.mjs";
+import { applyPackagedElectronFuses } from "./electron-fuses.mjs";
 import {
   assertInstalledMcpPackage,
   assertLockedMcpRuntimeContract,
@@ -187,6 +188,13 @@ async function assembleWindowsBundle() {
 await rm(release, { recursive: true, force: true });
 if (windows) await assembleWindowsBundle();
 else await assembleMacBundle();
+// Fuses are flipped here, before package-macos.mjs signs the bundle; the
+// packaging steps read them back from the final binary.
+const electronFuses = await applyPackagedElectronFuses({
+  bundle,
+  platform: process.platform,
+  executableName: WINDOWS_EXECUTABLE_NAME,
+});
 if (profile.updater) await writeFile(
   join(resources, "app-update.yml"),
   `${JSON.stringify(createDesktopUpdaterConfig({ arch: desktopArch, platform: process.platform }), null, 2)}\n`,
@@ -495,6 +503,7 @@ await writeFile(join(app, "package-artifact-manifest.json"), `${JSON.stringify({
   ...(preview ? { preview: true, protocol: profile.protocol, updater: false } : {}),
   bundleIdentifier,
   runtimeTreeSha256,
+  electronFuses: electronFuses.fuses,
   files,
 }, null, 2)}\n`);
 console.log(JSON.stringify({ bundle, version: desktopVersion, platform: process.platform, arch: process.arch, required: files }, null, 2));

@@ -25,6 +25,7 @@ import {
   setFocusedAgentStream,
   supervisorStateWatchAcceptsStatus,
   supervisorStateWatchRetryDelay,
+  supervisorDaemonSpawnArguments,
   supervisorDaemonSpawnEnvironment,
   supervisorRuntimeEnvironmentFingerprint,
   supervisorCompatibilityFingerprint,
@@ -3273,6 +3274,35 @@ test("desktop dev daemon uses the exact rebuilt repo MCP and packaged launches i
   assert.equal(development.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV, "1",
     "only the Desktop-derived development runtime is explicitly unsealed");
   assert.equal(development.ELECTRON_RUN_AS_NODE, "1");
+});
+
+test("the daemon starts with SIGUSR1 debugging off and still sees its own entry script", { skip: process.platform === "win32" }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-daemon-arguments-"));
+  try {
+    const script = join(directory, "entry.mjs");
+    await writeFile(script, "console.log(JSON.stringify({ script: process.argv[1], execArgv: process.execArgv }));\nsetInterval(() => {}, 1000);\n");
+    const args = supervisorDaemonSpawnArguments(script);
+    assert.equal(args.at(-1), script, "the daemon identity check expects the command to end with the script path");
+    const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+    try {
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      const [line] = await new Promise<[Buffer]>((resolve, reject) => {
+        child.stdout.once("data", (chunk: Buffer) => resolve([chunk]));
+        child.once("exit", (code) => reject(new Error(`the entry exited (${code}) before it started: ${stderr}`)));
+      });
+      assert.deepEqual(JSON.parse(line.toString()), { script, execArgv: ["--disable-sigusr1"] },
+        "daemon/main.ts reads process.argv[1] to decide that it is the entry point");
+      child.kill("SIGUSR1");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      assert.equal(child.exitCode, null, "SIGUSR1 does not stop the daemon");
+      assert.doesNotMatch(stderr, /Debugger listening/, "SIGUSR1 opens no debugger");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("desktop development watches daemon builds and rejects a stale replacement implementation", async () => {

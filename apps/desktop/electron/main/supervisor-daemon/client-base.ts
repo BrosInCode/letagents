@@ -22,6 +22,7 @@ import {
 } from "./constants.js";
 import { isConnectionUnavailable, SupervisorDaemonProtocolMismatchError, SupervisorDaemonRequestTimeoutError } from "./errors.js";
 import { defaultInspectDaemonProcess, signalDaemonProcess } from "./process-identity.js";
+import { supervisorDaemonSpawnArguments } from "./spawn-environment.js";
 import type {
   DaemonHandoffDiagnostic,
   DaemonIdentityInspection,
@@ -142,7 +143,7 @@ export abstract class SupervisorDaemonClientBase {
     this.now = options.now ?? (() => new Date());
     this.readyStatusTtlMs = options.readyStatusTtlMs ?? 2000;
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd, env) => {
-      const child = spawn(process.execPath, [scriptPath], {
+      const child = spawn(process.execPath, supervisorDaemonSpawnArguments(scriptPath), {
         cwd,
         detached: true,
         stdio: ["ignore", "ignore", "ignore", "ipc"],
