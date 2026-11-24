@@ -60,6 +60,7 @@ export const providerConnectionRefSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("codex_app_server"), url: z.string().max(4096), ...processFields }),
   z.strictObject({ kind: z.literal("claude_cli"), ...processFields }),
   z.strictObject({ kind: z.literal("cursor_cli"), ...processFields }),
+  z.strictObject({ kind: z.literal("antigravity_acp"), ...processFields }),
   z.strictObject({ kind: z.literal("opencode_server"), url: z.string().max(4096), ...processFields, serverAuthPath: z.string().max(4096) }),
 ]);
 
@@ -90,7 +91,7 @@ export type ProviderRuntimeSnapshot = z.output<typeof providerRuntimeSnapshotSch
 
 export const providerTerminalSchema = z.strictObject({
   nativeRuntimeDeath: z.strictObject({
-    kind: z.enum(["claude_cli", "codex_app_server"]),
+    kind: z.enum(["claude_cli", "codex_app_server", "antigravity_acp"]),
     pid: processId,
     processIdentity: z.string().min(1).max(512),
   }).optional(),

@@ -20,7 +20,7 @@ import {
 } from "../effect-journal/index.js";
 import { applyApprovalRequestClosureSchema } from "../execution-approval-journal.js";
 import { applyExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
-import { applyExecutionStorageSchema } from "../execution-storage-schema.js";
+import { applyExecutionStorageSchema, migrateExecutionStorageV3ToV4 } from "../execution-storage-schema.js";
 import { applyHostToolRuleSchema } from "../host-tool-rules.js";
 import { applyManagedLaunchContractSchema } from "../managed-launch-contract.js";
 import { applyPreparedRoomContextSchema } from "../prepared-room-context.js";
@@ -200,12 +200,22 @@ export function migrateV2ToV3(
 }
 
 /**
+ * Schema v3 -> v4: widens `execution_runtime_generations.provider` CHECK
+ * constraint to admit `'antigravity'` while preserving all rows, rowids, and
+ * referencing execution history intact.
+ */
+export function migrateV3ToV4(database: DatabaseSync): void {
+  migrateExecutionStorageV3ToV4(database);
+}
+
+/**
  * Plain numbered migrations from schema v1 onward. Each entry upgrades from
  * version `N` to `N + 1` inside the caller's write transaction.
  */
 export const DAEMON_STATE_MIGRATIONS: Readonly<Record<number, SchemaMigration>> = {
   1: migrateV1ToV2,
   2: (database) => migrateV2ToV3(database),
+  3: migrateV3ToV4,
 };
 
 type SchemaEntry = { type: string; name: string; tblName: string; sql: string };
@@ -734,7 +744,7 @@ export function applySchemaV1(database: DatabaseSync): void {
       ON agent_purge_operations(agent_id, updated_at);
   `);
 
-  applyExecutionStorageSchema(database);
+  applyExecutionStorageSchema(database, 1);
   applyApprovalRequestClosureSchema(database);
   applyExecutionApprovalPublicationSchema(database);
   applyHostToolRuleSchema(database);
@@ -752,8 +762,20 @@ export function applySchemaV1(database: DatabaseSync): void {
  * the exact same DDL by construction.
  */
 export function applySchemaCurrent(database: DatabaseSync): void {
-  applySchemaV1(database);
-  runNumberedMigrations(database, 1, SCHEMA_VERSION);
+  if (database.isTransaction) {
+    applySchemaV1(database);
+    runNumberedMigrations(database, 1, SCHEMA_VERSION);
+    return;
+  }
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applySchemaV1(database);
+    runNumberedMigrations(database, 1, SCHEMA_VERSION);
+    database.exec("COMMIT");
+  } catch (error) {
+    if (database.isTransaction) database.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 /** Runs plain numbered migrations `fromVersion -> targetVersion` inside a transaction. */
@@ -793,12 +815,14 @@ function referenceSchemaForVersion(version: number): readonly SchemaEntry[] {
   const memory = new DatabaseSync(":memory:");
   try {
     memory.exec("PRAGMA foreign_keys = ON");
+    memory.exec("BEGIN IMMEDIATE");
     applySchemaV1(memory);
     if (version > 1) {
       runNumberedMigrations(memory, 1, version);
     }
     memory.exec(`PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID}`);
     memory.exec(`PRAGMA user_version = ${toSqliteUserVersion(version)}`);
+    memory.exec("COMMIT");
     const entries = readSchemaEntries(memory);
     cachedReferenceSchemas.set(version, entries);
     return entries;

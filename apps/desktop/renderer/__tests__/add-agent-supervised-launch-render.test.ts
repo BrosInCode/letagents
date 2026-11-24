@@ -408,6 +408,30 @@ test("setup problems expand diagnostics and retain their actionable instructions
   assert.match(html, /Check again/);
 });
 
+test("a failed check says what to do in its own words, with no technical details toggle", async () => {
+  const html = await renderToString(createSSRApp({
+    render: () => h(AddAgentSetupStatus, {
+      ...setupPresentationProps,
+      preflight: { status: "error", nextAction: null },
+      statusTitle: "The Antigravity CLI needs an update.",
+      statusDescription: "This computer has agy 1.5.10. LetAgents agents need 1.5.12 or newer: run `agy update`, then choose Check again.",
+    }),
+  }));
+  assert.match(html, /run `agy update`/);
+  assert.doesNotMatch(html, /Technical details/);
+  // A load error keeps only the plain instruction: its raw text is not shown.
+  const failedLoad = await renderToString(createSSRApp({
+    render: () => h(AddAgentSetupStatus, {
+      ...setupPresentationProps,
+      error: "Couldn't load agent providers: ECONNREFUSED /tmp/daemon.sock",
+      preflight: null,
+      statusTitle: "Could not check the agent app",
+    }),
+  }));
+  assert.match(failedLoad, /Check the agent app and selected project, then choose Check again\./);
+  assert.doesNotMatch(failedLoad, /ECONNREFUSED|Technical details/);
+});
+
 test("locked credentials remain visible even when provider preflight succeeds", async () => {
   const html = await renderToString(createSSRApp({
     render: () => h(AddAgentSetupStatus, {

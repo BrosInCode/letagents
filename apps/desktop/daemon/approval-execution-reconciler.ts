@@ -33,10 +33,18 @@ type PendingReconciliation = {
   lowerBound: { sourceId: string; sequence: number } | null;
 };
 
+/** Requests in Claude Code's native shape: Claude's own, and Antigravity's mapped from ACP. */
+type ClaudeShapedRequest = Extract<ProviderPermissionRequest, { provider: "claude-code" | "antigravity" }>;
+function claudeShaped(native: ProviderPermissionRequest): native is ClaudeShapedRequest {
+  return native.provider === "claude-code" || native.provider === "antigravity";
+}
+/** The native connection a Claude-shaped request's execution evidence must come from. */
+const CLAUDE_SHAPED_CONNECTION = { "claude-code": "claude_cli", antigravity: "antigravity_acp" } as const;
+
 function requestIdentity(native: ProviderPermissionRequest, expected: HostApprovalReference): {
   key: string; operation: NonNullable<PendingReconciliation["operation"]>;
 } | null {
-  if (native.provider === "claude-code") {
+  if (claudeShaped(native)) {
     const request = native.native.request;
     if (!request.tool_use_id?.trim()) return null;
     // Claude tool requests lack a turn UUID. The broker has already correlated
@@ -66,7 +74,7 @@ function confirmsDecision(fact: NativeExecutionFact, pending: PendingReconciliat
   // tool starts. It proves completion of the request, not consumption of allow.
   // A deny is confirmed only by the adapter's own report that the tool it denied
   // for this exact request came back as an error and never ran.
-  if (pending.native.provider === "claude-code") return fact.kind === "completed"
+  if (claudeShaped(pending.native)) return fact.kind === "completed"
     && fact.outcome === (pending.decision === "allow_once" ? "succeeded" : "denied_before_start");
   if (pending.decision === "deny") return fact.kind === "completed" && fact.outcome === "denied_before_start";
   return fact.kind === "started"
@@ -102,7 +110,7 @@ export class ApprovalExecutionReconciler {
 
   prepare(native: ProviderPermissionRequest, expected: HostApprovalReference, decisionId: string,
     decision: "allow_once" | "deny"): PendingReconciliation | null {
-    if (native.provider !== "codex" && native.provider !== "claude-code") return null;
+    if (native.provider !== "codex" && !claudeShaped(native)) return null;
     const identity = requestIdentity(native, expected);
     const value: PendingReconciliation = { key: expected.requestId, native,
       executionKey: identity?.key ?? null, operation: identity?.operation ?? null,
@@ -125,7 +133,7 @@ export class ApprovalExecutionReconciler {
   }
 
   trackRequest(native: ProviderPermissionRequest, expected: HostApprovalReference): void {
-    if (native.provider !== "claude-code" || this.closed || !this.options.isCurrent()) return;
+    if (!claudeShaped(native) || this.closed || !this.options.isCurrent()) return;
     this.admittedRequests.set(expected.requestId, { native, expected });
     while (this.admittedRequests.size > 64) this.admittedRequests.delete(this.admittedRequests.keys().next().value!);
     for (const event of this.closedRequests) this.closeAdmittedRequest(event, native, expected);
@@ -133,7 +141,7 @@ export class ApprovalExecutionReconciler {
 
   private closeAdmittedRequest(event: Extract<ProviderPermissionObservation, { type: "request_closed" }>,
     native: ProviderPermissionRequest, expected: HostApprovalReference): void {
-    if (event.request.provider !== "claude-code" || native.provider !== "claude-code"
+    if (!claudeShaped(event.request) || event.request.provider !== native.provider
       || !("providerTurnId" in event) || event.providerTurnId !== expected.providerTurnId
       || event.providerContinuationId !== expected.providerContinuationId
       || !isDeepStrictEqual(event.request.native, native.native)) return;
@@ -147,7 +155,7 @@ export class ApprovalExecutionReconciler {
   observeRequestClosed(event: Extract<ProviderPermissionObservation, { type: "request_closed" }>): void {
     const native = event.request;
     if (this.closed || !this.options.isCurrent()) return;
-    if (native.provider === "claude-code") {
+    if (claudeShaped(native)) {
       this.closedRequests.push(event);
       if (this.closedRequests.length > 64) this.closedRequests.shift();
       for (const { native: admitted, expected } of this.admittedRequests.values()) this.closeAdmittedRequest(event, admitted, expected);
@@ -193,8 +201,8 @@ export class ApprovalExecutionReconciler {
     const lowerBound = pending?.lowerBound;
     if (!pending?.armed || this.closed || !this.options.isCurrent()) return;
     const connection = this.options.handle.providerConnection;
-    const exactProcess = pending.native.provider !== "claude-code"
-      || (connection?.kind === "claude_cli" && Boolean(connection.processIdentity)
+    const exactProcess = !claudeShaped(pending.native)
+      || (connection?.kind === CLAUDE_SHAPED_CONNECTION[pending.native.provider] && Boolean(connection.processIdentity)
         && observation?.nativeProcessIdentity === connection.processIdentity
         && observation?.nativeProcessPid === connection.pid);
     const applied = lowerBound && observation && observation.sourceId === lowerBound.sourceId

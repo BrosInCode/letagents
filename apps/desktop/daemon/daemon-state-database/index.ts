@@ -16,6 +16,7 @@ export {
   applySchemaCurrent,
   migrateV1ToV2,
   migrateV2ToV3,
+  migrateV3ToV4,
   runNumberedMigrations,
   validateDaemonStateShape,
   validateDaemonStateShapeForVersion,

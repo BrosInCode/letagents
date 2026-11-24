@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
+import { applyExecutionStorageSchema, migrateExecutionStorageV3ToV4, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 
 type Values = Record<string, string | number | null>;
 const digest = "a".repeat(64);
@@ -401,6 +401,70 @@ test("reopen validation rejects weakened constraints, indexes, triggers and cros
         db.exec("PRAGMA foreign_keys=ON");
       }
       assert.throws(() => validateExecutionStorageSchema(db), /Execution storage (schema|ownership) mismatch/, corruption);
+    } finally { db.close(); }
+  }
+});
+
+test("v3 to v4 admits Antigravity and preserves every runtime birth, rowid, and child reference", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys=ON");
+    applyExecutionStorageSchema(db, 1);
+    seed(db);
+    fact(db);
+    runtime(db, { runtime_generation_id: "claude-rt", provider: "claude-code" });
+    runtime(db, { runtime_generation_id: "cursor-rt", provider: "cursor" });
+    runtime(db, { runtime_generation_id: "open-model-rt", provider: "open-model" });
+    assert.throws(() => runtime(db, { runtime_generation_id: "antigravity-rt", provider: "antigravity" }), /CHECK/,
+      "v1-v3 constraints refuse Antigravity before v4 migration");
+    const rows = () => Object.fromEntries(["execution_runtime_generations", "runs", "execution_facts"]
+      .map((table) => [table, db.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all()]));
+    const before = rows();
+    assert.throws(() => migrateExecutionStorageV3ToV4(db), /requires a transaction/);
+    db.exec("BEGIN IMMEDIATE");
+    migrateExecutionStorageV3ToV4(db);
+    db.exec("COMMIT");
+    assert.deepEqual(rows(), before);
+    validateExecutionStorageSchema(db, 4);
+    validateExecutionStorageSchema(db);
+    assert.throws(() => validateExecutionStorageSchema(db, 1), /execution_runtime_generations/);
+    assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.throws(() => db.exec("DELETE FROM execution_runtime_generations WHERE runtime_generation_id='runtime'"), /FOREIGN KEY/,
+      "references to a rebuilt runtime birth are still enforced");
+
+    runtime(db, { runtime_generation_id: "antigravity-rt", provider: "antigravity" });
+    assert.throws(() => runtime(db, { runtime_generation_id: "unknown-rt", provider: "gemini" }), /CHECK/);
+    assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+  } finally { db.close(); }
+});
+
+test("v3 to v4 refuses an unexpected cascading reference or trigger on execution_runtime_generations before rebuilding", () => {
+  for (const mode of ["cascade_fk", "trigger"] as const) {
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec("PRAGMA foreign_keys=ON");
+      applyExecutionStorageSchema(db, 1);
+      seed(db);
+      if (mode === "cascade_fk") {
+        db.exec(`CREATE TABLE unexpected_runtime_child(
+          agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, runtime_generation_id TEXT NOT NULL,
+          FOREIGN KEY(agent_id,execution_generation_id,runtime_generation_id)
+            REFERENCES execution_runtime_generations(agent_id,execution_generation_id,runtime_generation_id) ON DELETE CASCADE
+        ) STRICT;
+        INSERT INTO unexpected_runtime_child VALUES('agent','generation','runtime')`);
+      } else {
+        db.exec(`CREATE TRIGGER unexpected_runtime_trigger AFTER DELETE ON execution_runtime_generations BEGIN SELECT 1; END;`);
+      }
+      const schema = db.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all();
+      db.exec("BEGIN IMMEDIATE");
+      assert.throws(() => migrateExecutionStorageV3ToV4(db), /Unexpected execution provider storage dependency/, mode);
+      db.exec("ROLLBACK");
+      if (mode === "cascade_fk") {
+        assert.deepEqual(db.prepare("SELECT * FROM unexpected_runtime_child").all().map((row) => ({ ...row })),
+          [{ agent_id: "agent", execution_generation_id: "generation", runtime_generation_id: "runtime" }]);
+      }
+      assert.deepEqual(db.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(), schema);
+      validateExecutionStorageSchema(db, 1);
     } finally { db.close(); }
   }
 });

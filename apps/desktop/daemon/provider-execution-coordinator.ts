@@ -1969,7 +1969,7 @@ export class ProviderExecutionCoordinator {
       supervisorSocketPath: this.options.socketPath,
       supervisorExecutionGenerationId: execution.execution_generation_id,
       ...(resumeWorker ? { supervisorWorkerSession: resumeWorker } : {}),
-      ...(devMcpServerEntryPath && ["codex", "open-model", "cursor", "claude-code"].includes(entry.provider)
+      ...(devMcpServerEntryPath && ["codex", "open-model", "cursor", "claude-code", "antigravity"].includes(entry.provider)
         ? { devMcpServerEntryPath }
         : {}),
       ...(openModelCredential ? {

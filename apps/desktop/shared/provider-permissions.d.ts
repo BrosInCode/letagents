@@ -17,11 +17,14 @@ export type ClaudePermissionObservation =
 export type ProviderPermissionRequest =
   | { provider: "codex"; native: CodexNativePermissionRequest }
   | { provider: "open-model"; native: OpenCodeNativePermissionRequest }
-  | { provider: "claude-code"; native: ClaudeNativePermissionRequest };
+  | { provider: "claude-code"; native: ClaudeNativePermissionRequest }
+  /** Antigravity's adapter maps each ACP permission request to Claude Code's native shape. */
+  | { provider: "antigravity"; native: ClaudeNativePermissionRequest };
 export type ProviderPermissionObservation =
   | { type: "snapshot"; connectionId: string | null; requests: readonly ProviderPermissionRequest[] }
   | { type: "request_closed"; request: { provider: "codex"; native: CodexNativePermissionRequest } }
   | { type: "request_closed"; request: { provider: "claude-code"; native: ClaudeNativePermissionRequest }; providerContinuationId: string; providerTurnId: string }
+  | { type: "request_closed"; request: { provider: "antigravity"; native: ClaudeNativePermissionRequest }; providerContinuationId: string; providerTurnId: string }
   | { type: "degraded" | "unavailable" };
 /** Exact native proposed edits, host-ephemeral like the permission request. */
 export type CodexPermissionFileChange = {

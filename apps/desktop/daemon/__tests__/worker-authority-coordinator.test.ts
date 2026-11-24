@@ -2214,6 +2214,16 @@ test("replacement worker restores an exact retired work lease before exposing it
   assert.equal(f.mutations.length, 2, "cached authority does not poll or repeat the transfer");
 });
 
+test("replacement Antigravity worker restores an exact retired work lease witnessed by antigravity_acp death", async () => {
+  const retired = execution({ ...terminalExecution(), terminal_cause: "stopped",
+    native_runtime_death: { kind: "antigravity_acp", pid: 42, processIdentity: "exact-agy-birth" } });
+  const f = retiredLeaseFixture({ entry: manifestEntry({ provider: "antigravity" }), executions: [retired] });
+  const minted = await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry);
+  assert.equal(minted?.agentSessionId, f.current.agent_session_id);
+  assert.equal(f.current.epoch, 5);
+  assert.deepEqual(f.mutations, ["attest:execution-1:4", "rebind:proof-1"]);
+});
+
 test("an unproven lease is skipped without stopping a provable lease in the same inventory from moving", async () => {
   const seed = retiredLeaseFixture();
   const unproven = { ...seed.lease, id: "lease-unproven", task_id: "task-unproven", agent_session_id: "session-without-history" };

@@ -439,7 +439,9 @@ function supervisedContextSession(env: NodeJS.ProcessEnv = process.env): StoredA
       ? "Claude Code"
       : provider === "codex"
         ? "Codex"
-        : "Supervised agent";
+        : provider === "antigravity"
+          ? "Antigravity"
+          : "Supervised agent";
   return {
     session_id: "", session_token: "", room_id: "", session_kind: "worker", runtime: provider,
     actor_label: "Daemon-supervised worker", agent_key: "daemon-supervised-worker",

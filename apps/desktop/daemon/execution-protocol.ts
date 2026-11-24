@@ -10,7 +10,7 @@ export type {
 export const executionIdentity = z.string().min(1).max(512).regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/);
 const integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const nativeRuntimeDeathSchema = z.strictObject({
-  kind: z.enum(["claude_cli", "codex_app_server"]),
+  kind: z.enum(["claude_cli", "codex_app_server", "antigravity_acp"]),
   pid: integer.min(1),
   processIdentity: z.string().min(1).max(512),
 });

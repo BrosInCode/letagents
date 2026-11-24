@@ -73,7 +73,7 @@ function runCheck(app, nodeArguments = [], env = {}) {
   });
 }
 
-test("the check passes for an app with the packaged import map and loads all four adapters", () => {
+test("the check passes for an app with the packaged import map and loads all five adapters", () => {
   const app = temporaryApp();
   try {
     const result = runCheck(app);

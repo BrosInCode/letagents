@@ -1,21 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
 
-/**
- * Structural storage for transparent execution (schema v1). No provider output,
- * command, absolute path, approval reason, diff, credential, or arbitrary JSON
- * belongs here. One bounded projection JSON slot is validated by its sole
- * writer and revalidated on read. Native payloads remain forbidden.
- */
-const tables: Record<string, string> = {
-  // Execution fencing survives multiple native child lifetimes (Cursor starts
-  // a child per turn). Neither identity substitutes for the other.
-  execution_generations: `CREATE TABLE execution_generations (
-    execution_generation_id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    UNIQUE(agent_id,execution_generation_id)
-  ) STRICT`,
-  execution_runtime_generations: `CREATE TABLE execution_runtime_generations (
+export type ExecutionStorageSchemaVersion = 1 | 2 | 3 | 4;
+
+const executionRuntimeGenerationsV1 = `CREATE TABLE execution_runtime_generations (
     runtime_generation_id TEXT PRIMARY KEY,
     execution_generation_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
@@ -30,7 +17,41 @@ const tables: Record<string, string> = {
     CHECK((runtime_state='exited') = (ended_at_ms IS NOT NULL)),
     UNIQUE(agent_id,execution_generation_id,runtime_generation_id),
     FOREIGN KEY(agent_id,execution_generation_id) REFERENCES execution_generations(agent_id,execution_generation_id)
+  ) STRICT`;
+
+const executionRuntimeGenerationsV4 = `CREATE TABLE execution_runtime_generations (
+    runtime_generation_id TEXT PRIMARY KEY,
+    execution_generation_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK(provider IN ('codex','claude-code','cursor','open-model','antigravity')),
+    authority_mode TEXT NOT NULL DEFAULT 'typed' CHECK(authority_mode='typed'),
+    runtime_state TEXT NOT NULL CHECK(runtime_state IN ('starting','ready','stopping','exited')),
+    control_state TEXT NOT NULL CHECK(control_state IN ('connecting','responsive','degraded','lost','unprobeable')),
+    continuation_state TEXT NOT NULL CHECK(continuation_state IN ('available','repairing','unavailable')),
+    config_revision INTEGER NOT NULL CHECK(config_revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    ended_at_ms INTEGER CHECK(ended_at_ms >= created_at_ms),
+    CHECK((runtime_state='exited') = (ended_at_ms IS NOT NULL)),
+    UNIQUE(agent_id,execution_generation_id,runtime_generation_id),
+    FOREIGN KEY(agent_id,execution_generation_id) REFERENCES execution_generations(agent_id,execution_generation_id)
+  ) STRICT`;
+
+/**
+ * Structural storage for transparent execution (schema v1-v4). No provider output,
+ * command, absolute path, approval reason, diff, credential, or arbitrary JSON
+ * belongs here. One bounded projection JSON slot is validated by its sole
+ * writer and revalidated on read. Native payloads remain forbidden.
+ */
+const tables: Record<string, string> = {
+  // Execution fencing survives multiple native child lifetimes (Cursor starts
+  // a child per turn). Neither identity substitutes for the other.
+  execution_generations: `CREATE TABLE execution_generations (
+    execution_generation_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    UNIQUE(agent_id,execution_generation_id)
   ) STRICT`,
+  execution_runtime_generations: executionRuntimeGenerationsV4,
   execution_message_attempts: `CREATE TABLE execution_message_attempts (
     attempt_id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
@@ -322,8 +343,17 @@ const triggers: Record<string, string> = {
     BEGIN SELECT RAISE(ABORT,'Approval projections are immutable.'); END`,
 };
 
-export function applyExecutionStorageSchema(database: DatabaseSync): void {
-  for (const statement of Object.values(tables)) {
+function tablesForVersion(version: ExecutionStorageSchemaVersion): Record<string, string> {
+  return version < 4
+    ? { ...tables, execution_runtime_generations: executionRuntimeGenerationsV1 }
+    : tables;
+}
+
+export function applyExecutionStorageSchema(
+  database: DatabaseSync,
+  version: ExecutionStorageSchemaVersion = 4,
+): void {
+  for (const statement of Object.values(tablesForVersion(version))) {
     database.exec(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "));
   }
   for (const statement of Object.values(indexes)) {
@@ -334,14 +364,71 @@ export function applyExecutionStorageSchema(database: DatabaseSync): void {
   }
 }
 
+/**
+ * The rebuilt runtime table may carry only the dependencies this module owns.
+ * Every table that references `execution_runtime_generations` must use plain
+ * NO ACTION foreign keys so `PRAGMA defer_foreign_keys = ON` defers checking
+ * until the rows return without triggering cascade or restrict actions.
+ */
+function validateProviderSetV4MigrationDependencies(database: DatabaseSync): void {
+  const extra = (database.prepare(`SELECT name FROM sqlite_master
+    WHERE tbl_name='execution_runtime_generations' AND type IN ('index','trigger') AND sql IS NOT NULL`).all())
+    .find(() => true);
+  if (extra) throw new Error("Unexpected execution provider storage dependency.");
+  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
+    const name = String(row.name);
+    for (const key of database.prepare(`PRAGMA foreign_key_list("${name.replaceAll('"', '""')}")`).all()) {
+      if (key.table === "execution_runtime_generations"
+        && (key.on_delete !== "NO ACTION" || key.on_update !== "NO ACTION")) {
+        throw new Error("Unexpected execution provider storage dependency.");
+      }
+    }
+  }
+}
+
+/**
+ * Schema v3 -> v4: admit Antigravity rows in `execution_runtime_generations`.
+ * Only the provider CHECK list widens; every runtime birth row, its rowid, and
+ * every child reference to it (`runs`, `execution_facts`, `execution_observers`)
+ * is preserved intact. Caller owns the write transaction.
+ */
+export function migrateExecutionStorageV3ToV4(database: DatabaseSync): void {
+  if (!database.isTransaction) throw new Error("Execution provider storage migration requires a transaction.");
+  validateExecutionStorageSchema(database, 3);
+  validateProviderSetV4MigrationDependencies(database);
+  const runtimeColumns = database.prepare("PRAGMA table_info(execution_runtime_generations)").all()
+    .map((column) => String(column.name)).join(",");
+  // Child tables keep pointing at `execution_runtime_generations`; with deferred
+  // NO ACTION keys, the drop's implicit delete settles once the identical rows
+  // and rowids are reinserted below.
+  database.exec(`
+    PRAGMA defer_foreign_keys = ON;
+    CREATE TEMP TABLE execution_runtime_generation_v4_migration AS
+      SELECT rowid AS original_rowid, * FROM execution_runtime_generations;
+    DROP TABLE execution_runtime_generations;
+    ${executionRuntimeGenerationsV4};
+    INSERT INTO execution_runtime_generations(rowid, ${runtimeColumns})
+      SELECT original_rowid, ${runtimeColumns} FROM execution_runtime_generation_v4_migration;
+    DROP TABLE execution_runtime_generation_v4_migration;
+  `);
+  validateExecutionStorageSchema(database, 4);
+  if (database.prepare("PRAGMA foreign_key_check").get()) {
+    throw new Error("Execution provider storage migration broke ownership.");
+  }
+}
+
 function normalizedSchema(sql: string): string {
   return (sql.match(/'(?:''|[^'])*'|[^']+/g) ?? [])
     .map((part) => (part.startsWith("'") ? part : part.replaceAll('"', "").replace(/\s+/g, "").toLowerCase()))
     .join("");
 }
 
-export function validateExecutionStorageSchema(database: DatabaseSync): void {
-  for (const [type, objects] of [["table", tables], ["index", indexes], ["trigger", triggers]] as const) {
+export function validateExecutionStorageSchema(
+  database: DatabaseSync,
+  version: ExecutionStorageSchemaVersion = 4,
+): void {
+  const expectedTables = tablesForVersion(version);
+  for (const [type, objects] of [["table", expectedTables], ["index", indexes], ["trigger", triggers]] as const) {
     for (const [name, statement] of Object.entries(objects)) {
       const row = database.prepare("SELECT sql FROM sqlite_master WHERE type=? AND name=?").get(type, name) as { sql: string } | undefined;
       if (!row || normalizedSchema(row.sql) !== normalizedSchema(statement)) {
@@ -349,7 +436,7 @@ export function validateExecutionStorageSchema(database: DatabaseSync): void {
       }
     }
   }
-  for (const name of Object.keys(tables)) {
+  for (const name of Object.keys(expectedTables)) {
     if (database.prepare(`PRAGMA foreign_key_check(${name})`).get()) {
       throw new Error(`Execution storage ownership mismatch: ${name}.`);
     }

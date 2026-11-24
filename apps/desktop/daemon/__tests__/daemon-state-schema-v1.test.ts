@@ -86,19 +86,21 @@ async function waitForExit(child: ChildProcess, timeoutMs = 5_000): Promise<bool
   });
 }
 
-test("fresh current schema enforces application_id, user_version=1003, downgrade-safe table layout, and 1:1 shape checks", async () => {
+test("fresh current schema enforces application_id, user_version=1004, downgrade-safe table layout, and 1:1 shape checks", async () => {
   const env = await tempDir("letagents-schema-v1-");
   const dbPath = join(env.root, "daemon-state.sqlite");
   try {
-    assert.equal(DAEMON_STATE_SCHEMA_VERSION, 3);
+    assert.equal(DAEMON_STATE_SCHEMA_VERSION, 4);
     assert.equal(DAEMON_STATE_USER_VERSION_OFFSET, 1000);
-    assert.equal(DAEMON_STATE_USER_VERSION, 1003);
+    assert.equal(DAEMON_STATE_USER_VERSION, 1004);
     assert.equal(toSqliteUserVersion(1), 1001);
     assert.equal(fromSqliteUserVersion(1001), 1);
     assert.equal(toSqliteUserVersion(2), 1002);
     assert.equal(fromSqliteUserVersion(1002), 2);
     assert.equal(toSqliteUserVersion(3), 1003);
     assert.equal(fromSqliteUserVersion(1003), 3);
+    assert.equal(toSqliteUserVersion(4), 1004);
+    assert.equal(fromSqliteUserVersion(1004), 4);
 
     const stateDb = await DaemonStateDatabase.open(dbPath);
     try {
@@ -271,7 +273,7 @@ test("legacy DB move-aside stops only exact-birth legacy processes, preserves le
 
 test("unknown/future modern DBs (application_id=LAD1) and foreign DBs fail closed without modifying or moving aside", async () => {
   const cases = [
-    { name: "future modern v3 (user_version=1003)", appId: DAEMON_STATE_APPLICATION_ID, userVersion: DAEMON_STATE_USER_VERSION + 1, table: true, pattern: /Unsupported daemon state schema version/i },
+    { name: "future modern v5 (user_version=1005)", appId: DAEMON_STATE_APPLICATION_ID, userVersion: DAEMON_STATE_USER_VERSION + 1, table: true, pattern: /Unsupported daemon state schema version/i },
     { name: "offset boundary (user_version=1000)", appId: DAEMON_STATE_APPLICATION_ID, userVersion: DAEMON_STATE_USER_VERSION_OFFSET, table: true, pattern: /Unsupported daemon state schema version/i },
     { name: "pre-offset modern collision (user_version=1)", appId: DAEMON_STATE_APPLICATION_ID, userVersion: 1, table: true, pattern: /Unsupported daemon state schema version/i },
     { name: "modern application_id with user_version=0 and tables", appId: DAEMON_STATE_APPLICATION_ID, userVersion: 0, table: true, pattern: /Unsupported daemon state schema version/i },

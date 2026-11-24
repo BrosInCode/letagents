@@ -9,7 +9,9 @@ import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 
 import {
+  antigravityApprovalKind,
   ProviderActionPortRouter,
+  providerFromConnection,
   type NativeProviderAdapter,
 } from "../provider-action-port-router.js";
 import type {
@@ -38,7 +40,7 @@ import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
 import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
-import type { ProviderPermissionObservation } from "../../shared/provider-permissions.js";
+import type { ClaudeNativePermissionRequest, ProviderPermissionObservation, ProviderPermissionRequest } from "../../shared/provider-permissions.js";
 import { noWorkLeaseHttp, runtimeReadySubscription, testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 
@@ -99,7 +101,7 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
   return daemonSocketRequest(socketPath, method, params);
 }
 
-type FakeProvider = "codex" | "claude-code" | "open-model";
+type FakeProvider = "codex" | "claude-code" | "open-model" | "antigravity";
 
 test("restoration preserves permission ownership while replacement retires it", async () => {
   const adapter = fakeAdapter("codex", []);
@@ -350,9 +352,102 @@ test("permission correlation and post-dispatch results reject replacement across
   assert.equal(sends, 1);
 });
 
+// Antigravity's adapter sends Claude Code's native shape. The router tags it with its own provider and
+// answers it as Claude's; only the approval kind follows the tool it names.
+for (const provider of ["claude-code", "antigravity"] as const) {
+  test(`${provider} permission routing tags, closes, correlates and answers Claude-shaped requests`, async () => {
+    const calls: string[] = [];
+    const adapter = fakeAdapter(provider, calls);
+    const router = new ProviderActionPortRouter({ [provider]: async () => adapter });
+    const spawn = { provider, workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+    const handle = await router.spawn(spawn);
+    const tool = (id: string, tool_name: string, input: Record<string, unknown>): ClaudeNativePermissionRequest =>
+      ({ id, request: { subtype: "can_use_tool", tool_name, tool_use_id: `${id}-tool`, input } });
+    const natives = [tool("bash", "Bash", { command: "npm test" }), tool("write", "Write", { file_path: "/repo/a.ts", content: "x" }),
+      tool("edit", "Edit", { file_path: "/repo/a.ts", old_string: "a", new_string: "b" }), tool("multi", "MultiEdit", { file_path: "/repo/a.ts" }),
+      tool("notebook", "NotebookEdit", { notebook_path: "/repo/a.ipynb" }), tool("fetch", "WebFetch", { url: "https://example.test/" }),
+      tool("search", "WebSearch", { query: "acp" }), tool("own", "browser_click", { selector: "#go" })];
+    let emit!: Parameters<NonNullable<NativeProviderAdapter["observePermissions"]>>[1];
+    adapter.observePermissions = async (_handle, listener) => { emit = listener; };
+    const events: ProviderPermissionObservation[] = [];
+    await router.observePermissions(handle, event => events.push(event), new AbortController().signal);
+    emit({ type: "snapshot", requests: natives });
+    const snapshot = events.at(-1)!;
+    assert.equal(snapshot.type, "snapshot");
+    if (snapshot.type !== "snapshot") return;
+    assert.match(snapshot.connectionId!, /^[a-f0-9]{64}$/);
+    assert.deepEqual(snapshot.requests, natives.map(native => ({ provider, native })));
+    assert.notEqual(snapshot.requests[0]!.native, natives[0], "the native payload is copied, never shared");
+    const requests = snapshot.requests as Extract<ProviderPermissionRequest, { provider: typeof provider }>[];
+
+    emit({ type: "request_closed", request: natives[1]!, providerContinuationId: handle.providerContinuationId!, providerTurnId: "turn" });
+    assert.deepEqual(events.at(-1), { type: "request_closed", request: { provider, native: natives[1] },
+      providerContinuationId: handle.providerContinuationId, providerTurnId: "turn" });
+    const before = events.length;
+    emit({ type: "request_closed", request: { id: 1, method: "item/commandExecution/requestApproval", connectionId: "socket" } });
+    assert.equal(events.length, before, "a Codex-shaped closure is not this provider's");
+
+    const asked: ClaudeNativePermissionRequest[] = [];
+    adapter.correlatePermissionTurn = async (nativeHandle, request) => {
+      asked.push(request as ClaudeNativePermissionRequest);
+      return { outcome: "correlated", providerContinuationId: nativeHandle.providerContinuationId!, providerTurnId: "turn" };
+    };
+    const kinds: string[] = [];
+    for (const request of requests) {
+      const correlated = await router.correlatePermissionTurn(handle, request);
+      assert.equal(correlated.outcome, "correlated");
+      if (correlated.outcome === "correlated") {
+        assert.equal(correlated.providerTurnId, "turn");
+        assert.equal(correlated.providerContinuationId, handle.providerContinuationId);
+        kinds.push(correlated.kind);
+      }
+    }
+    assert.deepEqual(kinds, provider === "claude-code" ? natives.map(() => "command")
+      : ["command", "file_change", "file_change", "file_change", "file_change", "network", "network", "command"]);
+    assert.deepEqual(asked, natives);
+    assert.notEqual(asked[0], requests[0]!.native, "the adapter correlates a copy");
+    const other = provider === "claude-code" ? "antigravity" : "claude-code";
+    assert.deepEqual(await router.correlatePermissionTurn(handle, { provider: other, native: natives[0]! }), { outcome: "correlation_unproven" },
+      "a request tagged for the other Claude-shaped provider is never this runtime's");
+    adapter.correlatePermissionTurn = async () => ({ outcome: "correlated", providerContinuationId: "another-session", providerTurnId: "turn" });
+    assert.deepEqual(await router.correlatePermissionTurn(handle, requests[0]!), { outcome: "correlation_unproven" });
+    adapter.correlatePermissionTurn = async () => ({ outcome: "correlation_unproven" });
+    assert.deepEqual(await router.correlatePermissionTurn(handle, requests[0]!), { outcome: "correlation_unproven" });
+
+    adapter.replyPermission = async (_handle, expected, reply, options) => {
+      assert.notEqual(expected, requests[0]!.native); assert.deepEqual(expected, natives[0]);
+      await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); calls.push(`send:${reply}`);
+      return { outcome: "sent", scope: "request" };
+    };
+    for (const reply of ["once", "reject"] as const) {
+      assert.deepEqual(await router.replyPermission(handle, requests[0]!, reply, {
+        beforeNativeDispatch: async () => { calls.push("intent"); }, assertNativeDispatch: () => { calls.push("fence"); },
+      }), { outcome: "sent_unacknowledged", nativeScope: "request" });
+    }
+    assert.deepEqual(calls.slice(-6), ["intent", "fence", "send:once", "intent", "fence", "send:reject"]);
+    await assert.rejects(router.replyPermission(handle, { provider: other, native: natives[0]! }, "once", { beforeNativeDispatch: async () => {} }),
+      /binding changed/);
+    adapter.replyPermission = async (_handle, _request, _reply, options) => {
+      await options!.beforeNativeDispatch(); options!.assertNativeDispatch!();
+      return { outcome: "processed", nativeScope: "request" };
+    };
+    await assert.rejects(router.replyPermission(handle, requests[0]!, "once", { beforeNativeDispatch: async () => {} }), { outcome: "uncertain" },
+      "only a sent reply is a Claude-shaped provider's evidence");
+    await router.spawn(spawn);
+    emit({ type: "snapshot", requests: natives });
+    assert.deepEqual(events.at(-1), { type: "unavailable" }, "a replaced runtime's requests are no longer observed");
+  });
+}
+
+test("Antigravity's approval kind follows the tool its adapter names", () => {
+  for (const name of ["Bash", "browser_click", "Read", "", "bash"]) assert.equal(antigravityApprovalKind(name), "command", name);
+  for (const name of ["Write", "Edit", "MultiEdit", "NotebookEdit"]) assert.equal(antigravityApprovalKind(name), "file_change", name);
+  for (const name of ["WebFetch", "WebSearch"]) assert.equal(antigravityApprovalKind(name), "network", name);
+});
+
 function fakeAdapter(provider: FakeProvider, calls: string[]): NativeProviderAdapter {
   const handles = new Map<string, ReturnType<typeof nativeHandle>>();
-  let nextPid = provider === "codex" ? 100 : provider === "claude-code" ? 200 : 300;
+  let nextPid = provider === "codex" ? 100 : provider === "claude-code" ? 200 : provider === "antigravity" ? 400 : 300;
   return {
     capabilities: () => ({
       resume: true,
@@ -405,7 +500,7 @@ function nativeHandle(
   provider: FakeProvider,
   workAttemptId: string,
   providerContinuationId: string,
-  pid = provider === "codex" ? 101 : provider === "claude-code" ? 202 : 303,
+  pid = provider === "codex" ? 101 : provider === "claude-code" ? 202 : provider === "antigravity" ? 404 : 303,
 ) {
   return {
     workAttemptId,
@@ -421,7 +516,9 @@ function nativeHandle(
             processIdentity: `opencode:${pid}`,
             serverAuthPath: `/tmp/opencode-${pid}.json`,
           }
-        : { kind: "claude_cli" as const, pid, processIdentity: `claude:${pid}` },
+        : provider === "antigravity"
+          ? { kind: "antigravity_acp" as const, pid, processIdentity: `agy:${pid}` }
+          : { kind: "claude_cli" as const, pid, processIdentity: `claude:${pid}` },
     observedState: () => "working" as const,
   };
 }
@@ -966,6 +1063,47 @@ test("provider router selects Open Model from an exact OpenCode connection", asy
   assert.deepEqual(calls, [
     "open-model:spawn:open-model-attempt",
     "open-model:attach:open-model-attempt",
+  ]);
+});
+
+test("each durable connection kind names exactly one provider", () => {
+  assert.equal(providerFromConnection({ kind: "codex_app_server", url: "ws://127.0.0.1:1", pid: 1, processIdentity: "codex:1" }), "codex");
+  assert.equal(providerFromConnection({ kind: "claude_cli", pid: 1, processIdentity: "claude:1" }), "claude-code");
+  assert.equal(providerFromConnection({ kind: "cursor_cli", pid: null, processIdentity: null }), "cursor");
+  assert.equal(providerFromConnection({ kind: "opencode_server", url: "http://127.0.0.1:1", pid: 1, processIdentity: "opencode:1",
+    serverAuthPath: "/tmp/opencode.json" }), "open-model");
+  assert.equal(providerFromConnection({ kind: "antigravity_acp", pid: 1, processIdentity: "agy:1" }), "antigravity");
+  assert.equal(providerFromConnection({ kind: "antigravity_acp", pid: null, processIdentity: null }), "antigravity");
+  assert.equal(providerFromConnection(null), null);
+  assert.equal(providerFromConnection(undefined), null);
+  assert.equal(providerFromConnection({ kind: "gemini_cli" } as unknown as ProviderActionConnectionRef), null);
+});
+
+test("provider router selects Antigravity from an exact ACP connection and refuses a conflicting provider", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("antigravity", calls);
+  const router = new ProviderActionPortRouter({ antigravity: async () => adapter });
+  const spawned = await router.spawn({
+    provider: "antigravity", workAttemptId: "antigravity-attempt", roomId: "room", cwd: "/tmp/antigravity",
+    launchPolicy: { agentMode: "default", dangerouslySkipPermissions: false, hostDecision: "reject" },
+    deliveryMode: "daemon_inbox", lifecycleAuthorityMode: "typed",
+  });
+  assert.equal(spawned.providerConnection?.kind, "antigravity_acp");
+
+  const freshRouter = new ProviderActionPortRouter({ antigravity: async () => adapter });
+  const ref = {
+    workAttemptId: spawned.workAttemptId,
+    providerContinuationId: spawned.providerContinuationId!,
+    providerConnection: spawned.providerConnection,
+    lifecycleAuthorityMode: "typed" as const,
+  };
+  assert.deepEqual(await freshRouter.attach(ref), spawned, "the connection kind alone selects the Antigravity adapter");
+  const conflicting = new ProviderActionPortRouter({ antigravity: async () => adapter });
+  await assert.rejects(conflicting.attach({ ...ref, provider: "claude-code" }),
+    /Conflicting provider identities for supervised lifecycle control: claude-code, antigravity/);
+  assert.deepEqual(calls, [
+    "antigravity:spawn:antigravity-attempt",
+    "antigravity:attach:antigravity-attempt",
   ]);
 });
 

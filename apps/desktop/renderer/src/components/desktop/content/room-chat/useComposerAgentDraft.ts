@@ -216,7 +216,8 @@ export function useComposerAgentDraft(options: {
     const provider = providerById(providerId);
     if (!provider) return [];
     const readiness = readinessFor(providerId);
-    // Cursor is listed only once it can start; otherwise "Set up another agent…" covers it.
+    // Cursor is listed only once it can start; otherwise "Set up another agent…" covers it. Antigravity is
+    // listed like Claude and Codex: before it can start, its row says what to do ("Install", "Sign in").
     if (providerId === "cursor" && readiness.state !== "ready") return [];
     const model = remembered.get(providerId)?.model;
     const detail = readiness.state === "not_set_up" ? "Not set up" : model ?? "Default";
@@ -335,11 +336,12 @@ export function useComposerAgentDraft(options: {
    * Effort, as the Add agent window offers it: Codex takes every shared level;
    * an Open Model agent takes exactly the levels its endpoint lists for the
    * model (the chosen one, or the saved default), so a model without that
-   * list has no slider. Supervised Claude takes its CLI's five levels.
+   * list has no slider. Supervised Claude takes its CLI's five levels. An
+   * Antigravity agent takes the thinking levels agy lists for the model.
    */
   const chipEfforts = computed(() => {
     const current = chip.value;
-    if (!current || (current.providerId !== "codex" && current.providerId !== "open-model" && current.providerId !== "claude-code")) return [];
+    if (!current || !["codex", "open-model", "claude-code", "antigravity"].includes(current.providerId)) return [];
     const catalog = catalogs[current.providerId];
     const modelId = current.model ?? catalog?.defaultModel ?? null;
     const option = catalog?.models.find((candidate) => candidate.id === modelId) ?? null;

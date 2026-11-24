@@ -1041,7 +1041,7 @@ export class WorkerAuthorityCoordinator {
       const execution = attempt.execution_generations.find(value => value.execution_generation_id === record.execution_generation_id);
       const terminal = execution?.terminal;
       const death = nativeRuntimeDeathSchema.safeParse(terminal?.native_runtime_death);
-      const expectedKind = entry.provider === "claude-code" ? "claude_cli" : entry.provider === "codex" ? "codex_app_server" : null;
+      const expectedKind = entry.provider === "claude-code" ? "claude_cli" : entry.provider === "codex" ? "codex_app_server" : entry.provider === "antigravity" ? "antigravity_acp" : null;
       const parsedLane = cursorLaneRetirementSchema.safeParse(record.cursor_lane_retirement);
       const lane = parsedLane.success ? parsedLane.data : undefined;
       const retiredCursorLane = entry.provider === "cursor" && binding && lane

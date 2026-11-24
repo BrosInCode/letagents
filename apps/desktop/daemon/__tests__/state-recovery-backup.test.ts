@@ -551,3 +551,40 @@ test("process death during compact database replacement rolls back the SQLite ba
   assert.equal(await compactDaemonStateDatabase(path, database, async () => {}), "compacted",
     "a later startup can safely retry after the killed backup");
 });
+
+test("a snapshot larger than one read piece survives, with multi-byte text split across pieces", async (t) => {
+  // A 1.47 GB state database failed every upgrade: its snapshot was decoded as one string,
+  // longer than JavaScript allows. The snapshot is now read in 4 MB pieces; this one spans several.
+  const directory = await privateTempDirectory("letagents-large-state-");
+  t.after(() => removeTestDirectory(directory));
+  const path = join(directory, "daemon.sqlite");
+  const database = new DatabaseSync(path);
+  let expected: Record<string, unknown> | undefined;
+  try {
+    database.exec(`PRAGMA user_version=1003; PRAGMA application_id=${DAEMON_STATE_APPLICATION_ID};
+      CREATE TABLE daemon_maintenance_state(key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;
+      CREATE TABLE reviews(id INTEGER PRIMARY KEY, body TEXT NOT NULL, data BLOB);`);
+    // Rows of odd lengths with four-byte characters, so piece boundaries fall inside characters and lines.
+    const insert = database.prepare("INSERT INTO reviews(body, data) VALUES(?, ?)");
+    database.exec("BEGIN");
+    for (let row = 0; row < 900; row += 1) insert.run(`review ${row} ${"🧠é".repeat(1_500 + row)}`, randomBytes(3_001 + row));
+    database.exec("COMMIT");
+    expected = database.prepare("SELECT count(*) AS n, sum(length(body)) AS chars, sum(length(data)) AS bytes FROM reviews").get();
+  } finally {
+    database.close();
+  }
+  const key = randomBytes(32);
+  const backup = await prepareStateRecoveryBackup(path, 1004, async () => ({ key: Buffer.from(key), sealedKey: "sealed" }));
+  assert.ok(backup);
+  assert.ok((await lstat(backup.path)).size > 3 * 4 * 1_024 * 1_024, "the snapshot spans several read pieces");
+  const restored = await decryptStateRecoveryBackup(backup.path, key);
+  try {
+    assert.deepEqual(restored.prepare("SELECT count(*) AS n, sum(length(body)) AS chars, sum(length(data)) AS bytes FROM reviews").get(), expected);
+    assert.match(String(restored.prepare("SELECT body FROM reviews WHERE id=900").get()!.body), /^review 899 (🧠é)+$/);
+  } finally { restored.close(); }
+  // One changed byte anywhere still fails before any record is read.
+  const bytes = await readFile(backup.path);
+  bytes[bytes.length - 1024] ^= 1;
+  await writeFile(backup.path, bytes);
+  await assert.rejects(decryptStateRecoveryBackup(backup.path, key), ERROR);
+});

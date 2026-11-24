@@ -184,6 +184,7 @@ export const entriesAndRecovery = storeMethods({
         claude_cli: "claude-code",
         cursor_cli: "cursor",
         opencode_server: "open-model",
+        antigravity_acp: "antigravity",
       } as const;
       const provider = expectedProvider[snapshot.providerConnection.kind];
       if (normalized.provider !== provider) {

@@ -36,7 +36,7 @@ export interface ComposerAgentLaunchHost {
 export const composerAgentLaunchKey: InjectionKey<ComposerAgentLaunchHost> = Symbol("composer-agent-launch");
 
 /** The providers the "Add agent" submenu lists by name, in this order. */
-export const COMPOSER_AGENT_PROVIDERS: readonly DesktopAgentProviderId[] = ["claude-code", "codex", "open-model", "cursor"];
+export const COMPOSER_AGENT_PROVIDERS: readonly DesktopAgentProviderId[] = ["claude-code", "codex", "antigravity", "open-model", "cursor"];
 
 export function composerAgentName(provider: Pick<DesktopAgentProvider, "id" | "name"> | null | undefined): string {
   if (!provider) return "Agent";

@@ -33,7 +33,7 @@ export type ProviderObservedState =
   | "stopped"
   | "failed";
 
-export type ProviderAdapterId = "codex" | "claude-code" | "cursor" | "open-model";
+export type ProviderAdapterId = "codex" | "claude-code" | "cursor" | "open-model" | "antigravity";
 
 // Negotiated per adapter; each `true` requires a proven spike cell (v10 §4.8).
 export interface ProviderAdapterCapabilities {
@@ -183,6 +183,14 @@ export type ProviderConnectionRef =
     // turn is live; an idle lane honestly records no process at all and its
     // continuation lives entirely in the session id (task_38 matrix row).
     kind: "cursor_cli";
+    pid: number | null;
+    processIdentity?: string | null;
+  }
+  | {
+    // Antigravity runs `agy acp`, an ACP server on the child's stdio. Like the
+    // Claude CLI it has no reconnectable endpoint: a fresh adapter can verify
+    // and fence the exact child, then resume its session in a new process.
+    kind: "antigravity_acp";
     pid: number | null;
     processIdentity?: string | null;
   }

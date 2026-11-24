@@ -20,7 +20,7 @@
         </div>
         <label class="agent-inspector-field"><span>Agent app</span><input :value="provider?.name || resource.configuration.provider" readonly aria-readonly="true" /><small>The agent app cannot be changed after creation.</small></label>
         <label class="agent-inspector-field"><span>Model</span><input :value="resource.draft.model || ''" :disabled="busy || !settingsEditable || !canEditModel" placeholder="Default model" @input="patch({ model: ($event.target as HTMLInputElement).value.trim() || null })" /><small v-if="!canEditModel">{{ provider ? 'The model cannot be changed for this agent.' : 'Available models could not be checked.' }}</small></label>
-        <label v-if="canEditEffort" class="agent-inspector-field"><span>Reasoning effort</span><select :value="resource.draft.reasoningEffort || ''" :disabled="busy || !settingsEditable" @change="patch({ reasoningEffort: (($event.target as HTMLSelectElement).value || null) as any })"><option v-for="option in inspectorEffortOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
+        <label v-if="canEditEffort" class="agent-inspector-field"><span>Reasoning effort</span><select :value="resource.draft.reasoningEffort || ''" :disabled="busy || !settingsEditable" @change="patch({ reasoningEffort: (($event.target as HTMLSelectElement).value || null) as any })"><option v-for="option in effortChoices" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
         <label class="agent-inspector-field"><span>Initial message</span><textarea :value="resource.draft.charter" rows="4" readonly aria-readonly="true"></textarea><small>The first message sent when this agent was created.</small></label>
         <fieldset v-if="resource.configuration.supervisedPermissionProfiles.length" class="agent-inspector-permissions" :disabled="busy || !settingsEditable" :aria-describedby="'agent-inspector-permission-detail'">
           <legend>Permissions</legend>
@@ -138,7 +138,7 @@ import {
   configurationHasRuntimeLag,
   IMAGE_INPUT_DESCRIPTION,
   IMAGE_INPUT_TITLE,
-  inspectorEffortOptions,
+  inspectorEffortChoices,
   permissionTimingNote,
   roomMovePresentation,
   type AgentInspectorConfigurationDraft,
@@ -168,6 +168,11 @@ const unsavedEdits = computed(() => {
   return (Object.keys(saved) as Array<keyof AgentInspectorConfigurationDraft>).some((key) => saved[key] !== draft[key]);
 });
 const movePresentation = computed(() => props.move.move ? roomMovePresentation(props.move.move) : null);
+const effortChoices = computed(() => inspectorEffortChoices(
+  props.resource.configuration?.provider,
+  undefined,
+  props.resource.draft?.reasoningEffort,
+));
 const moveTerminal = computed(() => Boolean(movePresentation.value?.terminal));
 function patch(value: Partial<AgentInspectorConfigurationDraft>) { emit("patch", value); }
 /** What an access level withholds, for this agent: its owner's own setup, when on, is outside those limits. */

@@ -23,10 +23,20 @@ export const TEST_PROVIDER_TURN_AUTHORITY = {
   provider_continuation_id: "thread_1",
 } as const;
 
+type ApprovalJournalProvider = "codex" | "open-model" | "claude-code" | "antigravity";
+const APPROVAL_JOURNAL_CONNECTION_KIND = {
+  codex: "codex_app_server",
+  "open-model": "opencode_server",
+  "claude-code": "claude_cli",
+  antigravity: "antigravity_acp",
+} as const;
+
 export async function seedApprovalJournalTurn(env: Awaited<ReturnType<typeof fixture>>, store: ManifestStore, database: DatabaseSync,
-  provider: "codex" | "open-model" = "codex"): Promise<ApprovalAuthority> {
+  provider: ApprovalJournalProvider = "codex"): Promise<ApprovalAuthority> {
   const providerConnection: ApprovalAuthority["providerConnection"] = provider === "codex"
     ? { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "birth" }
+    : provider === "claude-code" ? { kind: "claude_cli", pid: 4311, processIdentity: "birth" }
+    : provider === "antigravity" ? { kind: "antigravity_acp", pid: 4311, processIdentity: "birth" }
     : { kind: "opencode_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "birth", serverAuthPath: "/test/auth" };
   await store.write([{ ...entry, id: "agent", room_id: "room", provider, condition: "none", turn_control: undefined,
     reconciliation: undefined, reconciliation_notices: undefined, delivery_mode: "daemon_inbox", work_attempt_id: "workspace",
@@ -55,11 +65,11 @@ export function admitApproval(store: ManifestStore, input: AdmitExecutionApprova
   );
 }
 
-export function approvalJournalRequest(requestId = "request", nativeRequestId: string | number = 1, provider: "codex" | "open-model" = "codex"): { expected: ApprovalReference; input: AdmitExecutionApproval } {
+export function approvalJournalRequest(requestId = "request", nativeRequestId: string | number = 1, provider: ApprovalJournalProvider = "codex"): { expected: ApprovalReference; input: AdmitExecutionApproval } {
   const expected: ApprovalReference = {
     requestId, requestVersion: 1, requestSha256: "a".repeat(64), agentId: "agent", roomId: "room",
     executionGenerationId: "generation", runtimeGenerationId: executionRuntimeStorageIdentity(
-      "agent", "generation", provider === "codex" ? "codex_app_server" : "opencode_server", 4311, "birth",
+      "agent", "generation", APPROVAL_JOURNAL_CONNECTION_KIND[provider], 4311, "birth",
     ), turnId: executionStorageIdentity("turn", "agent", "continuation", "native-turn"),
     providerContinuationId: "continuation", providerTurnId: "native-turn", connectionId: "connection", nativeRequestId,
   };

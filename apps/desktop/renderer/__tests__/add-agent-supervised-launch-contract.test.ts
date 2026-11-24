@@ -251,7 +251,7 @@ test("bounded supervised defaults never tell providers to own polling and Claude
     /You are part of this room's team\. Work on the tasks assigned to you/,
   );
   // Codex and Claude always; Open Model only for a model whose endpoint lists efforts.
-  assert.match(presentationSource, /showEffortSelector = computed\(\(\) =>\s*selectedProviderId\.value === "codex"\s*\|\| selectedProviderId\.value === "claude-code"\s*\|\| \(selectedProviderId\.value === "open-model" && effortOptions\.value\.length > 0\)\s*\)/);
+  assert.match(presentationSource, /showEffortSelector = computed\(\(\) =>\s*selectedProviderId\.value === "codex"\s*\|\| selectedProviderId\.value === "claude-code"\s*\|\| \(\(selectedProviderId\.value === "open-model" \|\| selectedProviderId\.value === "antigravity"\) && effortOptions\.value\.length > 0\)\s*\)/);
 });
 
 test("supervised creation presents the first message as a one-time message, not a task", () => {

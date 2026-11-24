@@ -39,7 +39,7 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
   const suppliedByRuntime = new Map(supplied.map(value => [value.runtimeGenerationId, value]));
   if (suppliedByRuntime.size !== supplied.length) throw new Error("Retired runtime evidence contains duplicate identities.");
   const observer = database.prepare("SELECT * FROM execution_observers WHERE agent_id=?").get(entry.id);
-  if (!["claude-code", "codex"].includes(entry.provider)) {
+  if (!["claude-code", "codex", "antigravity"].includes(entry.provider)) {
     if (supplied.length) throw new Error("This provider does not support retired process evidence.");
     return { evidence: [], suppliedEvidence: supplied, observerJson: null };
   }
@@ -82,7 +82,7 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
     const witnessed = nativeRuntimeDeathSchema.safeParse(terminal.native_runtime_death);
     if (terminal.native_runtime_death !== undefined && !witnessed.success) throw new Error("The predecessor death record is invalid.");
     const death = provided?.death ?? (witnessed.success ? witnessed.data : null);
-    const kind = row.provider === "claude-code" ? "claude_cli" : row.provider === "codex" ? "codex_app_server" : null;
+    const kind = row.provider === "claude-code" ? "claude_cli" : row.provider === "codex" ? "codex_app_server" : row.provider === "antigravity" ? "antigravity_acp" : null;
     if (!death) throw new Error("An older runtime needs verified process identity evidence before recovery can continue.");
     if (provided && (provided.executionGenerationId !== row.execution_generation_id || (witnessed.success
       && (provided.death.kind !== witnessed.data.kind || provided.death.pid !== witnessed.data.pid || provided.death.processIdentity !== witnessed.data.processIdentity)))) {

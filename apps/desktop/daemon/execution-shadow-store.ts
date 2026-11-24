@@ -14,7 +14,7 @@ type Row = Record<string, string | number | null>;
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const runtimeInput = z.strictObject({
   agentId: id, executionGenerationId: id, runtimeGenerationId: id,
-  provider: z.enum(["codex", "claude-code", "cursor", "open-model"]), authorityMode: z.literal("typed"),
+  provider: z.enum(["codex", "claude-code", "cursor", "open-model", "antigravity"]), authorityMode: z.literal("typed"),
   configRevision: time.min(1), createdAtMs: time,
 });
 const attemptInput = z.strictObject({ agentId: id, roomId: id, sourceMessageId: id, executionGenerationId: id, workspaceId: id, createdAtMs: time });

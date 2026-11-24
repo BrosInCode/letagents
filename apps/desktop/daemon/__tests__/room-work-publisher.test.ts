@@ -45,7 +45,7 @@ import { removeTestDirectory } from "../../electron/__tests__/harness.js";
  * the stores' own bounded waits (for example a busy SQLite open on Windows) still need. Tests that drive
  * the publisher's timers themselves, or that need real time, pass realTimers.
  */
-async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex", { realTimers = false } = {}) {
+async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" | "antigravity" = "codex", { realTimers = false } = {}) {
   if (!realTimers) t.mock.method(RoomWorkPublisher.prototype as unknown as { schedule(): void }, "schedule", () => {});
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
   const workspacePath = await mkdtemp(join(tmpdir(), 'publisher-workspace-'));
@@ -815,7 +815,7 @@ test("HTTP publication validates exact receipts, both clear responses, and never
   }
 });
 
-for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const) {
+for (const provider of ["codex", "claude-code", "cursor", "open-model", "antigravity"] as const) {
   test(`${provider} settles unchanged work without a workspace publication across restart`, async t => {
     const f = await fixture(t, provider);
     f.options.workspaceLocation = async () => f.location;

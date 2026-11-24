@@ -166,7 +166,7 @@ export type DaemonStatus = z.infer<typeof daemonStatusSchema>;
 export const executionIdentitySchema = z.string().min(1).max(512).regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/);
 
 export const nativeRuntimeDeathSchema = z.strictObject({
-  kind: z.enum(["claude_cli", "codex_app_server"]),
+  kind: z.enum(["claude_cli", "codex_app_server", "antigravity_acp"]),
   pid: positiveSafeInt,
   processIdentity: z.string().min(1).max(512),
 });
@@ -218,6 +218,11 @@ export const daemonProviderConnectionSchema = z.union([
     pid: z.number().int().nullable(),
     processIdentity: z.string().nullable().optional(),
     serverAuthPath: z.string(),
+  }),
+  z.object({
+    kind: z.literal("antigravity_acp"),
+    pid: z.number().int().nullable(),
+    processIdentity: z.string().nullable().optional(),
   }),
 ]);
 export type DaemonProviderConnection = z.infer<typeof daemonProviderConnectionSchema>;
@@ -871,7 +876,7 @@ export const projectHostToolScopeSchema = z.strictObject({
   canonicalSourcePath: z.string().min(1).max(4096),
   repository: z.string().min(1).max(4096),
   remoteUrl: z.string().min(1).max(4096),
-  provider: z.enum(["codex", "claude-code", "open-model"]),
+  provider: z.enum(["codex", "claude-code", "open-model", "antigravity"]),
   toolId: hostApprovalIdSchema,
   toolLabel: hostToolLabelSchema,
   policySha256: hostApprovalShaSchema,
@@ -886,7 +891,7 @@ export const roomWorkspaceHostToolScopeSchema = z.strictObject({
   workAttemptId: z.string().uuid(),
   workspacePath: z.string().min(1).max(4096),
   canonicalWorkspacePath: z.string().min(1).max(4096),
-  provider: z.enum(["codex", "claude-code", "open-model"]),
+  provider: z.enum(["codex", "claude-code", "open-model", "antigravity"]),
   toolId: hostApprovalIdSchema,
   toolLabel: hostToolLabelSchema,
   policySha256: hostApprovalShaSchema,
@@ -925,7 +930,7 @@ export const hostApprovalCandidateSchema = z.strictObject({
   presentation: z.strictObject({
     agentId: hostApprovalIdSchema,
     displayName: z.string().max(256),
-    provider: z.enum(["codex", "open-model", "claude-code"]),
+    provider: z.enum(["codex", "open-model", "claude-code", "antigravity"]),
     title: z.enum(["Run a command", "Run a tool", "Change files", "Grant for this turn", "Approval unavailable"]),
     details: z.string().max(24 * 1024),
     denyScope: z.enum(["request", "request_and_turn", "session_pending"]),

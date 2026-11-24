@@ -694,7 +694,7 @@ test("isExternalMcpProviderReady distinguishes bridge-only providers from deskto
   })), false);
 });
 
-test("visibleDesktopAgentProviders excludes Antigravity from Add Agent choices", () => {
+test("visibleDesktopAgentProviders offers every provider, Antigravity included", () => {
   const providers = visibleDesktopAgentProviders([
     provider({
       id: "claude-code",
@@ -704,8 +704,7 @@ test("visibleDesktopAgentProviders excludes Antigravity from Add Agent choices",
     provider({
       id: "antigravity",
       name: "Antigravity",
-      capabilities: ["external_mcp"],
-      runtimeCommand: null,
+      runtimeCommand: "agy",
       mcpTargetId: "antigravity",
     }),
     provider({
@@ -717,7 +716,7 @@ test("visibleDesktopAgentProviders excludes Antigravity from Add Agent choices",
 
   assert.deepEqual(
     providers.map((provider) => provider.id),
-    ["claude-code", "codex"],
+    ["claude-code", "antigravity", "codex"],
   );
 });
 
@@ -936,7 +935,7 @@ test("supervised Cursor permission copy distinguishes Full access from Workspace
 });
 
 test("every access level a supervised agent can use states what it does not allow", () => {
-  for (const providerId of ["codex", "claude-code", "open-model", "cursor"] as const) {
+  for (const providerId of ["codex", "claude-code", "open-model", "cursor", "antigravity"] as const) {
     for (const profile of supervisedPermissionProfilesForProvider(providerId)) {
       const presented = supervisedPermissionProfilePresentation(providerId, profile as DesktopManagedAgentPermissionProfile, { hasProject: true, platform: "MacIntel" });
       const limits = supervisedPermissionProfileLimits(providerId, presented);
