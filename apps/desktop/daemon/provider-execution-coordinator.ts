@@ -397,17 +397,19 @@ export class ProviderExecutionCoordinator {
         async () => {
           if (reminder && this.pendingReminders.get(entryId) === reminder) this.pendingReminders.delete(entryId);
           await this.converge(entryId, kind);
-          this.conflictRetryAttempts.delete(entryId);
         },
       ))
       .then(async () => {
-        if (this.options.authority.isDispatchPaused?.()) return;
-        const pending = await this.options.refreshManagedRuntime?.(entryId);
-        if (!pending) return;
-        // The agent is still to be replaced. It is tried again from here, so
-        // a turn held back for the replacement never waits on another event.
-        this.scheduleRecovery(entryId, pending.retryAfterMs);
-        if (pending.notice) await this.recordLaunchNotices(entryId, [pending.notice]);
+        if (!this.options.authority.isDispatchPaused?.()) {
+          const pending = await this.options.refreshManagedRuntime?.(entryId);
+          if (pending) {
+            // The agent is still to be replaced. It is tried again from here, so
+            // a turn held back for the replacement never waits on another event.
+            this.scheduleRecovery(entryId, pending.retryAfterMs);
+            if (pending.notice) await this.recordLaunchNotices(entryId, [pending.notice]);
+          }
+        }
+        this.conflictRetryAttempts.delete(entryId);
       })
       .catch(async (error) => {
         if (error instanceof ManifestConflictError) {
@@ -417,6 +419,13 @@ export class ProviderExecutionCoordinator {
               && !this.options.authority.isDispatchPaused?.()
               && this.options.autoConverge) {
               this.conflictRetryAttempts.set(entryId, attempts);
+              console.warn("[provider_execution] convergence_conflict_retry", JSON.stringify({
+                entryId,
+                kind,
+                attempt: attempts,
+                limit: CONVERGENCE_CONFLICT_RETRY_LIMIT,
+                error: error.message,
+              }));
               // Queue the retry before `next` settles so `drainConvergence()`
               // waits for it and the retry runs under `serializeEntry`.
               this.request(entryId, kind);
@@ -1265,6 +1274,7 @@ export class ProviderExecutionCoordinator {
           entry.id,
         );
       } catch (error) {
+        await this.options.delivery.stop(entry.id).catch(() => undefined);
         await this.options.transition(
           entry.id,
           "failed",
@@ -1274,7 +1284,6 @@ export class ProviderExecutionCoordinator {
           undefined,
           version,
         );
-        await this.options.delivery.stop(entry.id).catch(() => undefined);
         return;
       }
     }
@@ -1358,7 +1367,7 @@ export class ProviderExecutionCoordinator {
     try {
       await this.launchProvider(entry, version, launchControlEpoch);
     } catch (error) {
-      launchProgress.fail(entry.id, error);
+      if (!(error instanceof ManifestConflictError)) launchProgress.fail(entry.id, error);
       throw error;
     } finally {
       launchProgress.settle(entry.id);
@@ -2295,7 +2304,9 @@ export class ProviderExecutionCoordinator {
         handle = await this.attachLiveProvider(entry);
       } catch (error) {
         if (error instanceof ExecutionProtocolError && error.code === "identity_mismatch") {
-          await this.stopRetiredPreTypedRuntime(entry, version);
+          const latest = await this.loadVersionedEntry(entry.id);
+          if (!latest || latest.entry.desired_state === "running") return;
+          await this.stopRetiredPreTypedRuntime(latest.entry, latest.version);
           return;
         }
         throw error;

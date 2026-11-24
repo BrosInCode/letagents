@@ -3478,11 +3478,15 @@ async function realSqliteSchedulerHarness(input: {
   provider?: ProviderActionPort;
   assertCurrent?: () => Promise<void>;
   onBeforeTransition?: (attempt: number) => Promise<void>;
+  onDeliveryStop?: (entryId: string) => void;
+  refreshManagedRuntime?: ProviderExecutionCoordinatorOptions["refreshManagedRuntime"];
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "letagents-pec-cas-"));
   const store = new ManifestStore(join(dir, "manifest.sqlite"));
   await store.initialize();
   const initialEntry = input.entry ?? baseEntry();
+  launchProgress.begin(initialEntry.id);
+  launchProgress.settle(initialEntry.id);
   await store.createEntry(initialEntry);
   const workAttemptId = initialEntry.work_attempt_id ?? "attempt-1";
   store.database!.prepare(`
@@ -3567,6 +3571,7 @@ async function realSqliteSchedulerHarness(input: {
   });
   const port = input.provider ?? provider();
   const options: ProviderExecutionCoordinatorOptions = {
+    ...(input.refreshManagedRuntime ? { refreshManagedRuntime: input.refreshManagedRuntime } : {}),
     settleRuntimeApprovals: async () => {},
     provider: port,
     store,
@@ -3656,7 +3661,10 @@ async function realSqliteSchedulerHarness(input: {
     }),
     observeProviderExit: async () => {},
     completeTurnControlForRuntimeRecovery: async (current) => current,
-    delivery: { stop: async () => {}, start: async () => {} },
+    delivery: {
+      stop: async (entryId) => { input.onDeliveryStop?.(entryId); },
+      start: async () => {},
+    },
     inbox: {
       head: async () => null,
       cursor: async () => ({ agent_id: initialEntry.id, room_id: initialEntry.room_id, last_observed_message_id: "1" }),
@@ -3752,6 +3760,10 @@ test("request() recovers from a real concurrent manifest write on the running pa
       assert.equal(final?.condition, "none");
       assert.equal(final?.last_error ?? null, null);
       assert.equal(env.auditEvents.some((event) => /coordination_blocked|convergence scheduler failure/i.test(event.cause)), false);
+      const progress = launchProgress.view("agent-1");
+      assert.equal(progress?.state, "launched", "retryable conflict must not leave launchProgress failed");
+      assert.equal(progress?.attempt, 1, "retryable conflict must not inflate launch attempt counter");
+      assert.equal(progress?.failure, null);
     } finally {
       env.cleanup();
     }
@@ -3785,6 +3797,7 @@ test("request() recovers from a real concurrent manifest write on the running pa
       assert.equal(abortedSpawns, 0, "stale running pass must not spawn after concurrent stop");
       assert.equal(flippedEnv.schedulerFailures.length, 0);
       assert.equal(flippedEnv.auditEvents.some((event) => event.to === "starting"), false, "rejected starting transition must never be committed or audited");
+      assert.equal(launchProgress.view("agent-1"), null, "aborted running pass flipped to stopped must not leave a failed launchProgress entry");
       const final = await flippedEnv.store.getEntry("agent-1");
       assert.equal(final?.desired_state, "stopped");
       assert.equal(final?.observed_state, "stopped");
@@ -4032,6 +4045,70 @@ test("request() never treats DaemonFenceLostError as a conflict retry and execut
     const final = await env.store.getEntry("agent-1");
     assert.equal(final?.observed_state, "absent");
     assert.equal(final?.condition, "none");
+  } finally {
+    env.cleanup();
+  }
+});
+
+test("unsafe rental permission profile stops delivery fail-closed before quarantine transition even under persistent conflicts", async () => {
+  const order: string[] = [];
+  let concurrentWrites = 0;
+  let env!: Awaited<ReturnType<typeof realSqliteSchedulerHarness>>;
+  env = await realSqliteSchedulerHarness({
+    entry: {
+      ...baseEntry(),
+      id: "supervised_rental_1",
+      permission_profile_id: "full_access",
+      desired_state: "running",
+      observed_state: "working",
+    },
+    onDeliveryStop: () => {
+      order.push("delivery.stop");
+    },
+    onBeforeTransition: async (attempt) => {
+      order.push(`transition:${attempt}`);
+      concurrentWrites += 1;
+      await env.transitions.updateEntry("supervised_rental_1", (current) => ({
+        ...current,
+        display_name: `Concurrent Write #${concurrentWrites}`,
+      }));
+    },
+  });
+  try {
+    env.coordinator.request("supervised_rental_1");
+    await env.coordinator.drainConvergence();
+
+    assert.equal(order[0], "delivery.stop", "delivery must stop before the first quarantine transition attempt");
+    assert.equal(order[1], "transition:1");
+    assert.equal(env.transitionCalls(), CONVERGENCE_CONFLICT_RETRY_LIMIT + 1);
+    assert.equal(env.schedulerFailures.length, 1);
+    assert.ok(env.schedulerFailures[0] instanceof ConvergenceConflictExhaustedError);
+  } finally {
+    env.cleanup();
+  }
+});
+
+test("request() bounds persistent ManifestConflictError thrown during post-converge refreshManagedRuntime", async () => {
+  let refreshCalls = 0;
+  const env = await realSqliteSchedulerHarness({
+    entry: { ...baseEntry(), desired_state: "stopped", observed_state: "stopped" },
+    refreshManagedRuntime: async () => {
+      refreshCalls += 1;
+      throw new ManifestConflictError(`post-converge conflict #${refreshCalls}`);
+    },
+  });
+  try {
+    env.coordinator.request("agent-1");
+    await env.coordinator.drainConvergence();
+
+    assert.equal(
+      refreshCalls,
+      CONVERGENCE_CONFLICT_RETRY_LIMIT + 1,
+      "post-converge ManifestConflictError must not reset the conflict retry counter",
+    );
+    assert.equal(env.schedulerFailures.length, 1);
+    assert.ok(env.schedulerFailures[0] instanceof ProviderStopError);
+    assert.ok(env.schedulerFailures[0].cause instanceof ConvergenceConflictExhaustedError);
   } finally {
     env.cleanup();
   }
