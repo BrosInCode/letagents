@@ -40,25 +40,6 @@ function isIncompleteRecoverableLaunch(entry: DesktopSupervisorManifestEntry): b
     && !supervisedLaunchProgress(entry).ready;
 }
 
-function withRecoveryScanTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    const finish = (callback: () => void): void => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timer);
-      callback();
-    };
-    const timer = window.setTimeout(() => finish(() => reject(new Error(
-      "The supervisor check took too long to respond.",
-    ))), timeoutMs);
-    operation.then(
-      (value) => finish(() => resolve(value)),
-      (error) => finish(() => reject(error)),
-    );
-  });
-}
-
 export function useSupervisedLaunchRecovery(options: {
   open: () => boolean;
   roomIdentifier: () => string;
@@ -91,41 +72,51 @@ export function useSupervisedLaunchRecovery(options: {
     detecting.value = true;
     scanStatus.value = "checking";
     options.setLookupFeedback(null);
-    let entries: DesktopSupervisorManifestEntry[];
-    try {
-      entries = await withRecoveryScanTimeout(
-        desktopIpc.supervisor.listAgents(roomIdentifier),
-        options.scanTimeoutMs ?? DEFAULT_RECOVERY_SCAN_TIMEOUT_MS,
-      );
-    } catch (error) {
-      if (
-        generation === lookupGeneration
-        && options.open()
-        && options.roomIdentifier() === roomIdentifier
-        && options.providerId() === providerId
-      ) {
-        scanStatus.value = "error";
-        options.setLookupFeedback(`${contextualAddAgentError(
-          `Couldn't check for previous ${providerId.replaceAll("-", " ")} agents`,
-          error,
-          "The supervisor is unavailable.",
-        )} Try the check again, or start a new supervised agent.`, "error");
+    const isCurrent = () => generation === lookupGeneration && options.open()
+      && options.roomIdentifier() === roomIdentifier && options.providerId() === providerId;
+    const applicable = () => isCurrent() && !options.conflict.value && !options.launchStarted.value
+      && !recovering.value && !candidate.value;
+
+    const readEntries = async (): Promise<void> => {
+      let entries: DesktopSupervisorManifestEntry[];
+      try { entries = await desktopIpc.supervisor.listAgents(roomIdentifier); }
+      catch (error) {
+        if (applicable()) {
+          scanStatus.value = "error";
+          options.setLookupFeedback(contextualAddAgentError(
+            "The local supervisor could not list previous agents", error, "Choose Check again to retry.",
+          ), "error");
+        }
+        return;
       }
-      return;
-    } finally {
+      if (!isCurrent()) return;
+      scanStatus.value = "ready";
+      if (applicable()) {
+        options.setLookupFeedback(null);
+        selectPreviousLaunch(entries, roomIdentifier, providerId);
+      }
+    };
+
+    // Release the form on its deadline, while still accepting the actual answer
+    // if the same lookup finishes and no new launch or retry has superseded it.
+    let timer: number | undefined;
+    const deadline = new Promise<void>(resolve => {
+      timer = window.setTimeout(() => {
+        if (applicable()) {
+          scanStatus.value = "error";
+          options.setLookupFeedback("The local supervisor is taking longer to respond. Choose Check again to retry.", "warning");
+        }
+        resolve();
+      }, options.scanTimeoutMs ?? DEFAULT_RECOVERY_SCAN_TIMEOUT_MS);
+    });
+    try { await Promise.race([readEntries(), deadline]); }
+    finally {
+      window.clearTimeout(timer);
       if (generation === lookupGeneration) detecting.value = false;
     }
-    if (
-      generation !== lookupGeneration
-      || !options.open()
-      || options.roomIdentifier() !== roomIdentifier
-      || options.providerId() !== providerId
-    ) return;
-    if (options.conflict.value || options.launchStarted.value || recovering.value || candidate.value) {
-      scanStatus.value = "ready";
-      return;
-    }
-    scanStatus.value = "ready";
+  }
+
+  function selectPreviousLaunch(entries: DesktopSupervisorManifestEntry[], roomIdentifier: string, providerId: DesktopAgentProviderId): void {
     const failedStop = entries
       .filter((entry) => entry.provider === providerId && supervisedLaunchProgress(entry).stopFailed)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
