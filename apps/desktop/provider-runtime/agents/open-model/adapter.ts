@@ -38,6 +38,11 @@ export class OpenModelProviderAdapter extends OpenModelAdapterLaunch implements 
     // re-invoked until the bounded-turn abort fires.
     const turnId = mintNativeUserMessageId(Date.now());
     await options.beforeNativeDispatch?.();
+    // OpenCode accepts a caller-supplied ascending messageID, so durability
+    // can record the exact native identity before promptAsync starts the turn
+    // and before any turn-active lifecycle observation can race the binding.
+    await options.checkpointTurnStarted?.(turnId);
+    handle.activeRoomTurnId = turnId;
     handle.setState("working");
     await handle.client.promptAsync(handle.providerContinuationId, {
       messageID: turnId,
@@ -47,13 +52,12 @@ export class OpenModelProviderAdapter extends OpenModelAdapterLaunch implements 
       },
       parts: [{ type: "text", text: boundedRoomTurnPrompt(request) }, ...(handle.imageInput ? roomTurnImageParts(request) : [])],
     }).catch((error) => {
+      if (handle.activeRoomTurnId === turnId) handle.activeRoomTurnId = null;
       handle.setState("idle");
       throw error;
     });
-    handle.activeRoomTurnId = turnId;
     handle.observedTurn = { id: turnId, terminal: null };
     this.emitTurnActive(handle, turnId);
-    await options.checkpointTurnStarted?.(turnId);
     try {
       const result = await this.awaitExactTurn(handle, turnId, options.detachSignal);
       await options.checkpointTerminalResult?.(result);
