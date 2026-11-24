@@ -389,6 +389,7 @@ export class ProviderExecutionCoordinator {
     if (kind === "rehydration" && this.pendingReminders.has(entryId)) return;
     const reminder = kind === "rehydration" ? Symbol() : null;
     if (reminder) this.pendingReminders.set(entryId, reminder);
+    let ensureDelivery = false;
     const previous = this.convergenceRequests.get(entryId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -396,10 +397,18 @@ export class ProviderExecutionCoordinator {
         entryId,
         async () => {
           if (reminder && this.pendingReminders.get(entryId) === reminder) this.pendingReminders.delete(entryId);
-          await this.converge(entryId, kind);
+          ({ ensureDelivery } = await this.convergeLocked(entryId, kind));
         },
       ))
       .then(async () => {
+        if (ensureDelivery
+          && !this.options.authority.isHandoffScheduled()
+          && !this.options.authority.isDispatchPaused?.()) {
+          // Run delivery/room-move admission after releasing `serializeEntry` so
+          // pending room-move reconciliation can enter `entryConcurrency.runRoomMove`
+          // without deadlocking behind this convergence pass.
+          await this.options.delivery.start(entryId, "ensure");
+        }
         if (!this.options.authority.isDispatchPaused?.()) {
           const pending = await this.options.refreshManagedRuntime?.(entryId);
           if (pending) {
@@ -1206,17 +1215,33 @@ export class ProviderExecutionCoordinator {
   }
 
   async converge(entryId: string, kind: ConvergenceRequestKind = "owned"): Promise<void> {
-    if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return;
+    const { ensureDelivery } = await this.convergeLocked(entryId, kind);
+    if (ensureDelivery
+      && !this.options.authority.isHandoffScheduled()
+      && !this.options.authority.isDispatchPaused?.()) {
+      await this.options.delivery.start(entryId, "ensure");
+    }
+  }
+
+  private async convergeLocked(
+    entryId: string,
+    kind: ConvergenceRequestKind = "owned",
+  ): Promise<{ ensureDelivery: boolean }> {
+    let ensureDelivery = false;
+    const markEnsureDelivery = () => { ensureDelivery = true; };
+    if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) {
+      return { ensureDelivery };
+    }
     // Owned lifecycle/terminal/timer work can retry even identical launch inputs.
     if (kind === "owned") this.failedLaunchAdmissions.delete(entryId);
     await this.options.settleRuntimeApprovals(entryId);
-    if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
+    if (await this.options.store.pendingRuntimeRecovery(entryId)) return { ensureDelivery };
     const loaded = await this.loadVersionedEntry(entryId);
     if (!loaded) {
       this.failedLaunchAdmissions.delete(entryId);
       this.workspaceRepositoryRetries.delete(entryId);
       this.conflictRetryAttempts.delete(entryId);
-      return;
+      return { ensureDelivery };
     }
     let { entry, version } = loaded;
     let launchControlEpoch = this.options.concurrency.currentControlEpoch(entryId);
@@ -1232,21 +1257,22 @@ export class ProviderExecutionCoordinator {
       if (controlledExecution?.terminal) {
         await this.options.completeTurnControlForRuntimeRecovery(entry);
         const refreshed = await this.loadVersionedEntry(entryId);
-        if (!refreshed) return;
+        if (!refreshed) return { ensureDelivery };
         entry = refreshed.entry;
         version = refreshed.version;
       }
     }
 
     if (entry.desired_state === "running") {
-      await this.convergeRunning(entry, version, launchControlEpoch, kind);
-      return;
+      await this.convergeRunning(entry, version, launchControlEpoch, kind, markEnsureDelivery);
+      return { ensureDelivery };
     }
     try {
       await this.convergeStopped(entry, version);
       this.failedLaunchAdmissions.delete(entryId);
       // A stopped agent starts its next attempt at the shortest wait.
       this.workspaceRepositoryRetries.delete(entryId);
+      return { ensureDelivery };
     } catch (error) {
       if (error instanceof ManifestConflictError || error instanceof DaemonFenceLostError) throw error;
       // A pause that fails is not a failed stop.
@@ -1259,6 +1285,7 @@ export class ProviderExecutionCoordinator {
     initialVersion: number,
     initialControlEpoch: number,
     kind: ConvergenceRequestKind,
+    markEnsureDelivery: () => void,
   ): Promise<void> {
     let entry = initialEntry;
     let version = initialVersion;
@@ -1356,7 +1383,7 @@ export class ProviderExecutionCoordinator {
       version = afterAttach.version;
     }
     if (handle) {
-      await this.convergeAttachedHandle(entry, version, handle);
+      await this.convergeAttachedHandle(entry, version, handle, markEnsureDelivery);
       return;
     }
     if (kind === "rehydration" && this.failedLaunchAdmissions.has(entry.id)) {
@@ -1365,7 +1392,7 @@ export class ProviderExecutionCoordinator {
       if (admission && admission === this.failedLaunchAdmissions.get(entry.id)) return;
     }
     try {
-      await this.launchProvider(entry, version, launchControlEpoch);
+      await this.launchProvider(entry, version, launchControlEpoch, markEnsureDelivery);
     } catch (error) {
       if (!(error instanceof ManifestConflictError)) launchProgress.fail(entry.id, error);
       throw error;
@@ -1407,6 +1434,7 @@ export class ProviderExecutionCoordinator {
     initialEntry: DaemonManifestEntry,
     initialVersion: number,
     handle: ProviderActionHandle,
+    markEnsureDelivery: () => void,
   ): Promise<void> {
     let entry = initialEntry;
     let version = initialVersion;
@@ -1532,7 +1560,7 @@ export class ProviderExecutionCoordinator {
       // A turn an earlier runtime left open, once its message is settled, would
       // refuse the next turn of this one. It is archived as soon as it is seen.
       await this.archiveExitedRuntimes(entry.id);
-      await this.options.delivery.start(entry.id, "ensure");
+      markEnsureDelivery();
     }
   }
 
@@ -1700,6 +1728,7 @@ export class ProviderExecutionCoordinator {
     initialEntry: DaemonManifestEntry,
     initialVersion: number,
     initialControlEpoch: number,
+    markEnsureDelivery: () => void,
   ): Promise<void> {
     // Unresolved native dispatch may recover its exact handle, never replay in a successor.
     if (await this.options.store.pendingRuntimeRecovery(initialEntry.id)) return;
@@ -2258,7 +2287,7 @@ export class ProviderExecutionCoordinator {
     this.options.host.clearSuccessfulRecovery(entry.id);
     if (requiresGrant) {
       const current = await this.loadVersionedEntry(entry.id);
-      if (current) await this.convergeAttachedHandle(current.entry, current.version, handle);
+      if (current) await this.convergeAttachedHandle(current.entry, current.version, handle, markEnsureDelivery);
       return;
     }
     const currentAfterLaunch = await this.loadVersionedEntry(entry.id);

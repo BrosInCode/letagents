@@ -142,7 +142,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
       () => this.liveRoomShare.dispose(),
       () => { executionDelegationDrain = this.executionDelegations.fenceAndDrain(); },
       () => this.roomWorkPublisher?.close(), () => this.executionCapture?.close(), () => this.effectExecutor?.fence(), () => this.supervisedDelivery?.fence(),
-      () => this.wakeRoomMoveReconciliationWaiters(), () => this.notifyStateChanged(), () => this.workerRuntimeCustody.destroyAllCredentials(),
+      () => this.roomMoves.clearRecoveryTimers(), () => this.wakeRoomMoveReconciliationWaiters(), () => this.notifyStateChanged(), () => this.workerRuntimeCustody.destroyAllCredentials(),
       () => executionDelegationDrain,
       () => this.supervisedDelivery?.fenceAndDrain(),
       () => this.fenceAndDrainRoomMoveReconciliations(),
@@ -185,6 +185,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     this.workerRuntimeCustody.destroyAllCredentials();
     this.convergencePacer.close();
     this.effectExecutor?.fence();
+    this.roomMoves.clearRecoveryTimers();
     this.wakeRoomMoveReconciliationWaiters();
     const failures: unknown[] = [...this.handoffCleanupFailures];
     try { await this.activityWrites.close(); } catch (error) { failures.push(error); }
@@ -237,6 +238,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     // Stop admitting new effects immediately without aborting already-admitted
     // bounded external tool calls before `drainExternalExecutions()` completes.
     this.effectExecutor?.fence({ abortInFlight: false });
+    this.roomMoves.clearRecoveryTimers();
     this.wakeRoomMoveReconciliationWaiters();
     this.notifyStateChanged();
     // A bootstrap that already read tail N must commit N before lock/socket

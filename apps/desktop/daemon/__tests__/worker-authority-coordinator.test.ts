@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { NativeActivityRejectedError, SupervisorGrantRequestError } from "../cloud-http.js";
 import { ConvergencePacerClosedError } from "../convergence-pacer.js";
+import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import { cursorLaneRetirementSchema } from "../runtime-recovery-journal.js";
 import { WorkerCredentialMintError } from "../daemon-error-policy.js";
 import { DAEMON_RPC_TIMEOUTS, resolveDaemonRpcTimeoutMs } from "#daemon-contract/index.js";
@@ -177,6 +178,8 @@ type HarnessOptions = {
   holdIngressForBearerRotation?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["holdIngressForBearerRotation"]>;
   bearerSuccessorBinding?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["bearerSuccessorBinding"]>;
   bearerSuccessorAbandoned?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["bearerSuccessorAbandoned"]>;
+  serializeEntry?: WorkerAuthorityCoordinatorOptions["serializeEntry"];
+  deliveryStart?: WorkerAuthorityCoordinatorOptions["delivery"]["start"];
   bindError?: Error;
 };
 
@@ -433,9 +436,11 @@ function fixture(options: HarnessOptions = {}) {
     concurrency: {
       currentControlEpoch: () => controlEpoch,
     },
-    serializeEntry: async (_entryId, operation) => {
+    serializeEntry: async (entryId, operation, signal) => {
       events.push("serialize:entry");
-      return operation();
+      return options.serializeEntry
+        ? options.serializeEntry(entryId, operation, signal)
+        : operation();
     },
     serializeCursorCheckpoint: async (_entryId, operation) => {
       events.push("serialize:cursor");
@@ -455,7 +460,11 @@ function fixture(options: HarnessOptions = {}) {
     },
     delivery: {
       stop: async () => { deliveryStops += 1; events.push("delivery:stop"); },
-      start: async () => { deliveryStarts += 1; events.push("delivery:start"); },
+      start: async (entryId) => {
+        deliveryStarts += 1;
+        events.push("delivery:start");
+        await options.deliveryStart?.(entryId);
+      },
       ...(options.holdIngressForBearerRotation ? { holdIngressForBearerRotation: options.holdIngressForBearerRotation } : {}),
       ...(options.bearerSuccessorBinding ? { bearerSuccessorBinding: options.bearerSuccessorBinding } : {}),
       ...(options.bearerSuccessorAbandoned ? { bearerSuccessorAbandoned: options.bearerSuccessorAbandoned } : {}),
@@ -2448,4 +2457,42 @@ test("a retained session can have earlier launch receipts from a replaced host g
   ] });
   assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
   assert.equal(f.current.epoch, 5);
+});
+
+test("credential-only host install awaits delivery.start outside serializeEntry so room-move runRoomMove cannot self-deadlock", async () => {
+  const gate = new EntryConcurrencyGate({ isHandoffScheduled: () => false });
+  let roomMoveEntered = 0;
+  const harness = fixture({
+    serializeEntry: (entryId, operation, signal) => gate.run(entryId, operation, signal),
+    deliveryStart: async (entryId) => {
+      const outcome = await gate.runRoomMove(entryId, "excluded", async () => {
+        roomMoveEntered += 1;
+        return "reconciled";
+      });
+      assert.equal(outcome, "reconciled");
+    },
+  });
+
+  const result = await Promise.race([
+    harness.subject.installHostGrant({
+      entry_id: "agent-1",
+      room_id: "room-1",
+      agent_key: "agent-key-1",
+      grant_id: "grant-rotate",
+      supervisor_grant: "secret-rotate",
+      grant_generation: 2,
+      api_url: "https://letagents.test/path",
+      daemon_generation: 7,
+      host_id: "host-1",
+      installation_id: "installation-1",
+      owner_account_id: "account-1",
+      scope_key: "owner",
+      grant_expires_at: new Date(now + 60_000).toISOString(),
+      credential_only: true,
+    }),
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("installHostGrant deadlocked on serializeEntry")), 2_000)),
+  ]);
+
+  assert.deepEqual(result, { status: "installed", agent_session_id: "session-minted" });
+  assert.ok(roomMoveEntered >= 1, "expected delivery.start to enter EntryConcurrencyGate.runRoomMove without deadlocking");
 });

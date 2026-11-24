@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { codexAgentIsReadOnly } from "./bounded-effect-coordinator.js";
 import { lastRoomMessageId } from "./cloud-http.js";
+import { shouldReplaceRecoveryDeadline } from "./convergence-policy.js";
 import {
   authoritativeRoomJoinRejection,
   schedulerErrorDetail,
@@ -99,7 +100,7 @@ export type RoomMoveCoordinatorPorts = {
   runtimeCustody: RoomMoveRuntimeCustodyPort;
   deliveryHttp: Pick<SupervisedDeliveryHttp, "joinRoom" | "latest">;
   authority: RoomMoveAuthorityPort;
-  entryConcurrency: Pick<EntryConcurrencyGate, "runRoomMove">;
+  entryConcurrency: Pick<EntryConcurrencyGate, "runRoomMove"> & Partial<Pick<EntryConcurrencyGate, "isLifecycleActive">>;
   serializeEntry: <T>(entryId: string, operation: () => Promise<T>) => Promise<T>;
   updateManifestEntry: (
     entryId: string,
@@ -108,7 +109,10 @@ export type RoomMoveCoordinatorPorts = {
   currentHandle: (entryId: string) => ProviderActionHandle | null | undefined;
   pauseIngress: (entryId: string) => void;
   restartDelivery: (entryId: string) => Promise<void>;
-  scheduleRecovery: (entryId: string, delayMs: number) => void;
+  scheduleRecovery?: (entryId: string, delayMs: number) => void;
+  autoConverge?: boolean;
+  setTimeout?: typeof setTimeout;
+  clearTimeout?: typeof clearTimeout;
   nowMs?: () => number;
   nowIso?: () => string;
   externalEffectSignal?: () => AbortSignal;
@@ -151,6 +155,8 @@ class RoomMoveSettlementStorageError extends Error {
   }
 }
 
+const ROOM_MOVE_LIFECYCLE_EXCLUDED_RETRY_DELAY_MS = 250;
+
 /**
  * Owns the durable room-move phase machine and compensation saga. Process
  * authority, durable stores, worker secrets, delivery loops, and lifecycle
@@ -162,6 +168,11 @@ export class RoomMoveCoordinator {
   private readonly nowMs: () => number;
   private readonly nowIso: () => string;
   private readonly externalEffectSignal: () => AbortSignal;
+  private readonly autoConverge: boolean;
+  private readonly setRecoveryTimeout: typeof setTimeout;
+  private readonly clearRecoveryTimeout: typeof clearTimeout;
+  private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly recoveryDueAtMs = new Map<string, number>();
   private effectExecutor: EffectExecutor | null = null;
   private effectDatabase: DatabaseSync | null = null;
   private effectWriteFence: () => void = () => {};
@@ -177,6 +188,62 @@ export class RoomMoveCoordinator {
       : () => Date.now());
     this.nowIso = ports.nowIso ?? (() => new Date(this.nowMs()).toISOString());
     this.externalEffectSignal = ports.externalEffectSignal ?? (() => AbortSignal.timeout(10_000));
+    this.autoConverge = ports.autoConverge ?? true;
+    this.setRecoveryTimeout = ports.setTimeout ?? setTimeout;
+    this.clearRecoveryTimeout = ports.clearTimeout ?? clearTimeout;
+  }
+
+  /**
+   * Dedicated per-agent retry timer for pending room-move sagas. Runs
+   * `reconcilePrepared` directly instead of routing through provider
+   * convergence, so retries progress across every move phase (including
+   * `bootstrapping_destination_tail` and `rollback_required`) without waiting
+   * on unrelated provider/cursor preconditions or competing with launch timers.
+   */
+  scheduleRecovery(entryId: string, delayMs: number): void {
+    if (this.ports.scheduleRecovery) {
+      this.ports.scheduleRecovery(entryId, delayMs);
+      return;
+    }
+    if (this.ports.authority.isHandoffScheduled() || !this.autoConverge) return;
+    const boundedDelayMs = Math.max(1, Math.round(delayMs));
+    const dueAtMs = this.nowMs() + boundedDelayMs;
+    const existingDueAtMs = this.recoveryDueAtMs.get(entryId);
+    if (!shouldReplaceRecoveryDeadline(this.recoveryTimers.has(entryId), existingDueAtMs, dueAtMs)) return;
+    this.clearRecovery(entryId);
+    const timer = this.setRecoveryTimeout(() => {
+      this.recoveryTimers.delete(entryId);
+      this.recoveryDueAtMs.delete(entryId);
+      if (this.ports.authority.isHandoffScheduled() || !this.autoConverge) return;
+      if (this.ports.entryConcurrency.isLifecycleActive?.(entryId)) {
+        this.scheduleRecovery(entryId, ROOM_MOVE_LIFECYCLE_EXCLUDED_RETRY_DELAY_MS);
+        return;
+      }
+      void this.reconcilePrepared(entryId).catch(() => {
+        if (!this.ports.authority.isHandoffScheduled() && this.autoConverge) {
+          this.scheduleRecovery(entryId, ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
+        }
+      });
+    }, boundedDelayMs);
+    timer.unref?.();
+    this.recoveryTimers.set(entryId, timer);
+    this.recoveryDueAtMs.set(entryId, dueAtMs);
+  }
+
+  clearRecovery(entryId: string): void {
+    const timer = this.recoveryTimers.get(entryId);
+    this.recoveryDueAtMs.delete(entryId);
+    if (!timer) return;
+    this.clearRecoveryTimeout(timer);
+    this.recoveryTimers.delete(entryId);
+  }
+
+  clearRecoveryTimers(): void {
+    for (const timer of this.recoveryTimers.values()) {
+      this.clearRecoveryTimeout(timer);
+    }
+    this.recoveryTimers.clear();
+    this.recoveryDueAtMs.clear();
   }
 
   /** Attaches the shared process-wide EffectExecutor and registers all room-move HTTP sub-action handlers. */
@@ -205,22 +272,30 @@ export class RoomMoveCoordinator {
         await this.reconcile(move);
       }
     } catch {
-      this.ports.scheduleRecovery(input.agent.agentId, 1_000);
+      this.scheduleRecovery(input.agent.agentId, 1_000);
     }
   }
 
   async reconcilePrepared(agentId?: string): Promise<void> {
+    if (this.ports.authority.isHandoffScheduled()) return;
     this.retireStalePreparedEffects(agentId);
     // Effect-first repair is required because terminal moves are omitted from
     // pendingRoomMoves even when their prepared join effect was not settled.
     for (const effect of await this.ports.inbox.preparedRoomMoves(agentId)) {
+      if (this.ports.authority.isHandoffScheduled()) return;
       await this.reconcilePreparedEffect(effect).catch(() => {
-        this.ports.scheduleRecovery(effect.agent_id, 1_000);
+        if (!this.ports.authority.isHandoffScheduled()) {
+          this.scheduleRecovery(effect.agent_id, 1_000);
+        }
       });
     }
+    if (this.ports.authority.isHandoffScheduled()) return;
     for (const move of await this.ports.store.pendingRoomMoves(agentId)) {
+      if (this.ports.authority.isHandoffScheduled()) return;
       await this.reconcile(move).catch(() => {
-        this.ports.scheduleRecovery(move.agent_id, 1_000);
+        if (!this.ports.authority.isHandoffScheduled()) {
+          this.scheduleRecovery(move.agent_id, 1_000);
+        }
       });
     }
   }
@@ -312,12 +387,27 @@ export class RoomMoveCoordinator {
 
   /** Run one idempotent reconciliation through the existing entry admission gate. */
   async reconcile(initial: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord> {
+    let entered = false;
     try {
-      return await this.ports.entryConcurrency.runRoomMove(
+      const result = await this.ports.entryConcurrency.runRoomMove(
         initial.agent_id,
         initial,
-        () => this.reconcileAdmitted(initial),
+        () => {
+          entered = true;
+          return this.reconcileAdmitted(initial);
+        },
       );
+      if (result.phase === "active" || result.phase === "failed") {
+        this.clearRecovery(initial.agent_id);
+      }
+      if (!entered
+        && !this.ports.authority.isHandoffScheduled()
+        && !["active", "failed"].includes(initial.phase)) {
+        // Lifecycle exclusion deferred this reconciliation; re-arm recovery so
+        // a retry timer that overlapped a brief lifecycle action is not dropped.
+        this.scheduleRecovery(initial.agent_id, ROOM_MOVE_LIFECYCLE_EXCLUDED_RETRY_DELAY_MS);
+      }
+      return result;
     } catch (error) {
       if (this.ports.authority.isHandoffScheduled()
         && (error instanceof DaemonFenceLostError || error instanceof EffectFenceError)) {
@@ -554,7 +644,7 @@ export class RoomMoveCoordinator {
         to: phase,
         error: "The exact provider generation or room membership changed during the move.",
       }, this.commitFence);
-      if (phase === "rollback_required") this.ports.scheduleRecovery(move.agent_id, 1_000);
+      if (phase === "rollback_required") this.scheduleRecovery(move.agent_id, 1_000);
       return move;
     }
 
@@ -591,7 +681,7 @@ export class RoomMoveCoordinator {
       detail: string,
     ): Promise<DaemonRoomMoveRecord> => {
       await advance(move.phase, terminal, { error: detail });
-      if (terminal === "rollback_required") this.ports.scheduleRecovery(move.agent_id, 1_000);
+      if (terminal === "rollback_required") this.scheduleRecovery(move.agent_id, 1_000);
       return move;
     };
 
@@ -697,7 +787,7 @@ export class RoomMoveCoordinator {
           await advance("joining_destination", "rollback_required", {
             error: `Destination join retry was rejected after a prior attempt may have committed remote membership; compensating back to source room: ${joinOutcome.detail}`,
           });
-          this.ports.scheduleRecovery(move.agent_id, ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
+          this.scheduleRecovery(move.agent_id, ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
           return move;
         }
         if (joinOutcome.kind === "retry") {
@@ -706,7 +796,7 @@ export class RoomMoveCoordinator {
               error: `Destination join outcome was ambiguous and will retry: ${joinOutcome.detail}`,
             });
           }
-          this.ports.scheduleRecovery(move.agent_id, joinOutcome.retryAfterMs);
+          this.scheduleRecovery(move.agent_id, joinOutcome.retryAfterMs);
           return move;
         }
         remoteRoomId = joinOutcome.remoteRoomId;
@@ -718,7 +808,7 @@ export class RoomMoveCoordinator {
         await advance("joining_destination", "joining_destination", {
           error: `Destination join outcome was ambiguous and will retry: ${schedulerErrorDetail(error)}`,
         });
-        this.ports.scheduleRecovery(move.agent_id, 1_000);
+        this.scheduleRecovery(move.agent_id, 1_000);
         return move;
       }
 
@@ -744,7 +834,7 @@ export class RoomMoveCoordinator {
             await advance("joining_destination", "rollback_required", {
               error: `Runtime authority changed after remote join and remote rollback failed: ${rollbackOutcome.detail}`,
             });
-            this.ports.scheduleRecovery(move.agent_id, rollbackOutcome.retryAfterMs);
+            this.scheduleRecovery(move.agent_id, rollbackOutcome.retryAfterMs);
           }
         } catch (error) {
           if (this.ports.authority.isHandoffScheduled()
@@ -754,7 +844,7 @@ export class RoomMoveCoordinator {
           await advance("joining_destination", "rollback_required", {
             error: `Runtime authority changed after remote join and remote rollback failed: ${schedulerErrorDetail(error)}`,
           });
-          this.ports.scheduleRecovery(move.agent_id, 1_000);
+          this.scheduleRecovery(move.agent_id, 1_000);
         }
         return move;
       }
@@ -801,7 +891,7 @@ export class RoomMoveCoordinator {
             await advance("joining_destination", "rollback_required", {
               error: `Local membership commit and remote rollback both failed: ${rollbackOutcome.detail}`,
             });
-            this.ports.scheduleRecovery(move.agent_id, rollbackOutcome.retryAfterMs);
+            this.scheduleRecovery(move.agent_id, rollbackOutcome.retryAfterMs);
           }
         } catch (error) {
           if (this.ports.authority.isHandoffScheduled()
@@ -811,7 +901,7 @@ export class RoomMoveCoordinator {
           await advance("joining_destination", "rollback_required", {
             error: `Local membership commit and remote rollback both failed: ${schedulerErrorDetail(error)}`,
           });
-          this.ports.scheduleRecovery(move.agent_id, 1_000);
+          this.scheduleRecovery(move.agent_id, 1_000);
         }
         return move;
       }
@@ -896,7 +986,7 @@ export class RoomMoveCoordinator {
         executionGenerationId: move.execution_generation_id,
       });
       if (tailOutcome.kind === "retry") {
-        this.ports.scheduleRecovery(move.agent_id, tailOutcome.retryAfterMs);
+        this.scheduleRecovery(move.agent_id, tailOutcome.retryAfterMs);
         return move;
       }
       const cursor = tailOutcome.cursor;
@@ -945,7 +1035,7 @@ export class RoomMoveCoordinator {
         to: "rollback_required",
         error: detail,
       }, this.commitFence);
-      this.ports.scheduleRecovery(move.agent_id, delayMs);
+      this.scheduleRecovery(move.agent_id, delayMs);
       return move;
     };
 
@@ -987,7 +1077,7 @@ export class RoomMoveCoordinator {
       });
       if (rollbackOutcome.kind !== "completed") {
         if (rollbackOutcome.backedOff) {
-          this.ports.scheduleRecovery(move.agent_id, rollbackOutcome.retryAfterMs);
+          this.scheduleRecovery(move.agent_id, rollbackOutcome.retryAfterMs);
           return move;
         }
         return retry(

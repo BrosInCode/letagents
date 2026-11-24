@@ -46,6 +46,7 @@ export type SupervisedDeliveryLifecyclePorts = {
   liveHandle(entryId: string): ProviderActionHandle | undefined;
   providerAuthority: Pick<ProviderCheckpointCoordinator, "isExactAuthority">;
   scheduleRecovery(entryId: string, delayMs: number): void;
+  scheduleRoomMoveRecovery?(entryId: string, delayMs: number): void;
 };
 
 /**
@@ -145,7 +146,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
       try {
         move = await this.ports.roomMoves.reconcile(pendingMove);
       } catch (error) {
-        this.ports.scheduleRecovery(pendingMove.agent_id, 1_000);
+        (this.ports.scheduleRoomMoveRecovery ?? this.ports.scheduleRecovery)(pendingMove.agent_id, 1_000);
         throw error;
       }
       if (this.ports.isLifecycleActive(entryId) || move.phase !== "waiting_for_current_turn") return;

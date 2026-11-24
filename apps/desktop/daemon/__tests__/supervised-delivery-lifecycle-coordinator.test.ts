@@ -128,3 +128,68 @@ test("start, laneOutlook, and exactActiveBoundedContext read manifest entries in
     { entryId: "agent-1", mode: "summary" },
   ]);
 });
+
+test("start routes room-move reconcile failures to scheduleRoomMoveRecovery instead of provider scheduleRecovery", async () => {
+  const providerScheduled: Array<{ entryId: string; delayMs: number }> = [];
+  const roomMoveScheduled: Array<{ entryId: string; delayMs: number }> = [];
+  const coordinator = new SupervisedDeliveryLifecycleCoordinator({
+    isHandoffScheduled: () => false,
+    supportsRoomTurns: () => true,
+    isLifecycleActive: () => false,
+    isOperationallyAdmitted: () => true,
+    currentDaemonGeneration: () => 7,
+    delivery: {
+      activeTurn: () => null,
+      ensureStarted: async () => {},
+      refresh: async () => {},
+      wake: () => {},
+    },
+    manifest: {
+      getEntry: async () => makeEntry(),
+      pendingRoomMoves: async () => [{
+        operation_id: "move-1",
+        request_id: "req-1",
+        agent_id: "agent-1",
+        source_room_id: "room-1",
+        destination_room_id: "room-2",
+        daemon_generation: 7,
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-1",
+        agent_session_id: "session-1",
+        activating_inbox_item_id: null,
+        provider_turn_id: null,
+        effect_id: null,
+        phase: "joining_destination",
+        remote_room_id: null,
+        destination_cursor: null,
+        source_credentials_revoked: false,
+        source_cursor_present: true,
+        source_cursor: null,
+        error: null,
+        created_at: "2026-08-26T00:00:00.000Z",
+        updated_at: "2026-08-26T00:00:00.000Z",
+      }],
+    },
+    roomMoves: {
+      reconcile: async () => { throw new Error("transient room move reconcile failure"); },
+    },
+    inbox: {
+      get: async () => null,
+      preparedRoomMove: async () => null,
+      providerTurnBinding: async () => null,
+      receipts: async () => [],
+    },
+    bindings: {
+      get: async () => null,
+      credentialFor: async () => null,
+    },
+    liveHandle: () => handle,
+    providerAuthority: { isExactAuthority: async () => true },
+    scheduleRecovery: (entryId, delayMs) => { providerScheduled.push({ entryId, delayMs }); },
+    scheduleRoomMoveRecovery: (entryId, delayMs) => { roomMoveScheduled.push({ entryId, delayMs }); },
+  });
+
+  await assert.rejects(() => coordinator.start("agent-1"), /transient room move reconcile failure/);
+  assert.deepEqual(providerScheduled, []);
+  assert.deepEqual(roomMoveScheduled, [{ entryId: "agent-1", delayMs: 1_000 }]);
+});
