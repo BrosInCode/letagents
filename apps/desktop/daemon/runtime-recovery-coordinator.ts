@@ -575,7 +575,7 @@ export class RuntimeRecoveryCoordinator {
       if (currentBirth === "unknown") throw new Error("The saved process identity changed before stopping. Recovery remains paused.");
       const terminal: ProviderActionTerminal = currentBirth === "gone"
         ? { endedAt: new Date(this.nowMs()).toISOString(), exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: savedRef.provider_continuation_id,
-            ...((savedRef.provider_connection?.kind === "claude_cli" || savedRef.provider_connection?.kind === "codex_app_server")
+            ...((savedRef.provider_connection?.kind === "claude_cli" || savedRef.provider_connection?.kind === "codex_app_server" || savedRef.provider_connection?.kind === "antigravity_acp")
               ? { nativeRuntimeDeath: { kind: savedRef.provider_connection.kind, pid: savedRef.provider_connection.pid!,
                   processIdentity: savedRef.provider_connection.processIdentity! } } : {}) }
         : await this.provider.stopRef!(exactRef, { force: true, graceMs: 5_000, actionId: record.operation_id });

@@ -21,11 +21,11 @@ export type AgentRoomAudience = "public" | "shared" | "private";
 
 export const agentRoomAudienceKey: InjectionKey<Readonly<Ref<AgentRoomAudience>>> = Symbol("agentRoomAudience");
 
-type HomeHarnessProvider = "codex" | "claude-code";
+type HomeHarnessProvider = "codex" | "claude-code" | "antigravity";
 
 function homeHarnessProvider(provider: string): HomeHarnessProvider | null {
   const id = provider.trim().toLowerCase();
-  return id === "codex" ? "codex" : id === "claude-code" || id === "claude" ? "claude-code" : null;
+  return id === "codex" ? "codex" : id === "claude-code" || id === "claude" ? "claude-code" : id === "antigravity" ? "antigravity" : null;
 }
 
 function providerLabel(provider: string): string {
@@ -33,7 +33,8 @@ function providerLabel(provider: string): string {
   return id === "codex" ? "Codex"
     : id === "claude-code" || id === "claude" ? "Claude Code"
       : id === "cursor" ? "Cursor"
-        : id === "open-model" ? "Open Model" : "agent app";
+        : id === "open-model" ? "Open Model"
+          : id === "antigravity" ? "Antigravity" : "agent app";
 }
 
 export function homeHarnessTitle(provider: string): string {
@@ -88,6 +89,9 @@ export function homeHarnessDescription(provider: string, permissionProfileId: st
   if (kind === "codex") {
     return "Lets this agent use your own Codex setup: your MCP servers, plugins, app connectors, skills, hooks, memories, and browser or computer control. Those tools act as you. Servers and hooks that a project adds stay off, and the agent will not start in a project that changes your servers or brings its own Codex settings or command rules.";
   }
+  if (kind === "antigravity") {
+    return "Lets this agent use your own Antigravity setup: your MCP servers, plugins, skills and global rules (GEMINI.md). Those tools act as you. LetAgents servers in your setup are left out, so the room's own connection is its only one. Your Antigravity permission rules are not used.";
+  }
   if (kind === "claude-code") {
     // A Read-only agent has no tool that runs a skill. Claude's default access level is Read-only.
     return permissionProfileId === "read_only" || permissionProfileId === null
@@ -116,6 +120,13 @@ export function homeHarnessApprovalNote(provider: string, permissionProfileId: s
       return "With Read-only, nothing asks you for an approval. Your MCP tools run only when your own Codex settings already approve them or their own server labels them read-only, which nothing checks. Codex refuses your other MCP tools. This level puts no limit of its own on your hooks, plugins and other tools.";
     }
     return "With Full access, those tools run without asking you.";
+  }
+  if (kind === "antigravity") {
+    const hooks = "Your plugins' hooks run without asking at every level.";
+    if (permissionProfileId === "ask_before_write") return `With Ask before writes, you approve each of your MCP tools before it runs, as you do each edit and command. ${hooks}`;
+    if (permissionProfileId === "auto_review") return `With Auto, Antigravity's own review decides whether each of those tools runs. What it would ask you about is refused. ${hooks}`;
+    if (permissionProfileId === "full_access") return "With Full access, those tools run without asking you.";
+    return `With Read-only, your MCP tools are refused like every edit and command. Your plugins' skills and your rules still apply. ${hooks}`;
   }
   if (kind === "claude-code") {
     const projectStaysOut = "A project's own servers and settings are not loaded.";
@@ -153,6 +164,7 @@ export function homeHarnessLimitNote(provider: string): string {
   const kind = homeHarnessProvider(provider);
   if (kind === "codex") return "A tool that needs you to type an answer or sign in is declined.";
   if (kind === "claude-code") return "A tool that needs you to type an answer is declined, and so is anything a skill's helper agent needs approved.";
+  if (kind === "antigravity") return "A question that asks you to pick an answer is declined.";
   return "";
 }
 

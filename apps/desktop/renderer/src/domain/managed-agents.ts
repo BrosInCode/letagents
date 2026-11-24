@@ -55,7 +55,7 @@ export function hasSupervisedRuntime(
 export function visibleDesktopAgentProviders(
   providers: DesktopAgentProvider[],
 ): DesktopAgentProvider[] {
-  return providers.filter((provider) => provider.id !== "antigravity");
+  return [...providers];
 }
 
 export function preferredManagedAgentRepoRootPath(
@@ -772,6 +772,12 @@ const SUPERVISED_PERMISSION_PROFILE_LIMITS: Partial<Record<
     ask_before_write: "Can't run commands or change files until you approve each one.",
     auto_review: "Can't open files outside the project. Commands that delete, publish, install or reach the network ask you first.",
   },
+  antigravity: {
+    read_only: "Can't change files or run commands: Antigravity asks first, and LetAgents refuses. Web search does not ask.",
+    ask_before_write: "Can't change files or run commands until you approve each one.",
+    auto_review: "Blocks only what Antigravity's own review won't approve. It doesn't ask you first.",
+    full_access: NOTHING_BLOCKED,
+  },
   // Only Cursor's restricted profiles use the outer macOS sandbox.
   cursor: {
     read_only: `Can't edit files. ${CURSOR_NO_NETWORK}`,
@@ -789,6 +795,11 @@ const OWNER_SETUP_PERMISSION_PROFILE_LIMITS: Partial<Record<
   DesktopAgentProviderId,
   Partial<Record<DesktopManagedAgentPermissionProfileId, string>>
 >> = {
+  antigravity: {
+    read_only: "Can't change files or run commands: Antigravity asks first, and LetAgents refuses, your MCP tools too. Your plugins' hooks run without asking.",
+    ask_before_write: "Can't change files or run commands until you approve each one. Your plugins' hooks run without asking.",
+    auto_review: "Blocks only what Antigravity's own review won't approve. Your plugins' hooks run without asking.",
+  },
   codex: {
     ask_before_write: "Without your approval, Codex's own commands change no files and have no network access. Your own MCP tools, hooks and plugins are not held to this.",
     auto_review: "Codex's own commands have no network access and change nothing outside its working folder, unless Codex approves more. Your own MCP tools, hooks and plugins are not held to this.",

@@ -23,13 +23,13 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const projectToolScopeSchema = z.strictObject({
   agentId: id, accountId: id, projectId: hash, projectName: label, sourceRepoPath: z.string().min(1).max(4096),
   canonicalSourcePath: z.string().min(1).max(4096), repository: z.string().min(1).max(4096), remoteUrl: z.string().min(1).max(4096),
-  provider: z.enum(["codex", "claude-code", "open-model"]), toolId: id, toolLabel: label, policySha256: hash,
+  provider: z.enum(["codex", "claude-code", "open-model", "antigravity"]), toolId: id, toolLabel: label, policySha256: hash,
 });
 // Existing project serialization is unchanged: stored permission hashes remain valid.
 const roomToolScopeSchema = z.strictObject({
   kind: z.literal("room_workspace"), version: z.literal(1), agentId: id, accountId: id, roomId: id,
   workAttemptId: z.string().uuid(), workspacePath: z.string().min(1).max(4096), canonicalWorkspacePath: z.string().min(1).max(4096),
-  provider: z.enum(["codex", "claude-code", "open-model"]), toolId: id, toolLabel: label, policySha256: hash,
+  provider: z.enum(["codex", "claude-code", "open-model", "antigravity"]), toolId: id, toolLabel: label, policySha256: hash,
 });
 export const hostToolScopeSchema = z.union([projectToolScopeSchema, roomToolScopeSchema]);
 export type HostToolScope = z.infer<typeof hostToolScopeSchema>;
@@ -45,6 +45,11 @@ export function nativeToolIdentity(request: ProviderPermissionRequest): { id: st
   if (request.provider === "claude-code") {
     const name = request.native.request.tool_name;
     return id.safeParse(name).success ? { id: `claude:${name}`, label: name } : null;
+  }
+  // Antigravity's requests arrive in Claude's shape. Its own prefix keeps a rule to one provider's tools.
+  if (request.provider === "antigravity") {
+    const name = request.native.request.tool_name;
+    return id.safeParse(name).success ? { id: `antigravity:${name}`, label: name } : null;
   }
   if (request.provider === "codex") {
     const params = request.native.params;

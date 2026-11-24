@@ -72,7 +72,7 @@ const PERMISSION_CHANGE_KEY = /^letagentsPermissionChangedAt([1-9][0-9]{0,14})$/
 export function permissionChangeKey(revision: number): string {
   return `letagentsPermissionChangedAt${revision}`;
 }
-const homeHarnessProviders = new Set(["codex", "claude-code", "claude"]);
+const homeHarnessProviders = new Set(["codex", "claude-code", "claude", "antigravity"]);
 const MAX_HOME_HARNESS_CHANGES = 32;
 
 export type HomeHarnessAvailability = "available" | "rental" | "unsupported" | "polling";
@@ -328,9 +328,14 @@ export function providerAcceptsReasoningEffort(provider: string, effort: unknown
   // Claude Code takes the same five levels as its `--effort` flag.
   if (normalized === "codex" || normalized === "claude-code" || normalized === "claude") return efforts.has(effort as Exclude<ProviderReasoningEffort, null>);
   if (normalized === "open-model") return openModelEfforts.has(effort as Exclude<ProviderReasoningEffort, null>);
+  // agy's thinking levels (its `thought_level` option); a model that lacks one runs at its default.
+  if (normalized === "antigravity") return antigravityEfforts.has(effort as Exclude<ProviderReasoningEffort, null>);
   return false;
 }
+const antigravityEfforts = new Set<Exclude<ProviderReasoningEffort, null>>(["low", "medium", "high", "xhigh"]);
 const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reasoningEffort", "sandbox"]);
+/** The whole Antigravity launch policy: every key is permission authority, and no other key is admitted. */
+const antigravityAuthorityKeys = ["agentMode", "dangerouslySkipPermissions", "hostDecision"] as const;
 
 /**
  * The immutable provider is the authority for editable Inspector settings.
@@ -339,7 +344,7 @@ const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reaso
  */
 export function resolveProviderConfigurationSnapshot(input: ConfigurationInput): ProviderConfigurationSnapshot {
   const provider = input.provider.trim().toLowerCase();
-  if (!["codex", "open-model", "claude-code", "claude", "cursor"].includes(provider)) {
+  if (!["codex", "open-model", "claude-code", "claude", "cursor", "antigravity"].includes(provider)) {
     throw new Error(`Provider '${input.provider}' does not support Inspector configuration.`);
   }
   if (input.model !== null && (typeof input.model !== "string" || !input.model.trim() || input.model.length > 256)) {
@@ -468,6 +473,36 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
     };
   }
 
+  if (provider === "antigravity") {
+    if (!providerAcceptsReasoningEffort(provider, input.reasoningEffort)) {
+      throw new Error(`Antigravity does not take reasoning effort '${String(input.reasoningEffort)}'.`);
+    }
+    for (const key of Object.keys(policy)) {
+      if (!(antigravityAuthorityKeys as readonly string[]).includes(key)) {
+        throw new Error(`Antigravity supervised launch policy contains unsupported native option '${key}'.`);
+      }
+    }
+    const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "ask_before_write", "auto_review", "full_access"]);
+    // agy reads files and searches the web without asking at every level, so it cannot work for a guest.
+    if (guest) throw new Error("antigravity launch refused: Antigravity does not run for a guest.");
+    // agy asks before every edit and command in its default mode. The adapter
+    // answers: Read-only and Auto refuse what is asked, Ask before writes takes
+    // it to the owner, Full access starts agy with nothing to ask.
+    const authority = profile === "full_access"
+      ? { agentMode: "default", dangerouslySkipPermissions: true, hostDecision: "allow" }
+      : profile === "ask_before_write"
+        ? { agentMode: "default", dangerouslySkipPermissions: false, hostDecision: "ask" }
+        : { agentMode: profile === "auto_review" ? "auto" : "default", dangerouslySkipPermissions: false, hostDecision: "reject" };
+    for (const [key, value] of Object.entries(authority)) {
+      requirePolicyMatch(policy, key, value, provider);
+    }
+    return {
+      provider, model: normalizedModel, reasoningEffort: input.reasoningEffort, permissionProfileId: profile,
+      launchPolicy: { ...authority }, configurationRevision: input.configurationRevision,
+      ...homeHarnessField,
+    };
+  }
+
   if (input.reasoningEffort !== null) throw new Error(`Provider '${provider}' does not support reasoning effort.`);
   scalarCliPolicy(policy, "Cursor");
   for (const key of Object.keys(policy)) {
@@ -576,7 +611,9 @@ function stripProfileAuthority(
       ]
       : provider === "cursor"
         ? ["mode", "force", "sandbox"]
-        : [];
+        : provider === "antigravity"
+          ? [...antigravityAuthorityKeys]
+          : [];
   const next = { ...policy };
   for (const key of authorityKeys) delete next[key];
   return next;

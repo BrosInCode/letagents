@@ -32,7 +32,9 @@ export type ProviderActionConnectionRef =
   | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
   | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
   | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null }
-  | { kind: "opencode_server"; url: string; pid: number | null; processIdentity?: string | null; serverAuthPath: string };
+  | { kind: "opencode_server"; url: string; pid: number | null; processIdentity?: string | null; serverAuthPath: string }
+  /** Antigravity's headless `agy acp` stdio child; it cannot be reattached once its daemon is gone. */
+  | { kind: "antigravity_acp"; pid: number | null; processIdentity?: string | null };
 
 // The comparison of the complete durable identity of two provider connections
 // has one definition, in the provider runtime package. A missing connection,

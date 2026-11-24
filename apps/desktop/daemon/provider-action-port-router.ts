@@ -423,7 +423,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const notify = (event: ProviderPermissionObservation) => { try { listener(event); } catch { /* Observer cannot control providers. */ } };
     const boundary = await this.boundary(remembered.provider);
     if (signal.aborted) return;
-    if (!current() || !["codex", "open-model", "claude-code"].includes(remembered.provider) || !boundary.has("observePermissions")) { notify({ type: "unavailable" }); return; }
+    if (!current() || !["codex", "open-model", "claude-code", "antigravity"].includes(remembered.provider) || !boundary.has("observePermissions")) { notify({ type: "unavailable" }); return; }
     // The native connection id of the last snapshot, read as the boundary reads it (no id is ""), or null when
     // no snapshot is current. The daemon's connection id of a provider other than Codex is made from the process
     // connection only, so a change of the native id is reported as a lost lane first.
@@ -444,6 +444,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         else if (remembered.provider === "claude-code" && "providerTurnId" in event && "request" in event.request)
           notify({ type: "request_closed", request: { provider: "claude-code", native: event.request },
             providerContinuationId: event.providerContinuationId, providerTurnId: event.providerTurnId });
+        else if (remembered.provider === "antigravity" && "providerTurnId" in event && "request" in event.request)
+          notify({ type: "request_closed", request: { provider: "antigravity", native: event.request },
+            providerContinuationId: event.providerContinuationId, providerTurnId: event.providerTurnId });
         return;
       }
       if (event.type !== "snapshot") { notify(event); return; }
@@ -461,7 +464,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         ? { provider: "codex", native: native as CodexNativePermissionRequest }
         : remembered.provider === "claude-code"
           ? { provider: "claude-code", native: structuredClone(native as ClaudeNativePermissionRequest) }
-          : { provider: "open-model", native: structuredClone(native as OpenCodeNativePermissionRequest) });
+          : remembered.provider === "antigravity"
+            ? { provider: "antigravity", native: structuredClone(native as ClaudeNativePermissionRequest) }
+            : { provider: "open-model", native: structuredClone(native as OpenCodeNativePermissionRequest) });
       // The daemon keeps the request for its own reading. For the boundary, the token is the name of the request.
       requests.forEach((request, index) => { if (tokens[index]) this.permissionTokens.set(request.native, tokens[index]!); });
       notify({ type: "snapshot", requests, connectionId });
@@ -543,6 +548,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       }
       const expected = structuredClone(request.native);
       const kind = request.provider === "claude-code" ? "command"
+        : request.provider === "antigravity" ? antigravityApprovalKind(request.native.request.tool_name)
         : (expected as OpenCodeNativePermissionRequest).permission === "bash" ? "command"
           : (expected as OpenCodeNativePermissionRequest).permission === "edit" ? "file_change" : null;
       if (!kind) return { outcome: "correlation_unproven" };
@@ -578,7 +584,8 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       throw error;
     });
     if (!admitted || !current()) throw Object.assign(new Error("Permission dispatch cannot be confirmed."), { outcome: "uncertain" });
-    if ((request.provider === "codex" || request.provider === "claude-code") && result.outcome === "sent") return { outcome: "sent_unacknowledged", nativeScope: "request" };
+    if ((request.provider === "codex" || request.provider === "claude-code" || request.provider === "antigravity")
+      && result.outcome === "sent") return { outcome: "sent_unacknowledged", nativeScope: "request" };
     if (request.provider === "open-model" && result.outcome === "processed") return { outcome: "native_processed", nativeScope: result.nativeScope };
     throw Object.assign(new Error("Permission dispatch returned unexpected evidence."), { outcome: "uncertain" });
   }
@@ -992,6 +999,11 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         const adapter: NativeProviderAdapter = new module.OpenModelProviderAdapter();
         return adapter;
       }
+      if (provider === "antigravity") {
+        const module = await import("#provider-runtime/agents/antigravity-provider-adapter.js");
+        const adapter: NativeProviderAdapter = new module.AntigravityProviderAdapter();
+        return adapter;
+      }
       throw new Error(`No supervised native adapter is available for ${provider}.`);
     })();
   }
@@ -1090,10 +1102,23 @@ function stopOptions(options?: { force?: boolean; graceMs?: number; actionId?: s
   };
 }
 
-function providerFromConnection(connection: ProviderActionRef["providerConnection"]): string | null {
+/**
+ * What an Antigravity request asks for. Its adapter names agy's tools as
+ * Claude Code names them; a tool it does not map keeps agy's own name and
+ * counts as a command, the kind that never delegates.
+ */
+export function antigravityApprovalKind(toolName: string): "command" | "file_change" | "network" {
+  if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(toolName)) return "file_change";
+  if (["WebFetch", "WebSearch"].includes(toolName)) return "network";
+  return "command";
+}
+
+/** The provider a durable connection kind belongs to; null for a missing or unknown connection. */
+export function providerFromConnection(connection: ProviderActionRef["providerConnection"]): string | null {
   if (connection?.kind === "codex_app_server") return "codex";
   if (connection?.kind === "claude_cli") return "claude-code";
   if (connection?.kind === "cursor_cli") return "cursor";
   if (connection?.kind === "opencode_server") return "open-model";
+  if (connection?.kind === "antigravity_acp") return "antigravity";
   return null;
 }

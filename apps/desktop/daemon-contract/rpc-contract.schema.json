@@ -1274,6 +1274,37 @@
             "serverAuthPath"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "antigravity_acp",
+              "type": "string"
+            },
+            "pid": {
+              "anyOf": [
+                {
+                  "maximum": 9007199254740991,
+                  "minimum": -9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "processIdentity": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "pid"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -2590,7 +2621,8 @@
               "enum": [
                 "codex",
                 "open-model",
-                "claude-code"
+                "claude-code",
+                "antigravity"
               ],
               "type": "string"
             },
@@ -3052,7 +3084,8 @@
         "kind": {
           "enum": [
             "claude_cli",
-            "codex_app_server"
+            "codex_app_server",
+            "antigravity_acp"
           ],
           "type": "string"
         },
@@ -3137,7 +3170,8 @@
           "enum": [
             "codex",
             "claude-code",
-            "open-model"
+            "open-model",
+            "antigravity"
           ],
           "type": "string"
         },
@@ -3542,7 +3576,8 @@
           "enum": [
             "codex",
             "claude-code",
-            "open-model"
+            "open-model",
+            "antigravity"
           ],
           "type": "string"
         },
@@ -3723,7 +3758,7 @@
       "retireAgentMs": 60000
     },
     "defaultMaxRequestBytes": 65536,
-    "implementationVersion": "2.0.284-modern.26",
+    "implementationVersion": "2.0.284-modern.27",
     "localBoardMaxFrameBytes": 16777216,
     "protocolVersion": 3,
     "stateActivitySummaryLimit": 16,

@@ -405,3 +405,23 @@ test("send_message preserves committed message receipt across post-commit presen
     },
   );
 });
+
+test("daemon executor binds exact supervised room authority for Antigravity", async () => {
+  const output = await executeDaemonTool({
+    provider: "antigravity",
+    toolName: "get_current_room",
+    input: {},
+    requestId: "effect_agy_1",
+    roomId: "focus_42",
+    apiUrl: "https://letagents.example",
+    bearer: "secret-worker-bearer",
+    cwd: process.cwd(),
+    agentSession: { ...session("focus_42", "agy"), runtime: "antigravity", ide_label: "Antigravity" },
+  });
+  const payload = JSON.parse(String(output.liveResult.content[0]?.type === "text"
+    ? output.liveResult.content[0].text
+    : "{}")) as Record<string, unknown>;
+  assert.equal(payload.connected, true);
+  assert.equal(payload.room_id, "focus_42");
+  assert.equal(payload.room_binding, "daemon_supervised");
+});

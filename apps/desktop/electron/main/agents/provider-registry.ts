@@ -51,13 +51,22 @@ const agentProviders: DesktopAgentProvider[] = [
   {
     id: "antigravity",
     name: "Antigravity",
-    description: "Join from Antigravity.",
-    capabilities: ["external_mcp"],
-    supervisedDeliveryMode: null,
-    runtimeCommand: null,
+    description: "Start an Antigravity agent here.",
+    capabilities: [
+      "external_mcp",
+      "supervised_runtime",
+      "auth_preflight",
+      "turn_control",
+    ],
+    supervisedDeliveryMode: "daemon_inbox",
+    runtimeCommand: "agy",
+    runtimeInstallCommand: process.platform === "win32"
+      ? "irm https://antigravity.google/cli/install.ps1 | iex"
+      : "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    runtimeInstallUrl: "https://antigravity.google/docs/cli/install",
     mcpTargetId: "antigravity",
-    permissionProfiles: [],
-    defaultPermissionProfileId: null,
+    permissionProfiles: listManagedAgentPermissionProfiles("antigravity"),
+    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("antigravity"),
   },
   {
     id: "cursor",
@@ -119,7 +128,6 @@ const agentProviders: DesktopAgentProvider[] = [
 
 export function listDesktopAgentProviders(): DesktopAgentProvider[] {
   return agentProviders
-    .filter((provider) => provider.id !== "antigravity")
     .map((provider) => {
       const authCommand = previewAuthCommand(provider.id);
       return {

@@ -10,6 +10,7 @@ import { createRoomDeliveryRetryCoordinator } from "../src/domain/room-delivery-
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalChoice } from "../../shared/host-approvals";
 import { HOST_APPROVAL_ARM_MS, hostApprovalFields, hostApprovalTitle } from "../src/components/desktop/content/room-chat/host-approval-presentation";
 import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "../src/components/desktop/content/room-chat/host-approval-dismissals";
+import { managedAgentProviderLabel } from "../src/domain/managed-agents";
 
 interface HostNode {
   kind: "element" | "text" | "comment";
@@ -1101,6 +1102,30 @@ test("native MCP approval shows the action and complete inputs without protocol 
   } }) };
   assert.equal(hostApprovalTitle(edit), "Edit TaskList.tsx");
   assert.equal(hostApprovalTitle({ ...edit, title: "Approval unavailable" }), "Approval unavailable");
+});
+
+test("an Antigravity approval card names the command or file as Claude's does, from the same request shape", async () => {
+  const base = { ...hostApproval().presentation, provider: "antigravity" as const, title: "Run a tool" as const, denyScope: "request" as const };
+  const request = (tool_name: string, input: Record<string, unknown>) => ({ ...base, details: JSON.stringify({ id: "private-request-id",
+    request: { subtype: "can_use_tool", tool_use_id: "private-tool-id", tool_name, input } }) });
+  const command = request("Bash", { command: "npm test\nprintf '<script>\u202e'" });
+  assert.equal(hostApprovalTitle(command), "Run a command");
+  assert.deepEqual(hostApprovalFields(command), [{ label: "Tool", value: "Bash" }, { label: "Command", value: "npm test\nprintf '<script>\\u202e'" }]);
+  const write = request("Write", { file_path: "/repo/src/TaskList.tsx", content: "export {}" });
+  assert.equal(hostApprovalTitle(write), "Write TaskList.tsx");
+  assert.deepEqual(hostApprovalFields(write).map(field => field.label), ["Tool", "File path", "Content"]);
+  const edit = request("Edit", { file_path: "/repo/src/TaskList.tsx", old_string: "old", new_string: "new" });
+  assert.equal(hostApprovalTitle(edit), "Edit TaskList.tsx");
+  assert.deepEqual(hostApprovalFields(edit), [{ label: "Tool", value: "Edit" }, { label: "File path", value: "/repo/src/TaskList.tsx" },
+    { label: "Old string", value: "old" }, { label: "New string", value: "new" }]);
+  assert.equal(hostApprovalTitle(request("WebFetch", { url: "https://example.test/" })), "Run WebFetch");
+  // A tool the adapter does not map keeps agy's own name.
+  assert.equal(hostApprovalTitle(request("browser_click", { selector: "#go" })), "Run browser_click");
+  assert.equal(hostApprovalTitle({ ...write, title: "Approval unavailable" }), "Approval unavailable");
+  for (const presentation of [command, write, edit]) {
+    assert.doesNotMatch(JSON.stringify(hostApprovalFields(presentation)), /private-request-id|private-tool-id|can_use_tool/);
+  }
+  assert.equal(managedAgentProviderLabel(base.provider), "Antigravity");
 });
 
 test("composer shows nothing about the approval service when no request is waiting", async () => {

@@ -500,39 +500,17 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         result.codexInstallGuidance = modalText().includes("Open installation guide") &&
           modalText().includes("LetAgents does not install or update external provider CLIs");
 
-        const antigravityProvider = document.querySelector('[data-testid="desktop-add-agent-provider-antigravity"]');
-        if (antigravityProvider) {
-          antigravityProvider.click();
-          await waitFor("antigravity instruction", () => modalText().includes("Open Antigravity"));
-          result.externalProviderInstruction = modalText().includes(
-            "Open Antigravity, then ask it to join this room through the installed LetAgents connection."
-          );
-          result.externalJoinPrompt = modalText().includes("Show full instructions") &&
-            modalText().includes("Call join_room") &&
-            modalText().includes("set_agent_name") &&
-            modalText().includes("register_agent_session") &&
-            modalText().includes('"agent_session_id":"<returned agent_session_id>"') &&
-            modalText().includes("get_board") &&
-            modalText().includes("wait_for_messages") &&
-            modalText().includes('"timeout":30000') &&
-            modalText().includes("empty wait result just means continue waiting") &&
-            modalText().includes('"runtime":"antigravity"') &&
-            modalText().includes("Examples: MapleRidge, CedarVista, DawnWinter, GardenFern, SilverHarbor") &&
-            modalText().includes("Do not call yourself Antigravity, Antigravity 1, Antigravity 2");
-          result.bridgeOnlyRepoCopy = modalText().includes("Handled by provider app");
-          result.installGuidanceClears = !modalText().includes("Copy install command");
-        } else {
-          // Antigravity is intentionally hidden in current builds. Still
-          // exercise provider-switch cleanup before returning to Codex.
-          document.querySelector('[data-testid="desktop-add-agent-provider-claude-code"]')?.click();
-          await waitFor("provider switch clears Codex install guidance", () =>
-            modalText().includes("Claude Code") && !modalText().includes("Copy install command")
-          );
-          result.externalProviderInstruction = true;
-          result.externalJoinPrompt = true;
-          result.bridgeOnlyRepoCopy = true;
-          result.installGuidanceClears = true;
-        }
+        // Every listed provider is desktop-managed now, so no bridge-only
+        // instruction is shown. Still exercise provider-switch cleanup before
+        // returning to Codex.
+        document.querySelector('[data-testid="desktop-add-agent-provider-claude-code"]')?.click();
+        await waitFor("provider switch clears Codex install guidance", () =>
+          modalText().includes("Claude Code") && !modalText().includes("Copy install command")
+        );
+        result.externalProviderInstruction = true;
+        result.externalJoinPrompt = true;
+        result.bridgeOnlyRepoCopy = true;
+        result.installGuidanceClears = true;
 
         const codexProviderAgain = document.querySelector('[data-testid="desktop-add-agent-provider-codex"]');
         codexProviderAgain?.click();

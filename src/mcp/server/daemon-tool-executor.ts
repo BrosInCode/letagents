@@ -18,7 +18,7 @@ type ToolHandler = {
 };
 
 const handlersByProvider = new Map<string, Map<string, ToolHandler>>();
-const SUPERVISED_PROVIDERS = new Set(["claude-code", "cursor", "codex", "open-model"]);
+const SUPERVISED_PROVIDERS = new Set(["claude-code", "cursor", "codex", "open-model", "antigravity"]);
 const WORKSPACE_SCOPED_TOOLS = new Set(["check_repo", "check_repo_visibility", "initialize_repo"]);
 
 function handlersForProvider(provider: string, apiUrl: string): Map<string, ToolHandler> {

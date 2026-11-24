@@ -164,7 +164,7 @@ test("populated v2 fixture migrates every legacy effects state cleanly to v3, dr
     await withProtectedStateUpgrade(
       v2Path,
       async (stateDb) => {
-        assert.equal(Number(stateDb.connection.prepare("PRAGMA user_version").get()?.user_version), toSqliteUserVersion(3));
+        assert.equal(Number(stateDb.connection.prepare("PRAGMA user_version").get()?.user_version), DAEMON_STATE_USER_VERSION);
         validateDaemonStateShape(stateDb.connection);
       },
       {

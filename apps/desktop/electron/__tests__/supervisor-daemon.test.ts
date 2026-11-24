@@ -4180,14 +4180,19 @@ test("closing and immediately reopening Live for the same agent discards the sta
   }
 });
 
-test("host approval client displays and signs one-time Claude tool decisions over the daemon socket", async () => {
+// Antigravity's approvals arrive in Claude's shape under their own provider tag, and its saved rules name it too.
+for (const [provider, name] of [["claude-code", "Claude"], ["antigravity", "Antigravity"]] as const)
+test(`host approval client displays and signs one-time ${name} tool decisions over the daemon socket`, async () => {
   const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
   const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
   const verifier = new HostApprovalVerifier(7, signer.publicKey);
   const candidate = hostApprovalCandidate();
   candidate.reference!.nativeRequestId = "claude-native-request";
-  candidate.presentation = { ...candidate.presentation, provider: "claude-code", title: "Run a tool",
-    details: '{"tool_name":"Write","input":{"file_path":"/tmp/qa","content":"proposed edit"}}' };
+  candidate.presentation = { ...candidate.presentation, provider, title: "Run a tool",
+    details: '{"tool_name":"Write","input":{"file_path":"/tmp/qa","content":"proposed edit"}}',
+    alwaysAllow: { kind: "room_workspace", version: 1, agentId: "agent_1", accountId: "owner", roomId: "room_1",
+      workAttemptId: "5bff98b0-2ab1-41d7-88c4-e0eb62dff36a", workspacePath: "/private/workspace", canonicalWorkspacePath: "/private/workspace",
+      provider, toolId: `${provider === "claude-code" ? "claude" : provider}:Write`, toolLabel: "Write", policySha256: "b".repeat(64) } };
   const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
   wire.hostApprovals.challenge = () => verifier.challenge();
   const decisions: HostApprovalDecision[] = [];
@@ -4201,12 +4206,17 @@ test("host approval client displays and signs one-time Claude tool decisions ove
     const snapshot = await client.listHostApprovals("room_1");
     assert.equal(snapshot.available, true); assert.equal(snapshot.approvals.length, 1);
     const view = snapshot.approvals[0]!;
-    assert.equal(view.presentation.provider, "claude-code"); assert.equal(view.presentation.title, "Run a tool");
+    assert.equal(view.presentation.provider, provider); assert.equal(view.presentation.title, "Run a tool");
+    assert.equal(view.presentation.alwaysAllow?.provider, provider);
     assert.equal(view.presentation.denyScope, "request"); assert.equal(view.status, "pending");
     assert.equal(await client.decideHostApproval({ id: view.id, decision: "allow_once" }), "decision_sent");
     assert.equal(decisions.length, 1); assert.equal(decisions[0]!.expected.nativeRequestId, "claude-native-request");
     assert.equal(decisions[0]!.decision, "allow_once");
     assert.equal(decisions[0]!.projectionSha256, createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex"));
+    candidate.presentation = { ...candidate.presentation, alwaysAllow: { ...candidate.presentation.alwaysAllow!,
+      provider: provider === "claude-code" ? "antigravity" : "claude-code" } };
+    const mismatched = await client.listHostApprovals("room_1");
+    assert.equal(mismatched.available, false, "a saved-rule scope for another provider is refused");
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
 

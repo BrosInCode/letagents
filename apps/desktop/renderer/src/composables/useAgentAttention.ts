@@ -7,7 +7,7 @@ import { isLocalRoomIdentifier } from '../domain/room-urls';
 import { hostApprovalRooms, refreshHostApprovals } from '../components/desktop/content/room-chat/host-approvals';
 
 /** Providers whose tools can stop on a host approval. */
-const APPROVAL_PROVIDERS = new Set(['codex', 'open-model', 'claude-code']);
+const APPROVAL_PROVIDERS = new Set(['codex', 'open-model', 'claude-code', 'antigravity']);
 /** A tool approval can only be asked inside a room turn. */
 const ACTIVE_TURN_STATES = new Set(['dispatching', 'responding', 'publishing', 'retrying']);
 /** Same bound as the Needs you room reads; each listing opens two daemon requests. */

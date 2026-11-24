@@ -161,7 +161,7 @@ export function registerDesktopSupervisorIpcHandlers(ipcMain: IpcMain): void {
           input.roomIdentifier = input.localRoomId;
           if (!storage.localRoom) await createLocalRoom({ roomIdentifier: input.localRoomId, displayName: roomIdentifier });
         }
-        if (provider !== "codex" && provider !== "claude-code" && provider !== "cursor" && provider !== "open-model") {
+        if (provider !== "codex" && provider !== "claude-code" && provider !== "cursor" && provider !== "open-model" && provider !== "antigravity") {
           throw new LaunchBlockedError(`Supervised ${provider} is not available yet: no background lifecycle is supported for this provider.`, "retry");
         }
         try {

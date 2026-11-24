@@ -33,6 +33,7 @@ export const PROVIDER_ADAPTER_ENTRIES = [
   "claude-code-provider-adapter.js",
   "cursor-provider-adapter.js",
   "open-model-provider-adapter.js",
+  "antigravity-provider-adapter.js",
 ];
 /** The folder of the adapter entry files in the shared package. */
 const ADAPTER_FOLDER = join("dist-provider-runtime", "agents");

@@ -33,7 +33,7 @@ import {
   entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 
-for (const providerId of ["open-model", "claude-code", "codex"] as const) {
+for (const providerId of ["open-model", "claude-code", "codex", "antigravity"] as const) {
 test(`explicit runtime recovery retires proven-dead ${providerId} without replacing the durable agent`, async () => {
   const env = await fixture();
   const paths = {
@@ -64,10 +64,12 @@ test(`explicit runtime recovery retires proven-dead ${providerId} without replac
   await durability.close();
   const deadConnection = providerId === "claude-code"
     ? { kind: "claude_cli" as const, pid: 45550, processIdentity: "Mon Sep 14 15:50:00 2026" }
-    : providerId === "codex"
-      ? { kind: "codex_app_server" as const, pid: 45550, processIdentity: "Mon Sep 14 15:50:00 2026", url: "ws://127.0.0.1:45550" }
-      : { kind: "opencode_server" as const, pid: 45550, processIdentity: "opencode-birth-45550",
-          url: "http://127.0.0.1:52486", serverAuthPath: join(env.root, "opencode", "server-auth.json") };
+    : providerId === "antigravity"
+      ? { kind: "antigravity_acp" as const, pid: 45550, processIdentity: "Mon Sep 14 15:50:00 2026" }
+      : providerId === "codex"
+        ? { kind: "codex_app_server" as const, pid: 45550, processIdentity: "Mon Sep 14 15:50:00 2026", url: "ws://127.0.0.1:45550" }
+        : { kind: "opencode_server" as const, pid: 45550, processIdentity: "opencode-birth-45550",
+            url: "http://127.0.0.1:52486", serverAuthPath: join(env.root, "opencode", "server-auth.json") };
   const death = deadConnection.kind === "opencode_server" ? undefined
     : { kind: deadConnection.kind, pid: deadConnection.pid, processIdentity: deadConnection.processIdentity };
   const calls = { attach: 0, spawn: 0, resume: 0, converge: 0 };

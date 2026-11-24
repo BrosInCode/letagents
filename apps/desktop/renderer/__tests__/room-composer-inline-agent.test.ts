@@ -76,7 +76,7 @@ const provider = (id: string, name: string) => ({ id, name, description: '', cap
 function fakeIpc(overrides: { preflight?: Record<string, any>; openModel?: any; createAgent?: (input: any) => Promise<any>; listAgents?: () => Promise<any[]> } = {}) {
   const calls = { create: [] as any[], preflight: [] as any[], listAgents: 0 };
   const ready = { status: 'ready', canStart: true, message: '', detail: null, nextAction: null, version: null, mcpStatus: null };
-  const preflight = { 'claude-code': ready, codex: ready, 'open-model': ready, cursor: { ...ready, status: 'auth_required', canStart: false }, ...overrides.preflight };
+  const preflight = { 'claude-code': ready, codex: ready, antigravity: ready, 'open-model': ready, cursor: { ...ready, status: 'auth_required', canStart: false }, ...overrides.preflight };
   ipc = {
     room: { getExpressions: async () => ({ enabled: false }) },
     workers: {
@@ -240,16 +240,27 @@ test('a second pick during the check gets a clean chip, and the first result is 
 
 /* ---------- chip lifecycle ---------- */
 
-test('the submenu lists Claude, Codex and Open Model, and Cursor only once it can start', async t => {
+test('the submenu lists Claude, Codex, Antigravity and Open Model, and Cursor only once it can start', async t => {
   fakeIpc();
   const { draft } = useDraft(t, fakeHost().host);
   await draft.refreshProviders();
-  assert.deepEqual(draft.rows.value.map((row: any) => [row.providerId, row.name]), [['claude-code', 'Claude'], ['codex', 'Codex'], ['open-model', 'Open Model']]);
+  assert.deepEqual(draft.rows.value.map((row: any) => [row.providerId, row.name]), [['claude-code', 'Claude'], ['codex', 'Codex'], ['antigravity', 'Antigravity'], ['open-model', 'Open Model']]);
   fakeIpc({ preflight: { cursor: { status: 'ready', canStart: true, nextAction: null } } });
   await draft.refreshProviders();
-  assert.equal(draft.rows.value.length, 3, 'a check younger than 30 s is reused, so opening the submenu again runs no CLI probes');
+  assert.equal(draft.rows.value.length, 4, 'a check younger than 30 s is reused, so opening the submenu again runs no CLI probes');
   await draft.refreshProviders({ force: true });
-  assert.deepEqual(draft.rows.value.map((row: any) => row.providerId), ['claude-code', 'codex', 'open-model', 'cursor']);
+  assert.deepEqual(draft.rows.value.map((row: any) => row.providerId), ['claude-code', 'codex', 'antigravity', 'open-model', 'cursor']);
+});
+
+test('Antigravity stays in the submenu before it can start, and says what to do, like Claude and Codex', async t => {
+  for (const [status, hint] of [['missing_runtime', 'Install'], ['auth_required', 'Sign in'], ['error', 'Check setup']] as const) {
+    fakeIpc({ preflight: { antigravity: { status, canStart: false, nextAction: null } } });
+    const { draft } = useDraft(t, fakeHost().host);
+    await draft.refreshProviders({ force: true });
+    const row = draft.rows.value.find((candidate: any) => candidate.providerId === 'antigravity');
+    assert.ok(row, status);
+    assert.equal(row.hint, hint, status);
+  }
 });
 
 test('picking a ready provider adds a chip with the personal default; a provider that needs setup opens the window instead', async t => {

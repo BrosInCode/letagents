@@ -94,12 +94,13 @@ test("the daemon and the adapters share one adapter contract", () => {
     ["provider-runtime/agents/claude-code/adapter.ts", "ClaudeCodeProviderAdapter"],
     ["provider-runtime/agents/cursor/provider-adapter.ts", "CursorProviderAdapter"],
     ["provider-runtime/agents/open-model/adapter.ts", "OpenModelProviderAdapter"],
+    ["provider-runtime/agents/antigravity/adapter.ts", "AntigravityProviderAdapter"],
   ] as const) {
     assert.match(read(path), new RegExp(`export class ${name}\\b[^{]*\\bimplements SupervisedProviderAdapter\\b`), `${name} must implement the contract`);
   }
   const router = read("daemon/provider-action-port-router.ts");
   assert.match(router, /export type NativeProviderAdapter = SupervisedProviderAdapter;/);
   const adapterImports = [...router.matchAll(/await import\("#provider-runtime\/agents\/[a-z-]+-provider-adapter\.js"\)([^;\n]*)/g)];
-  assert.equal(adapterImports.length, 4, "the router loads the four adapters by the package name");
+  assert.equal(adapterImports.length, 5, "the router loads the five adapters by the package name");
   for (const [text, rest] of adapterImports) assert.equal(rest.trim(), "", `no cast at an adapter import: ${text}`);
 });

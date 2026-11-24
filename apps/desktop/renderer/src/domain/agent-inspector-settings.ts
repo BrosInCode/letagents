@@ -209,7 +209,24 @@ export function settleConfigurationAlreadyApplied(
 }
 
 export function agentInspectorProviderSupportsEffort(providerId: string | null | undefined): boolean {
-  return providerId === "codex" || providerId === "claude-code";
+  return providerId === "codex" || providerId === "claude-code" || providerId === "antigravity";
+}
+
+/**
+ * The effort choices the inspector offers. An Antigravity model lists its own
+ * thinking levels (`supportedEfforts`); one that lists none takes no effort.
+ * When no model catalog is loaded (`model === undefined`), offer Antigravity's
+ * four valid thinking levels (excluding Claude's `max`). The saved effort
+ * stays listed so it can be seen and changed.
+ */
+export function inspectorEffortChoices(
+  providerId: string | null | undefined,
+  model?: { supportedEfforts?: readonly string[] } | null,
+  savedEffort?: string | null,
+): Array<{ value: "" | DesktopManagedAgentEffort; label: string }> {
+  if (providerId !== "antigravity") return inspectorEffortOptions;
+  const supported = new Set(model === undefined ? ["low", "medium", "high", "xhigh"] : (model?.supportedEfforts ?? []));
+  return inspectorEffortOptions.filter((option) => option.value === "" || supported.has(option.value) || option.value === savedEffort);
 }
 
 export function roomMovePresentation(move: DesktopSupervisorRoomMove): { label: string; detail: string; terminal: boolean } {

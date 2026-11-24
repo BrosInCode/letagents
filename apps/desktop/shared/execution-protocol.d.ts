@@ -10,7 +10,7 @@ export type ExecutionOutcome = "succeeded" | "failed" | "denied_before_start" | 
 export type HardControlEvidence = "process_exit" | "process_birth_changed" | "transport_refused" | "control_epoch_gone" | "native_session_terminated";
 /** Adapter observation of this exact process birth ending, never just a transport failure. */
 export type NativeRuntimeDeath = {
-  kind: "claude_cli" | "codex_app_server";
+  kind: "claude_cli" | "codex_app_server" | "antigravity_acp";
   pid: number;
   processIdentity: string;
 };
