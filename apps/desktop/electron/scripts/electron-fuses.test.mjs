@@ -81,27 +81,76 @@ test("packaging stops on a fuse it has not decided, a new wire version, a remove
   assert.throws(() => setElectronFuseWires(binary(ELECTRON_DEFAULTS), incomplete), /must set exactly these fuses/);
 });
 
-test("a macOS bundle gets its fuses flipped and its framework signed ad hoc before release signing", async () => {
+async function macBundle(root) {
+  const bundle = join(root, "LetAgents.app");
+  const binaryPath = packagedFuseBinaryPath({ bundle, platform: "darwin" });
+  await mkdir(dirname(binaryPath), { recursive: true });
+  await writeFile(binaryPath, binary(ELECTRON_DEFAULTS));
+  return { bundle, binaryPath };
+}
+
+function notSigned() {
+  return Object.assign(new Error("Command failed: codesign --display"), { stderr: "Electron Framework.framework: code object is not signed at all\n" });
+}
+
+test("an arm64 macOS bundle (Electron ships it linker-signed) gets its framework signed ad hoc after the flip", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-fuses-"));
   try {
-    const bundle = join(root, "LetAgents.app");
-    const binaryPath = packagedFuseBinaryPath({ bundle, platform: "darwin" });
-    await mkdir(dirname(binaryPath), { recursive: true });
-    await writeFile(binaryPath, binary(ELECTRON_DEFAULTS));
+    const { bundle, binaryPath } = await macBundle(root);
     const calls = [];
     const result = await applyPackagedElectronFuses({
       bundle,
       platform: "darwin",
-      run: async (command, args) => { calls.push([command, ...args]); return { stdout: "", stderr: "" }; },
+      run: async (command, args) => {
+        calls.push([command, ...args]);
+        if (args[0] === "--force") assert.equal(wireText(await readFile(binaryPath)), "101000011", "signed after the flip");
+        return { stdout: "", stderr: "" };
+      },
     });
     assert.equal(result.wires, 1);
     assert.deepEqual(result.fuses, LETAGENTS_ELECTRON_FUSES);
     assert.equal(wireText(await readFile(binaryPath)), "101000011");
-    assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0].slice(0, 4), ["codesign", "--force", "--sign", "-"]);
-    assert.match(calls[0][4], /Electron Framework\.framework$/);
+    assert.deepEqual(calls.map((call) => call.slice(0, -1)), [["codesign", "--display"], ["codesign", "--force", "--sign", "-"]]);
+    for (const call of calls) assert.match(call.at(-1), /Electron Framework\.framework$/);
     await writeFile(binaryPath, binary(ELECTRON_DEFAULTS));
     await assert.rejects(assertPackagedElectronFuses({ bundle, platform: "darwin" }), /EnableNodeCliInspectArguments: found true, expected false/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an x64 macOS bundle (Electron ships it unsigned) is flipped and left unsigned for release signing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-fuses-"));
+  try {
+    const { bundle, binaryPath } = await macBundle(root);
+    const calls = [];
+    await applyPackagedElectronFuses({
+      bundle,
+      platform: "darwin",
+      run: async (command, args) => {
+        calls.push([command, ...args]);
+        // codesign --force --sign - on this framework failed in CI: its crashpad helper is not signed at all.
+        if (args[0] === "--display") throw notSigned();
+        return assert.fail("an unsigned framework is not signed here");
+      },
+    });
+    assert.equal(wireText(await readFile(binaryPath)), "101000011");
+    assert.equal(calls.length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a codesign failure other than an unsigned framework stops packaging before the flip", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-fuses-"));
+  try {
+    const { bundle, binaryPath } = await macBundle(root);
+    await assert.rejects(applyPackagedElectronFuses({
+      bundle,
+      platform: "darwin",
+      run: async () => { throw Object.assign(new Error("spawn codesign ENOENT"), { stderr: "" }); },
+    }), /ENOENT/);
+    assert.equal(wireText(await readFile(binaryPath)), ELECTRON_DEFAULTS);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

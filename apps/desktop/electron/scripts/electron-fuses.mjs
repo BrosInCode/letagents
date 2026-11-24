@@ -136,9 +136,10 @@ export function distFuseBinaryPath({ dist, platform }) {
 
 /**
  * Flip the fuses of a packaged app folder before it is signed, then read them
- * back. On macOS the changed framework gets a new ad-hoc signature so an
- * unsigned local build still loads it; release signing replaces that
- * signature with the Developer ID one.
+ * back. On macOS a framework that Electron shipped signed (arm64 downloads
+ * are ad-hoc signed by the linker; x64 downloads are not signed at all) gets
+ * a new ad-hoc signature, so an unsigned local build still loads it. Release
+ * signing replaces it with the Developer ID signature either way.
  */
 export async function applyPackagedElectronFuses({
   bundle,
@@ -148,15 +149,26 @@ export async function applyPackagedElectronFuses({
   run = promisify(execFile),
 }) {
   const binary = packagedFuseBinaryPath({ bundle, platform, executableName });
+  const framework = platform === "darwin"
+    ? await realpath(join(bundle, "Contents", "Frameworks", "Electron Framework.framework"))
+    : null;
+  const resign = framework !== null && await darwinCodeIsSigned(framework, run);
   const bytes = await readFile(binary);
   const wires = setElectronFuseWires(bytes, policy, binary);
   await writeFile(binary, bytes);
-  if (platform === "darwin") {
-    const framework = await realpath(join(bundle, "Contents", "Frameworks", "Electron Framework.framework"));
-    await run("codesign", ["--force", "--sign", "-", framework]);
-  }
+  if (resign) await run("codesign", ["--force", "--sign", "-", framework]);
   await assertPackagedElectronFuses({ bundle, platform, executableName, policy });
   return { binary, wires, fuses: { ...policy } };
+}
+
+async function darwinCodeIsSigned(path, run) {
+  try {
+    await run("codesign", ["--display", path]);
+    return true;
+  } catch (error) {
+    if (/code object is not signed at all/.test(String(error?.stderr ?? ""))) return false;
+    throw error;
+  }
 }
 
 /** Fail unless every fuse wire of a packaged app folder matches the policy. */
