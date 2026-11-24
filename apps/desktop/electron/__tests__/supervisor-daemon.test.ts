@@ -3305,6 +3305,36 @@ test("the daemon starts with SIGUSR1 debugging off and still sees its own entry 
   }
 });
 
+test("the client's own daemon start puts the Node flags before the daemon script", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture();
+  try {
+    const report = join(env.root, "started.json");
+    const script = join(env.root, "entry.mjs");
+    await writeFile(script, [
+      "import { writeFileSync } from \"node:fs\";",
+      `writeFileSync(${JSON.stringify(report)}, JSON.stringify({ script: process.argv[1], execArgv: process.execArgv }));`,
+      "process.exit(0);",
+      "",
+    ].join("\n"));
+    // No spawnDaemon option: this runs the client's default start, as the app does.
+    const client = new SupervisorDaemonClient({ stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath, daemonScriptPath: script });
+    const { spawnDaemon } = client as unknown as { spawnDaemon: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess };
+    spawnDaemon(script, env.root, { ...process.env });
+    let started: unknown = null;
+    for (let attempt = 0; attempt < 400 && started === null; attempt += 1) {
+      started = await readFile(report, "utf8").then((text) => JSON.parse(text) as unknown, () => null);
+      if (started === null) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.deepEqual(started, { script, execArgv: ["--disable-sigusr1"] },
+      "the daemon starts without SIGUSR1 debugging and still sees its script as argv[1]");
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test("desktop development watches daemon builds and rejects a stale replacement implementation", async () => {
   const desktopPackage = JSON.parse(await readFile(desktopPackagePath, "utf8")) as { scripts?: Record<string, string> };
   assert.match(desktopPackage.scripts?.dev ?? "", /npm:watch:daemon/);

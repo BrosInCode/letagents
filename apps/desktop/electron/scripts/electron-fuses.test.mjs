@@ -124,23 +124,39 @@ test("a Windows folder gets the fuses in its branded executable and needs no sig
   }
 });
 
-test("the installed Electron has exactly the fuses this policy decides", { skip: !existsSync(join(desktopRoot, "node_modules", "electron", "dist")) && "electron is not installed" }, async () => {
+test("the installed Electron has exactly the fuses this policy decides, in the known order", { skip: !existsSync(join(desktopRoot, "node_modules", "electron", "dist")) && "electron is not installed" }, async () => {
   const path = distFuseBinaryPath({ dist: join(desktopRoot, "node_modules", "electron", "dist"), platform: process.platform });
   const wires = readElectronFuseWires(await readFile(path), path);
   assert.ok(wires.length >= 1);
-  for (const wire of wires) assert.deepEqual(Object.keys(wire.fuses), [...ELECTRON_FUSE_NAMES]);
+  const text = { true: "1", false: "0", removed: "r" };
+  for (const wire of wires) {
+    assert.deepEqual(Object.keys(wire.fuses), [...ELECTRON_FUSE_NAMES]);
+    // A changed default or a reordered wire in a new Electron fails here:
+    // check build/fuses/fuses.json5 of that Electron, then LETAGENTS_ELECTRON_FUSES.
+    assert.equal(ELECTRON_FUSE_NAMES.map((name) => text[String(wire.fuses[name])]).join(""), ELECTRON_DEFAULTS);
+  }
 });
 
 test("the fuses are flipped before signing and checked again in the files that ship", async () => {
   const artifact = await readFile(join(scriptsDirectory, "package-artifact.mjs"), "utf8");
-  const flip = artifact.indexOf("await applyPackagedElectronFuses(");
-  assert.ok(flip > artifact.indexOf("else await assembleMacBundle();"), "the flip runs on the assembled bundle");
+  // Every position is found first: indexOf returns -1 for missing text, and
+  // -1 is "before" anything.
+  const position = (source, text) => {
+    const index = source.indexOf(text);
+    assert.notEqual(index, -1, `missing: ${text}`);
+    return index;
+  };
+  const flip = position(artifact, "await applyPackagedElectronFuses(");
+  assert.ok(flip > position(artifact, "else await assembleMacBundle();"), "the flip runs on the assembled bundle");
+  assert.ok(flip < position(artifact, "await writeFile(join(app, \"package.json\")"), "the flip runs before the app files are added");
   assert.match(artifact, /electronFuses: electronFuses\.fuses/);
   const mac = await readFile(join(scriptsDirectory, "package-macos.mjs"), "utf8");
-  const check = mac.indexOf("await assertPackagedElectronFuses(");
-  assert.ok(check > mac.indexOf("await sign("), "the check reads the signed app");
-  assert.ok(check < mac.indexOf("notarizeWithStapleRecovery({ appPath: packagedApp"), "the check runs before notarization");
-  assert.ok(check < mac.indexOf("\"ditto\""), "the check runs before the update zip");
+  const check = position(mac, "await assertPackagedElectronFuses(");
+  assert.ok(check > position(mac, "await sign("), "the check reads the signed app");
+  assert.ok(check < position(mac, "notarizeWithStapleRecovery({ appPath: packagedApp"), "the check runs before notarization");
+  assert.ok(check < position(mac, "\"ditto\""), "the check runs before the update zip");
   const windows = await readFile(join(scriptsDirectory, "package-windows.mjs"), "utf8");
-  assert.ok(windows.indexOf("await assertPackagedElectronFuses(") < windows.indexOf("execFileAsync(makensis, ["), "the check runs before the installer");
+  const windowsCheck = position(windows, "await assertPackagedElectronFuses(");
+  assert.ok(windowsCheck > position(windows, "const artifactManifest = JSON.parse("), "the check reads the packaged folder the manifest names");
+  assert.ok(windowsCheck < position(windows, "execFileAsync(makensis, ["), "the check runs before the installer");
 });
