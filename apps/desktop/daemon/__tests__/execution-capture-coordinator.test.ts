@@ -1938,3 +1938,53 @@ test("capture flush stays fail-closed on a suspended lane and reused-handle arch
     }
   }
 });
+
+test("healthy fact drain does not record max_observed_sequence ahead of last_source_sequence before ingest", async () => {
+  const f = fixture("opencode_server");
+  const originalTrackNativeTurn = ExecutionShadowStore.prototype.trackNativeTurn;
+  let positionBeforeIngest: Record<string, unknown> | undefined;
+  let simulateMidDrainCrash = true;
+  try {
+    await f.install();
+    f.emit(ready);
+    await flush();
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 1 });
+
+    f.bindTurn("turn-healthy", "msg-healthy", "dispatching");
+    ExecutionShadowStore.prototype.trackNativeTurn = function patchedTrackNativeTurn(...args) {
+      const result = originalTrackNativeTurn.apply(this, args);
+      if (simulateMidDrainCrash) {
+        simulateMidDrainCrash = false;
+        positionBeforeIngest = { ...f.position() };
+        const busy = Object.assign(new Error("simulated crash before ingest"), { code: "ERR_SQLITE_ERROR", errcode: 5 });
+        throw busy;
+      }
+      return result;
+    };
+
+    f.emit({ ...active, providerTurnId: "turn-healthy" });
+    await flush();
+
+    assert.deepEqual(positionBeforeIngest, { last_source_sequence: 1, max_observed_sequence: 1 },
+      "drain must not advance max_observed_sequence ahead of last_source_sequence before ingest commits");
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 1 },
+      "an abrupt stop before ingest leaves no synthetic source_gap on disk");
+
+    // A restarted daemon binding a fresh source on the same surviving runtime must succeed without source_gap.
+    const runtimeId = executionRuntimeStorageIdentity("agent", "generation", "opencode_server", 42, "birth-secret");
+    const replacement = new ExecutionShadowStore(f.db);
+    assert.doesNotThrow(() => replacement.bindObserver({
+      agentId: "agent",
+      subjectRuntimeGenerationId: runtimeId,
+      observerRuntimeGenerationId: runtimeId,
+      sourceId: "restarted-daemon-source",
+      daemonGenerationId: "2",
+      expectedEpoch: 1,
+      boundAtMs: Date.parse(now) + 1_000,
+    }));
+  } finally {
+    ExecutionShadowStore.prototype.trackNativeTurn = originalTrackNativeTurn;
+    f.capture.close();
+    if (f.db.isOpen) f.db.close();
+  }
+});

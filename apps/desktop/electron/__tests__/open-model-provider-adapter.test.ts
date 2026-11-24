@@ -998,6 +998,89 @@ test("Open Model does not mint lifecycle evidence when native prompt dispatch is
   assert.equal(observations.some(({ fact }) => fact.domain === "turn"), false);
 });
 
+test("Open Model checkpoints the turn id before native prompt dispatch and turn-active evidence", async () => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-open-model-checkpoint-order-"));
+  const trace: string[] = [];
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: {
+      ...harness.dependencies,
+      async fetch(input, init) {
+        const url = new URL(input);
+        if (url.pathname.endsWith("/prompt_async") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { messageID?: string };
+          trace.push(`prompt_async:${body.messageID ?? ""}`);
+        }
+        return harness.dependencies.fetch(input, init);
+      },
+    },
+    startTimeoutMs: LAUNCH_BUDGET_MS,
+    turnTimeoutMs: 100,
+  });
+  try {
+    const handle = await adapter.spawn(spawnRequest({
+      workAttemptId: "attempt-checkpoint-order",
+      cwd: runtimeRoot,
+    }));
+    const observations: NativeExecutionObservation[] = [];
+    adapter.onExecution(handle, (event) => {
+      observations.push(event);
+      if (event.fact.domain === "turn" && event.fact.state === "active") {
+        trace.push(`turn_active:${event.fact.providerTurnId}`);
+      }
+    });
+
+    const result = await adapter.runRoomTurn(handle, {
+      inboxItemId: "inbox-order-1",
+      sourceMessage: { text: "check ordering" },
+      activation: { decision: "activate" },
+      actionId: "action-order-1",
+    }, {
+      beforeNativeDispatch: async () => { trace.push("dispatch"); },
+      checkpointTurnStarted: async (turnId) => { trace.push(`checkpoint:${turnId}`); },
+    });
+
+    assert.deepEqual(trace, [
+      "dispatch",
+      `checkpoint:${result.turnId}`,
+      `prompt_async:${result.turnId}`,
+      `turn_active:${result.turnId}`,
+    ]);
+
+    // A rejected prompt_async after checkpointing must still emit zero turn facts and reset to idle.
+    trace.length = 0;
+    observations.length = 0;
+    harness.setPromptFailure(new Error("rejected after checkpoint"));
+    let rejectedTurnId = "";
+    await assert.rejects(
+      adapter.runRoomTurn(handle, {
+        inboxItemId: "inbox-order-2",
+        sourceMessage: { text: "fail dispatch" },
+        activation: { decision: "activate" },
+        actionId: "action-order-2",
+      }, {
+        beforeNativeDispatch: async () => { trace.push("dispatch"); },
+        checkpointTurnStarted: async (turnId) => {
+          rejectedTurnId = turnId;
+          trace.push(`checkpoint:${turnId}`);
+        },
+      }),
+      /rejected after checkpoint/,
+    );
+    assert.deepEqual(trace, [
+      "dispatch",
+      `checkpoint:${rejectedTurnId}`,
+      `prompt_async:${rejectedTurnId}`,
+    ]);
+    assert.equal(observations.some(({ fact }) => fact.domain === "turn"), false);
+    assert.equal(handle.observedState(), "idle");
+  } finally {
+    await rm(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
 test("Open Model turn ids use OpenCode's ascending scheme so the native loop can exit", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const before = Date.now();

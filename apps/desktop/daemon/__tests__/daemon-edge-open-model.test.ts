@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, watch } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -36,6 +36,38 @@ async function waitForFile(path: string, timeoutMs = 20_000): Promise<void> {
     await new Promise((resolveWait) => setTimeout(resolveWait, 25));
   }
   throw new Error(`Timed out waiting for synchronization marker ${path}`);
+}
+
+async function waitForFileImmediate(dir: string, filename: string, timeoutMs = 20_000): Promise<void> {
+  const target = join(dir, filename);
+  if (existsSync(target)) return;
+  await new Promise<void>((resolveWait, rejectWait) => {
+    let settled = false;
+    let watcher: ReturnType<typeof watch> | null = null;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearInterval(poll);
+      try { watcher?.close(); } catch { /* ignore */ }
+      if (error) rejectWait(error);
+      else resolveWait();
+    };
+    const check = () => {
+      if (existsSync(target)) finish();
+    };
+    try {
+      watcher = watch(dir, () => check());
+      watcher.on("error", () => { /* fall back to poll */ });
+    } catch {
+      /* fall back to poll */
+    }
+    const poll = setInterval(check, 2);
+    const timeout = setTimeout(() => {
+      finish(new Error(`Timed out waiting for synchronization marker ${target}`));
+    }, timeoutMs);
+    check();
+  });
 }
 
 async function startOpenModelScenario(
@@ -367,6 +399,109 @@ describe(
         const sqlite = harness.openSqlite();
         try {
           assert.equal(sqlite.integrityCheck(), "ok");
+        } finally {
+          sqlite.close();
+        }
+      } finally {
+        await harness.dispose();
+      }
+    });
+
+    test("4b. SIGKILL immediately when provider receives turn (0ms, before active-turn projection) recovers with one reply and no source_gap", { timeout: 60_000 }, async () => {
+      const { harness, controlDir, agentConfig } = await startOpenModelScenario("kill-recover");
+      try {
+        await harness.startAgent(agentConfig);
+        const before = await harness.waitForEntry(
+          agentConfig.entryId,
+          (entry) => entry.observed_state === "idle" && Boolean(entry.provider_ref?.provider_connection?.pid),
+          25_000,
+        );
+        const providerPidBefore = before.provider_ref!.provider_connection!.pid!;
+
+        await writeFile(join(controlDir, "hold-turn-1"), "hold\n", "utf8");
+        harness.roomServer.enqueueMessage(agentConfig.roomId, { text: "Survive immediate SIGKILL" });
+        // Kill immediately when OpenCode receives prompt_async (before sending HTTP 204
+        // and before the daemon can project observed_state === "working" or drain turn/active).
+        await waitForFileImmediate(controlDir, "turn-1-started.json", 20_000);
+        await harness.kill("SIGKILL");
+
+        const preRestartSqlite = harness.openSqlite();
+        try {
+          const inboxRow = preRestartSqlite.get<{ state: string; provider_turn_id: string | null }>(
+            "SELECT state, provider_turn_id FROM inbox_items WHERE agent_id = ? ORDER BY fifo_sequence DESC LIMIT 1",
+            agentConfig.entryId,
+          );
+          assert.ok(inboxRow, "expected durable inbox row before restart");
+          assert.ok(inboxRow.provider_turn_id, "provider_turn_id must already be durable before promptAsync reaches OpenCode");
+          const observerRow = preRestartSqlite.get<{ last_source_sequence: number; max_observed_sequence: number }>(
+            "SELECT last_source_sequence, max_observed_sequence FROM execution_observers WHERE agent_id = ?",
+            agentConfig.entryId,
+          );
+          assert.ok(observerRow, "expected execution_observers row before restart");
+          assert.equal(
+            Number(observerRow.max_observed_sequence),
+            Number(observerRow.last_source_sequence),
+            "crash right after dispatch must not leave max_observed_sequence ahead of last_source_sequence",
+          );
+        } finally {
+          preRestartSqlite.close();
+        }
+
+        await writeFile(join(controlDir, "release-turn-1"), "go\n", "utf8");
+        const restarted = await harness.restart();
+        assert.ok(restarted.healthy);
+        await harness.reinstallCredentials(agentConfig, restarted.generation);
+
+        await harness.roomServer.waitForPublishedMessages(
+          agentConfig.roomId,
+          (msgs) => msgs.length >= 1,
+          25_000,
+        );
+
+        const after = await harness.waitForEntry(
+          agentConfig.entryId,
+          (entry) =>
+            entry.observed_state === "idle" &&
+            entry.room_agent_state?.turn.state === "idle" &&
+            (entry.room_agent_state?.inbox.pending_count ?? 0) === 0,
+          15_000,
+          "open-model idle with drained inbox after 0ms SIGKILL recovery",
+        );
+        assert.equal(after.condition, "none");
+        assert.deepEqual(
+          harness.roomServer.publishedMessages(agentConfig.roomId).map((m) => m.text),
+          ["survived-daemon-kill"],
+        );
+        assert.equal(
+          harness.roomServer.publishAttempts(agentConfig.roomId).length,
+          1,
+          "expected no duplicate room POST on 0ms SIGKILL recovery",
+        );
+        assert.equal(
+          existsSync(join(controlDir, "unexpected-turn-2.json")),
+          false,
+          "restarted daemon must not start a duplicate OpenCode turn",
+        );
+        assert.equal(after.provider_ref?.provider_connection?.pid, providerPidBefore);
+
+        const stderr = harness.daemonOutput().stderr;
+        assert.doesNotMatch(stderr, /"code":"source_gap"/, `unexpected source_gap in restarted daemon stderr:\n${stderr}`);
+        assert.doesNotMatch(stderr, /"code":"invalid_observation"/, `unexpected invalid_observation in restarted daemon stderr:\n${stderr}`);
+
+        const sqlite = harness.openSqlite();
+        try {
+          assert.equal(sqlite.integrityCheck(), "ok");
+          const blockedRows = sqlite.all<{ inbox_item_id: string }>(
+            "SELECT inbox_item_id FROM inbox_items WHERE agent_id = ? AND state = 'blocked'",
+            agentConfig.entryId,
+          );
+          assert.deepEqual(blockedRows, [], "expected zero blocked inbox rows after 0ms SIGKILL recovery");
+          const observerRow = sqlite.get<{ last_source_sequence: number; max_observed_sequence: number }>(
+            "SELECT last_source_sequence, max_observed_sequence FROM execution_observers WHERE agent_id = ?",
+            agentConfig.entryId,
+          );
+          assert.ok(observerRow);
+          assert.equal(Number(observerRow.max_observed_sequence), Number(observerRow.last_source_sequence));
         } finally {
           sqlite.close();
         }

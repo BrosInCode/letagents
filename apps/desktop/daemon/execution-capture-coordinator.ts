@@ -810,52 +810,88 @@ export class ExecutionCaptureCoordinator {
       || position.latestSequence < 0 || position.firstRetainedSequence < 1 || position.firstRetainedSequence > position.latestSequence + 1) {
       throw new ExecutionProtocolError("invalid_fact");
     }
-    this.store.observeSourcePosition(lane.subscription!.sourceId, token, position.latestSequence);
-    if (prior?.source_id !== source || Number(prior.max_observed_sequence) < position.latestSequence) lane.pendingChange = true;
-    lane.frontierStored = true;
-    if (lane.suspended) return false;
-    const current = this.hotRow("SELECT last_source_sequence FROM execution_observers WHERE agent_id=?", lane.agentId)!;
+    // Persist max_observed_sequence only after healthy queued facts ingest (each
+    // ingest advances last_source_sequence and max_observed_sequence atomically)
+    // or when stopping early on a gap, unplaceable fact, or protocol error.
+    // Writing the frontier before ingest would open a crash window where a
+    // SIGKILL leaves max_observed_sequence > last_source_sequence on disk and
+    // forces the restarted daemon into a false source_gap.
+    const recordFrontier = (): void => {
+      this.store.observeSourcePosition(lane.subscription!.sourceId, token, position.latestSequence);
+      if (prior?.source_id !== source || Number(prior.max_observed_sequence) < position.latestSequence) lane.pendingChange = true;
+      lane.frontierStored = true;
+    };
+    if (lane.suspended) { recordFrontier(); return false; }
+    const current = this.hotRow(`SELECT o.observer_epoch,o.daemon_generation_id,o.source_id,
+      o.observer_runtime_generation_id,o.last_source_sequence,s.source_id AS admitted_source_id
+      FROM execution_observers o
+      LEFT JOIN execution_observer_sources s ON s.agent_id=o.agent_id AND s.source_id=o.source_id
+      WHERE o.agent_id=?`, lane.agentId);
+    if (!current || Number(current.observer_epoch) !== token.epoch
+      || current.daemon_generation_id !== token.daemonGenerationId
+      || current.source_id !== source
+      || current.observer_runtime_generation_id !== token.observerRuntimeGenerationId
+      || current.admitted_source_id !== source) {
+      // Let observeSourcePosition raise the exact stale/unverified/mismatch protocol error.
+      recordFrontier();
+      return false;
+    }
     let cursor = Number(current.last_source_sequence);
+    if (position.latestSequence < cursor) {
+      recordFrontier();
+      return false;
+    }
     this.discardPrefix(lane, cursor);
     // Queued live observations can precede the helper's bounded retained suffix.
     const firstAvailable = lane.pending.keys().next().value ?? position.firstRetainedSequence;
     if (lane.overflow || firstAvailable > cursor + 1) {
+      recordFrontier();
       lane.suspended = true; lane.pending.clear(); lane.bytes = 0; this.report(lane, "source_gap"); return false;
     }
     let processed = 0;
-    for (const [sequence, queued] of lane.pending) {
-      if (processed++ >= BATCH_FACTS) return true;
-      const event = queued.event;
-      if (event.sourceId !== lane.subscription!.sourceId || sequence !== cursor + 1) {
-        lane.suspended = true; this.report(lane, "source_gap"); return false;
+    try {
+      for (const [sequence, queued] of lane.pending) {
+        if (processed++ >= BATCH_FACTS) return true;
+        const event = queued.event;
+        if (event.sourceId !== lane.subscription!.sourceId || sequence !== cursor + 1) {
+          recordFrontier();
+          lane.suspended = true; this.report(lane, "source_gap"); return false;
+        }
+        let runtime = this.knownRuntime(lane, event.nativeProcessPid, event.nativeProcessIdentity);
+        if (!runtime && (event.fact.domain === "turn" || event.fact.domain === "execution")) {
+          const known = this.hotRow("SELECT execution_generation_id FROM runs WHERE agent_id=? AND provider_continuation_id=? AND provider_turn_id=?", lane.agentId, event.fact.providerContinuationId, event.fact.providerTurnId);
+          if (known) runtime = this.knownRuntime(lane, event.nativeProcessPid,
+            event.nativeProcessIdentity, String(known.execution_generation_id));
+        }
+        if (!runtime) { recordFrontier(); this.report(lane, "identity_unavailable"); return false; }
+        const turn = event.fact.domain === "turn" || event.fact.domain === "execution" ? this.turn(lane, event, runtime) : null;
+        if ((event.fact.domain === "turn" || event.fact.domain === "execution") && !turn) { recordFrontier(); this.report(lane, "identity_unavailable"); return false; }
+        const subject = turn?.runtime ?? runtime;
+        token = this.bind(lane, subject, runtime, turn && subject.id !== runtime.id ? turn.identity : undefined);
+        const liveInstallation = this.liveInstallationFor(lane);
+        const ingestedFact = { ...event.fact, ...(turn?.identity ?? {}),
+          factId: opaque("fact", lane.agentId, event.sourceId, String(sequence)), agentId: lane.agentId,
+          executionGenerationId: subject.generation, runtimeGenerationId: subject.id, observerEpoch: token.epoch,
+          sourceSequence: sequence, observedAtMs: event.observedAtMs } as ExecutionFact;
+        const result = this.store.ingest(event.sourceId, token, ingestedFact, { liveInstallation });
+        if (result.status !== "accepted" && result.status !== "duplicate") {
+          recordFrontier();
+          lane.suspended = true; this.report(lane, result.status === "gap" ? "source_gap" : "retention_limit"); return false;
+        }
+        if (result.status === "accepted" || lane.diagnostic !== null) lane.pendingChange = true;
+        cursor = sequence; lane.pending.delete(sequence); lane.bytes -= queued.bytes; lane.diagnostic = null;
+        if (result.projectedObservedState !== undefined && result.projectedObservedState !== null) {
+          try { this.options.lifecycleProjected?.(lane.agentId, result.projectedObservedState); }
+          catch { /* optional observation */ }
+        }
       }
-      let runtime = this.knownRuntime(lane, event.nativeProcessPid, event.nativeProcessIdentity);
-      if (!runtime && (event.fact.domain === "turn" || event.fact.domain === "execution")) {
-        const known = this.hotRow("SELECT execution_generation_id FROM runs WHERE agent_id=? AND provider_continuation_id=? AND provider_turn_id=?", lane.agentId, event.fact.providerContinuationId, event.fact.providerTurnId);
-        if (known) runtime = this.knownRuntime(lane, event.nativeProcessPid,
-          event.nativeProcessIdentity, String(known.execution_generation_id));
+    } catch (error) {
+      if (error instanceof ExecutionProtocolError) {
+        try { recordFrontier(); } catch { /* preserve original protocol error */ }
       }
-      if (!runtime) { this.report(lane, "identity_unavailable"); return false; }
-      const turn = event.fact.domain === "turn" || event.fact.domain === "execution" ? this.turn(lane, event, runtime) : null;
-      if ((event.fact.domain === "turn" || event.fact.domain === "execution") && !turn) { this.report(lane, "identity_unavailable"); return false; }
-      const subject = turn?.runtime ?? runtime;
-      token = this.bind(lane, subject, runtime, turn && subject.id !== runtime.id ? turn.identity : undefined);
-      const liveInstallation = this.liveInstallationFor(lane);
-      const ingestedFact = { ...event.fact, ...(turn?.identity ?? {}),
-        factId: opaque("fact", lane.agentId, event.sourceId, String(sequence)), agentId: lane.agentId,
-        executionGenerationId: subject.generation, runtimeGenerationId: subject.id, observerEpoch: token.epoch,
-        sourceSequence: sequence, observedAtMs: event.observedAtMs } as ExecutionFact;
-      const result = this.store.ingest(event.sourceId, token, ingestedFact, { liveInstallation });
-      if (result.status !== "accepted" && result.status !== "duplicate") {
-        lane.suspended = true; this.report(lane, result.status === "gap" ? "source_gap" : "retention_limit"); return false;
-      }
-      if (result.status === "accepted" || lane.diagnostic !== null) lane.pendingChange = true;
-      cursor = sequence; lane.pending.delete(sequence); lane.bytes -= queued.bytes; lane.diagnostic = null;
-      if (result.projectedObservedState !== undefined && result.projectedObservedState !== null) {
-        try { this.options.lifecycleProjected?.(lane.agentId, result.projectedObservedState); }
-        catch { /* optional observation */ }
-      }
+      throw error;
     }
+    recordFrontier();
     if (cursor < position.latestSequence) { lane.suspended = true; this.report(lane, "source_gap"); }
     else if (lane.diagnostic === "storage_unavailable") {
       // A successful exact source/epoch check also revalidates an empty source.
