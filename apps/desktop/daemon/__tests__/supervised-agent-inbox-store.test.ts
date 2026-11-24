@@ -476,6 +476,12 @@ test("undispatched reset atomically archives an exited lost Cursor runtime and r
     pendingRecovery?: boolean;
     liveAgentPointsToRuntime?: boolean;
     agentProvider?: "cursor" | "codex";
+    agentConnectionJson?: string | null;
+    agentExecutionGenerationId?: string | null;
+    observerSourceId?: string | null;
+    omitObserverSourceRow?: boolean;
+    observerMaxSequence?: number;
+    observerPendingLifecycleFactId?: string | null;
     terminalResult?: boolean;
     effectRow?: boolean;
     tombstoneRow?: boolean;
@@ -529,17 +535,25 @@ test("undispatched reset atomically archives an exited lost Cursor runtime and r
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(turnRowId, attemptId, options.agentId, runRoom, runGen, runtimeId, runCont, providerTurnId,
           turnState, sideEffects, atMs, turnState === "terminal" || turnState === "lost" ? atMs + 5 : null);
+      const observerSourceId = options.observerSourceId !== undefined ? options.observerSourceId : `src-${options.agentId}`;
+      const observerMaxSeq = options.observerMaxSequence ?? 3;
+      const pendingLifecycleFactId = options.observerPendingLifecycleFactId ?? null;
       db.prepare(`INSERT INTO execution_observers
-        (agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,daemon_generation_id,observer_epoch,last_source_sequence,max_observed_sequence,recovery_turn_id,bound_at_ms,source_id)
-        VALUES(?,?,?,?,?,?,1,3,3,NULL,?,?)`)
-        .run(options.agentId, runGen, runtimeId, runGen, runtimeId, "1", atMs, `src-${options.agentId}`);
-      db.prepare("INSERT INTO execution_observer_sources(agent_id,source_id) VALUES(?,?)").run(options.agentId, `src-${options.agentId}`);
-      const connection = options.liveAgentPointsToRuntime
-        ? birth
-        : { kind: "cursor_cli", pid: null, processIdentity: null };
+        (agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,daemon_generation_id,observer_epoch,last_source_sequence,max_observed_sequence,recovery_turn_id,bound_at_ms,source_id,pending_lifecycle_fact_id)
+        VALUES(?,?,?,?,?,?,1,3,?,NULL,?,?,?)`)
+        .run(options.agentId, runGen, runtimeId, runGen, runtimeId, "1", observerMaxSeq, atMs, observerSourceId, pendingLifecycleFactId);
+      if (observerSourceId !== null && !options.omitObserverSourceRow) {
+        db.prepare("INSERT INTO execution_observer_sources(agent_id,source_id) VALUES(?,?)").run(options.agentId, observerSourceId);
+      }
+      const connectionJson = options.agentConnectionJson !== undefined
+        ? options.agentConnectionJson
+        : JSON.stringify(options.liveAgentPointsToRuntime
+          ? birth
+          : { kind: "cursor_cli", pid: null, processIdentity: null });
+      const agentExecGen = options.agentExecutionGenerationId !== undefined ? options.agentExecutionGenerationId : generationId;
       db.prepare(`INSERT INTO agents(agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,config_revision,runtime_configuration_revision,desired_state,observed_state,condition,work_attempt_id,provider_work_attempt_id,provider_continuation_id,provider_execution_generation_id,provider_connection_json)
         VALUES(?,0,1,'owner',?,'Agent',?,?,'charter',1,1,'running','idle','none',?,?,?,?,?)`)
-        .run(options.agentId, at, roomId, options.agentProvider ?? "cursor", workAttemptId, workAttemptId, continuationId, generationId, JSON.stringify(connection));
+        .run(options.agentId, at, roomId, options.agentProvider ?? "cursor", workAttemptId, workAttemptId, continuationId, agentExecGen, connectionJson);
 
       if (options.extraRunOnRuntime) {
         const extraAttempt = `attempt-extra-${options.agentId}`;
@@ -636,7 +650,7 @@ test("undispatched reset atomically archives an exited lost Cursor runtime and r
     { label: "side effects possible", opts: { agentId: "rej-se-possible", sideEffects: "possible" }, pattern: /lost turn with no recorded side effects/ },
     { label: "side effects observed", opts: { agentId: "rej-se-observed", sideEffects: "observed" }, pattern: /lost turn with no recorded side effects/ },
     { label: "recorded execution activity", opts: { agentId: "rej-exec-fact", executionFact: true }, pattern: /recorded execution activity/ },
-    { label: "wrong provider (codex)", opts: { agentId: "rej-codex", provider: "codex" }, pattern: /exact bound turn authority/ },
+    { label: "wrong provider (codex run on cursor agent)", opts: { agentId: "rej-codex", provider: "codex", agentProvider: "cursor" }, pattern: /exact bound turn authority/ },
     { label: "wrong generation", opts: { agentId: "rej-gen", runGenerationId: "other-generation" }, pattern: /exact bound turn authority/ },
     { label: "wrong room", opts: { agentId: "rej-room", runRoomId: "other-room" }, pattern: /exact bound turn authority/ },
     { label: "wrong continuation", opts: { agentId: "rej-cont", runContinuationId: "other-continuation" }, pattern: /exact bound turn authority/ },
@@ -644,7 +658,15 @@ test("undispatched reset atomically archives an exited lost Cursor runtime and r
     { label: "second turn on same runtime", opts: { agentId: "rej-extra-run", extraRunOnRuntime: true }, pattern: /carrying another turn/ },
     { label: "pending runtime recovery", opts: { agentId: "rej-pending-rec", pendingRecovery: true }, pattern: /runtime recovery is pending/, expectPendingCount: 1 },
     { label: "live agent still points to runtime", opts: { agentId: "rej-live-ref", liveAgentPointsToRuntime: true }, pattern: /still referenced by the live agent/ },
-    { label: "non-cursor agent row", opts: { agentId: "rej-agent-provider", agentProvider: "codex" }, pattern: /requires a Cursor agent/ },
+    { label: "non-cursor agent row with cursor run", opts: { agentId: "rej-agent-provider", agentProvider: "codex", provider: "cursor" }, pattern: /requires a Cursor agent/ },
+    { label: "partial non-idle agent connection json", opts: { agentId: "rej-partial-conn", agentConnectionJson: JSON.stringify({ kind: "cursor_cli", pid: 7771, processIdentity: null }) }, pattern: /could not verify the live agent connection/ },
+    { label: "empty object agent connection json", opts: { agentId: "rej-empty-conn", agentConnectionJson: "{}" }, pattern: /could not verify the live agent connection/ },
+    { label: "live cursor connection missing execution generation", opts: { agentId: "rej-missing-gen", liveAgentPointsToRuntime: true, agentExecutionGenerationId: null }, pattern: /could not verify the live agent connection/ },
+    { label: "non-string processIdentity in agent connection json", opts: { agentId: "rej-bad-identity-type", agentConnectionJson: JSON.stringify({ kind: "cursor_cli", pid: 7771, processIdentity: 123 }) }, pattern: /could not verify the live agent connection/ },
+    { label: "gapped execution observer", opts: { agentId: "rej-gapped-obs", observerMaxSequence: 5 }, pattern: /incomplete or unverified observer/ },
+    { label: "null source_id execution observer", opts: { agentId: "rej-null-src", observerSourceId: null }, pattern: /incomplete or unverified observer/ },
+    { label: "unverified source_id missing from observer sources", opts: { agentId: "rej-unverified-src", omitObserverSourceRow: true }, pattern: /incomplete or unverified observer/ },
+    { label: "pending lifecycle projection on observer", opts: { agentId: "rej-pending-lifecycle", observerPendingLifecycleFactId: "fact-pending" }, pattern: /incomplete or unverified observer/ },
     { label: "terminal result present", opts: { agentId: "rej-term-res", terminalResult: true }, pattern: /terminal or effect evidence/ },
     { label: "effect row present", opts: { agentId: "rej-effect", effectRow: true }, pattern: /terminal or effect evidence/ },
     { label: "effect tombstone present", opts: { agentId: "rej-tomb", tombstoneRow: true }, pattern: /terminal or effect evidence/ },
@@ -680,7 +702,37 @@ test("undispatched reset atomically archives an exited lost Cursor runtime and r
     } finally { await c.env.cleanup(); }
   }
 
-  // 3. Exhausted 3rd pre-dispatch failure moves to blocked without archiving or deleting the binding.
+  // 3. Consistent non-Cursor agent + run skips Cursor archival cleanly and still resets to pending.
+  {
+    const c = await seedCase({
+      agentId: "codex-undispatched",
+      provider: "codex",
+      agentProvider: "codex",
+      runtimeState: "ready",
+      turnState: "none",
+      agentConnectionJson: JSON.stringify({ kind: "codex_app_server", pid: 7771, processIdentity: "birth-codex-undispatched" }),
+    });
+    try {
+      const { item: reset, attempt } = await c.store.recordRetryFailure(c.item.inbox_item_id, {
+        domain: "pre_dispatch", error: "codex turn never dispatched", resetUndispatchedTurnId: c.providerTurnId,
+      });
+      assert.equal(attempt, 1);
+      assert.equal(reset.state, "pending");
+      assert.equal(reset.provider_turn_id, null);
+      assert.equal(reset.attempt_count, 0);
+      assert.equal(await c.store.providerTurnBinding(c.item.inbox_item_id), null);
+      const check = new DatabaseSync(c.env.database);
+      try {
+        const recCount = Number((check.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=?").get("codex-undispatched") as { n: number }).n);
+        assert.equal(recCount, 0, "non-Cursor reset writes no Cursor recovery boundary");
+        const obsEpoch = Number((check.prepare("SELECT observer_epoch FROM execution_observers WHERE agent_id=?").get("codex-undispatched") as { observer_epoch: number }).observer_epoch);
+        assert.equal(obsEpoch, 1, "non-Cursor reset leaves observer_epoch untouched");
+      } finally { check.close(); }
+      await c.store.close();
+    } finally { await c.env.cleanup(); }
+  }
+
+  // 4. Exhausted 3rd pre-dispatch failure moves to blocked without archiving or deleting the binding.
   {
     const c = await seedCase({ agentId: "cursor-exhausted", priorPreDispatchFailures: 2 });
     try {

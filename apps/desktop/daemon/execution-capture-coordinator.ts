@@ -799,7 +799,9 @@ export class ExecutionCaptureCoordinator {
       }
       this.report(lane, "identity_unavailable"); return false;
     }
-    const staleArchivedObserver = lane.observer !== null
+    const staleArchivedObserver = !lane.suspended
+      && !lane.detached
+      && lane.observer !== null
       && lane.observer.observerRuntimeGenerationId !== initial.id
       && Boolean(recoveredRuntime(this.database, lane.agentId, lane.observer.observerRuntimeGenerationId));
     let token = lane.observer && !staleArchivedObserver ? lane.observer : this.bind(lane, initial, initial);

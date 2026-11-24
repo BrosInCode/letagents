@@ -4,7 +4,8 @@ import { markExecutingBoundedMutationsUncertainInTransaction } from "./effect-jo
 import { executionIdentity, nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import { processBirthState, type ProcessIdentity } from "./process-identity.js";
 import type { DatabaseSync } from "node:sqlite";
-import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef } from "./provider-action-port.js";
+import { isIdleCursorConnection, isLiveCursorConnection } from "./provider-state-policy.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity } from "./execution-shadow-store.js";
 import type { DaemonManifestEntry, DaemonProviderRuntimeReference } from "./types.js";
 import type { SupervisedProviderTurnBinding } from "./supervised-agent-inbox-store.js";
@@ -500,6 +501,18 @@ export function archiveExitedUndispatchedCursorRuntime(
     || !database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'").get()) {
     return null;
   }
+  const hasAgentsTable = Boolean(
+    database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agents'").get(),
+  );
+  const agent = hasAgentsTable
+    ? database.prepare(
+      "SELECT provider,provider_execution_generation_id,provider_connection_json FROM agents WHERE agent_id=?",
+    ).get(turn.agent_id) as {
+      provider: string;
+      provider_execution_generation_id: string | null;
+      provider_connection_json: string | null;
+    } | undefined
+    : undefined;
   const rows = database.prepare(`SELECT t.turn_id,t.room_id,t.execution_generation_id,t.runtime_generation_id,
       t.provider_continuation_id,t.state,t.side_effects,r.provider,r.runtime_state,g.workspace_id
     FROM runs t
@@ -521,10 +534,19 @@ export function archiveExitedUndispatchedCursorRuntime(
       workspace_id: string;
     }>;
   if (rows.length === 0) return null;
+  // This archive is Cursor-only: skip cleanly when both the agent (if present)
+  // and all captured run rows are consistently non-Cursor, while still failing
+  // closed on any cross-provider mismatch involving Cursor.
+  if ((!agent || agent.provider !== "cursor") && rows.every((candidate) => candidate.provider !== "cursor")) {
+    return null;
+  }
   if (rows.length > 1) {
     throw new Error("Undispatched Cursor runtime archive found ambiguous captured turn evidence.");
   }
   const row = rows[0]!;
+  if (agent && agent.provider !== "cursor") {
+    throw new Error("Undispatched Cursor runtime archive requires a Cursor agent.");
+  }
   if (row.provider !== "cursor"
     || row.room_id !== turn.room_id
     || row.execution_generation_id !== turn.origin_execution_generation_id
@@ -552,47 +574,38 @@ export function archiveExitedUndispatchedCursorRuntime(
   if (pendingRuntimeRecovery(database, turn.agent_id)) {
     throw new Error("Undispatched Cursor runtime archive cannot run while a runtime recovery is pending.");
   }
-  const hasAgentsTable = Boolean(
-    database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agents'").get(),
-  );
-  const agent = hasAgentsTable
-    ? database.prepare(
-      "SELECT provider,provider_execution_generation_id,provider_connection_json FROM agents WHERE agent_id=?",
-    ).get(turn.agent_id) as {
-      provider: string;
-      provider_execution_generation_id: string | null;
-      provider_connection_json: string | null;
-    } | undefined
-    : undefined;
-  if (agent) {
-    if (agent.provider !== "cursor") {
-      throw new Error("Undispatched Cursor runtime archive requires a Cursor agent.");
+  if (agent && agent.provider_connection_json !== null) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(agent.provider_connection_json);
+    } catch {
+      throw new Error("Undispatched Cursor runtime archive could not verify the live agent connection.");
     }
-    if (agent.provider_execution_generation_id && agent.provider_connection_json) {
-      let connection: { kind?: unknown; pid?: unknown; processIdentity?: unknown };
-      try {
-        connection = JSON.parse(agent.provider_connection_json) as typeof connection;
-      } catch {
+    const raw = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+    const validShape = raw !== null
+      && (raw.processIdentity === undefined || raw.processIdentity === null || typeof raw.processIdentity === "string");
+    const connection = validShape ? raw as ProviderActionConnectionRef : null;
+    const idle: boolean = isIdleCursorConnection(connection);
+    if (idle) {
+      // Idle Cursor lane holds no live child birth.
+    } else if (isLiveCursorConnection(connection)) {
+      if (!agent.provider_execution_generation_id?.trim()) {
         throw new Error("Undispatched Cursor runtime archive could not verify the live agent connection.");
       }
-      if (connection && typeof connection === "object"
-        && typeof connection.kind === "string"
-        && typeof connection.pid === "number"
-        && Number.isSafeInteger(connection.pid)
-        && connection.pid > 0
-        && typeof connection.processIdentity === "string"
-        && connection.processIdentity.trim()) {
-        const liveRuntimeId = executionRuntimeStorageIdentity(
-          turn.agent_id,
-          agent.provider_execution_generation_id,
-          connection.kind,
-          connection.pid,
-          connection.processIdentity,
-        );
-        if (liveRuntimeId === runtimeId) {
-          throw new Error("Undispatched Cursor runtime archive refused a runtime still referenced by the live agent.");
-        }
+      const liveRuntimeId = executionRuntimeStorageIdentity(
+        turn.agent_id,
+        agent.provider_execution_generation_id,
+        connection.kind,
+        connection.pid!,
+        connection.processIdentity!,
+      );
+      if (liveRuntimeId === runtimeId) {
+        throw new Error("Undispatched Cursor runtime archive refused a runtime still referenced by the live agent.");
       }
+    } else {
+      throw new Error("Undispatched Cursor runtime archive could not verify the live agent connection.");
     }
   }
   if (recoveredRuntime(database, turn.agent_id, runtimeId)) {
@@ -600,7 +613,21 @@ export function archiveExitedUndispatchedCursorRuntime(
   }
   const observer = database.prepare(
     "SELECT * FROM execution_observers WHERE agent_id=? AND observer_runtime_generation_id=?",
-  ).get(turn.agent_id, runtimeId);
+  ).get(turn.agent_id, runtimeId) as Record<string, string | number | null> | undefined;
+  if (observer) {
+    const sourceId = typeof observer.source_id === "string" && observer.source_id.trim()
+      ? observer.source_id
+      : null;
+    const verifiedSource = sourceId !== null && Boolean(
+      database.prepare("SELECT 1 FROM execution_observer_sources WHERE agent_id=? AND source_id=?")
+        .get(turn.agent_id, sourceId),
+    );
+    if (!verifiedSource
+      || Number(observer.max_observed_sequence) !== Number(observer.last_source_sequence)
+      || observer.pending_lifecycle_fact_id !== null) {
+      throw new Error("Undispatched Cursor runtime archive refused an incomplete or unverified observer record.");
+    }
+  }
   const ref: DaemonProviderRuntimeReference = {
     work_attempt_id: turn.work_attempt_id,
     execution_generation_id: turn.origin_execution_generation_id,
