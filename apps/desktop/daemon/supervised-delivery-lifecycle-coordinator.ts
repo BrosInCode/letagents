@@ -32,7 +32,7 @@ export type SupervisedDeliveryLifecyclePorts = {
     "activeTurn" | "ensureStarted" | "refresh" | "wake"
   > | null;
   manifest: {
-    getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+    getEntry(entryId: string, activityMode?: "full" | "summary"): Promise<DaemonManifestEntry | undefined>;
     pendingRoomMoves(entryId: string): Promise<DaemonRoomMoveRecord[]>;
   };
   roomMoves: {
@@ -59,7 +59,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
 
   /** Whether the lane is restarted if its runtime ends now, read fresh from the manifest. */
   private async laneOutlook(entryId: string): Promise<"restarts" | "needs_owner" | undefined> {
-    const entry = await this.ports.manifest.getEntry(entryId);
+    const entry = await this.ports.manifest.getEntry(entryId, "summary");
     if (!entry || entry.desired_state !== "running") return undefined;
     return restartsAfterNextFailure(entry.reconciliation?.exit_timestamps_ms ?? [], Date.now())
       ? "restarts" : "needs_owner";
@@ -76,7 +76,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
     }
     const delivery = this.ports.delivery;
     if (!delivery) throw new Error("Supervised bounded turns are unavailable.");
-    const entry = await this.ports.manifest.getEntry(input.entryId);
+    const entry = await this.ports.manifest.getEntry(input.entryId, "summary");
     const handle = this.ports.liveHandle(input.entryId);
     const binding = await this.ports.bindings.get(input.entryId);
     const credential = binding ? await this.ports.bindings.credentialFor(binding) : null;
@@ -129,7 +129,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
     const delivery = this.ports.delivery;
     if (this.ports.isHandoffScheduled() || !delivery || !this.ports.supportsRoomTurns()) return;
     if (this.ports.isLifecycleActive(entryId)) return;
-    const entry = await this.ports.manifest.getEntry(entryId);
+    const entry = await this.ports.manifest.getEntry(entryId, "summary");
     if (!entry || entry.delivery_mode !== "daemon_inbox") return;
     if (!this.ports.isOperationallyAdmitted(entryId)) return;
     if (entry.turn_control?.inbox_item_id

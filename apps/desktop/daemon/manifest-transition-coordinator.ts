@@ -1,5 +1,5 @@
 import { redactCredentialText } from "./credential-redaction.js";
-import { ManifestConflictError } from "./manifest-store.js";
+import { ManifestConflictError, type ManifestTransitionCommit } from "./manifest-store.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import { advanceReconciliationState } from "./reconciler-state.js";
 import type {
@@ -22,6 +22,11 @@ export type ManifestTransitionPorts = {
       commitFence: CommitFence,
       roomMoveCancellation?: { agentId: string; detail: string },
     ): Promise<{ version: number; entry: DaemonManifestEntry }>;
+    commitTransition(
+      expectedVersion: number,
+      input: ManifestTransitionCommit,
+      commitFence: CommitFence,
+    ): Promise<{ version: number }>;
   };
   authority: {
     assertCurrent(): Promise<void>;
@@ -128,7 +133,7 @@ export class ManifestTransitionCoordinator {
     expectedVersion?: number,
   ): Promise<void> {
     await this.ports.authority.assertCurrent();
-    const loaded = await this.ports.store.getEntryWithVersion(entryId);
+    const loaded = await this.ports.store.getEntryWithVersion(entryId, "summary");
     if (!loaded) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
     if (expectedVersion !== undefined && loaded.version !== expectedVersion) {
       throw new ManifestConflictError(`Agent ${entryId} version ${loaded.version} does not match expected ${expectedVersion}.`);
@@ -175,18 +180,17 @@ export class ManifestTransitionCoordinator {
     const readyReachedAt = entry.provider === "cursor"
       ? resolveReadyReachedAt({ ...entry, observed_state: to, condition }, false, new Date().toISOString())
       : null;
-    const updated: DaemonManifestEntry = {
-      ...entry,
-      observed_state: to,
-      condition,
-      last_error: lastError,
-      ...(readyReachedAt ? { ready_reached_at: readyReachedAt } : {}),
-      reconciliation: nextReconciliation,
-      reconciliation_notices: notices.slice(-32),
-    };
-    const next = await this.ports.store.replaceEntry(
+    const next = await this.ports.store.commitTransition(
       expectedVersion ?? loaded.version,
-      updated,
+      {
+        agentId: entryId,
+        observedState: to,
+        condition,
+        lastError,
+        ...(readyReachedAt ? { readyReachedAt } : {}),
+        reconciliation: nextReconciliation,
+        reconciliationNotices: notices.slice(-32),
+      },
       commitFence ?? this.ports.authority.fenceCommit,
     );
     await this.ports.authority.serializeCommit(async () => {

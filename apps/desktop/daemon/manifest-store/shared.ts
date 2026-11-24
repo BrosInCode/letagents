@@ -2,7 +2,7 @@
 import type { StatementSync } from "node:sqlite";
 import { PENDING_RUNTIME_RECOVERY_SQL } from "../runtime-recovery-journal.js";
 import { composeDaemonManifestEntry, projectDaemonManifestEntry } from "../manifest-entry-projection.js";
-import type { DaemonActivityEvent, DaemonAgentConfiguration, DaemonManifestEntry, DaemonPurgePhase, DaemonPurgeRecord, DaemonPurgeWorkerSessionAttestation, DaemonRoomMovePhase, DaemonRoomMoveRecord } from "../types.js";
+import type { DaemonActivityEvent, DaemonAgentConfiguration, DaemonManifestEntry, DaemonPurgePhase, DaemonPurgeRecord, DaemonPurgeWorkerSessionAttestation, DaemonRoomMovePhase, DaemonRoomMoveRecord, ObservedState, PolicyCondition, ReconciliationNotice, ReconciliationState } from "../types.js";
 import type { ManifestStore } from "./store.js";
 
 export type Row = Record<string, unknown>;
@@ -34,6 +34,16 @@ export function liveSharingState(value: unknown): LiveSharingState {
   return value === "on" || value === "withdrawing" ? value : "off";
 }
 export type PreMembershipRoomMoveCancellation = { agentId: string; detail: string };
+/** Targeted observed-state / reconciliation transition persisted without touching activity_events. */
+export type ManifestTransitionCommit = {
+  agentId: string;
+  observedState: ObservedState;
+  condition: PolicyCondition;
+  lastError: string | null;
+  readyReachedAt?: string | null;
+  reconciliation: ReconciliationState;
+  reconciliationNotices: ReconciliationNotice[];
+};
 
 export function roomMoveFromRow(row: Row): DaemonRoomMoveRecord {
   return {
@@ -123,6 +133,10 @@ export function run(statement: StatementSync, ...values: unknown[]): void {
 export const MANIFEST_READS = {
   allEntries: "SELECT * FROM agents ORDER BY sort_order",
   entryIds: "SELECT agent_id FROM agents ORDER BY sort_order",
+  unresolvedTurnControlAgentIds: `SELECT agent_id FROM agents
+    WHERE turn_control_json IS NOT NULL
+      AND (turn_control_status IS NULL OR turn_control_status <> 'completed')
+    ORDER BY sort_order`,
   entryVersion: "SELECT version FROM agents WHERE agent_id = ?",
   agentManifestVersions: "SELECT agent_id, manifest_version FROM agent_state_versions",
   roomEntries: "SELECT * FROM agents WHERE room_id = ? ORDER BY sort_order",

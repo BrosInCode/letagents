@@ -33,13 +33,14 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
       registerDaemonBoardAccess(this.singleton, () =>
         this.boardOwnershipActive && !this.maintenance && !this.handoffScheduled);
       if (!this.maintenance) await this.hostApprovals.enroll(storage);
-      this.stateDatabase = await withProtectedStateUpgrade(this.stateDatabasePath, async (database) => {
+      this.stateDatabase = await withProtectedStateUpgrade(this.stateDatabasePath, async (database, { validateFullState }) => {
         this.store.attachDatabase(database.connection, writeFence);
         this.durability.attachDatabase(database.connection, writeFence);
         this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
         this.workerBindings.attachDatabase(database.connection, writeFence);
         this.supervisedInbox.attachDatabase(database.connection, writeFence);
-        await this.store.load();
+        // Full load checks every stored payload parses when upgrading, compacting, or validating a backup.
+        if (validateFullState) await this.store.load();
         return database;
       }, storage, () => this.singleton.assertCurrent(), { keepOpen: true });
     } catch (error) {

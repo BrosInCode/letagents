@@ -125,8 +125,8 @@ export type ProviderExecutionStore = {
   pendingRuntimeRecovery(agentId: string): Promise<unknown>;
   /** Archive what the agent's exited runtimes left unfinished in its execution record. Resolves with the runtimes archived. */
   archiveExitedRuntimes?(agentId: string, commitFence: CommitFence): Promise<string[]>;
-  getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
-  getEntryWithVersion(entryId: string): Promise<{ entry: DaemonManifestEntry; version: number } | undefined>;
+  getEntry(entryId: string, activityMode?: "full" | "summary"): Promise<DaemonManifestEntry | undefined>;
+  getEntryWithVersion(entryId: string, activityMode?: "full" | "summary"): Promise<{ entry: DaemonManifestEntry; version: number } | undefined>;
   getAgentConfiguration(entryId: string): Promise<ProviderExecutionConfiguration | undefined>;
   readRuntimeLifecycleAuthority(input: {
     agentId: string;
@@ -440,7 +440,7 @@ export class ProviderExecutionCoordinator {
             CONVERGENCE_CONFLICT_RETRY_LIMIT,
             error,
           );
-          const current = await this.options.store.getEntry(entryId).catch(() => undefined);
+          const current = await this.options.store.getEntry(entryId, "summary").catch(() => undefined);
           const failure = current?.desired_state === "stopped"
             ? new ProviderStopError(exhausted)
             : exhausted;
@@ -557,7 +557,7 @@ export class ProviderExecutionCoordinator {
   private async loadVersionedEntry(
     entryId: string,
   ): Promise<{ entry: DaemonManifestEntry; version: number } | null> {
-    return (await this.options.store.getEntryWithVersion(entryId)) ?? null;
+    return (await this.options.store.getEntryWithVersion(entryId, "summary")) ?? null;
   }
 
   private async launchVersionedEntryIfCurrent(
@@ -767,7 +767,7 @@ export class ProviderExecutionCoordinator {
     generation: number,
   ): Promise<boolean> {
     await this.options.authority.serializeManifestMutation(async () => undefined);
-    const current = await this.options.store.getEntry(entryId);
+    const current = await this.options.store.getEntry(entryId, "summary");
     if (!current || current.desired_state === "running") return false;
     await this.options.delivery.stop(entryId).catch(() => undefined);
     await this.options.transition(
@@ -851,7 +851,7 @@ export class ProviderExecutionCoordinator {
     await this.options.authority.serializeManifestMutation(async () => {
       for (let attempt = 0; attempt < 8; attempt += 1) {
         await this.options.authority.assertCurrent();
-        const loaded = await this.options.store.getEntryWithVersion(entryId);
+        const loaded = await this.options.store.getEntryWithVersion(entryId, "full");
         const current = loaded?.entry;
         if (!current || !loaded || current.work_attempt_id !== handle.workAttemptId) {
           throw new DaemonFenceLostError("Provider birth no longer matches the durable work attempt.");
@@ -968,7 +968,7 @@ export class ProviderExecutionCoordinator {
         || activeBeforeRead.daemonGeneration !== this.options.authority.currentDaemonGeneration()) {
         throw new DaemonFenceLostError("Retiring provider dispatch persistence gate closed.");
       }
-      const loaded = await this.options.store.getEntryWithVersion(entryId);
+      const loaded = await this.options.store.getEntryWithVersion(entryId, "full");
       const current = loaded?.entry;
       if (!current || !loaded || current.work_attempt_id !== handle.workAttemptId) {
         throw new DaemonFenceLostError(
@@ -1146,7 +1146,7 @@ export class ProviderExecutionCoordinator {
       authoritativeEntry = await this.options.authority.serializeManifestMutation(async () => {
         for (let attemptIndex = 0; attemptIndex < 8; attemptIndex += 1) {
           await this.options.authority.assertCurrent();
-          const loaded = await this.options.store.getEntryWithVersion(entry.id);
+          const loaded = await this.options.store.getEntryWithVersion(entry.id, "full");
           const current = loaded?.entry;
           const currentRef = current?.provider_ref;
           if (!current || !loaded || current.work_attempt_id !== ref.work_attempt_id
@@ -1616,7 +1616,7 @@ export class ProviderExecutionCoordinator {
       if (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id) return false;
     } else if (!await this.options.host.requiresGrant(entry) || !binding.room_cursor) return false;
     if (!await this.options.authority.ownsDaemonGeneration(daemonGeneration)) return false;
-    const current = await this.options.store.getEntry(entry.id);
+    const current = await this.options.store.getEntry(entry.id, "summary");
     return Boolean(current && current.desired_state === "running"
       && current.delivery_mode === entry.delivery_mode && current.room_id === entry.room_id
       && current.work_attempt_id === ref.work_attempt_id

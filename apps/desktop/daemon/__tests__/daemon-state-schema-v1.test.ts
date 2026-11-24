@@ -1943,3 +1943,66 @@ test("concurrent fresh database opens converge across the main/WAL observation w
     }
   }
 });
+
+test("listEntryIds and listUnresolvedTurnControlRecovery read scalar rows in sort order without hydrating payloads", async () => {
+  const env = await tempDir("letagents-scalar-turn-controls-");
+  const dbPath = join(env.root, "daemon-state.sqlite");
+  const store = new ManifestStore(dbPath);
+  try {
+    const baseControl = {
+      action_id: "ctrl",
+      action_sequence: 1,
+      work_attempt_id: "attempt",
+      execution_generation_id: "exec",
+      has_correction: false,
+      capability: "interrupt_and_resume" as const,
+      interrupted: null,
+      resumed: null,
+      state: "working" as const,
+      stages: ["delivered" as const],
+      error: null,
+      recorded_at: "2026-10-01T00:00:00.000Z",
+      updated_at: "2026-10-01T00:00:00.000Z",
+    };
+    const activity = [{
+      observed_at: "2026-10-01T00:00:00.000Z",
+      sequence: 1,
+      provider: "codex" as const,
+      kind: "tool" as const,
+      method: "item/x",
+      summary: "x",
+      status: "idle" as const,
+      payload: { big: "payload" },
+      payload_truncated: false,
+      payload_redacted: false,
+      durable_payload_ref: null,
+    }];
+    const absent = { ...sampleEntry("z-absent"), turn_control: undefined, last_turn_control_sequence: 0, activity: undefined, reconciliation: undefined, reconciliation_notices: undefined };
+    const nulled = { ...sampleEntry("a-null"), turn_control: null, last_turn_control_sequence: 0, activity };
+    const completed = { ...sampleEntry("m-done"), last_turn_control_sequence: 1, turn_control: { ...baseControl, status: "completed" as const }, activity };
+    const prepared = { ...sampleEntry("b-prep"), last_turn_control_sequence: 1, turn_control: { ...baseControl, status: "prepared" as const }, activity };
+    const dispatching = { ...sampleEntry("c-disp"), last_turn_control_sequence: 1, turn_control: { ...baseControl, status: "dispatching" as const }, activity };
+    await store.write([absent, nulled, completed, prepared, dispatching]);
+    const database = new DatabaseSync(dbPath);
+    try {
+      database.exec("UPDATE activity_events SET payload_json='invalid-json'");
+      assert.deepEqual(await store.listEntryIds(), ["z-absent", "a-null", "m-done", "b-prep", "c-disp"]);
+      assert.deepEqual(await store.listUnresolvedTurnControlRecovery(), {
+        agentIds: ["b-prep", "c-disp"],
+      });
+      const summaryAbsent = await store.getEntry("z-absent", "summary");
+      assert.deepEqual(summaryAbsent?.activity, []);
+      assert.equal(summaryAbsent?.turn_control, undefined);
+      assert.equal(summaryAbsent?.reconciliation, undefined);
+      assert.equal(summaryAbsent?.reconciliation_notices, undefined);
+      const summaryNulled = await store.getEntry("a-null", "summary");
+      assert.equal(summaryNulled?.activity?.length, 1);
+      assert.equal(summaryNulled?.activity?.[0]?.payload, null);
+    } finally {
+      database.close();
+    }
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
+});

@@ -1199,17 +1199,19 @@ test("the native heartbeat reads its entry without activity events when the mani
   });
   await harness.coordinator.install("agent-1", handle, "generation-2");
   await harness.coordinator.drainCallbacks();
+  assert.equal(fullReads, 0, "install and typed activation read only scalar entry fields when getScalarEntry is offered");
+  assert.ok(scalarReads.length >= 3, "prepareInstallation, post-onExit verification, and typed activation use getScalarEntry");
+  scalarReads.length = 0;
   harness.runtimeCustody.installLiveBinding("agent-1", {
     agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
   });
-  const readsAfterInstall = fullReads;
   heartbeat!();
   await harness.coordinator.drainCallbacks();
   heartbeat!();
   await harness.coordinator.drainCallbacks();
   assert.equal(activityCalls, 2, "the heartbeat still announces liveness from the scalar read");
   assert.deepEqual(scalarReads, ["agent-1", "agent-1"]);
-  assert.equal(fullReads, readsAfterInstall, "no heartbeat reads the full entry");
+  assert.equal(fullReads, 0, "neither install nor heartbeat reads the full entry");
   await harness.coordinator.disposeAll();
 });
 
@@ -1884,4 +1886,20 @@ test("stopping waits for stream callbacks no longer than its deadline, then goes
   await flush();
   assert.match(String(failure), /activity storage fault/);
   await failed;
+});
+
+test("install and typed activation use scalar entry reads without full activity hydration", async () => {
+  let fullReads = 0;
+  let scalarReads = 0;
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => "ready",
+    onGetEntry: () => { fullReads += 1; },
+    getScalarEntry: async (current) => { scalarReads += 1; return { ...current, activity: [] }; },
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(fullReads, 0, "typed install and promotion never read full activity");
+  assert.ok(scalarReads >= 5, `prepareInstallation, install, and typedInstallationCanActivate all use getScalarEntry (saw ${scalarReads})`);
+  await harness.coordinator.disposeAll();
 });

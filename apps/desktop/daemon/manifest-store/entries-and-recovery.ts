@@ -14,8 +14,9 @@ import { cancelInterruptedSupervisedTurn } from "../supervised-agent-history-ret
 import type { SupervisedProviderTurnBinding } from "../supervised-agent-inbox-store.js";
 import { composeDaemonManifestEntry, projectDaemonManifestEntry } from "../manifest-entry-projection.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
-import type { DaemonAgentConfiguration, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
-import { type Row, type StoredAgentConfiguration, type PreMembershipRoomMoveCancellation, ManifestConflictError, json, canonicalManifestEntry, storeMethods } from "./shared.js";
+import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "../reconciler-state.js";
+import type { DaemonAgentConfiguration, DaemonManifestEntry, DaemonProviderConnection, ReconciliationNotice, ReconciliationState } from "../types.js";
+import { type Row, type StoredAgentConfiguration, type PreMembershipRoomMoveCancellation, type ManifestTransitionCommit, ManifestConflictError, json, parseJson, canonicalManifestEntry, storeMethods } from "./shared.js";
 
 export const entriesAndRecovery = storeMethods({
   /** Insert one new agent row with initial version 1. Throws ManifestConflictError if it already exists. */
@@ -138,6 +139,51 @@ export const entriesAndRecovery = storeMethods({
       return persisted;
     }, commitFence);
     return { version: result.version, entry: result.value, recoveredRuntimeId };
+  },
+
+  /**
+   * Targeted observed-state and reconciliation transition. Updates only the
+   * transition columns on `agents` under the per-agent version CAS and write
+   * fence without reading or rewriting `activity_events`.
+   */
+  async commitTransition(
+    expectedVersion: number,
+    input: ManifestTransitionCommit,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ version: number }> {
+    const rawState = parseJson<ReconciliationState>(json(input.reconciliation));
+    const state: ReconciliationState = {
+      ...rawState,
+      completed_action_ids: rawState.completed_action_ids.slice(-MAX_PROJECTED_COMPLETED_ACTION_IDS),
+    };
+    const notices = parseJson<ReconciliationNotice[]>(json(input.reconciliationNotices.slice(-32)));
+    const readyReachedAt = input.readyReachedAt ? input.readyReachedAt : null;
+    const result = await this.writeAgent(input.agentId, expectedVersion, (database) => {
+      const updated = database.prepare(`
+        UPDATE agents
+        SET version = version + 1,
+            observed_state = ?,
+            condition = ?,
+            last_error = ?,
+            ready_reached_at = COALESCE(?, ready_reached_at),
+            reconciliation_json = ?,
+            reconciliation_notices_json = ?
+        WHERE agent_id = ? AND version = ?
+      `).run(
+        input.observedState,
+        input.condition,
+        input.lastError,
+        readyReachedAt,
+        json(state),
+        json(notices),
+        input.agentId,
+        expectedVersion,
+      );
+      if (Number(updated.changes) !== 1) {
+        throw new ManifestConflictError(`Agent ${input.agentId} version does not match expected ${expectedVersion}.`);
+      }
+    }, commitFence);
+    return { version: result.version };
   },
 
   /**
@@ -279,8 +325,8 @@ export const entriesAndRecovery = storeMethods({
   async archiveExitedRuntimes(agentId: string, commitFence: (commit: () => Promise<void>) => Promise<void>, identity?: ProcessIdentity): Promise<string[]> {
     // Asked on every convergence pass, and nearly always with nothing to do: look before taking the write lock.
     const database = await this.getDatabase();
-    if (!exitedRuntimesToArchive(database, this.readEntryFromDatabase(database, agentId), identity).length) return [];
-    return this.writeOperationalJournal(current => archiveExitedRuntimes(current, this.readEntryFromDatabase(current, agentId), identity), commitFence);
+    if (!exitedRuntimesToArchive(database, this.readEntryFromDatabase(database, agentId, "summary"), identity).length) return [];
+    return this.writeOperationalJournal(current => archiveExitedRuntimes(current, this.readEntryFromDatabase(current, agentId, "summary"), identity), commitFence);
   },
 
   async completeRuntimeRecovery(

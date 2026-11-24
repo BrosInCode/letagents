@@ -10,7 +10,10 @@ import {
   cleanupStateRecoveryBackup, decryptStateRecoveryBackup, markStateRecoveryBackupValidated,
   prepareStateRecoveryBackup, StateRecoveryError, type StateRecoveryBackup,
 } from "../state-recovery-backup.js";
-import { DAEMON_STATE_APPLICATION_ID, DAEMON_STATE_USER_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
+import {
+  applySchemaV1, DAEMON_STATE_APPLICATION_ID, DAEMON_STATE_SCHEMA_VERSION, DAEMON_STATE_USER_VERSION,
+  DaemonStateSchema, openDaemonStateDatabase, runNumberedMigrations, toSqliteUserVersion,
+} from "../daemon-state-database.js";
 import { archiveWorkspaceReview } from "../../../../shared/workspace-review-archive.mjs";
 import { applyRoomWorkspaceSchema } from "../room-workspace-store.js";
 import { compactDaemonStateDatabase } from "../daemon-state-maintenance.js";
@@ -693,4 +696,100 @@ test("a new metadata backup cannot replace the last recovery point if both revie
   await assert.rejects(makeBackup(), { code: "verify_failed" });
   assert.deepEqual(await readFile(env.backup), previous);
   assert.equal((await readdir(env.directory)).includes("daemon.sqlite.recovery.enc.pending"), false);
+});
+
+async function previousSchemaUpgradeFixture(t: test.TestContext) {
+  const directory = await privateTempDirectory("letagents-recovery-upgrade-");
+  const path = join(directory, "daemon.sqlite");
+  const previousSchema = DAEMON_STATE_SCHEMA_VERSION - 1;
+  assert.ok(previousSchema >= 1, "upgrade test requires at least schema v2");
+  const db = new DatabaseSync(path);
+  try {
+    db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
+    applySchemaV1(db);
+    if (previousSchema > 1) runNumberedMigrations(db, 1, previousSchema);
+    db.exec(`PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID}`);
+    db.exec(`PRAGMA user_version = ${toSqliteUserVersion(previousSchema)}`);
+    db.exec("COMMIT");
+  } finally {
+    db.close();
+  }
+  if (process.platform === "win32") await protectOwnerPrivate(path, "file", { force: true });
+  t.after(() => removeTestDirectory(directory));
+  const key = randomBytes(32);
+  const getBackupKey = async () => ({ key: Buffer.from(key), sealedKey: "electron-sealed" });
+  return { directory, path, getBackupKey };
+}
+
+test("withProtectedStateUpgrade sets validateFullState only on schema upgrade or compaction", async t => {
+  const upgrade = await previousSchemaUpgradeFixture(t);
+  const upgradeFlags: boolean[] = [];
+  await withProtectedStateUpgrade(upgrade.path, async (_opened, { validateFullState }) => {
+    upgradeFlags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  await withProtectedStateUpgrade(upgrade.path, async (_opened, { validateFullState }) => {
+    upgradeFlags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  assert.deepEqual(upgradeFlags, [true, false]);
+
+  const fragmented = await fragmentedStateFixture(t);
+  fragmented.database.close();
+  const compactionFlags: boolean[] = [];
+  await withProtectedStateUpgrade(fragmented.path, async (_opened, { validateFullState }) => {
+    compactionFlags.push(validateFullState);
+  }, {}, async () => {});
+  await withProtectedStateUpgrade(fragmented.path, async (_opened, { validateFullState }) => {
+    compactionFlags.push(validateFullState);
+  }, {}, async () => {});
+  assert.deepEqual(compactionFlags, [true, false]);
+});
+
+test("withProtectedStateUpgrade sets validateFullState after a compaction copy whose checkpoint is busy", async t => {
+  const fragmented = await fragmentedStateFixture(t);
+  fragmented.database.close();
+  const beforeDb = new DatabaseSync(fragmented.path, { readOnly: true });
+  const pagesBefore = (() => {
+    try { return Number(beforeDb.prepare("PRAGMA page_count").get()!.page_count); }
+    finally { beforeDb.close(); }
+  })();
+  // An open read snapshot pins the WAL: the copy commits, the checkpoint cannot finish.
+  const reader = new DatabaseSync(fragmented.path, { readOnly: true });
+  reader.exec("BEGIN");
+  reader.prepare("SELECT key FROM daemon_maintenance_state").get();
+  const flags: boolean[] = [];
+  try {
+    await withProtectedStateUpgrade(fragmented.path, async (_opened, { validateFullState }) => {
+      flags.push(validateFullState);
+    }, {}, async () => {});
+  } finally { reader.exec("ROLLBACK"); reader.close(); }
+  const after = new DatabaseSync(fragmented.path, { readOnly: true });
+  try {
+    assert.ok(Number(after.prepare("PRAGMA page_count").get()!.page_count) < pagesBefore / 4, "the compact copy replaced the content");
+    const row = after.prepare("SELECT value_json FROM daemon_maintenance_state WHERE key='state-space-maintenance'").get() as { value_json?: unknown } | undefined;
+    assert.equal(JSON.parse(String(row?.value_json)).reason, "checkpoint_busy");
+  } finally { after.close(); }
+  assert.deepEqual(flags, [true], "rewritten content is read in full even though the WAL is not reclaimed yet");
+});
+
+test("withProtectedStateUpgrade sets validateFullState again while an upgrade backup has no receipt", async t => {
+  const upgrade = await previousSchemaUpgradeFixture(t);
+  const flags: boolean[] = [];
+  await assert.rejects(withProtectedStateUpgrade(upgrade.path, async (_opened, { validateFullState }) => {
+    flags.push(validateFullState);
+    throw new Error("a migrated row does not parse");
+  }, { getBackupKey: upgrade.getBackupKey }), /does not parse/);
+  // The schema is current now, so no new backup is made, but the first backup was never validated.
+  await withProtectedStateUpgrade(upgrade.path, async (_opened, { validateFullState }) => {
+    flags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  // Only the start that made the backup can write its receipt, so every later
+  // start keeps the full read, as before this change.
+  await withProtectedStateUpgrade(upgrade.path, async (_opened, { validateFullState }) => {
+    flags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  assert.deepEqual(flags, [true, true, true]);
+  const database = new DatabaseSync(upgrade.path, { readOnly: true });
+  try {
+    assert.equal(database.prepare("SELECT 1 FROM daemon_maintenance_state WHERE key='encrypted-state-recovery-backup'").get(), undefined);
+  } finally { database.close(); }
 });
