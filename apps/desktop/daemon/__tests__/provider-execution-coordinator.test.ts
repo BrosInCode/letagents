@@ -4113,3 +4113,149 @@ test("request() bounds persistent ManifestConflictError thrown during post-conve
     await env.cleanup();
   }
 });
+
+test("converge reads entries in summary mode while provider-birth checkpoints read full entry with version and preserve activity", async () => {
+  const fullActivity = Array.from({ length: 24 }, (_, index) => ({
+    observed_at: "2026-08-26T00:00:00.000Z",
+    sequence: index + 1,
+    provider: "codex" as const,
+    kind: "tool" as const,
+    method: `item/${index + 1}`,
+    summary: `event ${index + 1}`,
+    status: "idle" as const,
+    payload: { index: index + 1, blob: "x".repeat(64) },
+    payload_truncated: false,
+    payload_redacted: false,
+    durable_payload_ref: null,
+  }));
+  const summarize = (entry: DaemonManifestEntry): DaemonManifestEntry => ({
+    ...entry,
+    activity: (entry.activity ?? []).slice(-16).map((event) => ({ ...event, payload: null })),
+  });
+
+  // 1. Stopped entry convergence uses strictly summary reads.
+  const stoppedCalls: Array<"full" | "summary" | undefined> = [];
+  const stopped = harness({
+    entry: { ...baseEntry(), desired_state: "stopped", observed_state: "stopped", activity: fullActivity },
+  });
+  const baseStoppedGetWithVersion = stopped.options.store.getEntryWithVersion;
+  stopped.options.store.getEntryWithVersion = async (id, mode) => {
+    stoppedCalls.push(mode);
+    const loaded = await baseStoppedGetWithVersion(id, mode);
+    return loaded && mode === "summary" ? { ...loaded, entry: summarize(loaded.entry) } : loaded;
+  };
+  await stopped.coordinator.converge("agent-1");
+  assert.deepEqual(stoppedCalls, ["summary"]);
+
+  // 2. Running launch: all read-only convergence reads use "summary", while
+  // persistProviderHandle reads getEntryWithVersion("full"), retries cleanly
+  // on ManifestConflictError, and preserves all 24 activity payloads intact.
+  const ops: string[] = [];
+  const running = harness({
+    entry: { ...baseEntry(), desired_state: "running", observed_state: "absent", activity: fullActivity },
+  });
+  let ver = 1;
+  let conflictOnce = true;
+  const baseRunningGet = running.options.store.getEntry;
+  running.options.store.getEntry = async (id, mode) => {
+    ops.push(`getEntry:${mode ?? "default"}`);
+    const entry = await baseRunningGet(id, mode);
+    return entry && mode === "summary" ? summarize(entry) : entry;
+  };
+  const baseRunningGetWithVersion = running.options.store.getEntryWithVersion;
+  running.options.store.getEntryWithVersion = async (id, mode) => {
+    ops.push(`getEntryWithVersion:${mode ?? "default"}:${ver}`);
+    const loaded = await baseRunningGetWithVersion(id, mode);
+    if (!loaded) return undefined;
+    return {
+      version: ver,
+      entry: mode === "summary" ? summarize(loaded.entry) : loaded.entry,
+    };
+  };
+  running.options.store.checkpointProviderBirth = async (expectedVersion, input, commitFence) => {
+    ops.push(`checkpoint:${expectedVersion}`);
+    if (conflictOnce) {
+      conflictOnce = false;
+      ver += 1;
+      throw new ManifestConflictError("concurrent commit");
+    }
+    assert.equal(expectedVersion, ver);
+    running.setEntry(input.entry);
+    await commitFence(async () => { ver += 1; });
+    return { version: ver, entry: input.entry, authorityMode: input.requestedAuthorityMode };
+  };
+  await running.coordinator.converge("agent-1");
+
+  const fullOps = ops.filter((op) => op.startsWith("getEntryWithVersion:full:"));
+  assert.equal(fullOps.length, 2, `only persistProviderHandle (initial + conflict retry) reads full mode, saw ${JSON.stringify(ops)}`);
+  assert.equal(ops.some((op) => op.includes(":default")), false, `no untagged default reads remain, saw ${JSON.stringify(ops)}`);
+  assert.ok(ops.some((op) => op.startsWith("getEntryWithVersion:summary:")), "read-only convergence sites read in summary mode");
+  assert.equal(running.entry().activity?.length, 24, "checkpointProviderBirth preserves full stored activity");
+  assert.deepEqual(running.entry().activity?.[0]?.payload, { index: 1, blob: "x".repeat(64) });
+  assert.deepEqual(running.entry().activity?.[23]?.payload, { index: 24, blob: "x".repeat(64) });
+
+  // 3. Handoff persistence (persistReturnedProviderForHandoff) reads full entry
+  // and preserves all 24 activity payloads intact.
+  const handoffOps: string[] = [];
+  const handoffRuntime = harness({
+    entry: { ...baseEntry(), desired_state: "running", observed_state: "absent", activity: fullActivity },
+    provider: provider({
+      spawn: async () => {
+        handoffRuntime.setHandoff(true);
+        return returnedHandle;
+      },
+    }),
+  });
+  const baseHandoffGetWithVersion = handoffRuntime.options.store.getEntryWithVersion;
+  handoffRuntime.options.store.getEntryWithVersion = async (id, mode) => {
+    handoffOps.push(`getEntryWithVersion:${mode ?? "default"}`);
+    const loaded = await baseHandoffGetWithVersion(id, mode);
+    return loaded && mode === "summary" ? { ...loaded, entry: summarize(loaded.entry) } : loaded;
+  };
+  await handoffRuntime.coordinator.converge("agent-1");
+  assert.equal(handoffOps.filter((op) => op === "getEntryWithVersion:full").length, 1,
+    `persistReturnedProviderForHandoff reads full entry once, saw ${JSON.stringify(handoffOps)}`);
+  assert.equal(handoffOps.includes("getEntryWithVersion:default"), false);
+  assert.equal(handoffRuntime.entry().activity?.length, 24);
+  assert.deepEqual(handoffRuntime.entry().activity?.[0]?.payload, { index: 1, blob: "x".repeat(64) });
+
+  // 4. attachReservedProvider recovered connection checkpoint path reads full
+  // entry and preserves all 24 activity payloads intact.
+  const attachOps: string[] = [];
+  const attachRuntime = harness({
+    entry: {
+      ...baseEntry(),
+      desired_state: "running",
+      observed_state: "recovering",
+      provider_ref: {
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-1",
+        provider_continuation_id: "continuation-1",
+        provider_connection: null,
+      },
+      activity: fullActivity,
+    },
+    frozenAuthorityMode: null,
+    provider: provider({ attach: async () => returnedHandle }),
+  });
+  attachRuntime.executionGenerations.push({
+    execution_generation_id: "generation-1",
+    work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:01.000Z",
+    actor: "daemon-provider",
+    generation: 1,
+    terminal: null,
+  });
+  const baseAttachGetWithVersion = attachRuntime.options.store.getEntryWithVersion;
+  attachRuntime.options.store.getEntryWithVersion = async (id, mode) => {
+    attachOps.push(`getEntryWithVersion:${mode ?? "default"}`);
+    const loaded = await baseAttachGetWithVersion(id, mode);
+    return loaded && mode === "summary" ? { ...loaded, entry: summarize(loaded.entry) } : loaded;
+  };
+  await attachRuntime.coordinator.converge("agent-1");
+  assert.equal(attachOps.filter((op) => op === "getEntryWithVersion:full").length, 1,
+    `attachReservedProvider reads full entry when checkpointing recovered connection, saw ${JSON.stringify(attachOps)}`);
+  assert.equal(attachOps.includes("getEntryWithVersion:default"), false);
+  assert.equal(attachRuntime.entry().activity?.length, 24);
+  assert.deepEqual(attachRuntime.entry().activity?.[0]?.payload, { index: 1, blob: "x".repeat(64) });
+});

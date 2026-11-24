@@ -79,6 +79,13 @@ export const entryReads = storeMethods({
     return (this.reads.get(database, "entryIds").all() as Row[]).map((row) => String(row.agent_id));
   },
 
+  async listUnresolvedTurnControlRecovery(): Promise<{ agentIds: string[] }> {
+    const database = await this.getDatabase();
+    const agentIds = (this.reads.get(database, "unresolvedTurnControlAgentIds").all() as Row[])
+      .map((row) => String(row.agent_id));
+    return { agentIds };
+  },
+
   async getEntry(agentId: string, activityMode: "full" | "summary" = "full"): Promise<DaemonManifestEntry | undefined> {
     const database = await this.getDatabase();
     return this.readEntryFromDatabase(database, agentId, activityMode);

@@ -371,7 +371,7 @@ export class ProviderStreamCoordinator {
         ));
       });
       if (!this.adoptLeaseDisposer(lease, disposeExit)) return;
-      const currentEntry = await this.options.manifest.getEntry(entryId);
+      const currentEntry = await this.readScalarEntry(entryId);
       if (!this.isCurrentInstallation(installation)) return;
       if (!currentEntry || !this.entryMatchesInstallation(currentEntry, installation)) {
         throw new Error("Provider installation changed while attaching its operational prerequisites.");
@@ -582,7 +582,7 @@ export class ProviderStreamCoordinator {
     installation: ProviderInstallationToken,
   ): Promise<boolean> {
     if (!this.isCurrentInstallation(installation)) return false;
-    const entry = await this.options.manifest.getEntry(installation.entryId);
+    const entry = await this.readScalarEntry(installation.entryId);
     return Boolean(entry
       && this.entryMatchesInstallation(entry, installation)
       && entry.desired_state === "running"
@@ -834,7 +834,7 @@ export class ProviderStreamCoordinator {
       || configurationRevision! < 1) {
       throw new Error("Provider installation requires an exact durable provider birth.");
     }
-    const first = await this.options.manifest.getEntry(entryId);
+    const first = await this.readScalarEntry(entryId);
     if (!first || !this.entryMatchesBirth(first, handle, executionGenerationId, connection)) {
       throw new Error("Provider installation no longer matches its durable provider birth.");
     }
@@ -850,7 +850,7 @@ export class ProviderStreamCoordinator {
     if (!authorityMode && !idleCursor) {
       throw new Error("Provider installation has no frozen lifecycle authority.");
     }
-    const second = await this.options.manifest.getEntry(entryId);
+    const second = await this.readScalarEntry(entryId);
     if (!second || !this.entryMatchesBirth(second, handle, executionGenerationId, connection)) {
       throw new Error("Provider installation changed while verifying frozen lifecycle authority.");
     }

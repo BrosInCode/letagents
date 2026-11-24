@@ -280,7 +280,7 @@ export const projections = storeMethods({
       ? (this.reads.get(database, "activitySummary")
         .all(agentId, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT) as Row[]).reverse()
       : this.reads.get(database, "activity").all(agentId) as Row[];
-    const activity = activityRows.map((event) => activityEventFromRow(event, parseJson(event.payload_json)));
+    const activity = activityRows.map((event) => activityEventFromRow(event, activityMode === "summary" ? null : parseJson(event.payload_json)));
 
     const runtime: DaemonManifestDomainProjection["runtime_deployment"] = {
       agent_id: agentId,

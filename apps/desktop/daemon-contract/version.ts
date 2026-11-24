@@ -13,7 +13,7 @@ export const DAEMON_PROTOCOL_VERSION: number = 3;
 // decides whether the already-running daemon contains this desktop build's
 // code. Every PR that changes daemon or provider-runtime code takes a new
 // value so an updated desktop replaces a running older daemon.
-export const DAEMON_IMPLEMENTATION_VERSION: string = "2.0.284-modern.28";
+export const DAEMON_IMPLEMENTATION_VERSION: string = "2.0.284-modern.29";
 
 /**
  * Maximum number of recent activity events carried in state-watch summaries
