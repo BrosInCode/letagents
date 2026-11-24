@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { ManifestTransitionCoordinator } from "../manifest-transition-coordinator.js";
 import type { DaemonActivityEvent, DaemonManifestEntry } from "../types.js";
 
@@ -108,4 +112,101 @@ test("another provider is left to its runtime fact", async () => {
   Object.assign(full, { provider: "codex", observed_state: "starting" });
   await coordinator.transition("agent-1", "idle", "none", "reattached durable provider handle", "daemon-convergence");
   assert.equal(replaced.at(-1)?.ready_reached_at, undefined);
+});
+
+test("expectedVersion CAS on real SQLite ManifestStore rejects stale transitions under one lock without writing state or audit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "letagents-transition-cas-"));
+  const store = new ManifestStore(join(dir, "manifest.sqlite"));
+  try {
+    await store.initialize();
+    await store.createEntry({
+      id: "agent-cas",
+      room_id: "room-1",
+      display_name: "Agent CAS",
+      provider: "codex",
+      model: null,
+      charter: "Help",
+      desired_state: "running",
+      observed_state: "absent",
+      condition: "none",
+      permission_profile_id: "full_access",
+      provider_launch_policy: {},
+      created_by: "test",
+      created_at: "2026-10-19T00:00:00.000Z",
+      workspace_path: "/tmp/work",
+    });
+
+    const auditEvents: Array<{ from: string; to: string; generation: number }> = [];
+    let lockDepth = 0;
+    let maxLockDepth = 0;
+    const coordinator = new ManifestTransitionCoordinator({
+      store,
+      authority: {
+        assertCurrent: async () => {},
+        serializeMutation: async (operation) => {
+          lockDepth += 1;
+          maxLockDepth = Math.max(maxLockDepth, lockDepth);
+          assert.equal(lockDepth, 1, "expectedVersion CAS must not nest manifest mutation locks");
+          try { return await operation(); } finally { lockDepth -= 1; }
+        },
+        serializeCommit: async (operation) => operation(),
+        fenceCommit: async (commit) => commit(),
+      },
+      audit: {
+        append: async (event) => {
+          auditEvents.push({ from: event.from, to: event.to, generation: event.generation });
+        },
+      },
+      nowMs: () => 1_000,
+    });
+
+    const initial = await store.getEntryWithVersion("agent-cas");
+    assert.ok(initial);
+    // Simulate a concurrent writer advancing the row's version.
+    await store.replaceEntry(
+      initial.version,
+      { ...initial.entry, observed_state: "starting" },
+      async (commit) => commit(),
+    );
+
+    await assert.rejects(
+      coordinator.transition(
+        "agent-cas",
+        "failed",
+        "coordination_blocked",
+        "stale transition must not commit",
+        "daemon-convergence",
+        undefined,
+        initial.version,
+      ),
+      (error: unknown) => error instanceof ManifestConflictError
+        && error.message.includes(`version ${initial.version + 1} does not match expected ${initial.version}`),
+    );
+
+    const afterConflict = await store.getEntryWithVersion("agent-cas");
+    assert.equal(afterConflict?.version, initial.version + 1);
+    assert.equal(afterConflict?.entry.observed_state, "starting");
+    assert.equal(afterConflict?.entry.condition, "none");
+    assert.equal(auditEvents.length, 0, "conflicted transition must not emit audit entries");
+
+    // Retrying with the fresh version succeeds cleanly under one lock.
+    await coordinator.transition(
+      "agent-cas",
+      "idle",
+      "none",
+      "fresh snapshot commit",
+      "daemon-convergence",
+      undefined,
+      afterConflict!.version,
+    );
+
+    const afterSuccess = await store.getEntryWithVersion("agent-cas");
+    assert.equal(afterSuccess?.version, initial.version + 2);
+    assert.equal(afterSuccess?.entry.observed_state, "idle");
+    assert.equal(auditEvents.length, 1);
+    assert.equal(maxLockDepth, 1);
+  } finally {
+    await store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

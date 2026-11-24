@@ -272,11 +272,11 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
     return { supervisor_id: this.singleton.lockPath, supervisor_generation: this.singleton.currentGeneration };
   }
 
-  async transition(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"]): Promise<void> {
-    return this.manifestTransitions.transition(entryId, to, condition, cause, actor, reconciliation);
+  async transition(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], expectedVersion?: number): Promise<void> {
+    return this.manifestTransitions.transition(entryId, to, condition, cause, actor, reconciliation, expectedVersion);
   }
 
-  protected async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], notice?: ReconciliationNotice["kind"], terminal?: ExecutionTerminalPayload, fence?: TerminalCommitFence): Promise<void> {
+  protected async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], notice?: ReconciliationNotice["kind"], terminal?: ExecutionTerminalPayload, fence?: TerminalCommitFence, expectedVersion?: number): Promise<void> {
     await this.manifestTransitions.transitionOnce(
       entryId,
       to,
@@ -286,7 +286,7 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
       reconciliation,
       notice,
       terminal,
-      fence,
+      fence, expectedVersion,
     );
   }
 
