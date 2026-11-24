@@ -10,10 +10,12 @@ import {
   codexHomeDirectory,
   codexMcpServerDisableOverride,
   codexOwnerIsolationOverrides,
+  codexProjectMcpServerInertTransport,
   listCodexMcpServers,
   runCodexMcpList,
   type CodexMcpListRunner,
   type CodexMcpServerEntry,
+  type CodexMcpServerInertTransport,
 } from "../../../../../shared/codex-owner-isolation.mjs";
 import { parseWindowsCommandLine, PROCESS_TREE_HELPER_NAME, signalTree, spawnTree, windowsProcessInfo } from "../../../../../shared/process-tree.mjs";
 
@@ -655,14 +657,14 @@ export async function codexHomeHarnessOverrides(
 
   assertProjectKeepsLetAgentsServer(inProject, outsideProject);
   const owned = new Map(outsideProject.map((entry) => [entry.name, entry]));
-  const projectServers = new Set<string>();
+  const projectServers = new Map<string, CodexMcpServerInertTransport>();
   const changedServer = (name: string) => refusal(
     `This project's Codex config changes your MCP server ${JSON.stringify(name)}`,
     `Remove [mcp_servers.${name}] from the project's .codex/config.toml`,
   );
   for (const entry of inProject) {
     const own = owned.get(entry.name);
-    if (!own) projectServers.add(entry.name);
+    if (!own) projectServers.set(entry.name, codexProjectMcpServerInertTransport(entry));
     else if (serverShape(own) !== serverShape(entry)) throw changedServer(entry.name);
   }
   // A project cannot remove a server either: one the owner has must still be listed in the project.
@@ -674,9 +676,9 @@ export async function codexHomeHarnessOverrides(
     const config = pathInRepository(view.cwd, join(layer.dotCodexFolder, "config.toml"));
     // The listing shows how a server starts. The layer also shows settings it
     // does not, such as which of the owner's tools may run without approval.
-    for (const name of Object.keys(record(layer.config.mcp_servers) ?? {})) {
+    for (const [name, serverConfig] of Object.entries(record(layer.config.mcp_servers) ?? {})) {
       if (owned.has(name) || name === LETAGENTS_MCP_SERVER_NAME) throw changedServer(name);
-      projectServers.add(name);
+      if (!projectServers.has(name)) projectServers.set(name, codexProjectMcpServerInertTransport(record(serverConfig)));
     }
     const others = Object.keys(layer.config).filter((key) => !NEUTRALISED_PROJECT_KEYS.has(key)).sort();
     if (others.length) {
@@ -703,7 +705,9 @@ export async function codexHomeHarnessOverrides(
   }
 
   const projectHooks = inspection.hooks.filter(isProjectHook).map((hook) => hook.key);
-  const serversOff = codexMcpServerDisableOverride([...projectServers]);
+  const serversOff = codexMcpServerDisableOverride(
+    [...projectServers.entries()].map(([name, inertTransport]) => ({ name, inertTransport })),
+  );
   const hooksOff = codexHookDisableOverride(projectHooks);
   const overrides = [serversOff, hooksOff].filter((override): override is string => override !== null);
   if (!overrides.length) return [];
@@ -712,7 +716,7 @@ export async function codexHomeHarnessOverrides(
   if (projectServers.size) {
     const relisted = await deps.listServers(codexBin, { ...view, configOverrides: [...view.configOverrides, ...overrides] });
     // One Codex no longer lists at all is not started either.
-    const stillOn = [...projectServers].find((name) => relisted.some((entry) => entry.name === name && entry.enabled !== false));
+    const stillOn = [...projectServers.keys()].find((name) => relisted.some((entry) => entry.name === name && entry.enabled !== false));
     if (stillOn) {
       throw new Error(`Codex did not turn off this project's own MCP server ${JSON.stringify(stillOn)}, so LetAgents will not start it with your own setup.`);
     }
@@ -889,7 +893,7 @@ export function assertLiveCodexProjectUnchanged(
  * One server or one personal skill as a launch override turns it off: whole,
  * with its quoted name or path, so that no name is found inside another.
  */
-const TURNED_OFF_BY_NAME = /"(?:[^"\\]|\\.)*" = \{ enabled = false \}|\{ path = "(?:[^"\\]|\\.)*", enabled = false \}/g;
+const TURNED_OFF_BY_NAME = /"(?:[^"\\]|\\.)*" = \{ (?:(?:command = "letagents-disabled"|url = "http:\/\/127\.0\.0\.1:0\/disabled"), )?enabled = false \}|\{ path = "(?:[^"\\]|\\.)*", enabled = false \}/g;
 
 /**
  * The same for a process that was started without its owner's setup. Such a
