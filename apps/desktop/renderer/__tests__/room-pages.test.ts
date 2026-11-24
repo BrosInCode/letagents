@@ -108,6 +108,11 @@ describe("room page presentation", () => {
     const pageView = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-pages/RoomPageView.vue", import.meta.url)), "utf8");
     assert.match(pageView, /\.room-page-view\.is-hidden \{\s*visibility: hidden;\s*pointer-events: none;\s*\}/);
     assert.match(pageView, /:class="\{ 'is-hidden': !active \}"/);
+    assert.match(
+      pageView,
+      /\.room-page-view \{[^}]*\bcontain: strict;[^}]*\}/,
+      "the page never sizes the cell it shares with the chat: its webview made each chat layout take seconds",
+    );
     assert.equal(shell.match(/<PageConfirmSheet \/>/g)?.length, 1);
     assert.match(shell, /:pages-menu="pagesMenu"/);
     assert.match(shell, /:active="activeTab === roomPageTabId\(page\.id\)"/, "main hears which page is in the active tab");

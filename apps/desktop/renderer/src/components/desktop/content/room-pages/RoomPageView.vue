@@ -304,12 +304,19 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
+/*
+ * The page shares its grid cell with the chat, and the shell sizes it. Its own
+ * content must never size that cell: without size containment the <webview>
+ * made every layout of the chat repeat, and coming back to Chat from a page
+ * froze the app for 4 to 26 seconds.
+ */
 .room-page-view {
   position: relative;
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr);
   padding: 0;
   overflow: hidden;
+  contain: strict;
 }
 
 .room-page-banner {
