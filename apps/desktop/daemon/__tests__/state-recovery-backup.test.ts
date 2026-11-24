@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, lstat, mkdtemp, open, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +11,7 @@ import {
   prepareStateRecoveryBackup, StateRecoveryError, type StateRecoveryBackup,
 } from "../state-recovery-backup.js";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
+import { archiveWorkspaceReview } from "../../../../shared/workspace-review-archive.mjs";
 import { applyRoomWorkspaceSchema } from "../room-workspace-store.js";
 import { compactDaemonStateDatabase } from "../daemon-state-maintenance.js";
 import { cloneStateDatabaseForCompaction } from "../state-recovery-backup.js";
@@ -738,4 +739,41 @@ test("each reread block must match authenticated bytes before any SQL in it is i
   await assert.rejects(decryptStateRecoveryBackup(env.backup, env.key), ERROR);
   assert.equal(passes, 2);
   assert.equal(ranDDL, false);
+});
+
+test("startup postpones optional compaction while significant inline review data still awaits migration", async t => {
+  const { database, path } = await fragmentedStateFixture(t);
+  database.exec(`PRAGMA foreign_keys=OFF;
+    INSERT INTO room_workspace_reviews VALUES('a','r','m','digest',hex(zeroblob(32*1024*1024)),0);
+    INSERT INTO maintenance_padding VALUES(zeroblob(80*1024*1024));
+    DELETE FROM maintenance_padding;
+    PRAGMA foreign_keys=ON`);
+  assert.ok(Number(database.prepare("PRAGMA freelist_count").get()!.freelist_count) * 8192 > 64 * 1024 * 1024);
+  assert.equal(await compactDaemonStateDatabase(path, database, async () => assert.fail("wait for archive conversion")), "not_needed");
+  database.exec("DELETE FROM room_workspace_reviews");
+  assert.equal(await compactDaemonStateDatabase(path, database, async () => {}), "compacted");
+});
+
+test("a new metadata backup cannot replace the last recovery point if both review copies are missing", async t => {
+  const env = await fixture(t);
+  env.database.exec(`PRAGMA user_version=54; UPDATE manifest_metadata SET schema_version=54;
+    CREATE TABLE room_work_publications(agent_id TEXT,room_id TEXT,source_message_id TEXT,
+    PRIMARY KEY(agent_id,room_id,source_message_id))`);
+  applyRoomWorkspaceSchema(env.database);
+  const makeBackup = () => prepareStateRecoveryBackup(env.path, 55, async () => ({ key: Buffer.from(env.key), sealedKey: "test" }));
+  await makeBackup();
+  const previous = await readFile(env.backup);
+  const data = "encoded review";
+  const digest = createHash("sha256").update(data).digest("hex");
+  const ref = archiveWorkspaceReview(env.path, data, digest);
+  env.database.exec(`INSERT INTO room_work_publications VALUES('a','r','m');
+    INSERT INTO room_workspace_captures VALUES('a','r','m','w','i',NULL,NULL)`);
+  env.database.prepare("INSERT INTO room_workspace_reviews VALUES('a','r','m',?,?,0)").run(digest, ref);
+  for (const suffix of [".reviews", ".reviews-recovery"]) {
+    const dir = env.path + suffix;
+    for (const name of await readdir(dir)) if (name.endsWith(".review")) await unlink(join(dir, name));
+  }
+  await assert.rejects(makeBackup(), { code: "verify_failed" });
+  assert.deepEqual(await readFile(env.backup), previous);
+  assert.equal((await readdir(env.directory)).includes("daemon.sqlite.recovery.enc.pending"), false);
 });

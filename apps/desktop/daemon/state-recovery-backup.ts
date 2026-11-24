@@ -6,6 +6,7 @@ import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqli
 import { isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated } from "../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
 
+import { verifyWorkspaceReviewRecoverySet } from "../../../shared/workspace-review-archive.mjs";
 import { REVIEW_LIMIT } from "../../../shared/workspace-review.mjs";
 import { hasWorkspaceReviewSchema } from "./room-workspace-store.js";
 
@@ -476,6 +477,7 @@ export async function prepareStateRecoveryBackup(
     failureCode = "verify_failed";
     const verified = await readRecoveryDatabase(candidate, key, canVerifyReviewBodiesSeparately(database));
     verified.close();
+    verifyWorkspaceReviewRecoverySet(databasePath, database);
     failureCode = "snapshot_refused";
     await regularFile(path, true);
     await renameWithRetryAsync(candidate, path);
