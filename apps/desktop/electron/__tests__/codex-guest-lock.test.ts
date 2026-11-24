@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { codexGuestToolsLocked, isGuestCodexToolSet, probeCodexGuestTools } from "../main/agents/codex-guest-lock.js";
+import { resolveCodexExecutable } from "../main/agents/codex-executable.js";
+import { codexGuestToolsLocked, disallowedGuestCodexTools, isGuestCodexToolSet, probeCodexGuestTools } from "../main/agents/codex-guest-lock.js";
 
-test("a guest Codex may be offered only the room's tools and four that read nothing local", () => {
+test("a guest Codex may be offered only the room's tools and allowlisted tools that reach nothing local", () => {
   assert.equal(isGuestCodexToolSet(["mcp__letagents__read_messages", "list_mcp_resources", "request_user_input"]), true);
-  for (const tool of ["exec_command", "view_image", "web_search", "mcp__codex_apps__gmail", "multi_agent_v1", "apply_patch"]) {
+  assert.equal(isGuestCodexToolSet(["mcp__letagents__read_messages", "functions.send_message_to_user_async"]), true);
+  for (const tool of ["exec_command", "view_image", "web_search", "mcp__codex_apps__gmail", "multi_agent_v1", "apply_patch", "collaboration.spawn_agent", "collaboration.send_message"]) {
     assert.equal(isGuestCodexToolSet(["mcp__letagents__read_messages", tool]), false, tool);
+    assert.deepEqual(disallowedGuestCodexTools(["mcp__letagents__read_messages", tool]), { tools: [tool], nested: [], unparsedCodeMode: false }, tool);
   }
 });
 
@@ -20,12 +23,15 @@ test("the lock fails closed when the probe sees a local tool or sees nothing", a
   assert.equal(await codexGuestToolsLocked("/fake/codex-b", {}, null, async () => null), false);
   assert.equal(await codexGuestToolsLocked("/fake/codex-c", {}, null, async () => { throw new Error("boom"); }), false);
   assert.equal(await codexGuestToolsLocked("/fake/codex-d", {}, null, seen(["mcp__letagents__send_message"])), true);
-  // Code mode: exec is fine only while its nested tools reach nothing local.
-  assert.equal(await codexGuestToolsLocked("/fake/codex-e", {}, null, seen(["functions.exec", "collaboration.spawn_agent"], "for example `await tools.exec_command(...)`\n### `apply_patch`\n### `clock__curr_time`")), true);
+  // Code mode: exec is fine only while its nested tools reach nothing local, and collaboration.* is rejected.
+  assert.equal(await codexGuestToolsLocked("/fake/codex-e", {}, null, seen(["functions.exec", "functions.wait", "functions.send_message_to_user_async", "clock.sleep"], "for example `await tools.exec_command(...)`\n### `apply_patch`\n### `clock__curr_time`")), true);
+  assert.equal(await codexGuestToolsLocked("/fake/codex-e2", {}, null, seen(["functions.exec", "collaboration.spawn_agent"], "### `apply_patch`\n### `clock__curr_time`")), false);
   assert.equal(await codexGuestToolsLocked("/fake/codex-f", {}, null, seen(["functions.exec"], "### `exec_command`\nRuns a shell command.")), false);
+  assert.deepEqual(disallowedGuestCodexTools({ tools: ["functions.exec"], nestedText: "### `exec_command`\nRuns a shell command." }), { tools: [], nested: ["exec_command"], unparsedCodeMode: false });
   // Nested tools are an allowlist: a new or unknown one is refused, and so is exec with nothing parsed.
   assert.equal(await codexGuestToolsLocked("/fake/codex-g", {}, null, seen(["functions.exec"], "### `mcp__letagents__send_message`\n### `brand_new_tool`")), false);
   assert.equal(await codexGuestToolsLocked("/fake/codex-h", {}, null, seen(["functions.exec"], "Run JavaScript with tools.")), false);
+  assert.deepEqual(disallowedGuestCodexTools({ tools: ["functions.exec"], nestedText: "Run JavaScript with tools." }), { tools: [], nested: [], unparsedCodeMode: true });
   assert.equal(await codexGuestToolsLocked("/fake/codex-i", {}, null, seen([])), false);
 });
 
@@ -63,14 +69,52 @@ for (const [name, wrapperWaits] of [["the npm wrapper exits first", false], ["th
   });
 }
 
-let codexBin: string | null = null;
-try { codexBin = execFileSync("/usr/bin/which", ["codex"], { encoding: "utf8" }).trim() || null; } catch { codexBin = null; }
+function installedCodex(): string | null {
+  if (process.env.LETAGENTS_SKIP_CODEX_CONTRACT === "1") return null;
+  const bin = resolveCodexExecutable();
+  const home = mkdtempSync(join(tmpdir(), "codex-guest-version-"));
+  try {
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    execFileSync(bin, ["--version"], { stdio: "ignore", timeout: 10_000, env: { ...process.env, HOME: home, CODEX_HOME: join(home, ".codex") } });
+    return bin;
+  } catch {
+    return null;
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
 
-for (const model of [null, "gpt-5", "gpt-6-astra"]) {
-  test(`the installed Codex, set up as a guest, offers no tool that reaches this Mac (model ${model ?? "default"})`, { skip: !codexBin && "codex is not installed" }, async () => {
-    const seen = await probeCodexGuestTools(codexBin!, process.env, model);
+const codexBin = installedCodex();
+
+function formatDisallowed(probe: NonNullable<Awaited<ReturnType<typeof probeCodexGuestTools>>>): string {
+  const bad = disallowedGuestCodexTools(probe);
+  const parts = [
+    ...(bad.tools.length ? [`disallowed tools: ${bad.tools.join(", ")}`] : []),
+    ...(bad.nested.length ? [`disallowed nested tools: ${bad.nested.join(", ")}`] : []),
+    ...(bad.unparsedCodeMode ? ["code-mode nested tools did not parse"] : []),
+  ];
+  return `${parts.join("; ")} (all seen: ${probe.tools.join(", ")})`;
+}
+
+for (const [label, model, cleanHome] of [
+  ["default (clean CODEX_HOME)", null, true],
+  ["default (owner env)", null, false],
+  ["gpt-5", "gpt-5", false],
+  ["gpt-6-astra", "gpt-6-astra", false],
+  ["gpt-6.2-sol", "gpt-6.2-sol", false],
+] as const) {
+  test(`the installed Codex, set up as a guest, offers no tool that reaches this Mac (model ${label})`, { skip: !codexBin && "codex is not installed" }, async t => {
+    let probeEnv = process.env;
+    if (cleanHome) {
+      const home = mkdtempSync(join(tmpdir(), "codex-guest-clean-home-"));
+      mkdirSync(join(home, ".codex"), { recursive: true });
+      t.after(() => rmSync(home, { recursive: true, force: true }));
+      probeEnv = { ...process.env, HOME: home, CODEX_HOME: join(home, ".codex") };
+    }
+    const seen = await probeCodexGuestTools(codexBin!, probeEnv, model);
     assert.ok(seen, "Codex sent its tool list to the probe");
-    assert.ok(isGuestCodexToolSet(seen!), `unexpected tools: ${seen!.tools.join(", ")}`);
+    assert.ok(isGuestCodexToolSet(seen!), formatDisallowed(seen!));
     assert.ok(!seen!.tools.includes("exec_command") && !seen!.tools.includes("view_image"));
+    assert.ok(!seen!.tools.some(tool => tool.startsWith("collaboration.")), `collaboration tools were not disabled: ${seen!.tools.join(", ")}`);
   });
 }
