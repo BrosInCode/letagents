@@ -432,6 +432,29 @@ test("a failed check says what to do in its own words, with no technical details
   assert.doesNotMatch(failedLoad, /ECONNREFUSED|Technical details/);
 });
 
+test("supervisor failure is shown once alongside the installed agent version", async () => {
+  const { controller, release } = readyController();
+  release();
+  controller.launch.recoveryScanStatus.value = "error";
+  const detail = "The supervisor could not prepare its database.";
+  const launch = { ...controller.launch, conflictLookupError: ref(detail) };
+  const html = await renderToString(createSSRApp({
+    render: () => h(AddAgentSetupStatus, {
+      ...setupPresentationProps,
+      preflight: { status: "error", blockedBySupervisor: true },
+      statusTitle: "Local supervisor unavailable", statusDescription: detail,
+    }, {
+      default: () => h(AddAgentSupervisedLaunch, {
+        controller: { ...controller, launch }, supervisorErrorShown: true,
+      }),
+    }),
+  }));
+  assert.equal(html.split(detail).length, 2);
+  assert.match(html, /codex-cli 0.153.4/);
+  assert.match(html, /Check again/);
+  assert.doesNotMatch(html, /Check the agent app|supervised-lookup-error/);
+});
+
 test("locked credentials remain visible even when provider preflight succeeds", async () => {
   const html = await renderToString(createSSRApp({
     render: () => h(AddAgentSetupStatus, {

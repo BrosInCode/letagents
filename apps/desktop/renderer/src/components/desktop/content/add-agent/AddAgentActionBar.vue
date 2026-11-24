@@ -124,9 +124,9 @@
     <span v-else-if="supervisedProvider && charterMissing" class="desktop-add-agent-confirmation">
       Add a first message to start the agent.
     </span>
-    <span v-else-if="supervisedProvider && recoveryScanStatus !== 'ready'" class="desktop-add-agent-confirmation">
+    <span v-else-if="supervisedProvider && !preflight?.blockedBySupervisor && recoveryScanStatus !== 'ready'" class="desktop-add-agent-confirmation">
       {{ recoveryScanStatus === "error"
-        ? "Previous launches could not be checked. Starting now creates a new agent."
+        ? "A new launch will check the local supervisor again."
         : "Checking for a previous agent before enabling Start..." }}
     </span>
     <span v-else-if="permissionWarning" class="desktop-add-agent-confirmation">
@@ -203,7 +203,7 @@ const canStart = computed(() => props.canStartBase
   }));
 const startButtonLabel = computed(() => {
   if (props.startingAgent) return "Starting...";
-  return recoveryScanStatus.value === "error" ? "Start new agent" : "Start agent";
+  return recoveryScanStatus.value === "error" && !props.preflight?.blockedBySupervisor ? "Start new agent" : "Start agent";
 });
 </script>
 <style scoped src="./AddAgentActionBar.css"></style>

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmod, lstat, mkdtemp, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, open, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -11,6 +11,8 @@ import {
   prepareStateRecoveryBackup, StateRecoveryError, type StateRecoveryBackup,
 } from "../state-recovery-backup.js";
 import { DAEMON_STATE_APPLICATION_ID, DAEMON_STATE_USER_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
+import { archiveWorkspaceReview } from "../../../../shared/workspace-review-archive.mjs";
+import { applyRoomWorkspaceSchema } from "../room-workspace-store.js";
 import { compactDaemonStateDatabase } from "../daemon-state-maintenance.js";
 import { cloneStateDatabaseForCompaction } from "../state-recovery-backup.js";
 import { requestStateRecoveryKey, withProtectedStateUpgrade } from "../state-recovery-key.js";
@@ -587,4 +589,108 @@ test("a snapshot larger than one read piece survives, with multi-byte text split
   bytes[bytes.length - 1024] ^= 1;
   await writeFile(backup.path, bytes);
   await assert.rejects(decryptStateRecoveryBackup(backup.path, key), ERROR);
+});
+
+test("verification preserves exact review payloads and honors extensions that index their contents", async t => {
+  const env = await fixture(t);
+  env.database.exec(`CREATE TABLE room_work_publications(agent_id TEXT,room_id TEXT,source_message_id TEXT,
+    PRIMARY KEY(agent_id,room_id,source_message_id))`);
+  applyRoomWorkspaceSchema(env.database);
+  const bodies = ["one".repeat(100_000), "two".repeat(200_000)];
+  for (const [i, body] of bodies.entries()) {
+    const id = String(i);
+    env.database.prepare("INSERT INTO room_work_publications VALUES('a','r',?)").run(id);
+    env.database.prepare("INSERT INTO room_workspace_captures VALUES('a','r',?,'w','i',NULL,NULL)").run(id);
+    env.database.prepare("INSERT INTO room_workspace_reviews VALUES('a','r',?,'digest',?,2)").run(id, body);
+  }
+  for (const ddl of ["", "CREATE UNIQUE INDEX full_body ON room_workspace_reviews(data)"]) {
+    if (ddl) env.database.exec(ddl);
+    await env.prepare();
+    const restored = await decryptStateRecoveryBackup(env.backup, env.key);
+    try {
+      assert.deepEqual(restored.prepare("SELECT data FROM room_workspace_reviews ORDER BY rowid").all().map(row => row.data), bodies);
+      assert.equal(restored.prepare("SELECT sum(uploaded_pages) AS n FROM room_workspace_reviews").get()!.n, 4);
+    } finally { restored.close(); }
+  }
+});
+
+test("a healthy source whose rows cannot be replayed keeps the previous restorable backup", async t => {
+  const env = await fixture(t);
+  await env.prepare();
+  const previous = await readFile(env.backup);
+  env.database.exec("CREATE TABLE stateful(value TEXT CHECK(changes()=0))");
+  for (const value of ["first", "second"]) {
+    const writer = new DatabaseSync(env.path);
+    try { writer.prepare("INSERT INTO stateful VALUES(?)").run(value); } finally { writer.close(); }
+  }
+  const reader = new DatabaseSync(env.path, { readOnly: true });
+  try { assert.equal(reader.prepare("pragma integrity_check").get()!.integrity_check, "ok"); } finally { reader.close(); }
+  await assert.rejects(env.prepare(), { code: "verify_failed" });
+  assert.deepEqual(await readFile(env.backup), previous);
+});
+
+test("each reread block must match authenticated bytes before any SQL in it is interpreted", async t => {
+  const env = await fixture(t);
+  await env.prepare();
+  const backup = await readFile(env.backup);
+  const start = backup.indexOf(10) + 1;
+  const handle = await open(env.backup, "r");
+  const prototype = Object.getPrototypeOf(handle);
+  await handle.close();
+  let passes = 0;
+  const read = prototype.read;
+  t.mock.method(prototype, "read", async function (this: typeof handle, buffer: Buffer, offset: number, length: number, position: number) {
+    const result = await read.call(this, buffer, offset, length, position);
+    if (position === start && ++passes === 2) buffer[offset + result.bytesRead - 2] ^= 1;
+    return result;
+  });
+  const exec = DatabaseSync.prototype.exec;
+  let ranDDL = false;
+  t.mock.method(DatabaseSync.prototype, "exec", function (this: DatabaseSync, sql: string) {
+    if (/CREATE TABLE/i.test(sql)) ranDDL = true;
+    return exec.call(this, sql);
+  });
+  await assert.rejects(decryptStateRecoveryBackup(env.backup, env.key), ERROR);
+  assert.equal(passes, 2);
+  assert.equal(ranDDL, false);
+});
+
+test("startup postpones optional compaction while significant inline review data still awaits migration", async t => {
+  const { database, path } = await fragmentedStateFixture(t);
+  database.exec(`PRAGMA foreign_keys=OFF;
+    INSERT INTO room_workspace_reviews VALUES('a','r','m','digest',hex(zeroblob(32*1024*1024)),0);
+    PRAGMA foreign_keys=ON`);
+  const pad = "y".repeat(1024 * 1024);
+  database.exec("BEGIN");
+  const insertPad = database.prepare("INSERT INTO daemon_maintenance_state(key,value_json,updated_at) VALUES(?,?,?)");
+  for (let i = 0; i < 80; i++) insertPad.run(`pad2-${i}`, JSON.stringify(pad), "2026-09-01T00:00:00.000Z");
+  database.exec("COMMIT; DELETE FROM daemon_maintenance_state WHERE key LIKE 'pad2-%'");
+  assert.ok(Number(database.prepare("PRAGMA freelist_count").get()!.freelist_count) * 8192 > 64 * 1024 * 1024);
+  assert.equal(await compactDaemonStateDatabase(path, database, async () => assert.fail("wait for archive conversion")), "not_needed");
+  database.exec("DELETE FROM room_workspace_reviews");
+  assert.equal(await compactDaemonStateDatabase(path, database, async () => {}), "compacted");
+});
+
+test("a new metadata backup cannot replace the last recovery point if both review copies are missing", async t => {
+  const env = await fixture(t);
+  env.database.exec(`PRAGMA user_version=${DAEMON_STATE_USER_VERSION};
+    CREATE TABLE room_work_publications(agent_id TEXT,room_id TEXT,source_message_id TEXT,
+    PRIMARY KEY(agent_id,room_id,source_message_id))`);
+  applyRoomWorkspaceSchema(env.database);
+  const makeBackup = () => prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, async () => ({ key: Buffer.from(env.key), sealedKey: "test" }));
+  await makeBackup();
+  const previous = await readFile(env.backup);
+  const data = "encoded review";
+  const digest = createHash("sha256").update(data).digest("hex");
+  const ref = archiveWorkspaceReview(env.path, data, digest);
+  env.database.exec(`INSERT INTO room_work_publications VALUES('a','r','m');
+    INSERT INTO room_workspace_captures VALUES('a','r','m','w','i',NULL,NULL)`);
+  env.database.prepare("INSERT INTO room_workspace_reviews VALUES('a','r','m',?,?,0)").run(digest, ref);
+  for (const suffix of [".reviews", ".reviews-recovery"]) {
+    const dir = env.path + suffix;
+    for (const name of await readdir(dir)) if (name.endsWith(".review")) await unlink(join(dir, name));
+  }
+  await assert.rejects(makeBackup(), { code: "verify_failed" });
+  assert.deepEqual(await readFile(env.backup), previous);
+  assert.equal((await readdir(env.directory)).includes("daemon.sqlite.recovery.enc.pending"), false);
 });

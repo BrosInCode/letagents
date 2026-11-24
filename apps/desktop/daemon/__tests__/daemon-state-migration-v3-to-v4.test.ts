@@ -192,8 +192,8 @@ test("populated v3 fixture upgrades cleanly to v4 with multi-piece (>12 MB) stre
       v3Path,
       async (stateDb) => {
         assert.equal(Number(stateDb.connection.prepare("PRAGMA user_version").get()?.user_version), DAEMON_STATE_USER_VERSION);
-        assert.equal(DAEMON_STATE_SCHEMA_VERSION, 4);
-        assert.equal(DAEMON_STATE_USER_VERSION, 1004);
+        assert.ok(DAEMON_STATE_SCHEMA_VERSION >= 4);
+        assert.ok(DAEMON_STATE_USER_VERSION >= 1004);
         validateDaemonStateShape(stateDb.connection);
         validateExecutionStorageSchema(stateDb.connection, 4);
       },

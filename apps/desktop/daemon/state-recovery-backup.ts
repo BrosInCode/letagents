@@ -5,7 +5,10 @@ import { dirname, resolve } from "node:path";
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated } from "../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
+import { verifyWorkspaceReviewRecoverySet } from "../../../shared/workspace-review-archive.mjs";
+import { REVIEW_LIMIT } from "../../../shared/workspace-review.mjs";
 import { DAEMON_STATE_APPLICATION_ID, DAEMON_STATE_USER_VERSION_OFFSET } from "./daemon-state-database/shared.js";
+import { hasWorkspaceReviewSchema } from "./room-workspace-store.js";
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const RECEIPT_KEY = "encrypted-state-recovery-backup";
@@ -93,7 +96,7 @@ function decode(cell: Cell): SQLInputValue {
 function checkDatabase(database: DatabaseSync): void {
   const rows = database.prepare("PRAGMA integrity_check").all();
   if (rows.length !== 1 || rows[0].integrity_check !== "ok"
-    || database.prepare("PRAGMA foreign_key_check").all().length) throw failure();
+    || database.prepare("PRAGMA foreign_key_check").get()) throw failure();
 }
 
 /** A read transaction includes committed WAL pages without creating a plaintext copy. */
@@ -133,7 +136,8 @@ function* snapshot(database: DatabaseSync): Generator<SnapshotRecord> {
       // Invalid UTF-8 TEXT cannot roundtrip through JavaScript strings. Refuse
       // it instead of retaining an apparently valid but lossy recovery point.
       if (typeof value === "string") {
-        const bytes = Buffer.from(row[`b${i}`] as Uint8Array);
+        const raw = row[`b${i}`] as Uint8Array;
+        const bytes = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
         value = bytes.toString("utf8"); // node:sqlite versions can truncate TEXT at NUL.
         if (!Buffer.from(value).equals(bytes)) throw failure();
       }
@@ -154,7 +158,7 @@ function* snapshot(database: DatabaseSync): Generator<SnapshotRecord> {
  * characters". So the envelope is read in bounded pieces, never whole.
  */
 const READ_CHUNK = 4 * 1_024 * 1_024;
-type Envelope = { header: Header; aad: Buffer; start: number; stop: number; tag: Buffer };
+type Envelope = { header: Header; aad: Buffer; start: number; stop: number; tag: Buffer; changeTime: bigint };
 
 function parseHeader(aad: Buffer): Header {
   const header = JSON.parse(aad.toString("utf8")) as Header;
@@ -177,10 +181,10 @@ async function readAt(file: FileHandle, buffer: Buffer, position: number): Promi
 async function* fileChunks(file: FileHandle, start: number, stop: number): AsyncGenerator<Buffer> {
   const buffer = Buffer.alloc(READ_CHUNK);
   for (let position = start; position < stop;) {
-    const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, stop - position), position);
-    if (bytesRead <= 0) throw failure();
-    yield buffer.subarray(0, bytesRead);
-    position += bytesRead;
+    const chunk = buffer.subarray(0, Math.min(buffer.length, stop - position));
+    await readAt(file, chunk, position);
+    yield chunk;
+    position += chunk.length;
   }
 }
 
@@ -190,7 +194,8 @@ async function openEnvelope(path: string): Promise<{ file: FileHandle; envelope:
   if (!await regularFile(path, true)) throw failure();
   const file = await openNoFollow(path, constants.O_RDONLY);
   try {
-    const { size } = await file.stat();
+    const stat = await file.stat({ bigint: true });
+    const size = Number(stat.size);
     const head = Buffer.alloc(Math.min(size, HEADER_LIMIT + 1));
     await readAt(file, head, 0);
     const end = head.indexOf(10);
@@ -198,11 +203,16 @@ async function openEnvelope(path: string): Promise<{ file: FileHandle; envelope:
     const aad = Buffer.from(head.subarray(0, end + 1));
     const tag = Buffer.alloc(16);
     await readAt(file, tag, size - 16);
-    return { file, envelope: { header: parseHeader(aad), aad, start: end + 1, stop: size - 16, tag } };
+    return { file, envelope: { header: parseHeader(aad), aad, start: end + 1, stop: size - 16, tag, changeTime: stat.ctimeNs } };
   } catch (error) {
     await file.close();
     throw error;
   }
+}
+
+async function assertEnvelopeUnchanged(file: FileHandle, envelope: Envelope): Promise<void> {
+  const stat = await file.stat({ bigint: true });
+  if (stat.size !== BigInt(envelope.stop + envelope.tag.length) || stat.ctimeNs !== envelope.changeTime) throw failure();
 }
 
 async function readEnvelope(path: string): Promise<{ header: Header; sha256: string }> {
@@ -210,6 +220,7 @@ async function readEnvelope(path: string): Promise<{ header: Header; sha256: str
   try {
     const hash = createHash("sha256");
     for await (const chunk of fileChunks(file, 0, envelope.stop + 16)) hash.update(chunk);
+    await assertEnvelopeUnchanged(file, envelope);
     return { header: envelope.header, sha256: hash.digest("hex") };
   } finally { await file.close(); }
 }
@@ -259,10 +270,12 @@ function restoreSnapshot(records: Iterable<SnapshotRecord>, version: number, pag
 }
 
 /** Rebuilds a snapshot one record at a time, so the records need not all be in memory. */
-function snapshotRestorer(version: number, pageSize = 4096): { add(record: SnapshotRecord): void; finish(): DatabaseSync; abort(): void } {
+function snapshotRestorer(version: number, pageSize = 4096, verifyReviewBodies = false): { add(record: SnapshotRecord): void; finish(): DatabaseSync; abort(): void } {
   const restored = new DatabaseSync(":memory:");
   let insert: ReturnType<DatabaseSync["prepare"]> | undefined;
   let ended = false;
+  let reviewBody = -1;
+  let checkReviewBody: ReturnType<DatabaseSync["prepare"]> | undefined;
   try {
     restored.exec(`PRAGMA page_size=${pageSize}`);
     restored.exec("PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=OFF; PRAGMA trusted_schema=OFF; BEGIN");
@@ -288,10 +301,21 @@ function snapshotRestorer(version: number, pageSize = 4096): { add(record: Snaps
             restored.exec("DELETE FROM sqlite_sequence");
           }
           const columns = [...(record.rowid ? [record.rowid] : []), ...record.columns];
+          reviewBody = verifyReviewBodies && record.name === "room_workspace_reviews" ? columns.indexOf("data") : -1;
+          if (reviewBody >= 0) checkReviewBody = restored.prepare(`SELECT typeof($body)='text' AND length($body)<=${REVIEW_LIMIT} AS valid`);
           insert = restored.prepare(`INSERT INTO ${quote(record.name)} (${columns.map(quote).join(",")}) VALUES (${columns.map(() => "?").join(",")})`);
           break;
         }
-        case "row": if (!insert) throw failure(); else insert.run(...record.cells.map(decode)); break;
+        case "row": {
+          if (!insert) throw failure();
+          const values = record.cells.map(decode);
+          if (reviewBody >= 0) {
+            if (!checkReviewBody!.get({ $body: values[reviewBody] })?.valid) throw failure();
+            values[reviewBody] = "";
+          }
+          insert.run(...values);
+          break;
+        }
         case "ddl": insert = undefined; restored.exec(record.sql); break;
         case "end": {
           if (!Number.isSafeInteger(record.applicationId)) throw failure();
@@ -330,6 +354,21 @@ export function cloneStateDatabaseForCompaction(database: DatabaseSync): Databas
  * restore flow must fence the daemon and revoke/remint restored worker credentials.
  */
 export async function decryptStateRecoveryBackup(path: string, key: Buffer): Promise<DatabaseSync> {
+  return readRecoveryDatabase(path, key, false);
+}
+
+// In the known review schema only SQLite's type and length checks depend on
+// data. Replay them on the original text. Keep all identities, digests and FK
+// edges in the verification database, without retaining every historical body.
+// Explicit restores always retain every byte. Any additional schema dependency
+// (e.g. an expression index over data) falls back to ordinary full replay.
+function canVerifyReviewBodiesSeparately(db: DatabaseSync): boolean {
+  return hasWorkspaceReviewSchema(db) && !db.prepare(`SELECT 1 FROM sqlite_schema
+    WHERE name <> 'room_workspace_reviews' AND sql IS NOT NULL
+      AND (lower(tbl_name)='room_workspace_reviews' OR instr(lower(sql),'room_workspace_reviews')>0) LIMIT 1`).get();
+}
+
+async function readRecoveryDatabase(path: string, key: Buffer, verifyReviewBodies: boolean): Promise<DatabaseSync> {
   let restorer: ReturnType<typeof snapshotRestorer> | undefined;
   try {
     const { file, envelope } = await openEnvelope(path);
@@ -342,15 +381,24 @@ export async function decryptStateRecoveryBackup(path: string, key: Buffer): Pro
       };
       // Authenticate completely before interpreting any SQL: this pass only checks the tag.
       const check = decipher();
-      for await (const chunk of fileChunks(file, envelope.start, envelope.stop)) check.update(chunk).fill(0);
+      const authenticatedBlocks: Buffer[] = [];
+      for await (const chunk of fileChunks(file, envelope.start, envelope.stop)) {
+        check.update(chunk).fill(0);
+        authenticatedBlocks.push(createHash("sha256").update(chunk).digest());
+      }
       check.final();
+      await assertEnvelopeUnchanged(file, envelope);
       // The second pass reads the same open file and checks the tag again at its end.
       const plain = decipher();
-      const active = snapshotRestorer(envelope.header.sourceVersion);
+      const active = snapshotRestorer(envelope.header.sourceVersion, 4096, verifyReviewBodies);
       restorer = active;
       const lines = lineSplitter((line) => active.add(JSON.parse(line) as SnapshotRecord));
       try {
+        let block = 0;
         for await (const chunk of fileChunks(file, envelope.start, envelope.stop)) {
+          // An open file can still change in place between passes. Check this
+          // block against the authenticated pass before its SQL can be used.
+          if (!createHash("sha256").update(chunk).digest().equals(authenticatedBlocks[block++])) throw failure();
           const bytes = plain.update(chunk);
           try { lines.push(bytes); } finally { bytes.fill(0); }
         }
@@ -358,6 +406,7 @@ export async function decryptStateRecoveryBackup(path: string, key: Buffer): Pro
         try { lines.push(last); } finally { last.fill(0); }
         lines.end();
       } finally { lines.wipe(); }
+      await assertEnvelopeUnchanged(file, envelope);
       return active.finish();
     } finally { await file.close(); }
   } catch {
@@ -431,8 +480,9 @@ export async function prepareStateRecoveryBackup(
       await file.sync();
     } finally { await file.close(); }
     failureCode = "verify_failed";
-    const verified = await decryptStateRecoveryBackup(candidate, key);
+    const verified = await readRecoveryDatabase(candidate, key, canVerifyReviewBodiesSeparately(database));
     verified.close();
+    verifyWorkspaceReviewRecoverySet(databasePath, database);
     failureCode = "snapshot_refused";
     await regularFile(path, true);
     await renameWithRetryAsync(candidate, path);
@@ -548,13 +598,13 @@ export async function cleanupStateRecoveryBackup(
       return hadCandidate;
     }
     if (!options.clear) {
-      const { sha256 } = await readEnvelope(path);
       const receipt = readReceipt(database);
-      if (!receipt || receipt.checksum !== sha256) return false;
+      if (!receipt) return false;
       const validatedAt = Date.parse(receipt.validated_at);
       const now = (options.now ?? new Date()).getTime();
       if (!Number.isFinite(now)) throw failure();
       if (!Number.isFinite(validatedAt) || now - validatedAt < RETENTION_MS) return false;
+      if (receipt.checksum !== (await readEnvelope(path)).sha256) return false;
     }
     await unlink(path);
     await syncDirectory(path);

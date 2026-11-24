@@ -370,6 +370,11 @@ export class RoomWorkPublisher {
     return sameWorkerPublicationOrigin(left, right, requireOriginalSession);
   }
 
+  private hasPendingReviewPage(record: RoomWorkPublication): boolean {
+    return hasReviewableRoomContribution(record.summary)
+      && this.workspaces.hasPendingPage(record.agentId, record.roomId, record.sourceMessageId);
+  }
+
   private pendingReviewPage(record: RoomWorkPublication) {
     return hasReviewableRoomContribution(record.summary)
       ? this.workspaces.pendingPage(record.agentId, record.roomId, record.sourceMessageId) : null;
@@ -1028,9 +1033,15 @@ export class RoomWorkPublisher {
     this.running = true;
     let more = false;
     let failed = false;
+    let archiveWork = false;
     try {
       await this.options.assertCurrent();
       if (this.unavailable()) return;
+      try { archiveWork = this.workspaces.maintainArchives(this.now()); }
+      catch (error) {
+        if (error instanceof DaemonFenceLostError) throw error;
+        this.report("storage_unavailable");
+      }
       if (this.ownsExecutor && !this.recoveredOwnedExecutor) {
         if (hasInterruptedRoomWorkEffects(this.database)) {
           recoverInterruptedEffectsOnStartup(this.database, this.writeFence, {
@@ -1090,7 +1101,7 @@ export class RoomWorkPublisher {
         else activeBySource.set(sourceKey, [effect]);
       }
       const pending = this.store.list(agentId)
-        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision || this.pendingReviewPage(record)));
+        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision || this.hasPendingReviewPage(record)));
       const eligible: Array<{
         record: RoomWorkPublication;
         reviewPage: WorkspaceReviewPage | null;
@@ -1196,7 +1207,7 @@ export class RoomWorkPublisher {
           this.pendingDispatchAuthority.set(effectId, current);
           const settled = await this.executor.runEffect(effectId);
           if (settled.state === "completed" && reviewPage) {
-            more = more || !!this.pendingReviewPage(record);
+            more = more || this.hasPendingReviewPage(record);
           }
         } catch (error) {
           if (error instanceof DaemonFenceLostError) throw error;
@@ -1257,7 +1268,7 @@ export class RoomWorkPublisher {
       this.running = false;
       // A failed pass may not have consumed its hint. Preserve it, but replace
       // even a wake queued during the failure so lost authority cannot spin.
-      this.schedule(failed ? RETRY_MS : this.settledAgents.size ? 0 : more || this.changedAgents.size ? COALESCE_MS : RETRY_MS, failed);
+      this.schedule(failed ? RETRY_MS : this.settledAgents.size ? 0 : more || archiveWork || this.changedAgents.size ? COALESCE_MS : RETRY_MS, failed);
     }
   }
 }

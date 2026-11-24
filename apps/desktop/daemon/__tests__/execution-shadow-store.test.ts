@@ -79,13 +79,15 @@ function fixture(path = ":memory:") {
   return { db, store };
 }
 
-function fullFixture(provider: "codex" | "cursor" = "codex") {
+function fullFixture(provider: "codex" | "cursor" | "antigravity" = "codex") {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys=ON");
   new DaemonStateSchema().createSchema(db);
   const connection = provider === "cursor"
     ? { kind: "cursor_cli" as const, pid: 42, processIdentity: "birth" }
-    : { kind: "codex_app_server" as const, url: "http://localhost", pid: 42, processIdentity: "birth" };
+    : provider === "antigravity"
+      ? { kind: "antigravity_acp" as const, pid: 42, processIdentity: "birth" }
+      : { kind: "codex_app_server" as const, url: "http://localhost", pid: 42, processIdentity: "birth" };
   const runtimeGenerationId = executionRuntimeStorageIdentity("agent", "generation", connection.kind, 42, "birth");
   db.prepare(`INSERT INTO agents(agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,config_revision,runtime_configuration_revision,desired_state,observed_state,condition,provider_work_attempt_id,provider_continuation_id,provider_execution_generation_id,provider_connection_json)
     VALUES('agent',0,1,'owner','2026-08-31T00:00:00.000Z','Agent','room',?,'charter',1,1,'running','idle','none','workspace','conversation','generation',?)`)
@@ -168,6 +170,32 @@ test("Cursor child exit is historical while its validated turn owns the reusable
       assert.equal(db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, terminal.expected);
     } finally { db.close(); }
   }
+});
+
+test("Antigravity typed lifecycle facts project idle -> working -> idle onto agents atomically", () => {
+  const typed = fullFixture("antigravity");
+  try {
+    assert.equal(typed.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    const active = typed.store.ingest(typed.token.sourceId, typed.token,
+      turnFact(1, { runtimeGenerationId: typed.runtimeGenerationId }), typed.installation);
+    assert.equal(active.status, "accepted");
+    assert.equal(active.projectedObservedState, "working");
+    assert.equal(typed.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+
+    const op = typed.store.ingest(typed.token.sourceId, typed.token,
+      operationFact(2, { runtimeGenerationId: typed.runtimeGenerationId }), typed.installation);
+    assert.equal(op.status, "accepted");
+    assert.equal(op.projectedObservedState, undefined);
+    assert.equal(typed.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+
+    const completed = typed.store.ingest(typed.token.sourceId, typed.token,
+      turnFact(3, { runtimeGenerationId: typed.runtimeGenerationId, state: "terminal", turnOutcome: "completed" }),
+      typed.installation);
+    assert.equal(completed.status, "accepted");
+    assert.equal(completed.projectedObservedState, "idle");
+    assert.equal(typed.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+  } finally { typed.db.close(); }
 });
 function countHistoryReads(t: TestContext, db: DatabaseSync): () => number {
   const prepare = db.prepare.bind(db);

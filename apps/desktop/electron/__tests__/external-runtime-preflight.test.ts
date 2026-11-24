@@ -80,6 +80,37 @@ test("Codex supplies its own connection and setup refresh explicitly reconciles 
   assert.equal(refresh.mock.callCount(), 1, "explicit refresh compares the daemon even when Electron PATH is unchanged");
 });
 
+test("supervisor startup and refresh failures retain the verified provider and its sign-in action", async (t) => {
+  const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
+  const { SupervisorStatePreparationError } = await import("../main/supervisor-state-recovery.js");
+  const { runDesktopAgentProviderPreflight } = await import("../main/agents/providers.js");
+  const { createElectronTestEnv } = await import("./harness.js");
+  const { join } = await import("node:path");
+  const env = createElectronTestEnv({ prefix: "supervisor-preflight-", paths: [],
+    extraCleanupEnvKeys: ["LETAGENTS_CODEX_BIN", "LETAGENTS_ALLOW_NON_DARWIN_DAEMON", "LETAGENTS_DESKTOP_MCP_CONFIG_HOME", "LETAGENTS_DESKTOP_USER_DATA_DIR"] });
+  const bin = join(env.tempDir, "codex");
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  process.env.LETAGENTS_DESKTOP_USER_DATA_DIR = join(env.tempDir, "user-data");
+  process.env.LETAGENTS_DESKTOP_MCP_CONFIG_HOME = join(env.tempDir, "mcp-config");
+  process.env.LETAGENTS_CODEX_BIN = writeFakeProvider(bin, "console.log('codex-cli 1.0.0');");
+  const failure = async () => { throw new SupervisorStatePreparationError("The supervisor could not prepare its database."); };
+  t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", failure);
+  t.mock.method(supervisorDaemonClient, "restartForEnvironmentRefresh", failure);
+
+  for (const refreshEnvironment of [false, true]) {
+    const result = await runDesktopAgentProviderPreflight("codex", { roomOnly: true, refreshEnvironment });
+    assert.equal(result.blockedBySupervisor, true);
+    assert.equal(result.canStart, false);
+    assert.equal(result.version, "codex-cli 1.0.0");
+    assert.match(result.detail ?? "", /supervisor could not prepare its database/);
+  }
+  writeFakeProvider(bin, "if (process.argv[2] === 'login') process.exit(1); console.log('codex-cli 1.0.0');");
+  const signedOut = await runDesktopAgentProviderPreflight("codex", { roomOnly: true, refreshEnvironment: true });
+  assert.equal(signedOut.status, "auth_required");
+  assert.equal(signedOut.nextAction, "authenticate");
+  assert.equal(signedOut.blockedBySupervisor, undefined);
+});
+
 test("Codex preflight reuses its CLI probes inside the window; Check again and a setup action re-run them", async (t) => {
   const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
   t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => true);

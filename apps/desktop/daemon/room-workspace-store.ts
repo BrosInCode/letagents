@@ -1,6 +1,8 @@
-import { encodeWorkspaceReview, REVIEW_PAGE_SIZE, type WorkspaceReview, type WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
+import { encodeWorkspaceReview, REVIEW_LIMIT, REVIEW_PAGE_SIZE, type WorkspaceReview, type WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
+import { InvalidInlineReviewError, REVIEW_ARCHIVE_MIN_USER_VERSION, archiveWorkspaceReview, discardUncommittedReviewArchive, pruneUnreferencedReviewArchives, readArchivedReviewPage, reviewArchiveReference } from '../../../shared/workspace-review-archive.mjs';
 import type { DatabaseSync } from 'node:sqlite';
 import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from '../../../shared/room-agent-work.mjs';
+import { DaemonFenceLostError } from './singleton.js';
 
 const schema = `CREATE TABLE room_workspace_captures (
   agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
@@ -12,15 +14,18 @@ const schema = `CREATE TABLE room_workspace_captures (
 ) STRICT`;
 const reviewSchema = `CREATE TABLE IF NOT EXISTS room_workspace_reviews (
   agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
-  digest TEXT NOT NULL, data TEXT NOT NULL CHECK(length(data)<=134217728),
+  digest TEXT NOT NULL, data TEXT NOT NULL CHECK(length(data)<=${REVIEW_LIMIT}),
   uploaded_pages INTEGER NOT NULL DEFAULT 0 CHECK(uploaded_pages>=0),
   PRIMARY KEY(agent_id,room_id,source_message_id),
   FOREIGN KEY(agent_id,room_id,source_message_id) REFERENCES room_workspace_captures(agent_id,room_id,source_message_id)
 ) STRICT`;
-export function validateRoomWorkspaceReviewSchema(db: DatabaseSync): void {
+export function hasWorkspaceReviewSchema(db: DatabaseSync): boolean {
   const sql = String(db.prepare("SELECT sql FROM sqlite_master WHERE name='room_workspace_reviews'").get()?.sql ?? '');
   const normalize = (value: string) => value.replace('IF NOT EXISTS ', '').replace(/\s+/g, ' ').trim();
-  if (normalize(sql) !== normalize(reviewSchema)) throw new Error('Invalid full workspace review schema.');
+  return normalize(sql) === normalize(reviewSchema);
+}
+export function validateRoomWorkspaceReviewSchema(db: DatabaseSync): void {
+  if (!hasWorkspaceReviewSchema(db)) throw new Error('Invalid full workspace review schema.');
 }
 export function applyRoomWorkspaceSchema(db: DatabaseSync): void {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='room_workspace_captures'").get()) db.exec(schema);
@@ -38,10 +43,21 @@ export type WorkspaceCaptureIdentity = { agentId: string; roomId: string; source
 const keys = (key: WorkspaceCaptureIdentity) => [key.agentId, key.roomId, key.sourceMessageId, key.workAttemptId, key.inboxItemId];
 export class RoomWorkspaceStore {
   private readonly reviewSizeSql: 'octet_length(data)' | 'length(data)';
+  private readonly databasePath: string | null;
+  private lastArchiveRow = 0;
+  private finishedArchiveMigration = false;
+  private pruneAfter = 0;
+  private archiveRetryAt = 0;
   constructor(
     private readonly db: DatabaseSync,
     private readonly assertWriteFence?: () => void,
   ) {
+    // In-memory inspection/test databases are self-contained. Only a fenced
+    // modern v5+ (PRAGMA user_version >= 1005) on-disk supervisor may commit an
+    // external archive reference; legacy application_id=0 databases are moved
+    // aside before opening by assertDaemonStateVersionSupported.
+    const file = db.prepare("SELECT file FROM pragma_database_list WHERE name='main'").get()?.file;
+    this.databasePath = file && Number(db.prepare('PRAGMA user_version').get()?.user_version) >= REVIEW_ARCHIVE_MIN_USER_VERSION ? String(file) : null;
     // Reviews are gzip/base64 ASCII. In UTF-8, byte length comes from SQLite's
     // record metadata, without reading an already-uploaded archive again.
     // Other database encodings retain the original character-count semantics.
@@ -104,20 +120,114 @@ export class RoomWorkspaceStore {
     let encoded: ReturnType<typeof encodeWorkspaceReview> | null = null;
     try { encoded = review ? encodeWorkspaceReview(review) : null; }
     catch (error) { if (!(error instanceof RangeError)) throw error; } // Optional archive capacity must never discard a valid preview.
-    this.writeTransaction(() => {
+    let newArchive: string | undefined;
+    let committing = false;
+    const nested = this.db.isTransaction;
+    const rollbackSql = nested ? 'ROLLBACK TO workspace_review; RELEASE workspace_review' : 'ROLLBACK';
+    this.db.exec(nested ? 'SAVEPOINT workspace_review' : 'BEGIN IMMEDIATE');
+    try {
+      this.assertWriteFence?.();
       const result = this.db.prepare('UPDATE room_workspace_captures SET settled_json=? WHERE agent_id=? AND room_id=? AND source_message_id=? AND work_attempt_id=? AND inbox_item_id=? AND settled_json IS NULL').run(JSON.stringify(parsed), ...keys(key));
-      if (result.changes && encoded) this.db.prepare('INSERT INTO room_workspace_reviews(agent_id,room_id,source_message_id,digest,data) VALUES(?,?,?,?,?)')
-        .run(...keys(key).slice(0, 3), encoded.digest, encoded.data);
-    });
+      if (result.changes && encoded) {
+        let data = encoded.data;
+        if (this.databasePath) {
+          try {
+            newArchive = archiveWorkspaceReview(this.databasePath, data, encoded.digest);
+            data = newArchive;
+          } catch {
+            // Preserve the original durable capture while the archive volume is
+            // unavailable. The publisher retries externalization after startup.
+            this.finishedArchiveMigration = false;
+            this.lastArchiveRow = 0;
+          }
+        }
+        this.db.prepare('INSERT INTO room_workspace_reviews(agent_id,room_id,source_message_id,digest,data) VALUES(?,?,?,?,?)')
+          .run(...keys(key).slice(0, 3), encoded.digest, data);
+      }
+      committing = true;
+      this.db.exec(nested ? 'RELEASE workspace_review' : 'COMMIT');
+    } catch (error) {
+      this.rollbackArchive(rollbackSql, committing, newArchive);
+      throw error;
+    }
   }
-  pendingPage(agentId: string, roomId: string, sourceMessageId: string): WorkspaceReviewPage | null {
+
+  /** After startup, move one historical review per publisher pass. The original
+   * row remains authoritative until its fsynced archive has been read back. */
+  maintainArchives(now: number): boolean {
+    if (!this.databasePath || now < this.archiveRetryAt || (this.finishedArchiveMigration && now < this.pruneAfter)) return false;
+    let newArchive: string | undefined;
+    let committing = false;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.assertWriteFence?.();
+      if (!this.finishedArchiveMigration) {
+        const row = this.db.prepare(`SELECT rowid,digest,data FROM room_workspace_reviews
+          WHERE rowid>? AND (${this.reviewSizeSql}>90 OR data NOT GLOB '@review1:*') ORDER BY rowid LIMIT 1`).get(this.lastArchiveRow);
+        if (row) {
+          try { newArchive = archiveWorkspaceReview(this.databasePath, String(row.data), String(row.digest)); }
+          catch (error) {
+            // An invalid immutable source can only be preserved inline. It must
+            // not prevent subsequent valid rows from migrating on this pass.
+            if (error instanceof InvalidInlineReviewError) this.lastArchiveRow = Number(row.rowid);
+            throw error;
+          }
+          this.db.prepare('UPDATE room_workspace_reviews SET data=? WHERE rowid=?').run(newArchive, row.rowid);
+          committing = true;
+          this.db.exec('COMMIT');
+          this.lastArchiveRow = Number(row.rowid);
+          return true;
+        }
+        this.finishedArchiveMigration = true;
+      }
+      this.pruneAfter = now + 24 * 60 * 60 * 1000;
+      pruneUnreferencedReviewArchives(this.databasePath, () => this.db.prepare(`SELECT data FROM room_workspace_reviews
+        WHERE ${this.reviewSizeSql}<=90 AND data GLOB '@review1:*'`).iterate());
+      this.db.exec('COMMIT');
+      return false;
+    } catch (error) {
+      if (!(error instanceof InvalidInlineReviewError) && !(error instanceof DaemonFenceLostError)) this.archiveRetryAt = now + 30_000;
+      this.rollbackArchive('ROLLBACK', committing, newArchive);
+      throw error;
+    }
+  }
+
+  private rollbackArchive(rollback: string, committing: boolean, archive?: string): void {
+    // SQLITE_FULL and RAISE(ROLLBACK) can end the transaction themselves.
+    // Preserve the file if the failure happened during COMMIT and SQLite
+    // already closed the transaction, since the outcome may be ambiguous.
+    if (this.db.isTransaction) this.db.exec(rollback);
+    else if (committing) return;
+    if (this.databasePath && archive) discardUncommittedReviewArchive(this.databasePath, archive);
+  }
+
+  private pendingReview(agentId: string, roomId: string, sourceMessageId: string, readInlinePage: boolean) {
+    // A v1 reference fits in 90 bytes. The length guard avoids fetching a
+    // completed legacy archive just to find out which representation it uses.
     const row = this.db.prepare(`SELECT digest,uploaded_pages,${this.reviewSizeSql} AS size,
-      CASE WHEN uploaded_pages*? < ${this.reviewSizeSql}
-        THEN substr(data,uploaded_pages*?+1,?) END AS page
+      CASE WHEN ${this.reviewSizeSql}<=90 THEN data
+        WHEN ? AND uploaded_pages*? < ${this.reviewSizeSql} THEN substr(data,uploaded_pages*?+1,?) END AS page
       FROM room_workspace_reviews WHERE agent_id=? AND room_id=? AND source_message_id=?`)
-      .get(REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, agentId, roomId, sourceMessageId);
-    if (!row || Number(row.uploaded_pages) * REVIEW_PAGE_SIZE >= Number(row.size)) return null;
-    return { digest: String(row.digest), index: Number(row.uploaded_pages), total: Math.ceil(Number(row.size) / REVIEW_PAGE_SIZE), data: String(row.page) };
+      .get(Number(readInlinePage), REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, agentId, roomId, sourceMessageId);
+    if (!row) return null;
+    const index = Number(row.uploaded_pages);
+    const reference = reviewArchiveReference(row.page);
+    const size = reference?.size ?? Number(row.size);
+    return index * REVIEW_PAGE_SIZE < size
+      ? { digest: String(row.digest), index, total: Math.ceil(size / REVIEW_PAGE_SIZE), reference, inline: row.page } : null;
+  }
+
+  hasPendingPage(agentId: string, roomId: string, sourceMessageId: string): boolean {
+    return !!this.pendingReview(agentId, roomId, sourceMessageId, false);
+  }
+
+  pendingPage(agentId: string, roomId: string, sourceMessageId: string): WorkspaceReviewPage | null {
+    const pending = this.pendingReview(agentId, roomId, sourceMessageId, true);
+    if (!pending) return null;
+    const { digest, index, total, reference, inline } = pending;
+    if (reference && !this.databasePath) throw new Error('Workspace review archive location is unavailable.');
+    const data = reference ? readArchivedReviewPage(this.databasePath!, reference, digest, index) : String(inline);
+    return { digest, index, total, data };
   }
   acknowledgePage(agentId: string, roomId: string, sourceMessageId: string, page: WorkspaceReviewPage): void {
     this.writeTransaction(() => {

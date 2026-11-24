@@ -17,6 +17,7 @@ export {
   migrateV1ToV2,
   migrateV2ToV3,
   migrateV3ToV4,
+  migrateV4ToV5,
   runNumberedMigrations,
   validateDaemonStateShape,
   validateDaemonStateShapeForVersion,

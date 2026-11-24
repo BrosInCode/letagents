@@ -1371,10 +1371,11 @@ test('retained trees can be released after observation authority has closed', as
 });
 
 
-test('complete review pages resume after restart without recapturing or bloating the room summary', async t => {
+for (const archiveAvailable of [true, false]) test(`complete review pages resume after restart without recapturing (archive available=${archiveAvailable})`, async t => {
   const { randomBytes } = await import('node:crypto');
   const { decodeWorkspaceReview } = await import('../../../../shared/workspace-review.mjs');
   const f = await fixture(t);
+  if (!archiveAvailable) await writeFile(f.path + '.reviews-recovery', 'temporarily unavailable');
   f.options.workspaceLocation = async () => f.location;
   f.publisher.observeNewSources(f.agent)?.(['msg_1']);
   const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
@@ -1382,6 +1383,9 @@ test('complete review pages resume after restart without recapturing or bloating
   await writeFile(join(f.location.path, 'app.ts'), randomBytes(180_000).toString('hex').match(/.{1,100}/g)!.join('\n') + '\nLAST SAVED LINE\n');
   f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
   await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', 'Large change', baseline);
+  const representation = String(f.db.prepare('SELECT data FROM room_workspace_reviews').get()!.data);
+  assert.equal(representation.startsWith('@review1:'), archiveAvailable);
+  if (!archiveAvailable) await rm(f.path + '.reviews-recovery');
   await f.publisher.flush();
   // The timer may already upload a page while workspace capture yields.
   const first = f.sent.find(value => value.reviewPage)!.reviewPage!;
