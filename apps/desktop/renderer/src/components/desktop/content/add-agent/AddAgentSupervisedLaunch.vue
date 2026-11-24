@@ -56,6 +56,7 @@ import type { AddAgentSupervisedUi } from "./useAddAgentController";
 
 const props = defineProps<{
   controller: AddAgentSupervisedUi;
+  supervisorErrorShown?: boolean;
 }>();
 const progress = computed(() => props.controller.launch.view.value);
 const stopping = computed(() => Boolean(props.controller.launch.stoppingEntryId.value));
@@ -68,7 +69,8 @@ const recoverableProviderName = computed(() => props.controller.recoverableProvi
 const recoveryAnnouncement = computed(() => recoveryCandidate.value && recoverableProviderName.value
   ? `Previous ${recoverableProviderName.value} agent available to recover.`
   : "");
-const lookupError = computed(() => props.controller.launch.conflictLookupError.value);
+const lookupError = computed(() => props.supervisorErrorShown && recoveryScanStatus.value === "error"
+  ? null : props.controller.launch.conflictLookupError.value);
 const lookupTone = computed(() => props.controller.launch.conflictLookupTone.value);
 const recoveryScanStatus = computed(() => props.controller.launch.recoveryScanStatus.value);
 const state = computed(() => {

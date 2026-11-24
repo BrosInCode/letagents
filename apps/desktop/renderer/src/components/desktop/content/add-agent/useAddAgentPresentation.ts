@@ -132,7 +132,7 @@ export function useAddAgentPresentation(
     if ((loadingProviders.value || loadingPreflight.value) && !preflight.value) return "Checking setup";
     if (loadError.value) return "Could not check the agent app";
     if (!preflight.value) return "Choose an agent app";
-    if (showSecureStorage.value && secureStorageStatus.value?.available === false) {
+    if (!preflight.value.blockedBySupervisor && showSecureStorage.value && secureStorageStatus.value?.available === false) {
       return "Unlock secure credential storage";
     }
     if (preflight.value.status === "ready") return "Choose how it works here";
@@ -140,8 +140,8 @@ export function useAddAgentPresentation(
   });
   const statusDescription = computed(() => {
     if (loadError.value) return "We couldn't check this agent app. Choose Check again to retry.";
-    if (!preflight.value) return "Checking the agent app…";
-    if (showSecureStorage.value && secureStorageStatus.value?.available === false) {
+    if (!preflight.value) return supervisedProvider.value ? "Checking the agent app and local supervisor…" : "Checking the agent app…";
+    if (!preflight.value.blockedBySupervisor && showSecureStorage.value && secureStorageStatus.value?.available === false) {
       return secureStorageStatus.value.detail;
     }
     if (preflight.value.status !== "ready") {
@@ -166,6 +166,7 @@ export function useAddAgentPresentation(
   const runtimeLabel = computed(() => {
     if (preflight.value?.version) return preflight.value.version;
     if (preflight.value?.status === "missing_runtime") return "Missing";
+    if (!preflight.value && loadingPreflight.value) return "Checking";
     if (supervisedProvider.value) return "Required";
     return "External app";
   });

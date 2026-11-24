@@ -3,7 +3,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 
 /** ASCII 'LAD1' (LetAgents Daemon schema lineage v1+). Legacy v1-v52 DBs have application_id = 0. */
 export const DAEMON_STATE_APPLICATION_ID = 0x4c414431;
-export const DAEMON_STATE_SCHEMA_VERSION = 4;
+export const DAEMON_STATE_SCHEMA_VERSION = 5;
 export const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 /**
  * Offset added to logical schema version when stored in SQLite's PRAGMA user_version.

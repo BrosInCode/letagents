@@ -209,6 +209,14 @@ export function migrateV3ToV4(database: DatabaseSync): void {
 }
 
 /**
+ * Schema v4 -> v5 (marker-only fence, zero DDL change): v5 (user_version 1005)
+ * can read both inline review bytes and sealed `@review1:` archive references.
+ * Advancing `user_version` fences older v4 daemons before the publisher begins
+ * moving historical workspace reviews outside the supervisor database.
+ */
+export function migrateV4ToV5(_database: DatabaseSync): void {}
+
+/**
  * Plain numbered migrations from schema v1 onward. Each entry upgrades from
  * version `N` to `N + 1` inside the caller's write transaction.
  */
@@ -216,6 +224,7 @@ export const DAEMON_STATE_MIGRATIONS: Readonly<Record<number, SchemaMigration>> 
   1: migrateV1ToV2,
   2: (database) => migrateV2ToV3(database),
   3: migrateV3ToV4,
+  4: migrateV4ToV5,
 };
 
 type SchemaEntry = { type: string; name: string; tblName: string; sql: string };
@@ -898,6 +907,7 @@ export class DaemonStateSchema {
       } else if (lockedVersion < SCHEMA_VERSION) {
         validateDaemonStateShapeForVersion(database, lockedVersion);
         runNumberedMigrations(database, lockedVersion, SCHEMA_VERSION);
+        this.schemaInitializationHook?.(database);
       }
       this.validateCurrentShape(database);
       database.exec("COMMIT");

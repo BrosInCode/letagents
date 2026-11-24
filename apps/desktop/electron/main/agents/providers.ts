@@ -56,6 +56,7 @@ import {
   desktopShellEnvironmentReady,
   refreshDesktopShellEnvironment,
 } from "#provider-runtime/desktop-shell-environment.js";
+import { SupervisorPreparationPendingError, SupervisorStatePreparationError } from "../supervisor-state-recovery.js";
 import { supervisorDaemonClient } from "../supervisor-daemon.js";
 import { supervisorDaemonAllowed } from "../platform-capabilities.js";
 
@@ -534,6 +535,11 @@ export async function runDesktopAgentProviderPreflight(
   input: DesktopAgentProviderPreflightInput = {},
   options: DesktopAgentProviderPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
+  let supervisorFailure: Pick<DesktopAgentProviderPreflight, "message" | "detail"> | null = null;
+  const supervisorIssue = (error: unknown) => ({
+    message: error instanceof SupervisorPreparationPendingError ? "Waiting for the local supervisor" : "Local supervisor unavailable",
+    detail: error instanceof SupervisorStatePreparationError ? error.message : "Check the local service diagnostics, then choose Check again.",
+  });
   if (input.refreshEnvironment) {
     // "Check again": the user may have installed or signed in since the last
     // probe. Clear again after the refresh, because a preflight that ran in the
@@ -541,7 +547,8 @@ export async function runDesktopAgentProviderPreflight(
     clearProbeCache();
     await refreshDesktopShellEnvironment();
     if (supervisorDaemonAllowed()) {
-      await supervisorDaemonClient.restartForEnvironmentRefresh();
+      try { await supervisorDaemonClient.restartForEnvironmentRefresh(); }
+      catch (error) { supervisorFailure = supervisorIssue(error); }
     }
     clearProbeCache();
   } else {
@@ -555,7 +562,16 @@ export async function runDesktopAgentProviderPreflight(
     if (!result.canStart || !provider.capabilities.includes("supervised_runtime")) {
       return result;
     }
-    if (!isDesktopSmokeCheck() && !(await supervisorDaemonClient.isRuntimeEnvironmentCurrent())) {
+    let environmentCurrent = true;
+    if (!supervisorFailure && !isDesktopSmokeCheck()) {
+      try { environmentCurrent = await supervisorDaemonClient.isRuntimeEnvironmentCurrent(); }
+      catch (error) { supervisorFailure = supervisorIssue(error); }
+    }
+    if (supervisorFailure) return {
+      ...result, status: "error", canStart: false, nextAction: null, blockedBySupervisor: true,
+      ...supervisorFailure,
+    };
+    if (!environmentCurrent) {
       return {
         ...result,
         status: "config_required",

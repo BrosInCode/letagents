@@ -13,7 +13,7 @@
     <!-- A failed check says what to do in its own words (for example: run `agy update`); a load error does not. -->
     <p v-if="needsAttention && !error && statusDescription">{{ statusDescription }}</p>
     <AddAgentFeedback
-      v-if="error || preflight?.status === 'error'"
+      v-if="error || (preflight?.status === 'error' && !preflight.blockedBySupervisor)"
       message="Check the agent app and selected project, then choose Check again."
       tone="error"
     />

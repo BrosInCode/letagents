@@ -33,6 +33,7 @@ function provider(id: "codex" | "cursor"): DesktopAgentProvider {
 
 test("provider switching invalidates an in-flight setup preflight", async (t) => {
   const oldPreflight = deferred<DesktopAgentProviderPreflight>();
+  let recoveryScans = 0;
   let preflightCalls = 0;
   const preflightInputs: DesktopAgentProviderPreflightInput[] = [];
   let laterPreflight: Promise<DesktopAgentProviderPreflight> | null = null;
@@ -93,7 +94,7 @@ test("provider switching invalidates an in-flight setup preflight", async (t) =>
     invalidateConfigurationRequests: () => undefined,
     resetConfigurationModelSelection: () => undefined,
     resetConfigurationTransientState: () => undefined,
-    onDetectRecoverableLaunch: () => undefined,
+    onDetectRecoverableLaunch: () => { recoveryScans++; },
     onResetSupervisedLaunch: () => undefined,
     onCleanupSupervisedLaunch: () => undefined,
     onResetStartingAgent: () => undefined,
@@ -182,6 +183,8 @@ test("provider switching invalidates an in-flight setup preflight", async (t) =>
   const retryResult = deferred<DesktopAgentProviderPreflight>();
   laterPreflight = retryResult.promise;
   const callsBeforeRetry = preflightCalls;
+  setup.preflight.value = { ...sameProviderSnapshot!, status: "error", canStart: false, blockedBySupervisor: true };
+  const scansBeforeRetry = recoveryScans;
   const retry = actions.retryProviderSetup();
   await actions.retryProviderSetup();
   assert.equal(preflightCalls, callsBeforeRetry + 1, "duplicate Check again clicks share one in-flight preflight");
@@ -196,6 +199,7 @@ test("provider switching invalidates an in-flight setup preflight", async (t) =>
     mcpStatus: "installed",
   });
   await retry;
+  assert.equal(recoveryScans, scansBeforeRetry + 1, "a repaired supervisor also rechecks previous launches");
   assert.equal(preflightInputs.at(-1)?.refreshEnvironment, true);
   assert.equal(preflightInputs.at(-1)?.refreshModels, true);
   for (const input of preflightInputs) {

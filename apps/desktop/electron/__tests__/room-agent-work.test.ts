@@ -426,7 +426,7 @@ test('on-demand full review reads every page and rejects mixed or damaged captur
 });
 
 
-test('local review cache requires current access and the exact uncleared public receipt', async t => {
+for (const archived of [false, true]) test(`local review cache requires current access and the exact uncleared public receipt (archived=${archived})`, async t => {
   const { DatabaseSync } = await import('node:sqlite');
   const { mkdtempSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -444,7 +444,9 @@ test('local review cache requires current access and the exact uncleared public 
   const encoded = encodeWorkspaceReview(review);
   db.exec(`CREATE TABLE room_workspace_reviews(agent_id,room_id,source_message_id,data,digest);
     CREATE TABLE room_work_publications(agent_id,room_id,source_message_id,agent_key,api_origin,state);`);
-  db.prepare('INSERT INTO room_workspace_reviews VALUES(?,?,?,?,?)').run('agent', ROOM, 'msg_1', encoded.data, encoded.digest);
+  const { archiveWorkspaceReview } = await import('../../../../shared/workspace-review-archive.mjs');
+  const stored = archived ? archiveWorkspaceReview(databasePath, encoded.data, encoded.digest) : encoded.data;
+  db.prepare('INSERT INTO room_workspace_reviews VALUES(?,?,?,?,?)').run('agent', ROOM, 'msg_1', stored, encoded.digest);
   db.prepare('INSERT INTO room_work_publications VALUES(?,?,?,?,?,?)').run('agent', ROOM, 'msg_1', 'owner/agent', apiUrl, 'open'); db.close();
   const input = { roomId: ROOM, agentKey: 'owner/agent', sourceMessageId: 'msg_1', attemptId: ATTEMPT, requestId: ATTEMPT };
   const current = { attempt_id: ATTEMPT, room_id: ROOM, agent_key: 'owner/agent', source_message_id: 'msg_1',

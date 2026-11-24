@@ -700,7 +700,7 @@ test("recovery ownership failures are visible and keep supervised Start fenced",
 
   assert.equal(launch.recoveryScanStatus.value, "error");
   assert.match(launch.conflictLookupError.value || "", /socket closed/);
-  assert.match(launch.conflictLookupError.value || "", /start a new supervised agent/);
+  assert.match(launch.conflictLookupError.value || "", /local supervisor could not list previous agents/i);
   launch.cleanup();
 });
 
@@ -766,7 +766,7 @@ test("a stalled recovery scan times out into an actionable retry instead of disa
 
   assert.equal(launch.recoveryScanStatus.value, "error");
   assert.equal(launch.detectingRecovery.value, false);
-  assert.match(launch.conflictLookupError.value || "", /took too long/i);
+  assert.match(launch.conflictLookupError.value || "", /local supervisor is taking longer/i);
   assert.match(launch.conflictLookupError.value || "", /Check again/i);
 
   window.letagentsDesktop!.supervisor.listAgents = async () => [];
@@ -775,6 +775,17 @@ test("a stalled recovery scan times out into an actionable retry instead of disa
   never.resolve([entry()]);
   await Promise.resolve();
   assert.equal(launch.recoveryCandidate.value, null, "the late first response cannot overwrite the retry");
+
+  const slow = deferred<DesktopSupervisorManifestEntry[]>();
+  window.letagentsDesktop!.supervisor.listAgents = () => slow.promise;
+  const waiting = launch.detectRecoverableLaunch();
+  timers.pop()!();
+  await waiting;
+  assert.equal(launch.recoveryScanStatus.value, "error");
+  slow.resolve([]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(launch.recoveryScanStatus.value, "ready", "a slow current answer clears the timeout automatically");
+  assert.equal(launch.conflictLookupError.value, null);
   launch.cleanup();
 });
 
