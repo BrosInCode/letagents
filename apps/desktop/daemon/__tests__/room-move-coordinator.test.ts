@@ -194,7 +194,12 @@ type Harness = {
   setActivatingTurn: (item: SupervisedInboxItem, failure: "failed" | "interrupted" | null) => void;
 };
 
-function harness(): Harness {
+function harness(options?: {
+  useBuiltInRecoveryTimer?: boolean;
+  autoConverge?: boolean;
+  setTimeout?: typeof setTimeout;
+  clearTimeout?: typeof clearTimeout;
+}): Harness {
   const effectDb = new DatabaseSync(":memory:");
   applyEffectJournalSchema(effectDb);
   const events: string[] = [];
@@ -388,7 +393,15 @@ function harness(): Harness {
     }),
     pauseIngress: (agentId) => { events.push(`delivery:pause:${agentId}`); },
     restartDelivery: async (agentId) => { events.push(`delivery:restart:${agentId}`); },
-    scheduleRecovery: (agentId, delayMs) => { events.push(`recovery:${agentId}:${delayMs}`); },
+    ...(options?.useBuiltInRecoveryTimer
+      ? {
+          autoConverge: options.autoConverge,
+          setTimeout: options.setTimeout,
+          clearTimeout: options.clearTimeout,
+        }
+      : {
+          scheduleRecovery: (agentId, delayMs) => { events.push(`recovery:${agentId}:${delayMs}`); },
+        }),
     nowMs: () => currentNowMs,
     nowIso: () => new Date(currentNowMs).toISOString(),
     externalEffectSignal: () => new AbortController().signal,
@@ -2078,4 +2091,98 @@ test("racing retry settlement fences against saga transition, live executing blo
     stateDb.close();
     removeTestDirectory(root);
   }
+});
+
+test("reconcile re-arms room-move recovery when temporarily excluded by an active lifecycle action, but never during handoff", async () => {
+  const h = harness();
+  const joining = roomMove({ phase: "joining_destination" });
+  h.setMove(joining);
+  let joinCalls = 0;
+  h.setJoinRoom(async ({ roomId }) => { joinCalls += 1; return { roomId }; });
+
+  const releaseLifecycle = h.gate.beginLifecycle("agent-1");
+  const excluded = await h.coordinator.reconcile(joining);
+  assert.equal(excluded.phase, "joining_destination");
+  assert.equal(joinCalls, 0);
+  assert.equal(
+    h.events.includes("recovery:agent-1:250"),
+    true,
+    "temporary lifecycle exclusion must re-arm room-move recovery instead of dropping the retry",
+  );
+
+  // Terminal snapshots never schedule recovery even if excluded.
+  h.events.length = 0;
+  await h.coordinator.reconcile(roomMove({ phase: "failed" }));
+  assert.equal(h.events.some((event) => event.startsWith("recovery:")), false);
+
+  // Handoff exclusion never schedules recovery.
+  h.setHandoff(true);
+  await h.coordinator.reconcile(joining);
+  assert.equal(h.events.some((event) => event.startsWith("recovery:")), false);
+  releaseLifecycle();
+});
+
+test("built-in room-move recovery timer keeps earliest deadline, defers during lifecycle exclusion, clears on handoff/purge, and respects autoConverge", async () => {
+  let nextTimerId = 1;
+  const timers = new Map<number, { delayMs: number; fn: () => void }>();
+  const fakeSetTimeout = ((fn: () => void, delay = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { delayMs: Number(delay), fn });
+    return { id, unref() { return this; } } as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const fakeClearTimeout = ((handle: ReturnType<typeof setTimeout>) => {
+    const id = (handle as unknown as { id?: number })?.id;
+    if (id !== undefined) timers.delete(id);
+  }) as typeof clearTimeout;
+
+  // autoConverge: false suppresses timers completely.
+  const disabled = harness({ useBuiltInRecoveryTimer: true, autoConverge: false, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout });
+  disabled.coordinator.scheduleRecovery("agent-1", 500);
+  assert.equal(timers.size, 0);
+
+  // Earliest deadline wins; later deadline does not replace an earlier timer.
+  const h = harness({ useBuiltInRecoveryTimer: true, autoConverge: true, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout });
+  let joinCalls = 0;
+  const joining = roomMove({ phase: "joining_destination" });
+  h.setMove(joining);
+  h.setJoinRoom(async ({ roomId }) => { joinCalls += 1; return { roomId }; });
+
+  h.coordinator.scheduleRecovery("agent-1", 1_000);
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0]!.delayMs, 1_000);
+  h.coordinator.scheduleRecovery("agent-1", 5_000);
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0]!.delayMs, 1_000, "later deadline must not delay earlier retry");
+  h.coordinator.scheduleRecovery("agent-1", 200);
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0]!.delayMs, 200, "earlier deadline replaces later retry");
+
+  // Firing while lifecycle-excluded re-arms at 250ms without calling joinRoom.
+  const releaseLifecycle = h.gate.beginLifecycle("agent-1");
+  const [firstId, firstTimer] = [...timers.entries()][0]!;
+  timers.delete(firstId);
+  firstTimer.fn();
+  assert.equal(joinCalls, 0);
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0]!.delayMs, 250);
+  releaseLifecycle();
+
+  // Firing once lifecycle exclusion clears reconciles the pending move automatically.
+  const [secondId, secondTimer] = [...timers.entries()][0]!;
+  timers.delete(secondId);
+  secondTimer.fn();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(joinCalls, 1);
+  assert.equal(h.getMove()?.phase, "rotating_credentials");
+
+  // clearRecovery and clearRecoveryTimers cancel pending timers cleanly.
+  h.coordinator.scheduleRecovery("agent-1", 1_000);
+  assert.equal(timers.size, 1);
+  h.coordinator.clearRecovery("agent-1");
+  assert.equal(timers.size, 0);
+  h.coordinator.scheduleRecovery("agent-1", 1_000);
+  h.coordinator.scheduleRecovery("agent-2", 1_000);
+  assert.equal(timers.size, 2);
+  h.coordinator.clearRecoveryTimers();
+  assert.equal(timers.size, 0);
 });

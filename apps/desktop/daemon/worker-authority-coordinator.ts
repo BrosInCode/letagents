@@ -1355,7 +1355,13 @@ export class WorkerAuthorityCoordinator {
     status: "installed" | "stale" | "provider_unavailable";
     agent_session_id?: string;
   }> {
-    return this.options.serializeEntry(input.entry_id, async () => {
+    const outcome = await this.options.serializeEntry<{
+      result: {
+        status: "installed" | "stale" | "provider_unavailable";
+        agent_session_id?: string;
+      };
+      startDelivery?: boolean;
+    }>(input.entry_id, async () => {
       if (input.credential_only && input.recovery_only) {
         throw new Error("Host grant installation cannot be both reconnect-only and recovery-only.");
       }
@@ -1370,9 +1376,9 @@ export class WorkerAuthorityCoordinator {
         throw new Error("Host grant owner_account_id and scope_key must be installed together.");
       }
       if (!Number.isSafeInteger(input.grant_generation) || input.grant_generation < 1
-        || !await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
+        || !await this.ownsDaemonGeneration(input.daemon_generation)) return { result: { status: "stale" } };
       const inputExpiry = Date.parse(input.grant_expires_at);
-      if (!Number.isFinite(inputExpiry) || inputExpiry <= this.options.nowMs()) return { status: "stale" };
+      if (!Number.isFinite(inputExpiry) || inputExpiry <= this.options.nowMs()) return { result: { status: "stale" } };
       let apiUrl: string;
       try {
         apiUrl = hostGrantApiOrigin(input.api_url);
@@ -1380,10 +1386,10 @@ export class WorkerAuthorityCoordinator {
         throw new Error("Host grant api_url must be HTTPS or exact loopback HTTP.");
       }
       let entry = await this.options.store.getEntry(input.entry_id);
-      if (!entry || !await this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
+      if (!entry || !await this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { result: { status: "stale" } };
       if (Boolean(entry.local_room_id) !== isLocalRoomApi(apiUrl)
         || (entry.local_room_id && entry.local_room_id !== entry.room_id)) throw new Error("Host grant transport does not match the saved room authority.");
-      if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
+      if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { result: { status: "stale" } };
       const currentGrant = this.currentHostGrant(entry);
       const isSameGrant = currentGrant?.grantId === input.grant_id;
       if (isSameGrant && currentGrant && (currentGrant.hostId !== hostId
@@ -1406,7 +1412,7 @@ export class WorkerAuthorityCoordinator {
         if (entry.desired_state === "running" && await this.options.inbox.cursor(entry.id)) {
           this.options.convergence.request(entry.id, "rehydration");
         }
-        return { status: "installed" };
+        return { result: { status: "installed" } };
       }
       const grant: InstalledHostGrant = currentGrantIsAtLeastInput && currentGrant ? currentGrant : {
         entryId: entry.id,
@@ -1429,7 +1435,7 @@ export class WorkerAuthorityCoordinator {
       }
       if (input.recovery_only) {
         if (!this.options.custody.hostGrantIsCurrent(entry.id, grant)) this.options.custody.installHostGrant(grant);
-        return { status: "installed" };
+        return { result: { status: "installed" } };
       }
       let live: ProviderActionHandle | null | undefined = this.options.runtime.currentHandle(entry.id);
       let hasExactLiveProvider = Boolean(entry.provider_ref && entry.work_attempt_id && live
@@ -1438,19 +1444,19 @@ export class WorkerAuthorityCoordinator {
       if (input.credential_only && !hasExactLiveProvider && entry.provider_ref) {
         live = await this.options.runtime.attach(entry, () => false);
         entry = await this.options.store.getEntry(input.entry_id);
-        if (!entry) return { status: "stale" };
+        if (!entry) return { result: { status: "stale" } };
         hasExactLiveProvider = Boolean(entry.provider_ref && entry.work_attempt_id && live
           && live.workAttemptId === entry.work_attempt_id
           && live.providerContinuationId === entry.provider_ref.provider_continuation_id);
       }
-      if (input.credential_only && !hasExactLiveProvider) return { status: "provider_unavailable" };
+      if (input.credential_only && !hasExactLiveProvider) return { result: { status: "provider_unavailable" } };
       if (!this.options.custody.hostGrantIsCurrent(entry.id, grant)) this.options.custody.installHostGrant(grant);
       if (hasExactLiveProvider && entry.provider_ref && entry.work_attempt_id && live) {
         const attempt = await this.options.durability.getAttempt(entry.work_attempt_id);
         if (!await this.ownsDaemonGeneration(input.daemon_generation)
           || !this.options.custody.hostGrantIsCurrent(entry.id, grant)) {
           this.revokeHostGrantIfCurrent(entry.id, grant);
-          return { status: "stale" };
+          return { result: { status: "stale" } };
         }
         const execution = attempt.execution_generations.find(
           (candidate) => candidate.execution_generation_id === entry!.provider_ref!.execution_generation_id,
@@ -1462,28 +1468,36 @@ export class WorkerAuthorityCoordinator {
             if (!await this.ownsDaemonGeneration(input.daemon_generation)
               || !this.options.custody.hostGrantIsCurrent(entry.id, grant)) {
               this.revokeHostGrantIfCurrent(entry.id, grant);
-              return { status: "stale" };
+              return { result: { status: "stale" } };
             }
-            if (input.credential_only && entry.delivery_mode === "daemon_inbox") await this.options.delivery.start(entry.id);
-            return { status: "installed", agent_session_id: minted.agentSessionId };
+            return {
+              result: { status: "installed", agent_session_id: minted.agentSessionId },
+              startDelivery: Boolean(input.credential_only && entry.delivery_mode === "daemon_inbox"),
+            };
           }
         }
       }
       if (input.credential_only) {
         if (grant !== currentGrant) this.revokeHostGrantIfCurrent(entry.id, grant);
-        return { status: "provider_unavailable" };
+        return { result: { status: "provider_unavailable" } };
       }
       if (!await this.ownsDaemonGeneration(input.daemon_generation)
         || !this.options.custody.hostGrantIsCurrent(entry.id, grant)) {
         this.revokeHostGrantIfCurrent(entry.id, grant);
-        return { status: "stale" };
+        return { result: { status: "stale" } };
       }
       if (entry.desired_state === "running"
         && (entry.delivery_mode !== "daemon_inbox" || await this.options.inbox.cursor(entry.id))) {
         this.options.convergence.request(entry.id, "rehydration");
       }
-      return { status: "installed" };
+      return { result: { status: "installed" } };
     });
+    if (outcome.startDelivery && !this.options.authority.isHandoffScheduled()) {
+      // Run outside `serializeEntry` so delivery startup can reconcile any
+      // pending room move through `entryConcurrency.runRoomMove` without deadlock.
+      await this.options.delivery.start(input.entry_id);
+    }
+    return outcome.result;
   }
 
   async bootstrapRoomIngress(

@@ -30,7 +30,7 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
 
   constructor(...args: SupervisorDaemonArgs) {
     super(...args);
-    const [, , providerPort, , , , , supervisedDeliveryHttp] = args;
+    const [, , providerPort, , , , recoveryClock, supervisedDeliveryHttp] = args;
     this.continuationRepairs = new ContinuationRepairCoordinator({
       authority: {
         isHandoffScheduled: () => this.handoffScheduled,
@@ -76,7 +76,7 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
       deliveryHttp: this.supervisedDeliveryHttp,
       authority: {
         currentGeneration: () => this.singleton.currentGeneration,
-        isHandoffScheduled: () => this.handoffScheduled,
+        isHandoffScheduled: () => this.handoffScheduled || this.handoffDraining,
         assertCurrent: () => this.singleton.assertCurrent(),
         ownsDaemonGeneration: (expected) => this.workerAuthority.ownsDaemonGeneration(expected),
         fenceCommit: (commit) => this.fenceDaemonCommit(commit),
@@ -87,7 +87,8 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
       currentHandle: (entryId) => this.liveHandles.get(entryId),
       pauseIngress: (entryId) => this.supervisedDelivery?.pauseIngress(entryId),
       restartDelivery: (entryId) => this.startSupervisedDelivery(entryId),
-      scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
+      autoConverge: this.autoConverge,
+      setTimeout: recoveryClock.setTimeout, clearTimeout: recoveryClock.clearTimeout,
       nowMs: () => this.nowMs(),
     });
     this.providerCheckpoints = new ProviderCheckpointCoordinator({
@@ -188,6 +189,7 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
       liveHandle: (entryId) => this.liveHandles.get(entryId),
       providerAuthority: this.providerCheckpoints,
       scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
+      scheduleRoomMoveRecovery: (entryId, delayMs) => this.roomMoves.scheduleRecovery(entryId, delayMs),
     });
     this.providerTerminals = new ProviderTerminalCoordinator({
       authority: {

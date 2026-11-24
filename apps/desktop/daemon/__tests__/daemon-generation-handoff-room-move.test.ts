@@ -7,6 +7,15 @@ import { type AddressInfo } from "node:net";
 import { join } from "node:path";
 import test from "node:test";
 import { ManifestStore } from "../manifest-store.js";
+import { SupervisorGrantRequestError } from "../cloud-http.js";
+import {
+  listActiveRoomMoveEffectsForAgent,
+  listEffectsForAgent,
+  ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+  ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+  ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
+} from "../effect-journal/index.js";
+import type { DaemonStateDatabase } from "../daemon-state-database.js";
 import { type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRoomMoveRecord } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { WorkerRuntimeCustody, type InstalledHostGrant } from "../worker-runtime-custody.js";
@@ -1073,5 +1082,481 @@ test("room-move rollback replays every external and local crash edge across daem
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
+  }
+});
+
+async function createLiveRoomMoveRetryDaemon(options: {
+  id: string;
+  joinRoom: NonNullable<SupervisedDeliveryHttp["joinRoom"]>;
+  latest?: SupervisedDeliveryHttp["latest"];
+  createWorkerSession?: (input: { roomId: string }) => Promise<{
+    sessionId: string;
+    bearer: string;
+    bearerId: string;
+    expiresAt: string;
+  }>;
+}) {
+  const env = await fixture();
+  const nativeServer = createHttpServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ accepted: true, presence: { status: "idle" }, lease_heartbeats: [] }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    nativeServer.once("error", reject);
+    nativeServer.listen(0, "127.0.0.1", resolve);
+  });
+  const apiUrl = `http://127.0.0.1:${(nativeServer.address() as AddressInfo).port}`;
+  const source = join(env.root, "source");
+  await mkdir(source);
+  await execFileAsync("git", ["init", source]);
+  await execFileAsync("git", ["-C", source, "config", "user.email", "daemon@example.invalid"]);
+  await execFileAsync("git", ["-C", source, "config", "user.name", "Daemon Test"]);
+  await writeFile(join(source, "README.md"), "room-move-retry\n");
+  await execFileAsync("git", ["-C", source, "add", "README.md"]);
+  await execFileAsync("git", ["-C", source, "commit", "-m", "fixture"]);
+  await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
+
+  const paths = {
+    lockPath: join(env.root, `${options.id}.lock`),
+    ...testNamedDaemonEndpoint(env.root, options.id),
+    manifestPath: join(env.root, `${options.id}.sqlite`),
+    auditPath: join(env.root, `${options.id}-audit.jsonl`),
+    attemptsPath: join(env.root, `${options.id}-attempts.json`),
+    attemptsRoot: join(env.root, `${options.id}-attempt-data`),
+    workspaceRoot: env.root,
+    workerBindingsPath: join(env.root, `${options.id}-bindings.json`),
+  };
+
+  let handle: import("../provider-action-port.js").ProviderActionHandle | null = null;
+  const exitListeners = new Set<(terminal: import("../provider-action-port.js").ProviderActionTerminal) => void>();
+  const port: ProviderActionPort = {
+    capabilities: async () => ({
+      resume: true,
+      midTurnInjection: false,
+      transcriptAccess: true,
+      permissionPromptBridging: false,
+      survivesRestart: true,
+    }),
+    spawn: async (req) => {
+      handle = {
+        workAttemptId: req.workAttemptId,
+        pid: process.pid,
+        providerContinuationId: `cont-${options.id}`,
+        providerConnection: {
+          kind: "codex_app_server",
+          url: "ws://127.0.0.1:65534",
+          pid: process.pid,
+          processIdentity: `fixture:${options.id}:${process.pid}`,
+        },
+        appliedConfigurationRevision: req.configurationRevision,
+        observedState: "idle",
+      };
+      return handle;
+    },
+    attach: async () => handle,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => handle!,
+    poke: async () => {},
+    stop: async () => {
+      const terminal = {
+        endedAt: new Date().toISOString(),
+        exitCode: 0,
+        signal: null,
+        terminalCause: "stopped" as const,
+        providerContinuationId: `cont-${options.id}`,
+      };
+      handle = null;
+      for (const listener of exitListeners) listener(terminal);
+      return terminal;
+    },
+    onExit: async (_providerHandle, listener) => {
+      exitListeners.add(listener);
+      return () => exitListeners.delete(listener);
+    },
+    onStream: async () => () => {},
+    onExecution: (providerHandle, listener) => runtimeReadySubscription(providerHandle, listener),
+    runRoomTurn: async () => ({ turnId: "unused-turn", outcome: "no_reply", text: null }),
+  };
+
+  const deliveryHttp: SupervisedDeliveryHttp = {
+    latest: options.latest ?? (async () => ({ messages: [] })),
+    poll: ({ signal }) => new Promise((resolve) => {
+      if (signal.aborted) resolve({ messages: [] });
+      else signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+    }),
+    publish: async () => {},
+    joinRoom: options.joinRoom,
+  };
+
+  const grantHttp = {
+    ...noWorkLeaseHttp,
+    createWorkerSession: options.createWorkerSession
+      ?? (async ({ roomId }: { roomId: string }) => ({
+        sessionId: `session_${roomId}`,
+        bearer: `bearer_${roomId}`,
+        bearerId: `bearer_id_${roomId}`,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      })),
+  };
+
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 60_000, undefined, {}, deliveryHttp, grantHttp);
+  await daemon.start();
+  const generation = Number(((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation);
+  assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
+    entry: {
+      ...entry,
+      id: options.id,
+      room_id: "source-room",
+      provider: "codex",
+      observed_state: "absent",
+      source_repo_path: source,
+      workspace_path: null,
+      work_attempt_id: null,
+      provider_launch_policy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
+    },
+  })).ok, true);
+  assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+    entry_id: options.id,
+    room_id: "source-room",
+    agent_key: `owner/${options.id}`,
+    grant_id: `grant_${options.id}_source`,
+    supervisor_grant: "grant-secret-source",
+    grant_generation: 1,
+    api_url: apiUrl,
+    daemon_generation: generation,
+    host_id: "host-test",
+    installation_id: "installation-test",
+    grant_expires_at: "2099-01-01T00:00:00.000Z",
+  })).ok, true);
+  assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+    entry_id: options.id,
+    daemon_generation: generation,
+  })).ok, true);
+  await eventually(async () => {
+    const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0];
+    return current?.observed_state === "idle" && current.worker_binding?.agent_session_id === "session_source-room";
+  }, `${options.id} ready`, 8_000);
+
+  return {
+    daemon,
+    paths,
+    apiUrl,
+    generation,
+    internals: daemon as unknown as {
+      stateDatabase: DaemonStateDatabase;
+      store: ManifestStore;
+      supervisedInbox: SupervisedAgentInboxStore;
+      providerExecution: {
+        request: (entryId: string, kind?: "owned" | "rehydration") => void;
+        drainConvergence: () => Promise<void>;
+      };
+    },
+    cleanup: async () => {
+      await daemon.stop().catch(() => undefined);
+      await new Promise<void>((resolve) => nativeServer.close(() => resolve()));
+      await env.cleanup();
+    },
+  };
+}
+
+test("transient 503 destination join retries automatically with zero external requests, rolls back on 403 retry, and purges cleanly (task_23)", async () => {
+  const joinEvents: Array<{ roomId: string; status: number }> = [];
+  let destAttempts = 0;
+  const live = await createLiveRoomMoveRetryDaemon({
+    id: "room_move_503_403_purge",
+    joinRoom: async ({ roomId }) => {
+      if (roomId === "destination-room") {
+        destAttempts += 1;
+        if (destAttempts === 1) {
+          joinEvents.push({ roomId, status: 503 });
+          throw new SupervisorGrantRequestError(503, "join room");
+        }
+        joinEvents.push({ roomId, status: 403 });
+        throw new SupervisorGrantRequestError(403, "join room");
+      }
+      joinEvents.push({ roomId, status: 200 });
+      return { roomId };
+    },
+  });
+  try {
+    await live.internals.providerExecution.drainConvergence();
+    const prep = await daemonRequest(live.paths.socketPath, "supervisor.prepare_room_move", {
+      entry_id: "room_move_503_403_purge",
+      destination_room_id: "destination-room",
+      request_id: "req-503-403",
+      daemon_generation: live.generation,
+    });
+    assert.equal(prep.ok, true, prep.error);
+    const operationId = (prep.result as DaemonRoomMoveRecord).operation_id;
+
+    const first = await daemonRequest(live.paths.socketPath, "supervisor.commit_room_move", {
+      operation_id: operationId,
+      entry_id: "room_move_503_403_purge",
+      daemon_generation: live.generation,
+    });
+    assert.equal(first.ok, true, first.error);
+    assert.equal((first.result as DaemonRoomMoveRecord).phase, "joining_destination");
+    assert.deepEqual(joinEvents, [{ roomId: "destination-room", status: 503 }]);
+
+    // Zero external requests to the agent: observe only the durable DB directly
+    // until the scheduled retry fires (403 -> rollback_required) and automatic
+    // source compensation finishes (source-room 200 -> failed).
+    const db = live.internals.stateDatabase.connection;
+    const [joinBeforeRetry] = listEffectsForAgent(db, "room_move_503_403_purge", {
+      kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+    });
+    assert.equal(joinBeforeRetry?.state, "prepared");
+    assert.ok(joinBeforeRetry?.next_attempt_at_ms !== null);
+
+    await eventually(async () => {
+      const move = await live.internals.store.getRoomMove(operationId);
+      return move?.phase === "failed";
+    }, "automatic 503 -> 403 -> rollback_required -> failed without external requests", 8_000);
+
+    assert.deepEqual(joinEvents, [
+      { roomId: "destination-room", status: 503 },
+      { roomId: "destination-room", status: 403 },
+      { roomId: "source-room", status: 200 },
+    ]);
+    assert.equal(listActiveRoomMoveEffectsForAgent(db, "room_move_503_403_purge").length, 0);
+    const [joinAfter] = listEffectsForAgent(db, "room_move_503_403_purge", {
+      kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+    });
+    const [rollbackAfter] = listEffectsForAgent(db, "room_move_503_403_purge", {
+      kind: ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
+    });
+    assert.equal(joinAfter?.state, "failed");
+    assert.equal(rollbackAfter?.state, "completed");
+    assert.equal((await live.internals.store.getEntry("room_move_503_403_purge"))?.room_id, "source-room");
+
+    // Stop, retire (2-phase), and purge (2-phase) with zero post-purge joins.
+    const joinsBeforePurge = joinEvents.length;
+    assert.equal((await daemonRequest(live.paths.socketPath, "manifest.set_desired_state", {
+      id: "room_move_503_403_purge",
+      desired_state: "stopped",
+    })).ok, true);
+    await eventually(async () => {
+      const current = (await live.internals.store.getEntry("room_move_503_403_purge"))?.observed_state;
+      return current === "stopped";
+    }, "agent stopped before retire/purge", 5_000);
+
+    const retire1 = await daemonRequest(live.paths.socketPath, "supervisor.retire_agent", {
+      entry_id: "room_move_503_403_purge",
+      daemon_generation: live.generation,
+    });
+    assert.equal(retire1.ok, true, retire1.error);
+    const retireSessionId = (retire1.result as { agent_session_id?: string }).agent_session_id;
+    assert.equal(retireSessionId, "session_source-room");
+    const retire2 = await daemonRequest(live.paths.socketPath, "supervisor.retire_agent", {
+      entry_id: "room_move_503_403_purge",
+      daemon_generation: live.generation,
+      revoked_agent_session_id: retireSessionId,
+    });
+    assert.equal(retire2.ok, true, retire2.error);
+    assert.equal((retire2.result as { outcome?: string }).outcome, "retired");
+
+    const purge1 = await daemonRequest(live.paths.socketPath, "supervisor.purge_agent", {
+      entry_id: "room_move_503_403_purge",
+      daemon_generation: live.generation,
+    });
+    assert.equal(purge1.ok, true, purge1.error);
+    const purgeResult1 = purge1.result as { outcome: string; revocation_kind?: string; agent_session_id?: string };
+    const purge2 = purgeResult1.outcome === "purged"
+      ? purge1
+      : await daemonRequest(live.paths.socketPath, "supervisor.purge_agent", {
+        entry_id: "room_move_503_403_purge",
+        daemon_generation: live.generation,
+        ...(purgeResult1.agent_session_id
+          ? { revoked_agent_session_id: purgeResult1.agent_session_id }
+          : { grant_revoked_without_worker_session: true }),
+      });
+    assert.equal(purge2.ok, true, purge2.error);
+    assert.equal((purge2.result as { outcome?: string }).outcome, "purged");
+    assert.equal(listEffectsForAgent(db, "room_move_503_403_purge").length, 0);
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    assert.equal(joinEvents.length, joinsBeforePurge, "purged agent must emit zero post-purge room joins");
+  } finally {
+    await live.cleanup();
+  }
+});
+
+test("supervisor.rollback_room_move and install_host_grant do not stall during 503 backoff or credential_only rotation, and tail bootstrap retries automatically (task_23)", async () => {
+  // Part A: During 503 retry backoff + concurrent convergence, install_host_grant and rollback_room_move never stall.
+  {
+    let destAttempts = 0;
+    const live = await createLiveRoomMoveRetryDaemon({
+      id: "room_move_concurrent_rpcs",
+      joinRoom: async ({ roomId }) => {
+        if (roomId === "destination-room") {
+          destAttempts += 1;
+          throw new SupervisorGrantRequestError(503, "join room");
+        }
+        return { roomId };
+      },
+    });
+    try {
+      await live.internals.providerExecution.drainConvergence();
+      const prep = await daemonRequest(live.paths.socketPath, "supervisor.prepare_room_move", {
+        entry_id: "room_move_concurrent_rpcs",
+        destination_room_id: "destination-room",
+        request_id: "req-concurrent",
+        daemon_generation: live.generation,
+      });
+      const operationId = (prep.result as DaemonRoomMoveRecord).operation_id;
+      const committed = await daemonRequest(live.paths.socketPath, "supervisor.commit_room_move", {
+        operation_id: operationId,
+        entry_id: "room_move_concurrent_rpcs",
+        daemon_generation: live.generation,
+      });
+      assert.equal(committed.ok, true, committed.error);
+      assert.equal((committed.result as DaemonRoomMoveRecord).phase, "joining_destination");
+      assert.equal(destAttempts, 1);
+
+      // Explicitly fire provider convergence while the move is in backoff — this
+      // previously self-deadlocked EntryConcurrencyGate.run(entryId) via delivery.start.
+      live.internals.providerExecution.request("room_move_concurrent_rpcs");
+      await within(
+        live.internals.providerExecution.drainConvergence(),
+        "convergence during pending room move backoff must not deadlock",
+        3_000,
+      );
+
+      // Both install_host_grant and rollback_room_move must respond promptly.
+      const hostGrantRes = await within(
+        daemonRequest(live.paths.socketPath, "supervisor.install_host_grant", {
+          entry_id: "room_move_concurrent_rpcs",
+          room_id: "source-room",
+          agent_key: "owner/room_move_concurrent_rpcs",
+          grant_id: "grant_room_move_concurrent_rpcs_source",
+          supervisor_grant: "grant-secret-source-2",
+          grant_generation: 2,
+          api_url: live.apiUrl,
+          daemon_generation: live.generation,
+          host_id: "host-test",
+          installation_id: "installation-test",
+          grant_expires_at: "2099-01-01T00:00:00.000Z",
+        }),
+        "install_host_grant during room-move backoff",
+        3_000,
+      );
+      assert.equal(hostGrantRes.ok, true, hostGrantRes.error);
+
+      const rollbackRes = await within(
+        daemonRequest(live.paths.socketPath, "supervisor.rollback_room_move", {
+          operation_id: operationId,
+          entry_id: "room_move_concurrent_rpcs",
+          error: "operator rollback during 503 backoff",
+          daemon_generation: live.generation,
+        }),
+        "rollback_room_move during room-move backoff",
+        3_000,
+      );
+      assert.equal(rollbackRes.ok, true, rollbackRes.error);
+      assert.equal((rollbackRes.result as DaemonRoomMoveRecord).phase, "rollback_required");
+
+      // Dedicated room-move timer finishes compensation automatically.
+      await eventually(async () => {
+        const move = await live.internals.store.getRoomMove(operationId);
+        return move?.phase === "failed";
+      }, "rollback completes automatically after operator rollback_room_move", 5_000);
+    } finally {
+      await live.cleanup();
+    }
+  }
+
+  // Part B: 503 -> 200 auto-retry reaches rotating_credentials, credential_only install_host_grant does not deadlock,
+  // and bootstrapping_destination_tail 503 -> 200 auto-retries to active even while cursor.room_id !== entry.room_id.
+  {
+    let destJoinAttempts = 0;
+    let destTailAttempts = 0;
+    const live = await createLiveRoomMoveRetryDaemon({
+      id: "room_move_503_to_active",
+      joinRoom: async ({ roomId }) => {
+        if (roomId === "destination-room") {
+          destJoinAttempts += 1;
+          if (destJoinAttempts === 1) throw new SupervisorGrantRequestError(503, "join room");
+        }
+        return { roomId };
+      },
+      latest: async ({ roomId }) => {
+        if (roomId === "destination-room") {
+          destTailAttempts += 1;
+          if (destTailAttempts === 1) throw new SupervisorGrantRequestError(503, "tail read");
+          return { messages: [{ id: "msg_9" }] };
+        }
+        return { messages: [] };
+      },
+    });
+    try {
+      await live.internals.providerExecution.drainConvergence();
+      const prep = await daemonRequest(live.paths.socketPath, "supervisor.prepare_room_move", {
+        entry_id: "room_move_503_to_active",
+        destination_room_id: "destination-room",
+        request_id: "req-503-active",
+        daemon_generation: live.generation,
+      });
+      const operationId = (prep.result as DaemonRoomMoveRecord).operation_id;
+      const first = await daemonRequest(live.paths.socketPath, "supervisor.commit_room_move", {
+        operation_id: operationId,
+        entry_id: "room_move_503_to_active",
+        daemon_generation: live.generation,
+      });
+      assert.equal((first.result as DaemonRoomMoveRecord).phase, "joining_destination");
+
+      // Automatic retry at +1s advances to rotating_credentials with zero external requests.
+      await eventually(async () => {
+        const move = await live.internals.store.getRoomMove(operationId);
+        return move?.phase === "rotating_credentials";
+      }, "503 -> 200 automatic progression to rotating_credentials", 5_000);
+      assert.equal(destJoinAttempts, 2);
+      assert.equal((await live.internals.store.getEntry("room_move_503_to_active"))?.room_id, "destination-room");
+
+      // Electron acknowledges source revocation and installs destination host grant with credential_only: true.
+      const ack = await daemonRequest(live.paths.socketPath, "supervisor.acknowledge_room_move_source_revocation", {
+        operation_id: operationId,
+        entry_id: "room_move_503_to_active",
+        source_agent_session_id: "session_source-room",
+        daemon_generation: live.generation,
+      });
+      assert.equal(ack.ok, true, ack.error);
+      const destGrant = await within(
+        daemonRequest(live.paths.socketPath, "supervisor.install_host_grant", {
+          entry_id: "room_move_503_to_active",
+          room_id: "destination-room",
+          agent_key: "owner/room_move_503_to_active",
+          grant_id: "grant_room_move_503_to_active_dest",
+          supervisor_grant: "grant-secret-dest",
+          grant_generation: 2,
+          api_url: live.apiUrl,
+          daemon_generation: live.generation,
+          host_id: "host-test",
+          installation_id: "installation-test",
+          grant_expires_at: "2099-01-01T00:00:00.000Z",
+          credential_only: true,
+        }),
+        "credential_only install_host_grant during rotating_credentials must not deadlock",
+        3_000,
+      );
+      assert.equal(destGrant.ok, true, destGrant.error);
+      assert.equal((destGrant.result as { status?: string }).status, "installed");
+
+      // Even with cursor still on source-room while entry.room_id is destination-room,
+      // the dedicated room-move timer retries bootstrapping_destination_tail automatically.
+      await eventually(async () => {
+        const move = await live.internals.store.getRoomMove(operationId);
+        return move?.phase === "active";
+      }, "bootstrapping_destination_tail 503 -> 200 automatic progression to active", 6_000);
+      assert.equal(destTailAttempts, 2);
+      const finalMove = await live.internals.store.getRoomMove(operationId);
+      assert.equal(finalMove?.destination_cursor, "msg_9");
+      assert.equal((await live.internals.supervisedInbox.cursor("room_move_503_to_active"))?.room_id, "destination-room");
+      assert.equal((await live.internals.supervisedInbox.cursor("room_move_503_to_active"))?.last_observed_message_id, "msg_9");
+      const [tailEffect] = listEffectsForAgent(live.internals.stateDatabase.connection, "room_move_503_to_active", {
+        kind: ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+      });
+      assert.equal(tailEffect?.state, "completed");
+    } finally {
+      await live.cleanup();
+    }
   }
 });

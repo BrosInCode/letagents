@@ -41,6 +41,7 @@ import { attestProviderSpawnPolicy } from "#provider-runtime/agents/provider-spa
 import { OpenModelProviderAdapter } from "#provider-runtime/agents/open-model-provider-adapter.js";
 import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
 import { ProviderActionPortRouter } from "../provider-action-port-router.js";
+import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import { ExecutionProtocolError } from "../execution-protocol.js";
 import { ProviderStopError } from "../daemon-error-policy.js";
 import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
@@ -4258,4 +4259,48 @@ test("converge reads entries in summary mode while provider-birth checkpoints re
   assert.equal(attachOps.includes("getEntryWithVersion:default"), false);
   assert.equal(attachRuntime.entry().activity?.length, 24);
   assert.deepEqual(attachRuntime.entry().activity?.[0]?.payload, { index: 1, blob: "x".repeat(64) });
+});
+
+test("request() and converge() invoke delivery.start outside serializeEntry so pending room-move runRoomMove cannot self-deadlock", async () => {
+  const gate = new EntryConcurrencyGate({ isHandoffScheduled: () => false });
+  let roomMoveEntries = 0;
+  const runtime = harness({
+    entry: {
+      ...baseEntry(),
+      delivery_mode: "daemon_inbox",
+      desired_state: "running",
+      observed_state: "working",
+      provider_ref: {
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-1",
+        provider_continuation_id: "continuation-1",
+        provider_connection: returnedHandle.providerConnection,
+      },
+    },
+  });
+  runtime.liveHandles.set("agent-1", { ...returnedHandle, observedState: "working" });
+  runtime.options.delivery.start = async (entryId, mode) => {
+    assert.equal(entryId, "agent-1");
+    assert.equal(mode, "ensure");
+    // Simulates SupervisedDeliveryLifecycleCoordinator.start -> RoomMoveCoordinator.reconcile -> entryConcurrency.runRoomMove.
+    const outcome = await gate.runRoomMove(entryId, "excluded", async () => {
+      roomMoveEntries += 1;
+      return "reconciled";
+    });
+    assert.equal(outcome, "reconciled");
+  };
+  runtime.options.concurrency.serializeEntry = (entryId, operation) => gate.run(entryId, operation);
+
+  runtime.coordinator.request("agent-1");
+  await Promise.race([
+    runtime.coordinator.drainConvergence(),
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("request() deadlocked on serializeEntry")), 2_000)),
+  ]);
+  assert.equal(roomMoveEntries, 1);
+
+  await Promise.race([
+    runtime.coordinator.converge("agent-1"),
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("converge() deadlocked on serializeEntry")), 2_000)),
+  ]);
+  assert.equal(roomMoveEntries, 2);
 });
