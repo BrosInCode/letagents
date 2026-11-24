@@ -799,7 +799,10 @@ export class ExecutionCaptureCoordinator {
       }
       this.report(lane, "identity_unavailable"); return false;
     }
-    let token = lane.observer ?? this.bind(lane, initial, initial);
+    const staleArchivedObserver = lane.observer !== null
+      && lane.observer.observerRuntimeGenerationId !== initial.id
+      && Boolean(recoveredRuntime(this.database, lane.agentId, lane.observer.observerRuntimeGenerationId));
+    let token = lane.observer && !staleArchivedObserver ? lane.observer : this.bind(lane, initial, initial);
     const position = lane.subscription!.position();
     if (!Number.isSafeInteger(position.latestSequence) || !Number.isSafeInteger(position.firstRetainedSequence)
       || position.latestSequence < 0 || position.firstRetainedSequence < 1 || position.firstRetainedSequence > position.latestSequence + 1) {

@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { BOUNDED_MCP_EFFECT_KIND } from "../effect-journal/index.js";
-import { pendingRuntimeRecovery } from "../runtime-recovery-journal.js";
+import { archiveExitedUndispatchedCursorRuntime, pendingRuntimeRecovery } from "../runtime-recovery-journal.js";
 import { prepareRoomContext } from "../prepared-room-context.js";
 import { FOLLOW_UP_ENDED } from "../task-continuity.js";
 import { cancelInterruptedSupervisedTurn, readDurableNativeFailure } from "../supervised-agent-history-retention.js";
@@ -287,7 +287,10 @@ export abstract class InboxDeliveryStore extends InboxRoomMoveStore {
       const label = input.domain === "result_recovery" ? "Result recovery"
         : input.domain === "publication" ? "Reply publication" : "Pre-dispatch preparation";
       const error = exhausted ? `${label} failed ${attempt} times: ${input.error}` : input.error;
-      if (reset) run(database.prepare("DELETE FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?"), inboxItemId);
+      if (reset) {
+        archiveExitedUndispatchedCursorRuntime(database, rowToProviderTurnBinding(binding!), timestamp);
+        run(database.prepare("DELETE FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?"), inboxItemId);
+      }
       run(database.prepare(`UPDATE inbox_items
         SET state=?,attempt_count=?,provider_turn_id=?,last_error=?,failure_code=NULL,
             blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?
