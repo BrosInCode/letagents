@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, statSync, utimesSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readArchivedReview, reviewArchiveReference } from '../../../../shared/workspace-review-archive.mjs';
+import { archiveWorkspaceReview, readArchivedReview, reviewArchiveReference, verifyWorkspaceReviewRecoverySet } from '../../../../shared/workspace-review-archive.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { REVIEW_PAGE_SIZE } from '../../../../shared/workspace-review.mjs';
@@ -122,6 +122,57 @@ test('a missing or invalid historical digest leaves its only local bytes intact'
   db.exec(`PRAGMA user_version=54; CREATE TABLE room_workspace_reviews (
     agent_id TEXT, room_id TEXT, source_message_id TEXT, digest TEXT, data TEXT, uploaded_pages INTEGER);
     INSERT INTO room_workspace_reviews VALUES('a','r','m','invalid','retained',0)`);
-  assert.throws(() => new RoomWorkspaceStore(db).maintainArchives(0), /Invalid workspace review archive/);
-  assert.equal(db.prepare('SELECT data FROM room_workspace_reviews').get()!.data, 'retained');
+  const next = 'Good next row';
+  db.prepare("INSERT INTO room_workspace_reviews VALUES('a','r','m2',?,?,0)").run(createHash('sha256').update(next).digest('hex'), next);
+  const store = new RoomWorkspaceStore(db);
+  assert.throws(() => store.maintainArchives(0), /Invalid workspace review archive/);
+  assert.equal(db.prepare("SELECT data FROM room_workspace_reviews WHERE source_message_id='m'").get()!.data, 'retained');
+  assert.equal(store.maintainArchives(1), true);
+  assert.ok(reviewArchiveReference(db.prepare("SELECT data FROM room_workspace_reviews WHERE source_message_id='m2'").get()!.data));
+});
+
+test('recovery verifies copied archives, repairs missing or changed ciphertext, and refuses an unrecoverable set', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'review-set-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'state.sqlite');
+  const db = new DatabaseSync(path);
+  t.after(() => db.close());
+  db.exec('PRAGMA user_version=54; CREATE TABLE room_workspace_reviews(digest TEXT,data TEXT)');
+  const data = 'original'.repeat(REVIEW_PAGE_SIZE);
+  const digest = createHash('sha256').update(data).digest('hex');
+  const envelope = archiveWorkspaceReview(path, data, digest);
+  db.prepare('INSERT INTO room_workspace_reviews VALUES(?,?)').run(digest, envelope);
+  const ref = reviewArchiveReference(envelope)!;
+  const name = readdirSync(path + '.reviews')[0];
+  const primary = join(path + '.reviews', name);
+  const mirror = join(path + '.reviews-recovery', name);
+  const original = readFileSync(primary);
+
+  unlinkSync(mirror);
+  verifyWorkspaceReviewRecoverySet(path, db);
+  assert.deepEqual(readFileSync(mirror), original, 'missing mirror is repaired');
+  const oldMtime = statSync(mirror).mtime;
+  const damaged = Buffer.from(original); damaged[1] ^= 1;
+  writeFileSync(mirror, damaged);
+  utimesSync(mirror, oldMtime, oldMtime);
+  verifyWorkspaceReviewRecoverySet(path, db);
+  assert.deepEqual(readFileSync(mirror), original, 'a same-size damaged mirror cannot reuse its receipt');
+
+  const receipt = mirror + '.verified';
+  const priorReceipt = existsSync(receipt) ? readFileSync(receipt) : null;
+  unlinkSync(mirror);
+  copyFileSync(primary, mirror);
+  unlinkSync(primary);
+  verifyWorkspaceReviewRecoverySet(path, db);
+  assert.equal(readArchivedReview(path, ref, digest), data, 'valid relocated ciphertext works even without the primary');
+  if (priorReceipt && existsSync(receipt)) {
+    assert.notDeepEqual(readFileSync(receipt), priorReceipt, 'the new file identity was reauthenticated');
+    const checked = statSync(receipt, { bigint: true }).mtimeNs;
+    verifyWorkspaceReviewRecoverySet(path, db);
+    assert.equal(statSync(receipt, { bigint: true }).mtimeNs, checked, 'an unchanged mirror keeps its authenticated receipt');
+  }
+
+  writeFileSync(mirror, damaged);
+  assert.throws(() => verifyWorkspaceReviewRecoverySet(path, db));
+  assert.deepEqual(readFileSync(mirror), damaged);
 });

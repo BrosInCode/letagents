@@ -1,5 +1,5 @@
 import { encodeWorkspaceReview, REVIEW_LIMIT, REVIEW_PAGE_SIZE, type WorkspaceReview, type WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
-import { archiveWorkspaceReview, discardUncommittedReviewArchive, pruneUnreferencedReviewArchives, readArchivedReviewPage, reviewArchiveReference } from '../../../shared/workspace-review-archive.mjs';
+import { InvalidInlineReviewError, archiveWorkspaceReview, discardUncommittedReviewArchive, pruneUnreferencedReviewArchives, readArchivedReviewPage, reviewArchiveReference } from '../../../shared/workspace-review-archive.mjs';
 import type { DatabaseSync } from 'node:sqlite';
 import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from '../../../shared/room-agent-work.mjs';
 
@@ -127,7 +127,13 @@ export class RoomWorkspaceStore {
         const row = this.db.prepare(`SELECT rowid,digest,data FROM room_workspace_reviews
           WHERE rowid>? AND (${this.reviewSizeSql}>90 OR data NOT GLOB '@review1:*') ORDER BY rowid LIMIT 1`).get(this.lastArchiveRow);
         if (row) {
-          newArchive = archiveWorkspaceReview(this.databasePath, String(row.data), String(row.digest));
+          try { newArchive = archiveWorkspaceReview(this.databasePath, String(row.data), String(row.digest)); }
+          catch (error) {
+            // An invalid immutable source can only be preserved inline. It must
+            // not prevent subsequent valid rows from migrating on this pass.
+            if (error instanceof InvalidInlineReviewError) this.lastArchiveRow = Number(row.rowid);
+            throw error;
+          }
           this.db.prepare('UPDATE room_workspace_reviews SET data=? WHERE rowid=?').run(newArchive, row.rowid);
           committing = true;
           this.db.exec('COMMIT');
@@ -142,7 +148,7 @@ export class RoomWorkspaceStore {
       this.db.exec('COMMIT');
       return false;
     } catch (error) {
-      this.archiveRetryAt = now + 30_000;
+      if (!(error instanceof InvalidInlineReviewError)) this.archiveRetryAt = now + 30_000;
       this.rollbackArchive('ROLLBACK', committing, newArchive);
       throw error;
     }

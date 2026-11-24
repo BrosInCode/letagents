@@ -1,7 +1,7 @@
 // The envelope lives in the supervisor row (and its encrypted recovery snapshot).
 // The immutable file contains authenticated pages, so uploads need only one page
 // of memory. Dropping a live reference drops its key as well.
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, readSync, readdirSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { assertOwnerPrivateSync, createPrivateDirSync, openNoFollowSync, syncDirectorySync, writePrivateFileAtomicallySync } from './owner-private-fs.mjs';
@@ -9,9 +9,13 @@ import { REVIEW_LIMIT, REVIEW_PAGE_SIZE } from './workspace-review.mjs';
 
 const prefix = '@review1:';
 const tagSize = 16;
+const readRegular = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0);
 const folders = databasePath => [databasePath + '.reviews', databasePath + '.reviews-recovery'];
 const filename = key => createHash('sha256').update(key).digest('hex') + '.review';
 function invalid() { throw new Error('Invalid workspace review archive.'); }
+export class InvalidInlineReviewError extends Error {
+  constructor() { super('Invalid workspace review archive source data.'); }
+}
 
 export function reviewArchiveReference(value) {
   if (typeof value !== 'string' || !value.startsWith('@')) return null;
@@ -28,7 +32,7 @@ function nonce(index) {
 
 function withArchive(directory, reference, callback) {
   assertOwnerPrivateSync(directory, { kind: 'directory' });
-  const descriptor = openNoFollowSync(join(directory, filename(reference.key)), constants.O_RDONLY);
+  const descriptor = openNoFollowSync(join(directory, filename(reference.key)), readRegular);
   try {
     const info = fstatSync(descriptor);
     const expected = reference.size + Math.ceil(reference.size / REVIEW_PAGE_SIZE) * tagSize;
@@ -37,7 +41,7 @@ function withArchive(directory, reference, callback) {
   } finally { closeSync(descriptor); }
 }
 
-function readPage(descriptor, reference, digest, index) {
+function readPage(descriptor, reference, digest, index, verifiedCiphertext) {
   const count = Math.min(REVIEW_PAGE_SIZE, reference.size - index * REVIEW_PAGE_SIZE);
   if (!Number.isSafeInteger(index) || index < 0 || count <= 0 || !/^[a-f0-9]{64}$/.test(digest)) invalid();
   const bytes = Buffer.allocUnsafe(count + tagSize);
@@ -52,7 +56,83 @@ function readPage(descriptor, reference, digest, index) {
   cipher.setAuthTag(bytes.subarray(count));
   const plaintext = cipher.update(bytes.subarray(0, count));
   cipher.final();
+  if (verifiedCiphertext) bytes.copy(verifiedCiphertext, position);
   return plaintext;
+}
+
+function checkPayload(descriptor, reference, digest, verifiedCiphertext) {
+  const hash = createHash('sha256');
+  for (let i = 0; i * REVIEW_PAGE_SIZE < reference.size; i++) hash.update(readPage(descriptor, reference, digest, i, verifiedCiphertext));
+  if (hash.digest('hex') !== digest) invalid();
+}
+
+function ensureArchiveDirectory(directory) {
+  try { createPrivateDirSync(directory); syncDirectorySync(dirname(directory)); }
+  catch (error) { if (error.code !== 'EEXIST') throw error; }
+  assertOwnerPrivateSync(directory, { kind: 'directory' });
+}
+
+// The optional receipt describes the exact authenticated recovery file on this
+// volume. Copying it to a new inode or changing its contents invalidates it.
+// Filesystems without reliable file IDs/change times always pay for a full check.
+function verificationStamp(descriptor, reference, digest) {
+  const stat = fstatSync(descriptor, { bigint: true });
+  if (!stat.ino || !stat.ctimeNs || !(stat.ctimeNs % 1_000_000_000n)) return null;
+  return createHmac('sha256', reference.key)
+    .update(['letagents-review-mirror-v1', digest, reference.size, stat.dev, stat.ino,
+      stat.size, stat.ctimeNs, stat.mtimeNs].join('/')).digest();
+}
+
+function receiptMatches(path, expected) {
+  let fd;
+  try {
+    fd = openNoFollowSync(path, readRegular);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size !== expected.length) return false;
+    const stored = Buffer.alloc(expected.length);
+    return readSync(fd, stored, 0, stored.length, 0) === stored.length && stored.equals(expected);
+  } catch { return false; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
+
+function verifyMirror(directory, reference, digest, useReceipt) {
+  const receipt = join(directory, filename(reference.key) + '.verified');
+  withArchive(directory, reference, descriptor => {
+    const before = verificationStamp(descriptor, reference, digest);
+    if (useReceipt && before && receiptMatches(receipt, before)) return;
+    checkPayload(descriptor, reference, digest);
+    if (before) {
+      if (!before.equals(verificationStamp(descriptor, reference, digest) ?? Buffer.alloc(0))) invalid();
+      // A receipt is an optimization; a valid read-only recovery set (e.g. a
+      // restored archive) still verifies even if the cache cannot be renewed.
+      try { writePrivateFileAtomicallySync(receipt, before); } catch { /* verify again next time */ }
+    }
+  });
+}
+
+/** Caller holds the original source transaction. An envelope alone cannot
+ * supersede an existing recovery set until all of its archive refs resolve. */
+export function verifyWorkspaceReviewRecoverySet(databasePath, database) {
+  if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 54
+    || !database.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='room_workspace_reviews'").get()) return;
+  const [primary, recovery] = folders(databasePath);
+  for (const row of database.prepare("SELECT digest,data FROM room_workspace_reviews WHERE data GLOB '@*'").iterate()) {
+    const reference = reviewArchiveReference(row.data);
+    if (!reference || !/^[a-f0-9]{64}$/.test(row.digest)) invalid();
+    try { verifyMirror(recovery, reference, row.digest, true); }
+    catch {
+      // Authenticate the primary first. A relocated primary or recovery copy
+      // needs no original inode or receipt; the envelope key authenticates it.
+      const bytes = withArchive(primary, reference, descriptor => {
+        const copy = Buffer.allocUnsafe(reference.size + Math.ceil(reference.size / REVIEW_PAGE_SIZE) * tagSize);
+        checkPayload(descriptor, reference, row.digest, copy);
+        return copy;
+      });
+      ensureArchiveDirectory(recovery);
+      writePrivateFileAtomicallySync(join(recovery, filename(reference.key)), bytes);
+      verifyMirror(recovery, reference, row.digest, false);
+    }
+  }
 }
 
 function readArchive(databasePath, reference, read) {
@@ -77,7 +157,7 @@ export function readArchivedReview(databasePath, reference, digest) {
 
 export function archiveWorkspaceReview(databasePath, data, digest) {
   if (typeof data !== 'string' || !data.length || data.length > REVIEW_LIMIT
-    || createHash('sha256').update(data).digest('hex') !== digest || Buffer.byteLength(data) !== data.length) invalid();
+    || createHash('sha256').update(data).digest('hex') !== digest || Buffer.byteLength(data) !== data.length) throw new InvalidInlineReviewError();
   const key = randomBytes(32);
   const pages = Math.ceil(data.length / REVIEW_PAGE_SIZE);
   const bytes = Buffer.allocUnsafe(data.length + tagSize * pages);
@@ -95,19 +175,14 @@ export function archiveWorkspaceReview(databasePath, data, digest) {
   // directory; later provider upgrades do not have to copy this object again.
   const reference = prefix + data.length + ':' + key.toString('hex');
   try {
-    for (const directory of folders(databasePath)) {
-      try { createPrivateDirSync(directory); syncDirectorySync(dirname(directory)); }
-      catch (error) { if (error.code !== 'EEXIST') throw error; }
-      assertOwnerPrivateSync(directory, { kind: 'directory' });
-      writePrivateFileAtomicallySync(join(directory, filename(key)), bytes);
-      const ref = { size: data.length, key };
-      const verified = withArchive(directory, ref, descriptor => {
-        const hash = createHash('sha256');
-        for (let i = 0; i < pages; i++) hash.update(readPage(descriptor, ref, digest, i));
-        return hash.digest('hex');
-      });
-      if (verified !== digest) invalid();
-    }
+    const [primary, recovery] = folders(databasePath);
+    ensureArchiveDirectory(primary);
+    writePrivateFileAtomicallySync(join(primary, filename(key)), bytes);
+    const ref = { size: data.length, key };
+    withArchive(primary, ref, descriptor => checkPayload(descriptor, ref, digest));
+    ensureArchiveDirectory(recovery);
+    writePrivateFileAtomicallySync(join(recovery, filename(key)), bytes);
+    verifyMirror(recovery, ref, digest, false);
   } catch (error) {
     discardUncommittedReviewArchive(databasePath, reference);
     throw error;
@@ -123,7 +198,9 @@ export function discardUncommittedReviewArchive(databasePath, value) {
   for (const directory of folders(databasePath)) {
     try {
       assertOwnerPrivateSync(directory, { kind: 'directory' });
-      unlinkSync(join(directory, filename(reference.key)));
+      const path = join(directory, filename(reference.key));
+      try { unlinkSync(path + '.verified'); } catch { /* A receipt is optional. */ }
+      unlinkSync(path);
     } catch { /* An unavailable volume can be swept once recovery releases it. */ }
   }
 }
@@ -146,8 +223,9 @@ export function pruneUnreferencedReviewArchives(databasePath, references) {
     try { assertOwnerPrivateSync(directory, { kind: 'directory' }); }
     catch (error) { if (error.code === 'ENOENT') continue; throw error; }
     for (const name of readdirSync(directory)) {
-      const abandonedWrite = /^\.[0-9a-f-]{36}\.[a-f0-9]{64}\.review\.tmp$/.test(name);
-      const unreferenced = !snapshotPresent && /^[a-f0-9]{64}\.review$/.test(name) && !retained.has(name);
+      const abandonedWrite = /^\.[0-9a-f-]{36}\.[a-f0-9]{64}\.review(?:\.verified)?\.tmp$/.test(name);
+      const object = /^([a-f0-9]{64}\.review)(?:\.verified)?$/.exec(name);
+      const unreferenced = !snapshotPresent && object && !retained.has(object[1]);
       if (abandonedWrite || unreferenced) unlinkSync(join(directory, name));
     }
   }
