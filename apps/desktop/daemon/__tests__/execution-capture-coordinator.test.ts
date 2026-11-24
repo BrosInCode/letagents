@@ -12,7 +12,7 @@ import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSu
 import type { ProviderActionConnectionRef, ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { projectRoomAgentManifestEntry } from "../room-agent-state-projection.js";
-import { archiveExitedRuntimes } from "../runtime-recovery-journal.js";
+import { archiveExitedRuntimes, archiveExitedUndispatchedCursorRuntime } from "../runtime-recovery-journal.js";
 import type { DaemonManifestEntry } from "../types.js";
 
 const now = "2026-08-31T00:00:00.000Z";
@@ -1793,5 +1793,148 @@ test("detached-lane runtimeFailure stays pending until both subject and observer
   } finally {
     f.capture.close();
     if (f.db.isOpen) f.db.close();
+  }
+});
+
+test("capture flush stays fail-closed on a suspended lane and reused-handle archival fences late facts from the archived child", async () => {
+  // 1. Suspended lane must fail closed on flush() (never bypass suspension).
+  {
+    const f = fixture("cursor_cli");
+    try {
+      f.install();
+      f.emit(ready);
+      await flush();
+      f.observer.markUnavailable();
+      f.emit(ready);
+      await flush();
+      assert.equal(f.admission(), "unavailable");
+      assert.equal(f.capture.recordBlock(f.tokenFor()), "source_gap");
+      assert.throws(() => f.capture.flush(f.tokenFor()), /identity_mismatch/);
+    } finally {
+      f.capture.close();
+      if (f.db.isOpen) f.db.close();
+    }
+  }
+
+  // 2. After archiving an exited undispatched Cursor runtime on a reused handle, a late fact from the
+  //    archived child still fails closed, while a new child advances cleanly to ready with recordBlock=null.
+  {
+    const f = fixture("cursor_cli");
+    try {
+      f.bindTurn("turn-1", "msg-1", "dispatching");
+      f.install();
+      await flush();
+      f.emit({ domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none", providerContinuationId: "continuation", providerTurnId: "turn-1" });
+      f.emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence: "process_exit", sideEffects: "none" });
+      f.emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
+      f.capture.flush(f.tokenFor());
+      const child1 = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
+
+      // Move live manifest off child1 before archiving (exact post-compensation state).
+      f.db.prepare("UPDATE agents SET provider='cursor', provider_connection_json=? WHERE agent_id='agent'")
+        .run(JSON.stringify({ kind: "cursor_cli", pid: null, processIdentity: null }));
+      f.db.exec("BEGIN IMMEDIATE");
+      try {
+        const archived = archiveExitedUndispatchedCursorRuntime(f.db, {
+          inbox_item_id: "inbox-1",
+          agent_id: "agent",
+          room_id: "room",
+          work_attempt_id: "workspace",
+          origin_execution_generation_id: "generation",
+          provider_continuation_id: "continuation",
+          provider_turn_id: "turn-1",
+        }, now);
+        assert.equal(archived, child1);
+        f.db.exec("COMMIT");
+      } catch (error) {
+        f.db.exec("ROLLBACK");
+        throw error;
+      }
+
+      // Advance the SAME lane to a fresh child (pid 43, birth-next) on the same source.
+      const nextConnection = { kind: "cursor_cli" as const, pid: 43, processIdentity: "birth-next" };
+      const child2 = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 43, "birth-next");
+      new ExecutionShadowStore(f.db).registerRuntime({
+        agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: child2,
+        provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) + 100,
+      });
+      f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'").run(JSON.stringify(nextConnection));
+      f.handle.pid = 43;
+      f.handle.providerConnection = nextConnection;
+      const nextToken = f.tokenFor();
+      f.capture.advance(nextToken);
+      f.observer.emit(ready, "birth-next", 43);
+      await flush();
+
+      assert.equal(f.capture.captureAdmission(nextToken), "ready", "reused lane admits the next Cursor child cleanly");
+      assert.equal(f.capture.recordBlock(nextToken), null);
+      const observer = f.db.prepare("SELECT observer_runtime_generation_id,observer_epoch FROM execution_observers WHERE agent_id='agent'")
+        .get() as { observer_runtime_generation_id: string; observer_epoch: number };
+      assert.deepEqual({ ...observer }, { observer_runtime_generation_id: child2, observer_epoch: 3 });
+
+      // A late fact claiming the archived exited child1 still fails closed.
+      f.observer.emit(ready, "birth-secret", 42);
+      await flush();
+      assert.equal(f.capture.captureAdmission(nextToken), "unavailable");
+      assert.equal(f.capture.recordBlock(nextToken), "invalid_observation");
+      assert.throws(() => f.capture.flush(nextToken), /identity_mismatch/);
+    } finally {
+      f.capture.close();
+      if (f.db.isOpen) f.db.close();
+    }
+  }
+
+  // 3. A detached+suspended lane whose cached observer was archived never calls bind() or mutates execution_observers.
+  {
+    const f = fixture("cursor_cli");
+    try {
+      f.bindTurn("turn-ds", "msg-ds", "dispatching");
+      const detach = f.install();
+      await flush();
+      f.emit({ domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none", providerContinuationId: "continuation", providerTurnId: "turn-ds" });
+      f.emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence: "process_exit", sideEffects: "none" });
+      f.emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
+      f.capture.flush(f.tokenFor());
+      const child1 = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
+
+      // Suspend the lane cleanly with a genuine source gap on a fresh fact, then register child2 and archive child1
+      // after detaching so schedule() still drains the detached+suspended lane to preserve frontier.
+      const child2 = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 45, "birth-ds-next");
+      new ExecutionShadowStore(f.db).registerRuntime({
+        agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: child2,
+        provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) + 100,
+      });
+      f.observer.markUnavailable();
+      f.observer.emit(ready, "birth-ds-next", 45);
+      await flush();
+      assert.equal(f.capture.recordBlock(f.tokenFor()), "source_gap");
+
+      // Manually record a recovery boundary for child1 (simulating operator archival) and detach the suspended lane.
+      f.db.exec("BEGIN IMMEDIATE");
+      try {
+        f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES(?,?,?,?,?,'resume','complete',?,NULL,?,?)")
+          .run("op-detached-suspended", "agent", "room", "generation", child1,
+            JSON.stringify({ work_attempt_id: "workspace", execution_generation_id: "generation", provider_continuation_id: "continuation", provider_connection: null }),
+            now, now);
+        f.db.prepare("UPDATE execution_observers SET observer_epoch=observer_epoch+1 WHERE agent_id='agent' AND observer_runtime_generation_id=?")
+          .run(child1);
+        f.db.exec("COMMIT");
+      } catch (error) {
+        f.db.exec("ROLLBACK");
+        throw error;
+      }
+      const beforeObserver = f.db.prepare("SELECT observer_runtime_generation_id,observer_epoch FROM execution_observers WHERE agent_id='agent'")
+        .get() as { observer_runtime_generation_id: string; observer_epoch: number };
+      detach();
+      f.capture.refresh("agent");
+      await flush();
+      const afterObserver = f.db.prepare("SELECT observer_runtime_generation_id,observer_epoch FROM execution_observers WHERE agent_id='agent'")
+        .get() as { observer_runtime_generation_id: string; observer_epoch: number };
+      assert.deepEqual({ ...afterObserver }, { ...beforeObserver },
+        "a detached+suspended lane must never rebind execution_observers even after its cached observer was archived");
+    } finally {
+      f.capture.close();
+      if (f.db.isOpen) f.db.close();
+    }
   }
 });

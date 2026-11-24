@@ -9,7 +9,7 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { DAEMON_STATE_USER_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
-import { ExecutionShadowStore } from "../execution-shadow-store.js";
+import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import { RETAINED_TERMINAL_TIMELINE_EVENTS, RETAINED_TERMINAL_CONTINUATION_REPAIRS, settleCapturedExecutionAttempts } from "../supervised-agent-history-retention.js";
 import type { DaemonManifestEntry } from "../types.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
@@ -455,6 +455,302 @@ test("an undispatched reset ignores compact evidence from an older execution gen
     assert.equal(await store.providerTurnBinding(item!.inbox_item_id), null);
     await store.close();
   } finally { await env.cleanup(); }
+});
+
+test("undispatched reset atomically archives an exited lost Cursor runtime and rejects every boundary mismatch without altering authority", async () => {
+  const at = "2026-08-02T00:00:00.000Z";
+  const atMs = Date.parse(at);
+
+  const seedCase = async (options: {
+    agentId: string;
+    provider?: "cursor" | "codex";
+    runtimeState?: "starting" | "ready" | "exited";
+    turnState?: "none" | "active" | "terminal" | "lost";
+    sideEffects?: "none" | "possible" | "observed";
+    runRoomId?: string;
+    runGenerationId?: string;
+    runContinuationId?: string;
+    runWorkspaceId?: string;
+    extraRunOnRuntime?: boolean;
+    executionFact?: boolean;
+    pendingRecovery?: boolean;
+    liveAgentPointsToRuntime?: boolean;
+    agentProvider?: "cursor" | "codex";
+    agentConnectionJson?: string | null;
+    agentExecutionGenerationId?: string | null;
+    observerSourceId?: string | null;
+    omitObserverSourceRow?: boolean;
+    observerMaxSequence?: number;
+    observerPendingLifecycleFactId?: string | null;
+    terminalResult?: boolean;
+    effectRow?: boolean;
+    tombstoneRow?: boolean;
+    itemOutcome?: string | null;
+    priorPreDispatchFailures?: number;
+  }) => {
+    const env = await fixture();
+    const store = new SupervisedAgentInboxStore(env.database, () => at);
+    const roomId = "room";
+    const workAttemptId = TEST_PROVIDER_TURN_AUTHORITY.work_attempt_id;
+    const generationId = TEST_PROVIDER_TURN_AUTHORITY.origin_execution_generation_id;
+    const continuationId = TEST_PROVIDER_TURN_AUTHORITY.provider_continuation_id;
+    const providerTurnId = `cursor:turn:${options.agentId}`;
+    const [item] = await store.ingestPoll({
+      agent_id: options.agentId,
+      room_id: roomId,
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+    assert.ok(item);
+    await store.claimHead(options.agentId);
+    await store.checkpointDispatchIntent(item.inbox_item_id);
+    await store.checkpointTurnStarted(item.inbox_item_id, providerTurnId, TEST_PROVIDER_TURN_AUTHORITY);
+
+    const db = new DatabaseSync(env.database);
+    db.exec("PRAGMA foreign_keys=ON");
+    const runGen = options.runGenerationId ?? generationId;
+    const runRoom = options.runRoomId ?? roomId;
+    const runCont = options.runContinuationId ?? continuationId;
+    const runWorkspace = options.runWorkspaceId ?? workAttemptId;
+    const runtimeProvider = options.provider ?? "cursor";
+    const runtimeState = options.runtimeState ?? "exited";
+    const turnState = options.turnState ?? "lost";
+    const sideEffects = options.sideEffects ?? "none";
+    const birth = { kind: "cursor_cli" as const, pid: 7771, processIdentity: `birth-${options.agentId}` };
+    const runtimeId = executionRuntimeStorageIdentity(options.agentId, runGen, birth.kind, birth.pid, birth.processIdentity);
+    const attemptId = `attempt-${options.agentId}`;
+    const turnRowId = `turn-${options.agentId}`;
+    try {
+      db.prepare("INSERT OR IGNORE INTO execution_generations VALUES(?,?,?)").run(runGen, options.agentId, atMs);
+      db.prepare(`INSERT INTO execution_runtime_generations
+        (runtime_generation_id,execution_generation_id,agent_id,provider,authority_mode,runtime_state,control_state,continuation_state,config_revision,created_at_ms,ended_at_ms)
+        VALUES(?,?,?,?,'typed',?,'lost','available',1,?,?)`)
+        .run(runtimeId, runGen, options.agentId, runtimeProvider, runtimeState, atMs, runtimeState === "exited" ? atMs + 10 : null);
+      db.prepare(`INSERT INTO execution_message_attempts(attempt_id,agent_id,room_id,source_message_id,state,created_at_ms)
+        VALUES(?,?,?,?,'active',?)`).run(attemptId, options.agentId, runRoom, "1", atMs);
+      db.prepare("INSERT INTO execution_attempt_generations VALUES(?,?,?,?,?,?)")
+        .run(attemptId, options.agentId, runRoom, runGen, runWorkspace, atMs);
+      db.prepare(`INSERT INTO runs
+        (turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(turnRowId, attemptId, options.agentId, runRoom, runGen, runtimeId, runCont, providerTurnId,
+          turnState, sideEffects, atMs, turnState === "terminal" || turnState === "lost" ? atMs + 5 : null);
+      const observerSourceId = options.observerSourceId !== undefined ? options.observerSourceId : `src-${options.agentId}`;
+      const observerMaxSeq = options.observerMaxSequence ?? 3;
+      const pendingLifecycleFactId = options.observerPendingLifecycleFactId ?? null;
+      db.prepare(`INSERT INTO execution_observers
+        (agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,daemon_generation_id,observer_epoch,last_source_sequence,max_observed_sequence,recovery_turn_id,bound_at_ms,source_id,pending_lifecycle_fact_id)
+        VALUES(?,?,?,?,?,?,1,3,?,NULL,?,?,?)`)
+        .run(options.agentId, runGen, runtimeId, runGen, runtimeId, "1", observerMaxSeq, atMs, observerSourceId, pendingLifecycleFactId);
+      if (observerSourceId !== null && !options.omitObserverSourceRow) {
+        db.prepare("INSERT INTO execution_observer_sources(agent_id,source_id) VALUES(?,?)").run(options.agentId, observerSourceId);
+      }
+      const connectionJson = options.agentConnectionJson !== undefined
+        ? options.agentConnectionJson
+        : JSON.stringify(options.liveAgentPointsToRuntime
+          ? birth
+          : { kind: "cursor_cli", pid: null, processIdentity: null });
+      const agentExecGen = options.agentExecutionGenerationId !== undefined ? options.agentExecutionGenerationId : generationId;
+      db.prepare(`INSERT INTO agents(agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,config_revision,runtime_configuration_revision,desired_state,observed_state,condition,work_attempt_id,provider_work_attempt_id,provider_continuation_id,provider_execution_generation_id,provider_connection_json)
+        VALUES(?,0,1,'owner',?,'Agent',?,?,'charter',1,1,'running','idle','none',?,?,?,?,?)`)
+        .run(options.agentId, at, roomId, options.agentProvider ?? "cursor", workAttemptId, workAttemptId, continuationId, agentExecGen, connectionJson);
+
+      if (options.extraRunOnRuntime) {
+        const extraAttempt = `attempt-extra-${options.agentId}`;
+        db.prepare(`INSERT INTO execution_message_attempts(attempt_id,agent_id,room_id,source_message_id,state,created_at_ms)
+          VALUES(?,?,?,?,'active',?)`).run(extraAttempt, options.agentId, runRoom, "2", atMs);
+        db.prepare("INSERT INTO execution_attempt_generations VALUES(?,?,?,?,?,?)")
+          .run(extraAttempt, options.agentId, runRoom, runGen, runWorkspace, atMs);
+        db.prepare(`INSERT INTO runs
+          (turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms)
+          VALUES(?,?,?,?,?,?,?,?,'terminal','none',?,?)`)
+          .run(`turn-extra-${options.agentId}`, extraAttempt, options.agentId, runRoom, runGen, runtimeId, runCont, "cursor:other-turn", atMs, atMs + 2);
+      }
+      if (options.executionFact) {
+        db.prepare(`INSERT INTO execution_facts
+          (fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,source_sequence,turn_id,execution_id,domain,kind,operation,side_effects,observed_at_ms)
+          VALUES(?,?,?,?,?,?,1,1,?,'exec-1','execution','started','command','none',?)`)
+          .run(`fact-${options.agentId}`, options.agentId, runGen, runtimeId, runGen, runtimeId, turnRowId, atMs + 1);
+      }
+      if (options.pendingRecovery) {
+        db.prepare("INSERT INTO agent_runtime_recoveries VALUES(?,?,?,?,?,'resume','prepared',?,NULL,?,?)")
+          .run(`pending-${options.agentId}`, options.agentId, roomId, runGen, runtimeId, JSON.stringify({ work_attempt_id: workAttemptId, execution_generation_id: runGen, provider_continuation_id: runCont, provider_connection: null }), at, at);
+      }
+      if (options.terminalResult) {
+        db.prepare(`INSERT INTO supervised_agent_terminal_results
+          (inbox_item_id,agent_id,execution_generation_id,provider_turn_id,outcome,normalized_text,evidence_source,terminal_evidence_json,observed_at,updated_at)
+          VALUES(?,?,?,?,'no_reply',NULL,'stream','{}',?,?)`)
+          .run(item.inbox_item_id, options.agentId, generationId, providerTurnId, at, at);
+      }
+      if (options.effectRow) {
+        seedBoundedMcpEffectRow(db, {
+          id: `eff-${options.agentId}`,
+          agent_id: options.agentId,
+          room_id: roomId,
+          execution_generation_id: generationId,
+          provider_turn_id: providerTurnId,
+          mcp_request_id: "req-1",
+          tool_name: "send_message",
+          state: "completed",
+        });
+      }
+      if (options.tombstoneRow) {
+        db.prepare(`INSERT INTO effect_tombstones
+          (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_sha256,request_bytes,mutation,state,result_json,error,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(`tomb-${options.agentId}`, options.agentId, roomId, generationId, providerTurnId, "req-1", "send_message", "0".repeat(64), 2, 1, "uncertain", null, "uncertain", at, at);
+      }
+      if (options.itemOutcome) {
+        db.prepare("UPDATE inbox_items SET outcome=? WHERE inbox_item_id=?").run(options.itemOutcome, item.inbox_item_id);
+      }
+      for (let i = 1; i <= (options.priorPreDispatchFailures ?? 0); i += 1) {
+        db.prepare(`INSERT INTO supervised_agent_inbox_events(inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
+          VALUES(?,?,?,?,?,?)`).run(item.inbox_item_id, 100 + i, `retry_failure:pre_dispatch:${i}`, "retry_scheduled", at, `prior ${i}`);
+      }
+    } finally {
+      db.close();
+    }
+    return { env, store, item, providerTurnId, runtimeId };
+  };
+
+  // 1. Happy path: exact exited lost Cursor runtime is atomically archived with the inbox reset.
+  {
+    const c = await seedCase({ agentId: "cursor-ok" });
+    try {
+      const { item: reset, attempt } = await c.store.recordRetryFailure(c.item.inbox_item_id, {
+        domain: "pre_dispatch", error: "wrapper not started", resetUndispatchedTurnId: c.providerTurnId,
+      });
+      assert.equal(attempt, 1);
+      assert.equal(reset.state, "pending");
+      assert.equal(reset.provider_turn_id, null);
+      assert.equal(reset.attempt_count, 0);
+      assert.equal(await c.store.providerTurnBinding(c.item.inbox_item_id), null);
+      const check = new DatabaseSync(c.env.database);
+      try {
+        const rec = check.prepare("SELECT phase,mode,runtime_generation_id,observer_json FROM agent_runtime_recoveries WHERE agent_id=?")
+          .get("cursor-ok") as { phase: string; mode: string; runtime_generation_id: string; observer_json: string | null };
+        assert.equal(rec.phase, "complete");
+        assert.equal(rec.mode, "resume");
+        assert.equal(rec.runtime_generation_id, c.runtimeId);
+        assert.equal((JSON.parse(rec.observer_json!) as { observer_epoch: number }).observer_epoch, 1);
+        const obs = check.prepare("SELECT observer_epoch FROM execution_observers WHERE agent_id=?").get("cursor-ok") as { observer_epoch: number };
+        assert.equal(obs.observer_epoch, 2);
+      } finally { check.close(); }
+      await c.store.close();
+    } finally { await c.env.cleanup(); }
+  }
+
+  // 2. Every fail-closed rejection rolls back the entire transaction and preserves original authority untouched.
+  const rejections: Array<{ label: string; opts: Parameters<typeof seedCase>[0]; pattern: RegExp; expectPendingCount?: number }> = [
+    { label: "runtime not exited (ready)", opts: { agentId: "rej-ready", runtimeState: "ready" }, pattern: /already recorded as exited/ },
+    { label: "runtime not exited (starting)", opts: { agentId: "rej-starting", runtimeState: "starting" }, pattern: /already recorded as exited/ },
+    { label: "turn active", opts: { agentId: "rej-active", turnState: "active" }, pattern: /lost turn with no recorded side effects/ },
+    { label: "turn terminal", opts: { agentId: "rej-terminal", turnState: "terminal" }, pattern: /lost turn with no recorded side effects/ },
+    { label: "turn none", opts: { agentId: "rej-none", turnState: "none" }, pattern: /lost turn with no recorded side effects/ },
+    { label: "side effects possible", opts: { agentId: "rej-se-possible", sideEffects: "possible" }, pattern: /lost turn with no recorded side effects/ },
+    { label: "side effects observed", opts: { agentId: "rej-se-observed", sideEffects: "observed" }, pattern: /lost turn with no recorded side effects/ },
+    { label: "recorded execution activity", opts: { agentId: "rej-exec-fact", executionFact: true }, pattern: /recorded execution activity/ },
+    { label: "wrong provider (codex run on cursor agent)", opts: { agentId: "rej-codex", provider: "codex", agentProvider: "cursor" }, pattern: /exact bound turn authority/ },
+    { label: "wrong generation", opts: { agentId: "rej-gen", runGenerationId: "other-generation" }, pattern: /exact bound turn authority/ },
+    { label: "wrong room", opts: { agentId: "rej-room", runRoomId: "other-room" }, pattern: /exact bound turn authority/ },
+    { label: "wrong continuation", opts: { agentId: "rej-cont", runContinuationId: "other-continuation" }, pattern: /exact bound turn authority/ },
+    { label: "wrong workspace", opts: { agentId: "rej-ws", runWorkspaceId: "other-attempt" }, pattern: /exact bound turn authority/ },
+    { label: "second turn on same runtime", opts: { agentId: "rej-extra-run", extraRunOnRuntime: true }, pattern: /carrying another turn/ },
+    { label: "pending runtime recovery", opts: { agentId: "rej-pending-rec", pendingRecovery: true }, pattern: /runtime recovery is pending/, expectPendingCount: 1 },
+    { label: "live agent still points to runtime", opts: { agentId: "rej-live-ref", liveAgentPointsToRuntime: true }, pattern: /still referenced by the live agent/ },
+    { label: "non-cursor agent row with cursor run", opts: { agentId: "rej-agent-provider", agentProvider: "codex", provider: "cursor" }, pattern: /requires a Cursor agent/ },
+    { label: "partial non-idle agent connection json", opts: { agentId: "rej-partial-conn", agentConnectionJson: JSON.stringify({ kind: "cursor_cli", pid: 7771, processIdentity: null }) }, pattern: /could not verify the live agent connection/ },
+    { label: "empty object agent connection json", opts: { agentId: "rej-empty-conn", agentConnectionJson: "{}" }, pattern: /could not verify the live agent connection/ },
+    { label: "live cursor connection missing execution generation", opts: { agentId: "rej-missing-gen", liveAgentPointsToRuntime: true, agentExecutionGenerationId: null }, pattern: /could not verify the live agent connection/ },
+    { label: "non-string processIdentity in agent connection json", opts: { agentId: "rej-bad-identity-type", agentConnectionJson: JSON.stringify({ kind: "cursor_cli", pid: 7771, processIdentity: 123 }) }, pattern: /could not verify the live agent connection/ },
+    { label: "gapped execution observer", opts: { agentId: "rej-gapped-obs", observerMaxSequence: 5 }, pattern: /incomplete or unverified observer/ },
+    { label: "null source_id execution observer", opts: { agentId: "rej-null-src", observerSourceId: null }, pattern: /incomplete or unverified observer/ },
+    { label: "unverified source_id missing from observer sources", opts: { agentId: "rej-unverified-src", omitObserverSourceRow: true }, pattern: /incomplete or unverified observer/ },
+    { label: "pending lifecycle projection on observer", opts: { agentId: "rej-pending-lifecycle", observerPendingLifecycleFactId: "fact-pending" }, pattern: /incomplete or unverified observer/ },
+    { label: "terminal result present", opts: { agentId: "rej-term-res", terminalResult: true }, pattern: /terminal or effect evidence/ },
+    { label: "effect row present", opts: { agentId: "rej-effect", effectRow: true }, pattern: /terminal or effect evidence/ },
+    { label: "effect tombstone present", opts: { agentId: "rej-tomb", tombstoneRow: true }, pattern: /terminal or effect evidence/ },
+    { label: "inbox outcome present", opts: { agentId: "rej-outcome", itemOutcome: JSON.stringify({ kind: "no_reply" }) }, pattern: /terminal or effect evidence/ },
+  ];
+
+  for (const { label, opts, pattern, expectPendingCount = 0 } of rejections) {
+    const c = await seedCase(opts);
+    try {
+      await assert.rejects(
+        c.store.recordRetryFailure(c.item.inbox_item_id, {
+          domain: "pre_dispatch", error: `reject ${label}`, resetUndispatchedTurnId: c.providerTurnId,
+        }),
+        pattern,
+        label,
+      );
+      const preserved = await c.store.get(c.item.inbox_item_id);
+      assert.equal(preserved?.state, "dispatching", `${label}: inbox state unchanged`);
+      assert.equal(preserved?.provider_turn_id, c.providerTurnId, `${label}: provider_turn_id preserved`);
+      assert.equal(preserved?.attempt_count, 1, `${label}: attempt_count preserved`);
+      assert.ok(await c.store.providerTurnBinding(c.item.inbox_item_id), `${label}: turn binding preserved`);
+
+      const check = new DatabaseSync(c.env.database);
+      try {
+        const recCount = Number((check.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=?").get(opts.agentId) as { n: number }).n);
+        assert.equal(recCount, expectPendingCount, `${label}: no recovery row written`);
+        const obsEpoch = Number((check.prepare("SELECT observer_epoch FROM execution_observers WHERE agent_id=?").get(opts.agentId) as { observer_epoch: number }).observer_epoch);
+        assert.equal(obsEpoch, 1, `${label}: observer_epoch unchanged`);
+        const rtState = String((check.prepare("SELECT runtime_state FROM execution_runtime_generations WHERE runtime_generation_id=?").get(c.runtimeId) as { runtime_state: string }).runtime_state);
+        assert.equal(rtState, opts.runtimeState ?? "exited", `${label}: runtime_state never mutated`);
+      } finally { check.close(); }
+      await c.store.close();
+    } finally { await c.env.cleanup(); }
+  }
+
+  // 3. Consistent non-Cursor agent + run skips Cursor archival cleanly and still resets to pending.
+  {
+    const c = await seedCase({
+      agentId: "codex-undispatched",
+      provider: "codex",
+      agentProvider: "codex",
+      runtimeState: "ready",
+      turnState: "none",
+      agentConnectionJson: JSON.stringify({ kind: "codex_app_server", pid: 7771, processIdentity: "birth-codex-undispatched" }),
+    });
+    try {
+      const { item: reset, attempt } = await c.store.recordRetryFailure(c.item.inbox_item_id, {
+        domain: "pre_dispatch", error: "codex turn never dispatched", resetUndispatchedTurnId: c.providerTurnId,
+      });
+      assert.equal(attempt, 1);
+      assert.equal(reset.state, "pending");
+      assert.equal(reset.provider_turn_id, null);
+      assert.equal(reset.attempt_count, 0);
+      assert.equal(await c.store.providerTurnBinding(c.item.inbox_item_id), null);
+      const check = new DatabaseSync(c.env.database);
+      try {
+        const recCount = Number((check.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=?").get("codex-undispatched") as { n: number }).n);
+        assert.equal(recCount, 0, "non-Cursor reset writes no Cursor recovery boundary");
+        const obsEpoch = Number((check.prepare("SELECT observer_epoch FROM execution_observers WHERE agent_id=?").get("codex-undispatched") as { observer_epoch: number }).observer_epoch);
+        assert.equal(obsEpoch, 1, "non-Cursor reset leaves observer_epoch untouched");
+      } finally { check.close(); }
+      await c.store.close();
+    } finally { await c.env.cleanup(); }
+  }
+
+  // 4. Exhausted 3rd pre-dispatch failure moves to blocked without archiving or deleting the binding.
+  {
+    const c = await seedCase({ agentId: "cursor-exhausted", priorPreDispatchFailures: 2 });
+    try {
+      const { item: blocked, attempt } = await c.store.recordRetryFailure(c.item.inbox_item_id, {
+        domain: "pre_dispatch", error: "wrapper failed third time", resetUndispatchedTurnId: c.providerTurnId,
+      });
+      assert.equal(attempt, 3);
+      assert.equal(blocked.state, "blocked");
+      assert.equal(blocked.provider_turn_id, c.providerTurnId);
+      assert.ok(await c.store.providerTurnBinding(c.item.inbox_item_id), "exhausted failure preserves binding");
+      const check = new DatabaseSync(c.env.database);
+      try {
+        const recCount = Number((check.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=?").get("cursor-exhausted") as { n: number }).n);
+        assert.equal(recCount, 0, "exhausted failure does not archive without reset");
+      } finally { check.close(); }
+      await c.store.close();
+    } finally { await c.env.cleanup(); }
+  }
 });
 
 test("pre-dispatch, exact-result recovery, and publication have independent durable retry budgets", async () => {

@@ -860,7 +860,18 @@ export abstract class SupervisedAgentDeliveryTurn extends SupervisedAgentDeliver
           });
           return;
         }
-        await retryFailure({ domain: "pre_dispatch", error: message, resetUndispatchedTurnId: current.provider_turn_id });
+        try {
+          await retryFailure({ domain: "pre_dispatch", error: message, resetUndispatchedTurnId: current.provider_turn_id });
+        } catch (resetError) {
+          if (resetError instanceof AuthorityLostError
+            || (resetError instanceof Error && resetError.name === "DaemonFenceLostError")) {
+            throw resetError;
+          }
+          await retryFailure({
+            domain: "result_recovery",
+            error: `Undispatched turn could not be safely reset and must retry exact recovery: ${resetError instanceof Error ? resetError.message : String(resetError)}`,
+          });
+        }
         return;
       }
       if (["ambiguous", "terminal_failure"].includes(
