@@ -30,6 +30,17 @@ export const CODEX_OWNER_FEATURE_OVERRIDES = Object.freeze([
 
 /** The room's own MCP server, the one server a LetAgents-launched Codex keeps. */
 export const LETAGENTS_MCP_SERVER_NAME = "letagents";
+/** Inert transport placeholders for disabling project-only MCP servers when Codex reloads global config without the project layer (Codex 0.171.0+). */
+export const CODEX_DISABLED_MCP_STDIO_COMMAND = "letagents-disabled";
+export const CODEX_DISABLED_MCP_HTTP_URL = "http://127.0.0.1:0/disabled";
+
+/** Transport kind needed for an inert disable override of a project-only MCP server. */
+export function codexProjectMcpServerInertTransport(server) {
+  if (!server || typeof server !== "object") return "stdio";
+  const transport = server.transport && typeof server.transport === "object" ? server.transport : server;
+  if (transport.type === "streamable_http" || typeof transport.url === "string") return "streamable_http";
+  return "stdio";
+}
 
 // `codex mcp list` checks OAuth for HTTP servers, which can take seconds when
 // one is unreachable. A launch waits this long at most, then fails.
@@ -102,11 +113,33 @@ export function codexSkillDisableOverride(skillFiles) {
  * Codex's dotted -c paths split on every dot, even inside quotes, so a server
  * name with a dot cannot be addressed that way. A parent-table override is
  * merged into the configured servers and names each one exactly.
+ *
+ * Project-only servers (not present in the owner's global config) also carry a
+ * matching inert transport (`command` or `url`) alongside `enabled = false`,
+ * because Codex 0.171.0+ reloads global config without the project layer on
+ * un-threaded `mcpServerStatus/list` and rejects a transportless table.
  */
-export function codexMcpServerDisableOverride(serverNames) {
-  const names = [...new Set(serverNames)].filter((name) => name !== LETAGENTS_MCP_SERVER_NAME).sort();
+export function codexMcpServerDisableOverride(servers) {
+  const byName = new Map();
+  for (const item of servers) {
+    const name = typeof item === "string" ? item : item?.name;
+    if (typeof name !== "string" || name === LETAGENTS_MCP_SERVER_NAME) continue;
+    const inertTransport = typeof item === "string" ? null : (item?.inertTransport ?? null);
+    if (!byName.has(name) || inertTransport) byName.set(name, inertTransport);
+  }
+  const names = [...byName.keys()].sort();
   if (!names.length) return null;
-  return `mcp_servers={ ${names.map((name) => `${JSON.stringify(name)} = { enabled = false }`).join(", ")} }`;
+  const formatEntry = (name) => {
+    const inertTransport = byName.get(name);
+    if (inertTransport === "stdio") {
+      return `${JSON.stringify(name)} = { command = ${JSON.stringify(CODEX_DISABLED_MCP_STDIO_COMMAND)}, enabled = false }`;
+    }
+    if (inertTransport === "streamable_http") {
+      return `${JSON.stringify(name)} = { url = ${JSON.stringify(CODEX_DISABLED_MCP_HTTP_URL)}, enabled = false }`;
+    }
+    return `${JSON.stringify(name)} = { enabled = false }`;
+  };
+  return `mcp_servers={ ${names.map(formatEntry).join(", ")} }`;
 }
 
 export function runCodexMcpList(codexBin, args, options, timeoutMs = MCP_LIST_TIMEOUT_MS) {
@@ -243,6 +276,11 @@ export async function codexOwnerIsolationOverrides(codexBin, options, run = runC
   ]);
   if (outsideProject) assertProjectKeepsLetAgentsServer(inProject, outsideProject);
   const skills = codexSkillDisableOverride(skillFiles);
-  const servers = codexMcpServerDisableOverride(inProject.map((entry) => entry.name));
+  const ownerServerNames = outsideProject ? new Set(outsideProject.map((entry) => entry.name)) : null;
+  const servers = codexMcpServerDisableOverride(inProject.map((entry) => (
+    ownerServerNames && !ownerServerNames.has(entry.name)
+      ? { name: entry.name, inertTransport: codexProjectMcpServerInertTransport(entry) }
+      : entry.name
+  )));
   return [...CODEX_OWNER_FEATURE_OVERRIDES, ...(skills ? [skills] : []), ...(servers ? [servers] : [])];
 }

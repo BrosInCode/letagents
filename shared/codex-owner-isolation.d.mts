@@ -1,5 +1,13 @@
 export const CODEX_OWNER_FEATURE_OVERRIDES: readonly string[];
 export const LETAGENTS_MCP_SERVER_NAME: "letagents";
+export const CODEX_DISABLED_MCP_STDIO_COMMAND: "letagents-disabled";
+export const CODEX_DISABLED_MCP_HTTP_URL: "http://127.0.0.1:0/disabled";
+
+export type CodexMcpServerInertTransport = "stdio" | "streamable_http";
+export type CodexDisabledMcpServerTarget = string | {
+  name: string;
+  inertTransport?: CodexMcpServerInertTransport | null;
+};
 
 export type CodexMcpListRunner = (
   codexBin: string,
@@ -10,7 +18,8 @@ export type CodexMcpListRunner = (
 export function codexHomeDirectory(env: NodeJS.ProcessEnv): string;
 export function codexPersonalSkillFiles(env: NodeJS.ProcessEnv): Promise<string[]>;
 export function codexSkillDisableOverride(skillFiles: readonly string[]): string | null;
-export function codexMcpServerDisableOverride(serverNames: readonly string[]): string | null;
+export function codexProjectMcpServerInertTransport(server: unknown): CodexMcpServerInertTransport;
+export function codexMcpServerDisableOverride(servers: readonly CodexDisabledMcpServerTarget[]): string | null;
 /** Runs `codex mcp list`; on timeout it stops Codex's whole process group, not just an npm wrapper. */
 export function runCodexMcpList(
   codexBin: string,
