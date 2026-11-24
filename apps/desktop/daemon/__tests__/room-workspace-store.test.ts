@@ -69,14 +69,14 @@ test('historical reviews move durably, resume the same page and survive clear th
     assert.equal(db.prepare('SELECT data FROM room_workspace_reviews').get()!.data, data);
   }
   unlinkSync(path + '.reviews-recovery');
-  db.exec("CREATE TRIGGER fail_commit BEFORE UPDATE ON room_workspace_reviews BEGIN SELECT RAISE(ABORT,'interrupt'); END;");
-  for (const now of [60_002, 90_003]) {
+  for (const [now, action] of [[60_002, 'ABORT'], [90_003, 'ROLLBACK']] as const) {
+    db.exec(`CREATE TRIGGER fail_commit BEFORE UPDATE ON room_workspace_reviews BEGIN SELECT RAISE(${action},'interrupt'); END;`);
     assert.throws(() => store.maintainArchives(now), /interrupt/);
     assert.deepEqual(readdirSync(folder), []);
     assert.deepEqual(readdirSync(path + '.reviews-recovery'), [], 'confirmed rollback frees both newly created files');
     assert.equal(db.prepare('SELECT data FROM room_workspace_reviews').get()!.data, data);
+    db.exec('DROP TRIGGER fail_commit');
   }
-  db.exec('DROP TRIGGER fail_commit');
   assert.equal(store.maintainArchives(90_004), false, 'failed storage gets a bounded retry delay');
   assert.equal(store.maintainArchives(120_004), true, 'same process retries the interrupted move');
   assert.equal(store.maintainArchives(120_005), false);

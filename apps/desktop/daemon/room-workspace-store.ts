@@ -87,6 +87,7 @@ export class RoomWorkspaceStore {
     try { encoded = review ? encodeWorkspaceReview(review) : null; }
     catch (error) { if (!(error instanceof RangeError)) throw error; } // Optional archive capacity must never discard a valid preview.
     let newArchive: string | undefined;
+    let committing = false;
     this.db.exec('SAVEPOINT workspace_review');
     try {
       const result = this.db.prepare('UPDATE room_workspace_captures SET settled_json=? WHERE agent_id=? AND room_id=? AND source_message_id=? AND work_attempt_id=? AND inbox_item_id=? AND settled_json IS NULL').run(JSON.stringify(parsed), ...keys(key));
@@ -106,10 +107,10 @@ export class RoomWorkspaceStore {
         this.db.prepare('INSERT INTO room_workspace_reviews(agent_id,room_id,source_message_id,digest,data) VALUES(?,?,?,?,?)')
           .run(...keys(key).slice(0, 3), encoded.digest, data);
       }
+      committing = true;
       this.db.exec('RELEASE workspace_review');
     } catch (error) {
-      this.db.exec('ROLLBACK TO workspace_review; RELEASE workspace_review');
-      if (this.databasePath && newArchive) discardUncommittedReviewArchive(this.databasePath, newArchive);
+      this.rollbackArchive('ROLLBACK TO workspace_review; RELEASE workspace_review', committing, newArchive);
       throw error;
     }
   }
@@ -119,6 +120,7 @@ export class RoomWorkspaceStore {
   maintainArchives(now: number): boolean {
     if (!this.databasePath || now < this.archiveRetryAt || (this.finishedArchiveMigration && now < this.pruneAfter)) return false;
     let newArchive: string | undefined;
+    let committing = false;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (!this.finishedArchiveMigration) {
@@ -127,6 +129,7 @@ export class RoomWorkspaceStore {
         if (row) {
           newArchive = archiveWorkspaceReview(this.databasePath, String(row.data), String(row.digest));
           this.db.prepare('UPDATE room_workspace_reviews SET data=? WHERE rowid=?').run(newArchive, row.rowid);
+          committing = true;
           this.db.exec('COMMIT');
           this.lastArchiveRow = Number(row.rowid);
           return true;
@@ -139,11 +142,19 @@ export class RoomWorkspaceStore {
       this.db.exec('COMMIT');
       return false;
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      if (newArchive) discardUncommittedReviewArchive(this.databasePath, newArchive);
       this.archiveRetryAt = now + 30_000;
+      this.rollbackArchive('ROLLBACK', committing, newArchive);
       throw error;
     }
+  }
+
+  private rollbackArchive(rollback: string, committing: boolean, archive?: string): void {
+    // SQLITE_FULL and RAISE(ROLLBACK) can end the transaction themselves.
+    // Preserve the file if the failure happened during COMMIT and SQLite
+    // already closed the transaction, since the outcome may be ambiguous.
+    if (this.db.isTransaction) this.db.exec(rollback);
+    else if (committing) return;
+    if (this.databasePath && archive) discardUncommittedReviewArchive(this.databasePath, archive);
   }
 
   private pendingReview(agentId: string, roomId: string, sourceMessageId: string, readInlinePage: boolean) {
