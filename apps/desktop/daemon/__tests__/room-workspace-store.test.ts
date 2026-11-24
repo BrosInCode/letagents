@@ -50,9 +50,11 @@ test('historical reviews move durably, resume the same page and survive clear th
   const dir = mkdtempSync(join(tmpdir(), 'review-archives-'));
   const path = join(dir, 'state.sqlite');
   const folder = path + '.reviews';
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const db = new DatabaseSync(path);
-  t.after(() => db.close());
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
   db.exec(`PRAGMA user_version=54; CREATE TABLE room_workspace_reviews (
     agent_id TEXT, room_id TEXT, source_message_id TEXT, digest TEXT, data TEXT, uploaded_pages INTEGER)`);
   const data = 'A'.repeat(REVIEW_PAGE_SIZE) + 'B'.repeat(REVIEW_PAGE_SIZE) + 'LAST';
@@ -116,9 +118,11 @@ test('historical reviews move durably, resume the same page and survive clear th
 
 test('a missing or invalid historical digest leaves its only local bytes intact', t => {
   const dir = mkdtempSync(join(tmpdir(), 'review-archive-invalid-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const db = new DatabaseSync(join(dir, 'state.sqlite'));
-  t.after(() => db.close());
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
   db.exec(`PRAGMA user_version=54; CREATE TABLE room_workspace_reviews (
     agent_id TEXT, room_id TEXT, source_message_id TEXT, digest TEXT, data TEXT, uploaded_pages INTEGER);
     INSERT INTO room_workspace_reviews VALUES('a','r','m','invalid','retained',0)`);
@@ -133,10 +137,12 @@ test('a missing or invalid historical digest leaves its only local bytes intact'
 
 test('recovery verifies copied archives, repairs missing or changed ciphertext, and refuses an unrecoverable set', t => {
   const dir = mkdtempSync(join(tmpdir(), 'review-set-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'state.sqlite');
   const db = new DatabaseSync(path);
-  t.after(() => db.close());
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
   db.exec('PRAGMA user_version=54; CREATE TABLE room_workspace_reviews(digest TEXT,data TEXT)');
   const data = 'original'.repeat(REVIEW_PAGE_SIZE);
   const digest = createHash('sha256').update(data).digest('hex');
