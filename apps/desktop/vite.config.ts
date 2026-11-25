@@ -2,6 +2,15 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { fileURLToPath, URL } from "node:url";
 import { readFileSync } from "node:fs";
+import rendererBundledPackages from "./renderer-bundled-packages.json";
+
+type BundledPackages = Record<string, { notices: string[] }>;
+
+/** The licence files of every package that Vite bundles into dist-renderer. */
+function rendererNoticeFiles(): string[] {
+  const packages: BundledPackages = { ...rendererBundledPackages.packages, ...rendererBundledPackages.bundledDependencies };
+  return Object.entries(packages).flatMap(([name, { notices }]) => notices.map(file => `${name}/${file}`));
+}
 
 export default defineConfig({
   base: "./",
@@ -12,12 +21,8 @@ export default defineConfig({
     name: "workspace-reader-notices",
     generateBundle() {
       this.emitFile({ type: "asset", fileName: "agent-identity-notices.txt", source: readFileSync(new URL("../../shared/ui/agent-identity/scene/assets/brain/ATTRIBUTION.txt", import.meta.url), "utf8") });
-      const files = [
-        "monaco-editor/LICENSE",
-        "monaco-editor/ThirdPartyNotices.txt",
-        "dompurify/LICENSE",
-        "highlight.js/LICENSE",
-      ];
+      // The packaged app does not install the bundled packages, so their licences ship here.
+      const files = rendererNoticeFiles();
       this.emitFile({ type: "asset", fileName: "workspace-reader-notices.txt", source: files.map(file =>
         `${file}\n\n${readFileSync(new URL(`./node_modules/${file}`, import.meta.url), "utf8")}`,
       ).join("\n\n") });

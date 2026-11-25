@@ -504,8 +504,11 @@ test("Open Model launches a dedicated OpenCode server without putting the provid
   const config = JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT ?? "{}") as Record<string, unknown>;
   const auth = JSON.parse(launch.env.OPENCODE_AUTH_CONTENT ?? "{}") as Record<string, unknown>;
   const serializedConfig = JSON.stringify(config);
-  const mcpEnvironment = (config.mcp as Record<string, Record<string, unknown>>)
-    .letagents.environment as Record<string, string>;
+  const mcpServer = (config.mcp as Record<string, Record<string, unknown>>).letagents!;
+  const mcpEnvironment = mcpServer.environment as Record<string, string>;
+  // On every platform: the sealed runtime on this app's own binary, never npx.
+  assert.deepEqual(mcpServer.command, [process.execPath, testMcpRuntime().entryPath]);
+  assert.equal(mcpEnvironment.ELECTRON_RUN_AS_NODE, "1");
 
   assert.doesNotMatch(serializedConfig, /provider-api-key-must-stay-out-of-config/);
   assert.match(JSON.stringify(auth), /provider-api-key-must-stay-out-of-config/);

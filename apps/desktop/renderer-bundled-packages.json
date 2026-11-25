@@ -1,0 +1,20 @@
+{
+  "$comment": "Packages that Vite bundles into dist-renderer. They are devDependencies, so the packaged app does not install them, but their code ships. package-artifact.mjs, the advisory audit (scripts/dependency-advisory-exceptions.mjs) and the notices in vite.config.ts read this file. Each entry names the licence files of the package that go into dist-renderer/workspace-reader-notices.txt.",
+  "packages": {
+    "@lucide/vue": { "notices": ["LICENSE"] },
+    "cuelume": { "notices": ["LICENSE"] },
+    "dompurify": { "notices": ["LICENSE", "LICENSE-MPL"] },
+    "highlight.js": { "notices": ["LICENSE"] },
+    "marked": { "notices": ["LICENSE"] },
+    "monaco-editor": { "notices": ["LICENSE", "ThirdPartyNotices.txt"] },
+    "three": { "notices": ["LICENSE"] },
+    "vue": { "notices": ["LICENSE"] }
+  },
+  "$bundledDependenciesComment": "Dependencies of the packages above that the renderer bundle also contains: the Vue runtime build imports these.",
+  "bundledDependencies": {
+    "@vue/reactivity": { "notices": ["LICENSE"] },
+    "@vue/runtime-core": { "notices": ["LICENSE"] },
+    "@vue/runtime-dom": { "notices": ["LICENSE"] },
+    "@vue/shared": { "notices": ["LICENSE"] }
+  }
+}
