@@ -10,11 +10,13 @@ import {
   firstLaunchKeychainCommands,
   launchUntilExit,
   mountPointFromAttachPlist,
+  mountPointsUnder,
   parseArguments,
   parseDmgName,
   processIdsUnder,
   QUARANTINE_AGENT,
   quarantineValue,
+  signalExitStatus,
   smokeVerdict,
   SMOKE_RESULT_MARKER,
 } from "./macos-dmg-first-launch.mjs";
@@ -128,14 +130,41 @@ test("the daemon socket must fit in a macOS socket path", () => {
   );
 });
 
-test("Gatekeeper must accept the item, and a source that says unnotarized is refused", () => {
+test("Gatekeeper must accept the item as notarized Developer ID software", () => {
   // What spctl printed on macOS 27.2 for the signed 0.1.21 DMG and the installed 0.1.143 app.
   assert.equal(assertGatekeeperAccepted("/x/LetAgents.app: accepted\nsource=Notarized Developer ID\norigin=Developer ID Application: Example (TEAMID)\n", "the app"), "Notarized Developer ID");
-  // Apple's wording of the source can change; "accepted" with exit 0 is the decision.
+  // A suffix after the long-standing form is allowed.
   assert.equal(assertGatekeeperAccepted("/x/LetAgents.dmg: accepted\nsource=Notarized Developer ID (stapled)\n", "the DMG"), "Notarized Developer ID (stapled)");
-  assert.throws(() => assertGatekeeperAccepted("/x/LetAgents.app: accepted\nsource=Unnotarized Developer ID\n", "the app"), /did not accept the app/);
-  assert.throws(() => assertGatekeeperAccepted("/x/LetAgents.app: rejected\nsource=Unnotarized Developer ID\n", "the app"), /did not accept/);
+  for (const report of [
+    "/x/LetAgents.app: accepted\n",
+    "/x/LetAgents.app: accepted\nsource=Developer ID\n",
+    "/x/LetAgents.app: accepted\nsource=Unnotarized Developer ID\n",
+    "/x/LetAgents.app: accepted\nsource=LetAgents local override\n",
+    "/x/LetAgents.app: accepted\nsource=Notarized Developer IDs\n",
+    "/x/LetAgents.app: rejected\nsource=Unnotarized Developer ID\n",
+  ]) {
+    assert.throws(() => assertGatekeeperAccepted(report, "the app"), /did not accept the app as notarized Developer ID software/, report);
+  }
   assert.throws(() => assertGatekeeperAccepted("/x/LetAgents.dmg: rejected (the code is valid but does not seem to be an app)\nsource=Notarized Developer ID\n", "the DMG"), /did not accept the DMG/);
+});
+
+test("the cleanup finds every mount below the check's folder, also one the check did not record", () => {
+  const folder = "/private/tmp/letagents-dmg-AbCdEf";
+  const plist = [
+    "<plist><dict><key>images</key><array>",
+    `<dict><key>system-entities</key><array><dict><key>mount-point</key>\n<string>${folder}/dmg.x1</string></dict></array></dict>`,
+    "<dict><key>system-entities</key><array><dict><key>mount-point</key><string>/Volumes/LetAgents</string></dict></array></dict>",
+    `<dict><key>system-entities</key><array><dict><key>mount-point</key><string>${folder}-other/dmg.y</string></dict></array></dict>`,
+    `<dict><key>system-entities</key><array><dict><key>mount-point</key><string>${folder}/dmg.x2</string></dict></array></dict>`,
+    "</array></dict></plist>",
+  ].join("");
+  assert.deepEqual(mountPointsUnder(plist, folder), [`${folder}/dmg.x1`, `${folder}/dmg.x2`]);
+  assert.deepEqual(mountPointsUnder("<plist><dict><key>images</key><array/></dict></plist>", folder), []);
+});
+
+test("a run that a signal stopped exits with 128 plus the signal number", () => {
+  assert.equal(signalExitStatus("SIGINT"), 130);
+  assert.equal(signalExitStatus("SIGTERM"), 143);
 });
 
 test("the smoke verdict passes only on exit 0 with every smoke check true", () => {

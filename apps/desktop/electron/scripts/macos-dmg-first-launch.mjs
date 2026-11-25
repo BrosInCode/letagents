@@ -148,19 +148,32 @@ export function firstLaunchEnvironment(base, { home, temporary, missingCodex }) 
 }
 
 /**
- * Gatekeeper's (spctl's) report must say "accepted"; run() has already
- * failed on a non-zero exit. spctl rejects Developer ID software without a
- * notarization ticket (source=Unnotarized Developer ID), so the exit code
- * and "accepted" are the decision. The source line is not matched exactly,
- * because its wording is Apple's (on macOS 27 it is "Notarized Developer
- * ID"); only a source that says unnotarized is refused as well.
+ * Gatekeeper's (spctl's) report must say "accepted" (run() has already
+ * failed on a non-zero exit) and name the notarized Developer ID source.
+ * "source=Notarized Developer ID" is the long-standing macOS form (seen on
+ * macOS 27.2); a suffix after it is allowed. Any other source fails: no
+ * source line, plain "Developer ID", "Unnotarized Developer ID", or a
+ * local override rule that accepts the item for another reason.
  */
 export function assertGatekeeperAccepted(report, label) {
   const source = /^source=(.*)$/m.exec(report)?.[1]?.trim() ?? "";
-  if (!/:\s*accepted\b/.test(report) || /unnotarized/i.test(source)) {
-    throw new Error(`Gatekeeper did not accept ${label}:\n${report.trim()}`);
+  if (!/:\s*accepted\b/.test(report) || !/^source=Notarized Developer ID\b/m.test(report)) {
+    throw new Error(`Gatekeeper did not accept ${label} as notarized Developer ID software:\n${report.trim()}`);
   }
   return source;
+}
+
+/** Every mount point in `hdiutil info -plist` output that lies below `folder`. */
+export function mountPointsUnder(plist, folder) {
+  const prefix = folder.endsWith("/") ? folder : `${folder}/`;
+  return [...plist.matchAll(/<key>mount-point<\/key>\s*<string>([^<]+)<\/string>/g)]
+    .map((match) => match[1])
+    .filter((point) => point.startsWith(prefix));
+}
+
+/** The exit status of a run that a signal stopped: 128 plus the signal number. */
+export function signalExitStatus(signal) {
+  return 128 + ({ SIGINT: 2, SIGTERM: 15 }[signal] ?? 1);
 }
 
 /** The result of the smoke launch: a pass needs exit 0 and a smoke result where every check is true. */
@@ -369,32 +382,28 @@ async function main() {
   const app = join(applications, APP_NAME);
   // Never created: the app's Codex lookup ends here (see firstLaunchEnvironment).
   const missingCodex = join(folder, "no-codex", "codex");
-  let mountPoint = null;
-  let keychain = null;
+  // Known before the step that makes it, so a stop at any time removes it.
+  const keychainPath = firstLaunchKeychainCommands(home, "").keychain;
   let failure = null;
-  let cleaning = null;
-  // Stop the app, detach the DMG, drop the keychain and remove the folder, once: at the end or on Ctrl-C.
-  const cleanUp = () => (cleaning ??= (async () => {
-    const errors = [];
-    for (const step of [
-      () => stopProcessesUnder(folder),
-      () => (mountPoint ? detach(mountPoint) : undefined),
-      () => (keychain ? removeKeychain(home, keychain) : undefined),
-      () => (options.keep ? console.log(`Kept ${folder}.`) : rm(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })),
-    ]) {
-      try { await step(); } catch (error) { errors.push(error); }
-    }
-    return errors;
-  })());
+  // A SIGINT or SIGTERM does not end the process at once: it stops the app
+  // (so a running launch returns), and main stops at its next checkpoint.
+  // The finally block below then cleans up, and the exit status is 130 or
+  // 143. A second signal while that runs is ignored, so it is not cut short.
+  let stoppedBy = null;
   const onSignal = (signal) => {
-    console.error(`Received ${signal}; cleaning up.`);
-    void cleanUp().then((errors) => {
-      for (const error of errors) console.error(`Cleanup: ${error.message}`);
-      process.exit(128 + (signal === "SIGINT" ? 2 : 15));
-    });
+    if (stoppedBy) {
+      console.error(`Received ${signal} again; the cleanup continues.`);
+      return;
+    }
+    stoppedBy = signal;
+    console.error(`Received ${signal}; stopping, then cleaning up.`);
+    void stopProcessesUnder(folder).catch(() => undefined);
   };
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
+  const checkpoint = () => {
+    if (stoppedBy) throw Object.assign(new Error(`Stopped by ${stoppedBy}.`), { exitStatus: signalExitStatus(stoppedBy) });
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
   try {
     await Promise.all([applications, home, temporary].map((path) => mkdir(path)));
     assertDaemonSocketFits(home);
@@ -403,13 +412,17 @@ async function main() {
     if (options.unsignedDmg) console.log("Skipping the DMG's signature and ticket checks (--unsigned-dmg).");
     else {
       assertGatekeeperAccepted(await run("spctl", ["-a", "-t", "open", "--context", "context:primary-signature", "-vv", options.dmg]), "the DMG");
+      checkpoint();
       await validateTicket(options.dmg);
     }
+    checkpoint();
 
-    mountPoint = mountPointFromAttachPlist(await run("hdiutil", [
+    // The cleanup detaches every mount below the folder, so an attach that a signal interrupts is found too.
+    const mountPoint = mountPointFromAttachPlist(await run("hdiutil", [
       "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountrandom", folder, "-plist", options.dmg,
     ], { quiet: true }));
     console.log(`Attached read-only at ${mountPoint}.`);
+    checkpoint();
     const mountedApp = join(mountPoint, APP_NAME);
     if (!existsSync(mountedApp)) throw new Error(`The DMG has no ${APP_NAME} at its top level.`);
     const applicationsLink = join(mountPoint, "Applications");
@@ -417,8 +430,9 @@ async function main() {
       throw new Error("The DMG has no Applications link to /Applications for the drag-to-install layout.");
     }
     await run("ditto", [mountedApp, app]);
+    checkpoint();
     await detach(mountPoint);
-    mountPoint = null;
+    checkpoint();
 
     const bundleVersion = (await run("plutil", ["-extract", "CFBundleShortVersionString", "raw", join(app, "Contents", "Info.plist")])).trim();
     if (bundleVersion !== dmgName.version) throw new Error(`The DMG is named for ${dmgName.version}, but its app is ${bundleVersion}.`);
@@ -437,10 +451,13 @@ async function main() {
       if (marked !== quarantine) throw new Error(`The copy carries quarantine '${marked}', not '${quarantine}'.`);
       await run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", app]);
       assertGatekeeperAccepted(await run("spctl", ["--assess", "--type", "execute", "-vv", app]), "the app");
+      checkpoint();
       await validateTicket(app);
     }
+    checkpoint();
 
-    keychain = await prepareKeychain(home);
+    await prepareKeychain(home);
+    checkpoint();
     console.log(`> ${executable} (LETAGENTS_DESKTOP_SMOKE_CHECK=1, HOME=${home}, limit ${options.timeoutMs} ms)`);
     const launch = await launchUntilExit({
       executable,
@@ -449,15 +466,33 @@ async function main() {
       timeoutMs: options.timeoutMs,
       onTimeout: () => stopProcessesUnder(folder),
     });
+    checkpoint();
     const verdict = smokeVerdict({ ...launch, timeoutMs: options.timeoutMs });
     if (!verdict.passed) throw new Error(`The first launch of the app from ${basename(options.dmg)} failed: ${verdict.reason}.`);
     console.log(`LetAgents ${bundleVersion} (${options.arch}) from ${basename(options.dmg)} passed its first-launch smoke check: ${verdict.reason}.`);
   } catch (error) {
     failure = error;
   } finally {
-    const cleanup = await cleanUp();
+    // Every step runs, and each looks at what exists now, not at what main got to.
+    const cleanup = [];
+    for (const step of [
+      () => stopProcessesUnder(folder),
+      async () => {
+        const info = await run("hdiutil", ["info", "-plist"], { quiet: true });
+        for (const point of mountPointsUnder(info, folder)) await detach(point);
+      },
+      () => (existsSync(keychainPath) ? removeKeychain(home, keychainPath) : undefined),
+      () => (options.keep ? console.log(`Kept ${folder}.`) : rm(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })),
+    ]) {
+      try { await step(); } catch (error) { cleanup.push(error); }
+    }
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
+    // A stop wins over the failure it caused (for example the app that the stop ended).
+    if (stoppedBy && !failure?.exitStatus) {
+      if (failure) console.error(`After the stop: ${failure.message}`);
+      failure = Object.assign(new Error(`Stopped by ${stoppedBy}; cleaned up.`), { exitStatus: signalExitStatus(stoppedBy) });
+    }
     if (!failure && cleanup.length > 0) failure = cleanup[0];
     else for (const error of cleanup) console.error(`Cleanup: ${error.message}`);
   }
@@ -469,6 +504,6 @@ if (process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === imp
     await main();
   } catch (error) {
     console.error(`FAIL: ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 1;
+    process.exitCode = error?.exitStatus ?? 1;
   }
 }
