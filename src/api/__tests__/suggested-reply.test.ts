@@ -52,8 +52,12 @@ test("an agent's newest message decides: a later message without a suggestion cl
   assert.deepEqual(suggestedReplyCandidates(rows, ME), []);
 });
 
-test("no human in the window means no suggestion", () => {
-  assert.deepEqual(suggestedReplyCandidates([agent("codex", "Hi", "Hello")], ME), []);
+test("with no person in the window, an agent's suggestion goes to its owner only", () => {
+  // The first message to a new agent is private, so its answer opens the room.
+  const rows = [agent("codex", "Mint or Coral?", "Let's go with Mint")];
+  assert.equal(suggestedReplyCandidates(rows, ME)[0]?.text, "Let's go with Mint");
+  assert.equal(suggestedReplyCandidates([agent("codex", "Hi", "Hello", { sender: "CanyonWest | QA Emmy's agent | Claude Code" })], ME)[0]?.from, "CanyonWest");
+  assert.deepEqual(suggestedReplyCandidates(rows, SHANNON), []);
 });
 
 test("one candidate needs no Jev call", async () => {

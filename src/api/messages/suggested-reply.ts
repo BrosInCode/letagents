@@ -8,7 +8,9 @@
  *    older suggestions are answered or stale.
  * 3. For each agent, its newest message in that span counts. It is a candidate
  *    when it carries a suggestion and it answers this person: it replies to
- *    their message, or the latest person who spoke before it is them.
+ *    their message, or the latest person who spoke before it is them, or no
+ *    person spoke before it and the agent is theirs (an agent's first message
+ *    to its owner is private, so it is not in the room).
  * 4. No candidate: nothing. One: that one. Several: Jev picks the reply this
  *    person is most likely to send, from the recent conversation. When Jev is
  *    off, slow or unsure, the newest candidate wins.
@@ -79,8 +81,12 @@ export function suggestedReplyCandidates(rows: readonly SuggestedReplyRow[], vie
     if (!text) continue;
     const repliedTo = row.reply_to_number != null ? byNumber.get(row.reply_to_number) ?? null : null;
     const asked = repliedTo && isHuman(repliedTo) ? repliedTo : lastHuman;
-    if (asked?.publisher_account_id !== viewerAccountId) continue;
-    candidates.push({ message_number: row.number, agent_key: agentKey, from: row.sender, text });
+    // Agent messages carry their owner's account.
+    const askedAccount = asked ? asked.publisher_account_id : row.publisher_account_id;
+    if (askedAccount !== viewerAccountId) continue;
+    // An agent's sender label is "Name | Owner's agent | Provider"; people know it by its name.
+    const from = row.sender.split(" | ")[0]?.trim() || row.sender;
+    candidates.push({ message_number: row.number, agent_key: agentKey, from, text });
   }
   return candidates.sort((a, b) => a.message_number - b.message_number);
 }
