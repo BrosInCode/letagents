@@ -9,9 +9,9 @@
 // turns are built from frames of the same recording:
 //
 //   branch-permission-1-deny.ndjson   write_file is refused: the recorded refusal of
-//                                     run_command (in_progress, then failed with agy's
-//                                     refusal text), for the write_file call, and the
-//                                     recorded end of the turn with no text.
+//                                     run_command (in_progress, then failed), for the
+//                                     write_file call, with a refusal text marked as not
+//                                     agy's, and the recorded end of the turn with no text.
 //   branch-permission-2-allow.ndjson  run_command is allowed: its in_progress update, a
 //                                     completed update shaped as the recorded completed
 //                                     write_file, one agent_message_chunk with the
@@ -23,6 +23,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+const DERIVED_REFUSAL = "DERIVED, not agy's words: the write was denied. agy's refusal text for a write was not recorded.";
 const DERIVED_REPLY = "Both steps ran: approval-a.txt was written and approval-b.txt was created.";
 
 const planDir = process.argv[2];
@@ -69,13 +70,14 @@ const write = (name, entries) => writeFileSync(join(planDir, name), `${entries.m
 
 const refusalUpdate = updateOf(refusal);
 write("branch-permission-1-deny.ndjson", [
-  start("approval/branch-permission-1-deny", "DERIVED, not recorded: the turn after write_file is denied. Built from the recorded refusal of run_command and the recorded end of the turn."),
+  start("approval/branch-permission-1-deny", "DERIVED, not recorded: the turn after write_file is denied. Built from the shape of the recorded refusal of run_command (its text is replaced) and the recorded end of the turn; the token usage is the recorded turn's."),
   update(refusalStart, { ...callFields(first), status: "in_progress" }),
   update(refusal, {
     ...callFields(first),
     status: "failed",
-    rawOutput: refusalUpdate.rawOutput,
-    ...(refusalUpdate.content ? { content: refusalUpdate.content } : {}),
+    // agy's refusal text for a write was not recorded; the recorded one names the command.
+    rawOutput: DERIVED_REFUSAL,
+    ...(refusalUpdate.content ? { content: [{ type: "content", content: { type: "text", text: DERIVED_REFUSAL } }] } : {}),
   }),
   { type: "emit_inbound", label: "turn-end", frame: turnEnd.frame },
   exit,
@@ -84,7 +86,7 @@ write("branch-permission-1-deny.ndjson", [
 const message = structuredClone(refusalStart.frame);
 message.params.update = { sessionUpdate: "agent_message_chunk", content: { type: "text", text: DERIVED_REPLY } };
 write("branch-permission-2-allow.ndjson", [
-  start("approval/branch-permission-2-allow", "DERIVED, not recorded: the turn after run_command is allowed. Its updates are shaped as the recorded write_file updates; the reply text is not agy's."),
+  start("approval/branch-permission-2-allow", "DERIVED, not recorded: the turn after run_command is allowed. Its updates are shaped as the recorded write_file updates; the reply text is not agy's; the token usage is the recorded turn's."),
   update(refusalStart, { ...callFields(second), status: "in_progress" }),
   update(writeDone, { ...callFields(second), status: "completed", rawOutput: {} }),
   { type: "emit_inbound", label: "reply", frame: message },
