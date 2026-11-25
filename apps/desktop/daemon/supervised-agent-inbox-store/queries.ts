@@ -1,4 +1,5 @@
 import { normalizeRoomGif, type RoomGif } from "../../../../shared/room-expressions.mjs";
+import { replySuggestionText } from "../../../../shared/suggested-reply.mjs";
 import { validRecordedReplyAttachments, type RecordedReplyAttachment } from "../../../../shared/message-attachments.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { ExecutionShadowStore } from "../execution-shadow-store.js";
@@ -92,6 +93,19 @@ export abstract class InboxQueryStore extends InboxTaskContinuationStore {
         WHERE i.inbox_item_id=? AND e.state='completed' AND e.tool_name='set_reply_gif'
         ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1`).get(inboxItemId) as Row | undefined;
       return row ? normalizeRoomGif(JSON.parse(String(row.request_json)).gif) : null;
+    });
+  }
+  /** The last suggested reply for this exact bound turn; text:null clears an earlier one. */
+  async replySuggestion(inboxItemId: string): Promise<string | null> {
+    return this.read(async (database) => {
+      const row = database.prepare(`SELECT e.request_json FROM supervised_agent_inbox i
+        JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
+          AND b.agent_id=i.agent_id AND b.room_id=i.room_id AND b.provider_turn_id=i.provider_turn_id
+        JOIN supervised_agent_effects e ON e.agent_id=b.agent_id AND e.room_id=b.room_id
+          AND e.execution_generation_id=b.origin_execution_generation_id AND e.provider_turn_id=b.provider_turn_id
+        WHERE i.inbox_item_id=? AND e.state='completed' AND e.tool_name='set_reply_suggestion'
+        ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1`).get(inboxItemId) as Row | undefined;
+      return row ? replySuggestionText(JSON.parse(String(row.request_json))) : null;
     });
   }
   /** The last attachment choice for this exact bound turn; files:null clears an earlier one. */

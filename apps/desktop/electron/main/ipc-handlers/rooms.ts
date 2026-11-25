@@ -147,6 +147,7 @@ import {
   getDesktopRoomMessage,
   getDesktopRoomMessageInfo,
   getDesktopRoomMessageReceipts,
+  getDesktopRoomSuggestedReply,
   getDesktopRoomMessagesBefore,
   getDesktopRoomMessagesAfter,
   getDesktopRoomStorage,
@@ -303,6 +304,11 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       messageIds: unknown,
     ): Promise<import("../../ipc-types.js").DesktopMessageReceipt[]> =>
       getDesktopRoomMessageReceipts(roomIdentifier, Array.isArray(messageIds) ? messageIds : []),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-suggested-reply",
+    async (_event, roomIdentifier: string) =>
+      getDesktopRoomSuggestedReply(typeof roomIdentifier === "string" ? roomIdentifier : ""),
   );
   targetIpcMain.handle(
     "desktop:room:get-message",

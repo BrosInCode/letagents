@@ -1,4 +1,5 @@
 import { MESSAGE_ATTACHMENT_LIMITS } from "../../../../../shared/message-attachments.mjs";
+import { SUGGESTED_REPLY_MAX_CHARS } from "../../../../../shared/suggested-reply.mjs";
 import type { RoomGif } from "../../../../../shared/room-expressions.mjs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -39,6 +40,7 @@ type SendMessageInput = {
   room_id?: string;
   text: string;
   gif?: RoomGif | null;
+  suggested_reply?: string;
   reply_to?: string;
   thread_parent_id?: string;
   agent_session_id?: string;
@@ -52,6 +54,7 @@ export function buildSendMessageRequestBody(input: {
   sender: string;
   text: string;
   gif?: RoomGif | null;
+  suggestedReply?: string;
   replyTarget?: string;
   resolvedThreadRoot?: string;
   uploadIds?: readonly string[];
@@ -61,6 +64,9 @@ export function buildSendMessageRequestBody(input: {
     sender: input.sender,
     text: input.text,
     ...(input.gif ? { gif: input.gif } : {}),
+    // A suggestion that is too long is dropped: it must never stop the message.
+    ...(input.suggestedReply?.trim() && input.suggestedReply.trim().length <= SUGGESTED_REPLY_MAX_CHARS
+      ? { suggested_reply: input.suggestedReply.trim() } : {}),
     ...(input.uploadIds?.length ? { attachments: input.uploadIds.map((upload_id) => ({ upload_id })) } : {}),
     reply_to: input.replyTarget,
     ...(input.resolvedThreadRoot ? { thread_root_id: input.resolvedThreadRoot } : {}),
@@ -217,6 +223,7 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
           sender: identity.actor_label,
           text: input.text,
           ...(input.gif ? { gif: input.gif } : {}),
+          ...(input.suggested_reply ? { suggestedReply: input.suggested_reply } : {}),
           replyTarget,
           resolvedThreadRoot,
           uploadIds: staged.map((file) => file.uploadId),
@@ -280,6 +287,13 @@ export function registerSendMessageTool(server: McpServer, options: SendToolOpti
         .optional()
         .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
       text: z.string().describe("The message text to send"),
+      suggested_reply: z
+        .string()
+        .optional()
+        .describe("When this message asks the human a question, waits on their decision or finishes a step they"
+          + " will respond to: the short reply you expect them to send next, in their voice (for example"
+          + " \"Yes, merge it\" or \"Use option 2\"). It is offered in their composer; they can send it with one key."
+          + " Leave it out when no reply is expected."),
       reply_to: z
         .string()
         .optional()
@@ -298,8 +312,8 @@ export function registerSendMessageTool(server: McpServer, options: SendToolOpti
         .describe("Registered agent session to use for this message. Required for worker messages."),
       ...attachments,
     },
-    async ({ room_id, sender: _sender, text, gif, reply_to, thread_parent_id, conversation_id: _conversation_id, agent_session_id, ...rest }) =>
-      sendMessageFromTool({ room_id, text, gif, reply_to, thread_parent_id, agent_session_id, ...fileAttachmentsInput(options, rest) })
+    async ({ room_id, sender: _sender, text, gif, suggested_reply, reply_to, thread_parent_id, conversation_id: _conversation_id, agent_session_id, ...rest }) =>
+      sendMessageFromTool({ room_id, text, gif, suggested_reply, reply_to, thread_parent_id, agent_session_id, ...fileAttachmentsInput(options, rest) })
   );
 
   server.tool(

@@ -19,6 +19,7 @@ import {
 import { resolveParticipantRoom } from "./helpers.js";
 import type { Message, Project } from "../../../db.js";
 import type { RoomMessageHandlerDeps, RoomMessageRouteDeps } from "./types.js";
+import { SUGGESTED_REPLY_MAX_CHARS } from "../../../messages/suggested-reply.js";
 
 /** The 201 body of a created message on the room route. */
 export type CreatedRoomMessageBody = Omit<Message, "account_agent_routing"> & {
@@ -63,6 +64,9 @@ export async function createRoomMessage(input: {
     const attachments = normalizeMessageAttachmentReferences(body.attachments);
     const gif = body.gif == null ? null : normalizeRoomGif(body.gif);
     if (body.gif != null && !gif) { res.status(400).json({ error: "gif must contain a GIPHY provider and valid ID" }); return; }
+    // A suggestion that is too long is dropped: it must never block the message.
+    const suggestedReplyText = body.suggested_reply?.trim() || null;
+    const suggestedReply = suggestedReplyText && suggestedReplyText.length <= SUGGESTED_REPLY_MAX_CHARS ? suggestedReplyText : null;
     const desktopHumanWrite = isHumanAppWrite(req, sessionCredentials);
     const requiresWorkerSession = !desktopHumanWrite && (req.authKind === "owner_token"
       || req.authKind === "agent_session"
@@ -107,6 +111,8 @@ export async function createRoomMessage(input: {
       attachments,
       attachment_uploader: resolveMessageAttachmentUploader(req),
       ...(gif ? { gif } : {}),
+      // Only an agent's message carries a suggestion for the human's next reply.
+      ...(workerIdentity && suggestedReply ? { suggested_reply: suggestedReply } : {}),
       ...(body.client_message_id ? { client_message_id: body.client_message_id } : {}),
       ...(workerIdentity ? {
         publisher_agent_key: workerIdentity.agent_key,

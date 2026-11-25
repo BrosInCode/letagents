@@ -327,6 +327,7 @@ export async function emitProjectMessage(
     reply_to?: string | null;
     thread_root_id?: string | null;
     gif?: RoomGif | null;
+    suggested_reply?: string | null;
     attachments?: NormalizedMessageAttachmentReference[];
     attachment_uploader?: AddMessageOptions["attachment_uploader"];
     client_message_id?: string | null;
@@ -365,6 +366,7 @@ export async function emitProjectMessage(
     attachments: options?.attachments,
     attachment_uploader: options?.attachment_uploader ?? null,
     gif: options?.gif,
+    suggested_reply: options?.suggested_reply ?? null,
     client_message_id: options?.client_message_id ?? null,
     publisher_agent_key: options?.publisher_agent_key ?? null,
     publisher_agent_session_id: options?.publisher_agent_session_id ?? null,

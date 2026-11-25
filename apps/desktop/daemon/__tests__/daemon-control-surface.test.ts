@@ -1436,6 +1436,31 @@ test("GIF publication falls back to text only on a known pre-commit disabled res
   } finally { globalThis.fetch = previousFetch; }
 });
 
+test("the published reply carries the agent's suggested reply, and the GIF fallback keeps it", async () => {
+  const previousFetch = globalThis.fetch;
+  const input = { roomId: "room_1", apiUrl: "https://letagents.test", bearer: "token", text: "CI is green. Merge it?",
+    gif: { provider: "giphy" as const, id: "abc123", title: "Nice work" }, suggestedReply: "Yes, merge it",
+    clientMessageId: "same-id", replyTo: null, threadRootId: null, signal: new AbortController().signal };
+  try {
+    const sent: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return sent.length === 1
+        ? new Response(JSON.stringify({ error: "expressions_disabled: GIF sending is disabled in this room. Send text instead." }), { status: 400 })
+        : new Response(JSON.stringify({ id: "msg_5", room_id: "room_1" }), { status: 200 });
+    }) as typeof fetch;
+    await productionSupervisedDeliveryHttp.publish(input);
+    assert.deepEqual(sent.map((body) => body.suggested_reply), ["Yes, merge it", "Yes, merge it"]);
+    sent.length = 0;
+    globalThis.fetch = (async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ id: "msg_6", room_id: "room_1" }), { status: 200 });
+    }) as typeof fetch;
+    await productionSupervisedDeliveryHttp.publish({ ...input, gif: null, suggestedReply: null });
+    assert.equal(Object.hasOwn(sent[0]!, "suggested_reply"), false, "no suggestion sends no field");
+  } finally { globalThis.fetch = previousFetch; }
+});
+
 test("a worker stages a reply attachment with its own bearer, and the reply carries the upload id", async () => {
   const previousFetch = globalThis.fetch;
   const calls: Array<{ url: string; method: string; authorization: string | null; body: unknown }> = [];

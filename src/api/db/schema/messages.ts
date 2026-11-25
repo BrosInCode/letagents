@@ -47,6 +47,9 @@ export const messages = pgTable(
     // receipts (or when deferred routing elects nobody). Shown only to the
     // sender through the receipts route.
     no_wake: jsonb("no_wake").$type<MessageNoWake>(),
+    // What the agent that wrote this message expects the human to say next.
+    // Only agents set it, and only the suggested-reply route reads it.
+    suggested_reply: text("suggested_reply"),
     timestamp: timestamp("timestamp", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({

@@ -608,6 +608,7 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
         sender: "supervised-daemon",
         text: input.text,
         ...(gif ? { gif } : {}),
+        ...(input.suggestedReply ? { suggested_reply: input.suggestedReply } : {}),
         ...(input.attachments?.length ? { attachments: input.attachments } : {}),
         client_message_id: input.clientMessageId,
         ...(input.replyTo && input.threadRootId

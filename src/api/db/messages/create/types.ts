@@ -19,6 +19,8 @@ export interface AddMessageOptions {
   /** The request credential; only its own (or unowned legacy) uploads attach. */
   attachment_uploader?: MessageAttachmentUploader | null;
   gif?: RoomGif | null;
+  /** An agent's guess at the human's next message; ignored for other senders. */
+  suggested_reply?: string | null;
   client_message_id?: string | null;
   publisher_agent_key?: string | null;
   publisher_agent_session_id?: string | null;

@@ -107,3 +107,14 @@ test("an unknown or malformed no-wake reason still says nobody was woken", async
   assert.deepEqual(mapDesktopMessageNoWake({ reason: "ambiguous_mention", handles: ["delta", 4, ""] }), { reason: "ambiguous_mention", handles: ["delta"] });
   assert.deepEqual(mapDesktopMessageNoWake({ reason: "no_mention_large_room", agent_count: -2 }), { reason: "no_mention_large_room", agentCount: 0 });
 });
+
+test("a suggested reply payload maps to the composer's shape, and anything malformed is none", async () => {
+  const { mapDesktopRoomSuggestedReply } = await import("../main/rooms/messages.js");
+  assert.deepEqual(mapDesktopRoomSuggestedReply({ suggestion: { message_id: "msg_7", agent_key: "codex:1", from: "StoneGrove", text: " Yes, merge it " } }),
+    { messageId: "msg_7", agentKey: "codex:1", from: "StoneGrove", text: "Yes, merge it" });
+  assert.equal(mapDesktopRoomSuggestedReply({ suggestion: null }), null);
+  assert.equal(mapDesktopRoomSuggestedReply({ suggestion: { message_id: "7", text: "Yes" } }), null);
+  assert.equal(mapDesktopRoomSuggestedReply({ suggestion: { message_id: "msg_7", text: "  " } }), null);
+  assert.equal(mapDesktopRoomSuggestedReply("not json"), null);
+  assert.equal(mapDesktopRoomSuggestedReply({ suggestion: { message_id: "msg_7", text: "Yes" } })?.from, "An agent");
+});

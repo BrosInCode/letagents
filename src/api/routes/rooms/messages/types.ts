@@ -77,6 +77,7 @@ export interface RoomMessageRouteDeps {
       reply_to?: string | null;
       thread_root_id?: string | null;
       gif?: RoomGif | null;
+      suggested_reply?: string | null;
     attachments?: NormalizedMessageAttachmentReference[];
       attachment_uploader?: MessageAttachmentUploader | null;
       client_message_id?: string | null;
