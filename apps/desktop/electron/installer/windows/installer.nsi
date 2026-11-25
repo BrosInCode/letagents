@@ -33,24 +33,36 @@ RequestExecutionLevel user
 !include "Win\Propkey.nsh"
 !include "${PAYLOAD_NSH}"
 
+!ifndef TEST_INSTANCE
 !define PRODUCT_NAME "LetAgents"
 ; The AppUserModelID: also WINDOWS_APP_USER_MODEL_ID in
 ; electron/main/windows-app-identity.ts, which the app sets on its process.
 !define APP_ID "chat.letagents.desktop"
+!define URL_SCHEME "letagents"
+; Must match updaterCacheDirName in resources\app-update.yml.
+!define UPDATER_CACHE "letagents-desktop-updater"
+!else
+  ; windows-installer.test.mjs only: its own names, so a test install never
+  ; touches a real LetAgents install, its links or its updater cache.
+  !define PRODUCT_NAME "LetAgentsTest-${TEST_INSTANCE}"
+  !define APP_ID "chat.letagents.desktop.test-${TEST_INSTANCE}"
+  !define URL_SCHEME "letagents-test-${TEST_INSTANCE}"
+  !define UPDATER_CACHE "letagents-test-${TEST_INSTANCE}-updater"
+!endif
 !define EXE_NAME "LetAgents.exe"
 !define UNINSTALLER_NAME "Uninstall LetAgents.exe"
 ; Programs the app runs from its own folder besides LetAgents.exe.
 !define RUNTIME_DIR "resources\app\runtime"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
-!define URL_KEY "Software\Classes\letagents"
-; Must match updaterCacheDirName in resources\app-update.yml.
-!define UPDATER_CACHE "letagents-desktop-updater"
+!define URL_KEY "Software\Classes\${URL_SCHEME}"
 ; An update writes the new version here first and moves the old version's
-; entries here while it swaps them; both are hidden subfolders of $INSTDIR, so
-; every rename stays on one volume. No payload entry starts with a dot
-; (windows-packaging.mjs), so these names never clash with one.
+; entries here while it swaps them (see SwapInStagedPayload). No payload entry
+; starts with a dot (windows-packaging.mjs), so these never clash with one.
+; windows-packaging.mjs checks that the longest payload path still fits in
+; MAX_PATH below STAGE_DIR (WINDOWS_STAGE_DIR there).
 !define STAGE_DIR ".letagents-new"
 !define BACKUP_DIR ".letagents-old"
+!define MOVED_IN_LIST ".moved-in"
 
 Name "${PRODUCT_NAME}"
 OutFile "${OUTPUT_FILE}"
@@ -78,7 +90,7 @@ Var InstalledHere
 Var MoveFrom
 Var MoveTo
 Var MoveName
-Var MoveKeepExisting
+Var MoveStopAtFailure
 Var MoveFailures
 ; "1" while $INSTDIR\${STAGE_DIR} holds a new copy that is not swapped in.
 Var Staging
@@ -254,28 +266,59 @@ Function .onInit
   ${EndIf}
 FunctionEnd
 
-; Stops the install: the error level is 2 also in silent mode (/S).
+; Stops the install or uninstall: the error level is 2 also in silent mode (/S).
 !macro FAIL_INSTALL TEXT
   MessageBox MB_OK|MB_ICONSTOP "${TEXT}" /SD IDOK
   SetErrorLevel 2
   Abort "${TEXT}"
 !macroend
 
-; Renames $MoveFrom\$MoveName to $MoveTo\$MoveName when the source exists. A
-; rename moves a whole folder at once and needs no free disk space. Windows
-; can refuse it for a moment while a virus scanner reads a file that was just
-; written, so it is tried for five seconds. A destination that exists is a
-; failure, except with $MoveKeepExisting "1": then the source stays where it
-; is. Adds each failure to $MoveFailures. Uses $R3.
-Function MoveLetAgentsEntry
+; How an update replaces the installed version, and what each stop leaves.
+; Both folders are hidden subfolders of $INSTDIR, so every move is a rename on
+; one volume: it moves a whole folder at once and needs no free disk space.
+;
+;   1. Extract the new version into ${STAGE_DIR}.
+;   2. Move the old entries from $INSTDIR into ${BACKUP_DIR}.
+;   3. Write ${MOVED_IN_LIST} into ${BACKUP_DIR}: the entries step 4 moves in.
+;   4. Move the new entries from ${STAGE_DIR} into $INSTDIR.
+;   5. The commit: remove ${STAGE_DIR}, which is empty now.
+;   6. Delete ${BACKUP_DIR} with the old version in it.
+;
+; A run that stops (power loss, a killed installer) leaves this, and the next
+; run of the installer or the uninstaller does this (RecoverInterruptedUpdate):
+;
+;   Stopped at  $INSTDIR      ${STAGE_DIR}  ${BACKUP_DIR}     Next run
+;   1           old, whole    part of new   none              deletes ${STAGE_DIR}
+;   2           part of old   new, whole    part of old       moves the old entries back
+;   3           no new entry  new, whole    old, part list    deletes the listed entries
+;                                                             (none there), moves old back
+;   4           part of new   rest of new   old, list         deletes the listed (new)
+;                                                             entries, moves old back
+;   5, 6        new, whole    none          (part of) old     deletes ${BACKUP_DIR}
+;   rollback    mixed         part of new   old, list         as for 4
+;
+; So both folders there means the swap was not committed and the old version
+; wins in full; ${BACKUP_DIR} alone means it was, and the new version stays.
+; A rollback (SwapInStagedPayload) keeps both folders until the old version
+; is whole again.
+
+!macro DEFINE_UPDATE_RECOVERY PREFIX
+; Renames $MoveFrom\$MoveName to $MoveTo\$MoveName when the source exists.
+; Windows can refuse a rename for a moment while a virus scanner reads a file
+; that was just written, so it is tried for five seconds. A destination that
+; exists is a failure. Adds each failure to $MoveFailures; with
+; $MoveStopAtFailure "1", does nothing once there is a failure. Uses $R3.
+Function ${PREFIX}MoveLetAgentsEntry
+  ${If} $MoveStopAtFailure == "1"
+  ${AndIf} $MoveFailures <> 0
+    Return
+  ${EndIf}
   ${IfNot} ${FileExists} "$MoveFrom\$MoveName"
     Return
   ${EndIf}
   ${If} ${FileExists} "$MoveTo\$MoveName"
-    ${If} $MoveKeepExisting != "1"
-      DetailPrint "$MoveTo\$MoveName is in the way."
-      IntOp $MoveFailures $MoveFailures + 1
-    ${EndIf}
+    DetailPrint "$MoveTo\$MoveName is in the way."
+    IntOp $MoveFailures $MoveFailures + 1
     Return
   ${EndIf}
   StrCpy $R3 0
@@ -295,94 +338,163 @@ Function MoveLetAgentsEntry
   ${Loop}
 FunctionEnd
 
+; Deletes $INSTDIR\$MoveName, a file or a folder. Counts a failure when it is
+; still there.
+Function ${PREFIX}DeleteLetAgentsEntry
+  ${If} ${FileExists} "$INSTDIR\$MoveName\*.*"
+    RMDir /r "$INSTDIR\$MoveName"
+  ${Else}
+    Delete "$INSTDIR\$MoveName"
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\$MoveName"
+    DetailPrint "Could not delete $INSTDIR\$MoveName."
+    IntOp $MoveFailures $MoveFailures + 1
+  ${EndIf}
+FunctionEnd
+
+; Puts the old version back after a swap that was not committed (see the
+; table above): deletes the entries ${MOVED_IN_LIST} names from $INSTDIR, then
+; moves every old entry back. Both folders stay, so a stop part way leaves a
+; state this repeats. Sets $MoveFailures. Uses $R1-$R3, $R5 and $R6.
+Function ${PREFIX}RestoreOldVersion
+  StrCpy $MoveFailures 0
+  StrCpy $MoveStopAtFailure "0"
+  ClearErrors
+  FileOpen $R5 "$INSTDIR\${BACKUP_DIR}\${MOVED_IN_LIST}" r
+  ${IfNot} ${Errors}
+    ${Do}
+      ClearErrors
+      FileRead $R5 $R6
+      ${If} ${Errors}
+        ${Break}
+      ${EndIf}
+      StrCpy $R1 $R6 1 -1
+      ${If} $R1 == "$\n"
+        StrCpy $R6 $R6 -1
+      ${EndIf}
+      ${If} $R6 != ""
+      ${AndIf} $R6 != "."
+      ${AndIf} $R6 != ".."
+        StrCpy $MoveName $R6
+        Call ${PREFIX}DeleteLetAgentsEntry
+      ${EndIf}
+    ${Loop}
+    FileClose $R5
+    ${If} $MoveFailures <> 0
+      Return
+    ${EndIf}
+    ; Every new entry is gone: from here no payload entry in $INSTDIR is new.
+    Delete "$INSTDIR\${BACKUP_DIR}\${MOVED_IN_LIST}"
+    ${If} ${FileExists} "$INSTDIR\${BACKUP_DIR}\${MOVED_IN_LIST}"
+      IntOp $MoveFailures $MoveFailures + 1
+      Return
+    ${EndIf}
+  ${EndIf}
+  StrCpy $MoveFrom "$INSTDIR\${BACKUP_DIR}"
+  StrCpy $MoveTo "$INSTDIR"
+  FindFirst $R1 $R2 "$INSTDIR\${BACKUP_DIR}\*"
+  ${DoWhile} $R2 != ""
+    ${If} $R2 != "."
+    ${AndIf} $R2 != ".."
+      StrCpy $MoveName $R2
+      Call ${PREFIX}MoveLetAgentsEntry
+    ${EndIf}
+    FindNext $R1 $R2
+  ${Loop}
+  FindClose $R1
+FunctionEnd
+
+; Finishes or undoes an update that stopped part way (see the table above).
+; Only in the folder this user's install is registered in. Not
+; IsRegisteredInstall: LetAgents.exe itself can be in ${BACKUP_DIR}.
+Function ${PREFIX}RecoverInterruptedUpdate
+  ReadRegStr $R0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  ${If} $R0 != $INSTDIR
+    Return
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\${STAGE_DIR}\*.*"
+  ${AndIf} ${FileExists} "$INSTDIR\${BACKUP_DIR}\*.*"
+    Call ${PREFIX}RestoreOldVersion
+    ${If} $MoveFailures <> 0
+      !insertmacro FAIL_INSTALL "An earlier ${PRODUCT_NAME} update did not finish, and its files in $INSTDIR could not be put back. Close the programs that use them, then try again."
+    ${EndIf}
+  ${EndIf}
+  ; ${BACKUP_DIR} first: with only ${STAGE_DIR} left, a stop here is case 1.
+  RMDir /r "$INSTDIR\${BACKUP_DIR}"
+  RMDir /r "$INSTDIR\${STAGE_DIR}"
+  ${If} ${FileExists} "$INSTDIR\${BACKUP_DIR}\*.*"
+  ${OrIf} ${FileExists} "$INSTDIR\${STAGE_DIR}\*.*"
+    !insertmacro FAIL_INSTALL "${PRODUCT_NAME} could not remove the files of an earlier update in $INSTDIR. Close the programs that use them, then try again."
+  ${EndIf}
+FunctionEnd
+!macroend
+!insertmacro DEFINE_UPDATE_RECOVERY ""
+!insertmacro DEFINE_UPDATE_RECOVERY "un."
+
 !macro MOVE_LETAGENTS_ENTRY NAME
   StrCpy $MoveName "${NAME}"
   Call MoveLetAgentsEntry
 !macroend
 
-; An earlier update that stopped part way (power loss, a killed installer)
-; can leave a staged copy and moved-aside entries. Each moved-aside entry
-; whose place in $INSTDIR is empty goes back, so the app is whole again;
-; then both folders go. Only in the folder this user's install is
-; registered in. Not IsRegisteredInstall: LetAgents.exe itself can be one
-; of the moved-aside entries.
-Function RecoverInterruptedUpdate
-  ReadRegStr $R0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
-  ${If} $R0 != $INSTDIR
-    Return
-  ${EndIf}
-  ${If} ${FileExists} "$INSTDIR\${BACKUP_DIR}\*.*"
-    StrCpy $MoveFrom "$INSTDIR\${BACKUP_DIR}"
-    StrCpy $MoveTo "$INSTDIR"
-    StrCpy $MoveKeepExisting "1"
-    StrCpy $MoveFailures 0
-    FindFirst $R1 $R2 "$INSTDIR\${BACKUP_DIR}\*"
-    ${DoWhile} $R2 != ""
-      ${If} $R2 != "."
-      ${AndIf} $R2 != ".."
-        StrCpy $MoveName $R2
-        Call MoveLetAgentsEntry
-      ${EndIf}
-      FindNext $R1 $R2
-    ${Loop}
-    FindClose $R1
-    ${If} $MoveFailures <> 0
-      !insertmacro FAIL_INSTALL "An earlier ${PRODUCT_NAME} update did not finish, and its files in $INSTDIR\${BACKUP_DIR} could not be put back. Close the programs that use them, then run the installer again."
-    ${EndIf}
-    RMDir /r "$INSTDIR\${BACKUP_DIR}"
-  ${EndIf}
-  RMDir /r "$INSTDIR\${STAGE_DIR}"
-  ${If} ${FileExists} "$INSTDIR\${BACKUP_DIR}\*.*"
-  ${OrIf} ${FileExists} "$INSTDIR\${STAGE_DIR}\*.*"
-    !insertmacro FAIL_INSTALL "${PRODUCT_NAME} could not remove the files of an earlier update in $INSTDIR. Close the programs that use them, then run the installer again."
-  ${EndIf}
-FunctionEnd
+!macro LIST_LETAGENTS_ENTRY NAME
+  FileWrite $R4 "${NAME}$\n"
+!macroend
 
-; Puts the staged copy in place of the installed one with renames only: the
-; old entries go to ${BACKUP_DIR}, then the new entries come into $INSTDIR,
-; so the swap needs no free disk space. If any entry does not move, the new
-; entries are removed and the old ones move back, and the install stops with
-; the old version in place. The old entries are deleted last. Only for the
-; registered install, as the payload names only LetAgents's own entries.
+; Steps 2 to 6 above. At the first entry that does not move it stops and
+; rolls back (RestoreOldVersion): the new entries go, the old ones come back,
+; then both folders go, and the install stops with the old version in place.
+; Only for the registered install, as the payload names only LetAgents's own
+; entries. Uses $R1-$R6.
 Function SwapInStagedPayload
   CreateDirectory "$INSTDIR\${BACKUP_DIR}"
   SetFileAttributes "$INSTDIR\${BACKUP_DIR}" HIDDEN
-  StrCpy $MoveKeepExisting "0"
+  StrCpy $MoveStopAtFailure "1"
   StrCpy $MoveFailures 0
   StrCpy $MoveFrom "$INSTDIR"
   StrCpy $MoveTo "$INSTDIR\${BACKUP_DIR}"
   !insertmacro LETAGENTS_PAYLOAD_ENTRIES MOVE_LETAGENTS_ENTRY
   ${If} $MoveFailures = 0
+    ClearErrors
+    FileOpen $R4 "$INSTDIR\${BACKUP_DIR}\${MOVED_IN_LIST}" w
+    ${If} ${Errors}
+      IntOp $MoveFailures $MoveFailures + 1
+    ${Else}
+      !insertmacro LETAGENTS_PAYLOAD_ENTRIES LIST_LETAGENTS_ENTRY
+      FileClose $R4
+    ${EndIf}
+  ${EndIf}
+  ${If} $MoveFailures = 0
     StrCpy $MoveFrom "$INSTDIR\${STAGE_DIR}"
     StrCpy $MoveTo "$INSTDIR"
     !insertmacro LETAGENTS_PAYLOAD_ENTRIES MOVE_LETAGENTS_ENTRY
-    ${If} $MoveFailures = 0
+  ${EndIf}
+  ${If} $MoveFailures = 0
+    ; The commit.
+    RMDir "$INSTDIR\${STAGE_DIR}"
+    ${IfNot} ${FileExists} "$INSTDIR\${STAGE_DIR}\*.*"
       StrCpy $Staging "0"
       RMDir /r "$INSTDIR\${BACKUP_DIR}"
-      RMDir /r "$INSTDIR\${STAGE_DIR}"
       Return
     ${EndIf}
-    ; Only new entries are in $INSTDIR now: the old ones are all aside.
-    !insertmacro REMOVE_LETAGENTS_PAYLOAD
   ${EndIf}
-  StrCpy $MoveFailures 0
-  StrCpy $MoveFrom "$INSTDIR\${BACKUP_DIR}"
-  StrCpy $MoveTo "$INSTDIR"
-  !insertmacro LETAGENTS_PAYLOAD_ENTRIES MOVE_LETAGENTS_ENTRY
-  RMDir /r "$INSTDIR\${STAGE_DIR}"
+  Call RestoreOldVersion
   StrCpy $Staging "0"
   ${If} $MoveFailures <> 0
-    ; The next run puts them back (RecoverInterruptedUpdate).
+    ; Both folders stay, so the next run puts the old version back.
     StrCpy $RestartAfterFailure "0"
-    !insertmacro FAIL_INSTALL "${PRODUCT_NAME} ${VERSION} could not replace the files in $INSTDIR, and some files of the installed version are still in $INSTDIR\${BACKUP_DIR}. Close the programs that use them, then run the installer again."
+    !insertmacro FAIL_INSTALL "${PRODUCT_NAME} ${VERSION} could not replace the files in $INSTDIR, and could not put all files of the installed version back. Close the programs that use them, then run the installer again."
   ${EndIf}
-  RMDir "$INSTDIR\${BACKUP_DIR}"
+  RMDir /r "$INSTDIR\${BACKUP_DIR}"
+  RMDir /r "$INSTDIR\${STAGE_DIR}"
   !insertmacro FAIL_INSTALL "${PRODUCT_NAME} ${VERSION} could not replace the files in $INSTDIR because some of them are in use. The installed version was not changed. Close the programs that use them, then try again."
 FunctionEnd
 
-; Also when a file could not be extracted and the person chose Abort.
+; Also when a file could not be extracted and the person chose Abort. Then
+; only ${STAGE_DIR} exists (case 1); with ${BACKUP_DIR} there too, removing
+; ${STAGE_DIR} would turn a swap that was not committed into one that was.
 Function .onInstFailed
   ${If} $Staging == "1"
+  ${AndIfNot} ${FileExists} "$INSTDIR\${BACKUP_DIR}\*.*"
     SetOutPath "$INSTDIR"
     RMDir /r "$INSTDIR\${STAGE_DIR}"
   ${EndIf}
@@ -495,15 +607,14 @@ SectionEnd
 Section "Uninstall"
   SetShellVarContext current
   Call un.CloseRunningApp
+  ; After a stop during an update, LetAgents.exe can be in ${BACKUP_DIR}.
+  Call un.RecoverInterruptedUpdate
   Call un.IsRegisteredInstall
   ; An uninstaller in any other folder removes only itself: the shortcuts,
   ; links, Installed apps entry and updater cache belong to the registered
   ; install.
   ${If} $InstalledHere == "1"
     !insertmacro REMOVE_LETAGENTS_PAYLOAD
-    ; Left by an update that did not finish.
-    RMDir /r "$INSTDIR\${STAGE_DIR}"
-    RMDir /r "$INSTDIR\${BACKUP_DIR}"
     Delete "$SMPROGRAMS\${PRODUCT_NAME}.lnk"
     Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
     DeleteRegKey HKCU "${URL_KEY}"

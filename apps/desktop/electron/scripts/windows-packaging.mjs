@@ -334,6 +334,45 @@ export function createNsisPayloadInclude(entries) {
   ].join("\r\n");
 }
 
+/** The installer's STAGE_DIR and BACKUP_DIR (installer.nsi): an update writes every payload file below one of them. */
+export const WINDOWS_STAGE_DIR = ".letagents-new";
+export const WINDOWS_BACKUP_DIR = ".letagents-old";
+/**
+ * The longest folder an update writes the payload below: the default install
+ * folder under a long profile folder name (a local account name has at most
+ * 20 characters; a domain or a second profile adds a suffix such as
+ * ".CONTOSO.001", so 32), then the staging folder.
+ */
+export const WINDOWS_LONGEST_STAGE_ROOT = `C:\\Users\\${"u".repeat(32)}\\AppData\\Local\\Programs\\LetAgents\\${WINDOWS_STAGE_DIR}`;
+/** MAX_PATH counts the closing NUL: NSIS writes no longer path without long-path support. */
+export const WINDOWS_MAX_PATH_LENGTH = 259;
+
+/** The payload file or folder with the longest path, as Windows writes it (backslashes), relative to the payload. */
+export async function longestPayloadPath(directory) {
+  let longest = "";
+  for (const entry of await readdir(directory, { withFileTypes: true, recursive: true })) {
+    const relative = win32.join(...join(entry.parentPath, entry.name).slice(directory.length).split(/[\\/]/).filter(Boolean));
+    if (relative.length > longest.length) longest = relative;
+  }
+  return longest;
+}
+
+/**
+ * Fail the build when a payload path below WINDOWS_LONGEST_STAGE_ROOT would
+ * be longer than MAX_PATH: every update would then stop at the extraction
+ * (exit 2) and keep the old version, so no update could ever install.
+ */
+export function assertPayloadPathsFit(longestRelativePath) {
+  const length = WINDOWS_LONGEST_STAGE_ROOT.length + 1 + longestRelativePath.length;
+  if (length > WINDOWS_MAX_PATH_LENGTH) {
+    throw new Error(
+      `The Windows payload path '${longestRelativePath}' is ${length} characters below ${WINDOWS_LONGEST_STAGE_ROOT}; ` +
+        `an update writes no path longer than ${WINDOWS_MAX_PATH_LENGTH}. Shorten the path or flatten the folder.`,
+    );
+  }
+  return length;
+}
+
 export async function listPayloadEntries(directory) {
   return (await readdir(directory, { withFileTypes: true })).map((entry) => ({
     name: entry.name,
