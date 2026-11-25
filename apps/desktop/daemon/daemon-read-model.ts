@@ -1,3 +1,4 @@
+import type { DaemonLegacyStateReset } from "#daemon-contract/index.js";
 import {
   NATIVE_LIVENESS_STALE_AFTER_MS,
   workplaceLivenessStaleAfterMs,
@@ -39,6 +40,7 @@ export type DaemonReadModelPorts = {
   currentDaemonGeneration(): number;
   nowMs(): number;
   startedAt: string;
+  legacyStateReset?(): DaemonLegacyStateReset | null;
   capabilities: {
     hasDelivery(): boolean;
     supportsRoomTurns(): boolean;
@@ -96,6 +98,7 @@ export class DaemonReadModel {
   constructor(private readonly ports: DaemonReadModelPorts) {}
 
   status() {
+    const legacyStateReset = this.ports.legacyStateReset?.() ?? null;
     return {
       healthy: true,
       protocol_version: DAEMON_PROTOCOL_VERSION,
@@ -123,6 +126,7 @@ export class DaemonReadModel {
       generation: this.ports.currentDaemonGeneration(),
       pid: process.pid,
       started_at: this.ports.startedAt,
+      ...(legacyStateReset ? { legacy_state_reset: legacyStateReset } : {}),
     };
   }
 

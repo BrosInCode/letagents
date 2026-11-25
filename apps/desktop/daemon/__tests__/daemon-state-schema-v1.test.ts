@@ -36,6 +36,7 @@ import {
   ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
   RUNTIME_RECOVERY_END_WORKER_SESSION_EFFECT_KIND,
 } from "../effect-journal/index.js";
+import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
 import { ExecutionApprovalPublicationStore } from "../execution-approval-publication-store.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import { SupervisorDaemon } from "../main.js";
@@ -2004,5 +2005,208 @@ test("listEntryIds and listUnresolvedTurnControlRecovery read scalar rows in sor
   } finally {
     await store.close();
     await env.cleanup();
+  }
+});
+
+test("legacy reset preserves room-only workspaces and review archives across restarts, rolls back on rename error, fails closed on symlinks, and reports one-time reset status", async () => {
+  const seedLegacyV54 = async (dbPath: string) => {
+    const seed = new DatabaseSync(dbPath);
+    try {
+      seed.exec(`
+        PRAGMA application_id = 0;
+        PRAGMA user_version = 54;
+        CREATE TABLE runtime_deployments (
+          agent_id TEXT PRIMARY KEY,
+          provider_connection_pid INTEGER,
+          provider_process_identity TEXT
+        );
+      `);
+    } finally {
+      seed.close();
+    }
+    await protectOwnerPrivate(dbPath, "file", { force: true });
+  };
+
+  // 1. Rollback on main DB rename failure + full SupervisorDaemon restart #1 and #2 preservation + status notice.
+  {
+    const env = await tempDir("letagents-legacy-preserve-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    const attemptId = "77d37322-4a2b-4c5d-8e9f-1234567890ab";
+    const reviewFileName = `${"a".repeat(64)}.review`;
+    try {
+      await seedLegacyV54(dbPath);
+      await writeFile(`${dbPath}.recovery.enc`, "legacy-recovery-envelope", "utf8");
+      await mkdir(`${dbPath}.reviews`, { recursive: true, mode: 0o700 });
+      await mkdir(`${dbPath}.reviews-recovery`, { recursive: true, mode: 0o700 });
+      await writeFile(join(`${dbPath}.reviews`, reviewFileName), "legacy-review-ciphertext", "utf8");
+      await writeFile(join(`${dbPath}.reviews-recovery`, reviewFileName), "legacy-review-recovery", "utf8");
+
+      const provisioner = new EphemeralWorkspaceProvisioner(env.root);
+      const provisioned = await provisioner.provision({ workAttemptId: attemptId, taskId: "task-room-only" });
+      await writeFile(join(provisioned.path, "uncommitted-work.txt"), "keep-me-safe\n", "utf8");
+
+      // Injected failure on main DB rename must roll back .recovery.enc, .reviews, .reviews-recovery, and worktrees/room-only.
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath, {
+          workspaceRoot: env.root,
+          renameFile: async (from, to) => {
+            if (from === dbPath) throw Object.assign(new Error("EIO: injected main rename failure"), { code: "EIO" });
+            await renameWithRetryAsync(from, to);
+          },
+        }),
+        /injected main rename failure/,
+      );
+      assert.equal(await readFile(join(provisioned.path, "uncommitted-work.txt"), "utf8"), "keep-me-safe\n");
+      assert.equal(await readFile(join(`${dbPath}.reviews`, reviewFileName), "utf8"), "legacy-review-ciphertext");
+      assert.equal(await readFile(join(`${dbPath}.reviews-recovery`, reviewFileName), "utf8"), "legacy-review-recovery");
+      assert.equal(await readFile(`${dbPath}.recovery.enc`, "utf8"), "legacy-recovery-envelope");
+
+      const paths = {
+        stateDir: env.root,
+        ...testDaemonEndpoint(env.root, "legacy-preserve"),
+        lockPath: join(env.root, "daemon.lock"),
+        manifestPath: dbPath,
+        auditPath: join(env.root, "audit.log"),
+        workspaceRoot: env.root,
+      };
+
+      // Startup #1: moves legacy DB + reviews + worktrees/room-only aside, runs recoverEphemeralWorkspaces & review pruning.
+      let backupName = "";
+      const daemon1 = new SupervisorDaemon(paths, process.platform);
+      try {
+        await daemon1.start();
+        const internals = daemon1 as unknown as {
+          stateDatabase: DaemonStateDatabase | null;
+          status(): { legacy_state_reset?: { reset_at: string; backup_name: string; legacy_schema_version: number; preserved_room_only_workspaces: boolean; preserved_review_archives: boolean } | null };
+        };
+        const status1 = internals.status();
+        assert.ok(status1.legacy_state_reset, "daemon status must report one-time legacy reset after moving aside v54 DB");
+        assert.equal(status1.legacy_state_reset.legacy_schema_version, 54);
+        assert.equal(status1.legacy_state_reset.preserved_room_only_workspaces, true);
+        assert.equal(status1.legacy_state_reset.preserved_review_archives, true);
+        backupName = status1.legacy_state_reset.backup_name;
+        assert.match(backupName, /^daemon-state\.sqlite\.legacy-.*Z(?:-\d+)?$/);
+
+        // Explicitly run review archive maintenance/pruning against the fresh v1005 DB.
+        const reviewStore = new RoomWorkspaceStore(internals.stateDatabase!.connection);
+        reviewStore.maintainArchives(Date.now());
+      } finally {
+        await daemon1.stop().catch(() => undefined);
+      }
+
+      // Verify legacy reviews and room-only uncommitted file survived startup #1 intact.
+      assert.equal(await readFile(join(env.root, `${backupName}.reviews`, reviewFileName), "utf8"), "legacy-review-ciphertext");
+      assert.equal(await readFile(join(env.root, `${backupName}.reviews-recovery`, reviewFileName), "utf8"), "legacy-review-recovery");
+      const worktreesEntries = await readdir(join(env.root, "worktrees"));
+      const legacyRoomOnly = worktreesEntries.filter((name) => name.startsWith("room-only.legacy-"));
+      assert.equal(legacyRoomOnly.length, 1, "non-empty worktrees/room-only must be moved aside with .legacy- prefix");
+      assert.equal(
+        await readFile(join(env.root, "worktrees", legacyRoomOnly[0]!, attemptId, "uncommitted-work.txt"), "utf8"),
+        "keep-me-safe\n",
+      );
+
+      // Startup #2 on the now-modern v1005 DB: preserved backups must survive and reset status stays readable.
+      const daemon2 = new SupervisorDaemon(paths, process.platform);
+      try {
+        await daemon2.start();
+        const internals = daemon2 as unknown as {
+          status(): { legacy_state_reset?: { backup_name: string; legacy_schema_version: number; preserved_room_only_workspaces: boolean; preserved_review_archives: boolean } | null };
+        };
+        const status2 = internals.status();
+        assert.equal(status2.legacy_state_reset?.backup_name, backupName);
+        assert.equal(status2.legacy_state_reset?.preserved_room_only_workspaces, true);
+        assert.equal(status2.legacy_state_reset?.preserved_review_archives, true);
+      } finally {
+        await daemon2.stop().catch(() => undefined);
+      }
+      assert.equal(
+        await readFile(join(env.root, "worktrees", legacyRoomOnly[0]!, attemptId, "uncommitted-work.txt"), "utf8"),
+        "keep-me-safe\n",
+      );
+      assert.equal(await readFile(join(env.root, `${backupName}.reviews`, reviewFileName), "utf8"), "legacy-review-ciphertext");
+    } finally {
+      await env.cleanup();
+    }
+  }
+
+  // 2. Fresh v1005 start (no legacy DB) must NOT surface legacy_state_reset in status.
+  {
+    const env = await tempDir("letagents-fresh-no-reset-");
+    const paths = {
+      stateDir: env.root,
+      ...testDaemonEndpoint(env.root, "fresh-no-reset"),
+      lockPath: join(env.root, "daemon.lock"),
+      manifestPath: join(env.root, "daemon-state.sqlite"),
+      auditPath: join(env.root, "audit.log"),
+      workspaceRoot: env.root,
+    };
+    const daemon = new SupervisorDaemon(paths, process.platform);
+    try {
+      await daemon.start();
+      const status = (daemon as unknown as { status(): { legacy_state_reset?: unknown } }).status();
+      assert.equal(status.legacy_state_reset, undefined);
+    } finally {
+      await daemon.stop().catch(() => undefined);
+      await env.cleanup();
+    }
+  }
+
+  // 3. Empty worktrees/room-only and empty .reviews are not moved unnecessarily; symlinked .reviews fails closed.
+  {
+    const env = await tempDir("letagents-legacy-empty-and-symlink-");
+    const dbPath = join(env.root, "daemon-state.sqlite");
+    try {
+      await seedLegacyV54(dbPath);
+      await mkdir(join(env.root, "worktrees", "room-only"), { recursive: true, mode: 0o700 });
+      await mkdir(`${dbPath}.reviews`, { recursive: true, mode: 0o700 });
+      const movedState: { info: { preservedReviews: boolean; preservedRoomOnlyWorkspaces: boolean } | null } = { info: null };
+      await moveAsideLegacyDaemonStateDatabase(dbPath, {
+        workspaceRoot: env.root,
+        onMovedAside: (info) => { movedState.info = info; },
+      });
+      assert.deepEqual(
+        movedState.info && {
+          preservedReviews: movedState.info.preservedReviews,
+          preservedRoomOnlyWorkspaces: movedState.info.preservedRoomOnlyWorkspaces,
+        },
+        { preservedReviews: false, preservedRoomOnlyWorkspaces: false },
+      );
+      assert.equal((await readdir(join(env.root, "worktrees"))).some((name) => name.startsWith("room-only.legacy-")), false);
+      assert.equal((await readdir(env.root)).some((name) => name.endsWith(".reviews") && name.includes(".legacy-")), false);
+
+      // Non-directory file or symlink/junction at .reviews must fail closed before moving the database.
+      const dbPath2 = join(env.root, "symlink-test.sqlite");
+      const externalTarget = join(env.root, "external-dir");
+      await mkdir(externalTarget, { recursive: true, mode: 0o700 });
+      await seedLegacyV54(dbPath2);
+      await symlink(externalTarget, `${dbPath2}.reviews`, process.platform === "win32" ? "junction" : "dir");
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath2, { workspaceRoot: env.root }),
+        /non-directory legacy review archive path/i,
+      );
+      assert.ok((await lstat(dbPath2)).isFile(), "legacy DB must remain untouched when .reviews is a symlink");
+
+      const dbPath3 = join(env.root, "file-reviews-test.sqlite");
+      await seedLegacyV54(dbPath3);
+      await writeFile(`${dbPath3}.reviews`, "not-a-directory", "utf8");
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath3, { workspaceRoot: env.root }),
+        /non-directory legacy review archive path/i,
+      );
+      assert.ok((await lstat(dbPath3)).isFile(), "legacy DB must remain untouched when .reviews is a regular file");
+
+      const unsafeWorktreeRoot = join(env.root, "unsafe-room-only");
+      const dbPath4 = join(unsafeWorktreeRoot, "daemon-state.sqlite");
+      await mkdir(join(unsafeWorktreeRoot, "worktrees"), { recursive: true, mode: 0o700 });
+      await seedLegacyV54(dbPath4);
+      await writeFile(join(unsafeWorktreeRoot, "worktrees", "room-only"), "not-a-directory", "utf8");
+      await assert.rejects(
+        () => moveAsideLegacyDaemonStateDatabase(dbPath4, { workspaceRoot: unsafeWorktreeRoot }),
+        /unsafe legacy room-only workspace directory/i,
+      );
+      assert.ok((await lstat(dbPath4)).isFile(), "legacy DB must remain untouched when worktrees/room-only is not a directory");
+    } finally {
+      await env.cleanup();
+    }
   }
 });

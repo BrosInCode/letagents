@@ -5,6 +5,8 @@ import {
   DaemonStateDatabase,
   DaemonStateSchema,
   moveAsideLegacyDaemonStateDatabase,
+  recordLegacyStateResetNotice,
+  type LegacyMoveAsideResult,
 } from "./daemon-state-database.js";
 import { prepareStateRecoveryBackup, markStateRecoveryBackupValidated, cleanupStateRecoveryBackup, recordStateRecoveryBackupWarning, stateRecoveryBackupAwaitsValidation, StateRecoveryError } from "./state-recovery-backup.js";
 import { compactDaemonStateDatabase } from "./daemon-state-maintenance.js";
@@ -67,14 +69,25 @@ export async function withProtectedStateUpgrade<T>(
   initialize: (database: DaemonStateDatabase, context: ProtectedStateUpgradeContext) => Promise<T>,
   bootstrap: StateRecoveryBootstrap,
   assertCurrent?: () => Promise<void>,
-  options: { keepOpen?: boolean } = {},
+  options: { keepOpen?: boolean; workspaceRoot?: string } = {},
 ): Promise<T> {
   let stateDatabase: DaemonStateDatabase | null = null;
   try {
-    await moveAsideLegacyDaemonStateDatabase(path);
+    const legacyReset: { moved: LegacyMoveAsideResult | null } = { moved: null };
+    await moveAsideLegacyDaemonStateDatabase(path, {
+      ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
+      onMovedAside: (moved) => { legacyReset.moved = moved; },
+    });
     const freshBackup = await prepareStateRecoveryBackup(path, DAEMON_STATE_USER_VERSION, bootstrap.getBackupKey ?? requestStateRecoveryKey);
-    stateDatabase = await DaemonStateDatabase.open(path, (opened) => new DaemonStateSchema().createSchema(opened));
+    stateDatabase = await DaemonStateDatabase.open(
+      path,
+      (opened) => new DaemonStateSchema().createSchema(opened),
+      options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : undefined,
+    );
     const database = stateDatabase.connection;
+    if (legacyReset.moved) {
+      recordLegacyStateResetNotice(database, legacyReset.moved);
+    }
     let rewritten = false;
     if (assertCurrent) {
       const maintenance = await compactDaemonStateDatabase(path, database, assertCurrent);

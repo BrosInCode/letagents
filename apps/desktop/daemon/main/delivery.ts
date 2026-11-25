@@ -160,6 +160,7 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       nowMs: () => this.nowMs(),
       startedAt: this.startedAt,
+      legacyStateReset: () => this.legacyStateResetNotice,
       capabilities: {
         hasDelivery: () => Boolean(this.supervisedDelivery),
         supportsRoomTurns: () => Boolean(this.providerPort?.runRoomTurn),

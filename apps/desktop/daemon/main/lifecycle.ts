@@ -1,6 +1,7 @@
 /** Starting, stopping and handing off the supervisor daemon. */
 import { openDaemonMaintenance, registerDaemonBoardAccess } from "../maintenance-service.js";
 import { BOUNDED_MCP_EFFECT_KIND, EffectExecutor } from "../effect-journal/index.js";
+import { readLegacyStateResetNotice } from "../daemon-state-database.js";
 import { restoreLocalRoomAuthorities } from "../local-room-runtime.js";
 import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import { withProtectedStateUpgrade, type StateRecoveryBootstrap } from "../state-recovery-key.js";
@@ -41,8 +42,9 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
         this.supervisedInbox.attachDatabase(database.connection, writeFence);
         // Full load checks every stored payload parses when upgrading, compacting, or validating a backup.
         if (validateFullState) await this.store.load();
+        this.legacyStateResetNotice = readLegacyStateResetNotice(database.connection);
         return database;
-      }, storage, () => this.singleton.assertCurrent(), { keepOpen: true });
+      }, storage, () => this.singleton.assertCurrent(), { keepOpen: true, workspaceRoot: this.workspaceRoot });
     } catch (error) {
       this.boardOwnershipActive = false;
       await this.store.close().catch(() => undefined);

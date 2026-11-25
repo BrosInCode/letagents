@@ -1,4 +1,5 @@
 /** The supervisor daemon's parameters, plain state and the parts every layer reads. */
+import type { DaemonLegacyStateReset } from "#daemon-contract/index.js";
 import type { DaemonMaintenanceService } from "../maintenance-service.js";
 import type { AuditLog } from "../audit-log.js";
 import type { AgentStreamRegistry } from "../agent-stream-registry.js";
@@ -83,11 +84,13 @@ export abstract class SupervisorDaemonState {
   /** Initial-tail reads are authority-bearing admission operations. */
   protected readonly bootstrapOperations = new Set<BootstrapOperation>();
   protected readonly startedAt = new Date().toISOString();
+  protected legacyStateResetNotice: DaemonLegacyStateReset | null = null;
   protected handoffScheduled = false;
   protected handoffDraining = false;
   protected boardOwnershipActive = false;
 
   protected abstract readonly stateDatabasePath: string;
+  protected abstract readonly workspaceRoot: string;
   protected abstract readonly singleton: DaemonSingleton;
   protected abstract readonly authority: DaemonAuthority;
   protected abstract readonly store: ManifestStore;

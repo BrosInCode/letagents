@@ -39,6 +39,7 @@ import type { SupervisorDaemonArgs } from "./state.js";
 
 export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
   protected readonly stateDatabasePath: string;
+  protected readonly workspaceRoot: string;
   protected readonly singleton: DaemonSingleton;
   protected readonly authority: DaemonAuthority;
   protected readonly store: ManifestStore;
@@ -125,6 +126,7 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       nowMs: () => this.nowMs(),
     });
     const root = paths.workspaceRoot ?? dirname(paths.manifestPath);
+    this.workspaceRoot = root;
     this.roomTurnAttachments = new RoomTurnAttachmentStager(join(root, "room-turn-attachments"));
     const gitCommand = createGitCommand(root);
     this.gitCommand = gitCommand;

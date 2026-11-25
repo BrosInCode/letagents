@@ -736,6 +736,35 @@
       ],
       "type": "object"
     },
+    "DaemonLegacyStateReset": {
+      "properties": {
+        "backup_name": {
+          "type": "string"
+        },
+        "legacy_schema_version": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "preserved_review_archives": {
+          "type": "boolean"
+        },
+        "preserved_room_only_workspaces": {
+          "type": "boolean"
+        },
+        "reset_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reset_at",
+        "backup_name",
+        "legacy_schema_version",
+        "preserved_room_only_workspaces",
+        "preserved_review_archives"
+      ],
+      "type": "object"
+    },
     "DaemonManifestEntryView": {
       "properties": {
         "activity": {
@@ -1868,6 +1897,16 @@
         },
         "implementation_version": {
           "type": "string"
+        },
+        "legacy_state_reset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DaemonLegacyStateReset"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "maintenance_hold_id": {
           "type": [
