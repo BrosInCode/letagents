@@ -126,8 +126,14 @@ async function waitTurnSettled(scenario: AgyScenario): Promise<void> {
 
 const EDIT_REQUEST = "Edge recording. Write approval-a.txt, then run touch approval-b.txt.";
 
+// A daemon started through LETAGENTS_EDGE_DAEMON_CMD has no Node IPC channel, and the host
+// approval key reaches the daemon over that channel only.
+const EXTERNAL_DAEMON_SKIP = process.env.LETAGENTS_EDGE_DAEMON_CMD?.trim()
+  ? "needs the Node IPC channel for the host approval key; an external daemon command has none"
+  : false;
+
 describe("daemon edge: Antigravity", { skip: EDGE_DAEMON_UNSUPPORTED_REASON ?? false }, () => {
-  test("the recorded turn: write allowed, command denied, so the turn ends with no reply", async () => {
+  test("the recorded turn: write allowed, command denied, so the turn ends with no reply", { skip: EXTERNAL_DAEMON_SKIP }, async () => {
     const scenario = await startAgyScenario("recorded");
     try {
       await startAgentAndWaitIdle(scenario);
@@ -145,7 +151,7 @@ describe("daemon edge: Antigravity", { skip: EDGE_DAEMON_UNSUPPORTED_REASON ?? f
     }
   });
 
-  test("a denied write ends the turn at once with no reply and no second prompt", async () => {
+  test("a denied write ends the turn at once with no reply and no second prompt", { skip: EXTERNAL_DAEMON_SKIP }, async () => {
     const scenario = await startAgyScenario("deny-first");
     try {
       await startAgentAndWaitIdle(scenario);
@@ -162,7 +168,7 @@ describe("daemon edge: Antigravity", { skip: EDGE_DAEMON_UNSUPPORTED_REASON ?? f
     }
   });
 
-  test("two allowed actions end the turn with exactly one reply", async () => {
+  test("two allowed actions end the turn with exactly one reply", { skip: EXTERNAL_DAEMON_SKIP }, async () => {
     const scenario = await startAgyScenario("allow-both");
     try {
       await startAgentAndWaitIdle(scenario);
@@ -183,7 +189,7 @@ describe("daemon edge: Antigravity", { skip: EDGE_DAEMON_UNSUPPORTED_REASON ?? f
     }
   });
 
-  test("a daemon kill while a prompt is open: the new daemon resumes the session and closes the old prompt", async () => {
+  test("a daemon kill while a prompt is open: the new daemon resumes the session and closes the old prompt", { skip: EXTERNAL_DAEMON_SKIP }, async () => {
     const scenario = await startAgyScenario("kill-open-prompt");
     try {
       const session = await startAgentAndWaitIdle(scenario);
