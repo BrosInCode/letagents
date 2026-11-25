@@ -153,6 +153,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-message-info", roomIdentifier, messageId),
     getMessageReceipts: (roomIdentifier: string, messageIds: string[]) =>
       ipcRenderer.invoke("desktop:room:get-message-receipts", roomIdentifier, messageIds),
+    getSuggestedReply: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:room:get-suggested-reply", roomIdentifier),
     getMessagesAfter: (roomIdentifier, afterMessageId) => ipcRenderer.invoke("desktop:room:get-messages-after", roomIdentifier, afterMessageId),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
@@ -164,6 +166,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:mark-thread-read", roomIdentifier, threadRootId, messageId ?? null),
     getReasoningSession: (roomIdentifier: string, sessionId: string) =>
       ipcRenderer.invoke("desktop:room:get-reasoning-session", roomIdentifier, sessionId),
+    readAttachmentText: (href: string) => ipcRenderer.invoke("desktop:room:read-attachment-text", href),
+    downloadAttachment: (href: string) => ipcRenderer.invoke("desktop:room:download-attachment", href),
     chooseAttachments: (limit: number) => ipcRenderer.invoke("desktop:room:choose-attachments", limit),
     stageChosenAttachments: (roomIdentifier: string, tokens: string[]) =>
       ipcRenderer.invoke("desktop:room:stage-chosen-attachments", roomIdentifier, tokens),

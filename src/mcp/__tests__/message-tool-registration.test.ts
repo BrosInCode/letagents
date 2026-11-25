@@ -249,3 +249,12 @@ test("wait_for_messages honors explicit cursors instead of forcing stored progre
     undefined,
   );
 });
+
+test("send_message carries a suggested reply, and a too-long one is dropped without stopping the message", () => {
+  const base = { sender: "Fern", text: "Merge?", credentials: {} };
+  assert.equal(buildSendMessageRequestBody({ ...base, suggestedReply: "  Yes, merge it " }).suggested_reply, "Yes, merge it");
+  const long = buildSendMessageRequestBody({ ...base, suggestedReply: "x".repeat(501) });
+  assert.equal(Object.hasOwn(long, "suggested_reply"), false);
+  assert.equal(long.text, "Merge?");
+  assert.equal(Object.hasOwn(buildSendMessageRequestBody(base), "suggested_reply"), false);
+});

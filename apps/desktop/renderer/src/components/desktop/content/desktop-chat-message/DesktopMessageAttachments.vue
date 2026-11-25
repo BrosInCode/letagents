@@ -55,6 +55,34 @@
         </span>
         <em>{{ openingDemoKeys[attachmentKey(attachment)] ? "Opening…" : "Open demo" }}</em>
       </button>
+      <button
+        v-else-if="textReaderAvailable && attachmentPreviewType(attachment)"
+        class="room-text-attachment"
+        type="button"
+        :title="attachmentName(attachment)"
+        :aria-label="`Preview ${attachmentName(attachment)}`"
+        @click="openTextPreview(attachment, $event)"
+      >
+        <FileText class="room-text-attachment-icon" :size="18" aria-hidden="true" />
+        <span class="room-text-attachment-label">
+          <strong>{{ attachmentName(attachment) }}</strong>
+          <small>{{ [attachmentPreviewType(attachment), formatDisplayBytes(attachment.sizeBytes ?? 0)].filter(Boolean).join(" · ") }}</small>
+        </span>
+        <span class="room-text-attachment-action">Preview <ChevronRight :size="15" aria-hidden="true" /></span>
+      </button>
+      <button
+        v-else-if="desktopIpc.room?.downloadAttachment && isDesktopAttachmentHref(attachment.href)"
+        class="room-message-attachment"
+        type="button"
+        :aria-label="`Download ${attachmentName(attachment)}`"
+        @click="downloadManagedAttachment(attachment)"
+      >
+        <span>
+          <strong>{{ attachmentName(attachment) }}</strong>
+          <small>{{ attachmentDisplayMeta(attachment) }}</small>
+          <small v-if="failedDownloadKey === attachmentKey(attachment)" role="status">Couldn’t download. Try again.</small>
+        </span>
+      </button>
       <a
         v-else
         class="room-message-attachment"
@@ -68,11 +96,19 @@
         </span>
       </a>
     </template>
+    <AttachmentTextReader
+      v-if="textPreview"
+      :attachment="textPreview.attachment"
+      :opener="textPreview.opener"
+      @close="textPreview = null"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { ChevronRight, FileText } from "@lucide/vue";
+import { ref, shallowRef, watch } from "vue";
+import { isDesktopAttachmentHref } from "../../../../../../../../shared/message-attachments.mjs";
 import type {
   DesktopManagedAgentPublicChangeSummary,
   DesktopRoomMessageAttachment,
@@ -81,6 +117,7 @@ import {
   attachmentHref,
   attachmentDisplayMeta,
   attachmentKey,
+  formatDisplayBytes,
   attachmentName,
   htmlDemoErrorText,
   imageAttachmentId,
@@ -93,6 +130,8 @@ import {
   fetchManagedAgentChangeSummaryAttachment,
   isManagedAgentChangeSummaryAttachment,
 } from "../../../../domain/managed-agent-changes";
+import { attachmentPreviewType } from "../../../../domain/attachment-preview";
+import AttachmentTextReader from "./AttachmentTextReader.vue";
 import ManagedAgentChangeSummaryCard from "../ManagedAgentChangeSummaryCard.vue";
 import DesktopInlineHtmlDemo from "./DesktopInlineHtmlDemo.vue";
 
@@ -111,6 +150,24 @@ defineEmits<{
 
 // An older main process cannot lease a demo to the chat, so its cards keep the window.
 const inlineDemosAvailable = typeof desktopIpc.room?.prepareInlineHtmlDemo === "function";
+
+const textReaderAvailable = typeof desktopIpc.room?.readAttachmentText === "function";
+const textPreview = shallowRef<{ attachment: DesktopRoomMessageAttachment; opener: HTMLElement | null } | null>(null);
+const failedDownloadKey = ref("");
+
+function openTextPreview(attachment: DesktopRoomMessageAttachment, event: MouseEvent): void {
+  textPreview.value = { attachment, opener: event.currentTarget as HTMLElement | null };
+}
+
+async function downloadManagedAttachment(attachment: DesktopRoomMessageAttachment): Promise<void> {
+  if (!attachment.href) return;
+  failedDownloadKey.value = "";
+  try {
+    await desktopIpc.room?.downloadAttachment?.(attachment.href);
+  } catch {
+    failedDownloadKey.value = attachmentKey(attachment);
+  }
+}
 
 const remoteChangeSummaries = ref<Record<string, DesktopManagedAgentPublicChangeSummary | null>>({});
 const loadingChangeSummaryKeys = ref<Record<string, boolean>>({});
@@ -141,8 +198,12 @@ async function openHtmlDemo(attachment: DesktopRoomMessageAttachment): Promise<v
 }
 
 watch(
-  () => props.attachments.map(attachmentKey).join("|"),
+  () => props.attachments.map(attachment => [attachmentKey(attachment), attachment.href]),
   () => {
+    const selected = textPreview.value?.attachment;
+    if (selected && !props.attachments.some(attachment => attachmentKey(attachment) === attachmentKey(selected) && attachment.href === selected.href)) {
+      textPreview.value = null;
+    }
     pruneChangeSummaryState();
     void loadRemoteChangeSummaryAttachments();
   },

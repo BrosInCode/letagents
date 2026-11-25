@@ -271,6 +271,8 @@ export interface DesktopApi {
     getMessageInfo: (roomIdentifier: string, messageId: string) => Promise<DesktopMessageInfo | null>;
     /** Receipts for the signed-in person's own messages among `messageIds`; other messages are left out. */
     getMessageReceipts?: (roomIdentifier: string, messageIds: string[]) => Promise<DesktopMessageReceipt[]>;
+    /** The reply an agent suggested for this person's composer, or null. */
+    getSuggestedReply?: (roomIdentifier: string) => Promise<{ messageId: string; agentKey: string; from: string; text: string } | null>;
     getMessagesAfter?: (roomIdentifier: string, afterMessageId: string | null) => Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
     /** The account's server-side read points and unread counts; null from a server without them. */
     getAccountUnread?: () => Promise<import("./unread.js").DesktopAccountUnread | null>;
@@ -282,6 +284,8 @@ export interface DesktopApi {
     markThreadRead: (roomIdentifier: string, threadRootId: string, messageId?: string | null) => Promise<DesktopRoomThreadReadResult>;
     getReasoningSession: (roomIdentifier: string, sessionId: string) => Promise<DesktopReasoningSessionDetail>;
     /** Open the file picker. Returns up to `limit` chosen files without uploading them. */
+    readAttachmentText?: (href: string) => Promise<{ text: string } | { error: string }>;
+    downloadAttachment?: (href: string) => Promise<void>;
     chooseAttachments: (limit: number) => Promise<DesktopChosenAttachment[]>;
     stageChosenAttachments: (roomIdentifier: string, tokens: string[]) => Promise<DesktopStagedAttachment[]>;
     stageDroppedAttachmentContents?: (

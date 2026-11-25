@@ -1,3 +1,5 @@
+import { isDesktopAttachmentHref } from "../../../../../shared/message-attachments.mjs";
+import { readDesktopAttachmentText } from "../attachments/text-preview.js";
 import { getDesktopBoardPlanning, updateDesktopBoardPlanning } from "../rooms/board-planning.js";
 import type { BoardPlanningUpdate } from "../../../../../shared/board-planning.mjs";
 import type { RoomGif, RoomExpressionsSetting } from "../../../../../shared/room-expressions.mjs";
@@ -145,6 +147,7 @@ import {
   getDesktopRoomMessage,
   getDesktopRoomMessageInfo,
   getDesktopRoomMessageReceipts,
+  getDesktopRoomSuggestedReply,
   getDesktopRoomMessagesBefore,
   getDesktopRoomMessagesAfter,
   getDesktopRoomStorage,
@@ -303,6 +306,11 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       getDesktopRoomMessageReceipts(roomIdentifier, Array.isArray(messageIds) ? messageIds : []),
   );
   targetIpcMain.handle(
+    "desktop:room:get-suggested-reply",
+    async (_event, roomIdentifier: string) =>
+      getDesktopRoomSuggestedReply(typeof roomIdentifier === "string" ? roomIdentifier : ""),
+  );
+  targetIpcMain.handle(
     "desktop:room:get-message",
     async (
       _event,
@@ -362,6 +370,11 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     ): Promise<DesktopReasoningSessionDetail> =>
       getDesktopReasoningSession(roomIdentifier, sessionId),
   );
+  targetIpcMain.handle("desktop:room:read-attachment-text", (_event, href: unknown) => readDesktopAttachmentText(href));
+  targetIpcMain.handle("desktop:room:download-attachment", (event, href: unknown) => {
+    if (!isDesktopAttachmentHref(href)) throw new Error("This attachment is unavailable.");
+    event.sender.downloadURL(href);
+  });
   targetIpcMain.handle(
     "desktop:room:choose-attachments",
     async (_event, limit: unknown): Promise<DesktopChosenAttachment[]> =>

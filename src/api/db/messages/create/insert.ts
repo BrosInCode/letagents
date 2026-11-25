@@ -46,11 +46,15 @@ export async function insertMessageRow(
     timestamp: new Date().toISOString(),
   };
 
+  // Stored for the suggested-reply route only; the message row type and its
+  // readers do not carry it.
+  const suggestedReply = options?.source === "agent" ? options?.suggested_reply?.trim() || null : null;
+  const values = { ...message, suggested_reply: suggestedReply };
   let createdMessage = message;
   if (clientMessageId) {
     const [insertedMessage] = await tx
       .insert(messages)
-      .values(message)
+      .values(values)
       .onConflictDoNothing()
       .returning(messageRowSelection);
     if (!insertedMessage) {
@@ -72,7 +76,7 @@ export async function insertMessageRow(
     }
     createdMessage = insertedMessage;
   } else {
-    await tx.insert(messages).values(message);
+    await tx.insert(messages).values(values);
   }
   return { createdMessage };
 }

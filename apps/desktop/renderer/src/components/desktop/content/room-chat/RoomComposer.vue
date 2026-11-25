@@ -283,7 +283,7 @@ import { composerAgentLaunchKey, composerAgentName } from "./composer-agent-laun
 import { captureAgentAvatarSource } from "./agent-avatar-flight";
 import { useComposerAgentDraft } from "./useComposerAgentDraft";
 import { supervisorEntriesKey } from "../add-agent/supervisor-entries-context";
-import { composerSuggestedReplyKey, settleSuggestion, suggestionSettled } from "./composer-suggested-reply";
+import { composerSuggestedReplyKey, settleSuggestion, suggestionSettled, useAgentSuggestedReply } from "./composer-suggested-reply";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
 import { cursorWindowsSandboxNotice, supervisedAgentsSupported } from "../../../../domain/supervised-agents-support";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
@@ -316,6 +316,8 @@ const props = defineProps<{
   roomIdentifier: string | null;
   /** The room's display name, for the placeholder and the input's label. */
   roomLabel?: string | null;
+  /** The newest message in the room; a new one asks again for an agent's suggested reply. */
+  latestMessageId?: string | null;
   roomLoading: boolean;
   sendError: string | null;
   sending: boolean;
@@ -663,12 +665,16 @@ const composerPlaceholder = computed(() =>
   props.roomIdentifier && !props.roomLoading ? `Message ${roomHandle.value} · @ to mention · / for commands` : undefined);
 const canAttach = computed(() => Boolean(!props.roomLoading && !props.sending && props.roomIdentifier && !props.attaching));
 
-// A suggested reply comes from an open Needs you request in this room. It shows
-// as faint text in the empty input until it is used (Tab) or dismissed (Escape).
+// A suggested reply comes from an open Needs you request in this room, or else
+// from what the room's agents expect you to say next. It shows as faint text in
+// the empty input until it is used (Tab) or dismissed (Escape).
 const readSuggestedReply = inject(composerSuggestedReplyKey, null);
+const agentSuggestion = useAgentSuggestedReply(() => props.roomIdentifier, () => props.latestMessageId ?? null);
 const visibleSuggestion = computed(() => {
-  const suggestion = readSuggestedReply?.(props.roomIdentifier) ?? null;
-  return suggestion && !suggestionSettled(suggestion.recordId) ? suggestion : null;
+  const request = readSuggestedReply?.(props.roomIdentifier) ?? null;
+  if (request && !suggestionSettled(request.recordId)) return request;
+  const agent = agentSuggestion.value;
+  return agent && !suggestionSettled(agent.recordId) ? agent : null;
 });
 const suggestionVisible = computed(() => Boolean(visibleSuggestion.value && !draft.value && !props.replyTo
   && !props.roomLoading && props.roomIdentifier));

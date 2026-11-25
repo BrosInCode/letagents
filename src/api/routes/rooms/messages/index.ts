@@ -8,6 +8,7 @@ import { registerMessageHistoryRoutes } from "./history.js";
 import { registerMessageStreamRoute } from "./stream.js";
 import { registerMessageInfoRoute } from "./info.js";
 import { registerMessageReceiptsRoute } from "./receipts.js";
+import { registerSuggestedReplyRoute } from "./suggested-reply.js";
 import { registerMessageReadsRoute } from "./reads.js";
 import { registerMessagePinRoutes } from "./pins.js";
 import { registerMessageLinkPreviewRoutes } from "./link-previews.js";
@@ -30,6 +31,7 @@ export function registerRoomMessageRoutes(
   registerMessageStreamRoute(app, deps);
   registerMessageInfoRoute(app, deps);
   registerMessageReceiptsRoute(app, deps);
+  registerSuggestedReplyRoute(app, deps);
   registerMessageReadsRoute(app, deps);
   registerMessageReactionRoutes(app, deps);
   registerMessageSearchRoute(app, deps);
