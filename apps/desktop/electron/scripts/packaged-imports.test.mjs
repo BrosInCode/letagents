@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { ownPlacePaths, PROVIDER_ADAPTER_ENTRIES } from "./packaged-app-import-check.mjs";
-import { isPackagedBuildFile, packagedImports, packagedPackageJson } from "./packaged-imports.mjs";
+import {
+  isPackagedBuildFile,
+  isTestBuildPath,
+  packagedBuildFilter,
+  packagedImports,
+  packagedPackageJson,
+  packagedTestPaths,
+} from "./packaged-imports.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const checkPath = join(here, "packaged-app-import-check.mjs");
@@ -47,6 +55,62 @@ test("declaration files are not part of the packaged build output", () => {
   assert.equal(isPackagedBuildFile("dist-provider-runtime/provider-probe-cache.d.ts"), false);
   assert.equal(isPackagedBuildFile("dist-provider-runtime/x.d.mts"), false);
   assert.equal(isPackagedBuildFile("dist-provider-runtime/tsconfig.tsbuildinfo"), false);
+});
+
+test("compiled tests, their fixtures and source maps are not part of the packaged build output", () => {
+  for (const path of [
+    "__tests__/main-window.test.js",
+    "__tests__/helpers/room.js",
+    "__tests__/provider-replay/fixtures/turn.json",
+    "main\\__tests__\\x.test.js",
+    "main/agents/__fixtures__/a.js",
+    "main/x.test.js",
+    "main/x.test.js.map",
+    "main/x.spec.mjs",
+  ]) {
+    assert.equal(isTestBuildPath(path), true, path);
+    assert.equal(isPackagedBuildFile(path), false, path);
+  }
+  for (const path of ["main.js", "main/tests-panel.js", "main/latest.js", "main/rooms/test-room.js", "page-preload.cjs"]) {
+    assert.equal(isTestBuildPath(path), false, path);
+    assert.equal(isPackagedBuildFile(path), true, path);
+  }
+});
+
+test("the build folder filter copies the app code and leaves out the tests", async () => {
+  // A folder named __tests__ above the build folder does not count.
+  const workspace = mkdtempSync(join(tmpdir(), "letagents-packaged-build-"));
+  const build = join(workspace, "__tests__", "dist-electron");
+  const app = join(workspace, "app");
+  try {
+    for (const [path, content] of [
+      ["main.js", "export {};\n"],
+      ["main/rooms/room.js", "export {};\n"],
+      ["main/rooms/room.d.ts", "export {};\n"],
+      ["__tests__/room.test.js", "export {};\n"],
+      ["__tests__/fixtures/room.json", "{}\n"],
+      ["main/rooms/room.test.js", "export {};\n"],
+    ]) {
+      mkdirSync(dirname(join(build, path)), { recursive: true });
+      writeFileSync(join(build, path), content);
+    }
+    await cp(build, join(app, "dist-electron"), { recursive: true, filter: packagedBuildFilter(build) });
+    assert.deepEqual(packagedTestPaths(app, ["dist-electron", "dist-daemon"]), []);
+    assert.equal(existsSync(join(app, "dist-electron", "main.js")), true);
+    assert.equal(existsSync(join(app, "dist-electron", "main", "rooms", "room.js")), true);
+    assert.equal(existsSync(join(app, "dist-electron", "main", "rooms", "room.d.ts")), false);
+    assert.equal(existsSync(join(app, "dist-electron", "__tests__")), false);
+    assert.equal(existsSync(join(app, "dist-electron", "main", "rooms", "room.test.js")), false);
+
+    // The packaging check finds tests that a plain copy brings in.
+    await cp(build, join(app, "dist-daemon"), { recursive: true });
+    assert.deepEqual(packagedTestPaths(app, ["dist-electron", "dist-daemon"]).sort(), [
+      "dist-daemon/__tests__",
+      "dist-daemon/main/rooms/room.test.js",
+    ]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 /** A small app folder in the shape of the packaged app. */
