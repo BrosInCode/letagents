@@ -3758,7 +3758,7 @@
       "retireAgentMs": 60000
     },
     "defaultMaxRequestBytes": 65536,
-    "implementationVersion": "2.0.284-modern.32",
+    "implementationVersion": "2.0.284-modern.33",
     "localBoardMaxFrameBytes": 16777216,
     "protocolVersion": 3,
     "stateActivitySummaryLimit": 16,

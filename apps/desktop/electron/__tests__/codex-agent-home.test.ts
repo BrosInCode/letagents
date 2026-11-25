@@ -2028,6 +2028,31 @@ test("before a running Codex without its owner's setup loads a conversation, wha
   // A server that is gone is no reason to stop: nothing new would start.
   settle({ servers: [] });
   await assertLiveCodexIsolationUnchanged(codex.bin, live, env);
+  // Project-only servers disabled with an inert transport match on reload, and changing transport or adding another still stops the agent.
+  const projectOnlyEntries = [
+    { name: "owner_browser", enabled: true, transport: { type: "stdio", command: "node", args: ["/owner.mjs"] } },
+    { name: "repo_only", enabled: true, transport: { type: "stdio", command: "node", args: ["/repo.mjs"] } },
+    { name: "repo_http", enabled: true, transport: { type: "streamable_http", url: "https://example.invalid/mcp" } },
+  ];
+  const projectOnlyRun = async (_bin: string, _args: string[], options: { cwd?: string }) => JSON.stringify(
+    options.cwd === project ? projectOnlyEntries : [projectOnlyEntries[0]],
+  );
+  const startedProjectOnly = await codexOwnerIsolationOverrides(codex.bin, { cwd: project, env, configOverrides: [ROOM] }, projectOnlyRun);
+  assert.ok(startedProjectOnly.includes('mcp_servers={ "owner_browser" = { enabled = false }, "repo_http" = { url = "http://127.0.0.1:0/disabled", enabled = false }, "repo_only" = { command = "letagents-disabled", enabled = false } }'));
+  const liveProjectOnly = {
+    cwd: project,
+    launchOverrides: [ROOM],
+    commandLine: `codex app-server ${[...startedProjectOnly, ROOM].map((override) => `-c ${override}`).join(" ")}`,
+  };
+  await assertLiveCodexIsolationUnchanged(codex.bin, liveProjectOnly, env, projectOnlyRun);
+  await assert.rejects(
+    assertLiveCodexIsolationUnchanged(codex.bin, liveProjectOnly, env, async (_bin, _args, options) => JSON.stringify(
+      options.cwd === project
+        ? [...projectOnlyEntries, { name: "repo_added", enabled: true, transport: { type: "stdio", command: "node", args: ["/new.mjs"] } }]
+        : [projectOnlyEntries[0]],
+    )),
+    (error: Error) => error.message === GAINED,
+  );
   // The same when one of several is gone, and a skill: each is compared by its own name, not as one list.
   const several = ["first", 'odd"name', "third"];
   settle({ servers: several });
