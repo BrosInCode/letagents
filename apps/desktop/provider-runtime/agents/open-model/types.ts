@@ -20,7 +20,7 @@ export interface OpenModelProviderAdapterDependencies {
   /** Tests only: the sealed MCP runtime that Windows starts. */
   resolveMcpRuntime?: () => LetAgentsMcpRuntime;
   /** Why OpenCode cannot run on this computer (a macOS older than its minimum), or null. */
-  unsupportedSystem?: () => { message: string; detail: string } | null;
+  unsupportedSystem(): { message: string; detail: string } | null;
   launch(input: {
     binary: string;
     args: string[];

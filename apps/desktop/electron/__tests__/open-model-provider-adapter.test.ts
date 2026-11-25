@@ -103,6 +103,7 @@ function createHarness() {
   const neverExits = new Promise<ProviderProcessExit>(() => {});
   observedProcessExit = neverExits;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    unsupportedSystem: () => null,
     resolveMcpRuntime: testMcpRuntime,
     launch(input) {
       launches.push(input);
@@ -4653,6 +4654,7 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
   let nextPort = 43_821;
   const refused = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
   const dependencies: OpenModelProviderAdapterDependencies = {
+    unsupportedSystem: () => null,
     resolveMcpRuntime: testMcpRuntime,
     launch(input) {
       launches.push(input);

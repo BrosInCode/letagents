@@ -19,6 +19,8 @@ const FAT_MAGIC_64 = 0xcafebabf;
 const LC_VERSION_MIN_MACOSX = 0x24;
 const LC_BUILD_VERSION = 0x32;
 const PLATFORM_MACOS = 1;
+// Images that dyld loads: each must name the macOS it needs.
+const LOADED_FILE_TYPES = new Map([[0x2, "executable"], [0x6, "dynamic library"], [0x8, "bundle"]]);
 // Java class files also start with 0xcafebabe; their next word is a class file
 // version (45 and up), which no universal binary has as its slice count.
 const MAX_FAT_SLICES = 32;
@@ -50,56 +52,73 @@ function parseMacOSVersion(value) {
   return value.split(".").map(Number);
 }
 
+function isThinMagic(buffer) {
+  if (buffer.length < 4) return false;
+  return [buffer.readUInt32LE(0), buffer.readUInt32BE(0)].some((magic) => magic === MH_MAGIC || magic === MH_MAGIC_64);
+}
+
 /**
  * The macOS minos of one thin Mach-O image at `offset`, or null when it has no
- * macOS build version. `readAt(offset, length)` returns at most `length` bytes.
+ * macOS build version and is not an image that dyld loads. An image whose
+ * header promises more bytes than the file has fails: a cut-off file must not
+ * pass as "no minimum". `readAt(offset, length)` returns at most `length` bytes.
  */
 async function thinMinimumMacOS(readAt, offset) {
   const header = await readAt(offset, 32);
-  if (header.length < 28) return null;
-  const magicLittle = header.readUInt32LE(0);
-  const magicBig = header.readUInt32BE(0);
-  const little = magicLittle === MH_MAGIC || magicLittle === MH_MAGIC_64;
-  if (!little && magicBig !== MH_MAGIC && magicBig !== MH_MAGIC_64) return null;
+  if (!isThinMagic(header)) throw new Error(`No Mach-O image at offset ${offset}.`);
+  const little = header.readUInt32LE(0) === MH_MAGIC || header.readUInt32LE(0) === MH_MAGIC_64;
   const word = (buffer, at) => (little ? buffer.readUInt32LE(at) : buffer.readUInt32BE(at));
   const headerSize = word(header, 0) === MH_MAGIC_64 ? 32 : 28;
+  if (header.length < headerSize) throw new Error("The Mach-O header is truncated.");
+  const fileType = word(header, 12);
   const commandCount = word(header, 16);
   const commandBytes = word(header, 20);
   if (commandBytes > MAX_LOAD_COMMAND_BYTES) throw new Error("Mach-O load commands are too large.");
   const commands = await readAt(offset + headerSize, commandBytes);
+  if (commands.length < commandBytes) {
+    throw new Error(`The Mach-O load commands are truncated: ${commands.length} of ${commandBytes} bytes.`);
+  }
   let minimum = null;
   let cursor = 0;
-  for (let index = 0; index < commandCount && cursor + 8 <= commands.length; index += 1) {
+  for (let index = 0; index < commandCount; index += 1) {
+    if (cursor + 8 > commands.length) throw new Error("The Mach-O load commands end before their count.");
     const command = word(commands, cursor);
     const size = word(commands, cursor + 4);
-    if (size < 8) throw new Error("Mach-O load command is malformed.");
+    if (size < 8 || cursor + size > commands.length) throw new Error("Mach-O load command is malformed.");
     let version = null;
-    if (command === LC_BUILD_VERSION && cursor + 16 <= commands.length && word(commands, cursor + 8) === PLATFORM_MACOS) {
+    if (command === LC_BUILD_VERSION && size >= 16 && word(commands, cursor + 8) === PLATFORM_MACOS) {
       version = formatMachOVersion(word(commands, cursor + 12));
-    } else if (command === LC_VERSION_MIN_MACOSX && cursor + 12 <= commands.length) {
+    } else if (command === LC_VERSION_MIN_MACOSX && size >= 12) {
       version = formatMachOVersion(word(commands, cursor + 8));
     }
     if (version && (!minimum || compareMacOSVersions(version, minimum) > 0)) minimum = version;
     cursor += size;
+  }
+  if (!minimum && LOADED_FILE_TYPES.has(fileType)) {
+    throw new Error(`The Mach-O ${LOADED_FILE_TYPES.get(fileType)} names no macOS minimum (no LC_BUILD_VERSION for macOS and no LC_VERSION_MIN_MACOSX).`);
   }
   return minimum;
 }
 
 /**
  * The newest macOS minos of any slice, or null when the bytes are not a Mach-O
- * file or no slice names a macOS minimum.
+ * file or no slice names a macOS minimum. A Mach-O file that is cut off fails.
  */
 export async function machOMinimumMacOS(readAt) {
   const start = await readAt(0, 8);
-  if (start.length < 8) return null;
+  if (start.length < 4) return null;
   const magic = start.readUInt32BE(0);
-  if (magic !== FAT_MAGIC && magic !== FAT_MAGIC_64) return thinMinimumMacOS(readAt, 0);
+  if (magic !== FAT_MAGIC && magic !== FAT_MAGIC_64) return isThinMagic(start) ? thinMinimumMacOS(readAt, 0) : null;
+  if (start.length < 8) throw new Error("The universal Mach-O header is truncated.");
   const sliceCount = start.readUInt32BE(4);
   if (sliceCount === 0 || sliceCount > MAX_FAT_SLICES) return null;
   const entrySize = magic === FAT_MAGIC_64 ? 32 : 20;
   const table = await readAt(8, sliceCount * entrySize);
+  if (table.length < sliceCount * entrySize) {
+    throw new Error(`The universal Mach-O slice table is truncated: ${table.length} of ${sliceCount * entrySize} bytes.`);
+  }
   let minimum = null;
-  for (let index = 0; index < sliceCount && (index + 1) * entrySize <= table.length; index += 1) {
+  for (let index = 0; index < sliceCount; index += 1) {
     const at = index * entrySize;
     const offset = magic === FAT_MAGIC_64 ? Number(table.readBigUInt64BE(at + 8)) : table.readUInt32BE(at + 8);
     const version = await thinMinimumMacOS(readAt, offset);
@@ -122,6 +141,8 @@ export async function fileMinimumMacOS(path) {
       const { bytesRead } = await handle.read(buffer, 0, length, offset);
       return buffer.subarray(0, bytesRead);
     });
+  } catch (error) {
+    throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   } finally {
     await handle.close();
   }

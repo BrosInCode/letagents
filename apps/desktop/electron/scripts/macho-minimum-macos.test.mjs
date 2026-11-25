@@ -23,13 +23,18 @@ const packed = (version) => {
   return ((major << 16) | (minor << 8) | patch) >>> 0;
 };
 
+const MH_OBJECT = 0x1;
+const MH_EXECUTE = 0x2;
+const MH_DYLIB = 0x6;
+const MH_BUNDLE = 0x8;
+
 /** A thin 64-bit little-endian Mach-O header with the given load commands. */
-function thinMachO(commands) {
+function thinMachO(commands, fileType = MH_EXECUTE) {
   const body = Buffer.concat(commands);
   const header = Buffer.alloc(32);
   header.writeUInt32LE(0xfeedfacf, 0);
   header.writeUInt32LE(0x0100000c, 4); // arm64
-  header.writeUInt32LE(2, 12); // MH_EXECUTE
+  header.writeUInt32LE(fileType, 12);
   header.writeUInt32LE(commands.length, 16);
   header.writeUInt32LE(body.length, 20);
   return Buffer.concat([header, body, Buffer.alloc(64)]);
@@ -92,14 +97,46 @@ test("the reader takes the macOS minos from LC_BUILD_VERSION and LC_VERSION_MIN_
   assert.equal(await machOMinimumMacOS(bufferReader(thinMachO([otherCommand(), buildVersion("13.0")]))), "13.0");
   assert.equal(await machOMinimumMacOS(bufferReader(thinMachO([versionMinMacOS("10.13")]))), "10.13");
   assert.equal(await machOMinimumMacOS(bufferReader(thinMachO([buildVersion("12.3.1")]))), "12.3.1");
-  // An iOS build version is not a macOS minimum.
-  assert.equal(await machOMinimumMacOS(bufferReader(thinMachO([buildVersion("17.0", 2)]))), null);
-  assert.equal(await machOMinimumMacOS(bufferReader(thinMachO([otherCommand()]))), null);
+  // An object file need not name a macOS minimum, and an iOS build version is not one.
+  assert.equal(await machOMinimumMacOS(bufferReader(thinMachO([buildVersion("17.0", 2)], MH_OBJECT))), null);
+  assert.equal(await machOMinimumMacOS(bufferReader(thinMachO([otherCommand()], MH_OBJECT))), null);
+});
+
+test("an executable, dynamic library or bundle that names no macOS minimum fails", async () => {
+  for (const [fileType, kind] of [[MH_EXECUTE, "executable"], [MH_DYLIB, "dynamic library"], [MH_BUNDLE, "bundle"]]) {
+    await assert.rejects(
+      machOMinimumMacOS(bufferReader(thinMachO([otherCommand()], fileType))),
+      new RegExp(`The Mach-O ${kind} names no macOS minimum`),
+    );
+    await assert.rejects(
+      machOMinimumMacOS(bufferReader(thinMachO([buildVersion("17.0", 2)], fileType))),
+      /names no macOS minimum/,
+    );
+  }
 });
 
 test("a universal binary needs the newest minos of its slices", async () => {
   const universal = fatMachO([thinMachO([buildVersion("11.0")]), thinMachO([buildVersion("13.0")])]);
   assert.equal(await machOMinimumMacOS(bufferReader(universal)), "13.0");
+});
+
+test("a cut-off Mach-O file fails instead of passing as no minimum", async () => {
+  // Load commands shorter than the header's sizeofcmds.
+  const thin = thinMachO([otherCommand(), buildVersion("13.0")]);
+  await assert.rejects(machOMinimumMacOS(bufferReader(thin.subarray(0, 32 + 20))), /load commands are truncated: 20 of 40 bytes/);
+  // A universal slice offset past the end of the file.
+  const universal = fatMachO([thinMachO([buildVersion("11.0")]), thinMachO([buildVersion("13.0")])]);
+  await assert.rejects(machOMinimumMacOS(bufferReader(universal.subarray(0, 4096 + 200))), /No Mach-O image at offset 8192/);
+  // A universal slice table shorter than its slice count.
+  await assert.rejects(machOMinimumMacOS(bufferReader(universal.subarray(0, 8 + 30))), /slice table is truncated: 30 of 40 bytes/);
+});
+
+test("the file reader names the file that fails", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-macho-cut-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "cut");
+  await writeFile(path, thinMachO([buildVersion("13.0")]).subarray(0, 40));
+  await assert.rejects(fileMinimumMacOS(path), (error) => error.message.startsWith(`${path}: The Mach-O load commands are truncated`));
 });
 
 test("files that are not Mach-O have no minimum", async () => {
