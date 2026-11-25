@@ -197,6 +197,53 @@ jobs:
             security delete-keychain "${MACOS_RELEASE_KEYCHAIN}"
           fi
 
+  # The first launch of each finished DMG, before anything is published: a
+  # new runner of the DMG's architecture (no build folder, no signing
+  # keychain) attaches the uploaded DMG read-only, checks its signature and
+  # ticket, copies the app out like a user, marks the copy as a download,
+  # checks it with Gatekeeper and starts it once with an empty HOME in the
+  # app's smoke-check mode. The publish job waits for it. It installs no npm
+  # package: the script uses only Node and the repository's own modules.
+  verify-macos-dmg:
+    name: macOS ${{ matrix.arch }} DMG first launch
+    needs: [build-macos]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Download the finished release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: desktop-release-${{ matrix.arch }}
+          path: ${{ runner.temp }}/desktop-release
+
+      - name: Check and first-launch the app from the DMG
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          node apps/desktop/electron/scripts/macos-dmg-first-launch.mjs \
+            --arch "${EXPECTED_ARCH}" \
+            --dmg "${RUNNER_TEMP}/desktop-release/LetAgents-${version}-darwin-${EXPECTED_ARCH}.dmg"
+
   # The sealed Windows native pieces, the process-tree helper
   # (apps/desktop/native/win-process-tree) and the daemon pipe addon
   # (apps/desktop/native/win-daemon-pipe), are built where their seals were
@@ -382,7 +429,7 @@ jobs:
 
   publish:
     name: Publish desktop release
-    needs: [build-macos, build-windows]
+    needs: [build-macos, verify-macos-dmg, build-windows]
     # A manual run, including one on a tag, must never advance public feeds.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: ubuntu-latest

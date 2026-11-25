@@ -41,10 +41,25 @@ The token cannot create or delete buckets. Versioned objects are uploaded with o
 
 1. Change `apps/desktop/package.json` to the next numeric `x.y.z` desktop version and merge that change to `staging` through a reviewed PR.
 2. From the exact reviewed commit, create and push the matching tag: `desktop-v<x.y.z>`.
-3. Watch the **Desktop release** workflow. Its arm64 and x64 jobs verify dependencies, build the exact embedded MCP and OpenCode runtimes, sign the applications, submit each app and DMG to Apple, validate the stapled tickets, and create GitHub build-provenance attestations. The Windows job then builds the installer, installs it on the runner, runs the installed app's smoke check and uninstalls it. A final job uploads every platform to immutable versioned R2 paths, publishes the matching GitHub Release as a backup/archive, then advances the three public R2 update feeds.
-4. Download the DMG on a clean Mac and complete the first-install smoke test before announcing the release.
+3. Watch the **Desktop release** workflow. Its arm64 and x64 jobs verify dependencies, build the exact embedded MCP and OpenCode runtimes, sign the applications, submit each app and DMG to Apple, validate the stapled tickets, and create GitHub build-provenance attestations. Then the **DMG first launch** job checks each finished DMG on a new runner of the same architecture (see [First-launch check of the DMG](#first-launch-check-of-the-dmg)). The Windows job builds the installer, installs it on the runner, runs the installed app's smoke check and uninstalls it. A final job uploads every platform to immutable versioned R2 paths, publishes the matching GitHub Release as a backup/archive, then advances the three public R2 update feeds. It starts only after the DMG first-launch checks and the Windows job pass.
+4. Before you announce the release, open the published DMG on a Mac from a browser download and drag LetAgents to Applications. Then open it from Finder and sign in. The automated check does not click through the Finder "downloaded from the Internet" dialog, and it does not sign in.
 
-The workflow refuses a tag that does not exactly match the desktop package version or a runner whose CPU does not match its matrix architecture. If either architecture fails signing, notarization, verification, attestation, or artifact generation, it does not publish the release.
+The workflow refuses a tag that does not exactly match the desktop package version or a runner whose CPU does not match its matrix architecture. If either architecture fails signing, notarization, verification, attestation, artifact generation, or the DMG first-launch check, it does not publish the release.
+
+### First-launch check of the DMG
+
+`apps/desktop/electron/scripts/macos-dmg-first-launch.mjs` runs for arm64 on `macos-15` and for x64 on `macos-15-intel`, from the DMG that the build job uploaded. It never uses the build folder. It:
+
+1. Checks the DMG: `spctl -a -t open --context context:primary-signature` must accept it as notarized Developer ID software, and `xcrun stapler validate` must pass.
+2. Attaches the DMG read-only (`hdiutil attach -nobrowse -readonly`), checks that `LetAgents.app` and the `Applications` link are at its top level, and copies the app with `ditto` into a new temporary `Applications` folder. Then it detaches the DMG.
+3. Checks that the app version is the version in the DMG name and that the executable is built for the runner's architecture.
+4. Sets `com.apple.quarantine` on the copy, as a browser does for a download, then runs `codesign --verify --deep --strict`, `spctl --assess --type execute` (it must accept the copy as notarized Developer ID software) and `xcrun stapler validate`.
+5. Starts the copy once in the app's smoke-check mode (`LETAGENTS_DESKTOP_SMOKE_CHECK=1`), with an empty `HOME` and `TMPDIR`, the `PATH` that Finder gives an app, and none of the runner's LetAgents, Electron or Node settings. The app loads its window against seeded local state, runs the smoke steps and exits by itself: 0 and a `LETAGENTS_DESKTOP_SMOKE` line where every check is true is a pass. The limit is 5 minutes.
+6. At the end, also after a failure, it stops every process that runs from its temporary folder (the app starts a detached supervisor daemon), detaches the DMG if it is still attached, and removes the folder.
+
+The temporary folder is below `/tmp` (change it with `--work-root`), not below `TMPDIR`: the daemon socket is `<HOME>/.letagents/daemon.sock`, a macOS socket path can have at most 103 bytes, and a `HOME` below `/var/folders/…` is too long.
+
+The smoke check expects that no Codex CLI is installed, as on a new runner. On a Mac where Codex is installed (for example in `/opt/homebrew/bin`), the smoke step "codex missing runtime" fails.
 
 Verify a downloaded DMG or updater ZIP against GitHub's signed provenance record with:
 
@@ -94,6 +109,13 @@ Run the unsigned path to verify bundle branding, the DMG layout, the update ZIP,
 
 ```sh
 npm --prefix apps/desktop run package:mac:local
+```
+
+To run the DMG first-launch check on a local build, use the same Mac architecture as the DMG. An unsigned local build has no signature or ticket to check, so add `--unsigned`. A DMG that you made yourself from a signed and notarized app needs only `--unsigned-dmg`. The release workflow uses neither option.
+
+```sh
+npm --prefix apps/desktop run smoke:macos-dmg -- --unsigned
+npm --prefix apps/desktop run smoke:macos-dmg -- --dmg /path/to/LetAgents-<version>-darwin-<arch>.dmg
 ```
 
 Every package build flips the Electron fuses in `electron/scripts/electron-fuses.mjs` (`LETAGENTS_ELECTRON_FUSES`) right after it assembles the bundle, before signing; `package-macos.mjs` and `package-windows.mjs` read them back from the binary that ships. The Node inspector fuse is off, so SIGUSR1 and `--inspect` open no debugger in the app; SIGUSR1 now ends the app instead. The supervisor daemon starts with `--disable-sigusr1` for the same reason. A new Electron fuse stops packaging until it gets a decision there. Dev builds (`npm run dev`) use the unflipped Electron from `node_modules`. The next hardening steps are in [docs/plans/electron-fuses.md](plans/electron-fuses.md).
