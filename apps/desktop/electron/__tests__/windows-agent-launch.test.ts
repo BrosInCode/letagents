@@ -283,18 +283,31 @@ test("Windows: a missing program named by path is ENOENT as it is, never a batch
   assert.throws(() => cursorWindowsProgram("C:\\x\\agent.cmd", { env: windowsEnv, exists: () => false }), /'C:\\x\\agent\.cmd' was not found on this computer/);
 });
 
-test("Open Model's MCP server is the sealed runtime on Windows, and macOS keeps npx", () => {
-  const runtime = { entryPath: "C:\\LetAgents\\resources\\app\\runtime\\letagents\\node_modules\\letagents\\dist\\mcp\\server.js", readRoots: [] };
-  assert.deepEqual(openCodeMcpLaunch(undefined, "win32", () => runtime), {
+test("Open Model's MCP server is the sealed runtime on this app's binary on every platform, with no npx fallback", () => {
+  const runtime = { entryPath: "/Applications/LetAgents.app/Contents/Resources/app/runtime/letagents/node_modules/letagents/dist/mcp/server.js", readRoots: [] };
+  const asked: Array<string | undefined> = [];
+  assert.deepEqual(openCodeMcpLaunch(undefined, (entry) => { asked.push(entry); return runtime; }), {
     command: [process.execPath, runtime.entryPath],
     environment: { ELECTRON_RUN_AS_NODE: "1" },
   });
-  assert.throws(() => openCodeMcpLaunch(undefined, "win32", () => { throw new Error("no runtime"); }), /no runtime/);
-  assert.deepEqual(openCodeMcpLaunch(undefined, "darwin", () => assert.fail("macOS does not read the runtime")).command.slice(0, 2), ["npx", "-y"]);
-  assert.deepEqual(openCodeMcpLaunch("/dev/entry.js", "win32", () => assert.fail("a development entry wins")), {
+  assert.deepEqual(asked, [undefined]);
+  assert.throws(() => openCodeMcpLaunch(undefined, () => { throw new Error("no runtime"); }), /no runtime/);
+  // The real resolver, with no packaged runtime in this process: the launch is refused, never npx.
+  assert.throws(() => openCodeMcpLaunch(), /packaged LetAgents MCP runtime is unavailable/);
+  // A development entry comes first and goes through the same resolver, as for the other providers.
+  const devAsked: Array<string | undefined> = [];
+  assert.deepEqual(openCodeMcpLaunch("/dev/entry.js", (entry) => { devAsked.push(entry); return { entryPath: "/dev/entry.js", readRoots: [] }; }), {
     command: [process.execPath, "/dev/entry.js"],
-    environment: {},
+    environment: { ELECTRON_RUN_AS_NODE: "1" },
   });
+  assert.deepEqual(devAsked, ["/dev/entry.js"]);
+  const previousDevServer = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+  delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+  try {
+    assert.throws(() => openCodeMcpLaunch("/dev/entry.js"), /only in explicit desktop development mode/);
+  } finally {
+    if (previousDevServer !== undefined) process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = previousDevServer;
+  }
 });
 
 test("a Windows Codex's own arguments are read through the helper that started it", () => {
