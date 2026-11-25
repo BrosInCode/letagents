@@ -1,5 +1,6 @@
 import { chmod, cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,7 +16,8 @@ import {
   assertLockedMcpRuntimeContract,
   installLockedMcpRuntime,
 } from "./mcp-runtime-install.mjs";
-import { isPackagedBuildFile, packagedPackageJson } from "./packaged-imports.mjs";
+import { RENDERER_BUNDLED_PACKAGES } from "./packaged-dependencies.mjs";
+import { packagedBuildFilter, packagedPackageJson, packagedTestPaths } from "./packaged-imports.mjs";
 import {
   assertDesktopArchitecture,
   assertWindowsArchitecture,
@@ -201,15 +203,20 @@ if (profile.updater) await writeFile(
   `${JSON.stringify(createDesktopUpdaterConfig({ arch: desktopArch, platform: process.platform }), null, 2)}\n`,
 );
 await mkdir(app, { recursive: true });
-for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
-  await cp(join(root, directory), join(app, directory), { recursive: true });
-}
-// The shared packages' builds have type declarations for the compiler; the app runs only the code.
-for (const directory of ["dist-daemon-contract", "dist-provider-runtime"]) {
+// Vite builds the renderer into one folder, with its packages bundled in.
+await cp(join(root, "dist-renderer"), join(app, "dist-renderer"), { recursive: true });
+// The compilers also build the tests, and the shared packages' builds have
+// type declarations for the compiler; the app runs only the code.
+const compiledBuildFolders = ["dist-electron", "dist-daemon", "dist-daemon-contract", "dist-provider-runtime"];
+for (const directory of compiledBuildFolders) {
   await cp(join(root, directory), join(app, directory), {
     recursive: true,
-    filter: async (source) => (await stat(source)).isDirectory() || isPackagedBuildFile(source),
+    filter: packagedBuildFilter(join(root, directory)),
   });
+}
+const packagedTests = packagedTestPaths(app, compiledBuildFolders);
+if (packagedTests.length > 0) {
+  throw new Error(`The packaged app must not contain tests: ${packagedTests.slice(0, 5).join(", ")}`);
 }
 // Protocol/domain contracts are repository-neutral, but compiled desktop
 // imports resolve them from Contents/shared in the packaged application.
@@ -229,6 +236,11 @@ await cp(join(root, "..", "..", "LICENSE"), join(app, "LICENSE"));
 const appInstall = npmInvocation(["ci", "--omit=dev", "--ignore-scripts", "--prefer-offline"]);
 await execFileAsync(appInstall.command, appInstall.args, { ...appInstall.options, cwd: app, maxBuffer: 8 * 1024 * 1024 });
 await rm(join(app, "node_modules", ".bin"), { recursive: true, force: true });
+// Vite bundles the renderer's packages, so they are dev dependencies: see packaged-dependencies.mjs.
+const installedRendererPackages = RENDERER_BUNDLED_PACKAGES.filter((name) => existsSync(join(app, "node_modules", name)));
+if (installedRendererPackages.length > 0) {
+  throw new Error(`The packaged app must not install packages that Vite bundles: ${installedRendererPackages.join(", ")}`);
+}
 // Supervised Cursor must never download executable bridge code at turn time.
 // Install the exact public MCP package into the desktop artifact under forced,
 // credential-free npm configuration; runtime resolution validates its version
@@ -404,7 +416,7 @@ const requiredAppFiles = [
   "dist-daemon/provider-action-port-router.js",
   "dist-renderer/index.html",
   "LICENSE",
-  "node_modules/vue/package.json",
+  "node_modules/zod/package.json",
   // Main's live demo socket (Electron's own WebSocket cannot send the Authorization header).
   "node_modules/ws/package.json",
   "node_modules/ws/wrapper.mjs",

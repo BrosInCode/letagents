@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { evaluateAdvisoryExceptions } from "./dependency-advisory-exceptions.mjs";
+import { bundledPackagePaths, evaluateAdvisoryExceptions } from "./dependency-advisory-exceptions.mjs";
 
 const EXPECTED_NPM_VERSION = "11.6.2";
 const MAX_ATTEMPTS = 3;
@@ -127,7 +127,14 @@ async function exceptionBlocking(npmCommand, target, targetDirectory, auditJson,
   // The lockfile's dev flags can be stale or edited: npm's own view must agree
   // that no copy is installed in production.
   const blocking = [];
-  for (const { advisory, packageName } of decision.used) {
+  // npm sees a package that Vite bundles as dev, but its code ships.
+  const bundled = bundledPackagePaths(lockfile);
+  for (const { advisory, packageName, paths } of decision.used) {
+    const bundledPaths = paths.filter((key) => bundled.has(key));
+    if (bundledPaths.length > 0) {
+      blocking.push(`${advisory} is excepted only for packages that are not shipped, but ${packageName} ships in a bundle: ${bundledPaths.join(", ")}.`);
+      continue;
+    }
     const listed = await runCommand(
       npmCommand,
       ["ls", packageName, "--omit=dev", "--package-lock-only", "--all", "--parseable"],
