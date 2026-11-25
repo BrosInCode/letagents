@@ -143,14 +143,12 @@ export async function checkPackagedAppImports(appRoot, { log = console.log } = {
   }
   log(`packaged-imports: ${resolved} use(s) of ${canonical.size} import name(s) resolve inside the app, each name to one file`);
 
-  // Compiled tests are in the build output too; their paths point at fixtures
-  // of the repository, which a packaged app does not have.
+  // The packaged app has no compiled tests (package-artifact.mjs leaves them out).
   let paths = 0;
   for (const folder of BUILD_FOLDERS) {
     const root = join(app, folder);
     if (!existsSync(root)) continue;
     for (const file of buildFiles(root)) {
-      if (relative(root, file).split(sep).includes("__tests__")) continue;
       const source = readFileSync(file, "utf8");
       if (!source.includes("import.meta.url")) continue;
       for (const parts of ownPlacePaths(source)) {
