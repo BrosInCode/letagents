@@ -35,10 +35,16 @@ test("once I speak, earlier suggestions are gone", () => {
   assert.deepEqual(suggestedReplyCandidates(rows, ME), []);
 });
 
-test("an agent answering another person is not a suggestion for me", () => {
+test("my agent answering another person is not a suggestion for me", () => {
   const rows = [human(ME, "Morning"), human(SHANNON, "Which theme?"), agent("claude", "Option 2 or 3?", "Use option 2")];
   assert.deepEqual(suggestedReplyCandidates(rows, ME), []);
-  assert.equal(suggestedReplyCandidates(rows, SHANNON)[0]?.text, "Use option 2");
+});
+
+test("another person's agent never fills my composer, even when it answers me", () => {
+  const mine = human(ME, "@Fern which build?");
+  const rows = [mine, agent("fern", "Build 2 or 3?", "Build 3", { publisher_account_id: SHANNON, reply_to_number: mine.number })];
+  assert.deepEqual(suggestedReplyCandidates(rows, ME), []);
+  assert.deepEqual(suggestedReplyCandidates(rows, SHANNON), [], "nor Shannon's: it answers me");
 });
 
 test("a reply to my message counts even when someone else spoke after me", () => {
@@ -58,6 +64,14 @@ test("with no person in the window, an agent's suggestion goes to its owner only
   assert.equal(suggestedReplyCandidates(rows, ME)[0]?.text, "Let's go with Mint");
   assert.equal(suggestedReplyCandidates([agent("codex", "Hi", "Hello", { sender: "CanyonWest | QA Emmy's agent | Claude Code" })], ME)[0]?.from, "CanyonWest");
   assert.deepEqual(suggestedReplyCandidates(rows, SHANNON), []);
+});
+
+test("the cache key follows the candidates, so a deleted message changes it", async () => {
+  const { suggestedReplyCandidatesKey } = await import("../messages/suggested-reply.js");
+  const rows = [human(ME, "Status?"), agent("codex", "Merge?", "Yes"), agent("claude", "Theme?", "Option 2")];
+  const both = suggestedReplyCandidatesKey(suggestedReplyCandidates(rows, ME));
+  const oneDeleted = suggestedReplyCandidatesKey(suggestedReplyCandidates([rows[0]!, rows[2]!], ME));
+  assert.notEqual(both, oneDeleted);
 });
 
 test("one candidate needs no Jev call", async () => {

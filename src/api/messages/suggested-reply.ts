@@ -6,8 +6,10 @@
  * 1. Read the room's newest main-room messages (threads have their own composer).
  * 2. Keep only what came after the person's own last message: once they spoke,
  *    older suggestions are answered or stale.
- * 3. For each agent, its newest message in that span counts. It is a candidate
- *    when it carries a suggestion and it answers this person: it replies to
+ * 3. For each of this person's own agents, its newest message in that span
+ *    counts. Another person's agent never fills this composer: the person
+ *    would send its words as their own, and their agents would act on them.
+ *    It is a candidate when it carries a suggestion and it answers this person: it replies to
  *    their message, or the latest person who spoke before it is them, or no
  *    person spoke before it and the agent is theirs (an agent's first message
  *    to its owner is private, so it is not in the room).
@@ -78,7 +80,7 @@ export function suggestedReplyCandidates(rows: readonly SuggestedReplyRow[], vie
   const candidates: SuggestedReplyCandidate[] = [];
   for (const [agentKey, { row, humanBefore: lastHuman }] of newestByAgent) {
     const text = row.suggested_reply?.trim();
-    if (!text) continue;
+    if (!text || row.publisher_account_id !== viewerAccountId) continue;
     const repliedTo = row.reply_to_number != null ? byNumber.get(row.reply_to_number) ?? null : null;
     const asked = repliedTo && isHuman(repliedTo) ? repliedTo : lastHuman;
     // Agent messages carry their owner's account.
@@ -95,14 +97,20 @@ function toSuggestion(candidate: SuggestedReplyCandidate): SuggestedReply {
   return { message_id: `msg_${candidate.message_number}`, agent_key: candidate.agent_key, from: candidate.from, text: candidate.text };
 }
 
-/** Step 4. */
+/** The candidates as a cache key: a deleted or hidden message changes it. */
+export function suggestedReplyCandidatesKey(candidates: readonly SuggestedReplyCandidate[]): string {
+  return JSON.stringify(candidates.map((candidate) => [candidate.message_number, candidate.text]));
+}
+
+/** Step 4. `candidates` come from suggestedReplyCandidates on the same rows. */
 export async function pickSuggestedReply(input: {
   rows: readonly SuggestedReplyRow[];
   viewerAccountId: string;
   endpoint: JevEndpoint | null;
   evaluate?: JevEvaluate;
+  candidates?: readonly SuggestedReplyCandidate[];
 }): Promise<SuggestedReply | null> {
-  const candidates = suggestedReplyCandidates(input.rows, input.viewerAccountId);
+  const candidates = input.candidates ?? suggestedReplyCandidates(input.rows, input.viewerAccountId);
   if (candidates.length === 0) return null;
   const newest = candidates[candidates.length - 1]!;
   if (candidates.length === 1 || !input.endpoint) return toSuggestion(newest);
@@ -135,8 +143,8 @@ export async function pickSuggestedReply(input: {
 }
 
 /**
- * Remembers each room and person's pick by the room's newest message, so a
- * room that has not changed costs no Jev call, and concurrent asks share one.
+ * Remembers each room and person's pick by its candidates, so the same
+ * choice costs no second Jev call, and concurrent asks share one.
  */
 export class SuggestedReplyCache {
   private readonly entries = new Map<string, Promise<SuggestedReply | null>>();

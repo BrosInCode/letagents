@@ -14,6 +14,8 @@ import { isAppSession } from "../../../request/app-session.js";
 import { readJevEndpoint } from "../../../messages/jev-conversation-routing.js";
 import {
   pickSuggestedReply,
+  suggestedReplyCandidates,
+  suggestedReplyCandidatesKey,
   SUGGESTED_REPLY_WINDOW,
   SuggestedReplyCache,
   type SuggestedReplyRow,
@@ -54,14 +56,18 @@ export function registerSuggestedReplyRoute(app: Express, deps: RoomMessageRoute
         .orderBy(desc(messages.number))
         .limit(SUGGESTED_REPLY_WINDOW);
       const rows = newestFirst.reverse();
-      const newest = rows.at(-1);
-      if (!newest) {
+      const candidates = suggestedReplyCandidates(rows, viewerAccountId);
+      if (candidates.length === 0) {
         res.json({ suggestion: null });
         return;
       }
-      const suggestion = await picks.get(`${project.id}\u0000${viewerAccountId}\u0000${newest.number}`, () => pickSuggestedReply({
+      // Keyed by the candidates themselves: a deleted or hidden message drops
+      // out of them, so it never stays in the composer.
+      const key = `${project.id}\u0000${viewerAccountId}\u0000${suggestedReplyCandidatesKey(candidates)}`;
+      const suggestion = await picks.get(key, () => pickSuggestedReply({
         rows,
         viewerAccountId,
+        candidates,
         endpoint: readJevEndpoint(),
       }));
       res.json({ suggestion });

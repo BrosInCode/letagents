@@ -1,4 +1,4 @@
-import { reactive, ref, watch, type InjectionKey, type Ref } from "vue";
+import { onScopeDispose, reactive, ref, watch, type InjectionKey, type Ref } from "vue";
 import { desktopIpc } from "../../../../ipc/index.js";
 import type { DesktopNeedsYou } from "../../../../../../electron/ipc-types/knowledge";
 import { roomReadKey } from "../../../../domain/desktop-room-read-state";
@@ -63,6 +63,11 @@ export function useAgentSuggestedReply(
   const suggestion = ref<ComposerSuggestedReply | null>(null);
   let version = 0;
   let shownRoom: string | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  onScopeDispose(() => {
+    version += 1;
+    clearTimeout(timer);
+  });
   watch(() => [roomIdentifier(), latestMessageId()] as const, async ([room, latest]) => {
     const current = ++version;
     // Another room's suggestion never shows here, not even for a moment.
@@ -75,12 +80,14 @@ export function useAgentSuggestedReply(
       suggestion.value = null;
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, AGENT_SUGGESTION_DELAY_MS));
+    clearTimeout(timer);
+    await new Promise((resolve) => { timer = setTimeout(resolve, AGENT_SUGGESTION_DELAY_MS); });
     if (current !== version) return;
     try {
       const next = await read(room);
       if (current !== version) return;
-      suggestion.value = next ? { recordId: `message:${next.messageId}`, from: next.from, text: next.text } : null;
+      // Message numbers repeat across rooms, so a dismissal names the room too.
+      suggestion.value = next ? { recordId: `message:${roomReadKey(room) ?? room}:${next.messageId}`, from: next.from, text: next.text } : null;
     } catch {
       if (current === version) suggestion.value = null;
     }

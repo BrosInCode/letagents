@@ -33,7 +33,7 @@ test('the composer reads the agent suggestion when the newest message changes, a
   t.after(() => scope.stop());
   const suggestion = scope.run(() => module.useAgentSuggestedReply(() => room.value, () => latest.value))!;
   await settle();
-  assert.deepEqual(suggestion.value, { recordId: 'message:msg_7', from: 'StoneGrove', text: 'Yes, merge it' });
+  assert.deepEqual(suggestion.value, { recordId: 'message:room-a:msg_7', from: 'StoneGrove', text: 'Yes, merge it' });
   assert.deepEqual(asked, ['room-a']);
 
   // A burst of new messages costs one request.

@@ -64,7 +64,9 @@ export function buildSendMessageRequestBody(input: {
     sender: input.sender,
     text: input.text,
     ...(input.gif ? { gif: input.gif } : {}),
-    ...(input.suggestedReply?.trim() ? { suggested_reply: input.suggestedReply.trim() } : {}),
+    // A suggestion that is too long is dropped: it must never stop the message.
+    ...(input.suggestedReply?.trim() && input.suggestedReply.trim().length <= SUGGESTED_REPLY_MAX_CHARS
+      ? { suggested_reply: input.suggestedReply.trim() } : {}),
     ...(input.uploadIds?.length ? { attachments: input.uploadIds.map((upload_id) => ({ upload_id })) } : {}),
     reply_to: input.replyTarget,
     ...(input.resolvedThreadRoot ? { thread_root_id: input.resolvedThreadRoot } : {}),
@@ -287,7 +289,6 @@ export function registerSendMessageTool(server: McpServer, options: SendToolOpti
       text: z.string().describe("The message text to send"),
       suggested_reply: z
         .string()
-        .max(SUGGESTED_REPLY_MAX_CHARS)
         .optional()
         .describe("When this message asks the human a question, waits on their decision or finishes a step they"
           + " will respond to: the short reply you expect them to send next, in their voice (for example"
