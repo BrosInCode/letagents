@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
@@ -15,6 +15,7 @@ import {
   parseSigningIdentityHash,
   readPackageArtifactManifest,
   resolveManifestEntry,
+  signMacBundleWithManifest,
   signManifestMachOEntries,
   verifyPackageArtifactManifest,
 } from "./package-artifact-manifest.mjs";
@@ -251,15 +252,100 @@ test("osx-sign signs a nested file with the arguments the manifest pre-sign uses
   assert.deepEqual(signing.find((args) => args.at(-1) === other), nestedCodeSignArguments({ identityHash: IDENTITY_HASH, entitlements, file: other }));
 });
 
-test("package-macos.mjs pre-signs the manifest's Mach-O entries and checks the manifest in the final app", async () => {
+test("symbolic links are not accepted as manifest entries", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const bundle = await makeBundle(directory, {
+    platform: "darwin",
+    files: { "runtime/opencode": machOBytes(), "dist-electron/main.js": "console.log(1);\n" },
+  });
+  const app = join(bundle, "Contents", "Resources", "app");
+  // A link to a file with the same bytes still fails.
+  await writeFile(join(directory, "outside.js"), "console.log(1);\n");
+  await rm(join(app, "dist-electron", "main.js"));
+  await symlink(join(directory, "outside.js"), join(app, "dist-electron", "main.js"));
+  // A linked folder above an entry fails too.
+  await rename(join(app, "runtime"), join(directory, "runtime"));
+  await symlink(join(directory, "runtime"), join(app, "runtime"));
+  const { mismatches } = await verifyPackageArtifactManifest({ bundle, platform: "darwin" });
+  assert.deepEqual(mismatches.map(({ path }) => path), ["runtime/opencode", "dist-electron/main.js"]);
+  assert.ok(mismatches.every(({ reason }) => /symbolic link/.test(reason)));
+  await assert.rejects(
+    signManifestMachOEntries({ bundle, identity: IDENTITY, entitlements: "/e.plist", execFile: fakeSigner({ calls: [] }) }),
+    /symbolic link/,
+  );
+});
+
+test("the verifier refuses a folder where a file is listed", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const bundle = await makeBundle(directory, { platform: "darwin", files: { LICENSE: "MIT\n" } });
+  await rm(join(bundle, "Contents", "Resources", "app", "LICENSE"));
+  await mkdir(join(bundle, "Contents", "Resources", "app", "LICENSE"));
+  const { mismatches } = await verifyPackageArtifactManifest({ bundle, platform: "darwin" });
+  assert.match(mismatches[0].reason, /not a regular file/);
+});
+
+test("only plain Mach-O files in Contents/Resources/app are pre-signed", async (t) => {
+  for (const path of ["Contents/MacOS/LetAgents", "Contents/Frameworks/Tool.framework/Tool", "runtime/Nested.app/Contents/MacOS/Nested"]) {
+    const directory = await temporaryDirectory(t);
+    const bundle = await makeBundle(directory, { platform: "darwin", files: { [path]: machOBytes() } });
+    const calls = [];
+    await assert.rejects(
+      signManifestMachOEntries({ bundle, identity: IDENTITY, entitlements: "/e.plist", execFile: fakeSigner({ calls }) }),
+      /not a plain file in Contents\/Resources\/app/,
+      path,
+    );
+    assert.deepEqual(calls, [], `${path}: nothing is signed`);
+  }
+});
+
+test("the macOS signing order pre-signs, seals, verifies, then checks the manifest", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const bundle = await makeBundle(directory, {
+    platform: "darwin",
+    files: { "runtime/opencode": machOBytes(), "dist-electron/main.js": "console.log(1);\n" },
+  });
+  const opencode = join(bundle, "Contents", "Resources", "app", "runtime", "opencode");
+  const steps = [];
+  const execFile = async (command, args) => {
+    steps.push(`${command} ${args[0]}${args.includes("--deep") ? " --deep" : ""}`);
+    return fakeSigner({ calls: [] })(command, args);
+  };
+  const signBundle = async ({ ignore }) => {
+    steps.push("osx-sign");
+    assert.equal(ignore(opencode), true);
+    assert.equal(ignore(join(bundle, "Contents", "Resources", "app", "dist-electron", "main.js")), false);
+    assert.equal(ignore(bundle), false);
+  };
+  assert.equal(await signMacBundleWithManifest({ bundle, identity: IDENTITY, entitlements: "/e.plist", execFile, signBundle }), 2);
+  assert.deepEqual(steps, ["security find-identity", "codesign --sign", "codesign --verify", "osx-sign", "codesign --verify --deep"]);
+
+  // A bundle seal that changes a listed file fails before notarization.
+  const changed = await makeBundle(await temporaryDirectory(t), { platform: "darwin", files: { "runtime/opencode": machOBytes() } });
+  const changedOpenCode = join(changed, "Contents", "Resources", "app", "runtime", "opencode");
+  await assert.rejects(
+    signMacBundleWithManifest({
+      bundle: changed,
+      identity: IDENTITY,
+      entitlements: "/e.plist",
+      execFile: fakeSigner({ calls: [] }),
+      // osx-sign without the ignore function: it signs OpenCode again.
+      signBundle: () => fakeSigner({ calls: [] })("codesign", ["--sign", IDENTITY_HASH, "--force", changedOpenCode]),
+    }),
+    /runtime\/opencode: size/,
+  );
+});
+
+test("package-macos.mjs uses the signing order and checks the manifest in the final app", async () => {
   const mac = await readFile(join(scriptsDirectory, "package-macos.mjs"), "utf8");
   const position = (text) => {
     const index = mac.indexOf(text);
     assert.notEqual(index, -1, `missing: ${text}`);
     return index;
   };
-  assert.ok(position("await signManifestMachOEntries(") < position("await sign("), "the entries are signed before the bundle seal");
-  assert.ok(position("ignore: (filePath) => presigned.has(filePath)") > position("await sign("), "osx-sign leaves the pre-signed entries alone");
+  const signing = position("await signMacBundleWithManifest(");
+  assert.ok(signing < position("await sign("), "osx-sign runs inside the signing order");
+  assert.match(mac.slice(signing, position("await assertPackagedElectronFuses(")), /\n\s+ignore,\n/, "osx-sign gets the ignore function");
+  assert.ok(signing < position("notarizeWithStapleRecovery({ appPath: packagedApp"), "the first check runs before notarization");
   const check = position("await assertPackageArtifactManifest({ bundle: packagedApp, platform: \"darwin\" })");
   assert.ok(check > position("await validateStapledTicket(packagedApp"), "the check reads the stapled app");
   assert.ok(check < position("\"ditto\""), "the check runs before the update zip");

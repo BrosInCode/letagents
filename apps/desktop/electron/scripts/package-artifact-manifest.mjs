@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, readFile, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
 
 import { WINDOWS_EXECUTABLE_NAME } from "./windows-packaging.mjs";
 
@@ -42,6 +42,30 @@ export function resolveManifestEntry({ bundle, platform, path }) {
   return bundleRoots.has(segments[0]) ? join(bundle, ...segments) : join(bundle, ...app, ...segments);
 }
 
+/**
+ * Reads a manifest entry that must be a regular file. No part of its path
+ * below the bundle may be a symbolic link, so the entry cannot describe a
+ * file outside the bundle.
+ */
+export async function readRegularFile({ bundle, file }) {
+  const below = relative(bundle, file);
+  if (below === "" || below.startsWith("..") || isAbsolute(below)) {
+    throw new Error(`${file} is not inside ${bundle}.`);
+  }
+  let current = bundle;
+  const segments = below.split(sep);
+  for (const [index, segment] of segments.entries()) {
+    current = join(current, segment);
+    const info = await lstat(current);
+    const last = index === segments.length - 1;
+    if (info.isSymbolicLink()) throw new Error(`${current} is a symbolic link, not a regular file.`);
+    if (last ? !info.isFile() : !info.isDirectory()) {
+      throw new Error(`${current} is not a regular ${last ? "file" : "folder"}.`);
+    }
+  }
+  return readFile(file);
+}
+
 export function describeBytes(bytes) {
   return { bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
@@ -75,7 +99,7 @@ export async function verifyPackageArtifactManifest({ bundle, platform, manifest
     seen.add(entry?.path);
     let bytes;
     try {
-      bytes = await readFile(resolveManifestEntry({ bundle, platform, path: entry?.path }));
+      bytes = await readRegularFile({ bundle, file: resolveManifestEntry({ bundle, platform, path: entry?.path }) });
     } catch (error) {
       mismatches.push({ path: String(entry?.path), reason: error.code === "ENOENT" ? "missing" : error.message });
       continue;
@@ -148,10 +172,19 @@ export function nestedCodeSignArguments({ identityHash, entitlements, file }) {
 export async function signManifestMachOEntries({ bundle, identity, entitlements, execFile }) {
   const platform = "darwin";
   const manifest = await readPackageArtifactManifest({ bundle, platform });
+  const appFolder = join(bundle, ...layout(platform).app);
   const machO = [];
   for (const entry of manifest.files) {
     const file = resolveManifestEntry({ bundle, platform, path: entry.path });
-    if (isMachO(await readFile(file))) machO.push({ entry, file });
+    if (!isMachO(await readRegularFile({ bundle, file }))) continue;
+    // The nested-file arguments are right only for a plain file in the app
+    // folder. osx-sign signs helper apps, frameworks and the main executable
+    // with other options, so such an entry needs its own design first.
+    const inApp = relative(appFolder, file);
+    if (inApp.startsWith("..") || isAbsolute(inApp) || /\.(app|framework)(\/|$)/.test(inApp.split(sep).join("/"))) {
+      throw new Error(`The manifest's Mach-O entry ${entry.path} is not a plain file in Contents/Resources/app, so package-macos.mjs cannot pre-sign it.`);
+    }
+    machO.push({ entry, file });
   }
   if (machO.length === 0) return new Set();
   const { stdout } = await execFile("security", ["find-identity", "-v"]);
@@ -159,8 +192,21 @@ export async function signManifestMachOEntries({ bundle, identity, entitlements,
   for (const { entry, file } of machO) {
     await execFile("codesign", nestedCodeSignArguments({ identityHash, entitlements, file }));
     await execFile("codesign", ["--verify", "--strict", "--verbose=2", file]);
-    Object.assign(entry, describeBytes(await readFile(file)));
+    Object.assign(entry, describeBytes(await readRegularFile({ bundle, file })));
   }
   await writePackageArtifactManifest({ bundle, platform, manifest });
   return new Set(machO.map(({ file }) => file));
+}
+
+/**
+ * The macOS signing order: pre-sign the manifest's Mach-O entries, seal the
+ * bundle with osx-sign (`signBundle` gets the `ignore` function to pass on),
+ * verify the seal, then check the manifest, so a mismatch fails before the
+ * notary submission.
+ */
+export async function signMacBundleWithManifest({ bundle, identity, entitlements, execFile, signBundle }) {
+  const presigned = await signManifestMachOEntries({ bundle, identity, entitlements, execFile });
+  await signBundle({ ignore: (filePath) => presigned.has(filePath) });
+  await execFile("codesign", ["--verify", "--deep", "--strict", "--verbose=2", bundle]);
+  return assertPackageArtifactManifest({ bundle, platform: "darwin" });
 }
