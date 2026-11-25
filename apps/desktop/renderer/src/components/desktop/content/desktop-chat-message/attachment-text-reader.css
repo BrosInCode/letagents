@@ -1,0 +1,53 @@
+.message-reader.attachment-text-reader {
+  width: min(900px, calc(100vw - 28px));
+  height: min(650px, calc(100dvh - 40px));
+  max-width: none;
+  max-height: none;
+  font-size: .875rem;
+}
+.attachment-text-reader[open] { animation: attachment-reader-enter 160ms cubic-bezier(.2,.8,.2,1) both; }
+@keyframes attachment-reader-enter {
+  from { opacity: 0; transform: translateY(5px) scale(.994); }
+}
+.attachment-reader-layout { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.attachment-reader-header, .attachment-reader-toolbar, .attachment-reader-footer { display: flex; align-items: center; gap: 12px; padding: 12px 18px; }
+.attachment-reader-header, .attachment-reader-toolbar { border-bottom: 1px solid var(--reader-line); }
+.attachment-reader-icon { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border-radius: 8px; background: var(--reader-hover); color: var(--reader-muted); }
+.attachment-reader-name { flex: 1; min-width: 0; }
+.attachment-reader-name h2 { margin: 0; font-size: 1em; font-weight: 600; overflow-wrap: anywhere; }
+.attachment-reader-name p { margin: 3px 0 0; color: var(--reader-muted); font-size: .82em; }
+.attachment-reader-actions, .attachment-reader-pages { display: flex; align-items: center; gap: 4px; flex: none; }
+.attachment-text-reader button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 32px; min-height: 32px; padding: 0 8px; border-radius: 6px; color: var(--reader-muted); }
+.attachment-text-reader button:hover:not(:disabled), .attachment-text-reader button[aria-pressed=true] { color: var(--reader-text); background: var(--reader-hover); }
+.attachment-text-reader button:disabled { opacity: .45; cursor: default; }
+.attachment-text-reader button svg, .attachment-reader-find > svg { width: 15px; height: 15px; }
+.attachment-reader-toolbar { justify-content: space-between; padding-block: 9px; }
+.attachment-reader-mode, .attachment-reader-find { display: flex; align-items: center; gap: 3px; border: 1px solid var(--reader-line); border-radius: 8px; padding: 2px; }
+.attachment-reader-label, .attachment-reader-footer { color: var(--reader-muted); }
+.attachment-reader-find { margin-inline-start: auto; padding-inline-start: 9px; min-width: 0; color: var(--reader-muted); }
+.attachment-reader-find:focus-within { border-color: var(--reader-faint); }
+.attachment-reader-find input { min-width: 0; width: min(25vw, 168px); flex: 1; border: 0; outline: 0; padding: 4px; background: none; color: var(--reader-text); font: inherit; }
+.attachment-reader-find span { font-size: .82em; white-space: nowrap; }
+.attachment-reader-content { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--reader-line) transparent; outline: none; }
+.attachment-reader-content:focus-visible { outline: 1px solid var(--reader-faint); outline-offset: -3px; }
+.attachment-reader-state { margin: 24px; color: var(--reader-muted); }
+.attachment-reader-state button { margin-inline-start: 8px; border: 1px solid var(--reader-line); }
+.attachment-reader-table { border-spacing: 0; min-width: 100%; color: var(--reader-body); font-size: .92em; }
+.attachment-reader-table :is(th, td) { padding: 9px 12px; border-bottom: 1px solid var(--reader-line); text-align: start; vertical-align: top; }
+.attachment-reader-table th { position: sticky; top: 0; background: var(--reader-code); color: var(--reader-text); font-weight: 600; }
+.attachment-reader-table td { min-width: 90px; max-width: 360px; overflow-wrap: anywhere; }
+.attachment-reader-table tr:hover td { background: var(--reader-hover); }
+.attachment-reader-lines { padding-block: 11px; font: .92em/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--reader-body); }
+.attachment-reader-lines > div { display: grid; grid-template-columns: 3.8em minmax(0, 1fr); padding: 2px 14px 2px 0; }
+.attachment-reader-lines span { color: var(--reader-muted); text-align: end; padding-inline-end: 12px; user-select: none; }
+.attachment-reader-lines code { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.attachment-reader-lines .is-match { background: var(--reader-hover); box-shadow: inset 2px 0 var(--reader-accent); color: var(--reader-text); }
+.attachment-reader-footer { justify-content: space-between; min-height: 44px; padding-block: 5px; border-top: 1px solid var(--reader-line); font-size: .85em; }
+@media (max-width: 520px) {
+  .attachment-reader-header, .attachment-reader-toolbar, .attachment-reader-footer { padding-inline: 10px; gap: 7px; }
+  .attachment-reader-actions span, .attachment-reader-icon { display: none; }
+  .attachment-reader-find input { width: min(18vw, 88px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .attachment-text-reader[open] { animation: none; }
+}

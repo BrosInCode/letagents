@@ -282,6 +282,8 @@ export interface DesktopApi {
     markThreadRead: (roomIdentifier: string, threadRootId: string, messageId?: string | null) => Promise<DesktopRoomThreadReadResult>;
     getReasoningSession: (roomIdentifier: string, sessionId: string) => Promise<DesktopReasoningSessionDetail>;
     /** Open the file picker. Returns up to `limit` chosen files without uploading them. */
+    readAttachmentText?: (href: string) => Promise<{ text: string } | { error: string }>;
+    downloadAttachment?: (href: string) => Promise<void>;
     chooseAttachments: (limit: number) => Promise<DesktopChosenAttachment[]>;
     stageChosenAttachments: (roomIdentifier: string, tokens: string[]) => Promise<DesktopStagedAttachment[]>;
     stageDroppedAttachmentContents?: (
