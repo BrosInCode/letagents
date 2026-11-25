@@ -123,7 +123,7 @@ test("makensis comes from LETAGENTS_MAKENSIS, PATH, or the NSIS install folder",
   assert.throws(() => findMakensis({ env: { PATH: "" }, exists: () => false }), /NSIS \(makensis\.exe\) was not found/);
 });
 
-test("the installer removes exactly the packaged top-level entries", () => {
+test("the installer removes and moves exactly the packaged top-level entries", () => {
   const include = createNsisPayloadInclude([
     { name: "resources", directory: true },
     { name: WINDOWS_EXECUTABLE_NAME, directory: false },
@@ -140,10 +140,18 @@ test("the installer removes exactly the packaged top-level entries", () => {
     '  RMDir /r "$INSTDIR\\resources"',
     '  RMDir /r "$INSTDIR\\shared"',
     "!macroend",
+    "!macro LETAGENTS_PAYLOAD_ENTRIES MACRO",
+    '  !insertmacro ${MACRO} "ffmpeg.dll"',
+    '  !insertmacro ${MACRO} "LetAgents.exe"',
+    '  !insertmacro ${MACRO} "locales"',
+    '  !insertmacro ${MACRO} "resources"',
+    '  !insertmacro ${MACRO} "shared"',
+    "!macroend",
     "",
   ].join("\r\n"));
   assert.throws(() => createNsisPayloadInclude([{ name: "resources", directory: true }]), /must contain LetAgents\.exe/);
-  for (const name of ['bad"name', "$PLUGINSDIR", "..", "Uninstall LetAgents.exe"]) {
+  // A dot first is refused too: the installer's staging folders start with one.
+  for (const name of ['bad"name', "$PLUGINSDIR", "..", ".letagents-new", "Uninstall LetAgents.exe"]) {
     assert.throws(
       () => createNsisPayloadInclude([{ name: WINDOWS_EXECUTABLE_NAME, directory: false }, { name, directory: false }]),
       /Unexpected top-level entry/,
@@ -163,9 +171,9 @@ test("the NSIS script honours electron-updater's installer flags and stays per-u
   assert.match(script, /!define UPDATER_CACHE "letagents-desktop-updater"/);
   assert.match(script, /"\$LOCALAPPDATA\\\$\{UPDATER_CACHE\}\\installer\.exe"/);
   assert.match(script, /WriteRegStr HKCU "\$\{URL_KEY\}\\shell\\open\\command" "" '"\$INSTDIR\\\$\{EXE_NAME\}" "%1"'/);
-  // The previous payload is removed only from the folder the install is registered in.
-  const guarded = /Call (?:un\.)?IsRegisteredInstall\s+(?:;[^\n]*\s+)*\$\{If\} \$InstalledHere == "1"\s+!insertmacro REMOVE_LETAGENTS_PAYLOAD/g;
-  assert.equal(script.match(guarded)?.length, 2);
+  // The uninstaller removes the payload only from the folder the install is registered in.
+  const guarded = /Call un\.IsRegisteredInstall\s+(?:;[^\n]*\s+)*\$\{If\} \$InstalledHere == "1"\s+!insertmacro REMOVE_LETAGENTS_PAYLOAD/g;
+  assert.equal(script.match(guarded)?.length, 1);
   assert.match(script, /ReadRegStr \$R0 HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"/);
   assert.match(script, /^InstallDirRegKey HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"$/m);
   assert.doesNotMatch(script, /RMDir \/r "\$INSTDIR"/);
@@ -179,6 +187,73 @@ test("the NSIS script honours electron-updater's installer flags and stays per-u
   for (const removal of ['DeleteRegKey HKCU "${UNINSTALL_KEY}"', 'DeleteRegKey HKCU "${URL_KEY}"', 'RMDir /r "$LOCALAPPDATA\\${UPDATER_CACHE}"', 'Delete "$SMPROGRAMS\\${PRODUCT_NAME}.lnk"']) {
     assert.ok(registeredOnly.includes(removal), removal);
   }
+});
+
+/** The text from `start` to the first `end` after it. */
+function between(text, start, end) {
+  const from = text.indexOf(start);
+  assert.notEqual(from, -1, start);
+  const to = text.indexOf(end, from);
+  assert.notEqual(to, -1, end);
+  return text.slice(from, to);
+}
+
+test("an update writes the new version beside the installed one and swaps it in only when it is complete", async () => {
+  const script = await readFile(join(desktopRoot, "electron", "installer", "windows", "installer.nsi"), "utf8");
+  const install = between(script, 'Section "Install"', "SectionEnd");
+  // Both folders are in $INSTDIR, so every rename stays on one volume; a dot
+  // first, which no payload entry has, so they never clash with one.
+  assert.match(script, /^!define STAGE_DIR "\.letagents-new"$/m);
+  assert.match(script, /^!define BACKUP_DIR "\.letagents-old"$/m);
+  // The old payload is not deleted before the new one is written.
+  assert.doesNotMatch(install, /REMOVE_LETAGENTS_PAYLOAD/);
+  // One copy of the payload in the installer, written to the staging folder
+  // only for the registered install (a first install writes into $INSTDIR).
+  assert.equal(script.match(/File \/r "\$\{SOURCE_DIR\}\\\*"/g)?.length, 1);
+  assert.match(install, /Call IsRegisteredInstall\s+\$\{If\} \$InstalledHere == "1"\s+StrCpy \$RestartAfterFailure "1"\s+StrCpy \$Staging "1"\s+StrCpy \$R0 "\$INSTDIR\\\$\{STAGE_DIR\}"\s+\$\{Else\}\s+StrCpy \$R0 "\$INSTDIR"/);
+  // An extraction error stops the install before anything moves, with the
+  // staging folder removed and a non-zero exit code also in silent mode.
+  assert.match(install, /ClearErrors\s+File \/r "\$\{SOURCE_DIR\}\\\*"\s+StrCpy \$R1 "0"\s+\$\{If\} \$\{Errors\}\s+StrCpy \$R1 "1"/);
+  const failed = between(install, '${If} $R1 == "1"', "Call SwapInStagedPayload");
+  assert.match(failed, /\$\{If\} \$Staging == "1"\s+RMDir \/r "\$INSTDIR\\\$\{STAGE_DIR\}"[\s\S]*!insertmacro FAIL_INSTALL/);
+  assert.match(between(script, "!macro FAIL_INSTALL", "!macroend"), /MessageBox [^\n]* \/SD IDOK\s+SetErrorLevel 2\s+Abort/);
+  // Windows does not rename or delete a folder that is the working folder.
+  assert.ok(install.indexOf('SetOutPath "$INSTDIR"', install.indexOf('File /r "')) < install.indexOf("Call SwapInStagedPayload"));
+  // The order: close the app, recover an interrupted update, write, swap, then the rest.
+  const order = ["Call CloseRunningApp", "Call RecoverInterruptedUpdate", "Call IsRegisteredInstall", "File /r \"", "Call SwapInStagedPayload", "WriteUninstaller"];
+  assert.deepEqual(order.map((step) => install.indexOf(step)), order.map((step) => install.indexOf(step)).sort((a, b) => a - b));
+  assert.ok(order.every((step) => install.includes(step)));
+
+  // The swap: old entries aside, new entries in, old entries deleted last; on
+  // a failure the new entries go and the old ones come back. Renames only.
+  const swap = between(script, "Function SwapInStagedPayload", "FunctionEnd");
+  const aside = swap.search(/StrCpy \$MoveFrom "\$INSTDIR"\s+StrCpy \$MoveTo "\$INSTDIR\\\$\{BACKUP_DIR\}"\s+!insertmacro LETAGENTS_PAYLOAD_ENTRIES MOVE_LETAGENTS_ENTRY/);
+  const moveIn = swap.search(/StrCpy \$MoveFrom "\$INSTDIR\\\$\{STAGE_DIR\}"\s+StrCpy \$MoveTo "\$INSTDIR"\s+!insertmacro LETAGENTS_PAYLOAD_ENTRIES MOVE_LETAGENTS_ENTRY/);
+  const deleteOld = swap.indexOf('RMDir /r "$INSTDIR\\${BACKUP_DIR}"');
+  const removeNew = swap.indexOf("!insertmacro REMOVE_LETAGENTS_PAYLOAD");
+  const moveBack = swap.search(/StrCpy \$MoveFrom "\$INSTDIR\\\$\{BACKUP_DIR\}"\s+StrCpy \$MoveTo "\$INSTDIR"\s+!insertmacro LETAGENTS_PAYLOAD_ENTRIES MOVE_LETAGENTS_ENTRY/);
+  assert.ok(aside > 0 && aside < moveIn && moveIn < deleteOld && deleteOld < removeNew && removeNew < moveBack, JSON.stringify({ aside, moveIn, deleteOld, removeNew, moveBack }));
+  assert.match(swap.slice(moveIn, deleteOld + 8), /\$\{If\} \$MoveFailures = 0\s+StrCpy \$Staging "0"\s+RMDir \/r/);
+  // When the old entries cannot all come back, they stay in the backup folder for the next run.
+  assert.doesNotMatch(swap.slice(moveBack), /RMDir \/r "\$INSTDIR\\\$\{BACKUP_DIR\}"/);
+  assert.equal(script.match(/!insertmacro REMOVE_LETAGENTS_PAYLOAD/g)?.length, 2);
+  const move = between(script, "Function MoveLetAgentsEntry", "FunctionEnd");
+  assert.match(move, /Rename "\$MoveFrom\\\$MoveName" "\$MoveTo\\\$MoveName"/);
+  assert.doesNotMatch(script, /CopyFiles[^\n]*(?:STAGE_DIR|BACKUP_DIR)/);
+  // A failed update cleans its staging folder and, with --force-run, starts the old version again.
+  const onFailed = between(script, "Function .onInstFailed", "FunctionEnd");
+  assert.match(onFailed, /\$\{If\} \$Staging == "1"\s+SetOutPath "\$INSTDIR"\s+RMDir \/r "\$INSTDIR\\\$\{STAGE_DIR\}"/);
+  assert.match(onFailed, /\$RestartAfterFailure == "1"\s+\$\{AndIf\} \$ForceRun == "1"\s+\$\{AndIf\} \$\{FileExists\} "\$INSTDIR\\\$\{EXE_NAME\}"\s+Exec/);
+
+  // Leftovers of an interrupted update are recovered only in the registered folder.
+  const recover = between(script, "Function RecoverInterruptedUpdate", "FunctionEnd");
+  assert.match(recover, /^Function RecoverInterruptedUpdate\s+ReadRegStr \$R0 HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"\s+\$\{If\} \$R0 != \$INSTDIR\s+Return/);
+  assert.match(recover, /StrCpy \$MoveKeepExisting "1"/);
+  // The uninstaller removes them too, also only for the registered install.
+  const uninstall = between(script, 'Section "Uninstall"', "SectionEnd");
+  const registeredOnly = between(uninstall, '${If} $InstalledHere == "1"', "${EndIf}");
+  assert.ok(registeredOnly.includes('RMDir /r "$INSTDIR\\${STAGE_DIR}"'));
+  assert.ok(registeredOnly.includes('RMDir /r "$INSTDIR\\${BACKUP_DIR}"'));
 });
 
 test("the process-tree helper ships at the path the app looks for it, built strictly unless one is given", () => {
