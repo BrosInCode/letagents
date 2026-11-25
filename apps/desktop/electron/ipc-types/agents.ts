@@ -232,8 +232,17 @@ export type DesktopSupervisorDesiredState = "running" | "paused" | "stopped";
 export type DesktopSupervisorObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
 export type DesktopSupervisorCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
 
+export interface DesktopSupervisorLegacyStateReset {
+  resetAt: string;
+  backupName: string;
+  legacySchemaVersion: number;
+  preservedRoomOnlyWorkspaces: boolean;
+  preservedReviewArchives: boolean;
+}
+
 export interface DesktopSupervisorDaemonStatus {
   maintenanceHoldId?: string | null;
+  legacyStateReset?: DesktopSupervisorLegacyStateReset | null;
   healthy: boolean;
   protocolVersion: number;
   implementationVersion: string;

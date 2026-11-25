@@ -1,7 +1,27 @@
-import type { DesktopSupervisorDaemonStatus } from "../../ipc-types.js";
+import type { DesktopSupervisorDaemonStatus, DesktopSupervisorLegacyStateReset } from "../../ipc-types.js";
 import { booleanField } from "./wire-values.js";
 
+function mapLegacyStateReset(value: unknown): DesktopSupervisorLegacyStateReset | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.reset_at !== "string"
+    || typeof record.backup_name !== "string"
+    || typeof record.legacy_schema_version !== "number"
+    || !Number.isSafeInteger(record.legacy_schema_version)
+    || record.legacy_schema_version < 0) {
+    return null;
+  }
+  return {
+    resetAt: record.reset_at,
+    backupName: record.backup_name,
+    legacySchemaVersion: record.legacy_schema_version,
+    preservedRoomOnlyWorkspaces: record.preserved_room_only_workspaces === true,
+    preservedReviewArchives: record.preserved_review_archives === true,
+  };
+}
+
 export function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatus {
+  const legacyStateReset = mapLegacyStateReset(value.legacy_state_reset);
   return {
     healthy: value.healthy === true,
     protocolVersion: Number(value.protocol_version ?? 0),
@@ -23,5 +43,6 @@ export function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaem
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),
     maintenanceHoldId: typeof value.maintenance_hold_id === "string" ? value.maintenance_hold_id : null,
+    ...(legacyStateReset ? { legacyStateReset } : {}),
   };
 }

@@ -145,7 +145,23 @@
       @pointerdown="startSidebarResize"
       @keydown="handleSidebarResizeKeydown"
     ></div>
-    <section class="app-main" :data-room-entry="activeEntry.type === 'room'" :data-messages-entry="activeEntry.type === 'messages'" :data-my-work-entry="activeEntry.type === 'my-work'" data-testid="desktop-main">
+    <section class="app-main" :data-room-entry="activeEntry.type === 'room'" :data-messages-entry="activeEntry.type === 'messages'" :data-my-work-entry="activeEntry.type === 'my-work'" :data-legacy-reset-banner="Boolean(legacyStateResetMessage) || null" data-testid="desktop-main">
+      <div
+        v-if="legacyStateResetMessage"
+        class="desktop-legacy-reset-banner"
+        role="status"
+        data-testid="desktop-legacy-reset-banner"
+      >
+        <p class="desktop-legacy-reset-banner-text">{{ legacyStateResetMessage }}</p>
+        <button
+          type="button"
+          class="desktop-legacy-reset-banner-dismiss"
+          aria-label="Dismiss background service upgrade notice"
+          @click="dismissLegacyStateResetNotice"
+        >
+          Dismiss
+        </button>
+      </div>
       <DesktopTopbar
         v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && activeEntry.type !== 'messages' && activeEntry.type !== 'my-work' && (activeEntry.type !== 'inbox' || sidebarMode === 'hidden') && !isSettingsSurface"
         :active-entry="activeEntry"
@@ -491,6 +507,8 @@ import CompanyHome from "./components/desktop/content/CompanyHome.vue";
 import AskAgentDialog from "./components/desktop/content/asks/AskAgentDialog.vue";
 import GiveAgentDialog from "./components/desktop/content/asks/GiveAgentDialog.vue";
 import { useAppAgentAsks } from "./composables/app/useAppAgentAsks";
+import { useAppLegacyResetNotice } from "./composables/app/useAppLegacyResetNotice";
+import { supervisedAgentsSupported } from "./domain/supervised-agents-support";
 import RoomDeletionDialog from "./components/desktop/content/RoomDeletionDialog.vue";
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
@@ -701,6 +719,9 @@ Object.assign(app, useAppAuthWatchers(app));
 Object.assign(app, useAppLifecycle(app));
 
 const { askAgentOpen, giveAgentToken } = useAppAgentAsks();
+const { legacyStateResetMessage, dismissLegacyStateResetNotice } = useAppLegacyResetNotice(
+  computed(() => !showFirstRunSplash.value && !showFirstRunGate.value && !showSignedOutGate.value && supervisedAgentsSupported.value),
+);
 
 const themeAccountKey = computed(() => authStatus.value?.authenticated && authStatus.value.account
   ? `${authStatus.value.apiUrl}:${authStatus.value.account.id}` : null);

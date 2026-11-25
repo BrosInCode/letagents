@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, mkdir, open } from "node:fs/promises";
-import { dirname } from "node:path";
+import { lstat, mkdir, open, readdir } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { DaemonLegacyStateReset } from "#daemon-contract/index.js";
 import { isOwnerPrivate, ownerPrivatePlatform, protectOwnerPrivate, windowsToolPaths } from "../../../../shared/owner-private-fs.mjs";
 import {
   isBirthEvidence, MAX_WINDOWS_BIRTH_PIDS, signalTree, signalTreeOutcome, windowsProcessBirths, windowsProcessInfo,
@@ -71,17 +72,59 @@ async function ensureOwnerPrivateFilesOnWindows(path: string): Promise<void> {
   }
 }
 
-async function uniqueLegacyDestination(path: string, now: Date): Promise<string> {
+const LEGACY_FILE_SIDECAR_SUFFIXES = [".recovery.enc", ".recovery.enc.pending"] as const;
+const LEGACY_DIRECTORY_SIDECAR_SUFFIXES = [".reviews", ".reviews-recovery"] as const;
+const LEGACY_ROOM_ONLY_REPO = "room-only";
+export const LEGACY_STATE_RESET_MAINTENANCE_KEY = "legacy-state-reset-notice";
+
+export type LegacyMoveAsideResult = {
+  databasePath: string;
+  legacySchemaVersion: number;
+  preservedReviews: boolean;
+  preservedRoomOnlyWorkspaces: boolean;
+  roomOnlyBackupPath: string | null;
+};
+
+async function statOrNull(path: string, statFile: typeof lstat): Promise<Awaited<ReturnType<typeof lstat>> | null> {
+  return statFile(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+}
+
+async function uniqueLegacyDestination(path: string, now: Date, statFile: typeof lstat = lstat): Promise<string> {
   const stamp = now.toISOString().replaceAll(":", "-").replaceAll(".", "-");
   for (let suffix = 0; suffix < 1_000; suffix += 1) {
     const candidate = suffix === 0 ? `${path}.legacy-${stamp}` : `${path}.legacy-${stamp}-${suffix}`;
-    const existing = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
-    if (!existing) return candidate;
+    const pathsToCheck = [
+      candidate,
+      ...LEGACY_FILE_SIDECAR_SUFFIXES.map((ext) => `${candidate}${ext}`),
+      ...LEGACY_DIRECTORY_SIDECAR_SUFFIXES.map((ext) => `${candidate}${ext}`),
+    ];
+    let taken = false;
+    for (const target of pathsToCheck) {
+      if (await statOrNull(target, statFile)) {
+        taken = true;
+        break;
+      }
+    }
+    if (!taken) return candidate;
   }
   throw new Error("Could not allocate a unique path to move aside the legacy daemon database.");
+}
+
+async function uniqueLegacyDirectoryDestination(
+  parentDirectory: string,
+  baseName: string,
+  legacySuffix: string,
+  statFile: typeof lstat = lstat,
+): Promise<string> {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const name = attempt === 0 ? `${baseName}${legacySuffix}` : `${baseName}${legacySuffix}-${attempt}`;
+    const candidate = join(parentDirectory, name);
+    if (!await statOrNull(candidate, statFile)) return candidate;
+  }
+  throw new Error(`Could not allocate a unique path to move aside legacy ${baseName} directory.`);
 }
 
 type LegacyLiveRuntime = { pid: number; birth: string };
@@ -93,6 +136,8 @@ export type PosixBirthReadResult =
 
 export type MoveAsideLegacyOptions = {
   now?: Date;
+  workspaceRoot?: string;
+  onMovedAside?: (result: LegacyMoveAsideResult) => void;
   platform?: NodeJS.Platform;
   birthState?: (pid: number, birth: string) => "live" | "gone" | "unknown";
   probePid?: (pid: number) => void;
@@ -109,7 +154,7 @@ export type MoveAsideLegacyOptions = {
   killWaitMs?: number;
 };
 
-export type OpenDaemonStateDatabaseOptions = Pick<MoveAsideLegacyOptions, "lstatFile">;
+export type OpenDaemonStateDatabaseOptions = Pick<MoveAsideLegacyOptions, "lstatFile" | "workspaceRoot">;
 
 const FILETIME_UNIX_EPOCH_MS = 11_644_473_600_000n;
 const MAX_FILETIME = (1n << 64n) - 1n;
@@ -620,28 +665,72 @@ export async function moveAsideLegacyDaemonStateDatabase(
   await stopLegacyLiveRuntimes(legacyRuntimes, options);
   await checkpointLegacyDaemonStateDatabase(path);
 
-  const destination = await uniqueLegacyDestination(path, options.now ?? new Date());
+  const destination = await uniqueLegacyDestination(path, options.now ?? new Date(), statFile);
+  const legacySuffix = destination.slice(path.length);
   const renameFile = options.renameFile ?? renameWithRetryAsync;
-  // Move recovery sidecars first (separate filesystem operations) and roll them
-  // back if renaming the checkpointed main file fails. Once the main file
-  // rename succeeds, `destination` is already complete and self-contained.
-  const movedRecovery: Array<{ from: string; to: string }> = [];
+  const workspaceRoot = options.workspaceRoot ?? dirname(path);
+  // Move recovery sidecars, review archive directories, and any non-empty
+  // room-only workspace directory before renaming the checkpointed main file,
+  // rolling back every moved path if any rename fails. Once the main file
+  // rename succeeds, `destination` and its preserved sidecars are self-contained.
+  const movedSidecars: Array<{ from: string; to: string }> = [];
+  let preservedReviews = false;
+  let preservedRoomOnlyWorkspaces = false;
+  let roomOnlyBackupPath: string | null = null;
   try {
-    for (const suffix of [".recovery.enc", ".recovery.enc.pending"]) {
+    for (const suffix of LEGACY_FILE_SIDECAR_SUFFIXES) {
       const sidecar = `${path}${suffix}`;
-      const sidecarInfo = await statFile(sidecar).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return null;
-        throw error;
-      });
+      const sidecarInfo = await statOrNull(sidecar, statFile);
       if (sidecarInfo && sidecarInfo.isFile() && !sidecarInfo.isSymbolicLink()) {
         const target = `${destination}${suffix}`;
         await renameFile(sidecar, target);
-        movedRecovery.push({ from: sidecar, to: target });
+        movedSidecars.push({ from: sidecar, to: target });
+      }
+    }
+    for (const suffix of LEGACY_DIRECTORY_SIDECAR_SUFFIXES) {
+      const sidecar = `${path}${suffix}`;
+      const sidecarInfo = await statOrNull(sidecar, statFile);
+      if (!sidecarInfo) continue;
+      if (sidecarInfo.isSymbolicLink() || !sidecarInfo.isDirectory()) {
+        throw new Error(`Refusing to move aside non-directory legacy review archive path: ${sidecar}`);
+      }
+      const entries = await readdir(sidecar);
+      if (entries.length === 0) continue;
+      const target = `${destination}${suffix}`;
+      await renameFile(sidecar, target);
+      movedSidecars.push({ from: sidecar, to: target });
+      preservedReviews = true;
+    }
+    const worktreesDir = join(workspaceRoot, "worktrees");
+    const worktreesInfo = await statOrNull(worktreesDir, statFile);
+    if (worktreesInfo) {
+      if (worktreesInfo.isSymbolicLink() || !worktreesInfo.isDirectory()) {
+        throw new Error(`Refusing to inspect unsafe legacy worktrees directory: ${worktreesDir}`);
+      }
+      const roomOnlyDir = join(worktreesDir, LEGACY_ROOM_ONLY_REPO);
+      const roomOnlyInfo = await statOrNull(roomOnlyDir, statFile);
+      if (roomOnlyInfo) {
+        if (roomOnlyInfo.isSymbolicLink() || !roomOnlyInfo.isDirectory()) {
+          throw new Error(`Refusing to move aside unsafe legacy room-only workspace directory: ${roomOnlyDir}`);
+        }
+        const entries = await readdir(roomOnlyDir);
+        if (entries.length > 0) {
+          const target = await uniqueLegacyDirectoryDestination(
+            worktreesDir,
+            LEGACY_ROOM_ONLY_REPO,
+            legacySuffix,
+            statFile,
+          );
+          await renameFile(roomOnlyDir, target);
+          movedSidecars.push({ from: roomOnlyDir, to: target });
+          preservedRoomOnlyWorkspaces = true;
+          roomOnlyBackupPath = target;
+        }
       }
     }
     await renameFile(path, destination);
   } catch (error) {
-    for (const entry of movedRecovery.reverse()) {
+    for (const entry of movedSidecars.reverse()) {
       await renameFile(entry.to, entry.from).catch(() => undefined);
     }
     throw error;
@@ -650,10 +739,7 @@ export async function moveAsideLegacyDaemonStateDatabase(
   // after checkpoint + close; `destination` already holds all committed pages.
   for (const suffix of ["-wal", "-shm"]) {
     const sidecar = `${path}${suffix}`;
-    const sidecarInfo = await statFile(sidecar).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
+    const sidecarInfo = await statOrNull(sidecar, statFile);
     if (sidecarInfo && sidecarInfo.isFile() && !sidecarInfo.isSymbolicLink()) {
       await renameFile(sidecar, `${destination}${suffix}`).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
@@ -661,8 +747,73 @@ export async function moveAsideLegacyDaemonStateDatabase(
     }
   }
   await syncDirectory(destination);
-  console.warn(`[daemon_state] moved aside legacy schema v${inspection.userVersion} database to ${destination}; starting clean on schema v${SCHEMA_VERSION}`);
+  if (roomOnlyBackupPath) await syncDirectory(roomOnlyBackupPath);
+  const movedResult: LegacyMoveAsideResult = {
+    databasePath: destination,
+    legacySchemaVersion: inspection.userVersion,
+    preservedReviews,
+    preservedRoomOnlyWorkspaces,
+    roomOnlyBackupPath,
+  };
+  options.onMovedAside?.(movedResult);
+  const extras = [
+    ...(preservedReviews ? ["review archives"] : []),
+    ...(roomOnlyBackupPath ? [`room-only workspaces -> ${roomOnlyBackupPath}`] : []),
+  ];
+  const preservedSummary = extras.length > 0 ? ` (preserved ${extras.join(" and ")})` : "";
+  console.warn(`[daemon_state] moved aside legacy schema v${inspection.userVersion} database to ${destination}${preservedSummary}; starting clean on schema v${SCHEMA_VERSION}`);
   return destination;
+}
+
+export function recordLegacyStateResetNotice(
+  database: DatabaseSync,
+  moved: LegacyMoveAsideResult,
+  now = new Date().toISOString(),
+): void {
+  const table = database.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='daemon_maintenance_state'",
+  ).get();
+  if (!table) return;
+  const payload: DaemonLegacyStateReset = {
+    reset_at: now,
+    backup_name: basename(moved.databasePath),
+    legacy_schema_version: Math.max(0, Math.trunc(moved.legacySchemaVersion)),
+    preserved_room_only_workspaces: moved.preservedRoomOnlyWorkspaces,
+    preserved_review_archives: moved.preservedReviews,
+  };
+  database.prepare(`INSERT INTO daemon_maintenance_state(key,value_json,updated_at)
+    VALUES (?,?,?) ON CONFLICT(key)
+    DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+    .run(LEGACY_STATE_RESET_MAINTENANCE_KEY, JSON.stringify(payload), now);
+}
+
+export function readLegacyStateResetNotice(database: DatabaseSync): DaemonLegacyStateReset | null {
+  try {
+    const row = database.prepare(
+      "SELECT value_json FROM daemon_maintenance_state WHERE key=?",
+    ).get(LEGACY_STATE_RESET_MAINTENANCE_KEY) as { value_json?: unknown } | undefined;
+    if (!row || typeof row.value_json !== "string") return null;
+    const parsed = JSON.parse(row.value_json) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object"
+      || typeof parsed.reset_at !== "string"
+      || typeof parsed.backup_name !== "string"
+      || typeof parsed.legacy_schema_version !== "number"
+      || !Number.isSafeInteger(parsed.legacy_schema_version)
+      || parsed.legacy_schema_version < 0
+      || typeof parsed.preserved_room_only_workspaces !== "boolean"
+      || typeof parsed.preserved_review_archives !== "boolean") {
+      return null;
+    }
+    return {
+      reset_at: parsed.reset_at,
+      backup_name: parsed.backup_name,
+      legacy_schema_version: parsed.legacy_schema_version,
+      preserved_room_only_workspaces: parsed.preserved_room_only_workspaces,
+      preserved_review_archives: parsed.preserved_review_archives,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Opens the single daemon state connection with the non-negotiable durability settings. */
@@ -674,7 +825,11 @@ export async function openDaemonStateDatabase(
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await protectOwnerPrivate(directory, "directory");
-  await moveAsideLegacyDaemonStateDatabase(path, options);
+  const movedState: { result: LegacyMoveAsideResult | null } = { result: null };
+  await moveAsideLegacyDaemonStateDatabase(path, {
+    ...options,
+    onMovedAside: (result) => { movedState.result = result; },
+  });
   await ensureOwnerPrivateFilesOnWindows(path);
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -697,6 +852,7 @@ export async function openDaemonStateDatabase(
         }
       }
       await initializeSchema(database);
+      if (movedState.result) recordLegacyStateResetNotice(database, movedState.result);
       return database;
     } catch (error) {
       try { database?.close(); } catch { /* preserve the triggering error */ }

@@ -25,12 +25,16 @@ export {
 } from "./schema.js";
 export {
   DaemonStateDatabase,
+  LEGACY_STATE_RESET_MAINTENANCE_KEY,
   areWindowsFiletimesCompatibleAtWmiPrecision,
   moveAsideLegacyDaemonStateDatabase,
   openDaemonStateDatabase,
   ensureDaemonStateDatabase,
   parseWindowsBirthFiletime,
   parseWindowsCimDateTimeToFiletimeUtc,
+  readLegacyStateResetNotice,
+  recordLegacyStateResetNotice,
+  type LegacyMoveAsideResult,
   type MoveAsideLegacyOptions,
   type OpenDaemonStateDatabaseOptions,
   type PosixBirthReadResult,

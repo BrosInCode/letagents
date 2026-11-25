@@ -145,6 +145,15 @@ export const daemonCapabilitiesSchema = z.object({
 });
 export type DaemonCapabilities = z.infer<typeof daemonCapabilitiesSchema>;
 
+export const daemonLegacyStateResetSchema = z.object({
+  reset_at: z.string(),
+  backup_name: z.string(),
+  legacy_schema_version: nonNegativeSafeInt,
+  preserved_room_only_workspaces: z.boolean(),
+  preserved_review_archives: z.boolean(),
+});
+export type DaemonLegacyStateReset = z.infer<typeof daemonLegacyStateResetSchema>;
+
 export const daemonStatusSchema = z.object({
   healthy: z.boolean(),
   protocol_version: positiveSafeInt,
@@ -156,6 +165,7 @@ export const daemonStatusSchema = z.object({
   pid: positiveSafeInt,
   started_at: z.string(),
   maintenance_hold_id: z.string().nullable().optional(),
+  legacy_state_reset: daemonLegacyStateResetSchema.nullable().optional(),
 });
 export type DaemonStatus = z.infer<typeof daemonStatusSchema>;
 
