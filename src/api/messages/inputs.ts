@@ -61,6 +61,7 @@ export interface CreateMessageBody {
   agent_session_id: string | null;
   agent_session_token: string | null;
   client_message_id: string | null;
+  suggested_reply: string | null;
 }
 
 export function parseCreateMessageBody(body: unknown): CreateMessageBody {
@@ -86,6 +87,7 @@ export function parseCreateMessageBody(body: unknown): CreateMessageBody {
     agent_session_id: optionalStringField(record, "agent_session_id"),
     agent_session_token: optionalStringField(record, "agent_session_token"),
     client_message_id: clientMessageId,
+    suggested_reply: optionalStringField(record, "suggested_reply"),
   };
 }
 

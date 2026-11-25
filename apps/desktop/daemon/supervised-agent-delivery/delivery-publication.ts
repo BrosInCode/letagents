@@ -119,6 +119,7 @@ export abstract class SupervisedAgentDeliveryPublication extends SupervisedAgent
       }
       if (!await this.hasLaneAuthority(agent, parent)) return false;
       const gif = await this.inbox.replyGif(item.inbox_item_id);
+      const suggestedReply = await this.inbox.replySuggestion?.(item.inbox_item_id).catch(() => null) ?? null;
       const attached = await this.stageReplyAttachments(agent, item, controller);
       // Uploads can take minutes; post only if this lane still owns the reply.
       if (!await this.hasLaneAuthority(agent, parent)) {
@@ -131,6 +132,7 @@ export abstract class SupervisedAgentDeliveryPublication extends SupervisedAgent
         bearer: agent.bearer,
         text: attached.unavailable.length ? `${text}\n\n(Could not attach: ${attached.unavailable.join(", ")})` : text,
         ...(gif ? { gif } : {}),
+        ...(suggestedReply ? { suggestedReply } : {}),
         ...(attached.uploads.length ? { attachments: attached.uploads } : {}),
         clientMessageId: item.reply_client_message_id,
         replyTo: replyTarget.replyTo,

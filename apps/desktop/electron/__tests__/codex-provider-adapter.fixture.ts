@@ -781,6 +781,7 @@ export const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused
   request_human_input: "approved",    // a question in a person's "Needs you" inbox
   set_reply_thread: "approved",       // where the final answer goes; approved at every access level
   set_reply_gif: "approved",          // optional attachment to the same final answer
+  set_reply_suggestion: "approved",   // the reply offered in the person's composer; sends nothing
   react_to_message: "approved",       // room communication under the agent's identity
   update_job: "approved",             // progress on a job it was given; changes only the job's own record
   complete_job: "approved",           // the job's result or error, checked by the room server

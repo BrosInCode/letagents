@@ -1,4 +1,5 @@
 import { validReplyGifIntent } from "../../../shared/room-expressions.mjs";
+import { SUGGESTED_REPLY_MAX_CHARS, validReplySuggestionIntent } from "../../../shared/suggested-reply.mjs";
 import { validReplyAttachmentsRequest } from "../../../shared/message-attachments.mjs";
 import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../shared/codex-read-only-room-tools.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
@@ -358,6 +359,9 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       throw new Error("set_reply_thread takes an empty object; the active turn determines its thread.");
     }
     if (input.toolName === "set_reply_gif" && !validReplyGifIntent(input.input)) throw new Error("Invalid GIF reply intent.");
+    if (input.toolName === "set_reply_suggestion" && !validReplySuggestionIntent(input.input)) {
+      throw new Error(`set_reply_suggestion takes { text: 1 to ${SUGGESTED_REPLY_MAX_CHARS} characters }, or { text: null } to clear it.`);
+    }
     let request = input.input;
     if (input.toolName === "set_reply_attachments") {
       if (isLocalRoomApi(context.agent.apiUrl)) throw new Error("Reply attachments need a cloud room.");

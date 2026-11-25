@@ -1,4 +1,5 @@
-import { reactive, type InjectionKey } from "vue";
+import { reactive, ref, watch, type InjectionKey, type Ref } from "vue";
+import { desktopIpc } from "../../../../ipc/index.js";
 import type { DesktopNeedsYou } from "../../../../../../electron/ipc-types/knowledge";
 import { roomReadKey } from "../../../../domain/desktop-room-read-state";
 import { attentionRecommendationReply } from "../../../../../../../../shared/room-knowledge.mjs";
@@ -44,4 +45,45 @@ export function suggestionSettled(recordId: string): boolean {
 
 export function settleSuggestion(recordId: string): void {
   settledSuggestions.add(recordId);
+}
+
+/** A short pause so a burst of new messages costs one request. */
+const AGENT_SUGGESTION_DELAY_MS = 300;
+
+/**
+ * The reply an agent suggested for this room, read from the server whenever
+ * the room's newest message changes. The server picks among the agents'
+ * suggestions and answers null once the person has spoken after them.
+ * Rooms kept on this computer have none.
+ */
+export function useAgentSuggestedReply(
+  roomIdentifier: () => string | null,
+  latestMessageId: () => string | null,
+): Ref<ComposerSuggestedReply | null> {
+  const suggestion = ref<ComposerSuggestedReply | null>(null);
+  let version = 0;
+  let shownRoom: string | null = null;
+  watch(() => [roomIdentifier(), latestMessageId()] as const, async ([room, latest]) => {
+    const current = ++version;
+    // Another room's suggestion never shows here, not even for a moment.
+    if (room !== shownRoom) {
+      suggestion.value = null;
+      shownRoom = room;
+    }
+    const read = desktopIpc.room?.getSuggestedReply;
+    if (!room || !latest || typeof read !== "function") {
+      suggestion.value = null;
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, AGENT_SUGGESTION_DELAY_MS));
+    if (current !== version) return;
+    try {
+      const next = await read(room);
+      if (current !== version) return;
+      suggestion.value = next ? { recordId: `message:${next.messageId}`, from: next.from, text: next.text } : null;
+    } catch {
+      if (current === version) suggestion.value = null;
+    }
+  }, { immediate: true });
+  return suggestion;
 }

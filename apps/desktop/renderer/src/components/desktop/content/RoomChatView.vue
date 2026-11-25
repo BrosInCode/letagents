@@ -169,6 +169,7 @@
           :reply-to="replyTarget"
           :room-identifier="roomIdentifier"
           :room-label="roomLabel"
+          :latest-message-id="latestRoomMessageId"
           :room-loading="roomLoading"
           :send-error="sendError"
           :sending="sending"
@@ -460,6 +461,14 @@ provide(deleteRoomContentKey, async (input) => {
 });
 
 const messagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.messages));
+// The newest saved message: when it changes the composer asks again for a suggested reply.
+const latestRoomMessageId = computed(() => {
+  for (let index = props.messages.length - 1; index >= 0; index -= 1) {
+    const id = props.messages[index]?.id;
+    if (typeof id === "string" && /^msg_\d+$/.test(id)) return id;
+  }
+  return null;
+});
 const threadMessagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.threadMessages));
 const activeThreadParent = computed(() =>
   fetchedThreadRootId.value === activeThreadParentId.value && fetchedThreadRoot.value

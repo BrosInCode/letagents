@@ -134,6 +134,8 @@ export interface SupervisedDeliveryHttp {
     text: string;
     clientMessageId: string;
     gif?: RoomGif | null;
+    /** What the agent expects the human to say next; the server keeps it for their composer. */
+    suggestedReply?: string | null;
     attachments?: Array<{ upload_id: string }>;
     replyTo: string | null;
     threadRootId: string | null;
