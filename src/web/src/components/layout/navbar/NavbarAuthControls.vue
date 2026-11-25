@@ -1,8 +1,8 @@
 <template>
   <template v-if="!auth.isSignedIn.value">
-    <button :class="signInClasses" type="button" @click="signIn">
-      <GitHubIcon :size="16" />
-      Sign In
+    <button :class="signInClasses" type="button" aria-label="Sign in with GitHub" @click="signIn">
+      <GitHubIcon v-if="mobile" :size="16" />
+      Sign in
     </button>
   </template>
   <template v-else>
@@ -37,9 +37,8 @@ const auth = useAuth()
 
 const signInClasses = computed(() => [
   'nav-btn',
-  'nav-btn-ghost',
   'nav-btn-sm',
-  props.mobile ? 'nav-mobile-auth-button' : '',
+  props.mobile ? 'nav-btn-ghost nav-mobile-auth-button' : 'nav-sign-in',
 ])
 
 const signOutClasses = computed(() => [

@@ -5,7 +5,6 @@
     </RouterLink>
     <a :href="GITHUB_REPOSITORY_URL" target="_blank" class="nav-link">GitHub</a>
 
-    <div class="nav-divider" />
     <NavbarAuthControls />
 
     <RouterLink :to="ROOM_ENTRY_LINK.to" class="nav-btn nav-btn-primary nav-btn-sm">

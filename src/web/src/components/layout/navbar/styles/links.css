@@ -37,10 +37,3 @@
 .nav-link:hover::after {
   width: 60%;
 }
-
-.nav-divider {
-  width: 1px;
-  height: 18px;
-  background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.12), transparent);
-  margin: 0 8px;
-}

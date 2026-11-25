@@ -1,3 +1,18 @@
+.nav-sign-in {
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .nav-sign-in:hover {
+    color: var(--text);
+    background: var(--accent-dim);
+  }
+}
+
 .nav-auth-user {
   display: flex;
   align-items: center;
