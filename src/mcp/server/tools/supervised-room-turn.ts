@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { SUGGESTED_REPLY_MAX_CHARS } from "../../../../shared/suggested-reply.mjs";
 
 const MAX_ROOM_REPLY_BYTES = 32 * 1024;
 
@@ -19,6 +20,16 @@ export function registerReplyThreadTool(server: McpServer): void {
     async () => { throw new Error("set_reply_attachments requires the active daemon-owned room turn."); },
   );
   if (attachmentsTool) attachmentsTool.inputSchema = z.object({ files: attachmentFiles }).strict();
+  const suggestionText = z.string().trim().min(1).max(SUGGESTED_REPLY_MAX_CHARS).nullable();
+  const suggestionTool = server.tool("set_reply_suggestion",
+    "When your final room reply asks the human a question, waits on their decision, or finishes a step they will respond to,"
+      + " record the short reply you expect them to send next, in their voice (for example \"Yes, merge it\" or \"Use option 2\")."
+      + " LetAgents offers it in their composer, and they can send it with one key. This records an intent only, sends nothing,"
+      + " and does not complete the turn. Skip it when no reply is expected. Pass text:null to clear it. A no_reply outcome sends nothing.",
+    { text: suggestionText },
+    async () => { throw new Error("set_reply_suggestion requires the active daemon-owned room turn."); },
+  );
+  if (suggestionTool) suggestionTool.inputSchema = z.object({ text: suggestionText }).strict();
   const tool = server.tool(
     "set_reply_thread",
     "Opt into a new thread for your final answer only when the user asks for one or a sustained side discussion would distract from the room. Answer ordinary top-level questions in the main room by default, without this tool; existing thread replies stay threaded automatically. Takes no arguments, sends no message, and does not finish the turn. Continue working and use your normal final completion when ready. Unavailable for synthetic task continuations or corrections.",

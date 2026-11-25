@@ -4,6 +4,9 @@ export declare const MESSAGE_ATTACHMENT_LIMITS: Readonly<{
   maxTotalBytes: number;
 }>;
 
+export declare const ATTACHMENT_PREVIEW_BYTE_LIMIT: number;
+export declare function isDesktopAttachmentHref(value: unknown): value is string;
+
 export declare function guessMessageAttachmentMimeType(fileName: string): string;
 export declare function formatMessageAttachmentLimit(bytes: number): string;
 export declare function assertMessageAttachmentFits(fileName: string, byteSize: number): void;

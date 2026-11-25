@@ -1,4 +1,5 @@
 import { normalizeRoomGif, type RoomGif } from "../../../../shared/room-expressions.mjs";
+import { replySuggestionText } from "../../../../shared/suggested-reply.mjs";
 import { validRecordedReplyAttachments, type RecordedReplyAttachment } from "../../../../shared/message-attachments.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { BOUNDED_MCP_EFFECT_KIND, deleteEffectsForAgentInTransaction, rowToBoundedMcpEffect } from "../effect-journal/index.js";
@@ -99,6 +100,22 @@ export abstract class InboxQueryStore extends InboxTaskContinuationStore {
       if (!row) return null;
       const payload = JSON.parse(String(row.payload)) as { request?: { gif?: unknown } };
       return normalizeRoomGif(payload.request?.gif);
+    });
+  }
+  /** The last suggested reply for this exact bound turn; text:null clears an earlier one. */
+  async replySuggestion(inboxItemId: string): Promise<string | null> {
+    return this.read(async (database) => {
+      const row = database.prepare(`SELECT e.payload FROM inbox_items i
+        JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
+          AND b.agent_id=i.agent_id AND b.room_id=i.room_id AND b.provider_turn_id=i.provider_turn_id
+        JOIN effects e ON e.agent_id=b.agent_id AND e.kind=?
+          AND json_extract(e.payload,'$.room_id')=b.room_id
+          AND json_extract(e.payload,'$.execution_generation_id')=b.origin_execution_generation_id
+          AND json_extract(e.payload,'$.provider_turn_id')=b.provider_turn_id
+        WHERE i.inbox_item_id=? AND e.state='completed' AND json_extract(e.payload,'$.tool_name')='set_reply_suggestion'
+        ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1`).get(BOUNDED_MCP_EFFECT_KIND, inboxItemId) as Row | undefined;
+      const request = row ? (JSON.parse(String(row.payload)) as { request?: unknown }).request ?? null : null;
+      return request ? replySuggestionText(request) : null;
     });
   }
   /** The last attachment choice for this exact bound turn; files:null clears an earlier one. */

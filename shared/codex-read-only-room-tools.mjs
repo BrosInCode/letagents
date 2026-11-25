@@ -18,7 +18,7 @@ import { API_AGENT_READ_TOOLS } from "./api-agent-tools.mjs";
  * what Codex does with an approval mode.
  */
 export const CODEX_READ_ONLY_ROOM_TOOLS = new Set([
-  "search_gifs", "react_to_message", "set_reply_gif",
+  "search_gifs", "react_to_message", "set_reply_gif", "set_reply_suggestion",
   // What the room says.
   "read_messages", "read_attachment", "read_demo_marks", "get_room_history_summary", "expand_room_history_summary", "get_current_room", "get_room_guidelines", "get_room_memory", "get_human_requests",
   "get_board", "get_board_settings", "list_board_intents", "list_wake_rules", "get_room_artifacts", "get_room_events",

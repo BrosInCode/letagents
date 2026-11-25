@@ -368,3 +368,28 @@
 .managed-agent-change-retry {
   cursor: pointer;
 }
+
+.room-text-attachment {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.room-text-attachment:hover { background: color-mix(in srgb, var(--text) 7%, transparent); }
+.room-text-attachment:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.room-text-attachment-label { display: grid; gap: 3px; min-width: 0; }
+.room-text-attachment-label strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .92em; font-weight: 580; }
+.room-text-attachment-label small { color: var(--text-secondary); font-size: .8em; }
+.room-text-attachment-icon { color: var(--text-secondary); }
+.room-text-attachment-action { display: flex; align-items: center; gap: 4px; padding-inline: 4px 0; font-size: .8em; color: var(--text-secondary); }

@@ -80,10 +80,13 @@ async function localAttachmentResponse(relativePath: string): Promise<Response> 
   if (!realPath) {
     return new Response("Attachment is outside the local files folder.", { status: 403 });
   }
+  const fileName = basename(filePath).replace(/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}-/i, "");
+  const downloadName = fileName.replace(/[^\w .@()-]/g, "_") || "attachment";
   return new Response(Readable.toWeb(createReadStream(realPath)) as ReadableStream, {
     headers: {
       "Content-Type": guessMessageAttachmentMimeType(basename(filePath)),
       "Content-Length": String(info.size),
+      "Content-Disposition": `inline; filename="${downloadName}"`,
       ...ATTACHMENT_RESPONSE_SECURITY_HEADERS,
     },
   });

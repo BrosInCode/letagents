@@ -1353,6 +1353,42 @@ export function mapDesktopMessageReceiptsPayload(payload: MessageReceiptsPayload
   });
 }
 
+export interface DesktopRoomSuggestedReply {
+  messageId: string;
+  agentKey: string;
+  from: string;
+  text: string;
+}
+
+/** Reads one suggestion payload; anything malformed is no suggestion. */
+export function mapDesktopRoomSuggestedReply(payload: unknown): DesktopRoomSuggestedReply | null {
+  const suggestion = payload && typeof payload === "object" ? (payload as { suggestion?: unknown }).suggestion : null;
+  if (!suggestion || typeof suggestion !== "object") return null;
+  const { message_id, agent_key, from, text } = suggestion as Record<string, unknown>;
+  if (typeof message_id !== "string" || !parsePositivePgIntegerScopedId(message_id, "msg")) return null;
+  if (typeof text !== "string" || !text.trim()) return null;
+  return {
+    messageId: message_id,
+    agentKey: typeof agent_key === "string" ? agent_key : "",
+    from: typeof from === "string" && from.trim() ? from.trim() : "An agent",
+    text: text.trim(),
+  };
+}
+
+/**
+ * The reply an agent suggested for this person's composer. Cloud rooms only:
+ * the server keeps the suggestions and picks one.
+ */
+export async function getDesktopRoomSuggestedReply(roomIdentifier: string): Promise<DesktopRoomSuggestedReply | null> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier || isDesktopSmokeCheck()) return null;
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") return null;
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, trimmedRoomIdentifier);
+  const payload = await apiFetch<unknown>(`/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/suggested-reply`);
+  return mapDesktopRoomSuggestedReply(payload);
+}
+
 /**
  * The sender's own receipts are cloud truth. A room kept on this computer has
  * none, and the server leaves out every message this account did not send.

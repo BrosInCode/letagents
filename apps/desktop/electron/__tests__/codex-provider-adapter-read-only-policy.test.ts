@@ -557,12 +557,12 @@ test("a Read-only Codex agent's room tools are an exact named list, and every ot
     "complete_job", "expand_room_history_summary", "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_job", "get_room_artifacts",
     "get_room_events", "get_room_guidelines", "get_room_history_summary", "get_room_memory", "list_board_intents", "list_wake_rules",
     "list_pages", "post_reasoning", "post_status",
-    "react_to_message", "read_attachment", "read_demo_marks", "read_messages", "read_page", "read_page_diagnostics", "request_human_input", "search_gifs", "send_message", "send_thread_message", "set_reply_gif", "set_reply_thread",
+    "react_to_message", "read_attachment", "read_demo_marks", "read_messages", "read_page", "read_page_diagnostics", "request_human_input", "search_gifs", "send_message", "send_thread_message", "set_reply_gif", "set_reply_suggestion", "set_reply_thread",
     "update_job", ...API_AGENT_READ_TOOLS,
   ].sort());
   // An approved tool that is not chat or status is one the room server itself classes as a read,
   // and none of the three that touch this Mac's repository or another service is approved.
-  const speaks = ["send_message", "send_thread_message", "post_status", "post_reasoning", "request_human_input", "set_reply_thread", "set_reply_gif", "react_to_message", "update_job", "complete_job"];
+  const speaks = ["send_message", "send_thread_message", "post_status", "post_reasoning", "request_human_input", "set_reply_thread", "set_reply_gif", "set_reply_suggestion", "react_to_message", "update_job", "complete_job"];
   assert.deepEqual(approved.filter((name) => !speaks.includes(name) && !SUPERVISED_READ_ONLY_TOOLS.has(name)), []);
   for (const name of ["check_repo", "check_repo_visibility", "initialize_repo"]) assert.equal(READ_ONLY_ROOM_TOOL_DECISIONS[name], "refused", name);
 

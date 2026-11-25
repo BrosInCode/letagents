@@ -1,4 +1,5 @@
 import { validReplyGifIntent } from "../../../../shared/room-expressions.mjs";
+import { replySuggestionText, validReplySuggestionIntent } from "../../../../shared/suggested-reply.mjs";
 import { validRecordedReplyAttachments } from "../../../../shared/message-attachments.mjs";
 import { randomUUID } from "node:crypto";
 import { SUPERVISED_READ_ONLY_TOOLS } from "../../../../shared/supervised-read-tools.mjs";
@@ -52,6 +53,7 @@ export abstract class InboxEffectStore extends InboxQueryStore {
     }
     if (input.tool_name === "set_reply_gif" && !validReplyGifIntent(input.request)) throw new Error("Invalid GIF reply intent.");
     if (input.tool_name === "set_reply_attachments" && !validRecordedReplyAttachments(input.request)) throw new Error("Invalid reply attachments intent.");
+    if (input.tool_name === "set_reply_suggestion" && !validReplySuggestionIntent(input.request)) throw new Error("Invalid reply suggestion intent.");
     const expectedMutation = !SUPERVISED_READ_ONLY_TOOLS.has(input.tool_name);
     if (input.mutation !== undefined && input.mutation !== expectedMutation) {
       throw new Error("The supervised effect classification does not match the registered tool policy.");
@@ -229,6 +231,21 @@ export abstract class InboxEffectStore extends InboxQueryStore {
         const result = serializeEffectJson({ content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload }, "result");
         // Keep a receipt per request id so reusing any id for a different tool
         // still fails. Existing admission limits bound repeated distinct calls.
+        this.assertEffectAdmissionCapacity(database, input, requestJson);
+        run(database.prepare(`INSERT INTO effects
+          (id,agent_id,kind,idempotency_key,epoch,state,payload,outcome,retryable,attempt_count,max_attempts,next_attempt_at_ms,last_error,created_at,updated_at)
+          VALUES (?,?,?,?,?,'completed',?,?,0,1,1,NULL,NULL,?,?)`),
+        effectId, input.agent_id, BOUNDED_MCP_EFFECT_KIND, idempotencyKey, epoch, payloadJson, result, timestamp, timestamp);
+        return { created: true, effect: rowToEffect(database.prepare("SELECT * FROM effects WHERE id=?").get(effectId) as Row) };
+      }
+      if (input.tool_name === "set_reply_suggestion") {
+        // Any turn that ends in a published reply may carry a suggestion, synthetic task turns included.
+        const recorded = replySuggestionText(input.request);
+        const payload = { code: "REPLY_SUGGESTION_RECORDED",
+          instruction: recorded
+            ? "Suggested reply recorded. Continue working, then finish with an ordinary reply. No message has been sent. A no_reply outcome sends nothing."
+            : "Suggested reply cleared. No message has been sent." };
+        const result = serializeEffectJson({ content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload }, "result");
         this.assertEffectAdmissionCapacity(database, input, requestJson);
         run(database.prepare(`INSERT INTO effects
           (id,agent_id,kind,idempotency_key,epoch,state,payload,outcome,retryable,attempt_count,max_attempts,next_attempt_at_ms,last_error,created_at,updated_at)

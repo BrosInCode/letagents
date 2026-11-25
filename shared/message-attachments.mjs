@@ -15,6 +15,14 @@ export const MESSAGE_ATTACHMENT_LIMITS = Object.freeze({
   maxTotalBytes: 100 * 1024 * 1024,
 });
 
+export const ATTACHMENT_PREVIEW_BYTE_LIMIT = 256 * 1024;
+
+export function isDesktopAttachmentHref(value) {
+  return typeof value === "string"
+    && /^letagents-attachment:\/\/(?:local|download)\/[A-Za-z0-9_-]+$/.test(value)
+    && value === value.trim();
+}
+
 const MIME_TYPES_BY_EXTENSION = Object.freeze({
   avif: "image/avif",
   bmp: "image/bmp",
