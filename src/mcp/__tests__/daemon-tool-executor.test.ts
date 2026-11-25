@@ -255,3 +255,206 @@ test("task mutations remain successful when the following presence update fails"
   assert.equal(requests[0].body.client_task_id, "due-dates");
   assert.equal(requests[0].body.source_message_id, "msg_121");
 });
+
+test("send_message and send_thread_message derive deterministic bounded-effect client_message_id from durable effectId and tag pre-dispatch rejections", async (t) => {
+  const sentBodies: Array<{ path: string; body: Record<string, unknown> }> = [];
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit = {}) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith("/presence")) {
+      return Response.json({ ok: true });
+    }
+    if ((init.method ?? "GET") === "GET" && parsed.pathname.includes("/messages/")) {
+      return Response.json({ id: "msg_10", thread_root_id: "msg_10" });
+    }
+    if (init.method === "POST" && parsed.pathname.endsWith("/messages")) {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      sentBodies.push({ path: parsed.pathname, body });
+      return Response.json({ id: `msg_${sentBodies.length + 100}`, text: body.text, client_message_id: body.client_message_id });
+    }
+    return Response.json({ error: "unexpected route" }, { status: 404 });
+  });
+
+  await executeDaemonTool({
+    provider: "cursor",
+    toolName: "send_message",
+    input: { text: "Cloud top-level reply", reply_to: "msg_10" },
+    requestId: "transient-mcp-req-1",
+    effectId: "durable-effect-uuid-1",
+    roomId: "focus_test",
+    apiUrl: "https://letagents.example",
+    bearer: "test-worker-bearer",
+    cwd: process.cwd(),
+    agentSession: session("focus_test", "send"),
+  });
+
+  await executeDaemonTool({
+    provider: "cursor",
+    toolName: "send_thread_message",
+    input: { text: "Cloud thread reply", thread_parent_id: "msg_10" },
+    requestId: "transient-mcp-req-2",
+    effectId: "durable-effect-uuid-2",
+    roomId: "focus_test",
+    apiUrl: "https://letagents.example",
+    bearer: "test-worker-bearer",
+    cwd: process.cwd(),
+    agentSession: session("focus_test", "send"),
+  });
+
+  assert.equal(sentBodies.length, 2);
+  assert.equal(sentBodies[0]!.body.client_message_id, "bounded-effect:durable-effect-uuid-1");
+  assert.equal(sentBodies[1]!.body.client_message_id, "bounded-effect:durable-effect-uuid-2");
+  for (const sent of sentBodies) {
+    const id = String(sent.body.client_message_id);
+    assert.equal(id.startsWith("internal:"), false);
+    assert.equal(id.startsWith("desktop-send:"), false);
+  }
+
+  // Pre-dispatch mismatch is tagged beforeExternalDispatch: true so mutations fail cleanly instead of going uncertain.
+  await assert.rejects(
+    () => executeDaemonTool({
+      provider: "cursor",
+      toolName: "send_message",
+      input: { text: "bad", reply_to: "msg_1", thread_parent_id: "msg_2" },
+      requestId: "transient-mcp-req-3",
+      effectId: "durable-effect-uuid-3",
+      roomId: "focus_test",
+      apiUrl: "https://letagents.example",
+      bearer: "test-worker-bearer",
+      cwd: process.cwd(),
+      agentSession: session("focus_test", "send"),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /reply_to and thread_parent_id must match/);
+      assert.equal((error as { beforeExternalDispatch?: unknown }).beforeExternalDispatch, true);
+      return true;
+    },
+  );
+
+  // Input Zod schema validation failure is tagged beforeExternalDispatch: true.
+  await assert.rejects(
+    () => executeDaemonTool({
+      provider: "cursor",
+      toolName: "send_message",
+      input: { text: 12345 },
+      requestId: "transient-mcp-req-4",
+      effectId: "durable-effect-uuid-4",
+      roomId: "focus_test",
+      apiUrl: "https://letagents.example",
+      bearer: "test-worker-bearer",
+      cwd: process.cwd(),
+      agentSession: session("focus_test", "send"),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "ZodError");
+      assert.equal((error as { beforeExternalDispatch?: unknown }).beforeExternalDispatch, true);
+      return true;
+    },
+  );
+});
+
+test("send_message preserves committed message receipt across post-commit presence 403, tags primary 4xx rejections, and forwards AbortSignal", async (t) => {
+  let observedSignal: AbortSignal | null | undefined;
+  let mode: "presence_403" | "send_403" = "presence_403";
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit = {}) => {
+    const parsed = new URL(url);
+    if (init.method === "POST" && parsed.pathname.endsWith("/messages")) {
+      observedSignal = init.signal;
+      if (mode === "send_403") {
+        return Response.json({ error: "forbidden by room policy" }, { status: 403 });
+      }
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return Response.json({ id: "msg_committed_200", text: body.text, client_message_id: body.client_message_id });
+    }
+    if (parsed.pathname.endsWith("/presence")) {
+      return Response.json({ error: "presence forbidden" }, { status: 403 });
+    }
+    return Response.json({ error: "unexpected route" }, { status: 404 });
+  });
+
+  // 1. POST /messages -> 200, then POST /presence -> 403 must still return the committed message.
+  const controller = new AbortController();
+  const committed = await executeDaemonTool({
+    provider: "cursor",
+    toolName: "send_message",
+    input: { text: "Committed before presence 403" },
+    requestId: "req-presence-403",
+    effectId: "effect-presence-403",
+    signal: controller.signal,
+    roomId: "focus_test",
+    apiUrl: "https://letagents.example",
+    bearer: "test-worker-bearer",
+    cwd: process.cwd(),
+    agentSession: session("focus_test", "send"),
+  });
+  assert.ok(observedSignal, "daemon shutdown AbortSignal is forwarded to fetch");
+  const committedText = committed.liveResult.content[0]?.type === "text" ? committed.liveResult.content[0].text : "";
+  assert.match(committedText, /msg_committed_200/);
+
+  // 2. Primary POST /messages -> 403 tags mutationRejectedBeforeCommit: true.
+  mode = "send_403";
+  await assert.rejects(
+    () => executeDaemonTool({
+      provider: "cursor",
+      toolName: "send_message",
+      input: { text: "Rejected directly by POST /messages" },
+      requestId: "req-send-403",
+      effectId: "effect-send-403",
+      roomId: "focus_test",
+      apiUrl: "https://letagents.example",
+      bearer: "test-worker-bearer",
+      cwd: process.cwd(),
+      agentSession: session("focus_test", "send"),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as { status?: unknown }).status, 403);
+      assert.equal((error as { mutationRejectedBeforeCommit?: unknown }).mutationRejectedBeforeCommit, true);
+      return true;
+    },
+  );
+
+  // 3. Pre-aborted signal fails before dispatch with beforeExternalDispatch: true.
+  controller.abort();
+  await assert.rejects(
+    () => executeDaemonTool({
+      provider: "cursor",
+      toolName: "send_message",
+      input: { text: "Never sent after abort" },
+      requestId: "req-pre-aborted",
+      effectId: "effect-pre-aborted",
+      signal: controller.signal,
+      roomId: "focus_test",
+      apiUrl: "https://letagents.example",
+      bearer: "test-worker-bearer",
+      cwd: process.cwd(),
+      agentSession: session("focus_test", "send"),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as { beforeExternalDispatch?: unknown }).beforeExternalDispatch, true);
+      return true;
+    },
+  );
+});
+
+test("daemon executor binds exact supervised room authority for Antigravity", async () => {
+  const output = await executeDaemonTool({
+    provider: "antigravity",
+    toolName: "get_current_room",
+    input: {},
+    requestId: "effect_agy_1",
+    roomId: "focus_42",
+    apiUrl: "https://letagents.example",
+    bearer: "secret-worker-bearer",
+    cwd: process.cwd(),
+    agentSession: { ...session("focus_42", "agy"), runtime: "antigravity", ide_label: "Antigravity" },
+  });
+  const payload = JSON.parse(String(output.liveResult.content[0]?.type === "text"
+    ? output.liveResult.content[0].text
+    : "{}")) as Record<string, unknown>;
+  assert.equal(payload.connected, true);
+  assert.equal(payload.room_id, "focus_42");
+  assert.equal(payload.room_binding, "daemon_supervised");
+});

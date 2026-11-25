@@ -31,6 +31,12 @@ import {
   readMessageAttachmentFiles,
   stageMessageAttachments,
 } from "../../runtime/message-attachments.js";
+import { ApiError } from "../../runtime/api.js";
+import {
+  getDaemonToolExecutionContext,
+  markMutationRejectedBeforeCommit,
+  markPreDispatchError,
+} from "../../runtime/daemon-tool-context.js";
 import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
 import { jsonToolResponse } from "./response.js";
 
@@ -58,6 +64,7 @@ export function buildSendMessageRequestBody(input: {
   replyTarget?: string;
   resolvedThreadRoot?: string;
   uploadIds?: readonly string[];
+  clientMessageId?: string;
   credentials: AgentSessionCredentialPayload;
 }): Record<string, unknown> {
   return {
@@ -70,8 +77,15 @@ export function buildSendMessageRequestBody(input: {
     ...(input.uploadIds?.length ? { attachments: input.uploadIds.map((upload_id) => ({ upload_id })) } : {}),
     reply_to: input.replyTarget,
     ...(input.resolvedThreadRoot ? { thread_root_id: input.resolvedThreadRoot } : {}),
+    ...(input.clientMessageId ? { client_message_id: input.clientMessageId } : {}),
     ...input.credentials,
   };
+}
+
+function boundedEffectClientMessageId(): string | undefined {
+  const effectId = getDaemonToolExecutionContext()?.effectId?.trim();
+  if (!effectId) return undefined;
+  return `bounded-effect:${effectId}`.slice(0, 240);
 }
 
 /** Only a registration that offers the field passes it on; anything else never reaches the file reader. */
@@ -138,7 +152,7 @@ function initialReplyTarget(input: SendMessageInput): {
   const replyTo = normalizeMessageId(input.reply_to);
   const threadParentId = normalizeMessageId(input.thread_parent_id);
   if (replyTo && threadParentId && replyTo !== threadParentId) {
-    throw new Error("reply_to and thread_parent_id must match when both are provided.");
+    throw markPreDispatchError(new Error("reply_to and thread_parent_id must match when both are provided."));
   }
   return {
     replyTarget: threadParentId || replyTo,
@@ -150,14 +164,21 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
   const targetRoomId = getTargetRoomId(input.room_id);
   const targetProjectId = getFallbackProjectId();
   if (!targetRoomId && !targetProjectId) {
-    throw new Error("No room is currently selected. Join a room first or pass room_id.");
+    throw markPreDispatchError(new Error("No room is currently selected. Join a room first or pass room_id."));
   }
   const localRoomId = targetRoomId ?? getCurrentRoom()?.room_id ?? targetProjectId;
-  if (input.attachments) assertMessageFileAttachmentsAvailable();
-  if (input.files) assertMessageFileContentsAvailable();
-  if ((input.attachments || input.files) && localRoomId && await isLocalRoomStorageEnabled(localRoomId)) throw localRoomAttachmentError();
+  try {
+    if (input.attachments) assertMessageFileAttachmentsAvailable();
+    if (input.files) assertMessageFileContentsAvailable();
+  } catch (error) {
+    if (error instanceof Error) throw markPreDispatchError(error);
+    throw error;
+  }
+  if ((input.attachments || input.files) && localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
+    throw markPreDispatchError(localRoomAttachmentError());
+  }
   if ((input.attachments?.length ?? 0) + (input.files?.length ?? 0) > MESSAGE_ATTACHMENT_LIMITS.maxFiles) {
-    throw new Error(`Attach at most ${MESSAGE_ATTACHMENT_LIMITS.maxFiles} files to one message (attachments and files together). Nothing was posted.`);
+    throw markPreDispatchError(new Error(`Attach at most ${MESSAGE_ATTACHMENT_LIMITS.maxFiles} files to one message (attachments and files together). Nothing was posted.`));
   }
 
   const { identity, agentSession } = await resolveWorkerToolIdentity({
@@ -178,7 +199,7 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
     : undefined;
 
   if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
-    if (input.gif) throw new Error("GIFs require a cloud room.");
+    if (input.gif) throw markPreDispatchError(new Error("GIFs require a cloud room."));
     const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
     const message = await addLocalChatMessage(sqliteRoomId || localRoomId, {
       sender: identity.actor_label,
@@ -199,16 +220,24 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
   // Every file is read and staged before the message is posted, with the same
   // credential, and a refused file posts nothing.
   if ((input.attachments || input.files) && !targetRoomId) {
-    throw new Error("Attachments need a room. Join one with join_room, or pass room_id. Nothing was posted.");
+    throw markPreDispatchError(new Error("Attachments need a room. Join one with join_room, or pass room_id. Nothing was posted."));
   }
   // Files from the workspace and files given as content: all read and checked before any upload.
-  const fromWorkspace = input.attachments && targetRoomId ? await readMessageAttachmentFiles(input.attachments) : [];
-  const given = input.files && targetRoomId
-    ? readMessageFileContents(input.files, fromWorkspace.reduce((sum, file) => sum + file.bytes.byteLength, 0))
-    : [];
+  let fromWorkspace: Awaited<ReturnType<typeof readMessageAttachmentFiles>>;
+  let given: ReturnType<typeof readMessageFileContents>;
+  try {
+    fromWorkspace = input.attachments && targetRoomId ? await readMessageAttachmentFiles(input.attachments) : [];
+    given = input.files && targetRoomId
+      ? readMessageFileContents(input.files, fromWorkspace.reduce((sum, file) => sum + file.bytes.byteLength, 0))
+      : [];
+  } catch (error) {
+    if (error instanceof Error) throw markPreDispatchError(error);
+    throw error;
+  }
   const staged = targetRoomId && (fromWorkspace.length || given.length)
     ? await stageMessageAttachments(targetRoomId, [...fromWorkspace, ...given])
     : [];
+  const clientMessageId = boundedEffectClientMessageId();
   let message: Record<string, unknown>;
   try {
     message = await roomScopedApiCall<Record<string, unknown>>({
@@ -227,21 +256,42 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
           replyTarget,
           resolvedThreadRoot,
           uploadIds: staged.map((file) => file.uploadId),
+          ...(clientMessageId ? { clientMessageId } : {}),
           credentials: agentSessionCredentials(agentSession),
         })),
       },
     });
   } catch (error) {
-    if (staged.length && targetRoomId) await discardMessageAttachments(targetRoomId, staged);
+    if (staged.length && targetRoomId) {
+      try {
+        await discardMessageAttachments(targetRoomId, staged);
+      } catch {
+        // Best-effort cleanup of staged uploads; preserve the primary send error.
+      }
+    }
+    if (error instanceof ApiError
+      && Number.isInteger(error.status)
+      && error.status >= 400
+      && error.status < 500
+      && error.status !== 408) {
+      throw markMutationRejectedBeforeCommit(error);
+    }
     throw error;
   }
   touchCurrentRoom();
-  await syncRoomPresence(
-    targetRoomId ?? getCurrentRoom()?.room_id ?? null,
-    identity,
-    getRememberedRoomPresence(targetRoomId ?? getCurrentRoom()?.room_id ?? null, identity),
-    agentSession
-  );
+  // Presence is an ancillary post-commit update. Its failure (e.g. HTTP 403 or
+  // transient error) must never erase a committed message receipt or cause a
+  // caller to retry and duplicate the posted message.
+  try {
+    await syncRoomPresence(
+      targetRoomId ?? getCurrentRoom()?.room_id ?? null,
+      identity,
+      getRememberedRoomPresence(targetRoomId ?? getCurrentRoom()?.room_id ?? null, identity),
+      agentSession
+    );
+  } catch {
+    // Preserve the committed message receipt even when presence sync fails.
+  }
 
   // The `replied` receipt transition is server-owned: message creation marks
   // the publisher's receipt on the reply target atomically with the reply
