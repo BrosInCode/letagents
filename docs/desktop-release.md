@@ -50,16 +50,18 @@ The workflow refuses a tag that does not exactly match the desktop package versi
 
 `apps/desktop/electron/scripts/macos-dmg-first-launch.mjs` runs for arm64 on `macos-15` and for x64 on `macos-15-intel`, from the DMG that the build job uploaded. It never uses the build folder. It:
 
-1. Checks the DMG: `spctl -a -t open --context context:primary-signature` must accept it as notarized Developer ID software, and `xcrun stapler validate` must pass.
+1. Checks the DMG: `spctl -a -t open --context context:primary-signature` must exit 0 and say `accepted` (spctl rejects Developer ID software that has no notarization ticket), and `xcrun stapler validate` must pass.
 2. Attaches the DMG read-only (`hdiutil attach -nobrowse -readonly`), checks that `LetAgents.app` and the `Applications` link are at its top level, and copies the app with `ditto` into a new temporary `Applications` folder. Then it detaches the DMG.
 3. Checks that the app version is the version in the DMG name and that the executable is built for the runner's architecture.
-4. Sets `com.apple.quarantine` on the copy, as a browser does for a download, then runs `codesign --verify --deep --strict`, `spctl --assess --type execute` (it must accept the copy as notarized Developer ID software) and `xcrun stapler validate`.
-5. Starts the copy once in the app's smoke-check mode (`LETAGENTS_DESKTOP_SMOKE_CHECK=1`), with an empty `HOME` and `TMPDIR`, the `PATH` that Finder gives an app, and none of the runner's LetAgents, Electron or Node settings. The app loads its window against seeded local state, runs the smoke steps and exits by itself: 0 and a `LETAGENTS_DESKTOP_SMOKE` line where every check is true is a pass. The limit is 5 minutes.
-6. At the end, also after a failure, it stops every process that runs from its temporary folder (the app starts a detached supervisor daemon), detaches the DMG if it is still attached, and removes the folder.
+4. Sets `com.apple.quarantine` on the copy, as a browser does for a download, then runs `codesign --verify --deep --strict`, `spctl --assess --type execute` (it must accept the copy) and `xcrun stapler validate`. spctl ignores the quarantine mark: it decides from the signature and the ticket. The mark matters for step 5, because macOS checks a quarantined program before it runs it.
+5. Starts the copy once in the app's smoke-check mode (`LETAGENTS_DESKTOP_SMOKE_CHECK=1`), with an empty `HOME` and `TMPDIR`, the `PATH` that Finder gives an app, and none of the runner's LetAgents, Electron or Node settings. Before the launch, the script gives the empty `HOME` its own new, unlocked default keychain (`security create-keychain`, then `list-keychains -s` and `default-keychain -s`, all run with that `HOME`). macOS looks for the user's keychains below `HOME`, so without this the app has no secure storage, the add-agent window shows "Unlock secure credential storage", and the smoke check fails on every Mac. The script makes sure that the caller's own keychain setup does not change, and deletes the keychain at the end. `LETAGENTS_CODEX_BIN` names a file that does not exist, so the host's Codex never runs (the app otherwise finds Codex in `/opt/homebrew/bin` or `/usr/local/bin`, whatever `PATH` is). The Windows smoke check sets the same override. The app loads its window against seeded local state, runs the smoke steps and exits by itself: 0 and a `LETAGENTS_DESKTOP_SMOKE` line where every check is true is a pass. The limit is 5 minutes.
+6. At the end, also after a failure, it stops every process that runs from its temporary folder (the app starts a detached supervisor daemon), detaches the DMG if it is still attached, deletes the temporary keychain, and removes the folder.
 
 The temporary folder is below `/tmp` (change it with `--work-root`), not below `TMPDIR`: the daemon socket is `<HOME>/.letagents/daemon.sock`, a macOS socket path can have at most 103 bytes, and a `HOME` below `/var/folders/…` is too long.
 
-The smoke check expects that no Codex CLI is installed, as on a new runner. On a Mac where Codex is installed (for example in `/opt/homebrew/bin`), the smoke step "codex missing runtime" fails.
+The check starts only the app copied from the DMG. Existing users get the update ZIP instead. The ZIP holds the same signed bundle, but the check does not unpack or start it.
+
+If you stop a local run with Ctrl-C, the script still stops the app, detaches the DMG and removes the temporary folder.
 
 Verify a downloaded DMG or updater ZIP against GitHub's signed provenance record with:
 

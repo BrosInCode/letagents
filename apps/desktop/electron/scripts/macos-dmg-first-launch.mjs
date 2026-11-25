@@ -7,7 +7,11 @@
 // and ticket, and then starts the copy once with an empty HOME and TMPDIR in
 // the app's smoke-check mode (LETAGENTS_DESKTOP_SMOKE_CHECK=1: the real
 // window loads against seeded local state and the app exits 0 when it
-// renders). It never uses the build folder.
+// renders). It never uses the build folder. The empty HOME gets its own new
+// login keychain (macOS finds keychains below HOME), and LETAGENTS_CODEX_BIN
+// names a missing file, so the host's keychain and Codex are not used. The
+// updater ZIP that existing users get holds the same bundle, but this check
+// does not start it.
 //
 //   node electron/scripts/macos-dmg-first-launch.mjs [--dmg <path>] [--arch arm64|x64]
 //     [--timeout-ms <n>] [--work-root <folder>] [--unsigned-dmg] [--unsigned] [--keep]
@@ -26,7 +30,7 @@
 // its temporary folder (the app starts a detached supervisor daemon),
 // detaches the DMG and removes the folder.
 import { execFile, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
@@ -118,8 +122,15 @@ const KEPT_VARIABLES = new Set(["USER", "LOGNAME", "SHELL", "LANG", "__CF_USER_T
  * shell and locale from the caller (no LetAgents, Electron, Node or tool
  * setting of the runner or the developer), Finder's PATH, a new HOME and
  * TMPDIR, and the smoke-check mode on.
+ *
+ * In smoke-check mode the app reports Codex as not installed without a
+ * lookup, but other paths (the model list) still start Codex, and the app
+ * looks for it in fixed folders (/opt/homebrew/bin, /usr/local/bin) whatever
+ * PATH is. LETAGENTS_CODEX_BIN, the app's own override, is read first and
+ * stops that search; it names a file in the check's folder that never
+ * exists, so the host's Codex never runs.
  */
-export function firstLaunchEnvironment(base, { home, temporary }) {
+export function firstLaunchEnvironment(base, { home, temporary, missingCodex }) {
   const env = {};
   for (const [name, value] of Object.entries(base)) {
     if (KEPT_VARIABLES.has(name) || name.startsWith("LC_")) env[name] = value;
@@ -129,17 +140,27 @@ export function firstLaunchEnvironment(base, { home, temporary }) {
     PATH: FINDER_PATH,
     HOME: home,
     TMPDIR: `${temporary}/`,
+    LETAGENTS_CODEX_BIN: missingCodex,
     LETAGENTS_DESKTOP_SMOKE_CHECK: "1",
     LETAGENTS_DESKTOP_SMOKE_DEBUG: "1",
     ELECTRON_ENABLE_LOGGING: "1",
   };
 }
 
-/** Gatekeeper's (spctl's) report must say the item is accepted as notarized Developer ID software. */
+/**
+ * Gatekeeper's (spctl's) report must say "accepted"; run() has already
+ * failed on a non-zero exit. spctl rejects Developer ID software without a
+ * notarization ticket (source=Unnotarized Developer ID), so the exit code
+ * and "accepted" are the decision. The source line is not matched exactly,
+ * because its wording is Apple's (on macOS 27 it is "Notarized Developer
+ * ID"); only a source that says unnotarized is refused as well.
+ */
 export function assertGatekeeperAccepted(report, label) {
-  if (!/:\s*accepted\b/.test(report) || !/^source=Notarized Developer ID$/m.test(report)) {
-    throw new Error(`Gatekeeper did not accept ${label} as notarized Developer ID software:\n${report.trim()}`);
+  const source = /^source=(.*)$/m.exec(report)?.[1]?.trim() ?? "";
+  if (!/:\s*accepted\b/.test(report) || /unnotarized/i.test(source)) {
+    throw new Error(`Gatekeeper did not accept ${label}:\n${report.trim()}`);
   }
+  return source;
 }
 
 /** The result of the smoke launch: a pass needs exit 0 and a smoke result where every check is true. */
@@ -213,17 +234,87 @@ export function launchUntilExit({ executable, args = [], env, cwd, timeoutMs, on
   });
 }
 
-async function run(command, args, { quiet = false } = {}) {
-  console.log(`> ${command} ${args.join(" ")}`);
+async function run(command, args, { quiet = false, env, secret } = {}) {
+  // A secret argument (the throwaway keychain's password) is never printed.
+  const shown = args.map((arg) => (secret !== undefined && arg === secret ? "<generated>" : arg)).join(" ");
+  console.log(`> ${command} ${shown}`);
   try {
-    const { stdout, stderr } = await execFileAsync(command, args, COMMAND_LIMITS);
+    const { stdout, stderr } = await execFileAsync(command, args, { ...COMMAND_LIMITS, ...(env ? { env } : {}) });
     const text = `${stdout}${stderr}`;
     if (text.trim() && !quiet) console.log(text.trim());
     return text;
   } catch (error) {
     const text = `${error.stdout ?? ""}${error.stderr ?? ""}`.trim();
-    throw new Error(`${command} ${args.join(" ")} failed (${error.code ?? error.signal ?? error.message})${text ? `:\n${text}` : ""}`);
+    throw new Error(`${command} ${shown} failed (${error.code ?? error.signal ?? error.message})${text ? `:\n${text}` : ""}`);
   }
+}
+
+/**
+ * The `security` commands that give the empty HOME a new, unlocked default
+ * login keychain. macOS looks for the user's keychains below HOME, so with
+ * an empty HOME it finds none, the app cannot use secure storage, and its
+ * add-agent window shows "Unlock secure credential storage" (the smoke check
+ * then fails, on every Mac). A new user has a new login keychain; this is
+ * that keychain. Run with HOME set to `home`, they change only `home`.
+ */
+export function firstLaunchKeychainCommands(home, password) {
+  // Not "login.keychain-db": macOS will not unlock a keychain of that name
+  // with the password it was made with (it expects the account password).
+  const keychain = join(home, "Library", "Keychains", "letagents-first-launch.keychain-db");
+  return {
+    keychain,
+    commands: [
+      ["create-keychain", "-p", password, keychain],
+      // No -l and no -t: it does not lock on sleep or after a time.
+      ["set-keychain-settings", keychain],
+      ["unlock-keychain", "-p", password, keychain],
+      ["list-keychains", "-d", "user", "-s", keychain],
+      ["default-keychain", "-d", "user", "-s", keychain],
+    ],
+  };
+}
+
+/** The default keychain and the search list that `env` (its HOME) gives `security`. */
+async function keychainSetup(env) {
+  const read = async (args) => {
+    try { return (await execFileAsync("security", args, { ...COMMAND_LIMITS, env })).stdout.trim(); } catch { return ""; }
+  };
+  return { defaultKeychain: await read(["default-keychain", "-d", "user"]), searchList: await read(["list-keychains", "-d", "user"]) };
+}
+
+const unquote = (text) => text.split("\n").map((line) => line.trim().replace(/^"|"$/g, "")).filter(Boolean);
+
+/**
+ * Give `home` its own login keychain. The caller's own keychain setup must
+ * not change; if it did, it is put back and the check fails.
+ */
+async function prepareKeychain(home) {
+  const before = await keychainSetup(process.env);
+  const env = { ...process.env, HOME: home };
+  const password = randomBytes(24).toString("hex");
+  const { keychain, commands } = firstLaunchKeychainCommands(home, password);
+  await mkdir(dirname(keychain), { recursive: true });
+  // The search list and default are saved in Library/Preferences, which must exist; without it the -s commands save nothing.
+  await mkdir(join(home, "Library", "Preferences"), { recursive: true });
+  try {
+    for (const args of commands) await run("security", args, { env, secret: password });
+  } finally {
+    const after = await keychainSetup(process.env);
+    if (after.defaultKeychain !== before.defaultKeychain || after.searchList !== before.searchList) {
+      if (before.searchList) await run("security", ["list-keychains", "-d", "user", "-s", ...unquote(before.searchList)]);
+      if (before.defaultKeychain) await run("security", ["default-keychain", "-d", "user", "-s", ...unquote(before.defaultKeychain)]);
+      // eslint-disable-next-line no-unsafe-finally
+      throw new Error("Setting up the empty HOME's keychain changed the caller's keychain setup; it was put back.");
+    }
+  }
+  const inHome = (await keychainSetup(env)).defaultKeychain;
+  if (!inHome.includes(keychain)) throw new Error(`With HOME=${home}, the default keychain is ${inHome || "missing"}, not ${keychain}.`);
+  console.log("The empty HOME has its own unlocked default keychain; the caller's keychain setup is unchanged.");
+  return keychain;
+}
+
+async function removeKeychain(home, keychain) {
+  await run("security", ["delete-keychain", keychain], { env: { ...process.env, HOME: home } });
 }
 
 /** `xcrun stapler validate`, with the release build's retry of Apple's transient network errors. */
@@ -276,11 +367,38 @@ async function main() {
   const home = join(folder, "home");
   const temporary = join(folder, "tmp");
   const app = join(applications, APP_NAME);
+  // Never created: the app's Codex lookup ends here (see firstLaunchEnvironment).
+  const missingCodex = join(folder, "no-codex", "codex");
   let mountPoint = null;
+  let keychain = null;
   let failure = null;
+  let cleaning = null;
+  // Stop the app, detach the DMG, drop the keychain and remove the folder, once: at the end or on Ctrl-C.
+  const cleanUp = () => (cleaning ??= (async () => {
+    const errors = [];
+    for (const step of [
+      () => stopProcessesUnder(folder),
+      () => (mountPoint ? detach(mountPoint) : undefined),
+      () => (keychain ? removeKeychain(home, keychain) : undefined),
+      () => (options.keep ? console.log(`Kept ${folder}.`) : rm(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })),
+    ]) {
+      try { await step(); } catch (error) { errors.push(error); }
+    }
+    return errors;
+  })());
+  const onSignal = (signal) => {
+    console.error(`Received ${signal}; cleaning up.`);
+    void cleanUp().then((errors) => {
+      for (const error of errors) console.error(`Cleanup: ${error.message}`);
+      process.exit(128 + (signal === "SIGINT" ? 2 : 15));
+    });
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
   try {
     await Promise.all([applications, home, temporary].map((path) => mkdir(path)));
     assertDaemonSocketFits(home);
+    if (existsSync(missingCodex)) throw new Error(`${missingCodex} must not exist.`);
 
     if (options.unsignedDmg) console.log("Skipping the DMG's signature and ticket checks (--unsigned-dmg).");
     else {
@@ -310,6 +428,9 @@ async function main() {
 
     if (options.unsigned) console.log("Skipping the quarantine mark and the app's signature checks (--unsigned).");
     else {
+      // spctl --assess decides from the signature and ticket and ignores the
+      // quarantine mark; the mark matters for the direct launch below, where
+      // macOS checks a quarantined program before it runs it.
       const quarantine = quarantineValue();
       await run("xattr", ["-w", "-r", QUARANTINE_ATTRIBUTE, quarantine, app]);
       const marked = (await run("xattr", ["-p", QUARANTINE_ATTRIBUTE, app])).trim();
@@ -319,10 +440,11 @@ async function main() {
       await validateTicket(app);
     }
 
+    keychain = await prepareKeychain(home);
     console.log(`> ${executable} (LETAGENTS_DESKTOP_SMOKE_CHECK=1, HOME=${home}, limit ${options.timeoutMs} ms)`);
     const launch = await launchUntilExit({
       executable,
-      env: firstLaunchEnvironment(process.env, { home, temporary }),
+      env: firstLaunchEnvironment(process.env, { home, temporary, missingCodex }),
       cwd: home,
       timeoutMs: options.timeoutMs,
       onTimeout: () => stopProcessesUnder(folder),
@@ -333,14 +455,9 @@ async function main() {
   } catch (error) {
     failure = error;
   } finally {
-    const cleanup = [];
-    for (const step of [
-      () => stopProcessesUnder(folder),
-      () => (mountPoint ? detach(mountPoint) : undefined),
-      () => (options.keep ? console.log(`Kept ${folder}.`) : rm(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })),
-    ]) {
-      try { await step(); } catch (error) { cleanup.push(error); }
-    }
+    const cleanup = await cleanUp();
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
     if (!failure && cleanup.length > 0) failure = cleanup[0];
     else for (const error of cleanup) console.error(`Cleanup: ${error.message}`);
   }

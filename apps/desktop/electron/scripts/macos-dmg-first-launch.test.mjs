@@ -7,6 +7,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   FINDER_PATH,
   firstLaunchEnvironment,
+  firstLaunchKeychainCommands,
   launchUntilExit,
   mountPointFromAttachPlist,
   parseArguments,
@@ -84,7 +85,8 @@ test("the first launch gets Finder's PATH, an empty HOME and TMPDIR, and none of
     LETAGENTS_STATE_PATH: "/Users/runner/state.json",
     LETAGENTS_OPENCODE_BIN: "/x/opencode",
     GITHUB_TOKEN: "not-for-the-app",
-  }, { home: "/private/tmp/f/home", temporary: "/private/tmp/f/tmp" });
+    LETAGENTS_CODEX_BIN: "/opt/homebrew/bin/codex",
+  }, { home: "/private/tmp/f/home", temporary: "/private/tmp/f/tmp", missingCodex: "/private/tmp/f/no-codex/codex" });
   assert.deepEqual(env, {
     USER: "runner",
     LOGNAME: "runner",
@@ -94,10 +96,27 @@ test("the first launch gets Finder's PATH, an empty HOME and TMPDIR, and none of
     PATH: FINDER_PATH,
     HOME: "/private/tmp/f/home",
     TMPDIR: "/private/tmp/f/tmp/",
+    // The host's Codex (or the caller's override) must not reach the smoke check.
+    LETAGENTS_CODEX_BIN: "/private/tmp/f/no-codex/codex",
     LETAGENTS_DESKTOP_SMOKE_CHECK: "1",
     LETAGENTS_DESKTOP_SMOKE_DEBUG: "1",
     ELECTRON_ENABLE_LOGGING: "1",
   });
+});
+
+test("the empty HOME gets a new, unlocked default login keychain of its own", () => {
+  const { keychain, commands } = firstLaunchKeychainCommands("/private/tmp/f/home", "pw");
+  assert.equal(keychain, "/private/tmp/f/home/Library/Keychains/letagents-first-launch.keychain-db");
+  assert.deepEqual(commands, [
+    ["create-keychain", "-p", "pw", keychain],
+    ["set-keychain-settings", keychain],
+    ["unlock-keychain", "-p", "pw", keychain],
+    ["list-keychains", "-d", "user", "-s", keychain],
+    ["default-keychain", "-d", "user", "-s", keychain],
+  ]);
+  for (const args of commands) {
+    assert.ok(args.every((arg) => arg === "pw" || !arg.startsWith("/") || arg.startsWith("/private/tmp/f/home/")), `${args[0]} touches only the empty HOME`);
+  }
 });
 
 test("the daemon socket must fit in a macOS socket path", () => {
@@ -109,9 +128,12 @@ test("the daemon socket must fit in a macOS socket path", () => {
   );
 });
 
-test("Gatekeeper must accept the item as notarized Developer ID software", () => {
-  assert.doesNotThrow(() => assertGatekeeperAccepted("/x/LetAgents.app: accepted\nsource=Notarized Developer ID\norigin=Developer ID Application: Example (TEAMID)\n", "the app"));
-  assert.throws(() => assertGatekeeperAccepted("/x/LetAgents.app: accepted\nsource=Developer ID\n", "the app"), /did not accept the app/);
+test("Gatekeeper must accept the item, and a source that says unnotarized is refused", () => {
+  // What spctl printed on macOS 27.2 for the signed 0.1.21 DMG and the installed 0.1.143 app.
+  assert.equal(assertGatekeeperAccepted("/x/LetAgents.app: accepted\nsource=Notarized Developer ID\norigin=Developer ID Application: Example (TEAMID)\n", "the app"), "Notarized Developer ID");
+  // Apple's wording of the source can change; "accepted" with exit 0 is the decision.
+  assert.equal(assertGatekeeperAccepted("/x/LetAgents.dmg: accepted\nsource=Notarized Developer ID (stapled)\n", "the DMG"), "Notarized Developer ID (stapled)");
+  assert.throws(() => assertGatekeeperAccepted("/x/LetAgents.app: accepted\nsource=Unnotarized Developer ID\n", "the app"), /did not accept the app/);
   assert.throws(() => assertGatekeeperAccepted("/x/LetAgents.app: rejected\nsource=Unnotarized Developer ID\n", "the app"), /did not accept/);
   assert.throws(() => assertGatekeeperAccepted("/x/LetAgents.dmg: rejected (the code is valid but does not seem to be an app)\nsource=Notarized Developer ID\n", "the DMG"), /did not accept the DMG/);
 });
