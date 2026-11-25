@@ -258,14 +258,22 @@ export async function apiCallWhenFree<T = unknown>(path: string, options?: Reque
  * redirect to storage). The caller reads or cancels the body. A failure is the
  * response's own status; nothing is retried or forgotten here.
  */
+function combineRequestSignal(callerSignal: AbortSignal | null | undefined): AbortSignal | undefined {
+  const daemonSignal = getDaemonToolExecutionContext()?.signal;
+  if (callerSignal && daemonSignal) return AbortSignal.any([callerSignal, daemonSignal]);
+  return callerSignal ?? daemonSignal;
+}
+
 export async function apiRequest(path: string, options: RequestInit = {}): Promise<Response> {
   const headers = new Headers(options.headers);
   if (!headers.has("User-Agent")) headers.set("User-Agent", MCP_USER_AGENT);
+  const signal = combineRequestSignal(options.signal);
+  const requestOptions: RequestInit = { ...options, headers, ...(signal ? { signal } : {}) };
   const scope = currentSessionScope();
   if (scope) {
     // In process, as the session's account; any caller Authorization header is dropped.
     headers.delete("Authorization");
-    return scope.dispatch(path, { ...options, headers });
+    return scope.dispatch(path, requestOptions);
   }
   const runtime = requireValidWorkerBearerRuntime();
   if (runtime.mode === "worker") {
@@ -276,7 +284,7 @@ export async function apiRequest(path: string, options: RequestInit = {}): Promi
     const ownerToken = await getLetagentsToken();
     if (ownerToken && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${ownerToken}`);
   }
-  return fetch(`${getApiUrl()}${path}`, { ...options, headers });
+  return fetch(`${getApiUrl()}${path}`, requestOptions);
 }
 
 export async function apiCall<T = unknown>(path: string, options?: RequestInit): Promise<T> {
@@ -285,13 +293,15 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
   if (!headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  const signal = combineRequestSignal(options?.signal);
+  const requestOptions: RequestInit = { ...options, headers, ...(signal ? { signal } : {}) };
 
   const scope = currentSessionScope();
   if (scope) {
     // The API's own routes, in process, as the session's account. Any caller
     // Authorization header is dropped: the dispatcher alone sets identity.
     headers.delete("Authorization");
-    const res = await scope.dispatch(path, { ...options, headers });
+    const res = await scope.dispatch(path, requestOptions);
     const body = await res.text();
     if (!res.ok) {
       if (res.status === 401 && body.includes(AGENT_SESSION_ENDED_ERROR)) forgetEndedSession(headers, options?.body);
@@ -318,10 +328,7 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
     }
   }
 
-  const res = await fetch(`${getApiUrl()}${path}`, {
-    ...options,
-    headers,
-  });
+  const res = await fetch(`${getApiUrl()}${path}`, requestOptions);
 
   if (!res.ok) {
     const body = await res.text();
