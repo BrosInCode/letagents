@@ -86,7 +86,7 @@ export function recordExecutionApprovalProjection(
   if (!approval || approval.request.kind !== "file_change" || approval.request.risk !== "low"
     || !approval.request.delegatable) reject("not_eligible");
   const workspace = database.prepare(`SELECT g.workspace_id FROM execution_approval_requests r
-    JOIN execution_turns t ON t.turn_id=r.turn_id AND t.agent_id=r.agent_id AND t.room_id=r.room_id
+    JOIN runs t ON t.turn_id=r.turn_id AND t.agent_id=r.agent_id AND t.room_id=r.room_id
       AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
     JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
       AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id

@@ -111,14 +111,14 @@ async function withDaemon(run: (context: {
     const storedPolicy = (entryId: string) => {
       const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
       try {
-        const row = database.prepare("SELECT provider_launch_policy_json AS policy FROM agent_configurations WHERE agent_id=?").get(entryId) as { policy: string | null };
+        const row = database.prepare("SELECT provider_launch_policy_json AS policy FROM agents WHERE agent_id=?").get(entryId) as { policy: string | null };
         return JSON.parse(row.policy ?? "{}") as Record<string, unknown>;
       } finally { database.close(); }
     };
     const forceStoredKey = () => {
       const database = new DatabaseSync(paths.manifestPath);
       try {
-        database.exec(`UPDATE agent_configurations SET provider_launch_policy_present=1, provider_launch_policy_undefined=0,
+        database.exec(`UPDATE agents SET
           provider_launch_policy_json=json_set(coalesce(provider_launch_policy_json,'{}'), '$.${KEY}', json('false'))`);
       } finally { database.close(); }
     };
@@ -331,7 +331,7 @@ test("turning the owner's own setup off restarts an idle agent that still has it
       { assertCurrent: async () => {}, currentGeneration: () => 7, isHandoffScheduled: () => false },
       {
         // The signature is checked by the verifier; here every request is the desktop app's own.
-        hostApprovals: { verify: (params: unknown) => params },
+        hostApprovals: { verify: (params: unknown) => JSON.parse((params as { payload: string }).payload) },
         updateAgentConfiguration: async (request: unknown) => {
           assert.deepEqual(request, { entryId: "agent", daemonGeneration: 7, expectedRevision: 5, configuration: {}, homeHarness: input.enabled });
           return input.saved;
@@ -339,8 +339,18 @@ test("turning the owner's own setup off restarts an idle agent that still has it
         applyAgentConfiguration: (request: unknown) => { applied.push(request); return (input.apply ?? (() => ({ outcome: "restarting" })))(); },
       } as unknown as DaemonControlOperations,
     );
-    const result = await handler({ version: DAEMON_PROTOCOL_VERSION, id: "test", method: "supervisor.host_approval_request",
-      params: { operation: "set_home_harness", input: { entryId: "agent", daemonGeneration: 7, expectedRevision: 5, enabled: input.enabled } } } as never);
+    const result = await handler({
+      version: DAEMON_PROTOCOL_VERSION,
+      id: "test",
+      method: "supervisor.host_approval_request",
+      params: {
+        payload: JSON.stringify({
+          operation: "set_home_harness",
+          input: { entryId: "agent", daemonGeneration: 7, expectedRevision: 5, enabled: input.enabled },
+        }),
+        signature: "test-signature",
+      },
+    } as never);
     return { result: result as Record<string, unknown>, applied };
   };
   const saved = (pending: unknown, outcome = "updated") => ({ outcome, configuration: { config_revision: 6, home_harness: false, home_harness_pending: pending } });
@@ -371,20 +381,15 @@ test("turning the owner's own setup off restarts an idle agent that still has it
   }
 });
 
-test("a signed request still cannot give a rental, a Cursor agent, an Open Model agent or an agent that collects its own messages the owner's own setup", { timeout: 60_000 * WAIT_SCALE }, async () => {
+test("a signed request still cannot give a rental, a Cursor agent, or an Open Model agent the owner's own setup", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, configuration, setOwnSetup, storedPolicy, forceStoredKey }) => {
-    for (const [id, provider, availability, reason, deliveryMode] of [
-      ["supervised_rental_0123456789abcdef", "cursor", "rental", /rented agent works for someone else/, "daemon_inbox"],
-      ["supervised_rental_fedcba9876543210", "codex", "rental", /rented agent works for someone else/, "daemon_inbox"],
-      ["supervised_cursor", "cursor", "unsupported", /no setup of yours/, "daemon_inbox"],
-      ["supervised_open", "open-model", "unsupported", /no setup of yours/, "daemon_inbox"],
-      // Agents on the older delivery, where each collects its own room messages: turning it off could not be enforced.
-      ["supervised_polling_codex", "codex", "polling", /^Not available for this agent: it fetches its own messages, so LetAgents can't reliably switch your setup off again\.$/, "mcp_polling"],
-      ["supervised_polling_claude", "claude-code", "polling", /it fetches its own messages/, undefined],
+    for (const [id, provider, availability, reason] of [
+      ["supervised_rental_0123456789abcdef", "cursor", "rental", /rented agent works for someone else/],
+      ["supervised_rental_fedcba9876543210", "codex", "rental", /rented agent works for someone else/],
+      ["supervised_cursor", "cursor", "unsupported", /no setup of yours/],
+      ["supervised_open", "open-model", "unsupported", /no setup of yours/],
     ] as const) {
-      const { delivery_mode: _delivered, ...polling } = agent(id, provider);
-      const created = await daemonRequest(socketPath, "manifest.put", { entry: deliveryMode === "daemon_inbox" ? agent(id, provider)
-        : { ...polling, ...(deliveryMode ? { delivery_mode: deliveryMode } : {}) } });
+      const created = await daemonRequest(socketPath, "manifest.put", { entry: agent(id, provider) });
       assert.equal(created.ok, true, created.error);
       assert.equal((await configuration(id)).home_harness_availability, availability);
       const refused = await setOwnSetup(id, true);
@@ -399,7 +404,7 @@ test("a signed request still cannot give a rental, a Cursor agent, an Open Model
 
     // A value that reached the stored policy some other way is still not the owner's choice for these agents.
     forceStoredKey();
-    for (const id of ["supervised_rental_0123456789abcdef", "supervised_rental_fedcba9876543210", "supervised_cursor", "supervised_open", "supervised_polling_codex", "supervised_polling_claude"]) {
+    for (const id of ["supervised_rental_0123456789abcdef", "supervised_rental_fedcba9876543210", "supervised_cursor", "supervised_open"]) {
       assert.equal(storedPolicy(id)[KEY], false, "the test did plant the value");
       assert.equal((await configuration(id)).home_harness, false, id);
     }
@@ -407,7 +412,7 @@ test("a signed request still cannot give a rental, a Cursor agent, an Open Model
     assert.equal(planted.some((item) => Object.hasOwn(item, "home_harness")), false, "no list or badge shows it for them");
 
     // And the next ordinary Save of such an agent takes the planted value out of what is stored.
-    for (const [id, profile] of [["supervised_rental_fedcba9876543210", "full_access"], ["supervised_cursor", "sandboxed_write"], ["supervised_polling_codex", "full_access"]] as const) {
+    for (const [id, profile] of [["supervised_rental_fedcba9876543210", "full_access"], ["supervised_cursor", "sandboxed_write"]] as const) {
       const current = await configuration(id);
       const saved = await daemonRequest(socketPath, "supervisor.update_agent_configuration", {
         entry_id: id, daemon_generation: current.daemon_generation, expected_revision: current.config_revision,
@@ -419,31 +424,12 @@ test("a signed request still cannot give a rental, a Cursor agent, an Open Model
   });
 });
 
-test("an imported manifest never brings the owner's own setup with it", { timeout: 60_000 * WAIT_SCALE }, async () => {
-  const { createHash } = await import("node:crypto");
-  await withDaemon(async ({ configuration, storedPolicy }) => {
-    assert.equal((await configuration("supervised_imported")).home_harness, false);
-    assert.deepEqual(storedPolicy("supervised_imported"), { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } });
-  }, async (root) => {
-    const manifest = { generation: 3, entries: [agent("supervised_imported", "codex", {
-      desired_state: "stopped", observed_state: "stopped",
-      provider_launch_policy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, [KEY]: false },
-    })] };
-    await writeFile(join(root, "daemon-manifest.json"), JSON.stringify({
-      checksum: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"), manifest,
-    }));
-    // Proves the import ran, so the assertion above is about an imported row.
-    const store = new ManifestStore(join(root, "daemon-state.sqlite"), join(root, "daemon-manifest.json"));
-    try { assert.deepEqual((await store.load()).entries.map((item) => item.id), ["supervised_imported"]); } finally { await store.close(); }
-  });
-});
-
 // ---- What an earlier writer left in a stored policy does not decide a launch with the owner's own setup.
 
 const { deriveProviderConfigurationSnapshot, entryLaunchPolicy } = await import("../provider-configuration.js");
-const { attestProviderSpawnPolicy } = await import("../../electron/main/agents/provider-spawn-configuration.js");
-const { claudeCliLaunchArgs, claudeLaunchPolicyArgs, claudeChildEnvironment, claudeOwnerSetupStartEnvironment } = await import("../../electron/main/agents/claude-code-provider-adapter.js");
-const { inspectClaudeCodeVersion, resolveClaudeCodeExecutable } = await import("../../electron/main/agents/claude-code-version.js");
+const { attestProviderSpawnPolicy } = await import("#provider-runtime/agents/provider-spawn-configuration.js");
+const { claudeCliLaunchArgs, claudeLaunchPolicyArgs, claudeChildEnvironment, claudeOwnerSetupStartEnvironment } = await import("#provider-runtime/agents/claude-code-provider-adapter.js");
+const { inspectClaudeCodeVersion, resolveClaudeCodeExecutable } = await import("#provider-runtime/agents/claude-code-version.js");
 
 /** The installed Claude Code, when it is one the adapter supports. Asked its version in a scratch home. */
 function installedClaude(scratch: string): string | null {

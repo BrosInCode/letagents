@@ -725,7 +725,7 @@ test("workspace provisioning survives deletion of the daemon's inherited launch 
     ].join("\n");
     const { stdout } = await execFileAsync(
       process.execPath,
-      ["--import", tsxImport, "--input-type=module", "-e", script],
+      ["--conditions=letagents-source", "--import", tsxImport, "--input-type=module", "-e", script],
       { cwd: launchCwd, maxBuffer: 8 * 1024 * 1024 },
     );
     const result = JSON.parse(stdout) as { path: string; reused: boolean };
@@ -755,28 +755,6 @@ test("durability store validates destructive identities, serializes GC, and quar
     await assert.rejects(() => store.markState(attempt.work_attempt_id, "quarantined"), /GC reservation/);
     releaseGc();
     assert.deepEqual(await collecting, [attempt.work_attempt_id]);
-
-    const protectedWorkspace = await provisionedWorkspace(env.root);
-    const protectedAttempt = await store.createAttempt({ taskId: "task", leaseId: "lease-2", leaseEpoch: 2, workspacePath: protectedWorkspace.path, workAttemptId: protectedWorkspace.id });
-    await store.concludeAttempt(protectedAttempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
-    await writeFile(path, "{\"version\":2,\"attempts\":[],\"checksum\":\"tampered\"}");
-    const recovered = new WorkDurabilityStore(path, join(env.root, "attempt-data"), () => "2026-01-01T00:00:01.000Z", join(env.root, "worktrees"));
-    await assert.rejects(() => recovered.garbageCollect(0), CorruptAttemptStoreError);
-    assert.equal((await stat(protectedWorkspace.path)).isDirectory(), true);
-    assert.ok((await readdir(env.root)).some((name) => name.startsWith("attempts.json.corrupt.")));
-
-    const legacyWorkspace = await provisionedWorkspace(env.root);
-    const legacyDatabase = join(env.root, "legacy-state.sqlite");
-    const legacyStore = new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:02.000Z", join(env.root, "worktrees"), undefined, undefined, undefined, TEST_SUPERVISOR, undefined, legacyDatabase);
-    const legacyAttempt = await legacyStore.createAttempt({ taskId: "task", leaseId: "lease-3", leaseEpoch: 3, workspacePath: legacyWorkspace.path, workAttemptId: legacyWorkspace.id });
-    await legacyStore.concludeAttempt(legacyAttempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
-    const legacySnapshot = await legacyStore.getAttempt(legacyAttempt.work_attempt_id);
-    await legacyStore.close();
-    await rm(legacyDatabase, { force: true });
-    await rm(`${legacyDatabase}-wal`, { force: true });
-    await rm(`${legacyDatabase}-shm`, { force: true });
-    await writeFile(join(env.root, "legacy-attempts.json"), JSON.stringify({ version: 1, attempts: [legacySnapshot] }));
-    assert.equal((await (new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:03.000Z", join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, legacyDatabase)).getAttempt(legacyAttempt.work_attempt_id)).state, "unreviewed");
   } finally { await env.cleanup(); }
 });
 

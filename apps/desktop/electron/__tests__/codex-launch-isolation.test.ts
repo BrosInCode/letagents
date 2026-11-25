@@ -44,13 +44,13 @@ const {
   launchManagedCodexAppServer,
   terminateSpawnedProcess,
   waitForLaunchedCodexAppServer,
-} = await import("../main/agents/codex-app-server.js");
+} = await import("#provider-runtime/agents/codex-app-server.js");
 const {
   assertLiveCodexProjectUnchanged, codexHomeHarnessOverrides, codexHookDisableOverride, codexProcessKeepsOwnerSetup, inspectCodexProject, readCodexCommandLine,
-} = await import("../main/agents/codex-home-harness.js");
-const { CodexProviderAdapter, CODEX_READ_ONLY_CONFIG_OVERRIDES } = await import("../main/agents/codex-provider-adapter.js");
-const { CodexRpcClient } = await import("../main/agents/codex-rpc-client.js");
-const { resolveCodexExecutable } = await import("../main/agents/codex-executable.js");
+} = await import("#provider-runtime/agents/codex-home-harness.js");
+const { CodexProviderAdapter, CODEX_READ_ONLY_CONFIG_OVERRIDES } = await import("#provider-runtime/agents/codex-provider-adapter.js");
+const { CodexRpcClient } = await import("#provider-runtime/agents/codex-rpc-client.js");
+const { resolveCodexExecutable } = await import("#provider-runtime/agents/codex-executable.js");
 
 let fixtureSerial = 0;
 function fixture(name: string): string {

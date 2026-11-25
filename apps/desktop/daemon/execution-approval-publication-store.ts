@@ -197,12 +197,34 @@ export function validateExecutionApprovalPublicationSchema(database: DatabaseSyn
 
 /** Immutable publication custody and exact remote receipt journal. */
 export class ExecutionApprovalPublicationStore {
-  constructor(private readonly database: DatabaseSync) {}
+  constructor(
+    private readonly database: DatabaseSync,
+    private readonly assertWriteFence?: () => void,
+  ) {}
   private transaction<T>(body: () => T): T {
     if (this.database.isTransaction) throw new Error("Execution approval publication requires its own transaction.");
     this.database.exec("BEGIN IMMEDIATE");
-    try { const result = body(); this.database.exec("COMMIT"); return result; }
+    try { this.assertWriteFence?.(); const result = body(); this.database.exec("COMMIT"); return result; }
     catch (error) { try { this.database.exec("ROLLBACK"); } catch { /* already rolled back */ } throw error; }
+  }
+  getByIdentity(identity: {
+    agentId: string;
+    roomId: string;
+    delegationInstanceId: string;
+    delegationRevision: number;
+    requestId: string;
+    requestVersion: number;
+  }): ExecutionApprovalPublicationRecord | null {
+    const row = this.database.prepare(`SELECT * FROM ${table} WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")}`)
+      .get(
+        text(identity.agentId),
+        text(identity.roomId),
+        text(identity.delegationInstanceId),
+        int(identity.delegationRevision, 2_147_483_647),
+        text(identity.requestId),
+        int(identity.requestVersion, 2_147_483_647),
+      );
+    return row ? decode(row) : null;
   }
   get(value: ExecutionApprovalPublicationPin): ExecutionApprovalPublicationRecord | null {
     const p = pin(value);
@@ -245,65 +267,89 @@ export class ExecutionApprovalPublicationStore {
     return this.database.prepare(`SELECT * FROM ${table} WHERE state IN ('open','attempted','acknowledged','closing') AND agent_id=?
       ORDER BY room_id,delegation_instance_id,delegation_revision,request_id,request_version LIMIT 10001`).all(text(agentId)).map(decode);
   }
-  markAttempted(sent: ExecutionApprovalPublicationRecord): ExecutionApprovalPublicationRecord {
+  markAttemptedInTransaction(sent: ExecutionApprovalPublicationRecord): ExecutionApprovalPublicationRecord {
+    if (!this.database.isTransaction) throw new Error("markAttemptedInTransaction requires an active transaction.");
     const p = pin(sent);
-    return this.transaction(() => {
-      this.database.prepare(`UPDATE ${table} SET state='attempted'
-        WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")} AND state='open' AND projection_sha256=?`)
-        .run(p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision,
-          p.expected.requestId, p.expected.requestVersion, p.projectionSha256);
-      const current = this.get(p);
-      if (!current || current.state !== "attempted") invalid();
-      return current;
-    });
+    this.database.prepare(`UPDATE ${table} SET state='attempted'
+      WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")} AND state='open' AND projection_sha256=?`)
+      .run(p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision,
+        p.expected.requestId, p.expected.requestVersion, p.projectionSha256);
+    const current = this.get(p);
+    if (!current || current.state !== "attempted") invalid();
+    return current;
   }
-  acknowledge(sent: ExecutionApprovalPublicationRecord, receipt: { publicationId: string; publicationDigest: string; publishedAtMs: number }): boolean {
+  markAttempted(sent: ExecutionApprovalPublicationRecord): ExecutionApprovalPublicationRecord {
+    return this.transaction(() => this.markAttemptedInTransaction(sent));
+  }
+  acknowledgeInTransaction(sent: ExecutionApprovalPublicationRecord, receipt: { publicationId: string; publicationDigest: string; publishedAtMs: number }): boolean {
+    if (!this.database.isTransaction) throw new Error("acknowledgeInTransaction requires an active transaction.");
     const p = pin(sent); const publicationId = text(receipt.publicationId); const publicationDigest = digest(receipt.publicationDigest);
     const publishedAtMs = int(receipt.publishedAtMs);
     if (publishedAtMs >= p.expiresAtMs) invalid();
-    return this.transaction(() => Number(this.database.prepare(`UPDATE ${table} SET state='acknowledged',publication_id=?,publication_digest=?,published_at_ms=?
+    return Number(this.database.prepare(`UPDATE ${table} SET state='acknowledged',publication_id=?,publication_digest=?,published_at_ms=?
       WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")} AND state='attempted' AND projection_sha256=?`)
       .run(publicationId, publicationDigest, publishedAtMs, p.agentId, p.roomId, p.delegationInstanceId,
-        p.delegationRevision, p.expected.requestId, p.expected.requestVersion, p.projectionSha256).changes) === 1);
+        p.delegationRevision, p.expected.requestId, p.expected.requestVersion, p.projectionSha256).changes) === 1;
+  }
+  acknowledge(sent: ExecutionApprovalPublicationRecord, receipt: { publicationId: string; publicationDigest: string; publishedAtMs: number }): boolean {
+    return this.transaction(() => this.acknowledgeInTransaction(sent, receipt));
+  }
+  beginCloseInTransaction(sent: ExecutionApprovalPublicationRecord): ExecutionApprovalPublicationRecord {
+    if (!this.database.isTransaction) throw new Error("beginCloseInTransaction requires an active transaction.");
+    const p = pin(sent);
+    this.database.prepare(`UPDATE ${table} SET state='closing'
+      WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")} AND state='acknowledged'
+        AND publication_id=? AND publication_digest=?`)
+      .run(p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision,
+        p.expected.requestId, p.expected.requestVersion, sent.publicationId, sent.publicationDigest);
+    const current = this.get(p);
+    if (!current || current.state !== "closing") invalid();
+    return current;
   }
   beginClose(sent: ExecutionApprovalPublicationRecord): ExecutionApprovalPublicationRecord {
-    const p = pin(sent);
-    return this.transaction(() => {
-      this.database.prepare(`UPDATE ${table} SET state='closing'
-        WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")} AND state='acknowledged'
-          AND publication_id=? AND publication_digest=?`)
-        .run(p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision,
-          p.expected.requestId, p.expected.requestVersion, sent.publicationId, sent.publicationDigest);
-      const current = this.get(p);
-      if (!current || current.state !== "closing") invalid();
-      return current;
-    });
+    return this.transaction(() => this.beginCloseInTransaction(sent));
   }
-  acknowledgeClose(sent: ExecutionApprovalPublicationRecord, closedAtMs: number): boolean {
+  acknowledgeCloseInTransaction(sent: ExecutionApprovalPublicationRecord, closedAtMs: number): boolean {
+    if (!this.database.isTransaction) throw new Error("acknowledgeCloseInTransaction requires an active transaction.");
     const p = pin(sent); int(closedAtMs);
-    return this.transaction(() => Number(this.database.prepare(`UPDATE ${table} SET state='closed',closed_at_ms=?
+    return Number(this.database.prepare(`UPDATE ${table} SET state='closed',closed_at_ms=?
       WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")} AND state='closing'
         AND publication_id=? AND publication_digest=?`)
       .run(closedAtMs, p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision,
-        p.expected.requestId, p.expected.requestVersion, sent.publicationId, sent.publicationDigest).changes) === 1);
+        p.expected.requestId, p.expected.requestVersion, sent.publicationId, sent.publicationDigest).changes) === 1;
+  }
+  acknowledgeClose(sent: ExecutionApprovalPublicationRecord, closedAtMs: number): boolean {
+    return this.transaction(() => this.acknowledgeCloseInTransaction(sent, closedAtMs));
+  }
+  conflictInTransaction(sent: ExecutionApprovalPublicationRecord): void {
+    if (!this.database.isTransaction) throw new Error("conflictInTransaction requires an active transaction.");
+    const p = pin(sent);
+    this.database.prepare(`UPDATE ${table} SET state='conflict'
+      WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")} AND state IN ('open','attempted','acknowledged','closing')`)
+      .run(p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision, p.expected.requestId, p.expected.requestVersion);
   }
   conflict(sent: ExecutionApprovalPublicationRecord): void {
+    this.transaction(() => { this.conflictInTransaction(sent); });
+  }
+  expireInTransaction(sent: ExecutionApprovalPublicationRecord): void {
+    if (!this.database.isTransaction) throw new Error("expireInTransaction requires an active transaction.");
     const p = pin(sent);
-    this.transaction(() => { this.database.prepare(`UPDATE ${table} SET state='conflict'
+    this.database.prepare(`UPDATE ${table} SET state='expired'
       WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")} AND state IN ('open','attempted','acknowledged','closing')`)
-      .run(p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision, p.expected.requestId, p.expected.requestVersion); });
+      .run(p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision, p.expected.requestId, p.expected.requestVersion);
   }
   expire(sent: ExecutionApprovalPublicationRecord): void {
+    this.transaction(() => { this.expireInTransaction(sent); });
+  }
+  invalidateInTransaction(sent: ExecutionApprovalPublicationRecord): void {
+    if (!this.database.isTransaction) throw new Error("invalidateInTransaction requires an active transaction.");
     const p = pin(sent);
-    this.transaction(() => { this.database.prepare(`UPDATE ${table} SET state='expired'
+    this.database.prepare(`UPDATE ${table} SET state='invalid'
       WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")} AND state IN ('open','attempted','acknowledged','closing')`)
-      .run(p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision, p.expected.requestId, p.expected.requestVersion); });
+      .run(p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision, p.expected.requestId, p.expected.requestVersion);
   }
   invalidate(sent: ExecutionApprovalPublicationRecord): void {
-    const p = pin(sent);
-    this.transaction(() => { this.database.prepare(`UPDATE ${table} SET state='invalid'
-      WHERE ${identityColumns.map(column => `${column}=?`).join(" AND ")} AND state IN ('open','attempted','acknowledged','closing')`)
-      .run(p.agentId, p.roomId, p.delegationInstanceId, p.delegationRevision, p.expected.requestId, p.expected.requestVersion); });
+    this.transaction(() => { this.invalidateInTransaction(sent); });
   }
 }
 

@@ -13,30 +13,30 @@ import type {
 import {
   prepareCursorSupervisedProfile,
   type CursorManagedProfile,
-} from "./cursor-managed-profile.js";
-import { removeDisposableCursorProfileRoot } from "./cursor/profile-filesystem.js";
+} from "#provider-runtime/agents/cursor-managed-profile.js";
+import { removeDisposableCursorProfileRoot } from "#provider-runtime/agents/cursor/profile-filesystem.js";
 import {
   assertCursorSupervisedMcpAuthority,
   cursorMcpInspectionEnv,
-} from "./cursor-mcp-authority.js";
+} from "#provider-runtime/agents/cursor-mcp-authority.js";
 import {
   cursorLaunchOptionsForPermissionProfile,
   cursorPermissionProfileReadyDetail,
-} from "./cursor-permission-profile.js";
+} from "#provider-runtime/agents/cursor-permission-profile.js";
 import {
   assertCursorPersonalIdentity,
   CursorIdentityAuthRequiredError,
-} from "./cursor-provider-adapter.js";
-import { buildCursorChildEnv } from "./cursor-runner.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
+import { buildCursorChildEnv } from "#provider-runtime/agents/cursor-runner.js";
 import {
   resolveLetAgentsMcpRuntime,
   type LetAgentsMcpRuntime,
-} from "./letagents-mcp-runtime.js";
-import { managedAgentPermissionProfileForProvider } from "./managed-agent-permission-profiles.js";
-import { cachedProbe, probeKey } from "./provider-probe-cache.js";
-import { assertSupervisedWorkspaceGenerationSupported } from "./supervised-workspace-generation.js";
-import { apiUrl as desktopApiUrl, workspaceRoot as sourceWorkspaceRoot } from "../paths.js";
-import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
+} from "#provider-runtime/agents/letagents-mcp-runtime.js";
+import { managedAgentPermissionProfileForProvider } from "#provider-runtime/agents/managed-agent-permission-profiles.js";
+import { cachedProbe, probeKey } from "#provider-runtime/provider-probe-cache.js";
+import { assertSupervisedWorkspaceGenerationSupported } from "#provider-runtime/agents/supervised-workspace-generation.js";
+import { apiUrl as desktopApiUrl, workspaceRoot as sourceWorkspaceRoot } from "#provider-runtime/paths.js";
+import { desktopRuntimeEnvironment } from "#provider-runtime/desktop-shell-environment.js";
 import { missingExternalRuntimePreflight } from "./external-runtime-preflight.js";
 
 type ExecResult = {

@@ -157,7 +157,7 @@ type Harness = ReturnType<typeof harness>;
 function harness() {
   const events: string[] = [];
   let daemonGeneration = DAEMON_GENERATION;
-  let manifestGeneration = 11;
+  let agentVersion = 11;
   let currentEntry: DaemonManifestEntry | undefined = entry();
   let currentPurge: DaemonPurgeRecord | null = null;
   let pendingPurges: DaemonPurgeRecord[] = [];
@@ -196,8 +196,8 @@ function harness() {
       async load() {
         events.push("store:load");
         return {
-          generation: manifestGeneration,
           entries: currentEntry ? [currentEntry] : [],
+          versions: currentEntry ? { [currentEntry.id]: agentVersion } : {},
         };
       },
       async getEntry(entryId) {
@@ -206,16 +206,23 @@ function harness() {
         getEntryHook?.(getEntryReads);
         return currentEntry?.id === entryId ? currentEntry : undefined;
       },
+      async getEntryWithVersion(entryId) {
+        const found = await ports.store.getEntry(entryId);
+        return found ? { entry: found, version: agentVersion } : undefined;
+      },
       async getAgentConfiguration(entryId) {
-        if (currentEntry?.id !== entryId) return null;
+        if (currentEntry?.id !== entryId) return undefined;
         return {
-          agent_id: currentEntry.id,
           provider: currentEntry.provider,
           model: currentEntry.model,
+          reasoning_effort: currentEntry.reasoning_effort ?? null,
           charter: currentEntry.charter,
           permission_profile_id: currentEntry.permission_profile_id,
+          provider_launch_policy: currentEntry.provider_launch_policy,
+          config_revision: currentEntry.config_revision ?? 1,
+          runtime_configuration_revision: currentEntry.runtime_configuration_revision ?? 1,
           delivery_mode: currentEntry.delivery_mode,
-          polling_contract: null,
+          image_input: false,
         };
       },
       async getPurge(operationId) {
@@ -230,8 +237,8 @@ function harness() {
         events.push(`store:attestation:${entryId}`);
         return workerAttestation;
       },
-      async preparePurge(expectedGeneration, input) {
-        events.push(`store:prepare-purge:${expectedGeneration}`);
+      async preparePurge(expectedVersion, input) {
+        events.push(`store:prepare-purge:${expectedVersion}`);
         currentPurge = purgeRecord({
           operation_id: input.operationId,
           request_id: input.requestId,
@@ -242,7 +249,7 @@ function harness() {
           worker_session_attestation: input.workerSessionAttestation,
           agent_session_id: input.agentSessionId,
         });
-        return { generation: expectedGeneration, created: true, purge: currentPurge };
+        return { version: expectedVersion, created: true, purge: currentPurge };
       },
       async adoptPurgeDaemonGeneration(input) {
         events.push(`store:adopt:${input.expectedDaemonGeneration}->${input.daemonGeneration}`);
@@ -269,16 +276,16 @@ function harness() {
         currentPurge = { ...currentPurge!, phase: "local_commit" };
         return currentPurge;
       },
-      async commitPurge(expectedGeneration, input, fence) {
-        events.push(`store:commit-request:${expectedGeneration}:${input.operationId}`);
+      async commitPurge(expectedVersion, input, fence) {
+        events.push(`store:commit-request:${expectedVersion}:${input.operationId}`);
         if (commitPurgeError) throw commitPurgeError;
         await (fence ?? (async (commit) => commit()))(async () => {
           events.push("store:commit-purge");
           currentPurge = { ...currentPurge!, phase: "complete" };
           currentEntry = undefined;
-          manifestGeneration += 1;
+          agentVersion += 1;
         });
-        return { generation: manifestGeneration, purge: currentPurge! };
+        return { version: agentVersion, purge: currentPurge! };
       },
     },
     bindings: {
@@ -344,11 +351,6 @@ function harness() {
     },
     authority: {
       currentDaemonGeneration: () => daemonGeneration,
-      currentManifestGeneration: () => manifestGeneration,
-      acceptManifestGeneration(generation) {
-        events.push(`authority:accept-generation:${generation}`);
-        manifestGeneration = generation;
-      },
       async assertCurrent() {
         events.push("authority:assert");
       },
@@ -420,6 +422,7 @@ function harness() {
 
   return {
     subject: new LifecycleAdministrationCoordinator(ports),
+    ports,
     events,
     attempts,
     recoveryRefusals,
@@ -460,21 +463,6 @@ test("retire fences invalid coordinates before lifecycle admission and always re
   assert.deepEqual(failed.events, [
     "lifecycle:begin:agent-1",
     "desired:stopped:agent-1",
-    "lifecycle:release:agent-1",
-  ]);
-});
-
-test("retire of a non-inbox agent preserves identity without credential cleanup", async () => {
-  const h = harness();
-  h.setEntry(entry({ delivery_mode: "mcp_polling", desired_state: "running" }));
-
-  const result = await h.subject.retireAgent("agent-1", DAEMON_GENERATION);
-
-  assert.equal(result.outcome, "retired");
-  assert.deepEqual(h.events, [
-    "lifecycle:begin:agent-1",
-    "desired:stopped:agent-1",
-    "liveness:project:agent-1",
     "lifecycle:release:agent-1",
   ]);
 });
@@ -774,7 +762,6 @@ test("purge commits ephemeral cleanup before its fenced identity deletion, then 
     "store:commit-request:11:purge:agent-1",
     "authority:fence",
     "store:commit-purge",
-    "authority:accept-generation:12",
     "custody:live:agent-1",
     "custody:auth:agent-1",
     "custody:grant:agent-1",
@@ -894,4 +881,57 @@ test("workspace recovery reports an orphan whose ephemeral attempt cleanup throw
     error: cleanupError,
   }]);
   assert.deepEqual(h.orphanRetainedSets, [[orphan]]);
+});
+
+test("purgeAgent reconciles inactive room-work, approval-publication, room-move, and runtime-recovery executions before preparePurge", async () => {
+  const h = harness();
+  h.setEntry(entry({ desired_state: "stopped", observed_state: "stopped", room_id: "local-room", local_room_id: "local-room" }));
+  const order: string[] = [];
+  const originalPrepare = h.ports.store.preparePurge;
+  h.ports.store.preparePurge = async (expectedVersion, input) => {
+    order.push(`prepare:${input.agentId}`);
+    return originalPrepare(expectedVersion, input);
+  };
+  h.ports.reconcileRoomWorkForPurge = (entryId) => {
+    order.push(`reconcile-room-work:${entryId}`);
+  };
+  h.ports.reconcileApprovalPublicationsForPurge = (entryId) => {
+    order.push(`reconcile-approval-publications:${entryId}`);
+  };
+  h.ports.reconcileRoomMovesForPurge = (entryId) => {
+    order.push(`reconcile-room-moves:${entryId}`);
+  };
+  h.ports.reconcileRuntimeRecoveriesForPurge = (entryId) => {
+    order.push(`reconcile-runtime-recoveries:${entryId}`);
+  };
+
+  const result = await h.subject.purgeAgent("agent-1", 7, null, true);
+  assert.deepEqual(result, { outcome: "purged" });
+  assert.deepEqual(order, [
+    "reconcile-room-work:agent-1",
+    "reconcile-approval-publications:agent-1",
+    "reconcile-room-moves:agent-1",
+    "reconcile-runtime-recoveries:agent-1",
+    "prepare:agent-1",
+  ]);
+});
+
+test("retireAgent retires stale runtime-recovery effects after committing retirement", async () => {
+  const h = harness();
+  const order: string[] = [];
+  const originalUpdate = h.ports.updateManifestEntry;
+  h.ports.updateManifestEntry = async (entryId, update) => {
+    order.push(`update:${entryId}`);
+    return originalUpdate(entryId, update);
+  };
+  h.ports.retireStaleRuntimeRecoveryEffects = (entryId) => {
+    order.push(`retire-stale-runtime-recoveries:${entryId}`);
+  };
+
+  const result = await h.subject.retireAgent("agent-1", 7, null, true);
+  assert.equal(result.outcome, "retired");
+  assert.deepEqual(order, [
+    "update:agent-1",
+    "retire-stale-runtime-recoveries:agent-1",
+  ]);
 });

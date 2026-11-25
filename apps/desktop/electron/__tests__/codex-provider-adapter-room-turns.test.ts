@@ -1,10 +1,10 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodexProviderAdapter } from "../main/agents/codex-provider-adapter.js";
-import { CodexRpcClient } from "../main/agents/codex-rpc-client.js";
-import type { ProviderStreamEvent } from "../main/agents/provider-adapter.js";
-import { ProviderTurnControlError } from "../main/agents/provider-adapter.js";
+import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { CodexRpcClient } from "#provider-runtime/agents/codex-rpc-client.js";
+import type { ProviderStreamEvent } from "#provider-runtime/agents/provider-adapter.js";
+import { ProviderTurnControlError } from "#provider-runtime/agents/provider-adapter.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import {
   type RecordedRequest,
@@ -22,11 +22,11 @@ test("Codex fresh spawn does not let a fatal placeholder resume probe block thre
 
   const handle = await adapter.spawn(spawnRequest());
 
-  assert.equal(handle.observedState(), "working");
+  assert.equal(handle.observedState(), "idle");
   assert.equal(handle.providerContinuationId, "thread-1");
   assert.deepEqual(
     harness.clients[0]!.requests.map((entry) => entry.method),
-    ["mcpServerStatus/list", "thread/start", "turn/start", "thread/read"],
+    ["mcpServerStatus/list", "thread/start"],
   );
   assert.deepEqual(harness.signals, []);
 });
@@ -37,7 +37,7 @@ test("Codex workplace status timeout does not kill launch or durable resume", as
   const firstAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
 
   const first = await firstAdapter.spawn(request);
-  assert.equal(first.observedState(), "working");
+  assert.equal(first.observedState(), "idle");
   assert.equal(first.providerContinuationId, "thread-1");
 
   harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
@@ -48,7 +48,7 @@ test("Codex workplace status timeout does not kill launch or durable resume", as
     providerContinuationId: first.providerContinuationId!,
   }, request);
 
-  assert.equal(resumed.observedState(), "working");
+  assert.equal(resumed.observedState(), "idle");
   assert.equal(resumed.providerContinuationId, first.providerContinuationId);
   assert.ok(harness.clients[1]!.requests.some((entry) => entry.method === "thread/resume"));
   assert.deepEqual(harness.signals, []);
@@ -91,9 +91,7 @@ test("Codex turn control cannot clear or act past a genuine runtime failure", as
   await assert.rejects(adapter.controlTurn!(handle, "Do not dispatch this correction.", {
     checkpointTurnStarted: async () => {},
     markDispatched: async () => {
-      client.emit({ method: "thread/status/changed", params: {
-        threadId: handle.providerContinuationId, status: { type: "systemError" },
-      } });
+      client.emit({ method: "process/systemError", params: {} });
       await flush();
     },
   }), (error: unknown) => error instanceof ProviderTurnControlError
@@ -325,7 +323,7 @@ test("Codex bounded room turn passes included images as labelled local image pat
 test("Codex bounded room turn adds nothing for an image without a file path or for a turn without images", async () => {
   const withoutPath = await codexRoomTurnInput([
     { index: 1, fileName: "inline.png", mimeType: "image/png", sizeBytes: 3, status: "image",
-      image: { mimeType: "image/png", data: new Uint8Array([1, 2, 3]) } },
+      image: { mimeType: "image/png", base64: Buffer.from([1, 2, 3]).toString("base64") } },
     { index: 2, fileName: "huge.png", mimeType: "image/png", sizeBytes: 11 * 1024 * 1024, status: "too_large" },
   ]);
   assert.equal(withoutPath.input.length, 1, "bytes in memory are not an input Codex reads; only the prompt text is sent");
@@ -700,9 +698,7 @@ test("a runtime failure during the turn checkpoint cannot be cleared by turn set
   }, {
     beforeNativeDispatch: async () => {},
     checkpointTurnStarted: async () => {
-      client.emit({ method: "thread/status/changed", params: {
-        threadId: handle.providerContinuationId, status: { type: "systemError" },
-      } });
+      client.emit({ method: "process/systemError", params: {} });
       await flush();
     },
   });
@@ -842,20 +838,4 @@ test("only a policy refusal is marked as one; other failed turns are not", async
   const interrupted = await stopped;
   assert.equal(interrupted.outcome, "interrupted");
   assert.equal("refusal" in interrupted, false, "an interrupted turn carries no refusal mark");
-});
-
-test("a lane that polls for itself still ends its runtime on a thread systemError", async () => {
-  for (const lifecycleAuthorityMode of ["typed_shadow", "legacy"] as const) {
-    const harness = createHarness();
-    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
-    const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode }));
-    const observations: NativeExecutionObservation[] = [];
-    adapter.onExecution(handle, (event) => observations.push(event));
-    harness.clients[0]!.emit({ method: "thread/status/changed", params: {
-      threadId: handle.providerContinuationId, status: { type: "systemError" },
-    } });
-    assert.equal(handle.observedState(), "failed", lifecycleAuthorityMode);
-    assert.deepEqual(observations.at(-1)?.fact, { domain: "runtime", kind: "state_changed", state: "exited",
-      controlEvidence: "native_session_terminated", sideEffects: "none" }, lifecycleAuthorityMode);
-  }
 });

@@ -214,15 +214,11 @@ export function bindHostToolRule(db: DatabaseSync, input: {
 export class HostToolRuleRevokedError extends Error {
   constructor(readonly ruleId: string, readonly ruleRevision: number) { super("This saved tool permission was revoked."); }
 }
-/** Whether a saved tool rule made or created this decision. Stores from before saved rules have none. */
+/** Whether a saved tool rule made or created this decision. */
 export function isToolRuleDecision(db: DatabaseSync, decisionId: string): boolean {
-  if (Number(db.prepare("PRAGMA user_version").get()!.user_version) < 44
-    && !db.prepare("SELECT 1 FROM sqlite_master WHERE name='host_tool_rule_decisions'").get()) return false;
   return Boolean(db.prepare("SELECT 1 FROM host_tool_rule_decisions WHERE decision_id=?").get(decisionId));
 }
 export function assertDecisionToolRule(db: DatabaseSync, decisionId: string, entry: DaemonManifestEntry | undefined): void {
-  if (Number(db.prepare("PRAGMA user_version").get()!.user_version) < 44
-    && !db.prepare("SELECT 1 FROM sqlite_master WHERE name='host_tool_rule_decisions'").get()) return;
   const bound = db.prepare("SELECT * FROM host_tool_rule_decisions WHERE decision_id=?").get(decisionId);
   if (!bound) return;
   const row = db.prepare("SELECT * FROM host_tool_rules WHERE rule_id=? AND state='active' AND revision=?")
@@ -243,8 +239,6 @@ export type WithdrawHostToolApproval = {
   expected: ApprovalReference; decisionId: string; ruleId: string; ruleRevision: number; dispatchId: string | null; atMs: number;
 };
 export function hostToolDecisionWasWithdrawn(db: DatabaseSync, decision: Record<string, unknown>, request: Record<string, unknown>): boolean {
-  if (Number(db.prepare("PRAGMA user_version").get()!.user_version) < 44
-    && !db.prepare("SELECT 1 FROM sqlite_master WHERE name='host_tool_rule_withdrawals'").get()) return false;
   const receipt = db.prepare("SELECT * FROM host_tool_rule_withdrawals WHERE decision_id=?").get(String(decision.decision_id));
   if (!receipt) return false;
   const bound = db.prepare("SELECT * FROM host_tool_rule_decisions WHERE decision_id=?").get(String(decision.decision_id));

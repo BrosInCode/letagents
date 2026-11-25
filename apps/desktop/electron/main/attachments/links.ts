@@ -4,7 +4,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { localFilesPath } from "../chat-storage/settings.js";
-import { apiUrl, attachmentProtocolScheme } from "../paths.js";
+import { apiUrl, attachmentProtocolScheme } from "#provider-runtime/paths.js";
 
 /**
  * The screen loads every attachment through one scheme:

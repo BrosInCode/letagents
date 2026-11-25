@@ -4,15 +4,15 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { join } from "node:path";
 import test from "node:test";
-import { ClaudeCodeProviderAdapter, claudeChildEnvironment, claudeTranscriptsRoot } from "../main/agents/claude-code-provider-adapter.js";
+import { ClaudeCodeProviderAdapter, claudeChildEnvironment, claudeTranscriptsRoot } from "#provider-runtime/agents/claude-code-provider-adapter.js";
 import type {
   ProviderRoomTurnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
   NativeExecutionObservation,
-} from "../main/agents/provider-adapter.js";
-import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
-import { defaultGetProcessIdentity, sameProcessBirthIdentity } from "../main/agents/provider-evidence.js";
+} from "#provider-runtime/agents/provider-adapter.js";
+import { PROCESS_ENDED_DURING_TURN } from "#provider-runtime/agents/provider-adapter.js";
+import { defaultGetProcessIdentity, sameProcessBirthIdentity } from "#provider-runtime/agents/provider-evidence.js";
 import {
   FakeClaudeChild,
   birthIdentity,
@@ -317,13 +317,12 @@ test("concurrent Claude attach authenticates one exact continuation, authority m
   const ref = {
     workAttemptId: handle.workAttemptId,
     providerContinuationId: handle.providerContinuationId!,
-    lifecycleAuthorityMode: "typed_shadow" as const,
+    lifecycleAuthorityMode: "typed" as const,
     providerConnection: handle.providerConnection,
   };
 
   const exact = fresh.attach(ref);
   assert.equal(await fresh.attach({ ...ref, providerContinuationId: "foreign-session" }), null);
-  assert.equal(await fresh.attach({ ...ref, lifecycleAuthorityMode: "typed" }), null);
   assert.equal(await fresh.attach({
     ...ref,
     providerConnection: { kind: "claude_cli", pid: handle.pid, processIdentity: birthIdentity(9999) },
@@ -416,12 +415,17 @@ test("result messages settle the observed state to idle and publish activity evi
   const handle = await adapter.spawn(spawnRequest());
   const child = harness.children[0]!;
 
-  child.emit({ type: "assistant", message: { content: [{ type: "text", text: "working on it" }] } });
+  const running = adapter.runRoomTurn(handle, { inboxItemId: "inbox-state", actionId: "action-state", sourceMessage: {}, activation: {} });
+  await flush();
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  const session_id = handle.providerContinuationId;
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
   await flush();
   assert.equal(handle.observedState(), "working");
 
-  child.emit({ type: "result", subtype: "success", result: "done", num_turns: 3 });
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: turnId, result: "done", num_turns: 3 });
   await flush();
+  assert.equal((await running).text, "done");
   assert.equal(handle.observedState(), "idle");
 });
 
@@ -497,9 +501,9 @@ test("daemon-owned Claude receives the included room images as labelled base64 b
     attachments: [
       { index: 1, fileName: "notes.zip", mimeType: "application/zip", sizeBytes: 500, status: "unsupported_type", category: "file" },
       { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: pngBytes.length, status: "image",
-        image: { mimeType: "image/png", data: backing.subarray(2, 2 + pngBytes.length) } },
+        image: { mimeType: "image/png", base64: Buffer.from(backing.subarray(2, 2 + pngBytes.length)).toString("base64") } },
       { index: 3, fileName: "photo.jpg", mimeType: "image/jpeg", sizeBytes: jpegBytes.length, status: "image",
-        image: { mimeType: "image/jpeg", data: jpegBytes } },
+        image: { mimeType: "image/jpeg", base64: Buffer.from(jpegBytes).toString("base64") } },
     ],
   }, {
     beforeNativeDispatch: async () => {},
@@ -681,9 +685,8 @@ for (const recordEnding of [true, false] as const) {
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys=ON");
     new DaemonStateSchema().createSchema(db);
-    db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${at}',0);
-      INSERT INTO agent_configurations(agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,config_revision,runtime_configuration_revision)
-        VALUES('agent','claude-code','charter','daemon_inbox',0,0,1,1);
+    db.exec(`INSERT INTO agents(agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,config_revision,runtime_configuration_revision,desired_state,observed_state,condition)
+        VALUES('agent',0,1,'owner','${at}','Agent','room','claude-code','charter',1,1,'running','idle','none');
       INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
         VALUES('wa-claude-1','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','${at}');
       INSERT INTO work_attempt_executions VALUES('generation','wa-claude-1','${at}','test',1,NULL);`);
@@ -701,12 +704,10 @@ for (const recordEnding of [true, false] as const) {
       current = { workAttemptId: native.workAttemptId, pid: native.pid, providerContinuationId: native.providerContinuationId,
         providerConnection: connection, observedState: "idle", appliedConfigurationRevision: 1 };
       natives.set(current, native);
-      db.prepare("DELETE FROM runtime_deployments").run();
-      db.prepare(`INSERT INTO runtime_deployments(agent_id,observed_state,workspace_path_present,work_attempt_id_present,work_attempt_id,
-        provider_ref_present,provider_work_attempt_id,provider_continuation_id,provider_connection_kind,provider_connection_pid,
-        provider_process_identity_present,provider_process_identity,provider_execution_generation_id,workplace_liveness_present,native_liveness_present,activity_present)
-        VALUES('agent','idle',0,1,'wa-claude-1',1,'wa-claude-1',?,'claude_cli',?,1,?,'generation',0,0,0)`)
-        .run(native.providerContinuationId, connection.pid, connection.processIdentity!);
+      db.prepare(`UPDATE agents SET observed_state='idle',work_attempt_id='wa-claude-1',
+        provider_work_attempt_id='wa-claude-1',provider_continuation_id=?,provider_execution_generation_id='generation',
+        provider_connection_json=? WHERE agent_id='agent'`)
+        .run(native.providerContinuationId, JSON.stringify({ kind: "claude_cli", pid: connection.pid, processIdentity: connection.processIdentity! }));
       new ExecutionShadowStore(db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
         runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", "claude_cli", connection.pid!, connection.processIdentity!),
         provider: "claude-code", authorityMode: "typed", configRevision: 1, createdAtMs: Date.parse(at) });
@@ -716,12 +717,12 @@ for (const recordEnding of [true, false] as const) {
     };
     /** The daemon saves which message a native turn belongs to before the turn's first event can arrive. */
     const bindTurn = (turnId: string, continuation: string) => {
-      const order = Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1;
-      db.prepare(`INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
+      const order = Number(db.prepare("SELECT COUNT(*) n FROM inbox_items").get()!.n) + 1;
+      db.prepare(`INSERT INTO inbox_items(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
         VALUES(?,'agent','room',?,'{}','{}',?,'awaiting_result',1,?,?,?,?,?)`).run(turnId, `message-${order}`, order, `action-${order}`, `reply-${order}`, turnId, at, at);
       db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room','wa-claude-1','generation',?,?)").run(turnId, continuation, turnId);
     };
-    const turns = () => db.prepare("SELECT provider_turn_id,state FROM execution_turns ORDER BY rowid").all().map((turn) => ({ ...turn }));
+    const turns = () => db.prepare("SELECT provider_turn_id,state FROM runs ORDER BY rowid").all().map((turn) => ({ ...turn }));
     const startTurn = async (native: Native, child: FakeClaudeChild, inboxItemId: string) => {
       const running = adapter.runRoomTurn!(native, { inboxItemId, actionId: inboxItemId, sourceMessage: {}, activation: {} },
         { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
@@ -758,7 +759,7 @@ for (const recordEnding of [true, false] as const) {
       const recovered = await adapter.recoverRoomTurn!(second, { inboxItemId: "inbox-1", providerTurnId: one.turnId, ...(recordEnding ? { recordEnding: true } : {}) },
         { checkpointTerminalResult: async () => {} });
       assert.deepEqual(recovered, { turnId: one.turnId, outcome: "reply", text: "Finished before the exit.", evidence: "transcript" });
-      db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged' WHERE inbox_item_id=?").run(one.turnId);
+      db.prepare("UPDATE inbox_items SET state='acknowledged' WHERE inbox_item_id=?").run(one.turnId);
       capture.refresh("agent");
       await flush();
       assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: recordEnding ? "terminal" : "lost" }]);

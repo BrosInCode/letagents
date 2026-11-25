@@ -5,13 +5,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CodexAppServerExit, CodexAppServerLaunch } from "../main/agents/codex-app-server.js";
-import { CodexProviderAdapter, type CodexAdapterRpc, type CodexProviderAdapterDependencies } from "../main/agents/codex-provider-adapter.js";
-import { type CodexBuiltInProfile, type CodexSignInProfile, codexSandboxedProfileId } from "../main/agents/codex-agent-home.js";
-import { type RpcNotification, type RpcServerRequest } from "../main/agents/codex-rpc-client.js";
+import type { CodexAppServerExit, CodexAppServerLaunch } from "#provider-runtime/agents/codex-app-server.js";
+import { CodexProviderAdapter, type CodexAdapterRpc, type CodexProviderAdapterDependencies } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { type CodexBuiltInProfile, type CodexSignInProfile, codexSandboxedProfileId } from "#provider-runtime/agents/codex-agent-home.js";
+import { type RpcNotification, type RpcServerRequest } from "#provider-runtime/agents/codex-rpc-client.js";
 import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../../shared/codex-owner-isolation.mjs";
 import { API_AGENT_TOOLS } from "../../../../shared/api-agent-tools.mjs";
-import type { ProviderHandle, ProviderRoomTurnRequest, ProviderSpawnRequest } from "../main/agents/provider-adapter.js";
+import type { ProviderHandle, ProviderRoomTurnRequest, ProviderSpawnRequest } from "#provider-runtime/agents/provider-adapter.js";
 import { OS_BIRTH } from "./platform.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
@@ -904,19 +904,8 @@ export async function codexDaemonFixture(options: {
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
   };
-  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
-    const socket = connectDaemon(paths.socketPath);
-    let received = "";
-    socket.setEncoding("utf8");
-    socket.once("error", reject);
-    socket.on("data", (chunk: string) => {
-      received += chunk;
-      if (!received.includes("\n")) return;
-      socket.end();
-      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
-    });
-    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
-  });
+  const { daemonSocketRequest } = await import("./daemon-socket-request.js");
+  const request = (method: string, params?: unknown) => daemonSocketRequest(paths.socketPath, method, params);
   const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = DAEMON_WAIT_MS) => {
     const deadline = Date.now() + timeoutMs;
     while (!await check()) {
@@ -1605,7 +1594,7 @@ export function executionRecord(agent: Awaited<ReturnType<typeof codexDaemonFixt
     boundaries: () => agent.read<{ operation_id: string; runtime_generation_id: string; phase: string; mode: string; observer_json: string | null; provider_ref_json: string }>(
       "SELECT operation_id,runtime_generation_id,phase,mode,observer_json,provider_ref_json FROM agent_runtime_recoveries WHERE agent_id=? ORDER BY created_at,operation_id"),
     turns: () => agent.read<{ provider_turn_id: string; state: string }>(
-      "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"),
+      "SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"),
     notices: async () => ((await agent.request("manifest.list")).result[0].activity as Array<{ kind: string; summary: string }>)
       .filter((event) => event.kind === "launch_notice").map((event) => event.summary),
   };

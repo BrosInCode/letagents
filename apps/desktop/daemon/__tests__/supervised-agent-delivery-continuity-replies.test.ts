@@ -18,6 +18,7 @@ import {
   recordThreadIntent,
   recordReplyIntent,
 } from "./helpers/supervised-agent-delivery-fixture.js";
+import { seedBoundedMcpEffectRow } from "./helpers/bounded-effect-seed.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("task continuity survives restart after native failure, preserves files and deduplicates completed effects", async () => {
@@ -38,11 +39,19 @@ test("task continuity survives restart after native failure, preserves files and
     await writeFile(join(root, "work.txt"), "partial implementation\n");
     // An already executed external mutation has its durable receipt before the provider fails.
     const db = new DatabaseSync(path);
-    db.prepare(`INSERT INTO supervised_agent_effects
-      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-      VALUES ('effect',?,?,?,?,?,?,?,1,'completed',?,NULL,?,?)`).run(agent.agentId, agent.roomId, "generation-1",
-      "failed-turn", effectRequest.mcp_request_id, effectRequest.tool_name, JSON.stringify(effectRequest.request),
-      JSON.stringify({ artifact_id: "pr-1" }), new Date().toISOString(), new Date().toISOString());
+    seedBoundedMcpEffectRow(db, {
+      id: "effect",
+      agent_id: agent.agentId,
+      room_id: agent.roomId,
+      execution_generation_id: "generation-1",
+      provider_turn_id: "failed-turn",
+      mcp_request_id: effectRequest.mcp_request_id,
+      tool_name: effectRequest.tool_name,
+      request: effectRequest.request,
+      mutation: true,
+      state: "completed",
+      outcome: { artifact_id: "pr-1" },
+    });
     db.close();
     const failed = { turnId: "failed-turn", providerContinuationId: "thread", outcome: "failed" as const,
       text: null, evidence: "stream" as const, error: "HTTP 503 unavailable" };
@@ -247,10 +256,19 @@ test("an uncertain mutation prevents automatic continuation across restart witho
     await options?.beforeNativeDispatch?.(); runs++;
     await options?.checkpointTurnStarted?.("failed");
     const db = new DatabaseSync(path);
-    db.prepare(`INSERT INTO supervised_agent_effects
-      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-      VALUES ('effect',?,?,?,'failed','request','publish_room_artifact','{}',1,'executing',NULL,NULL,?,?)`)
-      .run(agent.agentId, agent.roomId, "generation-1", new Date().toISOString(), new Date().toISOString()); db.close();
+    seedBoundedMcpEffectRow(db, {
+      id: "effect",
+      agent_id: agent.agentId,
+      room_id: agent.roomId,
+      execution_generation_id: "generation-1",
+      provider_turn_id: "failed",
+      mcp_request_id: "request",
+      tool_name: "publish_room_artifact",
+      request: {},
+      mutation: true,
+      state: "executing",
+    });
+    db.close();
     return { turnId: "failed", providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error: "HTTP 503" };
   });
   const http = { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] };
@@ -447,11 +465,18 @@ test("an intercepted thread choice survives publication failure and restart with
         // The coordinator retains the intercepted request before returning USE_FINAL_ANSWER.
         const db = new DatabaseSync(path);
         try {
-          db.prepare(`INSERT INTO supervised_agent_effects
-            (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-            VALUES ('thread-choice',?,?,?,'native-turn','request',?,?,1,?,NULL,NULL,?,?)`)
-            .run(agent.agentId, agent.roomId, "generation-1", toolName,
-              JSON.stringify({ thread_parent_id: "msg_72", text: "draft" }), effectState, new Date().toISOString(), new Date().toISOString());
+          seedBoundedMcpEffectRow(db, {
+            id: "thread-choice",
+            agent_id: agent.agentId,
+            room_id: agent.roomId,
+            execution_generation_id: "generation-1",
+            provider_turn_id: "native-turn",
+            mcp_request_id: "request",
+            tool_name: toolName,
+            request: { thread_parent_id: "msg_72", text: "draft" },
+            mutation: true,
+            state: effectState,
+          });
         } finally { db.close(); }
       }
       return { turnId: "native-turn", outcome: "reply", text: "final answer" };
@@ -488,18 +513,19 @@ test("unrelated or non-thread message effects cannot redirect the daemon's activ
       await options?.checkpointTurnStarted?.("native-turn");
       const db = new DatabaseSync(path);
       try {
-        db.prepare(`INSERT INTO supervised_agent_effects
-          (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-          VALUES ('other-effect',?,?,?,?,'request',?,?,1,?,NULL,NULL,?,?)`)
-          .run(variation === "agent" ? "other-agent" : agent.agentId,
-            variation === "room" ? "other-room" : agent.roomId,
-            variation === "generation" ? "old-generation" : "generation-1",
-            variation === "turn" ? "other-turn" : "native-turn",
-            variation === "tool" ? "publish_room_artifact" : "send_message",
-            JSON.stringify(variation === "quote" ? { reply_to: "msg_72" }
-              : { thread_parent_id: variation === "parent" ? "msg_71" : "msg_72" }),
-            ["executing", "completed", "uncertain"].includes(variation) ? variation : "prepared",
-            new Date().toISOString(), new Date().toISOString());
+        seedBoundedMcpEffectRow(db, {
+          id: "other-effect",
+          agent_id: variation === "agent" ? "other-agent" : agent.agentId,
+          room_id: variation === "room" ? "other-room" : agent.roomId,
+          execution_generation_id: variation === "generation" ? "old-generation" : "generation-1",
+          provider_turn_id: variation === "turn" ? "other-turn" : "native-turn",
+          mcp_request_id: "request",
+          tool_name: variation === "tool" ? "publish_room_artifact" : "send_message",
+          request: variation === "quote" ? { reply_to: "msg_72" }
+            : { thread_parent_id: variation === "parent" ? "msg_71" : "msg_72" },
+          mutation: true,
+          state: (["executing", "completed", "uncertain"].includes(variation) ? variation : "prepared") as "executing" | "completed" | "uncertain" | "prepared",
+        });
       } finally { db.close(); }
       return { turnId: "native-turn", outcome: "reply", text: "final answer" };
     }), {

@@ -11,7 +11,7 @@ import {
   isRentalSafePermissionProfile,
 } from "../main/agents/rental-permission-profiles.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
-import { redactCredentialText } from "../main/agents/provider-evidence.js";
+import { redactCredentialText } from "#provider-runtime/agents/provider-evidence.js";
 import {
   getOrCreateDesktopSupervisorAgentIdentity,
 } from "../main/supervisor-grant.js";

@@ -2,7 +2,13 @@ import { chmod, mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createServer, type Server, type Socket } from "node:net";
 
-import { DAEMON_PROTOCOL_VERSION, type DaemonRequest, type DaemonResponse } from "./types.js";
+import {
+  DAEMON_PROTOCOL_VERSION,
+  maxRequestBytesForMethod,
+  VERSION_AGNOSTIC_METHODS,
+  type DaemonRequest,
+  type DaemonResponse,
+} from "#daemon-contract/index.js";
 import { LOCAL_BOARD_MAX_FRAME_BYTES } from "../../../shared/local-board-owner.mjs";
 import { acceptDaemonPeer, ensureDaemonProof, isWindowsPipePath } from "../../../shared/daemon-endpoint.mjs";
 import { DaemonFenceLostError } from "./singleton.js";
@@ -122,15 +128,16 @@ export class DaemonControlSocket {
     if (socket.destroyed) close();
     try {
       request = JSON.parse(line) as DaemonRequest;
-      // Board imports carry existing task descriptions (up to 100,000 characters
-      // each). Other control requests keep their original 64 KiB admission cap.
-      if (request.method !== "local_board.mutate" && Buffer.byteLength(line) >= 64 * 1024) {
+      // Per-method request admission size comes from the single RPC contract
+      // (16 MiB for local_board.mutate, 64 KiB for all other control methods).
+      const maxMethodBytes = maxRequestBytesForMethod(request.method);
+      if (maxMethodBytes < this.maxFrameBytes && Buffer.byteLength(line) >= maxMethodBytes) {
         throw new Error("Daemon request is too large.");
       }
       // Negotiation is intentionally version-agnostic: a vN+1 desktop must be
       // able to identify and hand off a healthy vN daemon without blind-killing
       // it or its provider children.
-      if (request.version !== DAEMON_PROTOCOL_VERSION && request.method !== "daemon.negotiate") {
+      if (request.version !== DAEMON_PROTOCOL_VERSION && !VERSION_AGNOSTIC_METHODS.has(request.method)) {
         throw new Error(`Protocol version mismatch: expected ${DAEMON_PROTOCOL_VERSION}, received ${request.version}.`);
       }
       // Only read subscriptions consume this signal. Mutations retain their

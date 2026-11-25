@@ -10,7 +10,7 @@
 //   (turn id -> the first event the live display shows) and `turn_end`.
 //   The first turn after a launch is the cold one.
 //
-//   LETAGENTS_MEASURE_LIVE_PROVIDERS=1 node --import tsx \
+//   LETAGENTS_MEASURE_LIVE_PROVIDERS=1 node --conditions=letagents-source --import tsx \
 //     electron/scripts/measure-provider-start-latency.mjs --provider codex --turns 3
 //
 // The Codex adapter keeps its agents' home below HOME/.letagents. Run Codex
@@ -25,9 +25,9 @@ import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
-import { CodexProviderAdapter } from "../main/agents/codex-provider-adapter.ts";
-import { ClaudeCodeProviderAdapter } from "../main/agents/claude-code-provider-adapter.ts";
-import { resolveCodexExecutable } from "../main/agents/codex-executable.ts";
+import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { ClaudeCodeProviderAdapter } from "#provider-runtime/agents/claude-code-provider-adapter.js";
+import { resolveCodexExecutable } from "#provider-runtime/agents/codex-executable.js";
 import { ProviderLiveDisplay } from "../../daemon/provider-live-display.ts";
 import { sanitizeDaemonActivityEvent } from "../../daemon/credential-redaction.ts";
 import { isHumanRoomActivityEvent } from "../../daemon/provider-stream-policy.ts";

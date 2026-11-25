@@ -9,13 +9,15 @@ import {
   CURSOR_NO_ROOM_REPLY_SENTINEL,
   CursorProviderAdapter,
   type CursorProviderAdapterDependencies,
-} from "../main/agents/cursor-provider-adapter.js";
-import type { NativeExecutionObservation } from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
+import type { NativeExecutionObservation } from "#provider-runtime/agents/provider-adapter.js";
 import { expectedCursorSandbox } from "./platform.js";
+import { removeTestDirectory } from "./harness.js";
 import {
   argValue,
   wrapperHostedMcpFixture,
   createHarness,
+  FakeCursorChild,
   daemonSpawnRequest,
   supervisedAdapter,
   spawnDaemonLane,
@@ -338,6 +340,835 @@ test("a failed prepared-wrapper idle checkpoint recovers before the inbox item b
     assert.equal(harness.children.length, 2, "compensation does not redispatch the first inbox item");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a prepared wrapper whose retirement keeps failing reports every earlier cause (task_21)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-prepared-retirement-causes-"));
+  const harness = createHarness();
+  try {
+    const dependencies: CursorProviderAdapterDependencies = {
+      ...harness.dependencies,
+      prepareTurnState(path) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+      },
+      launchTurn(input) {
+        const child = harness.dependencies.launchTurn(input);
+        if (input.statePath) {
+          writeFileSync(`${input.statePath}.terminal.json`, JSON.stringify({
+            type: "not_started",
+            error: "Cursor wrapper startup failed: probe startup cause",
+            native_process_group_reaped: true,
+            reap_scope: "native_process_group",
+            remote_authority_revoked: true,
+          }));
+        }
+        return child;
+      },
+    };
+    const adapter = new CursorProviderAdapter({
+      dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir: join(root, "config"),
+        dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const detach = new AbortController();
+    let settlements = 0;
+    const turn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointPreparedTurn: async () => { detach.abort(); },
+      checkpointProviderState: async () => {},
+      // Both retirements (the launch path, then exact-turn recovery) fail, as the capture flush did on Windows.
+      settleLifecycleBeforeIdle: async () => {
+        settlements += 1;
+        throw new Error(`Execution evidence rejected: identity_mismatch (settlement ${settlements}).`);
+      },
+      detachSignal: detach.signal,
+    });
+    await assert.rejects(turn, (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      // Recovery retirement failure, with the not-dispatched cause it was retiring.
+      assert.match(message, /could not retire its exact child birth: Execution evidence rejected: identity_mismatch \(settlement 2\)/);
+      assert.match(message, /original cause: Cursor's prepared wrapper exited before native dispatch/);
+      assert.match(message, /Wrapper cause: Cursor wrapper startup failed: probe startup cause/);
+      // The first (launch-path) retirement failure and its own cause are kept too.
+      assert.match(message, /after launch failure: Cursor prepared wrapper was reaped, but its durable idle-state retirement failed: Execution evidence rejected: identity_mismatch \(settlement 1\)/);
+      assert.match(message, /\(settlement 1\)\. \(original cause: Cursor turn preparation was interrupted before native dispatch\.\)/);
+      const stack = String((error as Error).stack ?? "");
+      assert.equal(message.split("after launch failure:").length - 1, 1, "the launch failure appears once in the message");
+      assert.equal(stack.split("after launch failure:").length - 1, 1, "a logged stack shows the launch failure exactly once");
+      return true;
+    });
+    assert.equal(settlements, 2);
+    assert.equal(harness.children.length, 1, "a failed retirement never redispatches the inbox item");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("two pre-init not_started Cursor turns recover atomically across resumed handles, permit Stop, and deliver the next turn (task_21)", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { DaemonStateSchema } = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
+  const { ManifestStore } = await import(new URL("../../daemon/manifest-store.ts", import.meta.url).href);
+  const { SupervisedAgentInboxStore } = await import(new URL("../../daemon/supervised-agent-inbox-store.ts", import.meta.url).href);
+  const { ExecutionCaptureCoordinator } = await import(new URL("../../daemon/execution-capture-coordinator.ts", import.meta.url).href);
+  const { executionRuntimeStorageIdentity } = await import(new URL("../../daemon/execution-shadow-store.ts", import.meta.url).href);
+  const { serializeDaemonDeploymentId } = await import(new URL("../../daemon/manifest-entry-projection.ts", import.meta.url).href);
+  const { exitedRuntimesToArchive } = await import(new URL("../../daemon/runtime-recovery-journal.ts", import.meta.url).href);
+
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-two-turn-cr8-"));
+  const dbPath = join(root, "daemon-state.sqlite");
+  const at = "2026-08-31T00:00:00.000Z";
+  const agentId = "cursor-cr8-agent";
+  const roomId = "room-cr8";
+  const workAttemptId = "wa-cursor-1";
+  const sessionId = "agent-session-cr8";
+  const credentialRef = "cred-cr8";
+  const apiUrl = "https://letagents.test";
+
+  const db = new DatabaseSync(dbPath);
+  db.exec("PRAGMA foreign_keys=ON");
+  new DaemonStateSchema().createSchema(db);
+  const manifest = new ManifestStore(dbPath);
+  manifest.attachDatabase(db);
+  let onInboxMutation: () => void = () => undefined;
+  const inbox = new SupervisedAgentInboxStore(dbPath, () => at, () => onInboxMutation());
+  inbox.attachDatabase(db);
+
+  const harness = createHarness({ silent: true });
+  let launchCount = 0;
+  let releaseTurn3Completion!: () => void;
+  const turn3Ready = new Promise<void>((resolve) => { releaseTurn3Completion = resolve; });
+  let signalTurn3Init!: () => void;
+  const turn3InitObserved = new Promise<void>((resolve) => { signalTurn3Init = resolve; });
+
+  const dependencies: CursorProviderAdapterDependencies = {
+    ...harness.dependencies,
+    prepareTurnState(path) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+    },
+    launchTurn(input) {
+      launchCount += 1;
+      const attempt = launchCount;
+      const child = harness.dependencies.launchTurn(input) as FakeCursorChild;
+      if (attempt <= 2 && input.statePath) {
+        writeFileSync(`${input.statePath}.terminal.json`, JSON.stringify({
+          type: "not_started",
+          error: `Cursor wrapper startup failed: probe startup cause #${attempt}`,
+          native_process_group_reaped: true,
+          reap_scope: "native_process_group",
+          remote_authority_revoked: true,
+        }));
+      }
+      const originalRelease = child.release.bind(child);
+      child.release = () => {
+        originalRelease();
+        if (attempt <= 2) {
+          queueMicrotask(() => {
+            child.resolveExit({ type: "exit", code: 1, signal: null });
+          });
+        } else {
+          queueMicrotask(() => {
+            child.emit({ type: "system", subtype: "init", session_id: "sess-cursor-turn3", model: "cursor-fast" });
+            signalTurn3Init();
+            void turn3Ready.then(() => {
+              child.emit({
+                type: "assistant",
+                message: { role: "assistant", content: [{ type: "text", text: "Turn 3 delivered after undispatched recovery" }] },
+              });
+              child.emit({
+                type: "result",
+                subtype: "success",
+                is_error: false,
+                result: "Turn 3 delivered after undispatched recovery",
+                session_id: "sess-cursor-turn3",
+              });
+              child.resolveExit({ type: "exit", code: 0, signal: null });
+            });
+          });
+        }
+      };
+      return child;
+    },
+  };
+
+  const adapter = new CursorProviderAdapter({
+    dependencies,
+    supervisedProfileFactory: () => ({
+      homeDir: join(root, "home"), configDir: join(root, "config"),
+      dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+      env: { HOME: join(root, "home") },
+      ...wrapperHostedMcpFixture(root),
+    }),
+  });
+
+  const diagnostics: string[] = [];
+  let currentHandle: Awaited<ReturnType<typeof adapter.spawn>> | undefined;
+  let currentGeneration = "gen-1";
+  let currentInstallation: {
+    nonce: symbol;
+    listenerLeaseNonce: symbol;
+    entryId: string;
+    handle: NonNullable<typeof currentHandle>;
+    executionGenerationId: string;
+    workAttemptId: string;
+    providerContinuationId: string;
+    providerConnection: { kind: "cursor_cli"; pid: number | null; processIdentity: string | null };
+    configurationRevision: number;
+    authorityMode: "typed" | null;
+  } | null = null;
+
+  const capture = new ExecutionCaptureCoordinator(db, {
+    provider: {
+      onExecution: (handle: object, listener: (event: NativeExecutionObservation) => void) =>
+        adapter.onExecution(handle as Parameters<typeof adapter.onExecution>[0], listener),
+    },
+    currentHandle: () => currentHandle,
+    daemonGeneration: () => 1,
+    diagnostic: (_id: string, code: string) => diagnostics.push(code),
+  });
+  onInboxMutation = () => capture.refresh(agentId);
+
+  const readVersion = () => Number((db.prepare("SELECT version FROM agents WHERE agent_id=?").get(agentId) as { version: number }).version);
+  const readObservedState = () => String((db.prepare("SELECT observed_state FROM agents WHERE agent_id=?").get(agentId) as { observed_state: string }).observed_state);
+
+  const installHandle = (handle: NonNullable<typeof currentHandle>, generationId: string) => {
+    currentHandle = handle;
+    currentGeneration = generationId;
+    const leaseNonce = Symbol(`lease-${generationId}`);
+    currentInstallation = Object.freeze({
+      nonce: Symbol(`inst-${generationId}-idle`),
+      listenerLeaseNonce: leaseNonce,
+      entryId: agentId,
+      handle,
+      executionGenerationId: generationId,
+      workAttemptId,
+      providerContinuationId: handle.providerContinuationId!,
+      providerConnection: { kind: "cursor_cli" as const, pid: null, processIdentity: null },
+      configurationRevision: 1,
+      authorityMode: null,
+    });
+    capture.install(currentInstallation as unknown as Parameters<typeof capture.install>[0]);
+  };
+
+  const advanceHandle = (
+    handle: NonNullable<typeof currentHandle>,
+    providerContinuationId: string,
+    providerConnection: { kind: "cursor_cli"; pid: number | null; processIdentity: string | null },
+    authorityMode: "typed" | null,
+  ) => {
+    currentInstallation = Object.freeze({
+      nonce: Symbol(`inst-${currentGeneration}-${providerConnection.pid ?? "idle"}`),
+      listenerLeaseNonce: currentInstallation!.listenerLeaseNonce,
+      entryId: agentId,
+      handle,
+      executionGenerationId: currentGeneration,
+      workAttemptId,
+      providerContinuationId,
+      providerConnection: { ...providerConnection },
+      configurationRevision: 1,
+      authorityMode,
+    });
+    capture.advance(currentInstallation as unknown as Parameters<typeof capture.advance>[0]);
+    if (authorityMode === "typed" && providerConnection.pid !== null && providerConnection.processIdentity) {
+      capture.prepared({
+        agentId,
+        executionGenerationId: currentGeneration,
+        handle,
+        connection: { ...providerConnection },
+        configurationRevision: 1,
+      });
+    }
+  };
+
+  const turnCallbacks = (
+    handle: NonNullable<typeof currentHandle>,
+    inboxItemId: string,
+    generationId: string,
+    state: { turnId: string | null; continuation: string; connection: { kind: "cursor_cli"; pid: number | null; processIdentity: string | null }; versions: number[] },
+  ) => ({
+    checkpointPreparedTurn: async (checkpoint: {
+      providerTurnId: string;
+      providerContinuationId: string;
+      providerConnection: { kind: string; pid: number | null; processIdentity?: string | null };
+    }) => {
+      const loaded = await manifest.getEntryWithVersion(agentId);
+      assert.ok(loaded);
+      const nextConnection = {
+        kind: "cursor_cli" as const,
+        pid: checkpoint.providerConnection.pid,
+        processIdentity: checkpoint.providerConnection.processIdentity ?? null,
+      };
+      const result = await manifest.checkpointCursorPreparedTurn(loaded.version, {
+        agentId,
+        roomId,
+        inboxItemId,
+        providerTurnId: checkpoint.providerTurnId,
+        providerContinuationId: checkpoint.providerContinuationId,
+        workAttemptId,
+        executionGenerationId: generationId,
+        agentSessionId: sessionId,
+        credentialRef,
+        apiUrl,
+        expectedProviderContinuationId: state.continuation,
+        expectedProviderConnection: state.connection,
+        providerConnection: nextConnection,
+        configurationRevision: 1,
+        observedAt: at,
+      });
+      state.turnId = checkpoint.providerTurnId;
+      state.continuation = checkpoint.providerContinuationId;
+      state.connection = nextConnection;
+      state.versions.push(result.version);
+      advanceHandle(handle, state.continuation, nextConnection, "typed");
+    },
+    checkpointProviderState: async (checkpoint: {
+      providerContinuationId: string;
+      providerConnection: { kind: string; pid: number | null; processIdentity?: string | null };
+    }) => {
+      const loaded = await manifest.getEntryWithVersion(agentId);
+      assert.ok(loaded);
+      const nextConnection = {
+        kind: "cursor_cli" as const,
+        pid: checkpoint.providerConnection.pid,
+        processIdentity: checkpoint.providerConnection.processIdentity ?? null,
+      };
+      const result = await manifest.checkpointCursorProviderState(loaded.version, {
+        agentId,
+        roomId,
+        inboxItemId,
+        providerTurnId: state.turnId!,
+        workAttemptId,
+        executionGenerationId: generationId,
+        agentSessionId: sessionId,
+        credentialRef,
+        apiUrl,
+        expectedProviderContinuationId: state.continuation,
+        expectedProviderConnection: state.connection,
+        providerContinuationId: checkpoint.providerContinuationId,
+        providerConnection: nextConnection,
+        observedAt: at,
+      });
+      state.continuation = checkpoint.providerContinuationId;
+      state.connection = nextConnection;
+      state.versions.push(result.version);
+      advanceHandle(handle, state.continuation, nextConnection, nextConnection.pid === null ? null : "typed");
+    },
+    settleLifecycleBeforeIdle: async () => {
+      capture.flush(currentInstallation as unknown as Parameters<typeof capture.flush>[0]);
+      state.versions.push(readVersion());
+    },
+  });
+
+  let turn3Promise: Promise<unknown> | null = null;
+  try {
+    const idleConnection = { kind: "cursor_cli" as const, pid: null, processIdentity: null };
+    const handle1 = await adapter.spawn(daemonSpawnRequest({ cwd: root, workAttemptId }));
+    const initialContinuation = handle1.providerContinuationId!;
+
+    db.prepare(`INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+      VALUES(?,?,?,1,?,'repo','remote','rev','/private/bare','active',?)`)
+      .run(workAttemptId, agentId, agentId, root, at);
+    db.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,'test',1,NULL)").run("gen-1", workAttemptId, at);
+    db.prepare(`INSERT INTO agents(agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,config_revision,runtime_configuration_revision,desired_state,observed_state,condition,deployment_id,run_id,work_attempt_id,provider_work_attempt_id,provider_continuation_id,provider_execution_generation_id,provider_connection_json)
+      VALUES(?,0,6,'owner',?,'Cursor CR8',?,'cursor','charter',1,1,'running','idle','none',?,?,?,?,?,?,?)`)
+      .run(agentId, at, roomId, serializeDaemonDeploymentId(agentId, "gen-1"), "gen-1", workAttemptId, workAttemptId, initialContinuation, "gen-1", JSON.stringify(idleConnection));
+    db.prepare(`INSERT INTO worker_session_bindings(entry_id,room_id,work_attempt_id,execution_generation_id,agent_session_id,credential_ref,api_url,room_cursor,last_sequence,last_observed_at_ms,binding_epoch,updated_at)
+      VALUES(?,?,?,?,?,?,?,NULL,0,?,1,?)`)
+      .run(agentId, roomId, workAttemptId, "gen-1", sessionId, credentialRef, apiUrl, Date.parse(at), at);
+
+    const [item] = await inbox.ingestPoll({
+      agent_id: agentId,
+      room_id: roomId,
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { id: "1", text: "hello" }, activation: { for_current_agent: { decision: "activate" } } }],
+    });
+    assert.ok(item);
+    await inbox.claimHead(agentId);
+    await inbox.checkpointDispatchIntent(item.inbox_item_id);
+
+    installHandle(handle1, "gen-1");
+    await flush();
+
+    // --- Turn 1 (handle1, gen-1): exits pre-init (not_started #1), leaving runs(T1, R1, state='lost') and R1 exited ---
+    assert.equal(readVersion(), 6);
+    const turn1State = { turnId: null as string | null, continuation: initialContinuation, connection: { ...idleConnection }, versions: [] as number[] };
+    await assert.rejects(
+      adapter.runRoomTurn(handle1, roomTurnRequest({ inboxItemId: item.inbox_item_id, actionId: "action-1" }), turnCallbacks(handle1, item.inbox_item_id, "gen-1", turn1State)),
+      /exited before reporting its stream-json init/,
+    );
+    assert.ok(turn1State.turnId);
+    // Exact version gap from msg_3018:
+    // 6 -> 7 (checkpointCursorPreparedTurn), 7 -> 8 (projectLifecycleToAgent turn/lost -> failed), 8 -> 9 (checkpointCursorProviderState -> idle).
+    assert.deepEqual(turn1State.versions, [7, 8, 9],
+      "Turn 1 accounts for every version increment without audit rows: prepared(7), lifecycle turn/lost(8), idle checkpoint(9)");
+    assert.equal(readVersion(), 9);
+    assert.equal(readObservedState(), "failed", "Turn 1 turn/lost projected observed_state='failed' directly onto agents");
+
+    const child1 = harness.children[0]!;
+    const runtime1 = executionRuntimeStorageIdentity(agentId, "gen-1", "cursor_cli", child1.pid!, harness.dependencies.getProcessIdentity(child1.pid!)!);
+    const run1 = db.prepare("SELECT state,side_effects,runtime_generation_id FROM runs WHERE agent_id=? AND provider_turn_id=?")
+      .get(agentId, turn1State.turnId) as { state: string; side_effects: string; runtime_generation_id: string };
+    assert.deepEqual({ ...run1 }, { state: "lost", side_effects: "none", runtime_generation_id: runtime1 });
+    assert.equal((db.prepare("SELECT runtime_state FROM execution_runtime_generations WHERE runtime_generation_id=?").get(runtime1) as { runtime_state: string }).runtime_state, "exited");
+
+    // Delivery records result_recovery for Turn 1 and transitions back to pending for resume recovery.
+    await inbox.recordRetryFailure(item.inbox_item_id, { domain: "result_recovery", error: "startup failed" });
+    await inbox.transition(item.inbox_item_id, "pending");
+    await inbox.claimHead(agentId);
+
+    // Resume on a fresh handle2 (gen-2, fresh ProviderExecutionObserver sourceId).
+    db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='gen-1'")
+      .run(JSON.stringify({ ended_at: at, exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "crashed", actor: "test", generation: 1, provider_continuation_id: initialContinuation }));
+    db.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,'test',2,NULL)").run("gen-2", workAttemptId, at);
+    db.prepare("UPDATE agents SET observed_state='idle',deployment_id=?,run_id='gen-2',provider_execution_generation_id='gen-2',provider_connection_json=?,version=version+1 WHERE agent_id=?")
+      .run(serializeDaemonDeploymentId(agentId, "gen-2"), JSON.stringify(idleConnection), agentId);
+    db.prepare("UPDATE worker_session_bindings SET execution_generation_id='gen-2' WHERE entry_id=?").run(agentId);
+    const versionAfterResume = readVersion();
+    assert.equal(versionAfterResume, 10);
+
+    // exitedRuntimesToArchive skips R1 while the inbox item is still active (the exact cr8 precondition).
+    const resumedEntry = await manifest.getEntry(agentId);
+    assert.deepEqual(exitedRuntimesToArchive(db, resumedEntry), [], "active inbox item keeps R1 out of generic exited-runtime archival");
+
+    const handle2 = await adapter.resume(
+      { workAttemptId, providerContinuationId: initialContinuation, providerConnection: idleConnection },
+      daemonSpawnRequest({ cwd: root, workAttemptId }),
+    );
+    installHandle(handle2, "gen-2");
+    await flush();
+
+    // Recover Turn 1 on handle2 -> not_dispatched -> recordRetryFailure atomically archives R1 + resets inbox to pending.
+    await assert.rejects(
+      adapter.recoverRoomTurn(handle2, { inboxItemId: item.inbox_item_id, providerTurnId: turn1State.turnId }),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.equal((error as { roomTurnRecoveryOutcome?: unknown })?.roomTurnRecoveryOutcome, "not_dispatched", message);
+        assert.match(message, /probe startup cause #1/);
+        return true;
+      },
+    );
+    const reset1 = await inbox.recordRetryFailure(item.inbox_item_id, {
+      domain: "pre_dispatch",
+      error: "Cursor's prepared wrapper exited before native dispatch",
+      resetUndispatchedTurnId: turn1State.turnId,
+    });
+    assert.equal(reset1.item.state, "pending");
+    assert.equal(reset1.item.provider_turn_id, null);
+    assert.equal(reset1.item.attempt_count, 0);
+    assert.equal(await inbox.providerTurnBinding(item.inbox_item_id), null);
+
+    // --- Turn 2 (handle2, gen-2): exits pre-init (not_started #2), retires cleanly without identity_mismatch, clears handle.liveTurn, and permits Stop ---
+    await inbox.claimHead(agentId);
+    await inbox.checkpointDispatchIntent(item.inbox_item_id);
+    const turn2State = { turnId: null as string | null, continuation: initialContinuation, connection: { ...idleConnection }, versions: [] as number[] };
+    let turn2Error: unknown;
+    try {
+      await adapter.runRoomTurn(handle2, roomTurnRequest({ inboxItemId: item.inbox_item_id, actionId: "action-2" }), turnCallbacks(handle2, item.inbox_item_id, "gen-2", turn2State));
+    } catch (error) {
+      turn2Error = error;
+    }
+    await flush();
+    assert.ok(turn2State.turnId);
+    if (handle2.pid !== null) {
+      // Unfixed base leaves R1 unarchived, so Turn 2's flush throws invalid_transition
+      // and strands handle2.liveTurn. The delivery retry refresh then drains lane2,
+      // suspends it with invalid_observation, and exact-turn recovery fails with the
+      // exact cr8 field error ("could not retire its exact child birth: ... identity_mismatch").
+      capture.refresh(agentId);
+      await flush();
+      await adapter.recoverRoomTurn(handle2, { inboxItemId: item.inbox_item_id, providerTurnId: turn2State.turnId }, {
+        settleLifecycleBeforeIdle: async () => {
+          capture.flush(currentInstallation as unknown as Parameters<typeof capture.flush>[0]);
+        },
+      });
+    }
+    assert.match(turn2Error instanceof Error ? turn2Error.message : String(turn2Error), /exited before reporting its stream-json init/);
+    const recovery1 = db.prepare("SELECT phase,runtime_generation_id FROM agent_runtime_recoveries WHERE agent_id=? AND runtime_generation_id=?")
+      .get(agentId, runtime1) as { phase: string; runtime_generation_id: string } | undefined;
+    assert.deepEqual(recovery1 ? { ...recovery1 } : undefined, { phase: "complete", runtime_generation_id: runtime1 },
+      "undispatched reset atomically archived R1 in agent_runtime_recoveries");
+    assert.deepEqual(turn2State.versions, [11, 12, 13],
+      "Turn 2 also advances cleanly through prepared(11), lifecycle turn/lost(12), idle checkpoint(13)");
+    assert.equal(handle2.pid, null, "Turn 2 retired and cleared its retained liveTurn birth");
+    assert.equal(handle2.observedState(), "failed", "Turn 2 reached finishAttempt cleanly instead of stranding handle2 in working");
+    assert.equal(diagnostics.includes("invalid_observation"), false, `unexpected capture diagnostics: ${diagnostics.join(",")}`);
+
+    // Resume on handle3 (gen-3) after Turn 2's clean finishAttempt; Stop succeeds immediately (idle),
+    // Turn 2 recovers cleanly as not_dispatched (no identity_mismatch), and Turn 3 delivers on the SAME agent.
+    await inbox.recordRetryFailure(item.inbox_item_id, { domain: "result_recovery", error: "startup failed #2" });
+    await inbox.transition(item.inbox_item_id, "pending");
+    await inbox.claimHead(agentId);
+
+    db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='gen-2'")
+      .run(JSON.stringify({ ended_at: at, exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "crashed", actor: "test", generation: 2, provider_continuation_id: initialContinuation }));
+    db.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,'test',3,NULL)").run("gen-3", workAttemptId, at);
+    db.prepare("UPDATE agents SET observed_state='idle',deployment_id=?,run_id='gen-3',provider_execution_generation_id='gen-3',provider_connection_json=?,version=version+1 WHERE agent_id=?")
+      .run(serializeDaemonDeploymentId(agentId, "gen-3"), JSON.stringify(idleConnection), agentId);
+    db.prepare("UPDATE worker_session_bindings SET execution_generation_id='gen-3' WHERE entry_id=?").run(agentId);
+
+    const handle3 = await adapter.resume(
+      { workAttemptId, providerContinuationId: initialContinuation, providerConnection: idleConnection },
+      daemonSpawnRequest({ cwd: root, workAttemptId }),
+    );
+    installHandle(handle3, "gen-3");
+    await flush();
+
+    // Stop must succeed cleanly with idle state (never "no active settlement owner").
+    const stoppedAfterTurn2 = await adapter.controlTurn(handle3, null);
+    assert.equal(stoppedAfterTurn2.state, "idle");
+    assert.equal(stoppedAfterTurn2.interrupted, false);
+
+    // Recover Turn 2 -> clean not_dispatched (never "could not retire its exact child birth: ... identity_mismatch").
+    await assert.rejects(
+      adapter.recoverRoomTurn(handle3, { inboxItemId: item.inbox_item_id, providerTurnId: turn2State.turnId }),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.equal((error as { roomTurnRecoveryOutcome?: unknown })?.roomTurnRecoveryOutcome, "not_dispatched", message);
+        assert.match(message, /probe startup cause #2/);
+        assert.doesNotMatch(message, /could not retire|identity_mismatch/);
+        return true;
+      },
+    );
+    const reset2 = await inbox.recordRetryFailure(item.inbox_item_id, {
+      domain: "pre_dispatch",
+      error: "Cursor's prepared wrapper exited before native dispatch (#2)",
+      resetUndispatchedTurnId: turn2State.turnId,
+    });
+    assert.equal(reset2.item.state, "pending");
+    assert.equal(reset2.item.provider_turn_id, null);
+
+    // --- Turn 3 (handle3, gen-3): next turn is delivered on the SAME agent with captureAdmission='ready' and recordBlock=null ---
+
+    await inbox.claimHead(agentId);
+    await inbox.checkpointDispatchIntent(item.inbox_item_id);
+    const turn3State = { turnId: null as string | null, continuation: initialContinuation, connection: { ...idleConnection }, versions: [] as number[] };
+    const activeTurn3 = adapter.runRoomTurn(
+      handle3,
+      roomTurnRequest({ inboxItemId: item.inbox_item_id, actionId: "action-3" }),
+      turnCallbacks(handle3, item.inbox_item_id, "gen-3", turn3State),
+    );
+    turn3Promise = activeTurn3;
+    await turn3InitObserved;
+    await flush();
+    assert.equal(
+      capture.captureAdmission(currentInstallation as unknown as Parameters<typeof capture.captureAdmission>[0]),
+      "ready",
+      "Turn 3 captureAdmission must be ready on the same agent after Turn 2 retirement",
+    );
+    assert.equal(
+      capture.recordBlock(currentInstallation as unknown as Parameters<typeof capture.recordBlock>[0]),
+      null,
+      "Turn 3 recordBlock must be null on the same agent after Turn 2 retirement",
+    );
+    releaseTurn3Completion();
+    const turn3Result = await activeTurn3;
+    turn3Promise = null;
+    assert.equal(turn3Result.outcome, "reply");
+    assert.equal(turn3Result.text, "Turn 3 delivered after undispatched recovery");
+    assert.equal(handle3.pid, null);
+    assert.equal(handle3.observedState(), "idle");
+    assert.equal(diagnostics.includes("invalid_observation"), false);
+    assert.equal(diagnostics.includes("source_gap"), false);
+
+    await inbox.checkpointNormalizedTerminal({
+      inbox_item_id: item.inbox_item_id,
+      agent_id: agentId,
+      execution_generation_id: "gen-3",
+      provider_turn_id: turn3State.turnId!,
+      outcome: "reply",
+      text: turn3Result.text,
+      evidence: "stream",
+      terminal_evidence: turn3Result,
+    });
+    await inbox.transition(item.inbox_item_id, "awaiting_result");
+    await inbox.transition(item.inbox_item_id, "publishing");
+    const ack = await inbox.checkpointPublication({
+      inbox_item_id: item.inbox_item_id,
+      room_id: roomId,
+      canonical_message_id: "msg_reply_turn3",
+    });
+    assert.equal(ack.state, "acknowledged");
+  } finally {
+    releaseTurn3Completion();
+    await turn3Promise?.catch(() => undefined);
+    capture.close();
+    await inbox.close();
+    await manifest.close();
+    if (db.isOpen) db.close();
+    await removeTestDirectory(root);
+  }
+});
+
+test("a reused Cursor handle delivers the next turn on the same capture source after an undispatched lost turn is archived (task_21)", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { DaemonStateSchema } = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
+  const { ManifestStore } = await import(new URL("../../daemon/manifest-store.ts", import.meta.url).href);
+  const { SupervisedAgentInboxStore } = await import(new URL("../../daemon/supervised-agent-inbox-store.ts", import.meta.url).href);
+  const { ExecutionCaptureCoordinator } = await import(new URL("../../daemon/execution-capture-coordinator.ts", import.meta.url).href);
+  const { serializeDaemonDeploymentId } = await import(new URL("../../daemon/manifest-entry-projection.ts", import.meta.url).href);
+
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-reused-handle-"));
+  const dbPath = join(root, "daemon-state.sqlite");
+  const at = "2026-08-31T00:00:00.000Z";
+  const agentId = "cursor-reused-agent";
+  const roomId = "room-reused";
+  const workAttemptId = "wa-cursor-1";
+  const generationId = "gen-reused-1";
+  const sessionId = "agent-session-reused";
+  const credentialRef = "cred-reused";
+  const apiUrl = "https://letagents.test";
+
+  const db = new DatabaseSync(dbPath);
+  db.exec("PRAGMA foreign_keys=ON");
+  new DaemonStateSchema().createSchema(db);
+  const manifest = new ManifestStore(dbPath);
+  manifest.attachDatabase(db);
+  let onInboxMutation: () => void = () => undefined;
+  const inbox = new SupervisedAgentInboxStore(dbPath, () => at, () => onInboxMutation());
+  inbox.attachDatabase(db);
+
+  const harness = createHarness({ silent: true });
+  let launchCount = 0;
+  let releaseTurn2!: () => void;
+  const turn2Gate = new Promise<void>((resolve) => { releaseTurn2 = resolve; });
+  let signalTurn2Init!: () => void;
+  const turn2Init = new Promise<void>((resolve) => { signalTurn2Init = resolve; });
+
+  const dependencies: CursorProviderAdapterDependencies = {
+    ...harness.dependencies,
+    prepareTurnState(path) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+    },
+    launchTurn(input) {
+      launchCount += 1;
+      const attempt = launchCount;
+      const child = harness.dependencies.launchTurn(input) as FakeCursorChild;
+      if (attempt === 1 && input.statePath) {
+        writeFileSync(`${input.statePath}.terminal.json`, JSON.stringify({
+          type: "not_started",
+          error: "Cursor wrapper IPC channel closed before dispatch",
+          native_process_group_reaped: true,
+          reap_scope: "native_process_group",
+          remote_authority_revoked: true,
+        }));
+      }
+      const originalRelease = child.release.bind(child);
+      child.release = () => {
+        originalRelease();
+        if (attempt === 1) {
+          throw new Error("EPIPE sending release");
+        }
+        queueMicrotask(() => {
+          child.emit({ type: "system", subtype: "init", session_id: "sess-cursor-reused-2", model: "cursor-fast" });
+          signalTurn2Init();
+          void turn2Gate.then(() => {
+            child.emit({
+              type: "result",
+              subtype: "success",
+              is_error: false,
+              result: "Reused handle turn 2 succeeded",
+              session_id: "sess-cursor-reused-2",
+            });
+            child.resolveExit({ type: "exit", code: 0, signal: null });
+          });
+        });
+      };
+      return child;
+    },
+  };
+
+  const adapter = new CursorProviderAdapter({
+    dependencies,
+    supervisedProfileFactory: () => ({
+      homeDir: join(root, "home"), configDir: join(root, "config"),
+      dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+      env: { HOME: join(root, "home") },
+      ...wrapperHostedMcpFixture(root),
+    }),
+  });
+
+  const diagnostics: string[] = [];
+  let handle!: Awaited<ReturnType<typeof adapter.spawn>>;
+  let installation: {
+    nonce: symbol;
+    listenerLeaseNonce: symbol;
+    entryId: string;
+    handle: typeof handle;
+    executionGenerationId: string;
+    workAttemptId: string;
+    providerContinuationId: string;
+    providerConnection: { kind: "cursor_cli"; pid: number | null; processIdentity: string | null };
+    configurationRevision: number;
+    authorityMode: "typed" | null;
+  } | null = null;
+
+  const capture = new ExecutionCaptureCoordinator(db, {
+    provider: {
+      onExecution: (h: object, listener: (event: NativeExecutionObservation) => void) =>
+        adapter.onExecution(h as Parameters<typeof adapter.onExecution>[0], listener),
+    },
+    currentHandle: () => handle,
+    daemonGeneration: () => 1,
+    diagnostic: (_id: string, code: string) => diagnostics.push(code),
+  });
+  onInboxMutation = () => capture.refresh(agentId);
+
+  let turn2Promise: Promise<unknown> | null = null;
+  try {
+    const idleConnection: { kind: "cursor_cli"; pid: number | null; processIdentity: string | null } = {
+      kind: "cursor_cli", pid: null, processIdentity: null,
+    };
+    handle = await adapter.spawn(daemonSpawnRequest({ cwd: root, workAttemptId }));
+    const initialContinuation = handle.providerContinuationId!;
+
+    db.prepare(`INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+      VALUES(?,?,?,1,?,'repo','remote','rev','/private/bare','active',?)`)
+      .run(workAttemptId, agentId, agentId, root, at);
+    db.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,'test',1,NULL)").run(generationId, workAttemptId, at);
+    db.prepare(`INSERT INTO agents(agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,config_revision,runtime_configuration_revision,desired_state,observed_state,condition,deployment_id,run_id,work_attempt_id,provider_work_attempt_id,provider_continuation_id,provider_execution_generation_id,provider_connection_json)
+      VALUES(?,0,1,'owner',?,'Cursor Reused',?,'cursor','charter',1,1,'running','idle','none',?,?,?,?,?,?,?)`)
+      .run(agentId, at, roomId, serializeDaemonDeploymentId(agentId, generationId), generationId, workAttemptId, workAttemptId, initialContinuation, generationId, JSON.stringify(idleConnection));
+    db.prepare(`INSERT INTO worker_session_bindings(entry_id,room_id,work_attempt_id,execution_generation_id,agent_session_id,credential_ref,api_url,room_cursor,last_sequence,last_observed_at_ms,binding_epoch,updated_at)
+      VALUES(?,?,?,?,?,?,?,NULL,0,?,1,?)`)
+      .run(agentId, roomId, workAttemptId, generationId, sessionId, credentialRef, apiUrl, Date.parse(at), at);
+
+    const leaseNonce = Symbol("lease-reused");
+    installation = Object.freeze({
+      nonce: Symbol("inst-reused-idle"),
+      listenerLeaseNonce: leaseNonce,
+      entryId: agentId,
+      handle,
+      executionGenerationId: generationId,
+      workAttemptId,
+      providerContinuationId: initialContinuation,
+      providerConnection: { ...idleConnection },
+      configurationRevision: 1,
+      authorityMode: null,
+    });
+    capture.install(installation as unknown as Parameters<typeof capture.install>[0]);
+    await flush();
+
+    const [item] = await inbox.ingestPoll({
+      agent_id: agentId,
+      room_id: roomId,
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { id: "1", text: "hello" }, activation: { for_current_agent: { decision: "activate" } } }],
+    });
+    assert.ok(item);
+
+    const state = { turnId: null as string | null, continuation: initialContinuation, connection: { ...idleConnection } };
+    const callbacks = {
+      checkpointPreparedTurn: async (checkpoint: {
+        providerTurnId: string;
+        providerContinuationId: string;
+        providerConnection: { kind: string; pid: number | null; processIdentity?: string | null };
+      }) => {
+        const loaded = await manifest.getEntryWithVersion(agentId);
+        const nextConnection = {
+          kind: "cursor_cli" as const,
+          pid: checkpoint.providerConnection.pid,
+          processIdentity: checkpoint.providerConnection.processIdentity ?? null,
+        };
+        await manifest.checkpointCursorPreparedTurn(loaded!.version, {
+          agentId, roomId, inboxItemId: item.inbox_item_id, providerTurnId: checkpoint.providerTurnId,
+          providerContinuationId: checkpoint.providerContinuationId, workAttemptId, executionGenerationId: generationId,
+          agentSessionId: sessionId, credentialRef, apiUrl,
+          expectedProviderContinuationId: state.continuation, expectedProviderConnection: state.connection,
+          providerConnection: nextConnection, configurationRevision: 1, observedAt: at,
+        });
+        state.turnId = checkpoint.providerTurnId;
+        state.continuation = checkpoint.providerContinuationId;
+        state.connection = nextConnection;
+        installation = Object.freeze({
+          nonce: Symbol("inst-live"), listenerLeaseNonce: leaseNonce, entryId: agentId, handle,
+          executionGenerationId: generationId, workAttemptId, providerContinuationId: state.continuation,
+          providerConnection: { ...nextConnection }, configurationRevision: 1, authorityMode: "typed" as const,
+        });
+        capture.advance(installation as unknown as Parameters<typeof capture.advance>[0]);
+        capture.prepared({
+          agentId, executionGenerationId: generationId,
+          handle,
+          connection: { ...nextConnection }, configurationRevision: 1,
+        });
+      },
+      checkpointProviderState: async (checkpoint: {
+        providerContinuationId: string;
+        providerConnection: { kind: string; pid: number | null; processIdentity?: string | null };
+      }) => {
+        const loaded = await manifest.getEntryWithVersion(agentId);
+        const nextConnection = {
+          kind: "cursor_cli" as const,
+          pid: checkpoint.providerConnection.pid,
+          processIdentity: checkpoint.providerConnection.processIdentity ?? null,
+        };
+        await manifest.checkpointCursorProviderState(loaded!.version, {
+          agentId, roomId, inboxItemId: item.inbox_item_id, providerTurnId: state.turnId!,
+          workAttemptId, executionGenerationId: generationId, agentSessionId: sessionId, credentialRef, apiUrl,
+          expectedProviderContinuationId: state.continuation, expectedProviderConnection: state.connection,
+          providerContinuationId: checkpoint.providerContinuationId, providerConnection: nextConnection, observedAt: at,
+        });
+        state.continuation = checkpoint.providerContinuationId;
+        state.connection = nextConnection;
+        installation = Object.freeze({
+          nonce: Symbol("inst-state"), listenerLeaseNonce: leaseNonce, entryId: agentId, handle,
+          executionGenerationId: generationId, workAttemptId, providerContinuationId: state.continuation,
+          providerConnection: { ...nextConnection }, configurationRevision: 1,
+          authorityMode: nextConnection.pid === null ? null : "typed" as const,
+        });
+        capture.advance(installation as unknown as Parameters<typeof capture.advance>[0]);
+      },
+      settleLifecycleBeforeIdle: async () => {
+        capture.flush(installation as unknown as Parameters<typeof capture.flush>[0]);
+      },
+    };
+
+    // Turn 1 throws on release -> settles lost/exited -> inline recoverRoomTurn returns not_dispatched on the SAME handle.
+    await inbox.claimHead(agentId);
+    await inbox.checkpointDispatchIntent(item.inbox_item_id);
+    await assert.rejects(
+      adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: item.inbox_item_id, actionId: "reused-1" }), callbacks),
+      (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown })?.roomTurnRecoveryOutcome === "not_dispatched",
+    );
+    const reset = await inbox.recordRetryFailure(item.inbox_item_id, {
+      domain: "pre_dispatch", error: "wrapper release failed before dispatch", resetUndispatchedTurnId: state.turnId!,
+    });
+    assert.equal(reset.item.state, "pending");
+    assert.equal(handle.pid, null);
+    assert.equal(handle.observedState(), "idle");
+    const stopped = await adapter.controlTurn(handle, null);
+    assert.equal(stopped.state, "idle");
+    assert.equal(stopped.interrupted, false);
+
+    // Turn 2 runs on the EXACT SAME handle and capture source, advancing past the archived Turn 1 observer epoch.
+    await inbox.claimHead(agentId);
+    await inbox.checkpointDispatchIntent(item.inbox_item_id);
+    const activeTurn2 = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: item.inbox_item_id, actionId: "reused-2" }), callbacks);
+    turn2Promise = activeTurn2;
+    await turn2Init;
+    await flush();
+    assert.equal(capture.captureAdmission(installation as unknown as Parameters<typeof capture.captureAdmission>[0]), "ready");
+    assert.equal(capture.recordBlock(installation as unknown as Parameters<typeof capture.recordBlock>[0]), null);
+    releaseTurn2();
+    const result2 = await activeTurn2;
+    turn2Promise = null;
+    assert.equal(result2.outcome, "reply");
+    assert.equal(result2.text, "Reused handle turn 2 succeeded");
+    assert.equal(diagnostics.includes("invalid_observation"), false);
+  } finally {
+    releaseTurn2();
+    await turn2Promise?.catch(() => undefined);
+    capture.close();
+    await inbox.close();
+    await manifest.close();
+    if (db.isOpen) db.close();
+    await removeTestDirectory(root);
   }
 });
 

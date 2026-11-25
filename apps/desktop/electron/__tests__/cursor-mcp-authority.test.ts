@@ -17,7 +17,7 @@ import test from "node:test";
 import {
   assertCursorSupervisedMcpAuthority,
   runCursorSandboxedInspection,
-} from "../main/agents/cursor-mcp-authority.js";
+} from "#provider-runtime/agents/cursor-mcp-authority.js";
 import { needsPosixProcessGroups, needsProcessTreeHelper, writeFakeProvider, useTestProcessTreeHelper } from "./platform.js";
 
 useTestProcessTreeHelper();

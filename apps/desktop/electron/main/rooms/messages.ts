@@ -60,7 +60,7 @@ import {
   releaseLocalTaskPublishClaim,
   resolveLocalAwareRoomStorageMode,
 } from "./local-store.js";
-import { roomMessageHistoryPageSize } from "../paths.js";
+import { roomMessageHistoryPageSize } from "#provider-runtime/paths.js";
 import { desktopSmokeRoomSnapshot, isDesktopSmokeCheck } from "../smoke.js";
 import {
   mapCloudRoomMessagePayload,

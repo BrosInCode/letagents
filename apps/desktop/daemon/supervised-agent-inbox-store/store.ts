@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { assertNoDeliveryDrain } from "../delivery-drain.js";
-import { assertNoPollingActivation } from "../custodial-polling-activation.js";
 import type { SupervisedInboxItem, Row, ProviderContinuationRepair } from "./types.js";
 import { run } from "./sql.js";
 import { rowToItem, rowToContinuationRepair } from "./row-mapping.js";
@@ -33,9 +31,7 @@ export class SupervisedAgentInboxStore extends InboxDeliveryStore {
     missing_continuation: string;
   }): Promise<ProviderContinuationRepair> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      assertNoDeliveryDrain(database, input.agent_id);
-      assertNoPollingActivation(database, input.agent_id);
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
+      const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
       if (!row) throw new Error("The blocked room message no longer exists.");
       const item = rowToItem(row);
       if (item.agent_id !== input.agent_id || item.room_id !== input.room_id
@@ -80,7 +76,7 @@ export class SupervisedAgentInboxStore extends InboxDeliveryStore {
           SET daemon_generation=?,phase=?,attempt_count=attempt_count+1,last_error=NULL,updated_at=?
           WHERE repair_id=?`),
         input.daemon_generation, repair.replacement_continuation ? "replacement_created" : "probing", timestamp, repair.repair_id);
-        run(database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?"),
+        run(database.prepare("UPDATE inbox_items SET last_error=?,updated_at=? WHERE inbox_item_id=?"),
           "Restoring the saved provider conversation before any model work starts.", timestamp, input.inbox_item_id);
         this.recordEvent(database, input.inbox_item_id, `conversation_restoring:${repair.repair_id}:${repair.attempt_count + 1}`, "conversation_restoring", timestamp, "Retrying conversation restoration with the exact current provider authority.");
         return rowToContinuationRepair(database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repair.repair_id) as Row);
@@ -93,7 +89,7 @@ export class SupervisedAgentInboxStore extends InboxDeliveryStore {
       repairId, input.agent_id, input.room_id, input.inbox_item_id, input.daemon_generation,
       input.execution_generation_id, input.work_attempt_id, input.expected_pid,
       input.expected_process_identity, input.missing_continuation, timestamp, timestamp);
-      run(database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?"),
+      run(database.prepare("UPDATE inbox_items SET last_error=?,updated_at=? WHERE inbox_item_id=?"),
         "Restoring the saved provider conversation before any model work starts.", timestamp, input.inbox_item_id);
       this.recordEvent(database, input.inbox_item_id, `conversation_restoring:${repairId}`, "conversation_restoring", timestamp, "Verifying the saved conversation on the existing provider process.");
       return rowToContinuationRepair(database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repairId) as Row);
@@ -134,7 +130,7 @@ export class SupervisedAgentInboxStore extends InboxDeliveryStore {
       } else if (authoritativeContinuation !== repair.missing_continuation) {
         throw new Error("A rematerialized conversation must match the original continuation.");
       }
-      const itemRow = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(repair.inbox_item_id) as Row | undefined;
+      const itemRow = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(repair.inbox_item_id) as Row | undefined;
       if (!itemRow) throw new Error("Continuation repair lost its room message.");
       const item = rowToItem(itemRow);
       if (item.state !== "blocked" || item.attempt_count !== 0 || item.provider_turn_id || item.outcome) {
@@ -145,14 +141,14 @@ export class SupervisedAgentInboxStore extends InboxDeliveryStore {
       run(database.prepare(`UPDATE provider_continuation_repairs
         SET replacement_continuation=?,phase='committed',last_error=NULL,updated_at=? WHERE repair_id=?`),
       authoritativeContinuation, timestamp, repairId);
-      run(database.prepare(`UPDATE supervised_agent_inbox
+      run(database.prepare(`UPDATE inbox_items
         SET state='pending',last_error=NULL,failure_code=NULL,blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?
         WHERE inbox_item_id=?`), timestamp, item.inbox_item_id);
       const detail = continuityReset
         ? "Conversation restored with a replacement thread; durable agent identity and workspace were preserved."
         : "The saved conversation became available again; no replacement was created.";
       this.recordEvent(database, item.inbox_item_id, `conversation_restored:${repairId}`, "conversation_restored", timestamp, detail);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+      return rowToItem(database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
     }));
   }
 
@@ -165,7 +161,7 @@ export class SupervisedAgentInboxStore extends InboxDeliveryStore {
       const timestamp = this.now();
       run(database.prepare("UPDATE provider_continuation_repairs SET phase='failed',last_error=?,updated_at=? WHERE repair_id=?"),
         error, timestamp, repairId);
-      run(database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=? AND state='blocked'"),
+      run(database.prepare("UPDATE inbox_items SET last_error=?,updated_at=? WHERE inbox_item_id=? AND state='blocked'"),
         error, timestamp, repair.inbox_item_id);
       return rowToContinuationRepair(database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repairId) as Row);
     }));
@@ -181,7 +177,7 @@ export class SupervisedAgentInboxStore extends InboxDeliveryStore {
         "SELECT * FROM provider_continuation_repairs WHERE repair_id=?",
       ).get(repairId) as Row | undefined;
       const itemRow = database.prepare(
-        "SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?",
+        "SELECT * FROM inbox_items WHERE inbox_item_id=?",
       ).get(inboxItemId) as Row | undefined;
       if (!repairRow || !itemRow) throw new Error("Conversation restoration evidence is no longer available.");
       const repair = rowToContinuationRepair(repairRow);
@@ -202,7 +198,7 @@ export class SupervisedAgentInboxStore extends InboxDeliveryStore {
       const timestamp = this.now();
       run(
         database.prepare(
-          "UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?",
+          "UPDATE inbox_items SET last_error=?,updated_at=? WHERE inbox_item_id=?",
         ),
         error,
         timestamp,
@@ -217,7 +213,7 @@ export class SupervisedAgentInboxStore extends InboxDeliveryStore {
         error,
       );
       return rowToItem(
-        database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row,
+        database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(inboxItemId) as Row,
       );
     }));
   }

@@ -19,13 +19,13 @@ test("a new agent keeps the reasoning effort it was added with", async (t) => {
     { ...entry, id: "supervised_effort_default", provider: "claude-code", model: null, reasoning_effort: null },
   ];
   assert.equal(canonicalManifestEntry(added[0]!).reasoning_effort, "high");
-  const manifest = await store.load();
-  await store.write(manifest.generation, added);
+  await store.load();
+  await store.write(added);
   assert.equal((await store.getAgentConfiguration("supervised_effort_codex"))?.reasoning_effort, "high");
   assert.equal((await store.getAgentConfiguration("supervised_effort_antigravity"))?.reasoning_effort, "xhigh");
   assert.equal((await store.getAgentConfiguration("supervised_effort_default"))?.reasoning_effort, null);
   // A later whole-manifest write keeps it: the stored configuration is authoritative.
   const reloaded = await store.load();
-  await store.write(reloaded.generation, reloaded.entries);
+  await store.write(reloaded.entries);
   assert.equal((await store.getAgentConfiguration("supervised_effort_antigravity"))?.reasoning_effort, "xhigh");
 });

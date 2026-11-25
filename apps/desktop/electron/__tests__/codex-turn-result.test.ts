@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   CodexTurnResultAccumulator,
   finalCodexAgentText,
-} from "../main/agents/codex-turn-result.js";
+} from "#provider-runtime/agents/codex-turn-result.js";
 
 test("normalizes recorded final and final_answer transcript variants", () => {
   assert.equal(finalCodexAgentText([

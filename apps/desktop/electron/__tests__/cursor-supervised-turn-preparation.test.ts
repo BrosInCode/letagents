@@ -4,10 +4,10 @@ import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import test from "node:test";
 
-import { removeDisposableCursorProfileRoot } from "../main/agents/cursor/profile-filesystem.js";
-import { prepareSupervisedTurn } from "../main/agents/cursor/supervised-turn-preparation.js";
-import type { CursorProviderHandle } from "../main/agents/cursor/lane-state.js";
-import { removeCursorTurnRuntimeDataDir } from "../main/agents/cursor-sandbox-policy.js";
+import { removeDisposableCursorProfileRoot } from "#provider-runtime/agents/cursor/profile-filesystem.js";
+import { prepareSupervisedTurn } from "#provider-runtime/agents/cursor/supervised-turn-preparation.js";
+import type { CursorProviderHandle } from "#provider-runtime/agents/cursor/lane-state.js";
+import { removeCursorTurnRuntimeDataDir } from "#provider-runtime/agents/cursor-sandbox-policy.js";
 import {
   createHarness,
   spawnDaemonLane,

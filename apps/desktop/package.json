@@ -12,22 +12,39 @@
   "type": "module",
   "letagentsRuntime": {
     "openCodeVersion": "1.18.20",
-    "mcpVersion": "0.12.59"
+    "mcpVersion": "0.12.60"
   },
   "main": "dist-electron/main.js",
+  "imports": {
+    "#daemon-contract/*.js": {
+      "letagents-source": "./daemon-contract/*.ts",
+      "types": "./dist-daemon-contract/*.d.ts",
+      "default": "./dist-daemon-contract/*.js"
+    },
+    "#provider-runtime/*.js": {
+      "letagents-source": "./provider-runtime/*.ts",
+      "types": "./dist-provider-runtime/*.d.ts",
+      "default": "./dist-provider-runtime/*.js"
+    }
+  },
   "scripts": {
-    "dev": "npm run build:dev && concurrently -k \"npm:dev:renderer\" \"npm:watch:mcp\" \"npm:watch:electron\" \"npm:watch:daemon\" \"npm:serve:electron\"",
+    "dev": "npm run build:dev && concurrently -k \"npm:dev:renderer\" \"npm:watch:mcp\" \"npm:watch:daemon-contract\" \"npm:watch:provider-runtime\" \"npm:watch:electron\" \"npm:watch:daemon\" \"npm:serve:electron\"",
     "build:dev": "npm run build:mcp && npm run build:electron && npm run build:daemon",
+    "build:daemon-contract": "node -e \"require('node:fs').rmSync('dist-daemon-contract', { recursive: true, force: true })\" && tsc -p tsconfig.daemon-contract.json",
+    "watch:daemon-contract": "tsc -p tsconfig.daemon-contract.json --watch --preserveWatchOutput",
+    "generate:daemon-rpc-contract": "node --conditions=letagents-source --import tsx daemon-contract/generate-schema.ts",
+    "build:provider-runtime": "node -e \"require('node:fs').rmSync('dist-provider-runtime', { recursive: true, force: true })\" && tsc -p tsconfig.provider-runtime.json",
+    "watch:provider-runtime": "tsc -p tsconfig.provider-runtime.json --watch --preserveWatchOutput",
     "build:mcp": "npm --prefix ../.. run build",
     "dev:renderer": "vite",
     "watch:electron": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
     "watch:mcp": "tsc -p ../../tsconfig.json --watch --preserveWatchOutput",
     "watch:daemon": "tsc -p tsconfig.daemon.json --watch --preserveWatchOutput",
-    "serve:electron": "wait-on tcp:5174 ../../dist/mcp/server.js dist-electron/main.js dist-daemon/main.js && cross-env LETAGENTS_DESKTOP_DEV_SERVER_URL=http://127.0.0.1:5174 electron .",
+    "serve:electron": "wait-on tcp:5174 ../../dist/mcp/server.js dist-daemon-contract/index.js dist-provider-runtime/provider-probe-cache.js dist-electron/main.js dist-daemon/main.js && cross-env LETAGENTS_DESKTOP_DEV_SERVER_URL=http://127.0.0.1:5174 electron .",
     "build": "npm run build:renderer && npm run build:electron && npm run build:daemon",
     "build:renderer": "vite build",
-    "build:electron": "node -e \"require('node:fs').rmSync('dist-electron', { recursive: true, force: true })\" && tsc -p tsconfig.electron.json",
-    "build:daemon": "node -e \"require('node:fs').rmSync('dist-daemon', { recursive: true, force: true })\" && tsc -p tsconfig.daemon.json",
+    "build:electron": "npm run build:daemon-contract && npm run build:provider-runtime && node -e \"require('node:fs').rmSync('dist-electron', { recursive: true, force: true })\" && tsc -p tsconfig.electron.json",
+    "build:daemon": "npm run build:daemon-contract && npm run build:provider-runtime && node -e \"require('node:fs').rmSync('dist-daemon', { recursive: true, force: true })\" && tsc -p tsconfig.daemon.json",
     "package:artifact": "npm run build && node electron/scripts/package-artifact.mjs",
     "package:mac": "npm run package:artifact && node electron/scripts/package-macos.mjs",
     "package:mac:local": "cross-env MACOS_SKIP_SIGNING=1 npm run package:mac",
@@ -39,21 +56,23 @@
     "screenshot:board-tasks": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_BOARD_FIXTURE=tasks LETAGENTS_DESKTOP_BOARD_SCREENSHOT=/tmp/letagents-room-board-tasks.png electron .",
     "screenshot:updates": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_UPDATES_SCREENSHOT=/tmp/letagents-desktop-updates.png electron .",
     "smoke:packaged-supervisor": "npm run package:artifact && node electron/scripts/packaged-supervisor-smoke.mjs",
-    "smoke:cursor-managed": "node --import tsx electron/scripts/cursor-managed-isolation-smoke.ts",
+    "smoke:cursor-managed": "node --conditions=letagents-source --import tsx electron/scripts/cursor-managed-isolation-smoke.ts",
     "smoke:room-pages": "npm run build:electron && electron electron/scripts/room-pages-smoke.cjs",
     "smoke:opencode-contract": "npm run build:electron && node electron/scripts/opencode-runtime-contract-smoke.mjs",
-    "smoke:claude-daemon-inbox": "node --import tsx electron/scripts/claude-daemon-inbox-spike.ts",
+    "smoke:claude-daemon-inbox": "node --conditions=letagents-source --import tsx electron/scripts/claude-daemon-inbox-spike.ts",
     "test": "npm run test:renderer && npm run test:electron && npm run test:daemon && npm run test:packaging",
-    "test:renderer": "node --import tsx --test --test-timeout=600000 renderer/__tests__/*.test.ts",
+    "test:renderer": "node --conditions=letagents-source --import tsx --test --test-timeout=600000 renderer/__tests__/*.test.ts",
     "test:electron": "npm run test:electron:files -- electron/__tests__/*.test.ts",
-    "test:electron:files": "node --import tsx --test --test-concurrency=1 --test-timeout=600000 --experimental-test-module-mocks",
+    "test:electron:files": "node --conditions=letagents-source --import tsx --test --test-concurrency=1 --test-timeout=600000 --experimental-test-module-mocks",
     "test:daemon": "npm run test:daemon:files -- daemon/__tests__/*.test.ts",
-    "test:daemon:files": "node --import tsx --test --test-timeout=600000",
+    "test:daemon:edge": "node --conditions=letagents-source --import tsx --test --test-timeout=180000 daemon/__tests__/daemon-edge-*.test.ts daemon/__tests__/edge-*.test.ts",
+    "test:daemon:edge:slow": "node daemon/__tests__/edge/slow-runner/run.mjs",
+    "test:daemon:files": "node --conditions=letagents-source --import tsx --test --test-timeout=600000",
     "test:packaging": "node --test --test-timeout=600000 electron/scripts/*.test.mjs",
     "test:clean-home": "node electron/scripts/run-with-clean-home.mjs -- npm test",
-    "verify:mcp-runtime-digest": "node --import tsx electron/scripts/verify-mcp-runtime-digest.mjs",
+    "verify:mcp-runtime-digest": "node --conditions=letagents-source --import tsx electron/scripts/verify-mcp-runtime-digest.mjs",
     "lint:vue-components": "eslint \"renderer/src/**/*.vue\"",
-    "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.daemon.json --noEmit"
+    "typecheck": "npm run build:daemon-contract && npm run build:provider-runtime && vue-tsc --noEmit && tsc -p tsconfig.daemon-contract.json --noEmit && tsc -p tsconfig.provider-runtime.json --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.daemon.json --noEmit"
   },
   "dependencies": {
     "@lucide/vue": "1.17.0",

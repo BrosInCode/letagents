@@ -1,15 +1,20 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
+import { isolatePackagedBundle } from "./packaged-artifact-isolation.mjs";
+import { launchPackagedApp } from "./packaged-launch.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const windows = process.platform === "win32";
-const bundle = windows ? join(root, "release", "LetAgents-win32", "LetAgents") : join(root, "release", "LetAgents-darwin", "LetAgents.app");
+const builtBundle = windows ? join(root, "release", "LetAgents-win32", "LetAgents") : join(root, "release", "LetAgents-darwin", "LetAgents.app");
+// Every check of the packaged app uses a copy outside the checkout: see packaged-artifact-isolation.mjs.
+const isolated = await isolatePackagedBundle(builtBundle);
+const bundle = isolated.bundle;
 const executable = windows ? join(bundle, "LetAgents.exe") : join(bundle, "Contents", "MacOS", "LetAgents");
 const developmentDaemon = join(root, "dist-daemon", "main.js");
 const daemonTypes = await import(pathToFileURL(join(root, "dist-daemon", "types.js")).href);
@@ -20,10 +25,34 @@ const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
 // macOS: <home>/.letagents/daemon.sock. Windows: the named pipe for that folder.
 const socketPath = daemonEndpoint(join(home, ".letagents")).connectPath;
 const protocolVersion = daemonTypes.DAEMON_PROTOCOL_VERSION;
+const appRoot = windows ? join(bundle, "resources", "app") : join(bundle, "Contents", "Resources", "app");
+const importCheck = join(dirname(fileURLToPath(import.meta.url)), "packaged-app-import-check.mjs");
+
+/**
+ * The daemon runs the packaged program in Node mode and loads a provider
+ * adapter only when an agent starts, so a start of the app does not prove
+ * that the adapters load. Run the same program in the same mode on the
+ * import check, once as the app starts it and once with the condition that
+ * the repository's tests use, which must not change what a shipped app loads.
+ */
+function assertPackagedAppImports() {
+  for (const nodeOptions of ["", "--conditions=letagents-source"]) {
+    const result = spawnSync(executable, [importCheck, appRoot], {
+      cwd: appRoot,
+      encoding: "utf8",
+      // No NODE_PATH: it would let the check load packages from outside the app.
+      env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), ELECTRON_RUN_AS_NODE: "1", NODE_OPTIONS: nodeOptions, NODE_PATH: "" },
+      timeout: 120_000,
+    });
+    process.stdout.write(result.stdout ?? "");
+    if (result.status !== 0) {
+      throw new Error(`packaged import check failed (NODE_OPTIONS=${JSON.stringify(nodeOptions)}): ${result.error?.message ?? result.stderr}`);
+    }
+  }
+}
 
 async function assertPackagedDaemonExecutorSeal() {
-  const appRoot = windows ? join(bundle, "resources", "app") : join(bundle, "Contents", "Resources", "app");
-  const verifierPath = join(appRoot, "dist-electron", "main", "agents", "letagents-mcp-runtime.js");
+  const verifierPath = join(appRoot, "dist-provider-runtime", "agents", "letagents-mcp-runtime.js");
   const executorPath = join(appRoot, "runtime", "letagents", "node_modules", "letagents", "dist", "mcp", "server", "daemon-tool-executor.js");
   const loader = await import(pathToFileURL(join(appRoot, "dist-daemon", "supervised-tool-runtime.js")).href);
   const verifier = await import(pathToFileURL(verifierPath).href);
@@ -58,37 +87,47 @@ function request(method, params) {
 }
 
 function launch() {
-  return new Promise((resolveLaunch, reject) => {
-    const child = spawn(executable, [], {
-      // Its own APPDATA: an installed app holds the single-instance lock of the real one.
-      env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let output = "";
-    let ready = false;
-    const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`packaged Electron launch timed out: ${output}`)); }, launchTimeoutMs);
-    const capture = (chunk) => {
-      output += chunk;
-      if (!ready && output.includes("LETAGENTS_PACKAGED_SUPERVISOR_READY")) {
-        ready = true;
-        // Model the user quitting the packaged desktop process. The detached
-        // daemon must remain live and answer after this process is gone.
-        child.kill("SIGTERM");
-        child.stdout.destroy();
-        child.stderr.destroy();
-        child.unref();
-        clearTimeout(timeout);
-        resolveLaunch(output);
-      }
-    };
-    child.stdout.on("data", capture);
-    child.stderr.on("data", capture);
-    child.once("error", (error) => { clearTimeout(timeout); reject(error); });
-    child.once("exit", (code) => {
-      clearTimeout(timeout);
-      if (!ready) reject(new Error(`packaged Electron exited ${code}: ${output}`));
-    });
+  return launchPackagedApp({
+    executable,
+    // macOS: with a scratch HOME there is no login keychain, so the first use of secure storage opens a
+    // dialog to create one and the app waits for a person. Chromium's mock keychain keeps secure storage
+    // working with no dialog. The switch belongs to this test start only; a shipped app is never started with it.
+    args: process.platform === "darwin" ? ["--use-mock-keychain"] : [],
+    // Its own APPDATA: an installed app holds the single-instance lock of the real one.
+    env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1", ELECTRON_ENABLE_LOGGING: "1" },
+    timeoutMs: launchTimeoutMs,
+    collectEvidence: launchTimeoutEvidence,
   });
+}
+
+/**
+ * The app turns a failed load of its approval signer into "no signer" and still starts the daemon,
+ * so a daemon that answers does not prove the signer. The daemon's challenge names the key it enrolled.
+ * On macOS this run uses mocked secure storage: it proves the enrollment path, not Keychain protection.
+ */
+async function assertSignerEnrolled() {
+  const challenge = await request("supervisor.host_approval_challenge");
+  if (!challenge || typeof challenge.keyFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(challenge.keyFingerprint)) {
+    throw new Error(`packaged daemon has no enrolled approval signer: ${JSON.stringify(challenge)}`);
+  }
+  console.log(`packaged-smoke: approval signer enrolled, key fingerprint ${challenge.keyFingerprint.slice(0, 12)}`);
+}
+
+/** What is known at a launch timeout: the app's call stacks (macOS), the daemon's answer, and the log files of the scratch home. */
+async function launchTimeoutEvidence(pid) {
+  const parts = [];
+  if (process.platform === "darwin" && pid) {
+    const sampled = spawnSync("sample", [String(pid), "3"], { encoding: "utf8", timeout: 20_000 });
+    parts.push(`sample of pid ${pid}:\n${`${sampled.stdout ?? ""}${sampled.stderr ?? ""}`.split("\n").slice(0, 160).join("\n")}`);
+  }
+  parts.push(`daemon.status: ${await request("daemon.status").then((status) => JSON.stringify(status), (error) => `no answer (${error instanceof Error ? error.message : String(error)})`)}`);
+  const entries = await readdir(home, { recursive: true }).catch(() => []);
+  parts.push(`files in the scratch home: ${entries.length}`);
+  for (const entry of entries.filter((name) => name.endsWith(".log") || name.endsWith("daemon-lifecycle.jsonl")).slice(0, 8)) {
+    const text = await readFile(join(home, entry), "utf8").catch(() => "");
+    parts.push(`${entry} (last lines):\n${text.split("\n").slice(-40).join("\n")}`);
+  }
+  return parts.join("\n");
 }
 
 async function launchDevelopmentDaemon() {
@@ -112,7 +151,29 @@ async function launchDevelopmentDaemon() {
   throw new Error("development daemon did not become ready");
 }
 
+// The import checks start no app, so they register no letagents:// link
+// handler. A developer machine with an installed app can run them alone.
+const importsOnly = process.env.LETAGENTS_PACKAGED_SMOKE_IMPORTS_ONLY === "1";
 try {
+  console.log(`packaged-smoke: copy of the packaged app at ${bundle}`);
+  console.log("packaged-smoke: import names and provider adapters");
+  assertPackagedAppImports();
+  if (importsOnly) {
+    console.log(JSON.stringify({ packagedApp: bundle, importsOnly: true }));
+    process.exitCode = 0;
+  } else {
+    await runLaunchChecks();
+  }
+} finally {
+  if (!importsOnly) {
+    await request("daemon.prepare_handoff").catch(() => undefined);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  await rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  await rm(isolated.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+}
+
+async function runLaunchChecks() {
   console.log("packaged-smoke: sealed daemon executor");
   await assertPackagedDaemonExecutorSeal();
   console.log("packaged-smoke: cross-install predecessor");
@@ -125,6 +186,7 @@ try {
     throw new Error(`packaged app did not replace the development daemon: ${JSON.stringify({ predecessor, first })}`);
   }
   console.log(`packaged-smoke: daemon ${first.pid} generation ${first.generation} survived first app exit`);
+  await assertSignerEnrolled();
   console.log("packaged-smoke: relaunch");
   await launch();
   const second = await request("daemon.status");
@@ -132,8 +194,4 @@ try {
     throw new Error(`daemon did not survive packaged app relaunch: ${JSON.stringify({ first, second })}`);
   }
   console.log(JSON.stringify({ packagedApp: bundle, daemonPid: first.pid, generation: first.generation, survivedRelaunch: true }));
-} finally {
-  await request("daemon.prepare_handoff").catch(() => undefined);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  await rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 }

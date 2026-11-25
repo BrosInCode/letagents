@@ -415,6 +415,11 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "node scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
     "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    // desktop-packaged-smoke: one tree per step, each right after its install.
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures",
   ]);
   assert.deepEqual(releaseScripts.filter(containsDirectNpmAudit), [
@@ -438,6 +443,11 @@ test("dependency advisory checks use the pinned supported audit client", () => {
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit\nnode scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      // desktop-packaged-smoke
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
@@ -529,11 +539,13 @@ test("the dependency gates run once, in dependency-audit, before every check job
   // scripts, so each waits for the gates and none repeats them.
   const notGated = new Set(["dependency-audit", "build", "integration-tests", "npm-publish", "docker", "deploy", "room-ack-evaluation"]);
   const checkJobs = jobs.filter((candidate) => !notGated.has(candidate.name));
-  assert.deepEqual(checkJobs.map((candidate) => candidate.name).sort(), ["build-checks", "desktop-tests", "desktop-tests-windows", "integration-db-tests", "mcp-tests-windows", "process-tree-windows"]);
-  // Each Windows job's gate: the step after which its suites run.
+  assert.deepEqual(checkJobs.map((candidate) => candidate.name).sort(), ["build-checks", "desktop-edge-tests-macos", "desktop-packaged-smoke", "desktop-tests", "desktop-tests-windows", "integration-db-tests", "mcp-tests-windows", "process-tree-windows"]);
+  // Each non-Linux job's gate: the step after which its suites run.
   const windowsGates = {
     "mcp-tests-windows": { name: "Build the MCP server", id: "build" },
     "desktop-tests-windows": { name: "Run verified dependency lifecycle scripts", id: "setup" },
+    "desktop-edge-tests-macos": { name: "Run verified dependency lifecycle scripts", id: "setup" },
+    "desktop-packaged-smoke": { name: "Run verified dependency lifecycle scripts", id: "setup" },
   };
   for (const checkJob of checkJobs) {
     assert.deepEqual(checkJob.needs, ["dependency-audit"], `${checkJob.name} must wait for dependency-audit`);

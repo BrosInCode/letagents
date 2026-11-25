@@ -46,6 +46,9 @@ function mcpAction(params: Record<string, unknown>): { tool: string | null; inpu
   return { tool: match?.[1] ?? null, input };
 }
 
+/** Shown before a Deny that Codex can only take as `cancel`. It describes the request, not an observed result. */
+export const HOST_APPROVAL_DENY_ENDS_TURN_HINT = "Denying this request also stops the current turn.";
+
 export function hostApprovalTitle(presentation: HostApprovalPresentation): string {
   if (presentation.title !== "Run a tool") return presentation.title;
   const payload = payloadOf(presentation);
@@ -151,7 +154,7 @@ export function hostApprovalDecisionsArmed(shownAtMs: number, nowMs: number): bo
  * - none: nothing to do here (an unavailable record no turn waits on).
  */
 export type HostApprovalCardView =
-  | { kind: "decide"; denyLabel: string; denyTitle: string | null; alwaysAllow: boolean }
+  | { kind: "decide"; denyLabel: string; denyTitle: string | null; denyNote: string | null; alwaysAllow: boolean }
   | { kind: "offline" }
   | { kind: "blocked" }
   | { kind: "unconfirmed"; label: string; resend: HostApprovalSelection | null }
@@ -186,6 +189,7 @@ export function hostApprovalCardView(approval: Pick<DesktopHostApproval, "presen
     kind: "decide",
     denyLabel: coversAll && input.agentPending > 1 ? `Deny all ${input.agentPending}` : "Deny",
     denyTitle: coversAll ? `Denies this and every other request from ${approval.presentation.displayName}` : null,
+    denyNote: approval.presentation.denyScope === "request_and_turn" ? HOST_APPROVAL_DENY_ENDS_TURN_HINT : null,
     alwaysAllow: Boolean(approval.presentation.alwaysAllow),
   };
 }

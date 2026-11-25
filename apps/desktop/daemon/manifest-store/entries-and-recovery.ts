@@ -1,5 +1,5 @@
 /**
- * Agent configuration updates, entry replacement, provider birth checkpoints and runtime recovery.
+ * Agent creation, configuration updates, entry replacement, provider birth checkpoints and runtime recovery.
  *
  * Where new code goes: a ManifestStore method goes in the module of its concern
  * (see the module list in store.ts); shared row helpers and types go in shared.ts.
@@ -7,50 +7,98 @@
  */
 import type { ProcessIdentity } from "../process-identity.js";
 import type { DatabaseSync } from "node:sqlite";
+import { retireRuntimeRecoveryEffectsForOperationInTransaction } from "../effect-journal/index.js";
 import { sameProviderActionConnectionSnapshot } from "../provider-action-port.js";
 import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, archiveExitedRuntimes, exitedRuntimesToArchive, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, readRuntimeRecovery, recordInterruptedCursorRecovery, type RuntimeRestartRequest, type RuntimeRecoveryRecord } from "../runtime-recovery-journal.js";
-import { assertNoPollingActivation } from "../custodial-polling-activation.js";
-import { assertNoDeliveryDrain } from "../delivery-drain.js";
 import { cancelInterruptedSupervisedTurn } from "../supervised-agent-history-retention.js";
 import type { SupervisedProviderTurnBinding } from "../supervised-agent-inbox-store.js";
 import { composeDaemonManifestEntry, projectDaemonManifestEntry } from "../manifest-entry-projection.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
-import { lifecycleAuthorityProviderSchema, type LifecycleAuthorityMode } from "../lifecycle-authority-mode.js";
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "../reconciler-state.js";
 import type { DaemonAgentConfiguration, DaemonManifestEntry, DaemonProviderConnection, ReconciliationNotice, ReconciliationState } from "../types.js";
-import { type Row, type StoredAgentConfiguration, type PreMembershipRoomMoveCancellation, type ManifestTransitionCommit, ManifestConflictError, json, parseJson, canonicalManifestEntry, run, storeMethods } from "./shared.js";
+import { type Row, type StoredAgentConfiguration, type PreMembershipRoomMoveCancellation, type ManifestTransitionCommit, ManifestConflictError, json, parseJson, canonicalManifestEntry, storeMethods } from "./shared.js";
 
 export const entriesAndRecovery = storeMethods({
-  async updateAgentConfiguration(expectedGeneration: number, input: { agentId: string; expectedRevision: number; model: string | null; reasoningEffort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permissionProfileId: string | null; providerLaunchPolicy: unknown; imageInput: boolean }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; outcome: "updated" | "conflict" | "invalid"; configuration?: StoredAgentConfiguration }> {
+  /** Insert one new agent row with initial version 1. Throws ManifestConflictError if it already exists. */
+  async createEntry(
+    entry: DaemonManifestEntry,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ version: number; entry: DaemonManifestEntry }> {
+    const normalized = canonicalManifestEntry(entry);
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      const currentGeneration = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
-      if (currentGeneration !== expectedGeneration) throw new ManifestConflictError(`Manifest generation ${currentGeneration} does not match expected ${expectedGeneration}.`);
-      const current = database.prepare("SELECT config_revision FROM agent_configurations WHERE agent_id=?").get(input.agentId) as Row | undefined;
-      if (!current) return { generation: currentGeneration, outcome: "invalid" as const };
+      let committed = false;
+      let persisted!: DaemonManifestEntry;
+      const commit = async () => {
+        if (committed) throw new Error("Manifest transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          this.writeFence?.();
+          if (database.prepare("SELECT 1 FROM agents WHERE agent_id = ?").get(normalized.id)) {
+            throw new ManifestConflictError(`Daemon manifest entry already exists: ${normalized.id}`);
+          }
+          const nextOrder = Number((database.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS value FROM agents").get() as Row).value);
+          const projection = projectDaemonManifestEntry(normalized);
+          this.insertProjection(database, projection, nextOrder);
+          this.initializeMintStateIfExplicit(database, normalized);
+          const readBack = this.readEntryFromDatabase(database, normalized.id);
+          if (!readBack) throw new Error(`Daemon manifest entry disappeared during creation: ${normalized.id}`);
+          persisted = readBack;
+          database.exec("COMMIT");
+          committed = true;
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
+        }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
+      return { version: 1, entry: persisted };
+    });
+  },
+
+  async updateAgentConfiguration(
+    expectedVersion: number,
+    input: { agentId: string; expectedRevision: number; model: string | null; reasoningEffort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permissionProfileId: string | null; providerLaunchPolicy: unknown; imageInput: boolean },
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ version: number; outcome: "updated" | "conflict" | "invalid"; configuration?: StoredAgentConfiguration }> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      const current = database.prepare("SELECT version, config_revision FROM agents WHERE agent_id=?").get(input.agentId) as Row | undefined;
+      if (!current) return { version: expectedVersion, outcome: "invalid" as const };
+      const currentVersion = Number(current.version);
+      if (currentVersion !== expectedVersion) {
+        throw new ManifestConflictError(`Agent ${input.agentId} version ${currentVersion} does not match expected ${expectedVersion}.`);
+      }
       if (Number(current.config_revision) !== input.expectedRevision) {
-        return { generation: currentGeneration, outcome: "conflict" as const, configuration: await this.getAgentConfiguration(input.agentId) };
+        return { version: currentVersion, outcome: "conflict" as const, configuration: await this.getAgentConfiguration(input.agentId) };
       }
       let committed = false;
-      let transactionOpen = false;
       const commit = async () => {
-        database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
-        assertNoDeliveryDrain(database, input.agentId);
-        assertNoPollingActivation(database, input.agentId);
-        const advanced = database.prepare("UPDATE manifest_metadata SET generation=generation+1 WHERE singleton=1 AND generation=?").run(expectedGeneration);
-        if (Number(advanced.changes) !== 1) throw new ManifestConflictError("Manifest generation changed during configuration update.");
-        const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,image_input=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.imageInput ? 1 : 0, input.agentId, input.expectedRevision);
-        if (Number(changed.changes) !== 1) throw new ManifestConflictError("Agent configuration revision changed during update.");
-        database.exec("COMMIT"); transactionOpen = false; committed = true;
+        if (committed) throw new Error("Configuration transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          this.writeFence?.();
+          const policyJson = input.providerLaunchPolicy === undefined ? null : json(input.providerLaunchPolicy);
+          const changed = database.prepare(`UPDATE agents
+            SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,
+                provider_launch_policy_json=?,image_input=?,config_revision=config_revision+1,version=version+1
+            WHERE agent_id=? AND version=? AND config_revision=?`).run(
+            input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId,
+            policyJson, input.imageInput ? 1 : 0, input.agentId, expectedVersion, input.expectedRevision,
+          );
+          if (Number(changed.changes) !== 1) throw new ManifestConflictError("Agent configuration version or revision changed during update.");
+          database.exec("COMMIT");
+          committed = true;
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
+        }
       };
-      try {
-        if (commitFence) await commitFence(commit); else await commit();
-        if (!committed) throw new Error("Configuration commit fence returned without committing.");
-      } catch (error) {
-        if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
-        throw error;
-      }
-      return { generation: expectedGeneration + 1, outcome: "updated" as const, configuration: await this.getAgentConfiguration(input.agentId) };
+      if (commitFence) await commitFence(commit); else await commit();
+      if (!committed) throw new Error("Configuration commit fence returned without committing.");
+      return { version: expectedVersion + 1, outcome: "updated" as const, configuration: await this.getAgentConfiguration(input.agentId) };
     });
   },
 
@@ -60,20 +108,18 @@ export const entriesAndRecovery = storeMethods({
   },
 
   async replaceEntry(
-    expectedGeneration: number,
+    expectedVersion: number,
     entry: DaemonManifestEntry,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
     roomMoveCancellation?: PreMembershipRoomMoveCancellation,
     interruptedDelivery?: { turn: SupervisedProviderTurnBinding; detail: string; observedAt: string; cursorLaneRetirement?: import("../runtime-recovery-journal.js").CursorLaneRetirement },
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; recoveredRuntimeId?: string }> {
+  ): Promise<{ version: number; entry: DaemonManifestEntry; recoveredRuntimeId?: string }> {
     const normalized = canonicalManifestEntry(entry);
     let recoveredRuntimeId: string | undefined;
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
-      const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id = ?").get(normalized.id) as Row | undefined;
-      if (!row) throw new Error(`Unknown daemon manifest entry: ${normalized.id}`);
+    const result = await this.writeAgent(normalized.id, expectedVersion, (database, existingRow) => {
       if (interruptedDelivery) {
         const { turn, detail, observedAt } = interruptedDelivery;
-        const receipt = database.prepare("SELECT state,outcome,provider_turn_id FROM supervised_agent_inbox WHERE inbox_item_id=?").get(turn.inbox_item_id) as Row | undefined;
+        const receipt = database.prepare("SELECT state,outcome,provider_turn_id FROM inbox_items WHERE inbox_item_id=?").get(turn.inbox_item_id) as Row | undefined;
         const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(turn.inbox_item_id) as Row | undefined;
         if (turn.agent_id !== normalized.id || turn.room_id !== normalized.room_id
           || !receipt || receipt.state !== "blocked" || receipt.outcome !== null
@@ -86,112 +132,58 @@ export const entriesAndRecovery = storeMethods({
           { agent_id: normalized.id, room_id: normalized.room_id });
       }
       if (roomMoveCancellation) this.failPreMembershipRoomMoves(database, roomMoveCancellation);
-      // Configuration revisions are Inspector-owned state, intentionally not
-      // part of the legacy flat manifest projection. Preserve them through
-      // unrelated lifecycle/runtime replacements.
-      const configuration = database.prepare("SELECT * FROM agent_configurations WHERE agent_id=?").get(normalized.id) as Row;
       const projection = projectDaemonManifestEntry(normalized);
-      this.preserveInspectorConfiguration(projection, configuration);
-      run(database.prepare("DELETE FROM agent_identities WHERE agent_id = ?"), normalized.id);
-      this.insertProjection(database, projection, Number(row.sort_order));
+      this.updateProjection(database, projection, existingRow, expectedVersion);
       const persisted = this.readEntryFromDatabase(database, normalized.id);
       if (!persisted) throw new Error(`Daemon manifest entry disappeared during replacement: ${normalized.id}`);
       return persisted;
     }, commitFence);
-    return { generation: result.generation, entry: result.value, recoveredRuntimeId };
+    return { version: result.version, entry: result.value, recoveredRuntimeId };
   },
 
   /**
    * Targeted observed-state and reconciliation transition. Updates only the
-   * runtime state, lifecycle, readiness, and reconciliation tables without
-   * deleting agent_identities or reading/rewriting activity_events.
+   * transition columns on `agents` under the per-agent version CAS and write
+   * fence without reading or rewriting `activity_events`.
    */
   async commitTransition(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: ManifestTransitionCommit,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number }> {
-    const state = parseJson<ReconciliationState>(json(input.reconciliation));
+  ): Promise<{ version: number }> {
+    const rawState = parseJson<ReconciliationState>(json(input.reconciliation));
+    const state: ReconciliationState = {
+      ...rawState,
+      completed_action_ids: rawState.completed_action_ids.slice(-MAX_PROJECTED_COMPLETED_ACTION_IDS),
+    };
     const notices = parseJson<ReconciliationNotice[]>(json(input.reconciliationNotices.slice(-32)));
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
-      const runtime = database.prepare("UPDATE runtime_deployments SET observed_state = ? WHERE agent_id = ?")
-        .run(input.observedState, input.agentId);
-      if (Number(runtime.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${input.agentId}`);
-      const lifecycle = database.prepare(`
-        UPDATE agent_lifecycle_states
-        SET condition = ?, last_error_present = 1, last_error = ?
-        WHERE agent_id = ?
-      `).run(input.condition, input.lastError, input.agentId);
-      if (Number(lifecycle.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${input.agentId}`);
-      if (input.readyReachedAt) {
-        const readiness = database.prepare(`
-          UPDATE agent_readiness
-          SET ready_reached_at_present = 1, ready_reached_at = ?
-          WHERE agent_id = ?
-        `).run(input.readyReachedAt, input.agentId);
-        if (Number(readiness.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${input.agentId}`);
-      }
-      const terminalPresent = Boolean(state.last_terminal);
-      const terminal = state.last_terminal;
-      const reconciliation = database.prepare(`
-        UPDATE reconciliation_records
-        SET reconciliation_present = 1,
-            consecutive_action_failures = ?,
-            last_observed_state = ?,
-            next_restart_at_ms = ?,
-            last_action_sequence = ?,
-            pending_action_id = ?,
-            pending_action_sequence = ?,
-            pending_action_kind = ?,
-            pending_action_recorded_at_ms = ?,
-            last_terminal_present = ?,
-            terminal_ended_at = ?,
-            terminal_exit_code = ?,
-            terminal_signal = ?,
-            terminal_stdio_archive_ref = ?,
-            terminal_stdio_tail = ?,
-            terminal_cause = ?,
-            terminal_actor = ?,
-            terminal_generation = ?,
-            terminal_provider_continuation_id = ?,
-            reconciliation_notices_present = 1
-        WHERE agent_id = ?
+    const readyReachedAt = input.readyReachedAt ? input.readyReachedAt : null;
+    const result = await this.writeAgent(input.agentId, expectedVersion, (database) => {
+      const updated = database.prepare(`
+        UPDATE agents
+        SET version = version + 1,
+            observed_state = ?,
+            condition = ?,
+            last_error = ?,
+            ready_reached_at = COALESCE(?, ready_reached_at),
+            reconciliation_json = ?,
+            reconciliation_notices_json = ?
+        WHERE agent_id = ? AND version = ?
       `).run(
-        state.consecutive_action_failures, state.last_observed_state, state.next_restart_at_ms ?? null,
-        state.last_action_sequence, state.pending_action?.id ?? null, state.pending_action?.sequence ?? null,
-        state.pending_action?.kind ?? null, state.pending_action?.recorded_at_ms ?? null,
-        Number(terminalPresent), terminal?.ended_at ?? null, terminal?.exit_code ?? null,
-        terminal?.signal ?? null, terminal?.stdio_archive_ref ?? null, terminal?.stdio_tail ?? null,
-        terminal?.terminal_cause ?? null, terminal?.actor ?? null, terminal?.generation ?? null,
-        terminal?.provider_continuation_id ?? null, input.agentId,
+        input.observedState,
+        input.condition,
+        input.lastError,
+        readyReachedAt,
+        json(state),
+        json(notices),
+        input.agentId,
+        expectedVersion,
       );
-      if (Number(reconciliation.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${input.agentId}`);
-      run(database.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?"), input.agentId);
-      if (state.exit_timestamps_ms.length > 0) {
-        const insertExitTimestamp = database.prepare("INSERT INTO reconciliation_exit_timestamps VALUES (?, ?, ?)");
-        state.exit_timestamps_ms.forEach((timestamp, index) => run(insertExitTimestamp, input.agentId, index, timestamp));
-      }
-      run(database.prepare("DELETE FROM reconciliation_completed_actions WHERE agent_id = ?"), input.agentId);
-      const projectedActionIds = state.completed_action_ids.slice(-MAX_PROJECTED_COMPLETED_ACTION_IDS);
-      if (projectedActionIds.length > 0) {
-        const insertAction = database.prepare("INSERT INTO reconciliation_completed_actions VALUES (?, ?, ?)");
-        projectedActionIds.forEach((actionId, index) => run(insertAction, input.agentId, index, actionId));
-      }
-      run(database.prepare("DELETE FROM reconciliation_notices WHERE agent_id = ?"), input.agentId);
-      if (notices.length > 0) {
-        const insertNotice = database.prepare(`INSERT INTO reconciliation_notices VALUES (${Array.from({ length: 15 }, () => "?").join(", ")})`);
-        notices.forEach((notice, index) => {
-          const noticeTerminal = notice.terminal;
-          run(insertNotice, input.agentId, index, notice.at, notice.kind, notice.cause,
-            Number(Boolean(noticeTerminal)), noticeTerminal?.ended_at ?? null, noticeTerminal?.exit_code ?? null,
-            noticeTerminal?.signal ?? null, noticeTerminal?.stdio_archive_ref ?? null,
-            noticeTerminal?.stdio_tail ?? null, noticeTerminal?.terminal_cause ?? null,
-            noticeTerminal?.actor ?? null, noticeTerminal?.generation ?? null,
-            noticeTerminal?.provider_continuation_id ?? null);
-        });
+      if (Number(updated.changes) !== 1) {
+        throw new ManifestConflictError(`Agent ${input.agentId} version does not match expected ${expectedVersion}.`);
       }
     }, commitFence);
-    return { generation: result.generation };
+    return { version: result.version };
   },
 
   /**
@@ -200,34 +192,30 @@ export const entriesAndRecovery = storeMethods({
    * each paused child is materialized by checkpointCursorPreparedTurn instead.
    */
   async checkpointProviderBirth(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       entry: DaemonManifestEntry;
       executionGenerationId: string;
       providerConnection: DaemonProviderConnection;
       appliedRevision: number;
       managedLaunchContract?: string;
-      requestedAuthorityMode: LifecycleAuthorityMode;
+      requestedAuthorityMode?: "typed";
       observedAtMs: number;
     },
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode | null }> {
+  ): Promise<{ version: number; entry: DaemonManifestEntry; authorityMode: "typed" | null }> {
     const snapshot = structuredClone(input);
     const normalized = canonicalManifestEntry(snapshot.entry);
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
-      const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id=?")
-        .get(normalized.id) as Row | undefined;
-      const configuration = database.prepare("SELECT * FROM agent_configurations WHERE agent_id=?")
-        .get(normalized.id) as Row | undefined;
+    const result = await this.writeAgent(normalized.id, expectedVersion, (database, existingRow) => {
       const ref = normalized.provider_ref;
-      if (!row || !configuration || !ref
+      if (!ref
         || normalized.work_attempt_id !== ref.work_attempt_id
         || ref.execution_generation_id !== snapshot.executionGenerationId
         || !sameProviderActionConnectionSnapshot(ref.provider_connection, snapshot.providerConnection)
         || !Number.isSafeInteger(snapshot.appliedRevision)
         || snapshot.appliedRevision < 1
-        || snapshot.appliedRevision > Number(configuration.config_revision)
-        || Number(configuration.runtime_configuration_revision) > snapshot.appliedRevision
+        || snapshot.appliedRevision > Number(existingRow.config_revision)
+        || Number(existingRow.runtime_configuration_revision) > snapshot.appliedRevision
         || !Number.isSafeInteger(snapshot.observedAtMs)
         || snapshot.observedAtMs < 0) {
         throw new ManifestConflictError("Provider birth lost its exact manifest or configuration authority.");
@@ -237,7 +225,6 @@ export const entriesAndRecovery = storeMethods({
         .get(ref.work_attempt_id, snapshot.executionGenerationId)) {
         throw new ManifestConflictError("Provider birth has no exact durable execution generation.");
       }
-      const provider = lifecycleAuthorityProviderSchema.safeParse(normalized.provider);
       const expectedProvider = {
         codex_app_server: "codex",
         claude_cli: "claude-code",
@@ -245,18 +232,17 @@ export const entriesAndRecovery = storeMethods({
         opencode_server: "open-model",
         antigravity_acp: "antigravity",
       } as const;
-      if (!provider.success || provider.data !== expectedProvider[snapshot.providerConnection.kind]) {
+      const provider = expectedProvider[snapshot.providerConnection.kind];
+      if (normalized.provider !== provider) {
         throw new ManifestConflictError("Provider birth connection does not match its provider.");
       }
       const projection = projectDaemonManifestEntry(normalized);
-      this.preserveInspectorConfiguration(projection, configuration);
-      run(database.prepare("DELETE FROM agent_identities WHERE agent_id=?"), normalized.id);
-      this.insertProjection(database, projection, Number(row.sort_order));
-      run(database.prepare("UPDATE agent_configurations SET runtime_configuration_revision=? WHERE agent_id=?"),
-        snapshot.appliedRevision, normalized.id);
+      this.updateProjection(database, projection, existingRow, expectedVersion, {
+        appliedRuntimeRevision: snapshot.appliedRevision,
+      });
 
       const connection = snapshot.providerConnection;
-      let authorityMode: LifecycleAuthorityMode | null = null;
+      let authorityMode: "typed" | null = null;
       if (connection.pid === null || !connection.processIdentity) {
         if (connection.kind !== "cursor_cli" || connection.pid !== null || connection.processIdentity != null) {
           throw new ManifestConflictError("Provider birth requires an exact native process identity.");
@@ -264,18 +250,19 @@ export const entriesAndRecovery = storeMethods({
       } else {
         const runtimeGenerationId = executionRuntimeStorageIdentity(normalized.id,
           snapshot.executionGenerationId, connection.kind, connection.pid, connection.processIdentity);
-        authorityMode = materializeRuntimeIdentity(database, {
+        const persistedAuthority = materializeRuntimeIdentity(database, {
           agentId: normalized.id,
           executionGenerationId: snapshot.executionGenerationId,
           runtimeGenerationId,
-          provider: provider.data,
-          authorityMode: snapshot.requestedAuthorityMode,
+          provider,
+          authorityMode: "typed",
           configRevision: snapshot.appliedRevision,
           createdAtMs: snapshot.observedAtMs,
         });
-        if (authorityMode !== snapshot.requestedAuthorityMode) {
+        if (persistedAuthority !== "typed") {
           throw new Error("Provider birth retained an incompatible frozen lifecycle authority.");
         }
+        authorityMode = "typed";
         if (snapshot.managedLaunchContract !== undefined) {
           if (!/^[a-f0-9]{64}$/.test(snapshot.managedLaunchContract)) throw new Error("Invalid managed launch contract.");
           const prior = database.prepare("SELECT contract_sha256 FROM managed_launch_contracts WHERE runtime_generation_id=?").get(runtimeGenerationId);
@@ -289,15 +276,9 @@ export const entriesAndRecovery = storeMethods({
       if (!persisted) throw new Error("Provider birth disappeared during its atomic checkpoint.");
       return { entry: persisted, authorityMode };
     }, commitFence);
-    return { generation: result.generation, ...result.value };
+    return { version: result.version, ...result.value };
   },
 
-  /**
-   * Atomically install an accepted turn-control barrier and classify the exact
-   * FIFO head at that same SQLite boundary. If claimHead won first, the journal
-   * links that already-admitted row; if this transaction wins first, a pending
-   * row remains unlinked and the journal barrier prevents it from starting.
-   */
   async getRuntimeRecovery(operationId: string): Promise<RuntimeRecoveryRecord | null> {
     return readRuntimeRecovery(await this.getDatabase(), operationId);
   },
@@ -306,11 +287,9 @@ export const entriesAndRecovery = storeMethods({
     return this.reads.get(await this.getDatabase(), "pendingRuntimeRecovery").get(agentId) as RuntimeRecoveryRecord | undefined ?? null;
   },
 
-  async prepareRuntimeRecovery(expectedGeneration: number, input: RuntimeRestartRequest,
+  async prepareRuntimeRecovery(expectedVersion: number, input: RuntimeRestartRequest,
     commitFence: (commit: () => Promise<void>) => Promise<void>) {
-    const result = await this.writeTargeted(expectedGeneration, database => {
-      assertNoDeliveryDrain(database, input.entryId);
-      assertNoPollingActivation(database, input.entryId);
+    const result = await this.writeAgent(input.entryId, expectedVersion, (database) => {
       if (database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') LIMIT 1").get(input.entryId)) {
         throw new Error("Finish the room move before restarting this agent.");
       }
@@ -320,7 +299,7 @@ export const entriesAndRecovery = storeMethods({
       }
       return prepareRuntimeRecovery(database, input, current);
     }, commitFence);
-    return { generation: result.generation, record: result.value };
+    return { version: result.version, record: result.value };
   },
 
   async prepareRetiredRuntimePlan(request: RuntimeRestartRequest, supplied: RetiredRuntimeEvidence[] = [], identity?: ProcessIdentity) {
@@ -350,7 +329,11 @@ export const entriesAndRecovery = storeMethods({
     return this.writeOperationalJournal(current => archiveExitedRuntimes(current, this.readEntryFromDatabase(current, agentId, "summary"), identity), commitFence);
   },
 
-  async completeRuntimeRecovery(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>) {
+  async completeRuntimeRecovery(
+    operationId: string,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+    daemonGeneration: number,
+  ) {
     return this.writeOperationalJournal(database => {
       const record = readRuntimeRecovery(database, operationId);
       if (!record || record.phase === "prepared") throw new Error("The old runtime has not been proven stopped.");
@@ -359,8 +342,16 @@ export const entriesAndRecovery = storeMethods({
         || (record.mode === "fresh" ? entry.provider_ref != null : entry.provider_ref?.execution_generation_id !== record.execution_generation_id)) {
         throw new Error("The replacement runtime intent changed before recovery completed.");
       }
+      const completedAt = new Date().toISOString();
       database.prepare("UPDATE agent_runtime_recoveries SET phase='complete',updated_at=? WHERE operation_id=?")
-        .run(new Date().toISOString(), operationId);
+        .run(completedAt, operationId);
+      retireRuntimeRecoveryEffectsForOperationInTransaction(database, {
+        agentId: record.agent_id,
+        operationId,
+        expectedEpoch: daemonGeneration,
+        error: "runtime_recovery_complete",
+        nowIso: completedAt,
+      });
     }, commitFence);
   },
 });

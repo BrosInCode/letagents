@@ -6,6 +6,7 @@
 import { localRoomRuntime } from "../local-room-runtime.js";
 import { stopBackgroundCommand } from "../background-command-stop.js";
 import { BoundedEffectCoordinator } from "../bounded-effect-coordinator.js";
+import { getEffect } from "../effect-journal/index.js";
 import { productionSupervisedDeliveryHttp, productionSupervisorGrantHttp, type SupervisorGrantHttp } from "../cloud-http.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "../control-request-router.js";
@@ -56,8 +57,6 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       liveHandles: this.liveHandles,
       authority: {
         currentDaemonGeneration: () => this.singleton.currentGeneration,
-        currentManifestGeneration: () => this.manifestGeneration,
-        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
         isHandoffScheduled: () => this.handoffScheduled,
         assertCurrent: () => this.singleton.assertCurrent(),
         serializeManifest: (operation) => this.serializeManifestMutation(operation),
@@ -77,8 +76,6 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       authority: {
         currentGeneration: () => this.singleton.currentGeneration,
         assertCurrent: () => this.singleton.assertCurrent(),
-        manifestGeneration: () => this.manifestGeneration,
-        setManifestGeneration: (generation) => { this.manifestGeneration = generation; },
         fenceCommit: (commit) => this.fenceDaemonCommit(commit),
       },
       store: this.store,
@@ -117,6 +114,8 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       journal: {
         prepare: (input, fence) => this.supervisedInbox.prepareEffect(input, fence),
         markExecuting: (input, fence) => this.supervisedInbox.markEffectExecuting(input, fence),
+        authorizeClaimInTransaction: (database, effectRecord, input) =>
+          this.supervisedInbox.authorizeBoundedEffectClaimInTransaction(database, effectRecord, input),
         complete: (input, fence) => this.supervisedInbox.completeEffect(input, fence),
       },
       roomMoves: {
@@ -136,6 +135,11 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       replyAttachments: {
         snapshot: (input) => this.replyAttachmentSpool.snapshot(input),
         keepOnly: (inboxItemId, spoolIds) => this.replyAttachmentSpool.keepOnly(inboxItemId, spoolIds),
+      },
+      executor: () => this.effectExecutor,
+      getEffect: (effectId) => {
+        const database = this.stateDatabase?.connection;
+        return database && database.isOpen ? getEffect(database, effectId) : null;
       },
     });
     this.hostApprovals = createHostApprovalBridge({
@@ -158,9 +162,12 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       authority: this.workerAuthority,
       approvals: this.hostApprovals,
       remote: this.supervisorGrantHttp,
-      approvalPublication: { path: this.stateDatabasePath, custody: this.workerRuntimeCustody,
+      approvalPublication: { database: () => this.stateDatabase?.connection ?? null,
+        effectExecutor: () => this.effectExecutor, custody: this.workerRuntimeCustody,
         inbox: this.supervisedInbox, daemonGeneration: () => this.singleton.currentGeneration, isClosing: () => this.handoffScheduled,
-        assertCurrent: () => this.singleton.assertCurrent(), now: () => this.nowMs() },
+        assertCurrent: () => this.singleton.assertCurrent(),
+        assertWriteFence: () => { this.singleton.assertCurrentSync(); },
+        now: () => this.nowMs() },
       requestConvergence: (entryId, kind) => this.requestConvergence(entryId, kind),
       diagnostic: (domain, entryId, error) => console.warn(`[execution_delegation_${domain}_sync]`,
         JSON.stringify({ entryId, error: String(error) })),
@@ -185,19 +192,15 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
     });
     const controlOperations = {
       hostApprovals: this.hostApprovals,
-      activateCustodialPolling: (input) => this.deliveryCutoverExecution.activatePolling(input),
-      getPollingActivation: (input) => this.deliveryCutoverExecution.getPollingActivation(input),
-      cancelPollingActivation: (input) => this.deliveryCutoverExecution.cancelPollingActivation(input),
-      prepareDeliveryDrain: (input) => this.deliveryCutoverExecution.prepareDrain(input),
-      getDeliveryDrain: (input) => this.deliveryCutoverExecution.getDrain(input),
-      cancelDeliveryDrain: (input) => this.deliveryCutoverExecution.cancelDrain(input),
       acknowledgeInspectorRoomMoveSourceRevocation: (input) => this.roomMoves.acknowledgeSourceRevocation(input),
       applyAgentConfiguration: (input) => this.runtimeConfigurationApply.apply(input),
+      submitApplyAgentConfiguration: (input) => this.asyncRpcEffects.submitApplyAgentConfiguration(input, () => this.runtimeConfigurationApply.apply(input)),
       bindWorkerSession: this.workerAuthority.bindWorkerSession.bind(this.workerAuthority),
-      bootstrapRoomIngress: (input) => this.userAction(input.initial_message === undefined ? null : input.entry_id,
-        () => this.beginBootstrap(this.workerAuthority.bootstrapRoomIngress.bind(this.workerAuthority), input)),
+      bootstrapRoomIngress: (input) => this.asyncRpcEffects.submitBootstrapRoomIngress(input, () => this.userAction(
+        input.initial_message === undefined ? null : input.entry_id,
+        () => this.beginBootstrap(this.workerAuthority.bootstrapRoomIngress.bind(this.workerAuthority), input),
+      )),
       borrowWorkerCredential: this.workerAuthority.borrowWorkerCredential.bind(this.workerAuthority),
-      authorizeCustodialPolling: this.workerAuthority.authorizeCustodialPolling.bind(this.workerAuthority),
       checkpointWorkerCursor: this.workerAuthority.checkpointWorkerCursor.bind(this.workerAuthority),
       commitInspectorRoomMove: (input) => this.roomMoves.commitInspector(input),
       compareAndSetDesiredState: (id, expected, desired) => this.userAction(id, () => this.desiredStates.compareAndSet(id, expected, desired)),
@@ -209,7 +212,11 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       getAgentInspectorDetail: this.getAgentInspectorDetail.bind(this),
       getCurrentInspectorRoomMove: (input) => this.roomMoves.getCurrentInspector(input),
       getInspectorRoomMove: (input) => this.roomMoves.getInspector(input),
-      installHostGrant: (input) => this.userAction(input.credential_only ? input.entry_id : null, () => this.executionDelegations.installHostGrant(input)),
+      getRpcEffect: (effectId, daemonGeneration) => this.asyncRpcEffects.getForGeneration(effectId, daemonGeneration),
+      installHostGrant: (input) => this.asyncRpcEffects.submitInstallHostGrant(input, () => this.userAction(
+        input.credential_only ? input.entry_id : null,
+        () => this.executionDelegations.installHostGrant(input),
+      )),
       installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
       getManifestEntry: async (entryId) => this.store.getEntry(entryId, "full")
@@ -223,10 +230,16 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       purgeAgent: this.lifecycleAdministration.purgeAgent.bind(this.lifecycleAdministration),
       putManifestEntry: (entry) => this.userAction(entry.id, () => this.putManifestEntry(entry)),
       readAttempt: this.readAttempt.bind(this),
-      recoverAgentRuntime: (id, generation, recovery) => this.userAction(id, () => this.runtimeRecovery.recoverAgentRuntime(id, generation, recovery)),
+      recoverAgentRuntime: (id, generation, recovery) => this.asyncRpcEffects.submitRecoverAgentRuntime(
+        { entryId: id, daemonGeneration: generation, mode: recovery?.mode, operationId: recovery?.operationId },
+        () => this.userAction(id, () => this.runtimeRecovery.recoverAgentRuntime(id, generation, recovery)),
+      ),
       resolveTurnControl: (input) => this.turnControls.resolve(input),
       restoreAgentConversation: this.restoreAgentConversation.bind(this),
-      retireAgent: this.lifecycleAdministration.retireAgent.bind(this.lifecycleAdministration),
+      retireAgent: (entryId, daemonGeneration, revokedAgentSessionId, grantRevokedWithoutWorkerSession) => this.asyncRpcEffects.submitRetireAgent(
+        { entryId, daemonGeneration, hasRevokedAgentSessionId: revokedAgentSessionId !== null, grantRevokedWithoutWorkerSession },
+        () => this.lifecycleAdministration.retireAgent(entryId, daemonGeneration, revokedAgentSessionId, grantRevokedWithoutWorkerSession),
+      ),
       retryRoomDelivery: this.retryRoomDelivery.bind(this),
       rollbackInspectorRoomMove: (input) => this.roomMoves.rollbackInspector(input),
       setDesiredState: (id, desired) => this.userAction(id, () => this.desiredStates.set(id, desired)),

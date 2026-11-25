@@ -21,8 +21,8 @@ const env = createElectronTestEnv({ prefix: "letagents-claude-home-harness-", pa
 const {
   claudeChildEnvironment, claudeCliLaunchArgs, claudeLaunchPolicyArgs, claudeOwnerSetupReadsProjectInstructionsOnly, claudeOwnerSetupStartEnvironment,
   createManagedClaudeMcpConfig, ownerMcpServerNotices, ownerMcpStartupTimeoutMs,
-} = await import("../main/agents/claude-code-provider-adapter.js");
-const { inspectClaudeCodeVersion, resolveClaudeCodeExecutable } = await import("../main/agents/claude-code-version.js");
+} = await import("#provider-runtime/agents/claude-code-provider-adapter.js");
+const { inspectClaudeCodeVersion, resolveClaudeCodeExecutable } = await import("#provider-runtime/agents/claude-code-version.js");
 
 let fixtureSerial = 0;
 function fixture(name: string): string {
@@ -462,7 +462,7 @@ test("with Full access and the owner's own setup the installed Claude Code loads
   });
 });
 
-const { attestProviderSpawnPolicy } = await import("../main/agents/provider-spawn-configuration.js");
+const { attestProviderSpawnPolicy } = await import("#provider-runtime/agents/provider-spawn-configuration.js");
 
 /**
  * One turn of the installed Claude Code, started with the arguments a launch of a stored Full access

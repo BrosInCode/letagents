@@ -52,6 +52,8 @@
           above when it would not fit beside it. Retry, Check again and Stop
           turn sit in Deny's place, never where Allow once is, so a habitual
           click on Allow cannot stop a turn or answer a request that appears. -->
+        <p v-if="currentCardView.kind === 'decide' && currentCardView.denyNote" class="desktop-host-approval-quiet"
+          data-testid="desktop-host-approval-deny-note">{{ currentCardView.denyNote }}</p>
         <div class="desktop-host-approval-decisions">
           <div v-if="currentCardView.kind === 'decide'" class="desktop-composer-permission-actions">
             <button type="button" class="desktop-composer-permission-deny desktop-host-approval-deny" :disabled="hostApprovalDecisionsDisabled"

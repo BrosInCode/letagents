@@ -154,7 +154,7 @@ export type ElectronTestEnv = {
 
 /**
  * Unroutable API base used by the desktop test suite. When `LETAGENTS_API_URL`
- * is unset, `electron/main/paths.ts` falls back to the PRODUCTION host
+ * is unset, `provider-runtime/paths.ts` falls back to the PRODUCTION host
  * (`https://letagents.chat`), so any background call the runtime makes during a
  * test (notably the managed-worker desktop-heartbeat/desktop-pause timer) would
  * hammer prod. Port 9 (the "discard" port) is standard-reserved and nothing

@@ -18,7 +18,7 @@ import {
   withDaemonMaintenanceOperation,
 } from "../../../../shared/daemon-maintenance.mjs";
 import { forgetOwnerPrivateCache, isOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
-import { openDaemonStateDatabase } from "../daemon-state-database.js";
+import { DAEMON_STATE_APPLICATION_ID, DAEMON_STATE_USER_VERSION, openDaemonStateDatabase } from "../daemon-state-database.js";
 import { isDaemonEntryPoint } from "../entry-point.js";
 import { DaemonLifecycleLog } from "../lifecycle-log.js";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
@@ -39,9 +39,9 @@ async function scratch(t: test.TestContext): Promise<string> {
 function stateDatabase(directory: string): string {
   const path = join(directory, "daemon.sqlite");
   const database = new DatabaseSync(path);
-  database.exec(`PRAGMA user_version=17;
-    CREATE TABLE manifest_metadata(singleton INTEGER PRIMARY KEY, schema_version INTEGER);
-    INSERT INTO manifest_metadata VALUES(1,17);
+  database.exec(`PRAGMA application_id=${DAEMON_STATE_APPLICATION_ID};
+    PRAGMA user_version=${DAEMON_STATE_USER_VERSION};
+    CREATE TABLE daemon_maintenance_state(key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE retained_worker_bindings(agent_id TEXT PRIMARY KEY, token TEXT);
     INSERT INTO retained_worker_bindings VALUES('agent','secret');`);
   database.close();
@@ -61,10 +61,10 @@ test("Windows: the recovery snapshot needs a private folder, and its file inheri
   const database = stateDatabase(directory);
   await asWindows(fake, async () => {
     // mkdir alone gives an inherited DACL: refused, as a 0755 folder is on POSIX.
-    await assert.rejects(prepareStateRecoveryBackup(database, 18, getKey), { code: "snapshot_refused" });
+    await assert.rejects(prepareStateRecoveryBackup(database, DAEMON_STATE_USER_VERSION + 1, getKey), { code: "snapshot_refused" });
     await fake.security.protect(directory, "directory");
     const before = fake.protects.length;
-    const backup = await prepareStateRecoveryBackup(database, 18, getKey);
+    const backup = await prepareStateRecoveryBackup(database, DAEMON_STATE_USER_VERSION + 1, getKey);
     assert.ok(backup);
     // The verified folder passes its entries on; no tool runs for the snapshot file.
     assert.equal(fake.protects.length, before);
@@ -82,9 +82,9 @@ test("POSIX: the recovery snapshot still refuses a group-readable folder", { ski
   await mkdir(directory, { mode: 0o700 });
   const database = stateDatabase(directory);
   await chmod(directory, 0o750);
-  await assert.rejects(prepareStateRecoveryBackup(database, 18, getKey), { code: "snapshot_refused" });
+  await assert.rejects(prepareStateRecoveryBackup(database, DAEMON_STATE_USER_VERSION + 1, getKey), { code: "snapshot_refused" });
   await chmod(directory, 0o700);
-  assert.ok(await prepareStateRecoveryBackup(database, 18, getKey));
+  assert.ok(await prepareStateRecoveryBackup(database, DAEMON_STATE_USER_VERSION + 1, getKey));
   await chmod(`${database}.recovery.enc`, 0o640);
   await assert.rejects(decryptStateRecoveryBackup(`${database}.recovery.enc`, backupKey), { code: "verify_failed" });
 });
@@ -326,12 +326,12 @@ test("the daemon entry check recognizes an escaped entry path without starting i
   await writeFile(imported, `import { isDaemonEntryPoint } from ${JSON.stringify(check)};\nexport default isDaemonEntryPoint(import.meta.url, process.argv[1]);\n`);
   await writeFile(entry, `import { isDaemonEntryPoint } from ${JSON.stringify(check)};\nimport imported from './imported.mjs';\nprocess.stdout.write(JSON.stringify({ entry: isDaemonEntryPoint(import.meta.url, process.argv[1]), imported }));\n`);
   const { execFileSync } = await import("node:child_process");
-  const output = execFileSync(process.execPath, ["--import", "tsx", entry], { encoding: "utf8" });
+  const output = execFileSync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", entry], { encoding: "utf8" });
   assert.deepEqual(JSON.parse(output), { entry: true, imported: false });
   if (process.platform !== "win32") {
     const linked = join(root, "Preview launcher.mjs");
     symlinkSync(entry, linked);
-    const linkedOutput = execFileSync(process.execPath, ["--import", "tsx", linked], { encoding: "utf8" });
+    const linkedOutput = execFileSync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", linked], { encoding: "utf8" });
     assert.deepEqual(JSON.parse(linkedOutput), { entry: true, imported: false });
   }
 });

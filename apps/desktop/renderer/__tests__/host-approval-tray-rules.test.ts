@@ -43,13 +43,17 @@ test("a card's action key changes when a different button appears on the same re
 
 test("each card state, in plain words", () => {
   assert.deepEqual(hostApprovalCardView(pending, calm),
-    { kind: "decide", denyLabel: "Deny", denyTitle: "Denies this and every other request from Juniper", alwaysAllow: false });
+    { kind: "decide", denyLabel: "Deny", denyTitle: "Denies this and every other request from Juniper", denyNote: null, alwaysAllow: false });
   assert.deepEqual(hostApprovalCardView(pending, { ...calm, agentPending: 3 }),
-    { kind: "decide", denyLabel: "Deny all 3", denyTitle: "Denies this and every other request from Juniper", alwaysAllow: false },
+    { kind: "decide", denyLabel: "Deny all 3", denyTitle: "Denies this and every other request from Juniper", denyNote: null, alwaysAllow: false },
     "a deny that covers the agent's other requests says so on the button");
   const single = { ...pending, presentation: { ...presentation, provider: "codex", denyScope: "request" } } as typeof pending;
   assert.deepEqual(hostApprovalCardView(single, { ...calm, agentPending: 3 }),
-    { kind: "decide", denyLabel: "Deny", denyTitle: null, alwaysAllow: false }, "a deny for one request stays Deny");
+    { kind: "decide", denyLabel: "Deny", denyTitle: null, denyNote: null, alwaysAllow: false }, "a deny for one request stays Deny");
+  const endsTurn = { ...pending, presentation: { ...presentation, provider: "codex", denyScope: "request_and_turn" } } as typeof pending;
+  assert.deepEqual(hostApprovalCardView(endsTurn, { ...calm, agentPending: 3 }),
+    { kind: "decide", denyLabel: "Deny", denyTitle: null, denyNote: "Denying this request also stops the current turn.", alwaysAllow: false },
+    "a deny that Codex takes only as cancel says before the click that it also stops the turn");
   assert.deepEqual(hostApprovalCardView(pending, { ...calm, serviceError: true }), { kind: "offline" });
   assert.deepEqual(hostApprovalCardView(waiting, { ...calm, blocksTurn: true }), { kind: "blocked" });
   assert.deepEqual(hostApprovalCardView(waiting, { ...calm, blocksTurn: true, serviceError: true }), { kind: "blocked" },

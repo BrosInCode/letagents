@@ -1,10 +1,21 @@
+import type { DatabaseSync } from "node:sqlite";
 import { validReplyGifIntent } from "../../../shared/room-expressions.mjs";
 import { SUGGESTED_REPLY_MAX_CHARS, validReplySuggestionIntent } from "../../../shared/suggested-reply.mjs";
 import { validReplyAttachmentsRequest } from "../../../shared/message-attachments.mjs";
 import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../shared/codex-read-only-room-tools.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
+import {
+  BOUNDED_MCP_EFFECT_KIND,
+  BOUNDED_MCP_MAX_READ_ATTEMPTS,
+  EffectClaimRefusedError,
+  isProvenBoundedMutationPreDispatchOr4xxError,
+  type EffectExecutor,
+  type EffectHandler,
+  type EffectRecord,
+} from "./effect-journal/index.js";
 import type { ReplyAttachmentSnapshotInput } from "./reply-attachment-spool.js";
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
+import { EffectAuthorityError } from "./supervised-agent-inbox-store/effect-values.js";
 import type {
   SupervisedEffectRecord,
   SupervisedInboxItem,
@@ -39,6 +50,7 @@ export type CompleteBoundedEffectInput = BoundedEffectCoordinates & {
   effectId: string;
   result?: unknown;
   error?: string;
+  uncertain?: boolean;
 };
 
 export type BoundedEffectContext = {
@@ -66,6 +78,16 @@ export type BoundedWorkerAuthorization = {
   agentSession?: DaemonToolAgentSession;
 };
 
+export type BoundedEffectClaimAuthority = {
+  agent_id: string;
+  room_id: string;
+  execution_generation_id: string;
+  work_attempt_id: string;
+  current_execution_generation_id: string;
+  provider_continuation_id: string;
+  provider_turn_id: string;
+};
+
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
 export type BoundedEffectJournalPort = {
@@ -81,6 +103,7 @@ export type BoundedEffectJournalPort = {
     tool_name: string;
     request: unknown;
     mutation: boolean;
+    daemon_generation?: number;
   }, commitFence: CommitFence): Promise<{ created: boolean; effect: SupervisedEffectRecord }>;
   markExecuting(input: {
     effect_id: string;
@@ -91,11 +114,18 @@ export type BoundedEffectJournalPort = {
     current_execution_generation_id: string;
     provider_continuation_id: string;
     provider_turn_id: string;
+    daemon_generation?: number;
   }, commitFence: CommitFence): Promise<SupervisedEffectRecord>;
+  authorizeClaimInTransaction?: (
+    database: DatabaseSync,
+    effectRecord: EffectRecord,
+    input: BoundedEffectClaimAuthority,
+  ) => string | null;
   complete(input: {
     effect_id: string;
     result?: unknown;
     error?: string;
+    uncertain?: boolean;
     expected: {
       agent_id: string;
       work_attempt_id: string;
@@ -156,7 +186,50 @@ export type BoundedEffectCoordinatorOptions = {
     /** Drop the copies a newly journaled choice replaced. */
     keepOnly(inboxItemId: string, spoolIds: readonly string[]): Promise<void>;
   };
+  /** Single process-wide effect executor; when present, on-demand tool executions run through it. */
+  executor?: () => Pick<EffectExecutor, "runEffect" | "hasHandler"> | null;
+  /** Reads the updated unified effect record after settlement inside `EffectExecutor`. */
+  getEffect?: (effectId: string) => EffectRecord | null;
 };
+
+type ActiveOnDemandExecution = {
+  input: ExecuteBoundedToolInput;
+  runtime: SupervisedToolRuntime;
+  mutation: boolean;
+  claimAuthority: BoundedEffectClaimAuthority;
+  roomId: string;
+  liveResult: unknown;
+  thrownError: unknown;
+  hasThrownError: boolean;
+  uncertainUnrecorded: boolean;
+};
+
+async function raceWithAbortSignal<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<{ aborted: true } | { aborted: false; value: T }> {
+  if (signal.aborted) {
+    void operation.catch(() => {});
+    return { aborted: true };
+  }
+  let onAbort: (() => void) | null = null;
+  const abortPromise = new Promise<{ aborted: true }>((resolve) => {
+    onAbort = () => resolve({ aborted: true });
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const result = await Promise.race([
+      operation.then((value) => ({ aborted: false as const, value })),
+      abortPromise,
+    ]);
+    if (result.aborted) {
+      void operation.catch(() => {});
+    }
+    return result;
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
 
 /** Whether an agent is a Codex agent whose saved access level is Read-only. */
 export function codexAgentIsReadOnly(entry: Pick<DaemonManifestEntry, "provider" | "permission_profile_id">): boolean {
@@ -205,8 +278,182 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
     payload: string;
     result: Promise<Record<string, unknown>>;
   }>();
+  private readonly activeOnDemand = new Map<string, ActiveOnDemandExecution>();
 
   constructor(private readonly options: BoundedEffectCoordinatorOptions) {}
+
+  /**
+   * Builds the `EffectHandler` registered on the daemon's single `EffectExecutor`
+   * under `kind = "bounded_mcp_effect"` (`autoPump: false` — on-demand only).
+   */
+  createExecutorHandler(): EffectHandler {
+    return {
+      retryable: true,
+      autoPump: false,
+      defaultMaxAttempts: BOUNDED_MCP_MAX_READ_ATTEMPTS,
+      authorizeClaim: (database, effectRecord) => {
+        const invocation = this.activeOnDemand.get(effectRecord.id);
+        if (!invocation) {
+          return "The supervised bounded MCP effect requires an active on-demand execution caller.";
+        }
+        if (this.options.journal.authorizeClaimInTransaction) {
+          return this.options.journal.authorizeClaimInTransaction(database, effectRecord, invocation.claimAuthority);
+        }
+        return null;
+      },
+      execute: async (claimed, ctx) => {
+        const invocation = this.activeOnDemand.get(claimed.id);
+        if (!invocation) {
+          return {
+            status: "failed",
+            error: "The supervised bounded MCP effect lost its active on-demand caller before execution.",
+          };
+        }
+        if (ctx.signal.aborted) {
+          const error = new Error("The daemon shut down before the supervised tool began executing.");
+          invocation.thrownError = error;
+          invocation.hasThrownError = true;
+          return { status: "failed", error: error.message };
+        }
+        let context: BoundedEffectContext;
+        try {
+          context = await this.options.context.exactActive(invocation.input);
+        } catch (error) {
+          invocation.thrownError = error;
+          invocation.hasThrownError = true;
+          return {
+            status: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        const refusedNow = readOnlyRoomToolRefusal(context.entry, invocation.input.toolName);
+        if (refusedNow) {
+          invocation.thrownError = new Error(refusedNow);
+          invocation.hasThrownError = true;
+          return { status: "failed", error: refusedNow };
+        }
+        const authorization = this.options.authorizations.get(context.entry.id);
+        const session = authorization?.agentSession;
+        if (!authorization || !session
+          || authorization.agentSessionId !== context.agent.agentSessionId
+          || authorization.bearer !== context.agent.bearer
+          || authorization.bearerId !== context.binding.credential_ref
+          || authorization.roomId !== context.entry.room_id
+          || session.session_id !== context.agent.agentSessionId
+          || session.room_id !== context.entry.room_id
+          || session.runtime !== context.entry.provider
+          || session.agent_key !== authorization.agentKey
+          || session.agent_instance_id !== `daemon:${context.entry.id}`) {
+          const error = new Error("The exact server-issued worker identity is unavailable for this supervised tool execution.");
+          invocation.thrownError = error;
+          invocation.hasThrownError = true;
+          return { status: "failed", error: error.message };
+        }
+        if (ctx.signal.aborted) {
+          const error = new Error("The daemon shut down before the supervised tool began executing.");
+          invocation.thrownError = error;
+          invocation.hasThrownError = true;
+          return { status: "failed", error: error.message };
+        }
+        try {
+          const raced = await raceWithAbortSignal(
+            invocation.runtime.executeDaemonTool({
+              provider: context.entry.provider,
+              toolName: invocation.input.toolName,
+              input: invocation.input.input,
+              requestId: isLocalRoomApi(context.agent.apiUrl) ? claimed.id : invocation.input.mcpRequestId,
+              effectId: claimed.id,
+              signal: ctx.signal,
+              roomId: context.entry.room_id,
+              apiUrl: context.agent.apiUrl,
+              bearer: context.agent.bearer,
+              cwd: context.entry.workspace_path ?? "",
+              agentSession: session,
+            }),
+            ctx.signal,
+          );
+          if (raced.aborted) {
+            if (invocation.mutation) {
+              const detail = "The daemon shut down while the mutating tool was executing. It may have completed; verify external state before repeating it.";
+              invocation.thrownError = new Error(detail);
+              invocation.hasThrownError = true;
+              return { status: "uncertain", error: detail };
+            }
+            const detail = "The daemon shut down while the read-only tool was executing.";
+            invocation.thrownError = new Error(detail);
+            invocation.hasThrownError = true;
+            return { status: "retry", retryAfterMs: 0, error: detail };
+          }
+          invocation.roomId = context.entry.room_id;
+          invocation.liveResult = raced.value.liveResult;
+          return { status: "completed", outcome: raced.value.durableResult };
+        } catch (error) {
+          invocation.thrownError = error;
+          invocation.hasThrownError = true;
+          const detail = error instanceof Error ? error.message : String(error);
+          if (invocation.mutation) {
+            if (!ctx.signal.aborted && isProvenBoundedMutationPreDispatchOr4xxError(error)) {
+              return { status: "failed", error: detail };
+            }
+            return {
+              status: "uncertain",
+              error: ctx.signal.aborted
+                ? "The daemon shut down while the mutating tool was executing. It may have completed; verify external state before repeating it."
+                : detail,
+            };
+          }
+          if (ctx.signal.aborted) {
+            return { status: "retry", retryAfterMs: 0, error: detail };
+          }
+          return { status: "failed", error: detail };
+        }
+      },
+      settle: async (claimed, result, defaultSettle) => {
+        const invocation = this.activeOnDemand.get(claimed.id);
+        if (!invocation) return defaultSettle();
+        if (result.status === "completed") {
+          // Execution and checkpointing are separate truth boundaries. If the
+          // external effect succeeded but this write fails, leave the journal in
+          // executing state; never rewrite the real success as failure.
+          await this.reserveJournal(() => this.options.executionCompletion.complete({
+            ...invocation.input,
+            effectId: claimed.id,
+            result: result.outcome,
+          }, true));
+          return this.options.getEffect?.(claimed.id) ?? {
+            ...claimed,
+            state: "completed",
+            outcome: result.outcome ?? null,
+            last_error: null,
+          };
+        }
+        if (result.status === "failed" || result.status === "uncertain") {
+          let settledInJournal = false;
+          try {
+            await this.reserveJournal(() => this.options.executionCompletion.complete({
+              ...invocation.input,
+              effectId: claimed.id,
+              error: result.error,
+              ...(result.status === "uncertain" ? { uncertain: true } : {}),
+            }, true));
+            settledInJournal = true;
+          } catch {
+            // Preserve the execution error. An unconfirmed journal completion is
+            // deliberately never redriven as a mutation by the same request id.
+            if (result.status === "uncertain") {
+              invocation.uncertainUnrecorded = true;
+            }
+          }
+          return this.options.getEffect?.(claimed.id) ?? {
+            ...claimed,
+            state: settledInJournal ? result.status : claimed.state,
+            last_error: settledInJournal ? result.error : claimed.last_error,
+          };
+        }
+        return this.reserveJournal(async () => defaultSettle());
+      },
+    };
+  }
 
   prepare(input: PrepareBoundedEffectInput): Promise<Record<string, unknown>> {
     return this.reserveJournal(() => this.prepareOnce(input));
@@ -239,14 +486,15 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
   async executeOnce(input: ExecuteBoundedToolInput): Promise<Record<string, unknown>> {
     const runtime = await this.options.runtime.load();
     const mutation = runtime.supervisedToolIsMutation(input.toolName);
-    const prepared = await this.reserveJournal(() => this.prepareOnce({ ...input, mutation }));
+    const executor = this.activeExecutor();
+    const prepared = await this.reserveJournal(() => this.prepareOnce(
+      { ...input, mutation },
+      { claimForExecution: executor === null },
+    ));
     const roomId = typeof prepared.room_id === "string" ? prepared.room_id : "";
     if (prepared.state === "completed") return prepared;
     if (prepared.state === "uncertain") {
-      return { state: "completed", room_id: roomId, result: this.supervisedInstruction(
-        "This mutating tool may already have completed, but its result was not durably checkpointed. Verify the external state before issuing a new request; this exact request will not be repeated automatically.",
-        { code: "SUPERVISED_EFFECT_OUTCOME_UNCERTAIN", effect_id: prepared.effect_id, detail: prepared.error },
-      ) };
+      return this.uncertainToolResponse(roomId, String(prepared.effect_id ?? ""), prepared.error);
     }
     if (prepared.action === "use_final_answer") {
       const context = await this.options.context.exactActive(input);
@@ -268,6 +516,54 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
     }
     if (prepared.action !== "execute" || typeof prepared.effect_id !== "string") {
       throw new Error("The supervised effect journal returned an unsupported execution state.");
+    }
+
+    if (executor) {
+      const effectId = prepared.effect_id;
+      const claimAuthority = prepared.claim_authority as BoundedEffectClaimAuthority;
+      const invocation: ActiveOnDemandExecution = {
+        input,
+        runtime,
+        mutation,
+        claimAuthority,
+        roomId,
+        liveResult: undefined,
+        thrownError: undefined,
+        hasThrownError: false,
+        uncertainUnrecorded: false,
+      };
+      this.activeOnDemand.set(effectId, invocation);
+      let settled: EffectRecord;
+      try {
+        settled = await executor.runEffect(effectId);
+      } catch (error) {
+        if (error instanceof EffectClaimRefusedError) {
+          throw new EffectAuthorityError(error.message);
+        }
+        throw error;
+      } finally {
+        this.activeOnDemand.delete(effectId);
+      }
+      if (settled.state === "uncertain") {
+        return this.uncertainToolResponse(roomId, effectId, settled.last_error);
+      }
+      if (invocation.hasThrownError) {
+        if (invocation.uncertainUnrecorded) {
+          throw this.unrecordedUncertainError(invocation.thrownError);
+        }
+        throw invocation.thrownError;
+      }
+      if (settled.state === "failed") {
+        throw new Error(settled.last_error ?? "The supervised effect failed before execution.");
+      }
+      if (settled.state !== "completed") {
+        throw new Error(`The supervised effect entered unexpected state ${settled.state}.`);
+      }
+      return {
+        state: "completed",
+        room_id: invocation.roomId,
+        result: invocation.liveResult !== undefined ? invocation.liveResult : settled.outcome,
+      };
     }
 
     // Re-resolve exact authority after journal preparation and before any I/O.
@@ -308,6 +604,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
         toolName: input.toolName,
         input: input.input,
         requestId: isLocalRoomApi(context.agent.apiUrl) ? prepared.effect_id : input.mcpRequestId,
+        effectId: prepared.effect_id,
         roomId: context.entry.room_id,
         apiUrl: context.agent.apiUrl,
         bearer: context.agent.bearer,
@@ -316,15 +613,25 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      const uncertain = mutation && !isProvenBoundedMutationPreDispatchOr4xxError(error);
+      let settledUncertain = false;
       try {
         await this.reserveJournal(() => this.options.executionCompletion.complete({
           ...input,
           effectId: prepared.effect_id as string,
           error: detail,
+          ...(uncertain ? { uncertain: true } : {}),
         }, true));
+        settledUncertain = uncertain;
       } catch {
         // Preserve the execution error. An unconfirmed journal completion is
         // deliberately never redriven as a mutation by the same request id.
+      }
+      if (settledUncertain) {
+        return this.uncertainToolResponse(context.entry.room_id, prepared.effect_id as string, detail);
+      }
+      if (uncertain) {
+        throw this.unrecordedUncertainError(error);
       }
       throw error;
     }
@@ -339,7 +646,11 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
     return { state: "completed", room_id: context.entry.room_id, result: executed.liveResult };
   }
 
-  async prepareOnce(input: PrepareBoundedEffectInput): Promise<Record<string, unknown>> {
+  async prepareOnce(
+    input: PrepareBoundedEffectInput,
+    options: { claimForExecution?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
+    const claimForExecution = options.claimForExecution ?? true;
     if (!input.mcpRequestId.trim() || !input.toolName.trim()) {
       throw new Error("A supervised effect requires MCP request and tool identities.");
     }
@@ -437,6 +748,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       tool_name: input.toolName,
       request,
       mutation: input.mutation,
+      daemon_generation: input.daemonGeneration,
     }, (commit) => this.options.authority.fenceCommit(commit));
     if (prepared.effect.state === "completed") {
       if (input.toolName === "set_reply_attachments" && prepared.created) {
@@ -476,8 +788,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
         source_message_id: context.active.sourceMessageId,
       });
     }
-    const executing = await this.options.journal.markExecuting({
-      effect_id: prepared.effect.effect_id,
+    const claimAuthority: BoundedEffectClaimAuthority = {
       agent_id: input.entryId,
       room_id: context.entry.room_id,
       execution_generation_id: context.providerTurnBinding.origin_execution_generation_id,
@@ -485,6 +796,20 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       current_execution_generation_id: context.agent.executionGenerationId,
       provider_continuation_id: context.agent.providerContinuationId!,
       provider_turn_id: context.inbox.provider_turn_id!,
+    };
+    if (!claimForExecution) {
+      return withExactRoom({
+        state: "prepared",
+        effect_id: prepared.effect.effect_id,
+        action: "execute",
+        mutation: input.mutation,
+        claim_authority: claimAuthority,
+      });
+    }
+    const executing = await this.options.journal.markExecuting({
+      effect_id: prepared.effect.effect_id,
+      ...claimAuthority,
+      daemon_generation: input.daemonGeneration,
     }, (commit) => this.options.authority.fenceCommit(commit));
     if (executing.state !== "executing") {
       throw new Error("The supervised effect did not acquire durable execution authority.");
@@ -522,6 +847,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       effect_id: input.effectId,
       result: input.result,
       error: input.error,
+      ...(input.uncertain ? { uncertain: true } : {}),
       expected: {
         agent_id: input.entryId,
         work_attempt_id: input.workAttemptId,
@@ -549,6 +875,30 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
   /** Prepare-handoff additionally waits for admitted external tool executions. */
   async drainExternalExecutions(): Promise<void> {
     await Promise.all([...this.externalExecutions]);
+  }
+
+  private activeExecutor(): Pick<EffectExecutor, "runEffect" | "hasHandler"> | null {
+    const candidate = this.options.executor?.() ?? null;
+    return candidate && candidate.hasHandler(BOUNDED_MCP_EFFECT_KIND) ? candidate : null;
+  }
+
+  private unrecordedUncertainError(original: unknown): Error {
+    const detail = original instanceof Error ? original.message : String(original);
+    return new Error(
+      `${detail} (Outcome is uncertain and could not be recorded in the effect journal; verify external state before repeating it.)`,
+      { cause: original },
+    );
+  }
+
+  private uncertainToolResponse(roomId: string, effectId: string, detail: unknown): Record<string, unknown> {
+    return {
+      state: "completed",
+      room_id: roomId,
+      result: this.supervisedInstruction(
+        "This mutating tool may already have completed, but its result was not durably checkpointed. Verify the external state before issuing a new request; this exact request will not be repeated automatically.",
+        { code: "SUPERVISED_EFFECT_OUTCOME_UNCERTAIN", effect_id: effectId, detail },
+      ),
+    };
   }
 
   private supervisedInstruction(instruction: string, data: Record<string, unknown>): Record<string, unknown> {

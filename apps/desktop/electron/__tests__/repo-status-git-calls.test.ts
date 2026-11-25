@@ -7,7 +7,7 @@ import test from "node:test";
 
 import "./isolated-home.js";
 import { observeGitSpawns, type ObservedGitSpawn } from "./harness.js";
-import { startDesktopShellEnvironmentHydration } from "../main/desktop-shell-environment.js";
+import { startDesktopShellEnvironmentHydration } from "#provider-runtime/desktop-shell-environment.js";
 import {
   buildRepoStatus,
   clearBranchDeltaCacheForTest,

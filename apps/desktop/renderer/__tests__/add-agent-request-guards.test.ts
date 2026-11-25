@@ -8,7 +8,7 @@ import type {
   DesktopAgentProviderPreflight,
   DesktopAgentProviderPreflightInput,
 } from "../../electron/ipc-types";
-import { listManagedAgentPermissionProfiles } from "../../electron/main/agents/managed-agent-permission-profiles";
+import { listManagedAgentPermissionProfiles } from "#provider-runtime/agents/managed-agent-permission-profiles.js";
 import { useAddAgentConfiguration } from "../src/components/desktop/content/add-agent/useAddAgentConfiguration";
 import { useAddAgentSetup } from "../src/components/desktop/content/add-agent/useAddAgentSetup";
 import { supervisedPermissionProfilePresentation } from "../src/domain/managed-agents";

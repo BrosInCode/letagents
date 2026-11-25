@@ -2,14 +2,22 @@ import type { AgentAvatar } from "../../../../shared/agent-avatar.mjs";
 import type { DesktopGitRoomInfo } from "./room.js";
 import type { DesktopMcpInstallTargetId } from "./setup.js";
 import type { RetainedExecutionDetail } from "../../shared/execution-protocol.js";
-
-export type DesktopAgentProviderId =
-  | "claude-code"
-  | "antigravity"
-  | "cursor"
-  | "codex"
-  | "open-model"
-  | (string & {});
+import type {
+  DesktopAgentProviderId,
+  DesktopManagedAgentPermissionProfile,
+  DesktopManagedAgentPermissionProfileId,
+} from "../../shared/provider-desktop-types.js";
+export type {
+  DesktopAgentCommitIdentitySettings,
+  DesktopAgentProviderId,
+  DesktopCursorMcpPolicy,
+  DesktopManagedAgentPermissionProfile,
+  DesktopManagedAgentPermissionProfileId,
+  DesktopManagedAgentPermissionProfileRisk,
+  DesktopManagedAgentPermissionProfileStatus,
+  DesktopOpenModelSaveSettingsInput,
+  DesktopOpenModelSettingsStatus,
+} from "../../shared/provider-desktop-types.js";
 
 export type DesktopAgentProviderCapability =
   | "external_mcp"
@@ -107,9 +115,7 @@ export interface DesktopAgentProviderSetupResult {
   detail: string | null;
 }
 
-export type DesktopManagedAgentDeliveryMode =
-  | "mcp_polling"
-  | "daemon_inbox";
+export type DesktopManagedAgentDeliveryMode = "daemon_inbox";
 
 export type DesktopManagedAgentEffort =
   | "low"
@@ -117,11 +123,6 @@ export type DesktopManagedAgentEffort =
   | "high"
   | "xhigh"
   | "max";
-
-export type DesktopCursorMcpPolicy =
-  | "filter_letagents"
-  | "normal"
-  | "none";
 
 export type DesktopAgentProviderModelSource =
   | "provider"
@@ -165,34 +166,6 @@ export interface DesktopAgentProviderModelsResult {
   defaultModel: string | null;
   error: string | null;
   cliUpdate?: DesktopAgentProviderCliUpdate | null;
-}
-
-export type DesktopManagedAgentPermissionProfileId =
-  | "read_only"
-  | "ask_before_write"
-  | "auto_review"
-  | "sandboxed_write"
-  | "full_access"
-  | (string & {});
-
-export type DesktopManagedAgentPermissionProfileStatus =
-  | "available"
-  | "gated"
-  | "unsupported";
-
-export type DesktopManagedAgentPermissionProfileRisk =
-  | "low"
-  | "medium"
-  | "high";
-
-export interface DesktopManagedAgentPermissionProfile {
-  id: DesktopManagedAgentPermissionProfileId;
-  label: string;
-  description: string;
-  status: DesktopManagedAgentPermissionProfileStatus;
-  risk: DesktopManagedAgentPermissionProfileRisk;
-  detail: string | null;
-  isDefault: boolean;
 }
 
 export type DesktopManagedAgentChangeFileStatus =
@@ -258,35 +231,24 @@ export interface DesktopManagedAgentPublicChangeSummary {
 export type DesktopSupervisorDesiredState = "running" | "paused" | "stopped";
 export type DesktopSupervisorObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
 export type DesktopSupervisorCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
-export type DesktopLifecycleProjectionProvider = "codex" | "claude-code" | "cursor" | "open-model" | "antigravity";
-export type DesktopLifecycleCaptureAdmissionStatus = "pending" | "ready" | "unavailable";
-export interface DesktopLifecycleProjectionDiagnostics {
-  available: boolean;
-  providers: Record<DesktopLifecycleProjectionProvider, {
-    comparedSegments: number;
-    matched: number;
-    missingInTyped: number;
-    missingInLegacy: number;
-    pairedButDifferent: number;
-    conflicts: number;
-    observationUnavailable: number;
-  }>;
+
+export interface DesktopSupervisorLegacyStateReset {
+  resetAt: string;
+  backupName: string;
+  legacySchemaVersion: number;
+  preservedRoomOnlyWorkspaces: boolean;
+  preservedReviewArchives: boolean;
 }
 
 export interface DesktopSupervisorDaemonStatus {
   maintenanceHoldId?: string | null;
+  legacyStateReset?: DesktopSupervisorLegacyStateReset | null;
   healthy: boolean;
   protocolVersion: number;
   implementationVersion: string;
   generation: number;
   pid: number;
   startedAt: string;
-  recoveryDiagnostics: {
-    daemonInboxWaitEvidenceDependency: number;
-    lifecycleProjection: DesktopLifecycleProjectionDiagnostics;
-    lifecycleCaptureAdmission: Record<DesktopLifecycleProjectionProvider, DesktopLifecycleCaptureAdmissionStatus>;
-    lifecycleLocalConformanceEligible: Record<DesktopLifecycleProjectionProvider, boolean>;
-  } | null;
   capabilities: {
     roomDeliveryRetry: boolean;
     providerContinuationRepair: boolean;
@@ -718,8 +680,6 @@ export interface DesktopSupervisorManifestEntry {
   permissionProfileId: string | null;
   /** Durable room-ingress owner for this supervised provider. */
   deliveryMode: DesktopManagedAgentDeliveryMode;
-  /** Read-only daemon-owned custody; selecting delivery mode cannot enable it. */
-  pollingContract?: "custodial_polling_v1" | null;
   /**
    * Read-only: this agent uses its owner's own provider setup ("on"), will
    * once it restarts, or still does until it restarts. Absent means off.
@@ -925,30 +885,4 @@ export interface DesktopSupervisorAgentInspectorDetail {
   publication: { client_message_id: string; canonical_message_id: string | null; room_id: string | null } | null;
   continuation_repair: DesktopSupervisorContinuationRepair | null;
   timeline: DesktopRoomAgentCausalEvent[]; items: DesktopSupervisorAgentInspectorItem[]; uncertain_effects: DesktopSupervisorUncertainEffect[]; history_boundary: DesktopSupervisorAgentInspectorHistoryBoundary | null;
-}
-
-export interface DesktopOpenModelSettingsStatus {
-  configured: boolean;
-  hasApiKey: boolean;
-  baseUrl: string;
-  model: string;
-  savedAt: string | null;
-  settingsPath: string;
-  error: string | null;
-  contextWindow?: number | null;
-}
-
-export interface DesktopOpenModelSaveSettingsInput {
-  baseUrl?: string | null;
-  model?: string | null;
-  /** A string saves a new key, null clears the saved key, undefined keeps the current key. */
-  apiKey?: string | null;
-  contextWindow?: number | null;
-}
-
-export interface DesktopAgentCommitIdentitySettings {
-  /** True when the owner chose to keep the host's own Git identity for agent commits. */
-  useHostGitIdentity: boolean;
-  /** The signed-in GitHub account's noreply identity, or null when no GitHub account is known. */
-  githubIdentity: { name: string; email: string } | null;
 }

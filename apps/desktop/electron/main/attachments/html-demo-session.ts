@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import type { DesktopDemoSettings } from "../../ipc-types.js";
 
-import { htmlDemoProtocolScheme } from "../paths.js";
+import { htmlDemoProtocolScheme } from "#provider-runtime/paths.js";
 import {
   HTML_DEMO_DEAD_PROXY,
   HTML_DEMO_PARTITION,

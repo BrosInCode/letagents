@@ -74,16 +74,13 @@ test("start, laneOutlook, and exactActiveBoundedContext read manifest entries in
       wake: () => {},
     },
     manifest: {
-      unresolvedDeliveryDrain: async () => null,
       getEntry: async (entryId, activityMode) => {
         modes.push({ entryId, mode: activityMode });
         return entry;
       },
-      getAgentConfiguration: async () => ({}),
       pendingRoomMoves: async () => [],
     },
     roomMoves: { reconcile: async (move) => move },
-    cutovers: { start: async () => {} },
     inbox: {
       get: async () => ({
         inbox_item_id: "inbox-1",
@@ -130,13 +127,16 @@ test("start, laneOutlook, and exactActiveBoundedContext read manifest entries in
     { entryId: "agent-1", mode: "summary" },
     { entryId: "agent-1", mode: "summary" },
   ]);
+});
 
-  let cutoverStarts = 0;
-  const legacyCoordinator = new SupervisedDeliveryLifecycleCoordinator({
+test("start routes room-move reconcile failures to scheduleRoomMoveRecovery instead of provider scheduleRecovery", async () => {
+  const providerScheduled: Array<{ entryId: string; delayMs: number }> = [];
+  const roomMoveScheduled: Array<{ entryId: string; delayMs: number }> = [];
+  const coordinator = new SupervisedDeliveryLifecycleCoordinator({
     isHandoffScheduled: () => false,
     supportsRoomTurns: () => true,
     isLifecycleActive: () => false,
-    isOperationallyAdmitted: () => false,
+    isOperationallyAdmitted: () => true,
     currentDaemonGeneration: () => 7,
     delivery: {
       activeTurn: () => null,
@@ -145,16 +145,34 @@ test("start, laneOutlook, and exactActiveBoundedContext read manifest entries in
       wake: () => {},
     },
     manifest: {
-      unresolvedDeliveryDrain: async () => null,
-      getEntry: async (entryId, activityMode) => {
-        modes.push({ entryId, mode: activityMode });
-        return makeEntry({ desired_state: "stopped", observed_state: "stopped", delivery_mode: "mcp_polling" });
-      },
-      getAgentConfiguration: async () => ({ polling_contract: null }),
-      pendingRoomMoves: async () => [],
+      getEntry: async () => makeEntry(),
+      pendingRoomMoves: async () => [{
+        operation_id: "move-1",
+        request_id: "req-1",
+        agent_id: "agent-1",
+        source_room_id: "room-1",
+        destination_room_id: "room-2",
+        daemon_generation: 7,
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-1",
+        agent_session_id: "session-1",
+        activating_inbox_item_id: null,
+        provider_turn_id: null,
+        effect_id: null,
+        phase: "joining_destination",
+        remote_room_id: null,
+        destination_cursor: null,
+        source_credentials_revoked: false,
+        source_cursor_present: true,
+        source_cursor: null,
+        error: null,
+        created_at: "2026-08-26T00:00:00.000Z",
+        updated_at: "2026-08-26T00:00:00.000Z",
+      }],
     },
-    roomMoves: { reconcile: async (move) => move },
-    cutovers: { start: async () => { cutoverStarts += 1; } },
+    roomMoves: {
+      reconcile: async () => { throw new Error("transient room move reconcile failure"); },
+    },
     inbox: {
       get: async () => null,
       preparedRoomMove: async () => null,
@@ -165,12 +183,13 @@ test("start, laneOutlook, and exactActiveBoundedContext read manifest entries in
       get: async () => null,
       credentialFor: async () => null,
     },
-    liveHandle: () => undefined,
-    providerAuthority: { isExactAuthority: async () => false },
-    scheduleRecovery: () => {},
+    liveHandle: () => handle,
+    providerAuthority: { isExactAuthority: async () => true },
+    scheduleRecovery: (entryId, delayMs) => { providerScheduled.push({ entryId, delayMs }); },
+    scheduleRoomMoveRecovery: (entryId, delayMs) => { roomMoveScheduled.push({ entryId, delayMs }); },
   });
 
-  await legacyCoordinator.start("agent-1");
-  assert.equal(cutoverStarts, 1);
-  assert.deepEqual(modes.at(-1), { entryId: "agent-1", mode: "summary" });
+  await assert.rejects(() => coordinator.start("agent-1"), /transient room move reconcile failure/);
+  assert.deepEqual(providerScheduled, []);
+  assert.deepEqual(roomMoveScheduled, [{ entryId: "agent-1", delayMs: 1_000 }]);
 });

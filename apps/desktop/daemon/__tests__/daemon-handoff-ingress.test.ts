@@ -8,7 +8,6 @@ import { type DaemonActivityEvent, type DaemonManifestEntry } from "../types.js"
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import { unavailableLifecycleProjectionDiagnostics } from "../lifecycle-projection-ledger.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import {
   SupervisorDaemon,
@@ -199,8 +198,8 @@ test("a host-grant install queued before handoff cannot retain plaintext or repo
     releaseTick();
     await heldTick;
     const rejected = await queuedInstall;
-    assert.equal(rejected.ok, true);
-    assert.deepEqual(rejected.result, { status: "stale" });
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.error ?? "", /handoff|handed off|fenced|shutting down/i);
     assert.equal(mintCalls, 0, "a retired daemon cannot mint a worker session");
     assert.equal(internals.workerRuntimeCustody.hostGrant("queued_host_grant"), undefined, "a retired daemon retains no plaintext grant");
     await within(handoff, "queued host-grant handoff", 1_000);
@@ -233,8 +232,8 @@ test("handoff destroys open control sockets and fences a mutation paused before 
   try {
     await first.start();
     const store = (first as unknown as { store: ManifestStore }).store;
-    const originalWrite = store.write.bind(store);
-    store.write = (expected, entries, commitFence) => originalWrite(expected, entries, async (commit) => {
+    const originalCreateEntry = store.createEntry.bind(store);
+    store.createEntry = (candidate, commitFence) => originalCreateEntry(candidate, async (commit) => {
       reachedCommit();
       await commitGate;
       if (commitFence) await commitFence(commit);
@@ -244,12 +243,14 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       entry: { ...entry, id: "must_not_commit_after_handoff" },
     }).catch(() => null);
     const bindingStore = (first as unknown as { workerBindings: WorkerBindingStore }).workerBindings;
-    const rawBindingStore = bindingStore as unknown as { write: (value: unknown) => Promise<void> };
-    const originalBindingWrite = rawBindingStore.write.bind(rawBindingStore);
-    rawBindingStore.write = async (value) => {
+    const rawBindingStore = bindingStore as unknown as {
+      transaction: <T>(database: unknown, operation: () => T, notification?: unknown) => Promise<T>;
+    };
+    const originalBindingTransaction = rawBindingStore.transaction.bind(rawBindingStore);
+    rawBindingStore.transaction = async (database, operation, notification) => {
       reachedBindingCommit();
       await bindingCommitGate;
-      await originalBindingWrite(value);
+      return originalBindingTransaction(database, operation, notification);
     };
     const lateBinding = bindingStore.bind({
       entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_old",
@@ -392,25 +393,8 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
     const status = await daemonRequest(paths.socketPath, "daemon.status");
     assert.equal(status.ok, true);
     assert.equal((status.result as { generation: number }).generation, 1);
-    assert.deepEqual((status.result as { recovery_diagnostics: unknown }).recovery_diagnostics, {
-      daemon_inbox_wait_evidence_dependency: 0,
-      lifecycle_projection: unavailableLifecycleProjectionDiagnostics(),
-      lifecycle_capture_admission: { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable", "open-model": "unavailable",
-        antigravity: "unavailable" },
-      lifecycle_local_conformance_eligible: { codex: false, "claude-code": false, cursor: false, "open-model": false, antigravity: false },
-    });
-    const providerStreams = (daemon as unknown as {
-      providerStreams: { acceptsLegacyWaitAuthority(entry: DaemonManifestEntry): boolean };
-    }).providerStreams;
-    assert.equal(providerStreams.acceptsLegacyWaitAuthority({ ...entry, delivery_mode: "daemon_inbox" }), false);
     const negotiated = await daemonRequest(paths.socketPath, "daemon.negotiate");
-    assert.deepEqual((negotiated.result as { recovery_diagnostics: unknown }).recovery_diagnostics, {
-      daemon_inbox_wait_evidence_dependency: 1,
-      lifecycle_projection: unavailableLifecycleProjectionDiagnostics(),
-      lifecycle_capture_admission: { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable", "open-model": "unavailable",
-        antigravity: "unavailable" },
-      lifecycle_local_conformance_eligible: { codex: false, "claude-code": false, cursor: false, "open-model": false, antigravity: false },
-    });
+    assert.equal(negotiated.ok, true);
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, workspace_path: "/tmp/work" } });
     assert.equal(put.ok, true);
     const listed = await daemonRequest(paths.socketPath, "manifest.list");

@@ -10,7 +10,7 @@ import {
   getLetAgentsMcpServerIssue,
   isLocalDevLetAgentsApiUrl,
   LETAGENTS_NPX_ARGS,
-} from "../main/mcp-config.js";
+} from "#provider-runtime/mcp-config.js";
 import { withRefreshedRuntimeAndAuth } from "../main/mcp-setup.js";
 
 const baseExpected = createLetAgentsMcpServerConfig({

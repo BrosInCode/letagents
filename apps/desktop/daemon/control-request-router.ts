@@ -1,23 +1,31 @@
-import { retiredRuntimeEvidenceListSchema } from "./runtime-recovery-journal.js";
-import type { DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
-import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
-import type { CustodialForwardRequest, DeliveryDrainIdentity, DeliveryDrainRequest, PollingActivationRequest } from "./delivery-cutover-execution-coordinator.js";
+import {
+  DAEMON_RPC_TIMEOUTS,
+  HANDOFF_DRAIN_METHODS,
+  HANDOFF_LIFECYCLE_METHODS,
+  hostApprovalOperationSchemas,
+  isDaemonRpcMethod,
+  parseDaemonRpcParams,
+  type DaemonManifestEntry,
+  type DaemonRequest,
+  type DaemonRpcMethod,
+  type DaemonRpcParsedParams,
+  type DesiredState,
+  type ManifestActivityMode,
+} from "#daemon-contract/index.js";
 import type { createHostApprovalBridge } from "./host-approval-broker.js";
 
+export type { ManifestActivityMode };
+
 /**
- * The socket router owns protocol parsing and response shaping. Operations are
+ * The socket router owns protocol dispatch derived from the shared RPC
+ * contract (`#daemon-contract/index.js`). Parameter validation, framing bounds,
+ * and handoff admission sets come directly from the contract; operations are
  * bound by SupervisorDaemon, which remains the authority owner.
  */
 export interface DaemonControlOperations {
   mutateLocalBoard(input: unknown): Promise<unknown>;
   watchLocalBoard(input: unknown, signal: AbortSignal): Promise<unknown>;
   hostApprovals: Pick<ReturnType<typeof createHostApprovalBridge>, "challenge" | "verify" | "list" | "decide" | "listToolRules" | "revokeToolRule">;
-  activateCustodialPolling(input: PollingActivationRequest): unknown;
-  getPollingActivation(input: DeliveryDrainIdentity): unknown;
-  cancelPollingActivation(input: DeliveryDrainIdentity): unknown;
-  prepareDeliveryDrain(input: DeliveryDrainRequest | CustodialForwardRequest): unknown;
-  getDeliveryDrain(input: DeliveryDrainIdentity): unknown;
-  cancelDeliveryDrain(input: DeliveryDrainIdentity): unknown;
   status(): unknown;
   prepareHandoff(): unknown;
   /**
@@ -59,6 +67,9 @@ export interface DaemonControlOperations {
   applyAgentConfiguration(input: {
     entryId: string; daemonGeneration: number; expectedConfigurationRevision: number;
   }): unknown;
+  submitApplyAgentConfiguration(input: {
+    entryId: string; daemonGeneration: number; expectedConfigurationRevision: number;
+  }): unknown;
   /** Only the desktop app's signed request reaches this. */
   setLiveSharing(input: { entryId: string; daemonGeneration: number; enabled: boolean }): unknown;
   prepareInspectorRoomMove(input: { entryId: string; destinationRoomId: string; requestId: string; daemonGeneration: number }): unknown;
@@ -67,6 +78,7 @@ export interface DaemonControlOperations {
   rollbackInspectorRoomMove(input: RoomMoveIdentity & { detail: string }): unknown;
   getInspectorRoomMove(input: RoomMoveIdentity): unknown;
   getCurrentInspectorRoomMove(input: { entryId: string; daemonGeneration: number }): unknown;
+  getRpcEffect(effectId: string, daemonGeneration: number): unknown;
   recoverAgentRuntime(entryId: string, daemonGeneration: number, recovery?: import("./runtime-recovery-coordinator.js").AgentRuntimeRecoveryRequest): unknown;
   retireAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null, grantRevokedWithoutWorkerSession: boolean): unknown;
   purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null, grantRevokedWithoutWorkerSession: boolean): unknown;
@@ -99,7 +111,6 @@ export interface DaemonControlOperations {
   }): unknown;
   bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number; initial_message?: string }): unknown;
   borrowWorkerCredential(input: WorkerSessionCoordinates & { daemon_generation: number; provider_turn_id: string; api_url: string }): unknown;
-  authorizeCustodialPolling(input: CustodialPollingAuthorizationInput): unknown;
   checkpointWorkerCursor(input: Omit<WorkerSessionCoordinates, "room_id"> & { room_cursor: string }): unknown;
   readAttempt(id: string): unknown;
 }
@@ -124,101 +135,329 @@ export interface DaemonControlContext {
   requestBarrier?: (request: DaemonRequest) => Promise<void>;
 }
 
-export type ManifestActivityMode = "full" | "summary";
+type DaemonRpcHandlerTable = {
+  [M in DaemonRpcMethod]: (
+    params: DaemonRpcParsedParams<M>,
+    disconnected?: AbortSignal,
+  ) => Promise<unknown> | unknown;
+};
 
-// During the reversible drain, current-turn tools, approvals and observations
-// retain authority. New owner lifecycle actions wait until the update is deferred.
-const HANDOFF_DRAIN_METHODS = new Set<string>([
-  "daemon.negotiate", "daemon.status", "daemon.prepare_handoff",
-  "manifest.list", "manifest.get_entry", "manifest.watch_state", "manifest.update_workplace_liveness",
-  "local_board.watch", "attempt.read", "supervisor.watch_agent_stream", "supervisor.watch_background_commands",
-  "supervisor.get_agent_inspector_detail",
-  "supervisor.get_agent_configuration", "supervisor.get_room_move", "supervisor.get_current_room_move",
-  "supervisor.get_delivery_drain", "supervisor.get_polling_activation",
-  "supervisor.host_approval_challenge", "supervisor.host_approval_request",
-  "supervisor.prepare_bounded_effect", "supervisor.execute_bounded_tool", "supervisor.complete_bounded_effect",
-  "supervisor.borrow_worker_credential", "supervisor.verify_worker_session", "supervisor.checkpoint_worker_cursor",
-  "supervisor.install_host_grant", "supervisor.install_worker_credential", "supervisor.bind_worker_session",
-  "supervisor.authorize_custodial_polling", "supervisor.sync_execution_delegations",
-]);
-
-function paramsRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Daemon request params must be an object.");
-  return value as Record<string, unknown>;
+function parseSignedHostOperation<
+  K extends "list" | "set_home_harness" | "set_live_sharing" | "stop_background_command",
+>(operation: K, input: unknown): import("zod").output<(typeof hostApprovalOperationSchemas)[K]["input"]> {
+  const spec = hostApprovalOperationSchemas[operation];
+  const parsed = spec.input.safeParse(input);
+  if (!parsed.success) throw new Error(spec.invalidInputMessage);
+  return parsed.data as import("zod").output<(typeof hostApprovalOperationSchemas)[K]["input"]>;
 }
 
-function recordValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
-function requiredStringParam(params: Record<string, unknown>, key: string, error: string): string {
-  const value = params[key];
-  if (typeof value !== "string" || !value.trim() || value !== value.trim()) throw new Error(error);
-  return value;
-}
-
-function positiveIntegerParam(params: Record<string, unknown>, key: string, error: string): number {
-  const value = params[key];
-  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(error);
-  return value as number;
-}
-
-function desiredStateParam(params: Record<string, unknown>, key: string, error: string): DesiredState {
-  const value = params[key];
-  if (value !== "running" && value !== "paused" && value !== "stopped") throw new Error(error);
-  return value;
-}
-
-function runtimeRecoveryMode(params: Record<string, unknown>, error: string): "reconnect" | "resume" | "fresh" {
-  const mode = params.mode;
-  if (mode !== "reconnect" && mode !== "resume" && mode !== "fresh") throw new Error(error);
-  return mode;
-}
-
-/**
- * `manifest.list` is the full-history read, so it is also the expensive one.
- * An optional room scope lets the daemon project and serialize only the room
- * the caller will keep. Absent or null params preserve the whole-manifest
- * answer every existing caller depends on.
- */
-function optionalRoomScopeParam(value: unknown, error: string): string | null {
-  if (value === undefined || value === null) return null;
-  const roomId = paramsRecord(value).room_id;
-  if (roomId === undefined || roomId === null) return null;
-  if (typeof roomId !== "string" || !roomId.trim() || roomId !== roomId.trim()) throw new Error(error);
-  return roomId;
-}
-
-/**
- * An absent or null `activity` keeps the full-history read every existing
- * caller depends on. `"summary"` asks for the bounded projection. Anything else
- * is refused instead of silently reading the expensive way.
- */
-function optionalActivityModeParam(value: unknown, error: string): ManifestActivityMode {
-  if (value === undefined || value === null) return "full";
-  const activity = paramsRecord(value).activity;
-  if (activity === undefined || activity === null || activity === "full") return "full";
-  if (activity === "summary") return "summary";
-  throw new Error(error);
-}
-
-function paramsEntry(value: unknown): DaemonManifestEntry {
-  const params = paramsRecord(value);
-  const entry = params.entry;
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("manifest.put requires an entry.");
-  return entry as DaemonManifestEntry;
+function toRoomDeliveryControl(
+  params: DaemonRpcParsedParams<"supervisor.retry_room_delivery">,
+): RoomDeliveryControl {
+  return {
+    entryId: params.entry_id,
+    roomId: params.room_id,
+    sourceMessageId: params.source_message_id,
+    workAttemptId: params.work_attempt_id,
+    executionGenerationId: params.execution_generation_id,
+    agentSessionId: params.agent_session_id,
+    daemonGeneration: params.daemon_generation,
+  };
 }
 
 export function createDaemonControlRequestHandler(
   context: DaemonControlContext,
   operations: DaemonControlOperations,
 ): (request: DaemonRequest, disconnected?: AbortSignal) => Promise<unknown> {
+  const handlers: DaemonRpcHandlerTable = {
+    "daemon.negotiate": () => operations.status(),
+    "daemon.status": () => operations.status(),
+    "daemon.prepare_handoff": async () => {
+      await operations.prepareHandoff();
+      return { accepted: true, generation: context.currentGeneration() };
+    },
+    "manifest.list": (params) => operations.listManifest(
+      params?.room_id ?? null,
+      params?.activity ?? "full",
+    ),
+    "manifest.get_entry": (params) => operations.getManifestEntry(params.entry_id),
+    "local_board.mutate": (params) => operations.mutateLocalBoard(params),
+    "local_board.watch": async (params, disconnected) => {
+      if (!disconnected) throw new Error("A board subscription requires a live connection.");
+      const result = await operations.watchLocalBoard(params, disconnected);
+      await context.assertCurrent();
+      if (context.isHandoffScheduled()) throw new Error("The board service is restarting.");
+      return result;
+    },
+    "supervisor.host_approval_challenge": () => operations.hostApprovals.challenge(),
+    "supervisor.host_approval_request": async (params) => {
+      const authenticated = operations.hostApprovals.verify(params);
+      if (!authenticated) throw new Error("Host approvals are unavailable or this request could not be authenticated.");
+      if (authenticated.operation === "list") {
+        const input = parseSignedHostOperation("list", authenticated.input);
+        return operations.hostApprovals.list(input.roomId);
+      }
+      if (authenticated.operation === "list_tool_rules") {
+        return operations.hostApprovals.listToolRules(authenticated.input);
+      }
+      if (authenticated.operation === "revoke_tool_rule") {
+        return operations.hostApprovals.revokeToolRule(authenticated.input);
+      }
+      if (authenticated.operation === "set_home_harness") {
+        if (context.isHandoffDraining?.()) {
+          throw new Error("An update is waiting for current agent work to finish. Try this action after the update completes or is deferred.");
+        }
+        const input = parseSignedHostOperation("set_home_harness", authenticated.input);
+        const result = asRecord(await operations.updateAgentConfiguration({
+          entryId: input.entryId,
+          daemonGeneration: input.daemonGeneration,
+          expectedRevision: input.expectedRevision,
+          configuration: {},
+          homeHarness: input.enabled,
+        }));
+        const saved = asRecord(result?.configuration);
+        if (input.enabled || result?.outcome !== "updated" || saved?.home_harness_pending !== true) return result;
+        let apply: Record<string, unknown> | null = null;
+        try {
+          apply = asRecord(await operations.applyAgentConfiguration({
+            entryId: input.entryId,
+            daemonGeneration: input.daemonGeneration,
+            expectedConfigurationRevision: saved.config_revision as number,
+          }));
+        } catch {
+          // The choice is saved. A restart that failed is reported as not done.
+        }
+        return { ...result, apply: typeof apply?.outcome === "string" ? apply.outcome : "unavailable" };
+      }
+      if (authenticated.operation === "set_live_sharing") {
+        const input = parseSignedHostOperation("set_live_sharing", authenticated.input);
+        return operations.setLiveSharing(input);
+      }
+      if (authenticated.operation === "stop_background_command") {
+        const input = parseSignedHostOperation("stop_background_command", authenticated.input);
+        return operations.stopBackgroundCommand(input);
+      }
+      const input = asRecord(authenticated.input);
+      if (input?.actorId !== `host-${operations.hostApprovals.challenge()!.keyFingerprint}`) {
+        throw new Error("The approval actor is not the enrolled host.");
+      }
+      return operations.hostApprovals.decide(authenticated.input);
+    },
+    "manifest.watch_state": (params) => operations.watchState({
+      afterDaemonGeneration: params.after_daemon_generation ?? 0,
+      afterSequence: params.after_sequence ?? 0,
+      waitMs: params.wait_ms ?? DAEMON_RPC_TIMEOUTS.longPollDefaultWaitMs,
+      changedOnly: params.changed_only === true,
+    }),
+    "supervisor.watch_agent_stream": (params) => operations.watchAgentStream({
+      entryId: params.entry_id,
+      afterSequence: params.after_sequence ?? 0,
+      waitMs: params.wait_ms ?? DAEMON_RPC_TIMEOUTS.longPollDefaultWaitMs,
+    }),
+    "supervisor.watch_background_commands": (params) => operations.watchBackgroundCommands({
+      entryId: params.entry_id,
+      afterVersion: params.after_version ?? 0,
+      waitMs: params.wait_ms ?? DAEMON_RPC_TIMEOUTS.longPollDefaultWaitMs,
+    }),
+    "supervisor.retry_room_delivery": async (params) => {
+      await operations.retryRoomDelivery(toRoomDeliveryControl(params));
+      return { accepted: true };
+    },
+    "supervisor.restore_agent_conversation": async (params) => {
+      await operations.restoreAgentConversation(toRoomDeliveryControl(params));
+      return { accepted: true };
+    },
+    "supervisor.skip_room_delivery": async (params) => {
+      await operations.skipRoomDelivery(toRoomDeliveryControl(params));
+      return { accepted: true };
+    },
+    "supervisor.get_agent_inspector_detail": (params) => operations.getAgentInspectorDetail(
+      params.entry_id,
+      params.room_id,
+      params.source_message_id,
+    ),
+    "supervisor.prepare_bounded_effect": (params) => operations.prepareBoundedEffect({
+      entryId: params.entry_id,
+      workAttemptId: params.work_attempt_id,
+      executionGenerationId: params.execution_generation_id,
+      daemonGeneration: params.daemon_generation,
+      providerTurnId: params.provider_turn_id ?? "",
+      mcpRequestId: params.mcp_request_id,
+      toolName: params.tool_name,
+      input: params.input,
+      mutation: params.mutation === true,
+    }),
+    "supervisor.execute_bounded_tool": (params) => operations.executeBoundedTool({
+      entryId: params.entry_id,
+      workAttemptId: params.work_attempt_id,
+      executionGenerationId: params.execution_generation_id,
+      daemonGeneration: params.daemon_generation,
+      providerTurnId: params.provider_turn_id ?? "",
+      mcpRequestId: params.mcp_request_id,
+      toolName: params.tool_name,
+      input: params.input,
+    }),
+    "supervisor.complete_bounded_effect": (params) => operations.completeBoundedEffect({
+      entryId: params.entry_id,
+      workAttemptId: params.work_attempt_id,
+      executionGenerationId: params.execution_generation_id,
+      daemonGeneration: params.daemon_generation,
+      providerTurnId: params.provider_turn_id ?? "",
+      effectId: params.effect_id,
+      result: params.result,
+      error: params.error,
+    }),
+    "supervisor.get_agent_configuration": (params) => operations.getAgentConfiguration(
+      params.entry_id,
+      params.daemon_generation,
+    ),
+    "supervisor.update_agent_configuration": (params) => operations.updateAgentConfiguration({
+      entryId: params.entry_id,
+      daemonGeneration: params.daemon_generation,
+      expectedRevision: params.expected_revision,
+      configuration: params.configuration,
+    }),
+    "supervisor.apply_agent_configuration": (params) => operations.submitApplyAgentConfiguration({
+      entryId: params.entry_id,
+      daemonGeneration: params.daemon_generation,
+      expectedConfigurationRevision: params.expected_configuration_revision,
+    }),
+    "supervisor.prepare_room_move": (params) => operations.prepareInspectorRoomMove({
+      entryId: params.entry_id,
+      destinationRoomId: params.destination_room_id,
+      requestId: params.request_id,
+      daemonGeneration: params.daemon_generation,
+    }),
+    "supervisor.commit_room_move": (params) => operations.commitInspectorRoomMove({
+      operationId: params.operation_id,
+      entryId: params.entry_id,
+      daemonGeneration: params.daemon_generation,
+    }),
+    "supervisor.acknowledge_room_move_source_revocation": (params) => operations.acknowledgeInspectorRoomMoveSourceRevocation({
+      operationId: params.operation_id,
+      entryId: params.entry_id,
+      sourceAgentSessionId: params.source_agent_session_id,
+      daemonGeneration: params.daemon_generation,
+    }),
+    "supervisor.rollback_room_move": (params) => operations.rollbackInspectorRoomMove({
+      operationId: params.operation_id,
+      entryId: params.entry_id,
+      detail: params.error,
+      daemonGeneration: params.daemon_generation,
+    }),
+    "supervisor.get_room_move": (params) => operations.getInspectorRoomMove({
+      operationId: params.operation_id,
+      entryId: params.entry_id,
+      daemonGeneration: params.daemon_generation,
+    }),
+    "supervisor.get_rpc_effect": (params) => operations.getRpcEffect(
+      params.effect_id,
+      params.daemon_generation,
+    ),
+    "supervisor.get_current_room_move": (params) => operations.getCurrentInspectorRoomMove({
+      entryId: params.entry_id,
+      daemonGeneration: params.daemon_generation,
+    }),
+    "supervisor.recover_agent_runtime": (params) => operations.recoverAgentRuntime(
+      params.entry_id,
+      params.daemon_generation,
+      "mode" in params
+        ? {
+            ...("retired_runtime_evidence" in params && params.retired_runtime_evidence !== undefined
+              ? { retiredRuntimeEvidence: params.retired_runtime_evidence }
+              : {}),
+            mode: params.mode,
+            operationId: params.operation_id,
+            roomId: params.room_id,
+            executionGenerationId: params.execution_generation_id,
+            runtimeGenerationId: params.runtime_generation_id,
+          }
+        : undefined,
+    ),
+    "supervisor.retire_agent": (params) => operations.retireAgent(
+      params.entry_id,
+      params.daemon_generation,
+      params.revoked_agent_session_id ?? null,
+      params.grant_revoked_without_worker_session === true,
+    ),
+    "supervisor.purge_agent": (params) => operations.purgeAgent(
+      params.entry_id,
+      params.daemon_generation,
+      params.revoked_agent_session_id ?? null,
+      params.grant_revoked_without_worker_session === true,
+    ),
+    "manifest.put": (params) => operations.putManifestEntry(params.entry as DaemonManifestEntry),
+    "manifest.set_desired_state": async (params) => operations.entryWithDerivedLiveness(
+      await operations.setDesiredState(params.id, params.desired_state),
+    ),
+    "manifest.set_display_name": async (params) => operations.entryWithDerivedLiveness(
+      await operations.setDisplayName(params.id, params.display_name),
+    ),
+    "manifest.compare_and_set_desired_state": async (params) => {
+      const result = await operations.compareAndSetDesiredState(
+        params.id,
+        params.expected_desired_state,
+        params.desired_state,
+      );
+      return { applied: result.applied, entry: await operations.entryWithDerivedLiveness(result.entry) };
+    },
+    "manifest.control_turn": (params) => operations.controlTurn({
+      entryId: params.id,
+      daemonGeneration: params.daemon_generation,
+      roomId: params.room_id,
+      workAttemptId: params.work_attempt_id,
+      executionGenerationId: params.execution_generation_id,
+      providerContinuationId: params.provider_continuation_id,
+      providerTurnId: params.provider_turn_id,
+      inboxItemId: params.inbox_item_id,
+      sourceMessageId: params.source_message_id,
+      actionId: params.action_id,
+      actionSequence: params.action_sequence,
+      correction: params.correction ?? null,
+    }),
+    "manifest.resolve_turn_control": (params) => operations.resolveTurnControl({
+      entryId: params.id,
+      workAttemptId: params.work_attempt_id,
+      executionGenerationId: params.execution_generation_id,
+      actionId: params.action_id,
+      resolution: params.resolution as "not_applied" | "applied",
+    }),
+    "manifest.update_workplace_liveness": (params) => operations.updateWorkplaceLiveness(
+      params.id,
+      params.state ?? "unknown",
+      params.detail ?? null,
+      params.observed_at ?? new Date().toISOString(),
+    ),
+    "supervisor.bind_worker_session": (params) => operations.bindWorkerSession(params),
+    "supervisor.verify_worker_session": (params) => operations.verifyWorkerSession(params),
+    "supervisor.install_worker_credential": (params) => operations.installWorkerCredential(params),
+    "supervisor.install_host_grant": (params) => operations.installHostGrant({
+      ...params,
+      owner_account_id: params.owner_account_id ?? null,
+      scope_key: params.scope_key ?? null,
+      credential_only: params.credential_only === true,
+      recovery_only: params.recovery_only === true,
+    }),
+    "supervisor.sync_execution_delegations": (params) => operations.syncExecutionDelegations(params),
+    "supervisor.install_open_model_credential": (params) => operations.installOpenModelCredential(params),
+    "supervisor.bootstrap_room_ingress": (params) => operations.bootstrapRoomIngress(params),
+    "supervisor.borrow_worker_credential": (params) => operations.borrowWorkerCredential({
+      ...params,
+      provider_turn_id: params.provider_turn_id ?? "",
+    }),
+    "supervisor.checkpoint_worker_cursor": (params) => operations.checkpointWorkerCursor(params),
+    "attempt.read": (params) => operations.readAttempt(params.id),
+  };
+
   return async (request, disconnected) => {
     await context.assertCurrent();
-    const isLifecycleRequest = request.method === "daemon.negotiate"
-      || request.method === "daemon.status"
-      || request.method === "daemon.prepare_handoff"
-      || request.method === "manifest.watch_state";
+    const isLifecycleRequest = HANDOFF_LIFECYCLE_METHODS.has(request.method);
     if (context.isHandoffScheduled() && !isLifecycleRequest) {
       throw new Error("Supervisor handoff has fenced new daemon mutations.");
     }
@@ -236,577 +475,12 @@ export function createDaemonControlRequestHandler(
     if (context.isHandoffScheduled() && !isLifecycleRequest) {
       throw new Error("Supervisor handoff has fenced new daemon mutations.");
     }
-    if (request.method === "daemon.negotiate") return operations.status();
-    if (request.method === "daemon.status") return operations.status();
-    if (request.method === "daemon.prepare_handoff") {
-      await operations.prepareHandoff();
-      return { accepted: true, generation: context.currentGeneration() };
+    if (!isDaemonRpcMethod(request.method)) {
+      throw new Error(`Unsupported daemon method: ${request.method}`);
     }
-    if (request.method === "manifest.list") {
-      return operations.listManifest(
-        optionalRoomScopeParam(request.params, "manifest.list room_id must be an exact non-empty room identifier."),
-        optionalActivityModeParam(request.params, 'manifest.list activity must be "full" or "summary".'),
-      );
-    }
-    if (request.method === "manifest.get_entry") {
-      return operations.getManifestEntry(requiredStringParam(
-        paramsRecord(request.params),
-        "entry_id",
-        "manifest.get_entry requires an exact non-empty entry_id.",
-      ));
-    }
-    if (request.method === "local_board.mutate") return operations.mutateLocalBoard(request.params);
-    if (request.method === "local_board.watch") {
-      if (!disconnected) throw new Error("A board subscription requires a live connection.");
-      const result = await operations.watchLocalBoard(request.params, disconnected);
-      await context.assertCurrent();
-      if (context.isHandoffScheduled()) throw new Error("The board service is restarting.");
-      return result;
-    }
-    if (request.method === "supervisor.host_approval_challenge") return operations.hostApprovals.challenge();
-    if (request.method === "supervisor.host_approval_request") {
-      const authenticated = operations.hostApprovals.verify(request.params);
-      if (!authenticated) throw new Error("Host approvals are unavailable or this request could not be authenticated.");
-      const input = authenticated.input as Record<string, unknown> | null;
-      if (authenticated.operation === "list") {
-        if (!input || Object.keys(input).length !== 1 || typeof input.roomId !== "string") throw new Error("An exact approval room is required.");
-        return operations.hostApprovals.list(input.roomId);
-      }
-      if (authenticated.operation === "list_tool_rules") return operations.hostApprovals.listToolRules(input);
-      if (authenticated.operation === "revoke_tool_rule") return operations.hostApprovals.revokeToolRule(input);
-      if (authenticated.operation === "set_home_harness") {
-        // The signature proves the desktop app sent this: no agent, MCP tool
-        // or other local caller of this socket can let an agent use the
-        // owner's own setup. It is a configuration change like any other.
-        if (context.isHandoffDraining?.()) {
-          throw new Error("An update is waiting for current agent work to finish. Try this action after the update completes or is deferred.");
-        }
-        const error = "Changing an agent's use of your own setup requires an exact agent, the current daemon generation, a positive expected revision and a choice.";
-        if (!input || Object.keys(input).length !== 4 || typeof input.enabled !== "boolean") throw new Error(error);
-        const entryId = requiredStringParam(input, "entryId", error);
-        const daemonGeneration = positiveIntegerParam(input, "daemonGeneration", error);
-        const result = recordValue(await operations.updateAgentConfiguration({
-          entryId,
-          daemonGeneration,
-          expectedRevision: positiveIntegerParam(input, "expectedRevision", error),
-          configuration: {},
-          // The daemon entrypoint hands this object on as it is, so the choice reaches the coordinator.
-          homeHarness: input.enabled,
-        }));
-        const saved = recordValue(result?.configuration);
-        if (input.enabled || result?.outcome !== "updated" || saved?.home_harness_pending !== true) return result;
-        // Turned off while a process that has the owner's setup may be running:
-        // replace it now if it is idle. A turn in progress is never interrupted;
-        // the answer says so, and the agent keeps the setup until it restarts.
-        let apply: Record<string, unknown> | null = null;
-        try {
-          apply = recordValue(await operations.applyAgentConfiguration({
-            entryId, daemonGeneration, expectedConfigurationRevision: saved.config_revision as number,
-          }));
-        } catch {
-          // The choice is saved. A restart that failed is reported as not done.
-        }
-        return { ...result, apply: typeof apply?.outcome === "string" ? apply.outcome : "unavailable" };
-      }
-      if (authenticated.operation === "set_live_sharing") {
-        // The signature proves the desktop app sent this: no agent or other
-        // local caller of this socket can share an agent's activity with its room.
-        const error = "Sharing an agent's live activity requires an exact agent, the current daemon generation and a choice.";
-        if (!input || Object.keys(input).length !== 3 || typeof input.enabled !== "boolean") throw new Error(error);
-        return operations.setLiveSharing({
-          entryId: requiredStringParam(input, "entryId", error),
-          daemonGeneration: positiveIntegerParam(input, "daemonGeneration", error),
-          enabled: input.enabled,
-        });
-      }
-      if (authenticated.operation === "stop_background_command") {
-        // The signature proves the desktop app sent this: no agent or other
-        // local caller of this socket can stop an agent's command.
-        const error = "Stopping a background command requires an exact agent, the current daemon generation and a command.";
-        if (!input || Object.keys(input).length !== 3) throw new Error(error);
-        return operations.stopBackgroundCommand({
-          entryId: requiredStringParam(input, "entryId", error),
-          daemonGeneration: positiveIntegerParam(input, "daemonGeneration", error),
-          taskId: requiredStringParam(input, "taskId", error),
-        });
-      }
-      if (input?.actorId !== `host-${operations.hostApprovals.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
-      return operations.hostApprovals.decide(input);
-    }
-    if (request.method === "supervisor.activate_custodial_polling"
-      || request.method === "supervisor.get_polling_activation"
-      || request.method === "supervisor.cancel_polling_activation") {
-      const params = paramsRecord(request.params);
-      const error = "Polling activation requires exact typed coordinates and the current daemon generation.";
-      if (positiveIntegerParam(params, "daemon_generation", error) !== context.currentGeneration()) throw new Error(error);
-      const identity = {
-        entryId: requiredStringParam(params, "entry_id", error),
-        operationId: requiredStringParam(params, "operation_id", error),
-      };
-      if (request.method === "supervisor.get_polling_activation") return operations.getPollingActivation(identity);
-      if (request.method === "supervisor.cancel_polling_activation") return operations.cancelPollingActivation(identity);
-      return operations.activateCustodialPolling({ ...identity,
-        requestId: requiredStringParam(params, "request_id", error),
-        roomId: requiredStringParam(params, "room_id", error),
-        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
-        reverseOperationId: requiredStringParam(params, "reverse_operation_id", error),
-      });
-    }
-    if (request.method === "supervisor.prepare_delivery_drain"
-      || request.method === "supervisor.prepare_custodial_forward"
-      || request.method === "supervisor.get_delivery_drain"
-      || request.method === "supervisor.cancel_delivery_drain") {
-      const params = paramsRecord(request.params);
-      const error = "Delivery drain requires exact typed coordinates and the current daemon generation.";
-      if (positiveIntegerParam(params, "daemon_generation", error) !== context.currentGeneration()) throw new Error(error);
-      const identity = {
-        entryId: requiredStringParam(params, "entry_id", error),
-        operationId: requiredStringParam(params, "operation_id", error),
-      };
-      if (request.method === "supervisor.get_delivery_drain") return operations.getDeliveryDrain(identity);
-      if (request.method === "supervisor.cancel_delivery_drain") return operations.cancelDeliveryDrain(identity);
-      const coordinates = { ...identity,
-        requestId: requiredStringParam(params, "request_id", error),
-        roomId: requiredStringParam(params, "room_id", error),
-        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
-      };
-      return request.method === "supervisor.prepare_custodial_forward"
-        ? operations.prepareDeliveryDrain({ ...coordinates, reverseOperationId: requiredStringParam(params, "reverse_operation_id", error) })
-        : operations.prepareDeliveryDrain(coordinates);
-    }
-    if (request.method === "manifest.watch_state") {
-      const params = paramsRecord(request.params);
-      return operations.watchState({
-        afterDaemonGeneration: Number(params.after_daemon_generation ?? 0),
-        afterSequence: Number(params.after_sequence ?? 0),
-        waitMs: Number(params.wait_ms ?? 25_000),
-        changedOnly: params.changed_only === true,
-      });
-    }
-    if (request.method === "supervisor.watch_agent_stream") {
-      const params = paramsRecord(request.params);
-      return operations.watchAgentStream({
-        entryId: String(params.entry_id ?? ""),
-        afterSequence: Number(params.after_sequence ?? 0),
-        waitMs: Number(params.wait_ms ?? 25_000),
-      });
-    }
-    if (request.method === "supervisor.watch_background_commands") {
-      const params = paramsRecord(request.params);
-      return operations.watchBackgroundCommands({
-        entryId: String(params.entry_id ?? ""),
-        afterVersion: Number(params.after_version ?? 0),
-        waitMs: Number(params.wait_ms ?? 25_000),
-      });
-    }
-    if (request.method === "supervisor.retry_room_delivery") {
-      const params = paramsRecord(request.params);
-      await operations.retryRoomDelivery({
-        entryId: String(params.entry_id ?? ""),
-        roomId: String(params.room_id ?? ""),
-        sourceMessageId: String(params.source_message_id ?? ""),
-        workAttemptId: String(params.work_attempt_id ?? ""),
-        executionGenerationId: String(params.execution_generation_id ?? ""),
-        agentSessionId: String(params.agent_session_id ?? ""),
-        daemonGeneration: Number(params.daemon_generation ?? NaN),
-      });
-      return { accepted: true };
-    }
-    if (request.method === "supervisor.restore_agent_conversation") {
-      const params = paramsRecord(request.params);
-      await operations.restoreAgentConversation({
-        entryId: String(params.entry_id ?? ""),
-        roomId: String(params.room_id ?? ""),
-        sourceMessageId: String(params.source_message_id ?? ""),
-        workAttemptId: String(params.work_attempt_id ?? ""),
-        executionGenerationId: String(params.execution_generation_id ?? ""),
-        agentSessionId: String(params.agent_session_id ?? ""),
-        daemonGeneration: Number(params.daemon_generation ?? NaN),
-      });
-      return { accepted: true };
-    }
-    if (request.method === "supervisor.skip_room_delivery") {
-      const params = paramsRecord(request.params);
-      await operations.skipRoomDelivery({
-        entryId: String(params.entry_id ?? ""),
-        roomId: String(params.room_id ?? ""),
-        sourceMessageId: String(params.source_message_id ?? ""),
-        workAttemptId: String(params.work_attempt_id ?? ""),
-        executionGenerationId: String(params.execution_generation_id ?? ""),
-        agentSessionId: String(params.agent_session_id ?? ""),
-        daemonGeneration: Number(params.daemon_generation ?? NaN),
-      });
-      return { accepted: true };
-    }
-    if (request.method === "supervisor.get_agent_inspector_detail") {
-      const params = paramsRecord(request.params);
-      const entryId = params.entry_id;
-      const roomId = params.room_id;
-      const sourceMessageId = params.source_message_id;
-      if (typeof entryId !== "string" || typeof roomId !== "string"
-        || !Object.hasOwn(params, "source_message_id")
-        || !(sourceMessageId === null || typeof sourceMessageId === "string")) {
-        throw new Error("Agent inspector detail requires string entry_id, string room_id, and source_message_id as string or null.");
-      }
-      return operations.getAgentInspectorDetail(entryId, roomId, sourceMessageId);
-    }
-    if (request.method === "supervisor.prepare_bounded_effect") {
-      const params = paramsRecord(request.params);
-      return operations.prepareBoundedEffect({
-        entryId: String(params.entry_id ?? ""), workAttemptId: String(params.work_attempt_id ?? ""),
-        executionGenerationId: String(params.execution_generation_id ?? ""), daemonGeneration: Number(params.daemon_generation ?? NaN),
-        providerTurnId: String(params.provider_turn_id ?? ""),
-        mcpRequestId: String(params.mcp_request_id ?? ""), toolName: String(params.tool_name ?? ""),
-        input: params.input, mutation: params.mutation === true,
-      });
-    }
-    if (request.method === "supervisor.execute_bounded_tool") {
-      const params = paramsRecord(request.params);
-      const error = "Supervised tool execution requires exact typed coordinates.";
-      return operations.executeBoundedTool({
-        entryId: requiredStringParam(params, "entry_id", error),
-        workAttemptId: requiredStringParam(params, "work_attempt_id", error),
-        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
-        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
-        providerTurnId: typeof params.provider_turn_id === "string" ? params.provider_turn_id : "",
-        mcpRequestId: requiredStringParam(params, "mcp_request_id", error),
-        toolName: requiredStringParam(params, "tool_name", error),
-        input: params.input,
-      });
-    }
-    if (request.method === "supervisor.complete_bounded_effect") {
-      const params = paramsRecord(request.params);
-      return operations.completeBoundedEffect({
-        entryId: String(params.entry_id ?? ""), workAttemptId: String(params.work_attempt_id ?? ""),
-        executionGenerationId: String(params.execution_generation_id ?? ""), daemonGeneration: Number(params.daemon_generation ?? NaN),
-        providerTurnId: String(params.provider_turn_id ?? ""),
-        effectId: String(params.effect_id ?? ""), result: params.result,
-        error: typeof params.error === "string" ? params.error : undefined,
-      });
-    }
-    if (request.method === "supervisor.get_agent_configuration") {
-      const params = paramsRecord(request.params);
-      return operations.getAgentConfiguration(
-        requiredStringParam(params, "entry_id", "Agent configuration requires exact typed coordinates."),
-        positiveIntegerParam(params, "daemon_generation", "Agent configuration requires exact typed coordinates."),
-      );
-    }
-    if (request.method === "supervisor.update_agent_configuration") {
-      const params = paramsRecord(request.params);
-      if (params.configuration === null || typeof params.configuration !== "object" || Array.isArray(params.configuration)) throw new Error("Agent configuration update requires exact typed coordinates.");
-      return operations.updateAgentConfiguration({
-        entryId: requiredStringParam(params, "entry_id", "Agent configuration update requires exact typed coordinates."),
-        daemonGeneration: positiveIntegerParam(params, "daemon_generation", "Agent configuration update requires exact typed coordinates."),
-        expectedRevision: positiveIntegerParam(params, "expected_revision", "Agent configuration update requires exact typed coordinates."),
-        configuration: paramsRecord(params.configuration),
-      });
-    }
-    if (request.method === "supervisor.apply_agent_configuration") {
-      const params = paramsRecord(request.params);
-      const error = "Agent configuration apply requires exact typed coordinates.";
-      return operations.applyAgentConfiguration({
-        entryId: requiredStringParam(params, "entry_id", error),
-        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
-        expectedConfigurationRevision: positiveIntegerParam(
-          params,
-          "expected_configuration_revision",
-          error,
-        ),
-      });
-    }
-    if (request.method === "supervisor.prepare_room_move") {
-      const params = paramsRecord(request.params);
-      const error = "Room-move preparation requires exact typed coordinates.";
-      return operations.prepareInspectorRoomMove({
-        entryId: requiredStringParam(params, "entry_id", error),
-        destinationRoomId: requiredStringParam(params, "destination_room_id", error),
-        requestId: requiredStringParam(params, "request_id", error),
-        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
-      });
-    }
-    if (request.method === "supervisor.commit_room_move") {
-      const params = paramsRecord(request.params);
-      const error = "Room-move commit requires exact typed coordinates.";
-      return operations.commitInspectorRoomMove({
-        operationId: requiredStringParam(params, "operation_id", error),
-        entryId: requiredStringParam(params, "entry_id", error),
-        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
-      });
-    }
-    if (request.method === "supervisor.acknowledge_room_move_source_revocation") {
-      const params = paramsRecord(request.params);
-      const error = "Room-move credential acknowledgement requires exact typed coordinates.";
-      return operations.acknowledgeInspectorRoomMoveSourceRevocation({
-        operationId: requiredStringParam(params, "operation_id", error),
-        entryId: requiredStringParam(params, "entry_id", error),
-        sourceAgentSessionId: requiredStringParam(params, "source_agent_session_id", error),
-        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
-      });
-    }
-    if (request.method === "supervisor.rollback_room_move") {
-      const params = paramsRecord(request.params);
-      const error = "Room-move rollback requires exact typed coordinates.";
-      return operations.rollbackInspectorRoomMove({
-        operationId: requiredStringParam(params, "operation_id", error),
-        entryId: requiredStringParam(params, "entry_id", error),
-        detail: requiredStringParam(params, "error", error),
-        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
-      });
-    }
-    if (request.method === "supervisor.get_room_move") {
-      const params = paramsRecord(request.params);
-      const error = "Room-move status requires exact typed coordinates.";
-      return operations.getInspectorRoomMove({
-        operationId: requiredStringParam(params, "operation_id", error),
-        entryId: requiredStringParam(params, "entry_id", error),
-        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
-      });
-    }
-    if (request.method === "supervisor.get_current_room_move") {
-      const params = paramsRecord(request.params);
-      const error = "Current room-move discovery requires exact typed coordinates.";
-      return operations.getCurrentInspectorRoomMove({
-        entryId: requiredStringParam(params, "entry_id", error),
-        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
-      });
-    }
-    if (request.method === "supervisor.recover_agent_runtime") {
-      const params = paramsRecord(request.params);
-      const error = "Agent runtime recovery requires exact typed coordinates.";
-      if (params.retired_runtime_evidence !== undefined && !["resume", "fresh"].includes(String(params.mode))) throw new Error(error);
-      return operations.recoverAgentRuntime(
-        requiredStringParam(params, "entry_id", error),
-        positiveIntegerParam(params, "daemon_generation", error),
-        params.mode === undefined ? undefined : {
-          ...(params.retired_runtime_evidence === undefined ? {} : {
-            retiredRuntimeEvidence: retiredRuntimeEvidenceListSchema.parse(params.retired_runtime_evidence),
-          }),
-          mode: runtimeRecoveryMode(params, error),
-          operationId: requiredStringParam(params, "operation_id", error),
-          roomId: requiredStringParam(params, "room_id", error),
-          executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
-          runtimeGenerationId: requiredStringParam(params, "runtime_generation_id", error),
-        },
-      );
-    }
-    if (request.method === "supervisor.retire_agent") {
-      const params = paramsRecord(request.params);
-      const error = "Retire requires exact typed coordinates.";
-      if (!(params.revoked_agent_session_id === undefined || params.revoked_agent_session_id === null
-        || (typeof params.revoked_agent_session_id === "string" && params.revoked_agent_session_id.trim()
-          && params.revoked_agent_session_id === params.revoked_agent_session_id.trim()))) throw new Error(error);
-      if (!(params.grant_revoked_without_worker_session === undefined || params.grant_revoked_without_worker_session === false
-        || params.grant_revoked_without_worker_session === true)
-        || (typeof params.revoked_agent_session_id === "string" && params.grant_revoked_without_worker_session === true)) {
-        throw new Error(error);
-      }
-      return operations.retireAgent(
-        requiredStringParam(params, "entry_id", error),
-        positiveIntegerParam(params, "daemon_generation", error),
-        typeof params.revoked_agent_session_id === "string" ? params.revoked_agent_session_id : null,
-        params.grant_revoked_without_worker_session === true,
-      );
-    }
-    if (request.method === "supervisor.purge_agent") {
-      const params = paramsRecord(request.params);
-      const error = "Purge requires exact typed coordinates.";
-      if (!(params.revoked_agent_session_id === undefined || params.revoked_agent_session_id === null
-        || (typeof params.revoked_agent_session_id === "string" && params.revoked_agent_session_id.trim()
-          && params.revoked_agent_session_id === params.revoked_agent_session_id.trim()))) throw new Error(error);
-      if (!(params.grant_revoked_without_worker_session === undefined || params.grant_revoked_without_worker_session === false
-        || params.grant_revoked_without_worker_session === true)
-        || (typeof params.revoked_agent_session_id === "string" && params.grant_revoked_without_worker_session === true)) {
-        throw new Error(error);
-      }
-      return operations.purgeAgent(
-        requiredStringParam(params, "entry_id", error),
-        positiveIntegerParam(params, "daemon_generation", error),
-        typeof params.revoked_agent_session_id === "string" ? params.revoked_agent_session_id : null,
-        params.grant_revoked_without_worker_session === true,
-      );
-    }
-    if (request.method === "manifest.put") return operations.putManifestEntry(paramsEntry(request.params));
-    if (request.method === "manifest.set_desired_state") {
-      const params = paramsRecord(request.params);
-      const error = "Agent lifecycle requires an exact identity and desired state.";
-      const updated = await operations.setDesiredState(
-        requiredStringParam(params, "id", error),
-        desiredStateParam(params, "desired_state", error),
-      );
-      return operations.entryWithDerivedLiveness(updated);
-    }
-    if (request.method === "manifest.set_display_name") {
-      const params = paramsRecord(request.params);
-      const error = "Agent naming requires an exact identity and display name.";
-      const updated = await operations.setDisplayName(
-        requiredStringParam(params, "id", error),
-        requiredStringParam(params, "display_name", error),
-      );
-      return operations.entryWithDerivedLiveness(updated);
-    }
-    if (request.method === "manifest.compare_and_set_desired_state") {
-      const params = paramsRecord(request.params);
-      const error = "Agent lifecycle compare-and-set requires exact typed fields.";
-      const result = await operations.compareAndSetDesiredState(
-        requiredStringParam(params, "id", error),
-        desiredStateParam(params, "expected_desired_state", error),
-        desiredStateParam(params, "desired_state", error),
-      );
-      return { applied: result.applied, entry: await operations.entryWithDerivedLiveness(result.entry) };
-    }
-    if (request.method === "manifest.control_turn") {
-      const params = paramsRecord(request.params);
-      return operations.controlTurn({
-        entryId: String(params.id ?? ""),
-        daemonGeneration: Number(params.daemon_generation ?? 0),
-        roomId: String(params.room_id ?? ""),
-        workAttemptId: String(params.work_attempt_id ?? ""),
-        executionGenerationId: String(params.execution_generation_id ?? ""),
-        providerContinuationId: String(params.provider_continuation_id ?? ""),
-        providerTurnId: String(params.provider_turn_id ?? ""),
-        inboxItemId: String(params.inbox_item_id ?? ""),
-        sourceMessageId: String(params.source_message_id ?? ""),
-        actionId: String(params.action_id ?? ""),
-        actionSequence: Number(params.action_sequence ?? 0),
-        correction: typeof params.correction === "string" ? params.correction : null,
-      });
-    }
-    if (request.method === "manifest.resolve_turn_control") {
-      const params = paramsRecord(request.params);
-      return operations.resolveTurnControl({
-        entryId: String(params.id ?? ""),
-        workAttemptId: String(params.work_attempt_id ?? ""),
-        executionGenerationId: String(params.execution_generation_id ?? ""),
-        actionId: String(params.action_id ?? ""),
-        resolution: String(params.resolution ?? "") as "not_applied" | "applied",
-      });
-    }
-    if (request.method === "manifest.update_workplace_liveness") {
-      const params = paramsRecord(request.params);
-      return operations.updateWorkplaceLiveness(
-        String(params.id ?? ""),
-        String(params.state ?? "unknown") as "reachable" | "stale" | "unknown",
-        typeof params.detail === "string" ? params.detail : null,
-        typeof params.observed_at === "string" ? params.observed_at : new Date().toISOString(),
-      );
-    }
-    if (request.method === "supervisor.bind_worker_session") {
-      const params = paramsRecord(request.params);
-      return operations.bindWorkerSession({
-        entry_id: String(params.entry_id ?? ""),
-        room_id: String(params.room_id ?? ""),
-        work_attempt_id: String(params.work_attempt_id ?? ""),
-        execution_generation_id: String(params.execution_generation_id ?? ""),
-        agent_session_id: String(params.agent_session_id ?? ""),
-        agent_session_token: String(params.agent_session_token ?? ""),
-        api_url: String(params.api_url ?? ""),
-      });
-    }
-    if (request.method === "supervisor.verify_worker_session") {
-      const params = paramsRecord(request.params);
-      return operations.verifyWorkerSession({
-        entry_id: String(params.entry_id ?? ""),
-        room_id: String(params.room_id ?? ""),
-        work_attempt_id: String(params.work_attempt_id ?? ""),
-        execution_generation_id: String(params.execution_generation_id ?? ""),
-        agent_session_id: String(params.agent_session_id ?? ""),
-        agent_session_token: String(params.agent_session_token ?? ""),
-        api_url: String(params.api_url ?? ""),
-      });
-    }
-    if (request.method === "supervisor.install_worker_credential") {
-      const params = paramsRecord(request.params);
-      return operations.installWorkerCredential({
-        entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
-        work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
-        agent_session_id: String(params.agent_session_id ?? ""), agent_session_token: String(params.agent_session_token ?? ""),
-        daemon_generation: Number(params.daemon_generation ?? 0),
-      });
-    }
-    if (request.method === "supervisor.install_host_grant") {
-      const params = paramsRecord(request.params);
-      return operations.installHostGrant({
-        entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""), agent_key: String(params.agent_key ?? ""),
-        grant_id: String(params.grant_id ?? ""), supervisor_grant: String(params.supervisor_grant ?? ""),
-        grant_generation: Number(params.grant_generation ?? NaN), api_url: String(params.api_url ?? ""),
-        host_id: String(params.host_id ?? ""), installation_id: String(params.installation_id ?? ""),
-        owner_account_id: typeof params.owner_account_id === "string" ? params.owner_account_id : null,
-        scope_key: typeof params.scope_key === "string" ? params.scope_key : null,
-        grant_expires_at: String(params.grant_expires_at ?? ""),
-        daemon_generation: Number(params.daemon_generation ?? NaN),
-        credential_only: params.credential_only === true,
-        recovery_only: params.recovery_only === true,
-      });
-    }
-    if (request.method === "supervisor.sync_execution_delegations") {
-      const params = paramsRecord(request.params);
-      return operations.syncExecutionDelegations({
-        room_id: requiredStringParam(params, "room_id", "Execution delegation sync requires a room."),
-        daemon_generation: positiveIntegerParam(params, "daemon_generation", "Execution delegation sync requires a daemon generation."),
-      });
-    }
-    if (request.method === "supervisor.install_open_model_credential") {
-      const params = paramsRecord(request.params);
-      return operations.installOpenModelCredential({
-        entry_id: String(params.entry_id ?? ""),
-        api_key: params.api_key === null ? null : String(params.api_key ?? ""),
-        base_url: String(params.base_url ?? ""),
-        model: String(params.model ?? ""),
-        ...(params.context_window !== undefined ? { context_window: positiveIntegerParam(params, "context_window", "The model context window must be a positive whole number.") } : {}),
-        daemon_generation: Number(params.daemon_generation ?? NaN),
-      });
-    }
-    if (request.method === "supervisor.bootstrap_room_ingress") {
-      const params = paramsRecord(request.params);
-      return operations.bootstrapRoomIngress({
-        entry_id: String(params.entry_id ?? ""),
-        daemon_generation: Number(params.daemon_generation ?? NaN),
-        ...(typeof params.initial_message === "string" ? { initial_message: params.initial_message } : {}),
-      });
-    }
-    if (request.method === "supervisor.borrow_worker_credential") {
-      const params = paramsRecord(request.params);
-      return operations.borrowWorkerCredential({
-        entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
-        work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
-        agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? 0),
-        provider_turn_id: String(params.provider_turn_id ?? ""),
-        api_url: String(params.api_url ?? ""),
-      });
-    }
-    if (request.method === "supervisor.authorize_custodial_polling") {
-      const params = paramsRecord(request.params);
-      if (params.room_cursor !== undefined && params.room_cursor !== null && typeof params.room_cursor !== "string") {
-        throw new Error("Custodial polling cursor must be a string or null.");
-      }
-      return operations.authorizeCustodialPolling({
-        entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
-        work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
-        agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? NaN),
-        api_url: String(params.api_url ?? ""), contract: String(params.contract ?? ""),
-        phase: String(params.phase ?? ""), tool_name: String(params.tool_name ?? ""),
-        expected_configuration_revision: Number(params.expected_configuration_revision ?? NaN),
-        process_incarnation_id: typeof params.process_incarnation_id === "string" ? params.process_incarnation_id : undefined,
-        // JSON-RPC numeric and string request IDs belong to different invocations.
-        mcp_request_id: typeof params.mcp_request_id === "string" || typeof params.mcp_request_id === "number" ? params.mcp_request_id : undefined,
-        room_cursor: params.room_cursor as string | null | undefined,
-        expected_activation_id: typeof params.expected_activation_id === "string" ? params.expected_activation_id : undefined,
-        expected_binding_epoch: typeof params.expected_binding_epoch === "number" ? params.expected_binding_epoch : undefined,
-        input_cursor: typeof params.input_cursor === "string" ? params.input_cursor : undefined,
-        offered_frontier: typeof params.offered_frontier === "string" ? params.offered_frontier : undefined,
-      });
-    }
-    if (request.method === "supervisor.checkpoint_worker_cursor") {
-      const params = paramsRecord(request.params);
-      return operations.checkpointWorkerCursor({
-        entry_id: String(params.entry_id ?? ""),
-        work_attempt_id: String(params.work_attempt_id ?? ""),
-        execution_generation_id: String(params.execution_generation_id ?? ""),
-        agent_session_id: String(params.agent_session_id ?? ""),
-        room_cursor: String(params.room_cursor ?? ""),
-      });
-    }
-    if (request.method === "attempt.read") return operations.readAttempt(String(paramsRecord(request.params).id ?? ""));
-    throw new Error(`Unsupported daemon method: ${request.method}`);
+    const method = request.method;
+    const parsedParams = parseDaemonRpcParams(method, request.params);
+    const handler = handlers[method] as (params: unknown, signal?: AbortSignal) => Promise<unknown> | unknown;
+    return handler(parsedParams, disconnected);
   };
 }

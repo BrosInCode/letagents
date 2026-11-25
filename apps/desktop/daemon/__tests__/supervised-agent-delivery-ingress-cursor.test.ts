@@ -10,7 +10,9 @@ import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
-import { cursorAuthorityUnprovenDetail } from "../../electron/main/agents/cursor-turn-settlement.js";
+import { cursorAuthorityUnprovenDetail } from "#provider-runtime/agents/cursor-turn-settlement.js";
+import { DatabaseSync } from "node:sqlite";
+import { executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import { type DaemonManifestEntry } from "../types.js";
 import {
   agent,
@@ -1425,6 +1427,84 @@ test("a crashed Cursor turn settles as interrupted instead of blocking the FIFO 
     assert.equal(await internals.supervisedInbox.nativeFailure(receipt!.inbox_item_id), "interrupted");
   } finally {
     await daemon.stop().catch(() => undefined);
+    await removeTestDirectory(root);
+  }
+});
+
+test("Cursor undispatched reset refusal is bounded by result_recovery retries to blocked without spinning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-refused-archive-"));
+  const dbPath = join(root, "state.sqlite");
+  const at = "2026-08-31T00:00:00.000Z";
+  const atMs = Date.parse(at);
+  const store = new SupervisedAgentInboxStore(dbPath, () => at);
+  let recoveries = 0;
+  const cursorAgent = {
+    ...agent,
+    provider: "cursor",
+    providerConnection: { kind: "cursor_cli" as const, pid: null, processIdentity: null },
+  };
+  const delivery = new SupervisedAgentDelivery(
+    store,
+    provider(
+      async () => { throw new Error("recovery must not redispatch a bound Cursor turn"); },
+      async () => {
+        recoveries += 1;
+        const notDispatched = Object.assign(
+          new Error("Cursor's prepared wrapper exited before native dispatch."),
+          { roomTurnRecoveryOutcome: "not_dispatched" },
+        );
+        throw notDispatched;
+      },
+    ),
+    { poll: async () => ({}), publish: async () => { throw new Error("refused reset must not publish"); } },
+    currentAuthority,
+    1,
+  );
+  try {
+    const item = await enqueue(store);
+    const providerTurnId = "cursor:refused-archive-turn";
+    await store.checkpointTurnStarted(item.inbox_item_id, providerTurnId, TEST_PROVIDER_TURN_AUTHORITY);
+    // Seed a non-exited Cursor runtime row so archiveExitedUndispatchedCursorRuntime refuses and rolls back.
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.exec("PRAGMA foreign_keys=ON");
+      const gen = TEST_PROVIDER_TURN_AUTHORITY.origin_execution_generation_id;
+      const runtimeId = executionRuntimeStorageIdentity(cursorAgent.agentId, gen, "cursor_cli", 88123, "birth-unexited");
+      db.prepare("INSERT OR IGNORE INTO execution_generations VALUES(?,?,?)").run(gen, cursorAgent.agentId, atMs);
+      db.prepare(`INSERT INTO execution_runtime_generations
+        (runtime_generation_id,execution_generation_id,agent_id,provider,authority_mode,runtime_state,control_state,continuation_state,config_revision,created_at_ms,ended_at_ms)
+        VALUES(?,?,?,'cursor','typed','ready','responsive','available',1,?,NULL)`)
+        .run(runtimeId, gen, cursorAgent.agentId, atMs);
+      db.prepare(`INSERT INTO execution_message_attempts(attempt_id,agent_id,room_id,source_message_id,state,created_at_ms)
+        VALUES('att-refused',?,?,?,'active',?)`).run(cursorAgent.agentId, cursorAgent.roomId, item.source_message_id, atMs);
+      db.prepare("INSERT INTO execution_attempt_generations VALUES('att-refused',?,?,?,?,?)")
+        .run(cursorAgent.agentId, cursorAgent.roomId, gen, TEST_PROVIDER_TURN_AUTHORITY.work_attempt_id, atMs);
+      db.prepare(`INSERT INTO runs
+        (turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms)
+        VALUES('run-refused','att-refused',?,?,?,?,?,?, 'lost','none',?,?)`)
+        .run(cursorAgent.agentId, cursorAgent.roomId, gen, runtimeId, TEST_PROVIDER_TURN_AUTHORITY.provider_continuation_id, providerTurnId, atMs, atMs + 5);
+    } finally {
+      db.close();
+    }
+
+    await delivery.pump(cursorAgent);
+    assert.equal(recoveries, 3, "refused undispatched reset terminates at exactly 3 result_recovery attempts");
+    const finalItem = await store.get(item.inbox_item_id);
+    assert.equal(finalItem?.state, "blocked");
+    assert.equal(finalItem?.provider_turn_id, providerTurnId, "exact turn identity stays intact when reset is refused");
+    assert.match(finalItem?.last_error ?? "", /Result recovery failed 3 times: Undispatched turn could not be safely reset.*already recorded as exited/);
+    assert.ok(await store.providerTurnBinding(item.inbox_item_id), "exact provider-turn authority binding stays intact");
+
+    const check = new DatabaseSync(dbPath);
+    try {
+      const recCount = Number((check.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=?").get(cursorAgent.agentId) as { n: number }).n);
+      assert.equal(recCount, 0, "refused archival writes zero recovery rows");
+    } finally {
+      check.close();
+    }
+  } finally {
+    await delivery.fenceAndDrain().catch(() => undefined);
+    await store.close();
     await removeTestDirectory(root);
   }
 });

@@ -4,22 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { DaemonStateSchema, DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
+import { DaemonStateSchema, DAEMON_STATE_USER_VERSION } from "../daemon-state-database.js";
 import { prepareRoomContext } from "../prepared-room-context.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import { restorePreAntigravityProviderFixture } from "./helpers/pre-antigravity-fixture.js";
-
-function restoreV42Fixture(database: DatabaseSync): void {
-  restorePreAntigravityProviderFixture(database);
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_approval_request_closures").get()!.count, 0);
-  const closureSql = String(database.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get()!.sql)
-    .replace("decision_id TEXT REFERENCES", "decision_id TEXT NOT NULL REFERENCES")
-    .replace("dispatch_id TEXT,", "dispatch_id TEXT NOT NULL,");
-  database.exec(`DROP TABLE execution_approval_request_closures; ${closureSql};
-    DROP TABLE host_tool_rule_withdrawals; DROP TABLE host_tool_rule_decisions; DROP TABLE host_tool_rules;
-    DROP TABLE supervised_agent_prepared_context;
-    PRAGMA user_version=42; UPDATE manifest_metadata SET schema_version=42`);
-}
 
 test("context snapshots bound retained text and exclude non-text provider fields", () => {
   const snapshot = prepareRoomContext(Array.from({ length: 32 }, (_, index) => ({
@@ -45,12 +32,6 @@ test("dispatch context survives restart, remains exact to its message, and is pr
   try {
     const [item] = await store.ingestPoll({ agent_id: "stone", room_id: "room", last_observed_message_id: "1",
       messages: [{ source_message_id: "1", source_message: { id: "1", text: "Fix auth" }, activation: { reason: "mention" } }] });
-    // An actual v42 receipt survives upgrade, without invented past context.
-    await store.close();
-    const predecessor = new DatabaseSync(path);
-    restoreV42Fixture(predecessor);
-    predecessor.close();
-    store = new SupervisedAgentInboxStore(path, () => "2026-09-20T09:00:00.000Z");
     assert.equal((await store.detail("stone", "room", "1")).source_message?.text, "Fix auth");
     assert.equal((await store.detail("stone", "room", "1")).prepared_context, null);
     await assert.rejects(store.checkpointDispatchIntent(item!.inbox_item_id, undefined, []), /unstarted dispatching/);
@@ -72,27 +53,19 @@ test("dispatch context survives restart, remains exact to its message, and is pr
     const database = new DatabaseSync(path);
     try {
       database.exec("PRAGMA foreign_keys=ON");
-      database.prepare("DELETE FROM supervised_agent_inbox WHERE inbox_item_id=?").run(item!.inbox_item_id);
+      database.prepare("DELETE FROM inbox_items WHERE inbox_item_id=?").run(item!.inbox_item_id);
       assert.equal(database.prepare("SELECT COUNT(*) AS count FROM supervised_agent_prepared_context").get()?.count, 0);
     } finally { database.close(); }
   } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("v42 migration preserves manifest generation and rolls back both version markers on failure", () => {
+test("schema v1 shape check rejects a dropped prepared-context table", () => {
   const database = new DatabaseSync(":memory:");
   try {
     new DaemonStateSchema().createSchema(database);
-    restoreV42Fixture(database);
-    const metadata = database.prepare("SELECT generation FROM manifest_metadata").get();
-    assert.throws(() => new DaemonStateSchema(() => { throw new Error("interrupted upgrade"); }).createSchema(database), /interrupted upgrade/);
-    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 42);
-    assert.equal(database.prepare("SELECT schema_version FROM manifest_metadata").get()?.schema_version, 42);
-    assert.equal(database.prepare("SELECT 1 FROM sqlite_master WHERE name='supervised_agent_prepared_context'").get(), undefined);
-    new DaemonStateSchema().createSchema(database);
     new DaemonStateSchema().validateCurrentShape(database);
-    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
-    assert.deepEqual(database.prepare("SELECT generation FROM manifest_metadata").get(), metadata);
+    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_USER_VERSION);
     database.exec("DROP TABLE supervised_agent_prepared_context");
-    assert.throws(() => new DaemonStateSchema().createSchema(database), /invalid schema/);
+    assert.throws(() => new DaemonStateSchema().createSchema(database), /schema mismatch/i);
   } finally { database.close(); }
 });

@@ -5,17 +5,18 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
-import { AntigravityProviderAdapter, type AntigravityChild, type AntigravityProviderAdapterDependencies } from "../main/agents/antigravity-provider-adapter.js";
-import { classifyAntigravityTurn } from "../main/agents/antigravity/turn-results.js";
-import { antigravityToolDisplay } from "../main/agents/antigravity/tool-display.js";
-import { prepareAntigravityOwnerSetup } from "../main/agents/antigravity/owner-setup.js";
-import { ownerAntigravityTokenFileExists, shareAntigravitySignIn } from "../main/agents/antigravity/sign-in.js";
-import { antigravityPermissionTool } from "../main/agents/antigravity/permissions.js";
-import { antigravityWorkspaceCommandCustomizations, antigravityWorkspaceRefusal } from "../main/agents/antigravity/workspace-customizations.js";
-import { antigravityAuthorityFromPolicy, antigravityAuthorityForProfile, antigravityVersionAtLeast, isRoomServerToolCall, parseAntigravityVersion } from "../main/agents/antigravity/launch.js";
+import { AntigravityProviderAdapter, type AntigravityChild, type AntigravityProviderAdapterDependencies } from "#provider-runtime/agents/antigravity-provider-adapter.js";
+import { classifyAntigravityTurn } from "#provider-runtime/agents/antigravity/turn-results.js";
+import { antigravityToolDisplay } from "#provider-runtime/agents/antigravity/tool-display.js";
+import { prepareAntigravityOwnerSetup } from "#provider-runtime/agents/antigravity/owner-setup.js";
+import { ownerAntigravityTokenFileExists, shareAntigravitySignIn } from "#provider-runtime/agents/antigravity/sign-in.js";
+import { antigravityPermissionTool } from "#provider-runtime/agents/antigravity/permissions.js";
+import { antigravityWorkspaceCommandCustomizations, antigravityWorkspaceRefusal } from "#provider-runtime/agents/antigravity/workspace-customizations.js";
+import { antigravityAuthorityFromPolicy, antigravityAuthorityForProfile, antigravityVersionAtLeast, isRoomServerToolCall, parseAntigravityVersion } from "#provider-runtime/agents/antigravity/launch.js";
 import { parseAntigravityModelsOutput } from "../main/agents/managed-agent-models.js";
-import { PROCESS_ENDED_DURING_TURN, ProviderContinuationMissingError, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStreamEvent } from "../main/agents/provider-adapter.js";
-import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
+import { PROCESS_ENDED_DURING_TURN, ProviderContinuationMissingError, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStreamEvent } from "#provider-runtime/agents/provider-adapter.js";
+import { ProviderRuntimeBoundary } from "#provider-runtime/agents/provider-runtime-boundary.js";
+import type { ProviderProcessExit } from "#provider-runtime/agents/provider-evidence.js";
 import type { ClaudeNativePermissionRequest } from "../../shared/provider-permissions.js";
 
 const BIRTH = "Mon Nov 23 17:00:00 2026";
@@ -317,12 +318,17 @@ test("a room turn is one ACP prompt: the streamed text is the reply, with turn f
   const handle = await adapter.spawn(spawnRequest());
   const events: ProviderStreamEvent[] = [];
   adapter.onStream(handle, (event) => events.push(event));
+  const turnFacts: string[] = [];
+  const executionSub = adapter.onExecution(handle, (observation) => {
+    if (observation.fact.domain === "turn") turnFacts.push(`${observation.fact.state}:${observation.fact.turnOutcome ?? ""}`);
+  });
   const calls: string[] = [];
   const result = await adapter.runRoomTurn(handle, turnRequest, {
     beforeNativeDispatch: async () => { calls.push("dispatch"); },
     checkpointTurnStarted: async (turnId) => { calls.push(`started:${turnId.length}`); },
     checkpointTerminalResult: async (terminal) => { calls.push(`terminal:${terminal.outcome}`); },
   });
+  executionSub.dispose();
   assert.equal(result.outcome, "reply");
   assert.equal(result.text, "Hello room.");
   assert.deepEqual(calls, ["dispatch", "started:36", "terminal:reply"]);
@@ -331,7 +337,7 @@ test("a room turn is one ACP prompt: the streamed text is the reply, with turn f
   assert.match(blocks[0]!.text, /Inbox item: inbox-1/);
   assert.match(blocks[0]!.text, /LETAGENTS_NO_ROOM_REPLY/);
   assert.match(blocks[0]!.text, /Your access level for this turn is Read-only/, "a Read-only agent is told that edits and commands are refused");
-  assert.deepEqual(events.filter((event) => event.kind === "turn_lifecycle").map((event) => event.method), ["turn/started", "turn/completed"]);
+  assert.deepEqual(turnFacts, ["active:", "terminal:completed"]);
   assert.equal(events.filter((event) => event.kind === "text_delta").length, 2);
   assert.equal(handle.observedState(), "idle");
 });
@@ -647,7 +653,7 @@ test("a turn whose last conversation step is an error ends as that failure, not 
 });
 
 test("agy's error steps read back as the owner's reason, from a copy of the conversation database", async () => {
-  const { antigravityStepErrorMessage, readAntigravityLastStepError } = await import("../main/agents/antigravity/turn-errors.js");
+  const { antigravityStepErrorMessage, readAntigravityLastStepError } = await import("#provider-runtime/agents/antigravity/turn-errors.js");
   assert.match(antigravityStepErrorMessage("Error 429, Message: Resource has been exhausted, Status: RESOURCE_EXHAUSTED quotaResetTimeStamp\":\"2026-11-24T08:00:00Z"),
     /usage limit for this model is reached; it resets at 2026-11-24T08:00:00.000Z/);
   assert.match(antigravityStepErrorMessage("NOT_FOUND (code 404): model gemini-x is not available"), /request failed \(NOT_FOUND 404\): model gemini-x is not available/);
@@ -667,7 +673,7 @@ test("agy's error steps read back as the owner's reason, from a copy of the conv
 });
 
 test("agy's quota answer becomes the agent's limit windows", async () => {
-  const { parseAntigravityQuota } = await import("../main/agents/antigravity/usage.js");
+  const { parseAntigravityQuota } = await import("#provider-runtime/agents/antigravity/usage.js");
   const at = "2026-11-23T18:00:00.000Z";
   assert.deepEqual(parseAntigravityQuota(QUOTA_JSON, "claude-opus-5-5", at)?.map((window) => [window.id, window.label, window.usedPercent]),
     [["antigravity:3p-5h", "5 hours", 0], ["antigravity:3p-weekly", "Weekly", 0]]);
@@ -924,4 +930,57 @@ test("a sign-in file counts only as a non-empty file: an empty or dangling one i
   assert.equal(ownerAntigravityTokenFileExists(ownerDir), false, "a link to nothing is no sign-in");
   shareAntigravitySignIn(agentDir, ownerDir);
   assert.equal(existsSync(join(agentDir, "antigravity-cli", "antigravity-oauth-token")), false);
+});
+
+test("ProviderRuntimeBoundary drives Antigravity with plain-wire data, base64 images, and antigravity_acp death proof", async () => {
+  const { adapter, agy } = harness();
+  const seenSteps: string[] = [];
+  const boundary = new ProviderRuntimeBoundary("antigravity", adapter);
+  boundary.connectEventSink((envelope) => {
+    if (envelope.kind === "step") {
+      seenSteps.push(envelope.step);
+      boundary.answerStep(envelope.operationId, envelope.seq, { ok: true });
+    }
+  });
+  const snapshot = await boundary.spawn(spawnRequest("read_only"));
+  assert.equal(snapshot.providerConnection?.kind, "antigravity_acp");
+  assert.equal(snapshot.lifecycleAuthorityMode, "typed");
+
+  const pngBase64 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64");
+  const result = await boundary.runRoomTurn(
+    snapshot.ref,
+    {
+      ...turnRequest,
+      attachments: [
+        {
+          index: 1,
+          fileName: "shot.png",
+          mimeType: "image/png",
+          sizeBytes: 8,
+          status: "image",
+          image: { mimeType: "image/png", base64: pngBase64 },
+        },
+      ],
+    },
+    {
+      operationId: "op-agy-boundary-1",
+      steps: ["before_native_dispatch", "checkpoint_turn_started", "checkpoint_terminal_result"],
+    },
+  );
+  assert.equal(result.outcome, "reply");
+  assert.equal(result.text, "Hello room.");
+  assert.deepEqual(seenSteps, ["before_native_dispatch", "checkpoint_turn_started", "checkpoint_terminal_result"]);
+
+  const prompt = agy.received.find((message) => message.method === "session/prompt")!;
+  const blocks = prompt.params!.prompt as Array<{ type: string; mimeType?: string; data?: string; text?: string }>;
+  const imageBlock = blocks.find((block) => block.type === "image");
+  assert.deepEqual(imageBlock, { type: "image", mimeType: "image/png", data: pngBase64 });
+
+  const terminal = await boundary.stop(snapshot.ref);
+  assert.equal(terminal.terminalCause, "stopped");
+  assert.deepEqual(terminal.nativeRuntimeDeath, {
+    kind: "antigravity_acp",
+    pid: 4242,
+    processIdentity: BIRTH,
+  });
 });

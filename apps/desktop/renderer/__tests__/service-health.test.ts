@@ -24,7 +24,7 @@ function entry(id: string, overrides: Partial<DesktopSupervisorManifestEntry> = 
 function snapshot(entries: DesktopSupervisorManifestEntry[] = []): DesktopSupervisorServiceSnapshot {
   return { observedAt: "2026-10-09T12:00:00Z", status: { healthy: true, protocolVersion: 1,
     implementationVersion: "test-version", generation: 1, pid: 12, startedAt: "2026-10-09T11:00:00Z",
-    recoveryDiagnostics: null, capabilities: { roomDeliveryRetry: false, providerContinuationRepair: false,
+    capabilities: { roomDeliveryRetry: false, providerContinuationRepair: false,
       roomDeliverySkip: false, agentInspectorDetail: true, agentInspectorSettings: true, agentRoomMove: true,
       agentLifecycle: true, agentStateSubscription: true } }, state: { daemonGeneration: 1, sequence: 1, entries } };
 }

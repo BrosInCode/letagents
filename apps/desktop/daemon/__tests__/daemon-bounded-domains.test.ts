@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { DAEMON_RPC_METHOD_NAMES } from "#daemon-contract/index.js";
 
 // The entry point and the daemon class modules it re-exports from ./main/.
 const mainFiles = ["../main.ts", ...readdirSync(new URL("../main/", import.meta.url)).filter((name) => name.endsWith(".ts")).sort().map((name) => `../main/${name}`)];
@@ -9,7 +10,6 @@ const mainSource = mainFiles.map(read).join("\n");
 const routerSource = read("../control-request-router.ts");
 const cloudSource = read("../cloud-http.ts");
 const daemonReadModelSource = read("../daemon-read-model.ts");
-const deliveryCutoverExecutionSource = read("../delivery-cutover-execution-coordinator.ts");
 const desiredStateSource = read("../desired-state-coordinator.ts");
 const manifestTransitionSource = read("../manifest-transition-coordinator.ts");
 const nativeActivityPublicationSource = read("../native-activity-publication-coordinator.ts");
@@ -38,14 +38,10 @@ const expectedControlMethods = [
   "manifest.update_workplace_liveness",
   "manifest.watch_state",
   "supervisor.acknowledge_room_move_source_revocation",
-  "supervisor.activate_custodial_polling",
   "supervisor.apply_agent_configuration",
-  "supervisor.authorize_custodial_polling",
   "supervisor.bind_worker_session",
   "supervisor.bootstrap_room_ingress",
   "supervisor.borrow_worker_credential",
-  "supervisor.cancel_delivery_drain",
-  "supervisor.cancel_polling_activation",
   "supervisor.checkpoint_worker_cursor",
   "supervisor.commit_room_move",
   "supervisor.complete_bounded_effect",
@@ -53,17 +49,14 @@ const expectedControlMethods = [
   "supervisor.get_agent_configuration",
   "supervisor.get_agent_inspector_detail",
   "supervisor.get_current_room_move",
-  "supervisor.get_delivery_drain",
-  "supervisor.get_polling_activation",
   "supervisor.get_room_move",
+  "supervisor.get_rpc_effect",
   "supervisor.host_approval_challenge",
   "supervisor.host_approval_request",
   "supervisor.install_host_grant",
   "supervisor.install_open_model_credential",
   "supervisor.install_worker_credential",
   "supervisor.prepare_bounded_effect",
-  "supervisor.prepare_custodial_forward",
-  "supervisor.prepare_delivery_drain",
   "supervisor.prepare_room_move",
   "supervisor.purge_agent",
   "supervisor.recover_agent_runtime",
@@ -83,11 +76,15 @@ test("the daemon entrypoint delegates control-protocol parsing to one router", (
   assert.equal(matches(mainSource, /request\.method\s*===/g).length, 0);
   assert.equal(matches(mainSource, /createDaemonControlRequestHandler\s*\(/g).length, 1);
 
-  const actualMethods = matches(routerSource, /request\.method\s*===\s*"([^"]+)"/g)
+  assert.deepEqual([...DAEMON_RPC_METHOD_NAMES], expectedControlMethods);
+  assert.match(routerSource, /parseDaemonRpcParams\s*\(/);
+  assert.match(routerSource, /isDaemonRpcMethod\s*\(/);
+  const actualHandlers = matches(routerSource, /^\s*"([a-z0-9_.]+)"\s*:/mg)
     .map((match) => match[1])
+    .filter((method) => method.includes("."))
     .filter((method, index, methods) => methods.indexOf(method) === index)
     .sort();
-  assert.deepEqual(actualMethods, expectedControlMethods);
+  assert.deepEqual(actualHandlers, expectedControlMethods);
 });
 
 test("cloud requests are isolated from the daemon authority owner", () => {
@@ -107,8 +104,6 @@ test("daemon policy and projection domains remain extracted", () => {
     "daemon-error-policy",
     "daemon-read-model",
     "daemon-state-watch",
-    "delivery-cutover-coordinator",
-    "delivery-cutover-execution-coordinator",
     "desired-state-coordinator",
     "entry-concurrency-gate",
     "execution-delegation-coordinator",
@@ -137,9 +132,6 @@ test("daemon policy and projection domains remain extracted", () => {
   }
   assert.match(roomAgentProjectionSource, /from "\.\/manifest-view-projection\.js"/);
   assert.match(daemonReadModelSource, /from "\.\/room-agent-state-projection\.js"/);
-  assert.match(deliveryCutoverExecutionSource, /controlExactTurn/);
-  assert.match(mainSource, /startDelivery: \(entryId\) => this\.startSupervisedDelivery\(entryId, "wake"\)/,
-    "cutover cancellation wakes an existing A without refreshing or aborting its loop");
   assert.equal(matches(mainSource, /\.controlExactTurn\s*\(/g).length, 0);
   assert.match(desiredStateSource, /compareAndSet/);
   assert.equal(matches(mainSource, /private async setDesiredState\s*\(/g).length, 0);
@@ -208,8 +200,17 @@ test("daemon policy and projection domains remain extracted", () => {
   // background-command-stop.ts.
   // 1917 -> 1919: the Stop mark and lost-end ports; the mark stays in provider-live-display.ts,
   // the lost end in agent-stream-registry.ts.
-  assert.ok(mainSource.split("\n").length < 1_919, "main.ts must remain a thin composition root");
+  // 1919 -> 1928: legacy state reset notice and workspaceRoot composition wiring;
+  // backup move-aside and notice persistence stay in daemon-state-database/connection.ts.
+  assert.ok(mainSource.split("\n").length < 1_928, "main.ts must remain a thin composition root");
   for (const file of mainFiles) assert.ok(read(file).split("\n").length < 600, `${file} must stay under 600 lines`);
+});
+
+test("convergence-policy remains a pure, zero-I/O module with no clocks, timers, or process access", () => {
+  const source = read("../convergence-policy.ts");
+  assert.doesNotMatch(source, /from\s+["']node:/, "convergence-policy must not import Node built-ins");
+  assert.doesNotMatch(source, /\bDate\b|\bsetTimeout\b|\bsetInterval\b|\bsetImmediate\b|\bfetch\b|\bMath\.random\b|\bprocess\./,
+    "convergence-policy must not access clocks, timers, randomness, network, or process globals");
 });
 
 function read(relativePath: string): string {

@@ -5,8 +5,8 @@ import type {
 import {
   defaultManagedAgentPermissionProfileId,
   listManagedAgentPermissionProfiles,
-} from "./managed-agent-permission-profiles.js";
-import { isIsolatedDesktopPreview } from "../preview-mode.js";
+} from "#provider-runtime/agents/managed-agent-permission-profiles.js";
+import { isIsolatedDesktopPreview } from "#provider-runtime/preview-mode.js";
 
 function previewAuthCommand(providerId: DesktopAgentProviderId): string | undefined {
   if (!isIsolatedDesktopPreview() || (providerId !== "codex" && providerId !== "claude-code")) return undefined;
@@ -151,7 +151,7 @@ export function getDesktopAgentProvider(
 
 export function supervisedDeliveryModeForProvider(
   providerId: DesktopAgentProviderId,
-): "mcp_polling" | "daemon_inbox" {
+): "daemon_inbox" {
   const provider = getDesktopAgentProvider(providerId);
   if (!provider?.capabilities.includes("supervised_runtime") || !provider.supervisedDeliveryMode) {
     throw new Error(`${provider?.name ?? providerId} is not available through the supervised engine.`);

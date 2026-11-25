@@ -10,7 +10,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { AuditLog } from "../audit-log.js";
-import { ProviderExecutionObserver } from "../../electron/main/agents/provider-execution-observer.js";
+import { ProviderExecutionObserver } from "#provider-runtime/agents/provider-execution-observer.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "../lifecycle-log.js";
@@ -86,18 +86,21 @@ test("singleton fences a second daemon and detects a newer generation", async ()
   } finally { await env.cleanup(); }
 });
 
-test("manifest SQLite writes use generation CAS across concurrent callers", async () => {
+test("manifest SQLite writes use per-agent version CAS across concurrent callers", async () => {
   const env = await fixture();
   try {
     const path = join(env.root, "manifest.json");
     const store = new ManifestStore(path);
-    const saved = await store.write(0, [entry]);
-    assert.equal(saved.generation, 1);
-    await assert.rejects(() => store.write(0, []), ManifestConflictError);
-    const concurrent = await Promise.allSettled([store.write(1, [{ ...entry, id: "left" }]), store.write(1, [{ ...entry, id: "right" }])]);
+    const saved = await store.write([entry]);
+    assert.equal(saved.versions[entry.id], 1);
+    await assert.rejects(() => store.replaceEntry(0, { ...entry, display_name: "Stale" }), ManifestConflictError);
+    const concurrent = await Promise.allSettled([
+      store.replaceEntry(1, { ...entry, display_name: "Left" }),
+      store.replaceEntry(1, { ...entry, display_name: "Right" }),
+    ]);
     assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1);
     assert.equal(concurrent.filter((result) => result.status === "rejected" && result.reason instanceof ManifestConflictError).length, 1);
-    assert.equal((await store.load()).generation, 2);
+    assert.equal((await store.load()).versions[entry.id], 2);
     await store.close();
   } finally { await env.cleanup(); }
 });
@@ -764,7 +767,7 @@ for (const retried of [false, true]) test(`provider-aware handoff ${retried ? "i
       messages: [{ source_message_id: "task-continuation:parent", source_message: { text: "continue the task" }, activation: {} }] });
     // Exactly what the daemon saves for a follow-up that it makes blocked.
     const db = new DatabaseSync(env.paths.manifestPath);
-    db.prepare("UPDATE supervised_agent_inbox SET state='blocked',last_error='All three automatic attempts failed.' WHERE inbox_item_id=?").run(item!.inbox_item_id);
+    db.prepare("UPDATE inbox_items SET state='blocked',last_error='All three automatic attempts failed.' WHERE inbox_item_id=?").run(item!.inbox_item_id);
     db.prepare("INSERT INTO supervised_agent_inbox_events VALUES(?,3,'task-continuation:0','blocked',?,NULL)").run(item!.inbox_item_id, new Date().toISOString());
     db.close();
     assert.equal(await store.isUntouchedBlockedFollowUp(item!.inbox_item_id), true);
@@ -842,7 +845,7 @@ for (const scenario of [
     assert.equal(await env.internals.supervisedInbox.providerTurnBinding(item!.inbox_item_id), null);
     const readHistory = () => {
       const db = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
-      try { return db.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id); }
+      try { return db.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(item!.inbox_item_id); }
       finally { db.close(); }
     };
     const history = readHistory();
@@ -902,8 +905,8 @@ for (const stage of ["before_native_attach", "native_attach", "attach_error"] as
   try {
     const current = (await env.internals.store.getEntry(env.id))!;
     if (stage === "before_native_attach") {
-      const original = env.internals.store.unresolvedDeliveryDrain.bind(env.internals.store);
-      env.internals.store.unresolvedDeliveryDrain = async id => { entered(); await gate; return original(id); };
+      const original = env.internals.durability.getAttempt.bind(env.internals.durability);
+      env.internals.durability.getAttempt = async id => { entered(); await gate; return original(id); };
     }
     attaching = internal.providerExecution.attachLiveProvider(current);
     void attaching.catch(() => undefined);
@@ -993,7 +996,7 @@ test("provider-aware handoff retains router custody after stream installation fa
   const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
   const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "claude-code", {
     capabilities: router.capabilities.bind(router), runtimeCustody: router.runtimeCustody.bind(router), attach: router.attach.bind(router),
-    onStream: async () => { throw new Error("stream installation failed"); },
+    onExit: async () => { throw new Error("stream installation failed"); },
   });
   const internal = env.daemon as unknown as { providerExecution: { attachLiveProvider(entry: DaemonManifestEntry): Promise<ProviderActionHandle | null> }; handoffDraining: boolean };
   try {
@@ -1006,7 +1009,7 @@ test("provider-aware handoff retains router custody after stream installation fa
     assert.equal(result.ok, false, "failed stream setup cannot hide native custody");
     assert.match(result.error ?? "", /native connection could not be confirmed/);
     assert.equal(internal.handoffDraining, false);
-    env.port.onStream = async () => () => {};
+    env.port.onExit = async () => () => {};
     assert.ok(await internal.providerExecution.attachLiveProvider(current));
     assert.equal((await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff")).ok, true);
     await within(env.daemon.waitForHandoff(), "repaired custody retires without a poisoned dispatch reservation");
@@ -1108,7 +1111,7 @@ test("the daemon entrypoint exits after a completed handoff instead of retaining
   skip: process.platform !== "darwin" ? "the production daemon entrypoint is macOS-only" : false,
 }, async () => {
   const env = await fixture();
-  const child = spawn(process.execPath, ["--import", "tsx", join(process.cwd(), "daemon/main.ts")], {
+  const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", join(process.cwd(), "daemon/main.ts")], {
     cwd: process.cwd(),
     env: { ...process.env, HOME: env.root, USERPROFILE: env.root },
     stdio: "ignore",
@@ -1167,7 +1170,7 @@ test("SIGTERM after authority release uses default process-only termination and 
     process.send({ type: "authority_released", providerPid: provider.pid });
     setInterval(() => {}, 1000);
   `;
-  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+  const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
     cwd: process.cwd(),
     env: { ...process.env, HOME: env.root, USERPROFILE: env.root },
     stdio: ["ignore", "ignore", "ignore", "ipc"],

@@ -1,30 +1,37 @@
 import type { DatabaseSync, SQLInputValue, StatementSync } from "node:sqlite";
 import type { NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
-import { ExecutionProtocolError, executionIdentity, type NativeTurnIdentity } from "./execution-protocol.js";
-import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity as opaque, type ShadowObserver } from "./execution-shadow-store.js";
-import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
+import { ExecutionProtocolError, executionIdentity, type ExecutionFact, type NativeTurnIdentity } from "./execution-protocol.js";
+import {
+  ExecutionShadowStore,
+  executionRuntimeStorageIdentity,
+  executionStorageIdentity as opaque,
+  type ShadowIngestInstallation,
+  type ShadowObserver,
+} from "./execution-shadow-store.js";
 import { recoveredRuntime } from "./runtime-recovery-journal.js";
 import { isIdleCursorConnection } from "./provider-state-policy.js";
 import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
-import { isLifecycleProjectionProvider, unavailableLifecycleProjectionDiagnostics, type LifecycleProjectionDiagnostics,
-  type LifecycleCaptureAdmissionStatus, type LifecycleProjectionObservation,
-  type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
-import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema,
-  type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
 import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
+import type { ObservedState } from "./types.js";
+
+export type LifecycleCaptureAdmissionStatus = "ready" | "pending" | "unavailable";
 
 type Row = Record<string, string | number | null>;
 type CaptureCode = "source_gap" | "identity_unavailable" | "storage_unavailable" | "retention_limit" | "invalid_observation" | "settlement_unavailable";
-type Runtime = { id: string; generation: string; authorityMode: LifecycleAuthorityMode };
+type Runtime = { id: string; generation: string; authorityMode: "typed" };
 type CaptureOptions = {
   provider: Pick<ProviderActionPort, "onExecution">;
   currentHandle(agentId: string): ProviderActionHandle | undefined;
   daemonGeneration(): number;
   diagnostic(agentId: string, code: CaptureCode): void;
+  /** Synchronous generation fence check run inside every write transaction before COMMIT. */
+  assertWriteFence?(): void;
   /** This agent's record stops here for the runtime it has: a gap, a full record, or a fact the record refuses. */
   recordStopped?(agentId: string): void;
   changed?(agentId: string): void;
+  /** Called immediately after an ingested lifecycle fact updates `agents.observed_state`. */
+  lifecycleProjected?(agentId: string, observedState: ObservedState): void;
 };
 type Lane = {
   agentId: string; generation: string; handle: ProviderActionHandle; installation: ProviderInstallationToken;
@@ -34,7 +41,7 @@ type Lane = {
   detached: boolean; frontierStored: boolean; verifiedRuntime: Runtime | null;
   subscriptionFailed: boolean;
   receiptCursor: number;
-  expectedAuthorityMode: LifecycleAuthorityMode | null;
+  expectedAuthorityMode: "typed" | null;
   pendingChange: boolean;
   notifiedAdmission: string | null;
   storageRetry: NodeJS.Timeout | null;
@@ -52,18 +59,9 @@ export type PreparedRuntime = {
 const QUEUE_FACTS = 256;
 const QUEUE_BYTES = 256 * 1024;
 const BATCH_FACTS = 32;
-const LIFECYCLE_PROJECTION_RETRY_MS = 25;
 const CAPTURE_RETRY_MAX_MS = 30_000;
 const KNOWN_RUNTIMES_PER_LANE = 8;
 const MAX_CACHED_STATEMENTS = 32;
-function lifecycleProvider(connection: ProviderActionConnectionRef | null | undefined): LifecycleProjectionProvider | null {
-  if (connection?.kind === "codex_app_server") return "codex";
-  if (connection?.kind === "claude_cli") return "claude-code";
-  if (connection?.kind === "cursor_cli") return "cursor";
-  if (connection?.kind === "opencode_server") return "open-model";
-  if (connection?.kind === "antigravity_acp") return "antigravity";
-  return null;
-}
 
 /**
  * Structural capture, authoritative for typed lifecycle admission. Provider
@@ -76,28 +74,22 @@ export class ExecutionCaptureCoordinator {
   private readonly retiring = new Map<string, Lane>();
   private readonly suspendedAgents = new Set<string>();
   private readonly dirty = new Set<Lane>();
-  private readonly lifecycleProjectionPending = new Map<string, { observation: LifecycleProjectionObservation; bytes: number }>();
-  private readonly lifecycleProjectionUnavailable = new Map<LifecycleProjectionProvider, number>();
-  private lifecycleProjectionBytes = 0;
-  private lifecycleProjectionTimer: NodeJS.Timeout | null = null;
   private scheduled: NodeJS.Immediate | null = null;
   private closed = false;
   private handoffSealed = false;
   private readonly statements = new Map<string, StatementSync>();
 
-  /** Production capture is optional; opening failure cannot prevent daemon startup. */
-  static open(path: string, provider: CaptureOptions["provider"] | undefined,
+  /** Attach capture onto the process's single shared daemon SQLite connection. */
+  static attach(database: DatabaseSync, provider: CaptureOptions["provider"] | undefined,
     options: Omit<CaptureOptions, "diagnostic" | "provider">): ExecutionCaptureCoordinator | null {
     if (!provider?.onExecution) return null;
-    try {
-      return new ExecutionCaptureCoordinator(openDaemonStateObservationDatabase(path), {
-        ...options, provider, diagnostic: (agentId, code) => console.warn("[execution_capture]", JSON.stringify({ agentId, code })),
-      });
-    } catch { console.warn("[execution_capture] storage_unavailable"); return null; }
+    return new ExecutionCaptureCoordinator(database, {
+      ...options, provider, diagnostic: (agentId, code) => console.warn("[execution_capture]", JSON.stringify({ agentId, code })),
+    });
   }
 
   constructor(private readonly database: DatabaseSync, private readonly options: CaptureOptions) {
-    this.store = new ExecutionShadowStore(database);
+    this.store = new ExecutionShadowStore(database, { assertWriteFence: options.assertWriteFence });
   }
 
   /** Discard queued callbacks only after their exact dead runtime was archived. */
@@ -134,7 +126,14 @@ export class ExecutionCaptureCoordinator {
     this.lanes.set(agentId, lane);
     let pending: Promise<NativeExecutionSubscription>;
     try {
-      pending = Promise.resolve(this.options.provider.onExecution(handle, event => this.enqueue(lane, event)));
+      // A lost observation takes the same path as an observation that cannot be queued: the lane is marked and
+      // scheduled, and the drain reports the source gap. This also covers a lost last observation, which no later
+      // observation would reveal.
+      pending = Promise.resolve(this.options.provider.onExecution(handle, event => this.enqueue(lane, event), () => {
+        if (!this.current(lane) || lane.detached || lane.suspended) return;
+        lane.overflow = true;
+        this.schedule(lane);
+      }));
     } catch {
       lane.subscriptionFailed = true;
       if (this.current(lane)) {
@@ -397,19 +396,6 @@ export class ExecutionCaptureCoordinator {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    if (this.lifecycleProjectionTimer) clearTimeout(this.lifecycleProjectionTimer);
-    this.lifecycleProjectionTimer = null;
-    for (const { observation } of this.lifecycleProjectionPending.values()) {
-      this.lifecycleProjectionUnavailable.set(observation.provider,
-        (this.lifecycleProjectionUnavailable.get(observation.provider) ?? 0) + 1);
-    }
-    this.lifecycleProjectionPending.clear();
-    this.lifecycleProjectionBytes = 0;
-    for (const [provider, count] of this.lifecycleProjectionUnavailable) {
-      try { this.store.recordLifecycleProjectionUnavailable(provider, count); }
-      catch { /* shutdown cannot wait on optional observation storage */ }
-    }
-    this.lifecycleProjectionUnavailable.clear();
     if (this.scheduled) clearImmediate(this.scheduled);
     this.scheduled = null;
     this.dirty.clear();
@@ -438,54 +424,6 @@ export class ExecutionCaptureCoordinator {
     }
     for (const lane of closing) this.remove(lane);
     this.statements.clear();
-    try { this.database.close(); } catch { console.warn("[execution_capture] close_failed"); }
-  }
-
-  /** Bounded raw-classifier witness; provider delivery never waits on SQLite. */
-  recordLegacyLifecycle(value: LifecycleProjectionObservation): void {
-    if (this.closed) return;
-    const provider = value?.provider;
-    if (!isLifecycleProjectionProvider(provider)
-      || ![value.agentId, value.workAttemptId, value.executionGenerationId, value.nativeEventId]
-        .every(identity => executionIdentity.safeParse(identity).success)
-      || !(value.phase === "turn_active" || value.phase === "turn_terminal")
-      || !(value.state === "working" || value.state === "idle" || value.state === "terminal" || value.state === "failed")) {
-      if (isLifecycleProjectionProvider(provider)) {
-        this.markLifecycleProjectionUnavailable(provider);
-      }
-      return;
-    }
-    try {
-      const observation = structuredClone(value);
-      const bytes = Buffer.byteLength(JSON.stringify(observation));
-      const key = JSON.stringify([observation.agentId, observation.provider, observation.workAttemptId,
-        observation.executionGenerationId, observation.nativeEventId, observation.phase, observation.state]);
-      if (this.lifecycleProjectionPending.has(key)) return;
-      if (bytes > QUEUE_BYTES || this.lifecycleProjectionPending.size >= QUEUE_FACTS
-        || this.lifecycleProjectionBytes + bytes > QUEUE_BYTES) {
-        this.markLifecycleProjectionUnavailable(provider);
-        return;
-      }
-      this.lifecycleProjectionPending.set(key, { observation, bytes });
-      this.lifecycleProjectionBytes += bytes;
-      this.scheduleLifecycleProjection();
-    } catch { this.markLifecycleProjectionUnavailable(provider); }
-  }
-
-  recordLifecycleProjectionUnavailable(provider: LifecycleProjectionProvider): void {
-    this.markLifecycleProjectionUnavailable(provider);
-  }
-
-  lifecycleProjectionDiagnostics(): LifecycleProjectionDiagnostics {
-    if (this.closed) return unavailableLifecycleProjectionDiagnostics();
-    try {
-      const diagnostics = this.store.lifecycleProjectionDiagnostics();
-      for (const [provider, count] of this.lifecycleProjectionUnavailable) {
-        diagnostics.providers[provider].observationUnavailable += count;
-      }
-      return diagnostics;
-    }
-    catch { return unavailableLifecycleProjectionDiagnostics(); }
   }
 
   /**
@@ -531,10 +469,9 @@ export class ExecutionCaptureCoordinator {
         && durable.source_id === lane.subscription.sourceId
         && durable.source_id === lane.observer.sourceId
         && durable.admitted_source_id === durable.source_id
-        && lane.expectedAuthorityMode !== null
-        && durable.authority_mode === lane.expectedAuthorityMode
-        && isTypedCaptureAuthority(durable.authority_mode)
-        && isTypedCaptureAuthority(durable.subject_authority_mode)
+        && lane.expectedAuthorityMode === "typed"
+        && durable.authority_mode === "typed"
+        && durable.subject_authority_mode === "typed"
         && durable.runtime_state !== "exited";
       const validCursor = Number.isSafeInteger(last) && Number.isSafeInteger(maximum)
         && last >= 0 && maximum >= last && maximum <= position.latestSequence
@@ -571,7 +508,7 @@ export class ExecutionCaptureCoordinator {
   private hasUnreconstructedCodexTurn(lane: Lane, observerEpoch: number): boolean {
     if (lane.installation.providerConnection.kind !== "codex_app_server") return false;
     return Boolean(this.row(`WITH expected(provider_turn_id) AS (
-        SELECT t.provider_turn_id FROM execution_turns t
+        SELECT t.provider_turn_id FROM runs t
         JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id
           AND g.agent_id=t.agent_id AND g.room_id=t.room_id
           AND g.execution_generation_id=t.execution_generation_id
@@ -580,13 +517,13 @@ export class ExecutionCaptureCoordinator {
           AND t.state IN ('none','active','lost') AND g.workspace_id=?
         UNION
         SELECT b.provider_turn_id FROM supervised_agent_provider_turn_bindings b
-        JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id
+        JOIN inbox_items i ON i.inbox_item_id=b.inbox_item_id
           AND i.agent_id=b.agent_id AND i.room_id=b.room_id
         WHERE b.agent_id=? AND b.work_attempt_id=? AND b.origin_execution_generation_id=?
           AND b.provider_continuation_id=?
           AND i.state IN ('pending','dispatching','awaiting_result','result_recovery','retryable','blocked')
       ) SELECT 1 FROM expected e WHERE NOT EXISTS (
-        SELECT 1 FROM execution_facts f JOIN execution_turns t
+        SELECT 1 FROM execution_facts f JOIN runs t
           ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
           AND t.execution_generation_id=f.execution_generation_id
           AND t.runtime_generation_id=f.runtime_generation_id
@@ -602,10 +539,10 @@ export class ExecutionCaptureCoordinator {
   }
 
   /**
-   * Stricter than captureAdmission: typed lifecycle effects must be fully
-   * drained for the exact source and every retained lifecycle fact must have a
-   * durable disposition. B3 may consume this witness, but B2 suppresses no raw
-   * behavior merely because it is ready.
+   * Stricter than captureAdmission: the exact source cursor is fully drained.
+   * Lifecycle projection commits atomically with every ingested fact on the
+   * shared connection, so reaching the latest source position implies every
+   * lifecycle fact has already been applied to `agents`.
    */
   typedLifecycleAdmission(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus {
     if (installation.authorityMode !== "typed") return "unavailable";
@@ -615,7 +552,7 @@ export class ExecutionCaptureCoordinator {
     if (!lane || lane.installation !== installation || !lane.subscription || !lane.observer) return "unavailable";
     try {
       const position = lane.subscription.position();
-      const durable = this.row(`SELECT observer_epoch,last_source_sequence,max_observed_sequence
+      const durable = this.row(`SELECT observer_epoch,last_source_sequence,max_observed_sequence,pending_lifecycle_fact_id
         FROM execution_observers WHERE agent_id=?`, installation.entryId);
       if (!durable || Number(durable.observer_epoch) !== lane.observer.epoch) return "unavailable";
       const last = Number(durable.last_source_sequence);
@@ -623,54 +560,9 @@ export class ExecutionCaptureCoordinator {
       if (maximum > last) return "unavailable";
       if (last < position.latestSequence) return "pending";
       if (last !== position.latestSequence || maximum !== last) return "unavailable";
-      const missing = this.row(`SELECT 1 FROM execution_facts f
-        LEFT JOIN execution_lifecycle_effects e ON e.fact_id=f.fact_id
-        WHERE f.agent_id=? AND f.domain<>'execution' AND e.fact_id IS NULL LIMIT 1`, installation.entryId);
-      if (missing) return "unavailable";
-      const pending = this.row(`SELECT 1 FROM execution_lifecycle_effects
-        WHERE agent_id=? AND state='pending' LIMIT 1`, installation.entryId);
-      return pending ? "pending" : "ready";
+      if (durable.pending_lifecycle_fact_id !== null) return "pending";
+      return "ready";
     } catch { return "unavailable"; }
-  }
-
-  private markLifecycleProjectionUnavailable(provider: LifecycleProjectionProvider): void {
-    if (this.closed) return;
-    const current = this.lifecycleProjectionUnavailable.get(provider) ?? 0;
-    this.lifecycleProjectionUnavailable.set(provider, Math.min(Number.MAX_SAFE_INTEGER, current + 1));
-    this.scheduleLifecycleProjection();
-  }
-
-  private scheduleLifecycleProjection(delayMs = 0): void {
-    if (this.closed || this.lifecycleProjectionTimer) return;
-    this.lifecycleProjectionTimer = setTimeout(() => {
-      this.lifecycleProjectionTimer = null;
-      this.drainLifecycleProjection();
-    }, delayMs);
-    this.lifecycleProjectionTimer.unref();
-  }
-
-  private drainLifecycleProjection(): void {
-    if (this.closed) return;
-    let processed = 0;
-    try {
-      for (const [provider, count] of this.lifecycleProjectionUnavailable) {
-        if (processed++ >= BATCH_FACTS) break;
-        this.store.recordLifecycleProjectionUnavailable(provider, count);
-        this.lifecycleProjectionUnavailable.delete(provider);
-      }
-      if (!this.lifecycleProjectionUnavailable.size) {
-        for (const [key, pending] of this.lifecycleProjectionPending) {
-          if (processed++ >= BATCH_FACTS) break;
-          this.store.recordLegacyLifecycle(pending.observation);
-          this.lifecycleProjectionPending.delete(key);
-          this.lifecycleProjectionBytes -= pending.bytes;
-        }
-      }
-    } catch {
-      this.scheduleLifecycleProjection(LIFECYCLE_PROJECTION_RETRY_MS);
-      return;
-    }
-    if (this.lifecycleProjectionUnavailable.size || this.lifecycleProjectionPending.size) this.scheduleLifecycleProjection();
   }
 
   private current(lane: Lane): boolean {
@@ -721,10 +613,6 @@ export class ExecutionCaptureCoordinator {
     if (lane.diagnostic === code) return;
     lane.diagnostic = code;
     lane.pendingChange = true;
-    if (code !== "settlement_unavailable") {
-      const provider = lifecycleProvider(lane.handle.providerConnection);
-      if (provider) this.markLifecycleProjectionUnavailable(provider);
-    }
     try { this.options.diagnostic(lane.agentId, code); } catch { /* never turn an observation failure into delivery failure */ }
     if (code === "source_gap" || code === "retention_limit" || code === "invalid_observation") {
       try { this.options.recordStopped?.(lane.agentId); } catch { /* telling the owner is optional too */ }
@@ -769,15 +657,14 @@ export class ExecutionCaptureCoordinator {
   }
 
   private liveRuntime(lane: Lane): Runtime | null {
-    const row = this.hotRow(`SELECT d.provider_execution_generation_id,d.provider_work_attempt_id,d.work_attempt_id,
-      d.provider_connection_kind,d.provider_connection_pid,d.provider_process_identity,d.provider_connection_url,d.provider_server_auth_path,
-      c.delivery_mode,c.runtime_configuration_revision
-      FROM runtime_deployments d JOIN agent_configurations c USING(agent_id) WHERE d.agent_id=?`, lane.agentId);
-    if (!row || row.delivery_mode !== "daemon_inbox" || row.provider_execution_generation_id !== lane.generation
+    const row = this.hotRow(`SELECT provider_execution_generation_id,provider_work_attempt_id,work_attempt_id,
+      provider_connection_json,runtime_configuration_revision
+      FROM agents WHERE agent_id=?`, lane.agentId);
+    if (!row || row.provider_execution_generation_id !== lane.generation
       || row.provider_work_attempt_id !== lane.handle.workAttemptId || row.work_attempt_id !== lane.handle.workAttemptId
-      || Number(row.runtime_configuration_revision) !== lane.installation.configurationRevision) return null;
-    const connection = { kind: row.provider_connection_kind, pid: row.provider_connection_pid,
-      processIdentity: row.provider_process_identity, url: row.provider_connection_url, serverAuthPath: row.provider_server_auth_path } as ProviderActionConnectionRef;
+      || Number(row.runtime_configuration_revision) !== lane.installation.configurationRevision
+      || typeof row.provider_connection_json !== "string") return null;
+    const connection = JSON.parse(row.provider_connection_json) as ProviderActionConnectionRef;
     if (!sameProviderActionConnectionIdentity(connection, lane.handle.providerConnection)) return null;
     const runtime = this.knownRuntime(lane, connection.pid ?? undefined,
       connection.processIdentity ?? undefined);
@@ -804,9 +691,8 @@ export class ExecutionCaptureCoordinator {
     if (remembered) return remembered;
     const id = executionRuntimeStorageIdentity(lane.agentId, generation, kind, pid!, birth);
     const runtime = this.hotRow("SELECT runtime_generation_id,authority_mode,config_revision FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?", lane.agentId, generation, id);
-    const authorityMode = lifecycleAuthorityModeSchema.safeParse(runtime?.authority_mode);
-    if (!runtime || !authorityMode.success || Number(runtime.config_revision) !== revision) return null;
-    const known: Runtime = Object.freeze({ id, generation, authorityMode: authorityMode.data });
+    if (!runtime || runtime.authority_mode !== "typed" || Number(runtime.config_revision) !== revision) return null;
+    const known: Runtime = Object.freeze({ id, generation, authorityMode: "typed" });
     if (lane.knownRuntimes.size >= KNOWN_RUNTIMES_PER_LANE) lane.knownRuntimes.clear();
     lane.knownRuntimes.set(key, known);
     return known;
@@ -829,15 +715,14 @@ export class ExecutionCaptureCoordinator {
     const fact = event.fact;
     if (fact.domain !== "turn" && fact.domain !== "execution") return null;
     const existing = this.hotRow(`SELECT t.turn_id,t.execution_generation_id,t.runtime_generation_id,t.provider_continuation_id,t.provider_turn_id,
-      r.authority_mode FROM execution_turns t JOIN execution_runtime_generations r USING(agent_id,execution_generation_id,runtime_generation_id)
+      r.authority_mode FROM runs t JOIN execution_runtime_generations r USING(agent_id,execution_generation_id,runtime_generation_id)
       WHERE t.agent_id=? AND t.provider_continuation_id=? AND t.provider_turn_id=?`, lane.agentId, fact.providerContinuationId, fact.providerTurnId);
-    const authorityMode = lifecycleAuthorityModeSchema.safeParse(existing?.authority_mode);
-    if (existing && authorityMode.success) return { runtime: { id: String(existing.runtime_generation_id), generation: String(existing.execution_generation_id),
-      authorityMode: authorityMode.data }, identity: { turnId: String(existing.turn_id), providerContinuationId: fact.providerContinuationId,
+    if (existing && existing.authority_mode === "typed") return { runtime: { id: String(existing.runtime_generation_id), generation: String(existing.execution_generation_id),
+      authorityMode: "typed" }, identity: { turnId: String(existing.turn_id), providerContinuationId: fact.providerContinuationId,
       providerTurnId: fact.providerTurnId } };
     if (existing) return null;
     const binding = this.row(`SELECT b.room_id,b.work_attempt_id,b.origin_execution_generation_id,i.source_message_id,i.created_at
-      FROM supervised_agent_provider_turn_bindings b JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id AND i.agent_id=b.agent_id AND i.room_id=b.room_id
+      FROM supervised_agent_provider_turn_bindings b JOIN inbox_items i ON i.inbox_item_id=b.inbox_item_id AND i.agent_id=b.agent_id AND i.room_id=b.room_id
       WHERE b.agent_id=? AND b.provider_continuation_id=? AND b.provider_turn_id=?`, lane.agentId, fact.providerContinuationId, fact.providerTurnId);
     if (!binding || binding.work_attempt_id !== lane.handle.workAttemptId || binding.origin_execution_generation_id !== observed.generation) return null;
     const identity = { turnId: opaque("turn", lane.agentId, fact.providerContinuationId, fact.providerTurnId),
@@ -858,7 +743,29 @@ export class ExecutionCaptureCoordinator {
     return { runtime: observed, identity };
   }
 
+  private liveInstallationFor(lane: Lane): ShadowIngestInstallation | null {
+    return lane.detached ? null : {
+      workAttemptId: lane.installation.workAttemptId,
+      providerContinuationId: lane.installation.providerContinuationId,
+      executionGenerationId: lane.installation.executionGenerationId,
+      configurationRevision: lane.installation.configurationRevision,
+      providerConnection: lane.installation.providerConnection,
+    };
+  }
+
+  private retryPendingLifecycle(lane: Lane): void {
+    const outcome = this.store.retryPendingLifecycleProjection(lane.agentId, this.liveInstallationFor(lane));
+    if (outcome.status === "applied") {
+      lane.pendingChange = true;
+      try { this.options.lifecycleProjected?.(lane.agentId, outcome.observedState); }
+      catch { /* optional observation */ }
+    } else if (outcome.status === "superseded") {
+      lane.pendingChange = true;
+    }
+  }
+
   private drain(lane: Lane): boolean {
+    this.retryPendingLifecycle(lane);
     if (lane.detached && !lane.pending.size && !lane.checkpoints.size && lane.subscription!.position().latestSequence === 0) {
       lane.frontierStored = true; return false;
     }
@@ -892,52 +799,99 @@ export class ExecutionCaptureCoordinator {
       }
       this.report(lane, "identity_unavailable"); return false;
     }
-    let token = lane.observer ?? this.bind(lane, initial, initial);
+    const staleArchivedObserver = !lane.suspended
+      && !lane.detached
+      && lane.observer !== null
+      && lane.observer.observerRuntimeGenerationId !== initial.id
+      && Boolean(recoveredRuntime(this.database, lane.agentId, lane.observer.observerRuntimeGenerationId));
+    let token = lane.observer && !staleArchivedObserver ? lane.observer : this.bind(lane, initial, initial);
     const position = lane.subscription!.position();
     if (!Number.isSafeInteger(position.latestSequence) || !Number.isSafeInteger(position.firstRetainedSequence)
       || position.latestSequence < 0 || position.firstRetainedSequence < 1 || position.firstRetainedSequence > position.latestSequence + 1) {
       throw new ExecutionProtocolError("invalid_fact");
     }
-    this.store.observeSourcePosition(lane.subscription!.sourceId, token, position.latestSequence);
-    if (prior?.source_id !== source || Number(prior.max_observed_sequence) < position.latestSequence) lane.pendingChange = true;
-    lane.frontierStored = true;
-    if (lane.suspended) return false;
-    const current = this.hotRow("SELECT last_source_sequence FROM execution_observers WHERE agent_id=?", lane.agentId)!;
+    // Persist max_observed_sequence only after healthy queued facts ingest (each
+    // ingest advances last_source_sequence and max_observed_sequence atomically)
+    // or when stopping early on a gap, unplaceable fact, or protocol error.
+    // Writing the frontier before ingest would open a crash window where a
+    // SIGKILL leaves max_observed_sequence > last_source_sequence on disk and
+    // forces the restarted daemon into a false source_gap.
+    const recordFrontier = (): void => {
+      this.store.observeSourcePosition(lane.subscription!.sourceId, token, position.latestSequence);
+      if (prior?.source_id !== source || Number(prior.max_observed_sequence) < position.latestSequence) lane.pendingChange = true;
+      lane.frontierStored = true;
+    };
+    if (lane.suspended) { recordFrontier(); return false; }
+    const current = this.hotRow(`SELECT o.observer_epoch,o.daemon_generation_id,o.source_id,
+      o.observer_runtime_generation_id,o.last_source_sequence,s.source_id AS admitted_source_id
+      FROM execution_observers o
+      LEFT JOIN execution_observer_sources s ON s.agent_id=o.agent_id AND s.source_id=o.source_id
+      WHERE o.agent_id=?`, lane.agentId);
+    if (!current || Number(current.observer_epoch) !== token.epoch
+      || current.daemon_generation_id !== token.daemonGenerationId
+      || current.source_id !== source
+      || current.observer_runtime_generation_id !== token.observerRuntimeGenerationId
+      || current.admitted_source_id !== source) {
+      // Let observeSourcePosition raise the exact stale/unverified/mismatch protocol error.
+      recordFrontier();
+      return false;
+    }
     let cursor = Number(current.last_source_sequence);
+    if (position.latestSequence < cursor) {
+      recordFrontier();
+      return false;
+    }
     this.discardPrefix(lane, cursor);
     // Queued live observations can precede the helper's bounded retained suffix.
     const firstAvailable = lane.pending.keys().next().value ?? position.firstRetainedSequence;
     if (lane.overflow || firstAvailable > cursor + 1) {
+      recordFrontier();
       lane.suspended = true; lane.pending.clear(); lane.bytes = 0; this.report(lane, "source_gap"); return false;
     }
     let processed = 0;
-    for (const [sequence, queued] of lane.pending) {
-      if (processed++ >= BATCH_FACTS) return true;
-      const event = queued.event;
-      if (event.sourceId !== lane.subscription!.sourceId || sequence !== cursor + 1) {
-        lane.suspended = true; this.report(lane, "source_gap"); return false;
+    try {
+      for (const [sequence, queued] of lane.pending) {
+        if (processed++ >= BATCH_FACTS) return true;
+        const event = queued.event;
+        if (event.sourceId !== lane.subscription!.sourceId || sequence !== cursor + 1) {
+          recordFrontier();
+          lane.suspended = true; this.report(lane, "source_gap"); return false;
+        }
+        let runtime = this.knownRuntime(lane, event.nativeProcessPid, event.nativeProcessIdentity);
+        if (!runtime && (event.fact.domain === "turn" || event.fact.domain === "execution")) {
+          const known = this.hotRow("SELECT execution_generation_id FROM runs WHERE agent_id=? AND provider_continuation_id=? AND provider_turn_id=?", lane.agentId, event.fact.providerContinuationId, event.fact.providerTurnId);
+          if (known) runtime = this.knownRuntime(lane, event.nativeProcessPid,
+            event.nativeProcessIdentity, String(known.execution_generation_id));
+        }
+        if (!runtime) { recordFrontier(); this.report(lane, "identity_unavailable"); return false; }
+        const turn = event.fact.domain === "turn" || event.fact.domain === "execution" ? this.turn(lane, event, runtime) : null;
+        if ((event.fact.domain === "turn" || event.fact.domain === "execution") && !turn) { recordFrontier(); this.report(lane, "identity_unavailable"); return false; }
+        const subject = turn?.runtime ?? runtime;
+        token = this.bind(lane, subject, runtime, turn && subject.id !== runtime.id ? turn.identity : undefined);
+        const liveInstallation = this.liveInstallationFor(lane);
+        const ingestedFact = { ...event.fact, ...(turn?.identity ?? {}),
+          factId: opaque("fact", lane.agentId, event.sourceId, String(sequence)), agentId: lane.agentId,
+          executionGenerationId: subject.generation, runtimeGenerationId: subject.id, observerEpoch: token.epoch,
+          sourceSequence: sequence, observedAtMs: event.observedAtMs } as ExecutionFact;
+        const result = this.store.ingest(event.sourceId, token, ingestedFact, { liveInstallation });
+        if (result.status !== "accepted" && result.status !== "duplicate") {
+          recordFrontier();
+          lane.suspended = true; this.report(lane, result.status === "gap" ? "source_gap" : "retention_limit"); return false;
+        }
+        if (result.status === "accepted" || lane.diagnostic !== null) lane.pendingChange = true;
+        cursor = sequence; lane.pending.delete(sequence); lane.bytes -= queued.bytes; lane.diagnostic = null;
+        if (result.projectedObservedState !== undefined && result.projectedObservedState !== null) {
+          try { this.options.lifecycleProjected?.(lane.agentId, result.projectedObservedState); }
+          catch { /* optional observation */ }
+        }
       }
-      let runtime = this.knownRuntime(lane, event.nativeProcessPid, event.nativeProcessIdentity);
-      if (!runtime && (event.fact.domain === "turn" || event.fact.domain === "execution")) {
-        const known = this.hotRow("SELECT execution_generation_id FROM execution_turns WHERE agent_id=? AND provider_continuation_id=? AND provider_turn_id=?", lane.agentId, event.fact.providerContinuationId, event.fact.providerTurnId);
-        if (known) runtime = this.knownRuntime(lane, event.nativeProcessPid,
-          event.nativeProcessIdentity, String(known.execution_generation_id));
+    } catch (error) {
+      if (error instanceof ExecutionProtocolError) {
+        try { recordFrontier(); } catch { /* preserve original protocol error */ }
       }
-      if (!runtime) { this.report(lane, "identity_unavailable"); return false; }
-      const turn = event.fact.domain === "turn" || event.fact.domain === "execution" ? this.turn(lane, event, runtime) : null;
-      if ((event.fact.domain === "turn" || event.fact.domain === "execution") && !turn) { this.report(lane, "identity_unavailable"); return false; }
-      const subject = turn?.runtime ?? runtime;
-      token = this.bind(lane, subject, runtime, turn && subject.id !== runtime.id ? turn.identity : undefined);
-      const result = this.store.ingest(event.sourceId, token, { ...event.fact, ...(turn?.identity ?? {}),
-        factId: opaque("fact", lane.agentId, event.sourceId, String(sequence)), agentId: lane.agentId,
-        executionGenerationId: subject.generation, runtimeGenerationId: subject.id, observerEpoch: token.epoch,
-        sourceSequence: sequence, observedAtMs: event.observedAtMs });
-      if (result.status !== "accepted" && result.status !== "duplicate") {
-        lane.suspended = true; this.report(lane, result.status === "gap" ? "source_gap" : "retention_limit"); return false;
-      }
-      if (result.status === "accepted" || lane.diagnostic !== null) lane.pendingChange = true;
-      cursor = sequence; lane.pending.delete(sequence); lane.bytes -= queued.bytes; lane.diagnostic = null;
+      throw error;
     }
+    recordFrontier();
     if (cursor < position.latestSequence) { lane.suspended = true; this.report(lane, "source_gap"); }
     else if (lane.diagnostic === "storage_unavailable") {
       // A successful exact source/epoch check also revalidates an empty source.

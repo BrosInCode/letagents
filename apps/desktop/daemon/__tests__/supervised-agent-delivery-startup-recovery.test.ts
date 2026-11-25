@@ -54,6 +54,7 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
     };
     let repairs = 0;
     let turns = 0;
+    let replacedHandle: typeof liveHandle | null = null;
     const durableCheckpoints: string[] = [];
     daemon = new SupervisorDaemon(
       paths,
@@ -61,7 +62,7 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       provider(
         async (handle, _request, options) => {
           turns += 1;
-          assert.equal(handle, liveHandle, "repair promotes the same live provider handle");
+          assert.equal(handle, replacedHandle, "repair promotes the exact replacement handle on the same live process");
           assert.equal(handle.pid, connection.pid);
           assert.equal(handle.providerConnection?.processIdentity, connection.processIdentity);
           await options?.checkpointTurnStarted?.("turn-after-repair");
@@ -74,9 +75,12 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
           assert.equal(request.expectedProviderContinuationId, "thread-missing");
           assert.equal(request.workAttemptId, identity.attempt);
           await options.checkpointReplacement("thread-replacement");
-          liveHandle.providerContinuationId = "thread-replacement";
+          // Match ProviderActionPortRouter: a replaced conversation returns a
+          // new handle object on the same live process so delivery refresh
+          // replaces any lane still bound to the retired continuation.
+          replacedHandle = { ...liveHandle, providerContinuationId: "thread-replacement" };
           return {
-            handle: liveHandle,
+            handle: replacedHandle,
             outcome: "replaced",
             previousProviderContinuationId: "thread-missing",
             replacementProviderContinuationId: "thread-replacement",
@@ -99,6 +103,16 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       store: ManifestStore;
       manifestGeneration: number;
       supervisedInbox: SupervisedAgentInboxStore;
+      providerStreams: {
+        install(
+          entryId: string,
+          handle: typeof liveHandle,
+          executionGenerationId: string,
+          mayStartDelivery: () => boolean,
+        ): Promise<void>;
+        drainCallbacks: () => Promise<void>;
+        isDeliveryAdmitted: (entryId: string) => boolean;
+      };
       workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
       durability: {
         getAttempt(id: string): Promise<{ work_attempt_id: string; checkpoints: Array<{ provider_continuation_id: string | null }> }>;
@@ -160,16 +174,17 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       1,
     );
     const snapshot = await internals.store.load();
-    const birth = await internals.store.checkpointProviderBirth(snapshot.generation, {
+    await internals.store.checkpointProviderBirth(snapshot.versions.stone!, {
       entry: manifestEntry,
       executionGenerationId: identity.execution,
       providerConnection: connection,
       appliedRevision: 1,
-      requestedAuthorityMode: "typed_shadow",
+      requestedAuthorityMode: "typed",
       observedAtMs: Date.now(),
     });
-    internals.manifestGeneration = birth.generation;
-    internals.liveHandles.set("stone", liveHandle);
+    await internals.providerStreams.install("stone", liveHandle, identity.execution, () => false);
+    await waitForAsync(async () => internals.providerStreams.isDeliveryAdmitted("stone"));
+    await internals.providerStreams.drainCallbacks();
     await internals.workerBindings.bind({
       entry_id: "stone", room_id: "room", work_attempt_id: identity.attempt,
       execution_generation_id: identity.execution, agent_session_id: identity.session,

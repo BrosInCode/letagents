@@ -1,4 +1,9 @@
 import { createDaemonMaintenance, readDaemonMaintenance, daemonMaintenancePath } from "../../../../shared/daemon-maintenance.mjs";
+import {
+  DAEMON_IMPLEMENTATION_VERSION,
+  DAEMON_PROTOCOL_VERSION,
+  DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT,
+} from "#daemon-contract/index.js";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { createCipheriv, createDecipheriv, createHash, createPrivateKey, randomBytes, sign as nativeSign } from "node:crypto";
@@ -31,12 +36,13 @@ import {
   supervisorCompatibilityFingerprint,
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
+import { SupervisorDaemonRequestTimeoutError } from "../main/supervisor-daemon/errors.js";
 import {
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
   revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
 } from "../main/supervisor-grant.js";
-import { apiUrl as configuredApiUrl } from "../main/paths.js";
+import { apiUrl as configuredApiUrl } from "#provider-runtime/paths.js";
 import { createStateRecoveryKey, prepareSupervisorState } from "../main/supervisor-state-recovery.js";
 import { loadHostApprovalSigner } from "../main/host-approval-auth.js";
 import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/host-approvals.js";
@@ -678,7 +684,7 @@ test("current-schema child privately enrolls host approval verifier before readi
         });
         assert.equal(process.connected, false);
       `;
-      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
         stdio: ["ignore", "pipe", "pipe", "ipc"],
       });
       let output = ""; child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { output += data; });
@@ -1049,7 +1055,7 @@ test("real child requests its recovery key over private IPC and disconnects afte
     await reportStateRecoveryReady();
     assert.equal(process.connected, false);
   `;
-  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+  const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
   let output = "";
@@ -1061,33 +1067,18 @@ test("real child requests its recovery key over private IPC and disconnects afte
   assert.equal(output.includes("test-sealed-key"), false);
 });
 
-test("real supervisor upgrades v17 through encrypted private bootstrap before socket admission", async () => {
+test("real supervisor moves aside a legacy database intact and boots cleanly on schema v1 before socket admission", async () => {
   const env = await fixture();
   const statePath = join(env.root, "daemon-state.sqlite");
   // Source-run contract test across the separately compiled Electron/daemon roots.
   const schemaModule = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
-  const backupModule = await import(new URL("../../daemon/state-recovery-backup.ts", import.meta.url).href);
   const database = new DatabaseSync(statePath);
-  new schemaModule.DaemonStateSchema().createSchema(database);
-  database.exec("DROP TABLE custodial_polling_offers; DROP TABLE custodial_polling_activations; ALTER TABLE runtime_deployments DROP COLUMN custodial_launch_agent_session_id");
-  database.exec("ALTER TABLE agent_configurations DROP COLUMN polling_contract");
-  database.exec("PRAGMA foreign_keys=OFF");
-  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*'").all()) {
-    database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
-  }
-  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
-  // Newer Node versions protect sqlite_master by default. Only this disposable
-  // historical-schema fixture intentionally rewrites it; production keeps protection.
-  database.enableDefensive?.(false);
-  database.exec("PRAGMA writable_schema=ON");
-  database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
-  database.prepare("UPDATE sqlite_master SET sql=replace(replace(sql, ?, ''), ?, '') WHERE name='supervised_agent_terminal_results'").run(
-    ",'failed','interrupted'",
-    ",CHECK(outcome NOT IN ('failed','interrupted') OR (normalized_text IS NULL AND evidence_source <> 'none'))",
-  );
-  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
-    UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
-  database.enableDefensive?.(true);
+  database.exec(`
+    PRAGMA application_id = 0;
+    PRAGMA user_version = 52;
+    CREATE TABLE legacy_canary (note TEXT NOT NULL);
+    INSERT INTO legacy_canary VALUES ('preserved-before-clean-v1');
+  `);
   database.close();
   await protectOwnerPrivate(statePath, "file", { force: true });
   const mainModule = new URL("../../daemon/main.ts", import.meta.url).href;
@@ -1104,7 +1095,7 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
   `;
   let child: ChildProcess | undefined;
   try {
-    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], {
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
     let output = "";
@@ -1122,13 +1113,21 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
       assert.fail(`${String(error)}\n${output}`);
     }
     assert.equal(await exited, 0, output);
-    assert.equal(keyRequests, 1);
+    assert.equal(keyRequests, 0, "legacy move-aside preserves the original file directly without an encrypted upgrade snapshot");
     const current = new DatabaseSync(statePath, { readOnly: true });
-    try { assert.equal(current.prepare("PRAGMA user_version").get()!.user_version, schemaModule.DAEMON_STATE_SCHEMA_VERSION); }
-    finally { current.close(); }
-    const restored = await backupModule.decryptStateRecoveryBackup(`${statePath}.recovery.enc`, Buffer.alloc(32, 17));
-    try { assert.equal(restored.prepare("PRAGMA user_version").get()!.user_version, 17); }
-    finally { restored.close(); }
+    try {
+      assert.equal(current.prepare("PRAGMA application_id").get()!.application_id, schemaModule.DAEMON_STATE_APPLICATION_ID);
+      assert.equal(current.prepare("PRAGMA user_version").get()!.user_version, schemaModule.DAEMON_STATE_USER_VERSION);
+      assert.equal(Number(current.prepare("SELECT COUNT(*) AS count FROM agents").get()!.count), 0);
+    } finally { current.close(); }
+    const legacyFiles = (await readdir(env.root)).filter((name) => /^daemon-state\.sqlite\.legacy-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z(?:-\d+)?$/.test(name));
+    assert.equal(legacyFiles.length, 1);
+    const archived = new DatabaseSync(join(env.root, legacyFiles[0]!), { readOnly: true });
+    try {
+      assert.equal(archived.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
+      assert.equal(archived.prepare("PRAGMA user_version").get()!.user_version, 52);
+      assert.equal(archived.prepare("SELECT note FROM legacy_canary").get()!.note, "preserved-before-clean-v1");
+    } finally { archived.close(); }
     assert.equal(output.includes("test-sealed-key"), false);
   } finally {
     if (child?.exitCode === null) child.kill();
@@ -1152,7 +1151,7 @@ function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
       inbox_item_id: "inbox_1", source_message_id: "msg_1", fifo_sequence: 7, state: "blocked", attempt_count: 3,
       canonical_message_id: "msg_reply_1",
       reply_client_message_id: "supervised-room:agent_1:msg_1:reply:v1",
-      provider_turn_id: null, blocked_by_message_id: null, error: "failed", updated_at: "2026-01-01T00:00:00.000Z",
+      provider_turn_id: null, blocked_by_message_id: null, error: "failed", failure_code: null, terminal_reason: null, updated_at: "2026-01-01T00:00:00.000Z",
       timeline: [{ event_sequence: 1, phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
     }],
   };
@@ -1390,163 +1389,8 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
       23,
     );
     try {
-      const olderStatus = await client.connectIfRunning();
-      assert.equal(olderStatus?.generation, 23);
-      assert.equal(olderStatus?.recoveryDiagnostics, null, "missing older-daemon diagnostics cannot pass the zero gate");
-      wire.statusRecoveryDiagnostics.value = { daemon_inbox_wait_evidence_dependency: 2 };
-      assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null,
-        "an older wait-only diagnostic cannot imply lifecycle conformance");
-
-      const cleanProjection = {
-        available: true,
-        providers: Object.fromEntries(["codex", "claude-code", "cursor", "open-model", "antigravity"].map((provider) => [provider, {
-          comparedSegments: 1,
-          matched: 1,
-          missingInTyped: 0,
-          missingInLegacy: 0,
-          pairedButDifferent: 0,
-          conflicts: 0,
-          observationUnavailable: 0,
-        }])),
-      };
-      const eligibility = { codex: true, "claude-code": true, cursor: true, "open-model": true, antigravity: true };
-      const admissionReady = { codex: "ready", "claude-code": "ready", cursor: "ready", "open-model": "ready", antigravity: "ready" };
-      wire.statusRecoveryDiagnostics.value = {
-        daemon_inbox_wait_evidence_dependency: 0,
-        lifecycle_projection: cleanProjection,
-        lifecycle_capture_admission: admissionReady,
-        lifecycle_local_conformance_eligible: eligibility,
-      };
-      assert.deepEqual((await client.connectIfRunning())?.recoveryDiagnostics, {
-        daemonInboxWaitEvidenceDependency: 0,
-        lifecycleProjection: cleanProjection,
-        lifecycleCaptureAdmission: admissionReady,
-        lifecycleLocalConformanceEligible: eligibility,
-      });
-      const unavailableProjection = { ...cleanProjection, available: false };
-      const unavailableEligibility = { codex: false, "claude-code": false, cursor: false, "open-model": false, antigravity: false };
-      const admissionUnavailable = { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable", "open-model": "unavailable", antigravity: "unavailable" };
-      wire.statusRecoveryDiagnostics.value = {
-        daemon_inbox_wait_evidence_dependency: 0,
-        lifecycle_projection: unavailableProjection,
-        lifecycle_capture_admission: admissionUnavailable,
-        lifecycle_local_conformance_eligible: unavailableEligibility,
-      };
-      assert.deepEqual((await client.connectIfRunning())?.recoveryDiagnostics, {
-        daemonInboxWaitEvidenceDependency: 0,
-        lifecycleProjection: unavailableProjection,
-        lifecycleCaptureAdmission: admissionUnavailable,
-        lifecycleLocalConformanceEligible: unavailableEligibility,
-      }, "unavailable evidence remains visible but cannot imply eligibility");
-      for (const contradictory of [
-        {
-          daemon_inbox_wait_evidence_dependency: 0,
-          lifecycle_projection: unavailableProjection,
-          lifecycle_capture_admission: admissionReady,
-          lifecycle_local_conformance_eligible: eligibility,
-        },
-        {
-          daemon_inbox_wait_evidence_dependency: 1,
-          lifecycle_projection: cleanProjection,
-          lifecycle_capture_admission: admissionReady,
-          lifecycle_local_conformance_eligible: eligibility,
-        },
-        {
-          daemon_inbox_wait_evidence_dependency: 0,
-          lifecycle_projection: {
-            ...cleanProjection,
-            providers: {
-              ...cleanProjection.providers,
-              codex: { ...cleanProjection.providers.codex, missingInTyped: 1 },
-            },
-          },
-          lifecycle_capture_admission: admissionReady,
-          lifecycle_local_conformance_eligible: eligibility,
-        },
-        {
-          daemon_inbox_wait_evidence_dependency: 0,
-          lifecycle_projection: {
-            ...cleanProjection,
-            providers: {
-              ...cleanProjection.providers,
-              "open-model": { ...cleanProjection.providers["open-model"], comparedSegments: 0 },
-            },
-          },
-          lifecycle_capture_admission: admissionReady,
-          lifecycle_local_conformance_eligible: eligibility,
-        },
-        {
-          daemon_inbox_wait_evidence_dependency: 0,
-          lifecycle_projection: cleanProjection,
-          lifecycle_capture_admission: { ...admissionReady, codex: "pending" },
-          lifecycle_local_conformance_eligible: eligibility,
-        },
-      ]) {
-        wire.statusRecoveryDiagnostics.value = contradictory;
-        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null,
-          "a positive eligibility claim must be supported by the projected evidence");
-      }
-      wire.statusRecoveryDiagnostics.value = {
-        daemon_inbox_wait_evidence_dependency: 0,
-        lifecycle_projection: cleanProjection,
-        lifecycle_capture_admission: { ...admissionReady, codex: "pending" },
-        lifecycle_local_conformance_eligible: { ...eligibility, codex: false },
-      };
-      assert.equal((await client.connectIfRunning())?.recoveryDiagnostics?.lifecycleLocalConformanceEligible.codex, false,
-        "a stricter false eligibility remains forward-compatible with additional daemon-side blockers");
-      for (const malformed of [
-        { daemon_inbox_wait_evidence_dependency: -1 },
-        { daemon_inbox_wait_evidence_dependency: 1.5 },
-        { daemon_inbox_wait_evidence_dependency: "0" },
-      ]) {
-        wire.statusRecoveryDiagnostics.value = malformed;
-        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
-      }
-      for (const key of [
-        "comparedSegments", "matched", "missingInTyped", "missingInLegacy",
-        "pairedButDifferent", "conflicts", "observationUnavailable",
-      ]) {
-        const malformedProjection = structuredClone(cleanProjection);
-        (malformedProjection.providers.codex as Record<string, unknown>)[key] = -1;
-        wire.statusRecoveryDiagnostics.value = {
-          daemon_inbox_wait_evidence_dependency: 0,
-          lifecycle_projection: malformedProjection,
-          lifecycle_capture_admission: admissionReady,
-          lifecycle_local_conformance_eligible: eligibility,
-        };
-        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null, `${key} fails closed`);
-      }
-      for (const malformedEligibility of [
-        undefined,
-        { codex: true, "claude-code": true },
-        { codex: true, "claude-code": true, cursor: true },
-        { codex: true, "claude-code": true, cursor: true, "open-model": "true" },
-        // A daemon that predates Antigravity reports four providers; that is not the whole set.
-        { codex: true, "claude-code": true, cursor: true, "open-model": true },
-      ]) {
-        wire.statusRecoveryDiagnostics.value = {
-          daemon_inbox_wait_evidence_dependency: 0,
-          lifecycle_projection: cleanProjection,
-          lifecycle_capture_admission: admissionReady,
-          lifecycle_local_conformance_eligible: malformedEligibility,
-        };
-        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
-      }
-      for (const malformedAdmission of [
-        undefined,
-        { codex: "ready", "claude-code": "ready" },
-        { codex: "ready", "claude-code": "ready", cursor: "ready" },
-        { codex: "ready", "claude-code": "ready", cursor: "ready", "open-model": "unknown" },
-        { codex: "ready", "claude-code": "ready", cursor: "ready", "open-model": "ready" },
-      ]) {
-        wire.statusRecoveryDiagnostics.value = {
-          daemon_inbox_wait_evidence_dependency: 0,
-          lifecycle_projection: cleanProjection,
-          lifecycle_capture_admission: malformedAdmission,
-          lifecycle_local_conformance_eligible: eligibility,
-        };
-        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
-      }
+      const status = await client.connectIfRunning();
+      assert.equal(status?.generation, 23);
       assert.equal(spawnCount, 0);
     } finally {
       await closeServer(wire.server, env.socketPath);
@@ -1692,6 +1536,80 @@ async function startWireDaemon(
   };
   let handoffPrepared = false;
   const handoff = { prepare: null as null | (() => Promise<void>) };
+  const rpcEffects: Array<{
+    effect_id: string;
+    agent_id: string;
+    kind: string;
+    daemon_generation: number;
+    state: "prepared" | "executing" | "completed" | "failed" | "uncertain";
+    result?: unknown;
+    error?: string | null;
+    updated_at: string;
+  }> = [];
+  let rpcEffectCounter = 0;
+  let watchSequence = 7;
+  const watchWaiters = new Set<() => void>();
+  const wakeWatchWaiters = () => {
+    for (const wake of watchWaiters) wake();
+    watchWaiters.clear();
+  };
+  const stallAsyncAck = new Set<string>();
+  const asyncEffectOverride: { value: null | { state: "failed" | "uncertain"; error: string } } = { value: null };
+  const scheduleAsyncRpcEffect = (
+    kind: string,
+    agentId: string,
+    delayMs: number,
+    computeOutcome: () => unknown,
+  ) => {
+    const effectId = `rpc:${kind}:${++rpcEffectCounter}`;
+    const settleView = () => {
+      const override = asyncEffectOverride.value;
+      if (override) {
+        return {
+          effect_id: effectId,
+          agent_id: agentId,
+          kind,
+          daemon_generation: generation,
+          state: override.state,
+          error: override.error,
+          updated_at: "2026-01-01T00:00:01.000Z",
+        };
+      }
+      return {
+        effect_id: effectId,
+        agent_id: agentId,
+        kind,
+        daemon_generation: generation,
+        state: "completed" as const,
+        result: computeOutcome(),
+        updated_at: "2026-01-01T00:00:01.000Z",
+      };
+    };
+    if (delayMs > 0) {
+      const pending = {
+        effect_id: effectId,
+        agent_id: agentId,
+        kind,
+        daemon_generation: generation,
+        state: "executing" as const,
+        updated_at: "2026-01-01T00:00:00.000Z",
+      };
+      rpcEffects.push(pending);
+      watchSequence += 1;
+      wakeWatchWaiters();
+      setTimeout(() => {
+        const index = rpcEffects.findIndex((item) => item.effect_id === effectId);
+        if (index >= 0) rpcEffects[index] = settleView();
+        watchSequence += 1;
+        wakeWatchWaiters();
+      }, delayMs).unref?.();
+    } else {
+      rpcEffects.push(settleView());
+      watchSequence += 1;
+      wakeWatchWaiters();
+    }
+    return { effect_id: effectId, daemon_generation: generation };
+  };
   const server = createTestDaemonServer(socketPath, (socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -1701,6 +1619,7 @@ async function startWireDaemon(
       const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n"))) as { id: string; method: string; params?: Record<string, any> };
       requests.push({ method: request.method, params: request.params });
       if (unresponsiveAfterPrepare && handoffPrepared && (request.method === "daemon.negotiate" || request.method === "daemon.status")) return;
+      if (stallAsyncAck.has(request.method)) return;
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
@@ -1712,7 +1631,7 @@ async function startWireDaemon(
           }
           responseDelayMs = negotiation.delayMs;
         }
-        result = { maintenance_hold_id: maintenance.id, healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
+        result = { maintenance_hold_id: maintenance.id, healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true, async_rpc_effects_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
           ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
         if (handoff.prepare) {
@@ -1733,9 +1652,38 @@ async function startWireDaemon(
         result = entries.find((candidate) => candidate.id === request.params?.entry_id) ?? null;
         responseDelayMs = manifestListDelayMs;
       } else if (request.method === "manifest.watch_state") {
-        result = request.params?.changed_only === true && Number(request.params.after_sequence) > 0 && stateChanges.value
-          ? { daemon_generation: generation, sequence: 8, complete: false, ...stateChanges.value }
-          : { daemon_generation: generation, sequence: 7, entries };
+        const replyWatch = () => {
+          if (socket.destroyed) return;
+          const payload = request.params?.changed_only === true && Number(request.params.after_sequence) > 0 && stateChanges.value
+            ? { daemon_generation: generation, sequence: 8, complete: false, ...stateChanges.value, ...(rpcEffects.length > 0 ? { rpc_effects: rpcEffects.map((item) => ({ ...item })) } : {}) }
+            : request.params?.changed_only === true && Number(request.params.after_sequence) > 0 && rpcEffects.length > 0
+              ? { daemon_generation: generation, sequence: watchSequence, complete: false, entries: [], removed_entry_ids: [], entry_order: entries.map((item) => item.id), rpc_effects: rpcEffects.map((item) => ({ ...item })) }
+              : { daemon_generation: generation, sequence: watchSequence, entries, ...(rpcEffects.length > 0 ? { rpc_effects: rpcEffects.map((item) => ({ ...item })) } : {}) };
+          socket.end(`${JSON.stringify({ version, id: request.id, ok: true, result: payload })}\n`);
+        };
+        const afterGen = Number(request.params?.after_daemon_generation ?? 0);
+        const afterSeq = Number(request.params?.after_sequence ?? 0);
+        const waitMs = Number(request.params?.wait_ms ?? 0);
+        if (afterGen === generation && afterSeq >= watchSequence && waitMs > 0 && !stateChanges.value) {
+          let finished = false;
+          const finish = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            watchWaiters.delete(finish);
+            replyWatch();
+          };
+          const timer = setTimeout(finish, Math.min(waitMs, 5_000));
+          timer.unref?.();
+          watchWaiters.add(finish);
+          socket.once("close", () => {
+            clearTimeout(timer);
+            watchWaiters.delete(finish);
+          });
+          return;
+        }
+        replyWatch();
+        return;
       } else if (request.method === "manifest.put") {
         const next = { ...request.params!.entry, workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null }, activity: [] };
         const existing = entries.find((candidate) => candidate.id === next.id);
@@ -1751,11 +1699,13 @@ async function startWireDaemon(
         if (applied) entry.desired_state = request.params!.desired_state;
         result = { applied, entry };
       } else if (request.method === "supervisor.recover_agent_runtime") {
-        const entry = entries.find((candidate) => candidate.id === request.params!.entry_id)!;
-        entry.observed_state = "starting";
-        entry.condition = "none";
-        entry.provider_ref = null;
-        result = { outcome: "recovering", entry };
+        result = scheduleAsyncRpcEffect("rpc_recover_agent_runtime", String(request.params!.entry_id), 0, () => {
+          const entry = entries.find((candidate) => candidate.id === request.params!.entry_id)!;
+          entry.observed_state = "starting";
+          entry.condition = "none";
+          entry.provider_ref = null;
+          return { outcome: "recovering", entry };
+        });
       } else if (request.method === "manifest.control_turn") {
         responseDelayMs = controlTurnDelayMs;
         result = {
@@ -1777,15 +1727,23 @@ async function startWireDaemon(
       } else if (request.method === "supervisor.update_agent_configuration") {
         result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1, ...configurationExtras.value } };
       } else if (request.method === "supervisor.apply_agent_configuration") {
-        responseDelayMs = configurationApplyResponseDelayMs;
-        result = { outcome: request.params!.entry_id === "agent_invalid" ? "invented" : "restarting" };
+        result = scheduleAsyncRpcEffect(
+          "rpc_apply_agent_configuration",
+          String(request.params!.entry_id),
+          configurationApplyResponseDelayMs,
+          () => ({ outcome: request.params!.entry_id === "agent_invalid" ? "invented" : "restarting" }),
+        );
       } else if (request.method === "supervisor.retire_agent") {
-        responseDelayMs = retireResponseDelayMs;
-        result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
-          ? { outcome: "retired" }
-          : request.params!.entry_id === "agent_grant_only"
-            ? { outcome: "revocation_required", revocation_kind: "grant_only" }
-            : { outcome: "revocation_required", revocation_kind: "worker_session", agent_session_id: "session_exact" };
+        result = scheduleAsyncRpcEffect(
+          "rpc_retire_agent",
+          String(request.params!.entry_id),
+          retireResponseDelayMs,
+          () => (request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
+            ? { outcome: "retired" }
+            : request.params!.entry_id === "agent_grant_only"
+              ? { outcome: "revocation_required", revocation_kind: "grant_only" }
+              : { outcome: "revocation_required", revocation_kind: "worker_session", agent_session_id: "session_exact" }),
+        );
       } else if (request.method === "supervisor.purge_agent") {
         result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
           ? { outcome: "purged", purged_work_attempt_id: "attempt-cleanup" }
@@ -1794,6 +1752,11 @@ async function startWireDaemon(
             : { outcome: "revocation_required", operation_id: `purge:${request.params!.entry_id}`, revocation_kind: "worker_session", agent_session_id: "session_exact" };
       } else if (request.method === "supervisor.get_current_room_move" && request.params!.entry_id === "agent_none") {
         result = null;
+      } else if (request.method === "supervisor.get_rpc_effect") {
+        const match = rpcEffects.find(
+          (item) => item.effect_id === request.params?.effect_id && item.daemon_generation === request.params?.daemon_generation,
+        );
+        result = match ? { ...match } : null;
       } else if (["supervisor.prepare_room_move", "supervisor.commit_room_move", "supervisor.get_room_move", "supervisor.get_current_room_move", "supervisor.acknowledge_room_move_source_revocation", "supervisor.rollback_room_move"].includes(request.method)) {
         result = { operation_id: request.params!.operation_id ?? `inspector-room-move:${request.params!.entry_id}:${request.params!.request_id}`, request_id: request.params!.request_id ? `inspector:${request.params!.request_id}` : "inspector:request_1", agent_id: request.params!.entry_id, source_room_id: "room_1", destination_room_id: "room_2", daemon_generation: request.params!.daemon_generation, work_attempt_id: "attempt_1", execution_generation_id: "execution_1", agent_session_id: "session_1", phase: request.method === "supervisor.prepare_room_move" ? "prepared" : "bootstrapping_destination_tail", remote_room_id: request.method === "supervisor.prepare_room_move" ? null : "room_2", destination_cursor: null, source_credentials_revoked: request.method !== "supervisor.prepare_room_move", error: null, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:01.000Z" };
       } else if (request.method === "attempt.read") {
@@ -1802,13 +1765,23 @@ async function startWireDaemon(
       } else if (request.method === "supervisor.retry_room_delivery") {
         result = { accepted: true };
       } else if (request.method === "supervisor.install_host_grant") {
-        result = { status: "installed" };
+        result = scheduleAsyncRpcEffect(
+          "rpc_install_host_grant",
+          String(request.params!.entry_id),
+          0,
+          () => ({ status: "installed" }),
+        );
       } else if (request.method === "supervisor.sync_execution_delegations") {
         result = { status: "queued" };
       } else if (request.method === "supervisor.install_open_model_credential") {
         result = { status: "installed" };
       } else if (request.method === "supervisor.bootstrap_room_ingress") {
-        result = { status: "bootstrapped" };
+        result = scheduleAsyncRpcEffect(
+          "rpc_bootstrap_room_ingress",
+          String(request.params!.entry_id),
+          0,
+          () => ({ status: "bootstrapped", last_observed_message_id: null }),
+        );
       } else if (request.method === "supervisor.host_approval_challenge") {
         result = hostApprovals.challenge();
       } else if (request.method === "supervisor.host_approval_request") {
@@ -1825,7 +1798,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, configurationExtras, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation, stateChanges };
+  return { server, entries, requests, hostApprovals, configurationExtras, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation, stateChanges, stallAsyncAck, asyncEffectOverride };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -2026,7 +1999,7 @@ test("a state watch snapshot with trimmed receipt timelines keeps every receipt 
 
 test("legacy retained timeline indexes are never promoted to durable event sequences", () => {
   const legacy = wireEntryWithCausalProjection();
-  legacy.delivery_receipts![0]!.timeline = Array.from({ length: 64 }, (_, index) => ({
+  (legacy.delivery_receipts![0] as Record<string, unknown>).timeline = Array.from({ length: 64 }, (_, index) => ({
     phase: index === 63 ? "conversation_restored" : "queued",
     observed_at: "2026-01-01T00:00:00.000Z",
     detail: null,
@@ -2038,7 +2011,7 @@ test("legacy retained timeline indexes are never promoted to durable event seque
   );
 
   const withoutDurableReceiptOrder = wireEntryWithCausalProjection();
-  delete withoutDurableReceiptOrder.delivery_receipts![0]!.fifo_sequence;
+  delete (withoutDurableReceiptOrder.delivery_receipts![0] as Record<string, unknown>).fifo_sequence;
   assert.deepEqual(
     mapEntry(withoutDurableReceiptOrder).deliveryReceipts,
     [],
@@ -2335,13 +2308,13 @@ test("configuration apply waits for the authority-bearing daemon result beyond t
     undefined,
     0,
     0,
-    35,
+    45 + PIPE_ALLOWANCE_MS,
   );
   try {
     const client = new SupervisorDaemonClient({
       stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath,
       daemonScriptPath,
-      requestTimeoutMs: 5,
+      requestTimeoutMs: 15 + PIPE_ALLOWANCE_MS,
       spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
     });
     const startedAt = Date.now();
@@ -2350,7 +2323,7 @@ test("configuration apply waits for the authority-bearing daemon result beyond t
       daemonGeneration: 39,
       expectedConfigurationRevision: 2,
     }), { outcome: "restarting" });
-    assert.ok(Date.now() - startedAt >= 30, "configuration apply waits beyond the injected ordinary request deadline");
+    assert.ok(Date.now() - startedAt >= 35 + PIPE_ALLOWANCE_MS, "configuration apply waits beyond the injected ordinary request deadline");
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 
@@ -2459,18 +2432,90 @@ test("retirement completion is not bound to the three-second control-request dea
     0,
     undefined,
     0,
-    25,
+    45 + PIPE_ALLOWANCE_MS,
   );
   try {
     const client = new SupervisorDaemonClient({
       stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath,
       daemonScriptPath,
-      requestTimeoutMs: 5,
+      requestTimeoutMs: 15 + PIPE_ALLOWANCE_MS,
       spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
     });
     assert.deepEqual(await client.retireAgent("agent_exact", 40), {
       outcome: "revocation_required", revocationKind: "worker_session", agentSessionId: "session_exact",
     });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("async RPC methods bound socket acknowledgement to requestTimeoutMs and surface failed/uncertain watch outcomes", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 40);
+  wire.entries.push({ ...wireEntryWithCausalProjection(), id: "agent_dead", observed_state: "failed", condition: "coordination_blocked", workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "terminal", observed_at: null, detail: null }, activity: [] });
+  try {
+    const client = new SupervisorDaemonClient({
+      stateDir: env.root,
+      socketPath: env.socketPath,
+      peerProofPath: env.peerProofPath,
+      daemonScriptPath,
+      requestTimeoutMs: 35 + PIPE_ALLOWANCE_MS,
+      readyStatusTtlMs: 60_000,
+      spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
+    });
+    // Prime ready status first before stalling async ACK frames.
+    await client.ensureRunning();
+
+    // Every converted async RPC uses the short default socket timeout (no 30s/45s/60s/unlimited blocking wait).
+    for (const method of [
+      "supervisor.apply_agent_configuration",
+      "supervisor.recover_agent_runtime",
+      "supervisor.bootstrap_room_ingress",
+      "supervisor.install_host_grant",
+      "supervisor.retire_agent",
+    ] as const) {
+      wire.stallAsyncAck.clear();
+      wire.stallAsyncAck.add(method);
+      const startedAt = Date.now();
+      let callPromise: Promise<unknown>;
+      if (method === "supervisor.apply_agent_configuration") {
+        callPromise = client.applyAgentConfiguration({ entryId: "agent_dead", daemonGeneration: 40, expectedConfigurationRevision: 2 });
+      } else if (method === "supervisor.recover_agent_runtime") {
+        callPromise = client.recoverAgentRuntime("agent_dead");
+      } else if (method === "supervisor.bootstrap_room_ingress") {
+        callPromise = client.bootstrapRoomIngress("agent_dead", 40);
+      } else if (method === "supervisor.install_host_grant") {
+        callPromise = client.installHostGrant({
+          entryId: "agent_dead", roomId: "room_1", agentKey: "owner/agent", grantId: "g1", supervisorGrant: "secret",
+          grantGeneration: 1, daemonGeneration: 40, hostId: "h1", installationId: "i1", ownerAccountId: null, scopeKey: null,
+          expiresAt: "2099-01-01T00:00:00.000Z", apiUrl: "https://letagents.example",
+        });
+      } else {
+        callPromise = client.retireAgent("agent_dead", 40);
+      }
+      await assert.rejects(callPromise, (error: unknown) =>
+        error instanceof SupervisorDaemonRequestTimeoutError && error.message.includes(method));
+      assert.ok(Date.now() - startedAt < 1_000 + PIPE_ALLOWANCE_MS, `${method} stalled ACK must time out at requestTimeoutMs`);
+    }
+
+    wire.stallAsyncAck.clear();
+    // Terminal failed and uncertain outcomes delivered over manifest.watch_state reject with exact error text.
+    wire.asyncEffectOverride.value = { state: "failed", error: "provider rejected configuration restart" };
+    await assert.rejects(
+      () => client.applyAgentConfiguration({ entryId: "agent_dead", daemonGeneration: 40, expectedConfigurationRevision: 2 }),
+      /provider rejected configuration restart/,
+    );
+    wire.asyncEffectOverride.value = { state: "uncertain", error: "Daemon stopped or handed off while this operation was in flight." };
+    await assert.rejects(
+      () => client.retireAgent("agent_dead", 40),
+      /Daemon stopped or handed off/,
+    );
+    wire.asyncEffectOverride.value = null;
   } finally {
     await closeServer(wire.server, env.socketPath);
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -2633,7 +2678,7 @@ test("production create durably proves no mint, grant-only purge survives restar
         "complete",
       );
       assert.equal(
-        Number((tombstoneDatabase.prepare("SELECT COUNT(*) AS count FROM agent_identities WHERE agent_id=?")
+        Number((tombstoneDatabase.prepare("SELECT COUNT(*) AS count FROM agents WHERE agent_id=?")
           .get(created.id) as { count: number }).count),
         0,
       );
@@ -3075,8 +3120,10 @@ test("a supervised launch is saved running unless the caller asks for a paused r
 
 test("desktop and daemon implementation identities stay in lockstep", async () => {
   const daemonTypes = await readFile(daemonTypesPath, "utf8");
-  const daemonIdentity = daemonTypes.match(/DAEMON_IMPLEMENTATION_VERSION\s*=\s*"([^"]+)"/)?.[1];
-  assert.equal(daemonIdentity, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+  assert.ok(daemonTypes.includes('from "#daemon-contract/index.js"'));
+  assert.match(daemonTypes, /\bDAEMON_IMPLEMENTATION_VERSION\b/);
+  assert.doesNotMatch(daemonTypes, /DAEMON_IMPLEMENTATION_VERSION\s*=\s*"/);
+  assert.equal(SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION, DAEMON_IMPLEMENTATION_VERSION);
 });
 
 test("a room-scoped list asks the daemon to scope and still filters what it gets back", async () => {
@@ -3183,8 +3230,9 @@ test("desktop and daemon agree on the state channel's activity summary limit", a
     join(dirname(fileURLToPath(import.meta.url)), "../../daemon/state-watch-projection.ts"),
     "utf8",
   );
-  const daemonLimit = projection.match(/STATE_WATCH_ACTIVITY_SUMMARY_LIMIT\s*=\s*(\d+)/)?.[1];
-  assert.equal(Number(daemonLimit), SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT);
+  assert.ok(projection.includes('from "#daemon-contract/index.js"'));
+  assert.match(projection, /export const STATE_WATCH_ACTIVITY_SUMMARY_LIMIT = DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT;/);
+  assert.equal(SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT, DAEMON_STATE_ACTIVITY_SUMMARY_LIMIT);
 });
 
 test("the state subscription bounds activity even if a daemon answers with history", async () => {
@@ -3741,7 +3789,11 @@ test("desktop replaces the pre-avatar implementation and accepts only the new ex
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.281",
+    // The daemon of the build before the adapters moved. It loads each adapter
+    // from dist-electron/main/agents at the first use of a provider, and those
+    // files are gone after an update at the same install path. So this app
+    // must replace it, and that needs a different implementation version.
+    "2.0.284-modern.1",
   );
   oldServer = old.server;
   try {
@@ -3761,8 +3813,9 @@ test("desktop replaces the pre-avatar implementation and accepts only the new ex
     const status = await client.ensureRunning();
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
+    assert.equal(status.protocolVersion, DAEMON_PROTOCOL_VERSION);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.288");
+    assert.equal(status.implementationVersion, DAEMON_IMPLEMENTATION_VERSION);
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

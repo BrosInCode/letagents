@@ -26,6 +26,8 @@ export type ExecuteDaemonToolInput = {
   toolName: string;
   input: unknown;
   requestId: string;
+  effectId?: string;
+  signal?: AbortSignal;
   roomId: string;
   apiUrl: string;
   bearer: string;
@@ -58,7 +60,7 @@ type SupervisedToolRuntimeLoadOptions = {
 function defaultVerifierPath(): string {
   return resolve(
     dirname(fileURLToPath(import.meta.url)),
-    "../dist-electron/main/agents/letagents-mcp-runtime.js",
+    "../dist-provider-runtime/agents/letagents-mcp-runtime.js",
   );
 }
 

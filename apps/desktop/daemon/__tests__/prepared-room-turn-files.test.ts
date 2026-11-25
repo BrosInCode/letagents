@@ -7,14 +7,14 @@ import { inspectorPreparedRoomContext, readPreparedRoomTurnFiles, recordPrepared
 // Only the columns the record reads: the inbox rows and their prepared context.
 function database(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
-  db.exec(`CREATE TABLE supervised_agent_inbox (inbox_item_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL);
-    CREATE TABLE supervised_agent_prepared_context (inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id),
+  db.exec(`CREATE TABLE inbox_items (inbox_item_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL);
+    CREATE TABLE supervised_agent_prepared_context (inbox_item_id TEXT PRIMARY KEY REFERENCES inbox_items(inbox_item_id),
       snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json))) STRICT;`);
   return db;
 }
 
 function turn(db: DatabaseSync, id: string, preparedAt: string | null, files?: { continuation: string; outcome: string; attachment?: string }) {
-  db.prepare("INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id) VALUES (?,?,?)").run(id, "agent", "room");
+  db.prepare("INSERT INTO inbox_items(inbox_item_id,agent_id,room_id) VALUES (?,?,?)").run(id, "agent", "room");
   if (preparedAt === null) return; // Still waiting: never prepared for dispatch.
   db.prepare("INSERT INTO supervised_agent_prepared_context(inbox_item_id,snapshot_json) VALUES (?,?)")
     .run(id, JSON.stringify({ preparedAt, totalMessages: 0, omittedMessages: 0, messages: [] }));

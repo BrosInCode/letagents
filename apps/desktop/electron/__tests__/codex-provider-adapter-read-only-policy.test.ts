@@ -1,10 +1,10 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodexProviderAdapter, CODEX_READ_ONLY_CONFIG_OVERRIDES, CODEX_READ_ONLY_ROOM_TOOLS } from "../main/agents/codex-provider-adapter.js";
+import { CodexProviderAdapter, CODEX_READ_ONLY_CONFIG_OVERRIDES, CODEX_READ_ONLY_ROOM_TOOLS } from "#provider-runtime/agents/codex-provider-adapter.js";
 import { API_AGENT_READ_TOOLS } from "../../../../shared/api-agent-tools.mjs";
-import { codexSandboxedProfileId } from "../main/agents/codex-agent-home.js";
-import type { ProviderHandle, ProviderSpawnRequest } from "../main/agents/provider-adapter.js";
+import { codexSandboxedProfileId } from "#provider-runtime/agents/codex-agent-home.js";
+import type { ProviderHandle, ProviderSpawnRequest } from "#provider-runtime/agents/provider-adapter.js";
 import {
   assertProviderHandle,
   FakeRpc,
@@ -27,7 +27,7 @@ import {
   assertStoppedNotAtLevel,
   READ_ONLY_ROOM_TOOL_DECISIONS,
 } from "./codex-provider-adapter.fixture.js";
-import { CODEX_APPROVAL_LEVEL_CONFIG_OVERRIDES } from "../main/agents/codex/thread-access.js";
+import { CODEX_APPROVAL_LEVEL_CONFIG_OVERRIDES } from "#provider-runtime/agents/codex/thread-access.js";
 
 test("Codex ask-before-write keeps its permission profile and its approval policy at turn dispatch after reattachment, and never names a sandbox", async () => {
   const harness = createHarness();
@@ -336,14 +336,6 @@ test("Codex Read-only starts with web search off, at launch and for every conver
   }, { checkpointReplacement: async () => {} });
   assert.deepEqual(sent(found.clients[1]!, "thread/start")[0]!.config, { web_search: "disabled" });
 
-  // The polling kind of launch is not started at Read-only at all: see the test of the room tools.
-  const polling = createHarness();
-  await assert.rejects(new CodexProviderAdapter({ dependencies: polling.dependencies }).spawn(readOnly({
-    pollingContract: "custodial_polling_v1", deliveryMode: "mcp_polling", supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
-    supervisorExecutionGenerationId: "execution_exact", supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" } })),
-    /^Error: Read-only access is for a Codex agent that LetAgents delivers room messages to\./);
-  assert.deepEqual(polling.launchOptions, [], "no Codex was started");
-
   // No other access level changes: no override, and a stored config reaches the conversation as it always did.
   for (const [permissionProfileId, launchPolicy] of [
     ["full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
@@ -632,19 +624,6 @@ test("a Read-only Codex agent's room tools are an exact named list, and every ot
   assert.deepEqual(unnamed.modes, unchanged);
   assert.equal(unnamed.defaultMode, "writes");
   assert.deepEqual(unnamed.otherOverrides, []);
-
-  // The background service holds that list only where it runs the room tools itself. An agent that
-  // collects its own messages calls the room server directly, and only Codex would hold the list there.
-  // So that kind of launch is not started at Read-only, and its owner is told what to do.
-  const polling = { pollingContract: "custodial_polling_v1" as const, deliveryMode: "mcp_polling" as const };
-  const NOT_FOR_POLLING = "Read-only access is for a Codex agent that LetAgents delivers room messages to. This agent collects its own room messages, "
-    + "so LetAgents cannot hold it to the room tools that Read-only allows, and did not start it. Choose another access level for this agent.";
-  await assert.rejects(launchOf({ ...polling, ...readOnlyLevel }), (error: Error) => error.message === NOT_FOR_POLLING);
-  // A launch that does not say how its messages arrive is taken as that kind too.
-  await assert.rejects(new CodexProviderAdapter({ dependencies: createHarness().dependencies }).spawn(spawnRequest({ ...readOnlyLevel, configurationRevision: 1 })),
-    (error: Error) => error.message === NOT_FOR_POLLING);
-  const pollingFullAccess = await launchOf({ ...polling, permissionProfileId: "full_access", launchPolicy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } });
-  assert.equal(pollingFullAccess.tools.includes("wait_for_messages"), true, "every other level starts that kind of launch as before");
 
   // The daemon compares one launch contract for a room server: a Read-only agent records the one it expects,
   // so it is not replaced again and again as out of date.

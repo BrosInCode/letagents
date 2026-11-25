@@ -1,4 +1,5 @@
 /** The supervisor daemon's parameters, plain state and the parts every layer reads. */
+import type { DaemonLegacyStateReset } from "#daemon-contract/index.js";
 import type { DaemonMaintenanceService } from "../maintenance-service.js";
 import type { AuditLog } from "../audit-log.js";
 import type { AgentStreamRegistry } from "../agent-stream-registry.js";
@@ -10,12 +11,11 @@ import type { DaemonControlSocket } from "../control-socket.js";
 import type { createHostApprovalBridge } from "../host-approval-broker.js";
 import type { DaemonAuthority } from "../daemon-authority.js";
 import type { DaemonReadModel } from "../daemon-read-model.js";
-import type { DeliveryCutoverCoordinator } from "../delivery-cutover-coordinator.js";
-import type { DeliveryCutoverExecutionCoordinator } from "../delivery-cutover-execution-coordinator.js";
 import type { DaemonStateWatch } from "../daemon-state-watch.js";
+import type { DaemonStateDatabase } from "../daemon-state-database.js";
+import type { AsyncRpcEffectCoordinator, EffectExecutor } from "../effect-journal/index.js";
 import type { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import type { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
-import type { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
 import type { DesiredStateCoordinator } from "../desired-state-coordinator.js";
 import type { WorkDurabilityStore } from "../durability-store.js";
 import type { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
@@ -70,8 +70,9 @@ export abstract class SupervisorDaemonState {
   protected maintenance: DaemonMaintenanceService | null = null;
   protected replyAttachmentSweep: NodeJS.Timeout | null = null;
   protected readonly liveHandles = new Map<string, ProviderActionHandle>();
+  protected stateDatabase: DaemonStateDatabase | null = null;
+  protected effectExecutor: EffectExecutor | null = null;
   protected executionCapture: ExecutionCaptureCoordinator | null = null;
-  protected typedLifecycleEffects: TypedLifecycleEffectCoordinator | null = null;
   protected roomWorkPublisher: RoomWorkPublisher | null = null;
   protected readonly handoffCleanupFailures: unknown[] = [];
   /**
@@ -83,11 +84,13 @@ export abstract class SupervisorDaemonState {
   /** Initial-tail reads are authority-bearing admission operations. */
   protected readonly bootstrapOperations = new Set<BootstrapOperation>();
   protected readonly startedAt = new Date().toISOString();
+  protected legacyStateResetNotice: DaemonLegacyStateReset | null = null;
   protected handoffScheduled = false;
   protected handoffDraining = false;
   protected boardOwnershipActive = false;
 
   protected abstract readonly stateDatabasePath: string;
+  protected abstract readonly workspaceRoot: string;
   protected abstract readonly singleton: DaemonSingleton;
   protected abstract readonly authority: DaemonAuthority;
   protected abstract readonly store: ManifestStore;
@@ -119,11 +122,10 @@ export abstract class SupervisorDaemonState {
   protected abstract readonly runtimeRecovery: RuntimeRecoveryCoordinator;
   protected abstract readonly runtimeConfigurationApply: RuntimeConfigurationApplyCoordinator;
   protected abstract readonly boundedEffects: BoundedEffectCoordinator;
+  protected abstract readonly asyncRpcEffects: AsyncRpcEffectCoordinator;
   protected abstract readonly socket: DaemonControlSocket;
   protected abstract readonly stateWatch: DaemonStateWatch;
   protected abstract readonly entryConcurrency: EntryConcurrencyGate;
-  protected abstract readonly deliveryCutovers: DeliveryCutoverCoordinator;
-  protected abstract readonly deliveryCutoverExecution: DeliveryCutoverExecutionCoordinator;
   protected abstract readonly providerStreams: ProviderStreamCoordinator;
   protected abstract readonly hostApprovals: ReturnType<typeof createHostApprovalBridge>;
   protected abstract readonly providerCheckpoints: ProviderCheckpointCoordinator;
@@ -136,12 +138,10 @@ export abstract class SupervisorDaemonState {
   protected abstract readonly liveRoomShare: LiveRoomSharePublisher;
   protected abstract readonly handoff: ProviderHandoffCoordinator;
 
-  protected get manifestGeneration(): number {
-    return this.authority.generation;
-  }
-
-  protected set manifestGeneration(generation: number) {
-    this.authority.generation = generation;
+  protected closeStateDatabase(): void {
+    const database = this.stateDatabase;
+    this.stateDatabase = null;
+    database?.close();
   }
 
   constructor(

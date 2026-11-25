@@ -177,8 +177,8 @@ export abstract class SupervisedAgentDeliveryInterrupts extends SupervisedAgentD
    *    committed to publishing — the reply stands and the turn was not truly
    *    interrupted (only this case downgrades `interrupted`). No abort: the
    *    publishing turn keeps its own consumer.
-   *  - `"no_active_turn"`: no matching daemon delivery turn (e.g. an mcp_polling
-   *    agent, or an idle daemon_inbox agent). The provider's own native
+   *  - `"no_active_turn"`: no matching daemon delivery turn (e.g. an idle
+   *    daemon_inbox agent). The provider's own native
    *    interrupt stands; there is no daemon reply to arbitrate.
    *
    * Without an explicit inbox reservation, the identity gate mirrors

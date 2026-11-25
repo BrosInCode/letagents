@@ -25,10 +25,10 @@ import {
   defaultLaunchTurn,
   type CursorCliChild,
   type CursorProviderAdapterDependencies,
-} from "../main/agents/cursor-provider-adapter.js";
-import type { ProviderRoomTurnOptions, ProviderRoomTurnResult, ProviderTerminalPayload } from "../main/agents/provider-adapter.js";
-import { prepareCursorSupervisedProfile } from "../main/agents/cursor-managed-profile.js";
-import { removeSupervisedWorkspaceGenerationReceipt } from "../main/agents/supervised-workspace-generation.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
+import type { ProviderRoomTurnOptions, ProviderRoomTurnResult, ProviderTerminalPayload } from "#provider-runtime/agents/provider-adapter.js";
+import { prepareCursorSupervisedProfile } from "#provider-runtime/agents/cursor-managed-profile.js";
+import { removeSupervisedWorkspaceGenerationReceipt } from "#provider-runtime/agents/supervised-workspace-generation.js";
 import {
   argValue,
   initializeGitWorkspace,
@@ -1211,8 +1211,17 @@ test("the production Cursor turn wrapper never leaks Electron's wrapper-only Nod
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-wrapper-electron-env-"));
   const previousElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
   try {
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(join(root, "npm-cache"), { recursive: true });
     let executable = join(root, "fake-cursor-agent");
-    executable = writeFakeProvider(executable, `if (process.argv.includes("--endpoint") || process.argv.includes("--agent-endpoint")) process.exit(8);
+    executable = writeFakeProvider(executable, `const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
 if (process.env.ELECTRON_RUN_AS_NODE !== undefined) process.exit(7);
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-electron-env" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "native env clean", session_id: "sess-electron-env" }) + "\\n");
@@ -1220,9 +1229,17 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
     chmodSync(executable, 0o700);
     process.env.ELECTRON_RUN_AS_NODE = "1";
 
-    const adapter = new CursorProviderAdapter({ cursorBin: executable });
-    const handle = await adapter.spawn(spawnRequest({ cwd: root }));
-    for (let index = 0; index < 100 && handle.observedState() !== "idle"; index += 1) await flush();
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      supervisedProfileFactory: () => ({
+        homeDir, configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: homeDir, NPM_CONFIG_CACHE: join(root, "npm-cache") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    await adapter.runRoomTurn(handle, roomTurnRequest());
     assert.equal(handle.observedState(), "idle");
     assert.equal(handle.providerContinuationId, "sess-electron-env");
   } finally {

@@ -22,6 +22,7 @@ import type { NativeExecutionObservation, NativeExecutionSubscription } from "..
 import type { ExecutionCaptureCoordinator } from "../../execution-capture-coordinator.js";
 import type { ProviderCheckpointCoordinator } from "../../provider-checkpoint-coordinator.js";
 import type { ProviderStreamCoordinator } from "../../provider-stream-coordinator.js";
+import { daemonRawSocketRequest, daemonSocketRequest } from "../../../electron/__tests__/daemon-socket-request.js";
 
 export const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt",
@@ -111,7 +112,8 @@ export function runtimeReadySubscription(
 ): NativeExecutionSubscription {
   const processIdentity = handle.providerConnection?.processIdentity ?? null;
   const pid = handle.providerConnection?.pid ?? handle.pid;
-  const sourceId = `runtime-ready:${handle.workAttemptId}:${processIdentity ?? "unknown"}`;
+  const safeIdentity = (processIdentity ?? "unknown").replace(/[^A-Za-z0-9_.:/-]+/g, "_");
+  const sourceId = `runtime-ready:${handle.workAttemptId}:${pid ?? "none"}:${safeIdentity}`;
   listener({
     sourceId,
     sequence: 1,
@@ -220,25 +222,10 @@ if (WINDOWS_TEST_HELPER && !process.env.LETAGENTS_PROCESS_TREE_HELPER) process.e
  */
 export const REQUEST_ARRIVAL_MS = process.platform === "win32" ? 500 : 10;
 
+export const daemonRawRequest = daemonRawSocketRequest;
+
 export async function daemonRequest(socketPath: string, method: string, params?: unknown, version = DAEMON_PROTOCOL_VERSION): Promise<{ ok: boolean; result?: unknown; error?: string; version: number }> {
-  return new Promise((resolve, reject) => {
-    const client = connectDaemon(socketPath);
-    let received = "";
-    let settled = false;
-    client.setEncoding("utf8");
-    client.once("error", reject);
-    client.once("close", () => {
-      if (!settled) reject(new Error(`Daemon connection closed before '${method}' returned a response.`));
-    });
-    client.on("data", (chunk) => {
-      received += chunk;
-      if (!received.includes("\n")) return;
-      settled = true;
-      client.end();
-      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
-    });
-    client.on("connect", () => client.write(`${JSON.stringify({ version, id: "test", method, params })}\n`));
-  });
+  return daemonSocketRequest(socketPath, method, params, version);
 }
 
 export const TEST_OID = "a".repeat(40);
@@ -328,7 +315,6 @@ export async function observationDaemonFixture(onExecution: NonNullable<Provider
     workerBindings: WorkerBindingStore; providerStreams: ProviderStreamCoordinator;
     providerCheckpoints: ProviderCheckpointCoordinator; executionCapture: ExecutionCaptureCoordinator | null;
     liveHandles: Map<string, ProviderActionHandle>;
-    manifestGeneration: number;
   };
   try {
     await daemon.start();
@@ -356,18 +342,16 @@ export async function observationDaemonFixture(onExecution: NonNullable<Provider
     const inserted = await daemonRequest(paths.socketPath, "manifest.put", { entry: stored });
     assert.equal(inserted.ok, true, inserted.error);
     handle.appliedConfigurationRevision = 1;
-    const persisted = await internals.store.load();
-    const current = persisted.entries.find((candidate) => candidate.id === id);
-    assert.ok(current);
-    const birth = await internals.store.checkpointProviderBirth(persisted.generation, {
-      entry: current,
+    const loaded = await internals.store.getEntryWithVersion(id);
+    assert.ok(loaded);
+    await internals.store.checkpointProviderBirth(loaded.version, {
+      entry: loaded.entry,
       executionGenerationId: execution.execution_generation_id,
       providerConnection: handle.providerConnection!,
       appliedRevision: 1,
-      requestedAuthorityMode: "typed_shadow",
+      requestedAuthorityMode: "typed",
       observedAtMs: Date.now(),
     });
-    internals.manifestGeneration = birth.generation;
     return { ...env, id, paths, daemon, internals, handle, port, generation: execution.execution_generation_id,
       cleanup: async () => { await daemon.stop(); await env.cleanup(); } };
   } catch (error) {

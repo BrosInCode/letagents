@@ -3,7 +3,7 @@ import {
   buildWorkerSnapshots as buildLocalWorkerSnapshots,
   readLetAgentsLocalState,
 } from "../../board-task-actions.js";
-import { apiUrl, getLetAgentsLocalStatePath } from "../paths.js";
+import { apiUrl, getLetAgentsLocalStatePath } from "#provider-runtime/paths.js";
 
 export function buildWorkerSnapshots(): WorkerSnapshot[] {
   return buildLocalWorkerSnapshots(

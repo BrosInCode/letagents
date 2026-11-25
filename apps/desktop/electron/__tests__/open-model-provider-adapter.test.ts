@@ -13,7 +13,7 @@ import {
   OpenModelProviderAdapter,
   type OpenCodePermissionObservation,
   type OpenModelProviderAdapterDependencies,
-} from "../main/agents/open-model-provider-adapter.js";
+} from "#provider-runtime/agents/open-model-provider-adapter.js";
 import {
   PROCESS_ENDED_DURING_TURN,
   ProviderTurnControlError,
@@ -22,21 +22,21 @@ import {
   type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStreamEvent,
-} from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/provider-adapter.js";
 import {
   terminateFreshLaunch,
   type ProviderProcessExit,
-} from "../main/agents/provider-evidence.js";
+} from "#provider-runtime/agents/provider-evidence.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import {
   OpenCodePermissionReplyError,
   OpenCodeServerClient,
   parseOpenCodePermissionEvent,
   type OpenCodePermissionRequest,
-} from "../main/agents/opencode-server-client.js";
-import { clearOpenModelEffortCatalogCacheForTest } from "../main/agents/open-model-efforts.js";
-import { OPEN_MODEL_OPENCODE_PROVIDER_ID, seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
-import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
+} from "#provider-runtime/agents/opencode-server-client.js";
+import { clearOpenModelEffortCatalogCacheForTest } from "#provider-runtime/agents/open-model-efforts.js";
+import { OPEN_MODEL_OPENCODE_PROVIDER_ID, seedOpenCodeConfigHome, shieldOwnerInstructions } from "#provider-runtime/agents/opencode-launch-contract.js";
+import { OPENCODE_RUNTIME_VERSION } from "#provider-runtime/agents/opencode-runtime.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 import { ProviderInstallError } from "../../../../shared/provider-executable.mjs";
@@ -535,7 +535,7 @@ test("Open Model launches a dedicated OpenCode server without putting the provid
         pid: 6101,
         processIdentity: "opencode-birth-6101",
       },
-      lifecycleAuthorityMode: "typed_shadow",
+      lifecycleAuthorityMode: "typed",
     },
   );
 });
@@ -607,7 +607,7 @@ test("Open Model launches Auto asking as before and with nothing outside the pro
   }
 });
 
-test("Open Model freezes lifecycle authority across spawn, attach, and resume", async () => {
+test("Open Model freezes typed lifecycle authority across spawn, attach, and resume", async () => {
   const { adapter, handle, harness, runtimeRoot } = await spawnAdapter({ lifecycleAuthorityMode: "typed" });
   const typedHandle = handle as ProviderHandle & { lifecycleAuthorityMode: string };
   const ref = {
@@ -618,10 +618,7 @@ test("Open Model freezes lifecycle authority across spawn, attach, and resume", 
   };
   assert.equal(typedHandle.lifecycleAuthorityMode, "typed");
   assert.equal(await adapter.attach(ref), handle);
-  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
-  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: undefined }), null);
-  await assert.rejects(adapter.resume(ref, spawnRequest({ lifecycleAuthorityMode: "typed_shadow" })),
-    /does not match the frozen provider birth/);
+  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: undefined }), handle);
 
   const replacement = new OpenModelProviderAdapter({
     binary: "/opt/letagents/opencode",
@@ -630,7 +627,6 @@ test("Open Model freezes lifecycle authority across spawn, attach, and resume", 
     startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
-  assert.equal(await replacement.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
   const attached = await replacement.attach(ref);
   assert.ok(attached && !("state" in attached));
   const attachedObservations: NativeExecutionObservation[] = [];
@@ -641,16 +637,10 @@ test("Open Model freezes lifecycle authority across spawn, attach, and resume", 
     state: "ready",
     sideEffects: "none",
   }]);
-
-  await assert.rejects(adapter.spawn(spawnRequest({
-    workAttemptId: "typed-non-daemon",
-    lifecycleAuthorityMode: "typed",
-    deliveryMode: "mcp_polling",
-  })), /Typed Open Model lifecycle authority requires daemon-inbox delivery/);
   assert.equal(harness.launches.length, 1);
 });
 
-test("a dead Open Model runtime reports terminal evidence even under a mismatched lifecycle authority", async () => {
+test("a dead Open Model runtime reports terminal evidence on attach", async () => {
   const { handle, harness, runtimeRoot } = await spawnAdapter({ lifecycleAuthorityMode: "typed" });
   const ref = {
     workAttemptId: handle.workAttemptId,
@@ -666,9 +656,7 @@ test("a dead Open Model runtime reports terminal evidence even under a mismatche
     turnTimeoutMs: 100,
   });
 
-  // A legacy-frozen birth read back against a typed control file used to
-  // return null here, leaving the generation live with no handle forever.
-  for (const lifecycleAuthorityMode of ["typed", "typed_shadow", "legacy", undefined] as const) {
+  for (const lifecycleAuthorityMode of ["typed", undefined] as const) {
     const attached = await afterDeath.attach({ ...ref, lifecycleAuthorityMode } as typeof ref);
     assert.ok(attached && "state" in attached && attached.state === "terminal", String(lifecycleAuthorityMode));
     assert.equal(attached.terminal.providerContinuationId, ref.providerContinuationId);
@@ -696,7 +684,7 @@ test("attach finishes a cached handle whose process died before its exit observe
     workAttemptId: handle.workAttemptId,
     providerContinuationId: handle.providerContinuationId!,
     providerConnection: handle.providerConnection,
-    lifecycleAuthorityMode: "typed_shadow",
+    lifecycleAuthorityMode: "typed",
   });
 
   assert.ok(attached && "state" in attached && attached.state === "terminal");
@@ -710,7 +698,7 @@ test("attach finishes a cached handle whose process died before its exit observe
   }).then(value => value && "state" in value ? value.state : "handle"), "terminal", "the dead handle is no longer served from cache");
 });
 
-test("resuming a dead runtime under a changed lifecycle authority starts fresh instead of refusing forever", async () => {
+test("resuming a dead runtime reports OpenCodeRuntimeGoneError instead of launching directly", async () => {
   const harness = createHarness();
   let alive = true;
   const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-adapter-"));
@@ -725,16 +713,10 @@ test("resuming a dead runtime under a changed lifecycle authority starts fresh i
     providerConnection: handle.providerConnection,
     lifecycleAuthorityMode: "typed" as const,
   };
-  const afterRestart = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot, dependencies,
-    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 100 });
-
-  // Alive: a changed authority is still refused rather than attached.
-  await assert.rejects(afterRestart.resume(ref, spawnRequest({ lifecycleAuthorityMode: "typed_shadow" })),
-    /does not match the frozen provider birth/);
   alive = false;
   const afterDeath = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot, dependencies,
     startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 100 });
-  await assert.rejects(afterDeath.resume(ref, spawnRequest({ lifecycleAuthorityMode: "typed_shadow" })),
+  await assert.rejects(afterDeath.resume(ref, spawnRequest({ lifecycleAuthorityMode: "typed" })),
     (error: unknown) => error instanceof OpenCodeRuntimeGoneError);
   assert.equal(harness.launches.length, 1, "resume itself never launches; the daemon replaces the runtime");
 });
@@ -759,36 +741,6 @@ test("Open Model reattaches from its exact runtime sidecar when a legacy daemon 
   assert.ok(attached && !("state" in attached));
   assert.deepEqual(attached.providerConnection, handle.providerConnection);
   assert.equal(harness.launches.length, 1, "reattachment must not launch another OpenCode server");
-});
-
-/*
- * A pre-authority sidecar is an existing durable runtime, not a second lifecycle
- * implementation. Its only safe interpretation is the former default mode.
- */
-test("Open Model treats a pre-authority runtime sidecar as typed shadow", async () => {
-  const { handle, harness, runtimeRoot } = await spawnAdapter();
-  const connection = handle.providerConnection;
-  assert.ok(connection?.kind === "opencode_server");
-  const control = JSON.parse(await readFile(connection.serverAuthPath, "utf8")) as Record<string, unknown>;
-  delete control.lifecycleAuthorityMode;
-  await writeFile(connection.serverAuthPath, `${JSON.stringify(control)}\n`, { mode: 0o600 });
-  const replacement = new OpenModelProviderAdapter({
-    binary: "/opt/letagents/opencode",
-    runtimeRoot,
-    dependencies: harness.dependencies,
-  });
-  assert.equal(await replacement.attach({
-    workAttemptId: handle.workAttemptId,
-    providerContinuationId: handle.providerContinuationId!,
-    providerConnection: connection,
-    lifecycleAuthorityMode: "typed",
-  }), null);
-  const attached = await replacement.attach({
-    workAttemptId: handle.workAttemptId,
-    providerContinuationId: handle.providerContinuationId!,
-    providerConnection: connection,
-  });
-  assert.ok(attached && !("state" in attached));
 });
 
 test("Open Model discovers and checkpoints a pre-sidecar-metadata runtime exactly once", async () => {
@@ -885,15 +837,8 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
   ]);
   assert.ok(stream.some((event) => event.method === "reasoning/summaryTextDelta"));
   assert.ok(stream.some((event) => event.method === "item/agentMessage/delta"));
-  const lifecycleFrames = stream.filter((event) => event.lifecycleProjectionOnly);
-  assert.deepEqual(lifecycleFrames.map(({ method, nativeLifecyclePhase }) => ({ method, nativeLifecyclePhase })), [
-    { method: "turn/started", nativeLifecyclePhase: "turn_active" },
-    { method: "turn/completed", nativeLifecyclePhase: "turn_terminal" },
-  ]);
   const lifecycleFacts = observations.filter(({ fact }) => fact.domain === "turn");
-  assert.deepEqual(lifecycleFrames.map((event) => event.nativeEventId),
-    lifecycleFacts.map((event) => event.fact.nativeEventId),
-    "typed and legacy shadow witnesses use the same exact native checkpoints");
+  assert.equal(lifecycleFacts.length, 2, "typed turn active and terminal facts are emitted");
 });
 
 /** A PNG signature and a few more bytes, as a view into a larger buffer the way a download slice would be. */
@@ -912,7 +857,7 @@ function imageTurn(png = pngView()): ProviderRoomTurnRequest {
     attachments: [
       { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "cannot_read_pdf", category: "file" },
       { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: png.bytes.length, status: "image",
-        image: { mimeType: "image/png", data: png.view } },
+        image: { mimeType: "image/png", base64: Buffer.from(png.view).toString("base64") } },
       { index: 3, fileName: "staged.png", mimeType: "image/png", sizeBytes: 10, status: "image",
         image: { mimeType: "image/png", path: "/scratch/turn-1/image-2.png" } },
     ],
@@ -1050,8 +995,90 @@ test("Open Model does not mint lifecycle evidence when native prompt dispatch is
     adapter.runRoomTurn(handle, { inboxItemId: "rejected", sourceMessage: {}, activation: {}, actionId: "rejected" }),
     /injected prompt rejection/,
   );
-  assert.equal(stream.some((event) => event.lifecycleProjectionOnly), false);
   assert.equal(observations.some(({ fact }) => fact.domain === "turn"), false);
+});
+
+test("Open Model checkpoints the turn id before native prompt dispatch and turn-active evidence", async () => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-open-model-checkpoint-order-"));
+  const trace: string[] = [];
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: {
+      ...harness.dependencies,
+      async fetch(input, init) {
+        const url = new URL(input);
+        if (url.pathname.endsWith("/prompt_async") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { messageID?: string };
+          trace.push(`prompt_async:${body.messageID ?? ""}`);
+        }
+        return harness.dependencies.fetch(input, init);
+      },
+    },
+    startTimeoutMs: LAUNCH_BUDGET_MS,
+    turnTimeoutMs: 100,
+  });
+  try {
+    const handle = await adapter.spawn(spawnRequest({
+      workAttemptId: "attempt-checkpoint-order",
+      cwd: runtimeRoot,
+    }));
+    const observations: NativeExecutionObservation[] = [];
+    adapter.onExecution(handle, (event) => {
+      observations.push(event);
+      if (event.fact.domain === "turn" && event.fact.state === "active") {
+        trace.push(`turn_active:${event.fact.providerTurnId}`);
+      }
+    });
+
+    const result = await adapter.runRoomTurn(handle, {
+      inboxItemId: "inbox-order-1",
+      sourceMessage: { text: "check ordering" },
+      activation: { decision: "activate" },
+      actionId: "action-order-1",
+    }, {
+      beforeNativeDispatch: async () => { trace.push("dispatch"); },
+      checkpointTurnStarted: async (turnId) => { trace.push(`checkpoint:${turnId}`); },
+    });
+
+    assert.deepEqual(trace, [
+      "dispatch",
+      `checkpoint:${result.turnId}`,
+      `prompt_async:${result.turnId}`,
+      `turn_active:${result.turnId}`,
+    ]);
+
+    // A rejected prompt_async after checkpointing must still emit zero turn facts and reset to idle.
+    trace.length = 0;
+    observations.length = 0;
+    harness.setPromptFailure(new Error("rejected after checkpoint"));
+    let rejectedTurnId = "";
+    await assert.rejects(
+      adapter.runRoomTurn(handle, {
+        inboxItemId: "inbox-order-2",
+        sourceMessage: { text: "fail dispatch" },
+        activation: { decision: "activate" },
+        actionId: "action-order-2",
+      }, {
+        beforeNativeDispatch: async () => { trace.push("dispatch"); },
+        checkpointTurnStarted: async (turnId) => {
+          rejectedTurnId = turnId;
+          trace.push(`checkpoint:${turnId}`);
+        },
+      }),
+      /rejected after checkpoint/,
+    );
+    assert.deepEqual(trace, [
+      "dispatch",
+      `checkpoint:${rejectedTurnId}`,
+      `prompt_async:${rejectedTurnId}`,
+    ]);
+    assert.equal(observations.some(({ fact }) => fact.domain === "turn"), false);
+    assert.equal(handle.observedState(), "idle");
+  } finally {
+    await rm(runtimeRoot, { recursive: true, force: true });
+  }
 });
 
 test("Open Model turn ids use OpenCode's ascending scheme so the native loop can exit", async () => {
@@ -1289,7 +1316,6 @@ test("Open Model announces each provider retry, without provider text or a chang
     assert.doesNotMatch(notice.method, /(?:failed|systemError|error_during_execution|completed|finished|idle|stopped|interrupted)$/i);
     assert.equal(notice.nativeEventId, undefined);
     assert.equal(notice.nativeLifecyclePhase, undefined);
-    assert.equal(notice.lifecycleProjectionOnly, undefined);
     const payload = notice.payload as Record<string, unknown>;
     for (const operationalKey of ["status", "subtype", "threadStatus", "turnStatus", "turn", "thread", "item"]) {
       assert.equal(operationalKey in payload, false, `${operationalKey} would be read as lifecycle state`);
@@ -2075,45 +2101,6 @@ test("Open Model reports a completed child as active while the native session is
   ]);
 
   assert.equal(await adapter.inspectTurn(handle, "turn-active"), "active");
-});
-
-test("Open Model aborts and fences a bounded turn that exceeds its assistant-step budget", async () => {
-  const harness = createHarness();
-  harness.setTranscriptFactories([
-    (turnId) => [
-      assistantMessage(turnId, "assistant-1", 10, null, "tool-calls"),
-      assistantMessage(turnId, "assistant-2", 20, "A possible answer."),
-      assistantMessage(turnId, "assistant-3", 30, "LETAGENTS_NO_ROOM_REPLY"),
-    ],
-  ]);
-  const adapter = new OpenModelProviderAdapter({
-    binary: "/opt/letagents/opencode",
-    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-runaway-")),
-    dependencies: harness.dependencies,
-    startTimeoutMs: LAUNCH_BUDGET_MS,
-    turnTimeoutMs: 100,
-    maxAssistantSteps: 2,
-  });
-  const handle = await adapter.spawn(spawnRequest());
-
-  await assert.rejects(
-    adapter.runRoomTurn(handle, {
-      inboxItemId: "inbox-runaway",
-      sourceMessage: { text: "say hi" },
-      activation: { decision: "activate" },
-      actionId: "runaway",
-    }),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /exceeded the bounded turn limit of 2 assistant steps/);
-      assert.equal(
-        (error as Error & { roomTurnRecoveryOutcome?: string }).roomTurnRecoveryOutcome,
-        "ambiguous",
-      );
-      return true;
-    },
-  );
-  assert.deepEqual(harness.aborts, ["session-open-model-1"]);
 });
 
 test("typed Open Model reports a step guardrail without aborting the native turn", async () => {
@@ -3294,32 +3281,6 @@ test("fresh launch cleanup rechecks process birth before kill escalation", async
   assert.deepEqual(signals, ["SIGTERM"], "a recycled pid is not killed after the grace period");
 });
 
-test("Open Model bounded turns time out without polling transcript history", async () => {
-  const harness = createHarness();
-  harness.holdTurnOpen();
-  const adapter = new OpenModelProviderAdapter({
-    binary: "/opt/letagents/opencode",
-    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-timeout-")),
-    dependencies: harness.dependencies,
-    startTimeoutMs: LAUNCH_BUDGET_MS,
-    turnTimeoutMs: 10,
-  });
-  const handle = await adapter.spawn(spawnRequest());
-
-  await assert.rejects(
-    adapter.runRoomTurn(handle, {
-      inboxItemId: "inbox-timeout",
-      sourceMessage: { text: "stay busy" },
-      activation: { decision: "activate" },
-      actionId: "timeout",
-    }),
-    /bounded turn timed out/,
-  );
-  assert.equal(harness.promptBodies.length, 1);
-  assert.equal(harness.messageReads, 1, "one bounded snapshot replaces transcript polling");
-  assert.deepEqual(harness.aborts, ["session-open-model-1"], "the watchdog stops the exact native session");
-});
-
 test("typed Open Model reports a duration guardrail and keeps observing the exact turn", async () => {
   const harness = createHarness();
   harness.holdTurnOpen();
@@ -4196,7 +4157,6 @@ test("Open Model session errors do not invent an exact typed or legacy terminal"
     { inboxItemId: "session-error", sourceMessage: {}, activation: {}, actionId: "session-error" });
   assert.equal(result.outcome, "unreadable");
   assert.equal(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"), false);
-  assert.equal(stream.some((event) => event.lifecycleProjectionOnly && event.nativeLifecyclePhase === "turn_terminal"), false);
 });
 
 test("an idle session error cannot publish an earlier tool step before its failure is persisted", async () => {
@@ -4299,17 +4259,15 @@ for (const ending of ["idle", "reread", "open"] as const) {
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys=ON");
     new DaemonStateSchema().createSchema(db);
-    db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${at}',0);
-      INSERT INTO agent_configurations(agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,config_revision,runtime_configuration_revision)
-        VALUES('agent','open-model','charter','daemon_inbox',0,0,1,1);
+    db.exec(`INSERT INTO agents(agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,config_revision,runtime_configuration_revision,desired_state,observed_state,condition)
+        VALUES('agent',0,1,'owner','${at}','Agent','room','open-model','charter',1,1,'running','idle','none');
       INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
         VALUES('${attempt}','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','${at}');
       INSERT INTO work_attempt_executions VALUES('${generation}','${attempt}','${at}','test',1,NULL);`);
-    db.prepare(`INSERT INTO runtime_deployments(agent_id,observed_state,workspace_path_present,work_attempt_id_present,work_attempt_id,
-      provider_ref_present,provider_work_attempt_id,provider_continuation_id,provider_connection_kind,provider_connection_pid,
-      provider_process_identity_present,provider_process_identity,provider_execution_generation_id,workplace_liveness_present,native_liveness_present,activity_present)
-      VALUES('agent','idle',0,1,?,1,?,?,'opencode_server',?,1,?,?,0,0,0)`)
-      .run(attempt, attempt, handle.providerContinuationId, connection.pid, connection.processIdentity!, generation);
+    db.prepare(`UPDATE agents SET observed_state='idle',work_attempt_id=?,
+      provider_work_attempt_id=?,provider_continuation_id=?,provider_execution_generation_id=?,
+      provider_connection_json=? WHERE agent_id='agent'`)
+      .run(attempt, attempt, handle.providerContinuationId, generation, JSON.stringify(connection));
     new ExecutionShadowStore(db).registerRuntime({ agentId: "agent", executionGenerationId: generation,
       runtimeGenerationId: executionRuntimeStorageIdentity("agent", generation, "opencode_server", connection.pid!, connection.processIdentity!),
       provider: "open-model", authorityMode: "typed", configRevision: 1, createdAtMs: Date.parse(at) });
@@ -4325,14 +4283,14 @@ for (const ending of ["idle", "reread", "open"] as const) {
       providerConnection: { ...connection }, configurationRevision: 1, authorityMode: "typed" }));
     /** The daemon saves which message a native turn belongs to when the adapter reports the turn started. */
     const bindTurn = async (turnId: string) => {
-      const order = Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1;
-      db.prepare(`INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
+      const order = Number(db.prepare("SELECT COUNT(*) n FROM inbox_items").get()!.n) + 1;
+      db.prepare(`INSERT INTO inbox_items(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
         VALUES(?,'agent','room',?,'{}','{}',?,'awaiting_result',1,?,?,?,?,?)`).run(turnId, `message-${order}`, order, `action-${order}`, `reply-${order}`, turnId, at, at);
       db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room',?,?,?,?)").run(turnId, attempt, generation, handle.providerContinuationId, turnId);
       capture.refresh("agent");
     };
     const settle = async () => { for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve)); };
-    const turns = () => db.prepare("SELECT provider_turn_id,state FROM execution_turns ORDER BY rowid").all().map((turn) => ({ ...turn }));
+    const turns = () => db.prepare("SELECT provider_turn_id,state FROM runs ORDER BY rowid").all().map((turn) => ({ ...turn }));
     const run = (inboxItemId: string) => adapter.runRoomTurn(handle, { inboxItemId, sourceMessage: {}, activation: {}, actionId: inboxItemId },
       { beforeNativeDispatch: async () => {}, checkpointTurnStarted: bindTurn });
     try {
@@ -4353,7 +4311,7 @@ for (const ending of ["idle", "reread", "open"] as const) {
         assert.equal(reread.outcome, "unreadable");
         await settle();
       }
-      db.prepare("UPDATE supervised_agent_inbox SET state='blocked' WHERE inbox_item_id=?").run(one.turnId);
+      db.prepare("UPDATE inbox_items SET state='blocked' WHERE inbox_item_id=?").run(one.turnId);
       const closed = ending !== "open";
       assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: closed ? "terminal" : "active" }]);
 
@@ -4641,19 +4599,8 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
   };
-  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
-    const socket = connectDaemon(paths.socketPath);
-    let received = "";
-    socket.setEncoding("utf8");
-    socket.once("error", reject);
-    socket.on("data", (chunk: string) => {
-      received += chunk;
-      if (!received.includes("\n")) return;
-      socket.end();
-      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
-    });
-    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
-  });
+  const { daemonSocketRequest } = await import("./daemon-socket-request.js");
+  const request = (method: string, params?: unknown) => daemonSocketRequest(paths.socketPath, method, params);
   const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = 15_000) => {
     const deadline = Date.now() + timeoutMs;
     while (!await check()) {
@@ -4933,7 +4880,7 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
       },
       /** The turns in the agent's execution record, its recovery boundaries, and whether the record has a gap. */
       recorded: () => ({
-        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,rowid"),
         boundaries: read<{ n: number }>("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=? AND phase='complete'")[0]!.n,
         gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
           .filter((observer) => observer.max !== observer.last).length,
@@ -5351,4 +5298,132 @@ test("Open Model opens staged room files only when its running runtime may read 
     providerContinuationId: full.handle.providerContinuationId!, providerConnection: null });
   assert.ok(attached && !("state" in attached));
   assert.equal(replacement.roomTurnFileAccess(attached), null);
+});
+
+test("Open Model refuses live pre-typed sidecars on attach, proves death or terminates via stopRef, and allows a fresh typed launch afterwards", async () => {
+  for (const priorMode of ["legacy", "typed_shadow"] as const) {
+    const { handle, harness, runtimeRoot } = await spawnAdapter({
+      workAttemptId: `wa-pre-typed-${priorMode}`,
+      lifecycleAuthorityMode: "typed",
+    });
+    const connection = handle.providerConnection;
+    assert.ok(connection?.kind === "opencode_server");
+    const saved = JSON.parse(await readFile(connection.serverAuthPath, "utf8")) as Record<string, unknown>;
+    await writePrivateFileAtomically(
+      connection.serverAuthPath,
+      `${JSON.stringify({ ...saved, lifecycleAuthorityMode: priorMode })}\n`,
+    );
+    const ref = {
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId!,
+      providerConnection: connection,
+    };
+
+    // 1. Live pre-typed runtime: attach refuses admission and resume refuses to spawn a competitor.
+    let identityState: string | null | undefined = connection.processIdentity!;
+    let identityReads = 0;
+    const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+    let killOnSignal: NodeJS.Signals | null = null;
+    const upgraded = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot,
+      stopGraceMs: 30,
+      startTimeoutMs: LAUNCH_BUDGET_MS,
+      turnTimeoutMs: 100,
+      dependencies: {
+        ...harness.dependencies,
+        getProcessIdentity: (pid) => {
+          if (pid !== connection.pid) return null;
+          identityReads += 1;
+          return identityState;
+        },
+        signalProcess: (pid, signal, identity) => {
+          signals.push({ pid, signal, identity });
+          if (killOnSignal === signal) identityState = null;
+        },
+      },
+    });
+    assert.equal(await upgraded.attach(ref), null, `${priorMode} live sidecar is never admitted to typed delivery`);
+    assert.ok(identityReads >= 1);
+    await assert.rejects(
+      upgraded.resume(ref, spawnRequest({ workAttemptId: handle.workAttemptId, lifecycleAuthorityMode: "typed" })),
+      /could not be authenticated/,
+    );
+    assert.equal(harness.launches.length, 1, `${priorMode} resume never launches a second writer`);
+
+    // 2. Unverifiable birth refuses to signal or report stopped.
+    identityState = undefined;
+    await assert.rejects(
+      upgraded.stopRef(ref, { graceMs: 20 }),
+      /process birth cannot be verified/,
+    );
+    assert.equal(signals.length, 0, `${priorMode} unverifiable birth sends zero signals`);
+
+    // 3. Stubborn surviving process escalates TERM -> KILL and refuses to claim stopped.
+    identityState = connection.processIdentity!;
+    killOnSignal = null;
+    await assert.rejects(
+      upgraded.stopRef(ref, { graceMs: 25 }),
+      /has not yet proved the recorded process birth is gone/,
+    );
+    assert.deepEqual(
+      signals.map(({ pid, signal, identity }) => ({ pid, signal, identity })),
+      [
+        { pid: connection.pid!, signal: "SIGTERM", identity: connection.processIdentity! },
+        { pid: connection.pid!, signal: "SIGKILL", identity: connection.processIdentity! },
+      ],
+    );
+
+    // 4. Reused PID (different birth) settles without signaling the unrelated process.
+    signals.length = 0;
+    identityState = "opencode-birth-reused-9999";
+    const reused = await upgraded.stopRef(ref, { graceMs: 25 });
+    assert.equal(reused.terminalCause, "stopped");
+    assert.equal(reused.providerContinuationId, ref.providerContinuationId);
+    assert.equal(signals.length, 0, `${priorMode} reused PID is never signaled`);
+
+    // 5. Already-dead pre-typed sidecar reports terminal on attach().
+    identityState = null;
+    const deadAttach = await upgraded.attach(ref);
+    assert.ok(deadAttach && "state" in deadAttach && deadAttach.state === "terminal");
+
+    // 6. Live pre-typed runtime killed cleanly via stopRef -> subsequent fresh spawn writes typed sidecar.
+    identityState = connection.processIdentity!;
+    killOnSignal = "SIGTERM";
+    const stopped = await upgraded.stopRef(ref, { graceMs: 50 });
+    assert.equal(stopped.terminalCause, "stopped");
+    assert.equal(stopped.providerContinuationId, ref.providerContinuationId);
+    assert.deepEqual(signals, [
+      { pid: connection.pid!, signal: "SIGTERM", identity: connection.processIdentity! },
+    ]);
+
+    // Fresh spawn now passes assertPriorStartupProcessGone and rewrites server-auth.json as typed.
+    let freshPid = 7100;
+    const freshLive = new Map<number, string>();
+    const freshAdapter = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot,
+      startTimeoutMs: LAUNCH_BUDGET_MS,
+      turnTimeoutMs: 100,
+      dependencies: {
+        ...harness.dependencies,
+        launch: (input) => {
+          const launched = harness.dependencies.launch(input);
+          const pid = ++freshPid;
+          freshLive.set(pid, `opencode-birth-${pid}`);
+          Object.assign(launched.child, { pid });
+          return launched;
+        },
+        getProcessIdentity: (pid) => freshLive.get(pid) ?? null,
+      },
+    });
+    const freshHandle = await freshAdapter.spawn(
+      spawnRequest({ workAttemptId: handle.workAttemptId, lifecycleAuthorityMode: "typed" }),
+    );
+    const freshAuth = JSON.parse(await readFile(connection.serverAuthPath, "utf8")) as {
+      lifecycleAuthorityMode?: string;
+    };
+    assert.equal(freshAuth.lifecycleAuthorityMode, "typed");
+    assert.equal((freshHandle as ProviderHandle & { lifecycleAuthorityMode: string }).lifecycleAuthorityMode, "typed");
+  }
 });

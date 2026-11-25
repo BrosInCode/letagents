@@ -1,3 +1,10 @@
+import {
+  DAEMON_PROTOCOL_VERSION,
+  resolveDaemonRpcTimeoutMs,
+  type DaemonRpcMethod,
+  type DaemonRpcParams,
+  type DaemonRpcResult,
+} from "#daemon-contract/index.js";
 import { randomUUID } from "node:crypto";
 import { SupervisedAgentsUnsupportedError, supervisedAgentsSupported } from "../platform-capabilities.js";
 import { join } from "node:path";
@@ -6,7 +13,7 @@ import { daemonMaintenancePath, DAEMON_MAINTENANCE_MESSAGE } from "../../../../.
 import { connectDaemon, daemonEndpoint, prepareDaemonConnection } from "../../../../../shared/daemon-endpoint.mjs";
 import { letagentsHome } from "../../../../../shared/letagents-home.mjs";
 import type { DesktopSupervisorDaemonStatus } from "../../ipc-types.js";
-import { desktopRoot } from "../paths.js";
+import { desktopRoot } from "#provider-runtime/paths.js";
 import { loadHostApprovalSigner, type HostApprovalSigner } from "../host-approval-auth.js";
 import type { HostApprovalChallenge } from "../../../shared/host-approval-auth.js";
 import type { DesktopHostApproval, HostApprovalCandidate, HostApprovalSelection } from "../../../shared/host-approvals.js";
@@ -30,6 +37,15 @@ import type {
   SupervisorDaemonLifecycleOptions,
   WireResponse,
 } from "./types.js";
+
+export interface DaemonRpcCallOptions {
+  version?: number;
+  timeoutMs?: number;
+  unrefSocket?: boolean;
+  signal?: AbortSignal;
+  assertDispatch?: () => void;
+  maintenance?: boolean;
+}
 
 export abstract class SupervisorDaemonClientBase {
   /** The daemon's state directory; every local path below derives from it, never from the socket. */
@@ -87,6 +103,7 @@ export abstract class SupervisorDaemonClientBase {
   protected readonly statePreparationWaitMs: number;
   protected readonly requestTimeoutMs: number;
   protected readonly turnControlRequestTimeoutMs: number;
+  protected readonly asyncRpcWaitTimeoutsMs?: Partial<Record<import("#daemon-contract/index.js").DaemonAsyncRpcMethod, number>>;
   protected readonly now: () => Date;
   protected attachedDaemonObservation: {
     identity: DaemonProcessIdentity;
@@ -140,6 +157,7 @@ export abstract class SupervisorDaemonClientBase {
     this.statePreparationWaitMs = options.statePreparationWaitMs ?? 30_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
+    this.asyncRpcWaitTimeoutsMs = options.asyncRpcWaitTimeoutsMs;
     this.now = options.now ?? (() => new Date());
     this.readyStatusTtlMs = options.readyStatusTtlMs ?? 2000;
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd, env) => {
@@ -182,10 +200,35 @@ export abstract class SupervisorDaemonClientBase {
     return status;
   }
 
+  /**
+   * Contract-typed RPC dispatch: derives parameter types, result types,
+   * protocol version, and per-method timeout from `#daemon-contract/index.js`.
+   */
+  protected call<M extends DaemonRpcMethod>(
+    method: M,
+    params?: DaemonRpcParams<M>,
+    options: DaemonRpcCallOptions = {},
+  ): Promise<DaemonRpcResult<M>> {
+    const timeoutMs = options.timeoutMs ?? resolveDaemonRpcTimeoutMs(method, params, {
+      defaultTimeoutMs: this.requestTimeoutMs,
+      turnControlTimeoutMs: this.turnControlRequestTimeoutMs,
+    });
+    return this.request<DaemonRpcResult<M>>(
+      method,
+      params,
+      options.version ?? DAEMON_PROTOCOL_VERSION,
+      timeoutMs,
+      options.unrefSocket ?? false,
+      options.signal,
+      options.assertDispatch,
+      options.maintenance ?? false,
+    );
+  }
+
   protected request<T = unknown>(
     method: string,
     params?: unknown,
-    version = SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    version: number = SUPERVISOR_DAEMON_PROTOCOL_VERSION,
     timeoutMs = this.requestTimeoutMs,
     unrefSocket = false,
     signal?: AbortSignal,

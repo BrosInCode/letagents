@@ -2,7 +2,6 @@
  * Builds the provider side of the daemon: provider streams, scheduler
  * failures, provider execution and provider reconciliation.
  */
-import { unavailableLifecycleProjectionDiagnostics } from "../lifecycle-projection-ledger.js";
 import { ProviderExecutionCoordinator } from "../provider-execution-coordinator.js";
 import { ProviderReconciliationCoordinator } from "../provider-reconciliation-coordinator.js";
 import { ProviderSchedulerFailureCoordinator } from "../provider-scheduler-failure-coordinator.js";
@@ -21,14 +20,8 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
     const [paths, , providerPort, , , , recoveryClock] = args;
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
-      observeExecution: (installation) => (this.typedLifecycleEffects?.changed(installation.entryId),
-        this.executionCapture?.install(installation) ?? (() => {})),
-      advanceExecution: (installation) => { this.typedLifecycleEffects?.changed(installation.entryId); this.executionCapture?.advance(installation); },
-      observeLegacyLifecycle: (observation) => this.executionCapture?.recordLegacyLifecycle(observation),
-      markLifecycleProjectionUnavailable: (provider) => this.executionCapture?.recordLifecycleProjectionUnavailable(provider),
-      lifecycleProjectionDiagnostics: () => this.executionCapture?.lifecycleProjectionDiagnostics()
-        ?? unavailableLifecycleProjectionDiagnostics(),
-      captureAdmission: (installation) => this.executionCapture?.captureAdmission(installation) ?? "unavailable",
+      observeExecution: (installation) => this.executionCapture?.install(installation) ?? (() => {}),
+      advanceExecution: (installation) => { this.executionCapture?.advance(installation); this.providerStreams.typedLifecycleAdmissionChanged(installation.entryId); },
       typedLifecycleAdmission: (installation) => this.executionCapture?.typedLifecycleAdmission(installation) ?? "unavailable",
       recordBlock: (installation) => this.executionCapture?.recordBlock(installation) ?? null,
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
@@ -42,7 +35,6 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
         readRuntimeLifecycleAuthority: (input) => this.store.readRuntimeLifecycleAuthority(input),
       },
       bindings: this.workerBindings,
-      durability: this.durability,
       runtimeCustody: this.workerRuntimeCustody,
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeManifest: (operation) => this.serializeManifestMutation(operation),
@@ -61,7 +53,6 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
       },
       delivery: {
         start: (entryId) => this.startSupervisedDelivery(entryId),
-        startCutover: (entryId) => this.deliveryCutovers.start(entryId),
       },
       heartbeat: {
         intervalMs: this.nativeHeartbeatIntervalMs,
@@ -104,8 +95,6 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
           isHandoffScheduled: () => this.handoffScheduled,
           isDispatchPaused: () => this.handoffDraining,
           currentDaemonGeneration: () => this.singleton.currentGeneration,
-          currentManifestGeneration: () => this.manifestGeneration,
-          acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
           assertCurrent: () => this.singleton.assertCurrent(),
           ownsDaemonGeneration: (generation) => this.workerAuthority.ownsDaemonGeneration(generation),
           fenceCommit: (commit) => this.fenceDaemonCommit(commit),
@@ -117,7 +106,7 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
           serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
         },
         updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
-        transition: (entryId, state, condition, detail, actor) => this.transition(entryId, state, condition, detail, actor),
+        transition: (entryId, state, condition, detail, actor, reconciliation, expectedVersion) => this.transition(entryId, state, condition, detail, actor, reconciliation, expectedVersion),
         terminalPayload: (terminal, actor, connection) => this.providerTerminals.terminalPayload(terminal, actor, connection),
         observeProviderExit: (entryId, terminal, actor, executionGenerationId, handle) =>
           this.observeProviderExitOnce(entryId, terminal, actor, executionGenerationId, handle),
@@ -176,8 +165,6 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
         store: this.store,
         authority: {
           assertCurrent: () => this.singleton.assertCurrent(),
-          currentManifestGeneration: () => this.manifestGeneration,
-          acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
           fenceCommit: (commit) => this.fenceDaemonCommit(commit),
           serializeManifest: (operation) => this.serializeManifestMutation(operation),
         },

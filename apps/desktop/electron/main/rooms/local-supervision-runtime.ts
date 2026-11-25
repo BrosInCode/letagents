@@ -8,7 +8,7 @@ import { parseRoomAgentWorkSummary } from "../../../../../shared/room-agent-work
 import { addLocalChatMessage, getLocalChatMessages, getLatestLocalChatMessages,
   getLocalChatMessagesBefore, getLocalMessageAttachment, getLocalMessageThread } from "./messages/local-store.js";
 import { readLocalAttachmentBytesWithin } from "../attachments/local-store.js";
-import { withoutInlineFileBytes } from "../attachments/inline-bytes.js";
+import { withoutInlineFileBytes } from "#provider-runtime/attachments/inline-bytes.js";
 import type { RoomMessagePayload } from "./messages/mappers.js";
 import { getLocalRoom, listLocalTasks, addLocalTask, updateLocalTask, claimLocalTaskReviewLease,
   claimLocalTaskWorkLease, changeLocalTaskWorkLease } from "./local-store.js";
@@ -25,8 +25,11 @@ const LOCAL_AGENT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): ObjectValue => value && typeof value === "object" && !Array.isArray(value) ? value as ObjectValue : {};
+function preDispatchError(message: string): Error & { beforeExternalDispatch: true } {
+  return Object.assign(new Error(message), { beforeExternalDispatch: true as const });
+}
 function required(value: unknown, name: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required.`);
+  if (typeof value !== "string" || !value.trim()) throw preDispatchError(`${name} is required.`);
   return value.trim();
 }
 const optional = (value: unknown): string | null => typeof value === "string" && value.trim() ? value.trim() : null;
@@ -222,7 +225,7 @@ export async function readLocalSupervisorWork(roomId: string, afterCursor: strin
 }
 
 type LocalToolInput = {
-  provider: string; toolName: string; input: unknown; requestId: string; roomId: string;
+  provider: string; toolName: string; input: unknown; requestId: string; effectId?: string; signal?: AbortSignal; roomId: string;
   apiUrl: string; bearer: string; cwd: string; agentSession: { session_id: string; agent_key: string; room_id: string };
 };
 type LocalToolContext = {
@@ -243,10 +246,11 @@ const localToolHandlers = defineLocalSupervisedToolHandlers<LocalToolContext>({
     const text = input.toolName === "post_status" ? `[status] ${required(args.status, "status")}`
       : input.toolName === "post_reasoning" ? `[reasoning] ${required(args.summary, "summary")}` : required(args.text, "text");
     const thread = optional(args.thread_parent_id ?? args.thread_root_id ?? args.root_message_id);
-    if (input.toolName === "send_thread_message" && !thread) throw new Error("A thread parent is required.");
+    if (input.toolName === "send_thread_message" && !thread) throw preDispatchError("A thread parent is required.");
+    const durableKey = (input.effectId ?? input.requestId).trim() || input.requestId;
     const message = await addLocalChatMessage(input.roomId, { sender: worker.actor_label, text,
       source: "agent", agent_avatar: worker.avatar, publisher_agent_key: worker.agent_key, publisher_agent_session_id: worker.session_id,
-      idempotency_key: `local-supervised-tool:${worker.agent_key}:${input.requestId}`,
+      idempotency_key: `local-supervised-tool:${worker.agent_key}:${durableKey}`,
       reply_to: optional(args.reply_to ?? args.reply_to_id) ?? (thread ? thread : null), thread_root_id: thread });
     return { room_id: input.roomId, message };
   },
@@ -279,13 +283,14 @@ const localToolHandlers = defineLocalSupervisedToolHandlers<LocalToolContext>({
 
 /** The daemon performs the same effect fencing and journaling before entering either transport. */
 export async function executeLocalSupervisorTool(input: LocalToolInput) {
-  if (input.apiUrl !== LOCAL_ROOM_API_ORIGIN) throw new Error("Invalid local tool authority.");
+  if (input.signal?.aborted) throw preDispatchError("The daemon shut down before the local supervised tool began executing.");
+  if (input.apiUrl !== LOCAL_ROOM_API_ORIGIN) throw preDispatchError("Invalid local tool authority.");
   const worker = await authorizeLocalWorker(input.roomId, input.bearer, input.agentSession.session_id);
   if (worker.agent_key !== input.agentSession.agent_key || worker.runtime !== input.provider
-    || input.agentSession.room_id !== input.roomId) throw new Error("Local tool worker identity changed.");
+    || input.agentSession.room_id !== input.roomId) throw preDispatchError("Local tool worker identity changed.");
   const args = object(input.input);
   const leaseWorker = { ...worker, supervised: true };
-  if (args.room_id && args.room_id !== input.roomId) throw new Error("This tool is scoped to the agent's local room.");
+  if (args.room_id && args.room_id !== input.roomId) throw preDispatchError("This tool is scoped to the agent's local room.");
   const operation = localSupervisedRoomToolOperation(input.toolName);
   if (!operation) {
     const result = { isError: true, content: [{ type: "text", text: JSON.stringify({ code: "local_room_tool_unavailable",

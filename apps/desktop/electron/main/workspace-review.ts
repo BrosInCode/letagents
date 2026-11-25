@@ -7,7 +7,7 @@ import { parseRoomAgentWorkSummary } from '../../../../shared/room-agent-work.mj
 import { parseWorkspaceReviewPage, type WorkspaceReview, type WorkspaceReviewPage } from '../../../../shared/workspace-review.mjs';
 import type { WorkspaceDiffPage, WorkspaceDiffPageOptions } from '../../../../shared/workspace-diff.mjs';
 import { apiFetch, DesktopApiError } from './auth.js';
-import { apiUrl } from './paths.js';
+import { apiUrl } from '#provider-runtime/paths.js';
 
 export type WorkspaceReviewRequest = { roomId: string; agentKey: string; sourceMessageId: string; attemptId: string; requestId: string };
 export type WorkspaceReviewPageRequest = WorkspaceDiffPageOptions & { requestId: string; view: 'workspace' | 'contribution'; path: string };

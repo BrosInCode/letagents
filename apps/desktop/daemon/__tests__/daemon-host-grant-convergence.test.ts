@@ -30,6 +30,37 @@ import {
   entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 
+const ownedConvergenceDeliveryHttp = {
+  latest: async () => ({ messages: [] }),
+  poll: ({ signal }: { signal: AbortSignal }) => new Promise<{ messages: never[] }>((resolve) => {
+    if (signal.aborted) resolve({ messages: [] });
+    else signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+  }),
+  publish: async () => {},
+};
+
+const ownedConvergenceGrantHttp = {
+  ...noWorkLeaseHttp,
+  createWorkerSession: async ({ agentInstanceId }: { agentInstanceId: string }) => ({
+    sessionId: `session_${agentInstanceId.replace(/:/g, "_")}`,
+    bearer: `bearer_${agentInstanceId}`,
+    bearerId: `bearer_id_${agentInstanceId}`,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  }),
+};
+
+async function admitOwnedConvergenceEntry(daemon: SupervisorDaemon, socketPath: string, entryId: string, roomId: string): Promise<void> {
+  await admitDaemonInboxForProviderTest(daemon, entryId, roomId);
+  const generation = ((await daemonRequest(socketPath, "daemon.status")).result as { generation: number }).generation;
+  const installed = await daemonRequest(socketPath, "supervisor.install_host_grant", {
+    entry_id: entryId, room_id: roomId, agent_key: `owner/${entryId}`,
+    grant_id: `grant_${entryId}_${generation}`, supervisor_grant: `grant-secret-${entryId}`,
+    grant_generation: generation, api_url: "http://127.0.0.1:9", daemon_generation: generation,
+    host_id: "host-test", installation_id: "installation-test", grant_expires_at: "2099-01-01T00:00:00.000Z",
+  });
+  assert.equal(installed.ok, true, installed.error);
+}
+
 test("host grant renewal retries transient failures, rotates the bearer in place, and rejects stale Electron rollback", async () => {
   const env = await fixture();
   const paths = {
@@ -253,7 +284,7 @@ test("an unattached live durable generation blocks a duplicate provider start", 
     stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "live-continuation" }),
     onExit: async () => () => {},
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedConvergenceDeliveryHttp, ownedConvergenceGrantHttp);
   try {
     await daemon.start();
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
@@ -266,6 +297,7 @@ test("an unattached live durable generation blocks a duplicate provider start", 
         execution_generation_id: execution.execution_generation_id,
       },
     } })).ok, true);
+    await admitOwnedConvergenceEntry(daemon, paths.socketPath, "unattached_live_generation", entry.room_id);
     await eventually(async () => {
       const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
       return current.condition === "coordination_blocked" && /remains live/.test(current.last_error ?? "");
@@ -302,14 +334,16 @@ test("a failed provider launch terminalizes its generation and releases the shar
     stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: recovered.providerContinuationId }),
     onExit: async () => () => {},
     onStream: async () => () => {},
+    onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedConvergenceDeliveryHttp, ownedConvergenceGrantHttp);
   try {
     await daemon.start();
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: "failed_launch_cleanup", provider: "claude-code", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } })).ok, true);
+    await admitOwnedConvergenceEntry(daemon, paths.socketPath, "failed_launch_cleanup", entry.room_id);
     await eventually(async () => {
       const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
       return current.condition === "coordination_blocked" && /injected launch failure/.test(current.last_error ?? "");
@@ -320,7 +354,7 @@ test("a failed provider launch terminalizes its generation and releases the shar
     assert.equal((await readdir(fenceDirectory)).some((name) => name.startsWith("shared-")), false, "failed launch releases retained workspace authority");
 
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "failed_launch_cleanup", desired_state: "running" })).ok, true);
-    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "provider retry without daemon restart");
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "idle", "provider retry without daemon restart");
     assert.equal(launchCount, 2);
     assert.equal((await readdir(fenceDirectory)).filter((name) => name.startsWith("shared-")).length, 1, "successful retry reacquires one shared fence");
   } finally {
@@ -392,26 +426,12 @@ test("a provider handle returned already terminal is fenced and resumes under a 
     },
     onStream: async (handle, listener) => {
       streamListeners.set(handle as object, listener);
-      if (handle === failedHandle) {
-        listener({
-          workAttemptId: attempt.work_attempt_id,
-          providerContinuationId: "claude-continuation",
-          observedAt: new Date().toISOString(),
-          sequence: 1,
-          provider: "claude-code",
-          kind: "error",
-          method: "result/error_during_execution",
-          payload: { type: "result", subtype: "error_during_execution", is_error: true },
-          payloadTruncated: false,
-          payloadRedacted: false,
-          durablePayloadRef: null,
-        });
-      }
       return () => streamListeners.delete(handle as object);
     },
+    onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
   const recovery = fakeRecoveryClock();
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, recovery.clock);
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, recovery.clock, ownedConvergenceDeliveryHttp, ownedConvergenceGrantHttp);
   try {
     await daemon.start();
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
@@ -423,6 +443,7 @@ test("a provider handle returned already terminal is fenced and resumes under a 
       work_attempt_id: attempt.work_attempt_id,
     } });
     assert.equal(put.ok, true, put.error);
+    await admitOwnedConvergenceEntry(daemon, paths.socketPath, "returned_terminal", entry.room_id);
     await eventually(async () => stopCount === 1 && recovery.pending() === 1, "terminal fence and recovery timer");
     assert.equal(resumeCount, 0);
     await recovery.advance(999);
@@ -431,7 +452,7 @@ test("a provider handle returned already terminal is fenced and resumes under a 
     await recovery.advance(1);
     await eventually(async () => {
       const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
-      return current.observed_state === "working"
+      return current.observed_state === "idle"
         && current.provider_ref?.execution_generation_id !== undefined;
     }, "already-terminal launch recovery");
     assert.equal(stopCount, 1, "returned-state and just-installed stream paths share one idempotent terminal fence");
@@ -442,18 +463,12 @@ test("a provider handle returned already terminal is fenced and resumes under a 
     assert.ok(detail.execution_generations[0]?.terminal, "the returned-terminal generation is durably terminal");
     assert.equal(detail.execution_generations[1]?.terminal, null, "only the successor generation remains live");
 
-    streamListeners.get(recoveredHandle as object)?.({
-      workAttemptId: attempt.work_attempt_id,
+    exitListeners.get(recoveredHandle as object)?.({
+      endedAt: new Date().toISOString(),
+      exitCode: 1,
+      signal: null,
+      terminalCause: "stopped",
       providerContinuationId: "claude-continuation",
-      observedAt: new Date().toISOString(),
-      sequence: 2,
-      provider: "claude-code",
-      kind: "error",
-      method: "result/error_during_execution",
-      payload: { type: "result", subtype: "error_during_execution", is_error: true },
-      payloadTruncated: false,
-      payloadRedacted: false,
-      durablePayloadRef: null,
     });
     await eventually(async () => recovery.pending() === 1, "second terminal recovery timer");
     await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "returned_terminal", desired_state: "stopped" });
@@ -496,15 +511,17 @@ test("direct terminal recovery increases delay and quarantines before a sixth ge
     },
     onExit: async (handle, listener) => { exitListeners.set(handle as object, listener); return () => exitListeners.delete(handle as object); },
     onStream: async () => () => {},
+    onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
   const recovery = fakeRecoveryClock();
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, recovery.clock);
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, recovery.clock, ownedConvergenceDeliveryHttp, ownedConvergenceGrantHttp);
   try {
     await daemon.start();
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: "bounded_terminal_loop", provider: "claude-code", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } })).ok, true);
+    await admitOwnedConvergenceEntry(daemon, paths.socketPath, "bounded_terminal_loop", entry.room_id);
     for (const [index, delay] of [1_000, 2_000, 4_000, 8_000].entries()) {
       await eventually(async () => launchCount === index + 1 && recovery.pending() === 1, `recovery timer ${index + 1}`);
       assert.equal(recovery.delays.at(-1), delay);
@@ -538,7 +555,7 @@ test("a terminal handle discovered during daemon reattach is fenced and resumes 
   const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
   const attempt = await durability.createAttempt({ taskId: "reattached_terminal", leaseId: "reattached_terminal", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
   const liveHandle = { workAttemptId: attempt.work_attempt_id, pid: 4301, providerContinuationId: "reattach-continuation", observedState: "working" as const };
-  const terminalHandle = { ...liveHandle, observedState: "idle" as const };
+  const terminalHandle = { ...liveHandle, observedState: "failed" as const };
   const successorHandle = { ...liveHandle, pid: 4302 };
   const firstPort: ProviderActionPort = {
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
@@ -550,9 +567,10 @@ test("a terminal handle discovered during daemon reattach is fenced and resumes 
     stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "reattach-continuation" }),
     onExit: async () => () => {},
     onStream: async () => () => {},
+    onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
   const recovery = fakeRecoveryClock();
-  const first = new SupervisorDaemon(paths, "darwin", firstPort, true, 15_000, undefined, recovery.clock);
+  const first = new SupervisorDaemon(paths, "darwin", firstPort, true, 15_000, undefined, recovery.clock, ownedConvergenceDeliveryHttp, ownedConvergenceGrantHttp);
   let second: SupervisorDaemon | null = null;
   let stopCount = 0;
   let resumeCount = 0;
@@ -563,7 +581,8 @@ test("a terminal handle discovered during daemon reattach is fenced and resumes 
       ...entry, id: "reattached_terminal", provider: "claude-code", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } })).ok, true);
-    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "first daemon provider start");
+    await admitOwnedConvergenceEntry(first, paths.socketPath, "reattached_terminal", entry.room_id);
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "idle", "first daemon provider start");
     await first.stop();
 
     const secondPort: ProviderActionPort = {
@@ -578,13 +597,15 @@ test("a terminal handle discovered during daemon reattach is fenced and resumes 
         return terminal;
       },
       onExit: async (handle, listener) => { exitListeners.set(handle as object, listener); return () => exitListeners.delete(handle as object); },
+      onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
     };
-    second = new SupervisorDaemon(paths, "darwin", secondPort, true, 15_000, undefined, recovery.clock);
+    second = new SupervisorDaemon(paths, "darwin", secondPort, true, 15_000, undefined, recovery.clock, ownedConvergenceDeliveryHttp, ownedConvergenceGrantHttp);
     await second.start();
+    await admitOwnedConvergenceEntry(second, paths.socketPath, "reattached_terminal", entry.room_id);
     await eventually(async () => stopCount === 1 && recovery.pending() === 1, "terminal reattach fence");
     assert.equal(resumeCount, 0);
     await recovery.advance(1_000);
-    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "reattached successor");
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "idle", "reattached successor");
     assert.equal(stopCount, 1);
     assert.equal(resumeCount, 1);
     const detail = (await daemonRequest(paths.socketPath, "attempt.read", { id: "reattached_terminal" })).result as { execution_generations: Array<{ terminal: unknown }> };
@@ -614,7 +635,7 @@ test("direct provider convergence quarantines persisted crash loops without anot
     stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
     onExit: async () => () => {},
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, ownedConvergenceDeliveryHttp, ownedConvergenceGrantHttp);
   try {
     await daemon.start();
     const now = Date.now();
@@ -632,6 +653,7 @@ test("direct provider convergence quarantines persisted crash loops without anot
         pending_action: null,
       },
     } })).ok, true);
+    await admitOwnedConvergenceEntry(daemon, paths.socketPath, "persisted_crash_loop", entry.room_id);
     await eventually(async () => {
       const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
       return current.condition === "quarantined";
@@ -875,7 +897,7 @@ test("supervisor convergence persists the retry deadline before it can restart",
   try {
     const manifestPath = join(env.root, "manifest.json");
     const store = new ManifestStore(manifestPath);
-    await store.write(0, [{ ...entry, observed_state: "failed" }]);
+    await store.write([{ ...entry, observed_state: "failed" }]);
     const calls: string[] = [];
     const handle = { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "starting" as const };
     const port: ProviderActionPort = {
@@ -905,7 +927,7 @@ test("five terminal exit edges across reload quarantine even with intermediate w
   try {
     const manifestPath = join(env.root, "manifest.json");
     const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") };
-    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "working" }]);
+    await new ManifestStore(manifestPath).write([{ ...entry, observed_state: "working" }]);
     let spawnCalls = 0;
     const port: ProviderActionPort = {
       capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
@@ -937,7 +959,7 @@ test("reconciliation journals intent before provider dispatch and attaches it af
   try {
     const manifestPath = join(env.root, "manifest.json");
     const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") };
-    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [0], consecutive_action_failures: 1, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
+    await new ManifestStore(manifestPath).write([{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [0], consecutive_action_failures: 1, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
     let releaseSpawn!: () => void;
     let signalSpawn!: () => void;
     const spawned = new Promise<void>((resolve) => { signalSpawn = resolve; });
@@ -957,7 +979,7 @@ test("reconciliation journals intent before provider dispatch and attaches it af
     await daemon.stop();
     const reloadedPort: ProviderActionPort = { ...port, spawn: async () => { throw new Error("must not respawn a pending action"); }, attachAction: async (id) => id === "orphan" ? { state: "attached", handle: { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "starting" } } : { state: "absent" } };
     const stored = await new ManifestStore(manifestPath).load();
-    await new ManifestStore(manifestPath).write(stored.generation, stored.entries.map((candidate) => candidate.id === entry.id ? { ...candidate, reconciliation: { ...candidate.reconciliation!, pending_action: { id: "orphan", sequence: 3, kind: "restart_fresh", recorded_at_ms: 3_000 } } } : candidate));
+    await new ManifestStore(manifestPath).write(stored.entries.map((candidate) => candidate.id === entry.id ? { ...candidate, reconciliation: { ...candidate.reconciliation!, pending_action: { id: "orphan", sequence: 3, kind: "restart_fresh", recorded_at_ms: 3_000 } } } : candidate));
     reloaded = new SupervisorDaemon(paths, "darwin", reloadedPort);
     await reloaded.start();
     assert.equal((await reloaded.reconcile(entry.id, { ...input, reconciliationActionId: "generation-3", reconciliationActionSequence: 3, nowMs: 3_001 }, 100)).disposition, "held");
@@ -971,7 +993,7 @@ test("an absent pending intent redispatches its exact durable identity and kind,
   let daemon: SupervisorDaemon | null = null;
   try {
     const manifestPath = join(env.root, "manifest.json");
-    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 7, pending_action: { id: "durable-restart", sequence: 7, kind: "restart_fresh", recorded_at_ms: 1 } } }]);
+    await new ManifestStore(manifestPath).write([{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 7, pending_action: { id: "durable-restart", sequence: 7, kind: "restart_fresh", recorded_at_ms: 1 } } }]);
     const requests: Array<{ actionId?: string }> = [];
     let attachment: "absent" | "ambiguous" = "absent";
     const port: ProviderActionPort = {
@@ -992,7 +1014,7 @@ test("an absent pending intent redispatches its exact durable identity and kind,
     const stored = await new ManifestStore(manifestPath).load();
     await daemon.stop();
     daemon = null;
-    await new ManifestStore(manifestPath).write(stored.generation, stored.entries.map((candidate) => candidate.id === entry.id ? { ...candidate, reconciliation: { ...candidate.reconciliation!, pending_action: { id: "ambiguous-intent", sequence: 9, kind: "restart_fresh", recorded_at_ms: 3 } } } : candidate));
+    await new ManifestStore(manifestPath).write(stored.entries.map((candidate) => candidate.id === entry.id ? { ...candidate, reconciliation: { ...candidate.reconciliation!, pending_action: { id: "ambiguous-intent", sequence: 9, kind: "restart_fresh", recorded_at_ms: 3 } } } : candidate));
     attachment = "ambiguous";
     daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
@@ -1008,7 +1030,7 @@ test("global manifest mutation serialization preserves concurrent different-entr
   const env = await fixture();
   try {
     const manifestPath = join(env.root, "manifest.json");
-    await new ManifestStore(manifestPath).write(0, [entry, { ...entry, id: "agent_2" }]);
+    await new ManifestStore(manifestPath).write([entry, { ...entry, id: "agent_2" }]);
     const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin");
     await daemon.start();
     await Promise.all([daemon.transition("agent_1", "failed", "none", "exit", "test"), daemon.transition("agent_2", "failed", "none", "exit", "test")]);
@@ -1021,7 +1043,7 @@ test("scheduled convergence records provider exits and durable escalation notice
   const env = await fixture();
   try {
     const manifestPath = join(env.root, "manifest.json");
-    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "working" }]);
+    await new ManifestStore(manifestPath).write([{ ...entry, observed_state: "working" }]);
     let onExit: ((terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null }) => void) | null = null;
     const port: ProviderActionPort = {
       capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }), spawn: async () => { throw new Error("unreachable"); }, attach: async () => null, resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
@@ -1049,7 +1071,7 @@ test("scheduled convergence atomically replaces exit subscriptions and preserves
   let daemon: SupervisorDaemon | null = null;
   try {
     const manifestPath = join(env.root, "manifest.json");
-    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
+    await new ManifestStore(manifestPath).write([{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
     const listeners = new Map<number, (terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null }) => void>();
     let subscriptions = 0;
     const poked: Array<number | null> = [];
@@ -1089,7 +1111,7 @@ test("a slow old replacement registration cannot overwrite a newer child listene
   let daemon: SupervisorDaemon | null = null;
   try {
     const manifestPath = join(env.root, "manifest.json");
-    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
+    await new ManifestStore(manifestPath).write([{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
     const listeners = new Map<number, (terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null }) => void>();
     let releaseSecondRegistration!: () => void;
     const secondRegistration = new Promise<void>((resolve) => { releaseSecondRegistration = resolve; });
@@ -1128,7 +1150,7 @@ test("a replacement child terminal callback enters durable convergence", async (
   let daemon: SupervisorDaemon | null = null;
   try {
     const manifestPath = join(env.root, "manifest.json");
-    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
+    await new ManifestStore(manifestPath).write([{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
     let replacementExit: ((terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null }) => void) | null = null;
     const port: ProviderActionPort = {
       capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
@@ -1150,7 +1172,7 @@ test("a transient replacement listener failure retries the promoted child withou
   let daemon: SupervisorDaemon | null = null;
   try {
     const manifestPath = join(env.root, "manifest.json");
-    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
+    await new ManifestStore(manifestPath).write([{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
     let spawnCount = 0;
     let failReplacementListener = true;
     let replacementExit: ((terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null }) => void) | null = null;
@@ -1176,7 +1198,7 @@ test("desired stopped turns every terminal into a clean stopped observation and 
   let daemon: SupervisorDaemon | null = null;
   try {
     const manifestPath = join(env.root, "manifest.json");
-    await new ManifestStore(manifestPath).write(0, [{ ...entry, desired_state: "stopped", observed_state: "stopping" }]);
+    await new ManifestStore(manifestPath).write([{ ...entry, desired_state: "stopped", observed_state: "stopping" }]);
     let failSubscribe = true;
     const port: ProviderActionPort = {
       capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }), spawn: async () => { throw new Error("unreachable"); }, attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
@@ -1237,7 +1259,7 @@ test("an intentional stop-turn terminal remains idle without restarting the runn
       updated_at: "2026-07-17T06:59:18.205Z",
     },
   };
-  await new ManifestStore(manifestPath).write(0, [stoppedTurnEntry]);
+  await new ManifestStore(manifestPath).write([stoppedTurnEntry]);
   const daemon = new SupervisorDaemon({
     lockPath: join(env.root, "daemon.lock"),
     ...testDaemonEndpoint(env.root),
@@ -1257,7 +1279,7 @@ test("an intentional stop-turn terminal remains idle without restarting the runn
     assert.equal(current.desired_state, "running");
     assert.equal(current.observed_state, "idle");
     assert.equal(current.condition, "none");
-    assert.equal(current.last_error, null);
+    assert.equal(current.last_error ?? null, null);
     assert.equal(current.provider_ref?.execution_generation_id, executionGenerationId);
     assert.equal(current.turn_control?.action_id, "stop-turn-action");
     assert.equal(current.reconciliation?.last_terminal?.terminal_cause, "stopped");
@@ -1288,7 +1310,7 @@ test("restart recovery quarantines every dispatched turn control regardless of c
     recorded_at: "2026-08-01T00:00:00.000Z",
     updated_at: "2026-08-01T00:00:00.000Z",
   });
-  await new ManifestStore(manifestPath).write(0, [
+  await new ManifestStore(manifestPath).write([
     // Stop-only provider on daemon_inbox + a correction ⇒ stop-then-resend.
     { ...entry, id: "resend_agent", room_id: "room-a", provider: "open-model", delivery_mode: "daemon_inbox", work_attempt_id: "attempt", last_turn_control_sequence: 1, turn_control: dispatchedControl("control-resend", true, "stop_then_resend") },
     // Native-correction provider (midTurnCorrection) ⇒ not re-drivable blindly.
@@ -1376,7 +1398,7 @@ test("restart treats every exact predecessor correction row state as applied evi
   const seedInbox = new SupervisedAgentInboxStore(manifestPath);
   let daemon: ProductionSupervisorDaemon | null = null;
   try {
-    await seedStore.write(0, [...evidenced, retired, quarantined].map((candidate) => ({ ...candidate, turn_control: undefined })));
+    await seedStore.write([...evidenced, retired, quarantined].map((candidate) => ({ ...candidate, turn_control: undefined })));
     const correctionRows = new Map<string, string>();
     for (const candidate of evidenced) {
       const row = await seedInbox.enqueueCorrection({
@@ -1411,7 +1433,7 @@ test("restart treats every exact predecessor correction row state as applied evi
       candidate.id,
       (await seedInbox.get(correctionRows.get(candidate.id)!))!.state,
     ] as const)));
-    await seedStore.write(1, [...evidenced, retired, quarantined]);
+    await seedStore.write([...evidenced, retired, quarantined]);
     await seedInbox.close();
     await seedStore.close();
 
@@ -1450,196 +1472,6 @@ test("restart treats every exact predecessor correction row state as applied evi
     await daemon?.stop().catch(() => undefined);
     await seedInbox.close().catch(() => undefined);
     await seedStore.close().catch(() => undefined);
-    await env.cleanup();
-  }
-});
-
-test("legacy delivery cutover converges across pre-dispatch failure, dispatch crash, uncertainty, and stale generations", async () => {
-  const env = await fixture();
-  const paths = {
-    lockPath: join(env.root, "delivery-cutover.lock"),
-    ...testNamedDaemonEndpoint(env.root, "delivery-cutover"),
-    manifestPath: join(env.root, "delivery-cutover.sqlite"),
-    auditPath: join(env.root, "delivery-cutover.audit.jsonl"),
-  };
-  const connection = {
-    kind: "codex_app_server" as const,
-    url: "http://127.0.0.1:47891",
-    pid: 47891,
-    processIdentity: "codex-cutover-birth",
-  };
-  const handles = new Map<string, {
-    workAttemptId: string;
-    pid: number;
-    providerContinuationId: string;
-    providerConnection: typeof connection;
-    observedState: "working";
-  }>();
-  const controlTargets = new Map<string, Array<string | null>>();
-  const inspectTargets = new Map<string, string[]>();
-  const retryCalls = new Map<string, number>();
-  const port: ProviderActionPort = {
-    capabilities: async () => ({
-      deliveryModes: ["mcp_polling", "daemon_inbox"], resume: true, midTurnInjection: false,
-      transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true,
-    }),
-    spawn: async () => { throw new Error("cutover test must not spawn"); },
-    attach: async () => null,
-    attachAction: async () => ({ state: "absent" }),
-    resume: async () => { throw new Error("cutover test must not resume"); },
-    poke: async () => {},
-    stop: async () => { throw new Error("cutover test never stops the provider process"); },
-    onExit: async () => () => {},
-    onStream: async () => () => {},
-    inspectTurn: async (handle, turnId) => {
-      const id = handle.workAttemptId;
-      inspectTargets.set(id, [...(inspectTargets.get(id) ?? []), turnId]);
-      if (id === "attempt-dispatch-crash") {
-        return (inspectTargets.get(id)?.length ?? 0) === 1 ? "active" : "terminal";
-      }
-      if (id === "attempt-uncertain") return "terminal";
-      return "unknown";
-    },
-    controlExactTurn: async (handle, options) => {
-      const id = handle.workAttemptId;
-      controlTargets.set(id, [...(controlTargets.get(id) ?? []), options.targetTurnId ?? null]);
-      if (id === "attempt-retryable") {
-        const call = (retryCalls.get(id) ?? 0) + 1;
-        retryCalls.set(id, call);
-        await options.checkpointTargetTurn("turn-retryable-A");
-        if (call === 1) throw new Error("transient failure before native dispatch");
-        await options.markDispatched();
-        return { outcome: "terminal", targetTurnId: "turn-retryable-A" };
-      }
-      if (id === "attempt-dispatch-crash") {
-        assert.equal(options.targetTurnId, "turn-dispatch-A");
-        await options.checkpointTargetTurn("turn-dispatch-A");
-        await options.markDispatched();
-        return { outcome: "interrupt_dispatched", targetTurnId: "turn-dispatch-A" };
-      }
-      throw new Error(`unexpected cutover control for ${id}`);
-    },
-  };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
-  try {
-    await daemon.start();
-    const internals = daemon as unknown as {
-      store: ManifestStore;
-      durability: WorkDurabilityStore & { getAttempt: (workAttemptId: string) => Promise<unknown> };
-      liveHandles: Map<string, (typeof handles extends Map<string, infer T> ? T : never)>;
-      requestConvergence: (entryId: string) => void;
-      scheduleDeliveryCutoverRetry: (entryId: string, delayMs: number) => void;
-      deliveryCutovers: { start: (entryId: string) => Promise<void> };
-    };
-    internals.requestConvergence = () => {};
-    // Timers are an availability mechanism, not part of these state-machine
-    // assertions. Drive retries explicitly so every crash edge is deterministic.
-    internals.scheduleDeliveryCutoverRetry = () => {};
-    const liveEntry = (
-      id: string,
-      workAttemptId: string,
-      executionGenerationId: string,
-      providerContinuationId: string,
-      deliveryCutover?: DaemonManifestEntry["delivery_cutover"],
-    ): DaemonManifestEntry => ({
-      ...entry,
-      id,
-      provider: "codex",
-      delivery_mode: "mcp_polling",
-      observed_state: "working",
-      work_attempt_id: workAttemptId,
-      provider_ref: {
-        work_attempt_id: workAttemptId,
-        execution_generation_id: executionGenerationId,
-        provider_continuation_id: providerContinuationId,
-        provider_connection: connection,
-      },
-      delivery_cutover: deliveryCutover,
-    });
-    const installLive = async (candidate: DaemonManifestEntry) => {
-      assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: candidate })).ok, true);
-      const ref = candidate.provider_ref!;
-      const handle = {
-        workAttemptId: candidate.work_attempt_id!, pid: connection.pid,
-        providerContinuationId: ref.provider_continuation_id,
-        providerConnection: connection, observedState: "working" as const,
-      };
-      handles.set(candidate.id, handle);
-      internals.liveHandles.set(candidate.id, handle);
-    };
-
-    const retryable = liveEntry("cutover-retryable", "attempt-retryable", "run-retryable", "thread-retryable");
-    await installLive(retryable);
-    await internals.deliveryCutovers.start(retryable.id);
-    let saved = await internals.store.getEntry(retryable.id);
-    assert.equal(saved?.delivery_mode ?? "mcp_polling", "mcp_polling");
-    assert.equal(saved?.delivery_cutover?.phase, "retryable");
-    assert.equal(saved?.delivery_cutover?.provider_turn_id, "turn-retryable-A");
-    await internals.deliveryCutovers.start(retryable.id);
-    saved = await internals.store.getEntry(retryable.id);
-    assert.equal(saved?.delivery_mode, "daemon_inbox", "a pre-dispatch failure retries and completes without operator repair");
-    assert.equal(saved?.delivery_cutover ?? null, null);
-    assert.deepEqual(controlTargets.get("attempt-retryable"), [null, "turn-retryable-A"], "retry never rediscovers or retargets A");
-
-    const dispatchCrash = liveEntry("cutover-dispatch-crash", "attempt-dispatch-crash", "run-dispatch", "thread-dispatch", {
-      work_attempt_id: "attempt-dispatch-crash", execution_generation_id: "run-dispatch",
-      provider_continuation_id: "thread-dispatch", provider_turn_id: "turn-dispatch-A",
-      phase: "dispatching", error: null, updated_at: "2026-08-05T12:00:00.000Z",
-    });
-    await installLive(dispatchCrash);
-    await internals.deliveryCutovers.start(dispatchCrash.id);
-    saved = await internals.store.getEntry(dispatchCrash.id);
-    assert.equal(saved?.delivery_mode, "daemon_inbox", "dispatching recovery re-inspects and safely redrives exact active A");
-    assert.deepEqual(inspectTargets.get("attempt-dispatch-crash"), ["turn-dispatch-A", "turn-dispatch-A"]);
-    assert.deepEqual(controlTargets.get("attempt-dispatch-crash"), ["turn-dispatch-A"]);
-
-    const uncertain = liveEntry("cutover-uncertain", "attempt-uncertain", "run-uncertain", "thread-uncertain", {
-      work_attempt_id: "attempt-uncertain", execution_generation_id: "run-uncertain",
-      provider_continuation_id: "thread-uncertain", provider_turn_id: "turn-uncertain-A",
-      phase: "uncertain", error: "response lost", updated_at: "2026-08-05T12:01:00.000Z",
-    });
-    await installLive(uncertain);
-    await internals.deliveryCutovers.start(uncertain.id);
-    saved = await internals.store.getEntry(uncertain.id);
-    assert.equal(saved?.delivery_mode, "daemon_inbox", "terminal inspection converges an ambiguous dispatch without replay");
-    assert.deepEqual(inspectTargets.get("attempt-uncertain"), ["turn-uncertain-A"]);
-    assert.equal(controlTargets.has("attempt-uncertain"), false);
-
-    const terminalAttempts = new Set(["attempt-stale", "attempt-detached"]);
-    internals.durability.getAttempt = async (workAttemptId: string) => terminalAttempts.has(workAttemptId) ? ({
-      execution_generations: [{
-        execution_generation_id: workAttemptId === "attempt-stale" ? "run-old" : "run-detached",
-        terminal: { terminal_cause: "process_exit" },
-      }],
-    }) : null;
-    const stale = liveEntry("cutover-stale", "attempt-successor", "run-successor", "thread-successor", {
-      work_attempt_id: "attempt-stale", execution_generation_id: "run-old",
-      provider_continuation_id: "thread-old", provider_turn_id: "turn-old-A",
-      phase: "uncertain", error: "old response lost", updated_at: "2026-08-05T12:02:00.000Z",
-    });
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: stale })).ok, true);
-    await internals.deliveryCutovers.start(stale.id);
-    saved = await internals.store.getEntry(stale.id);
-    assert.equal(saved?.delivery_mode ?? "mcp_polling", "mcp_polling", "a terminal stale generation cannot flip a successor runtime's ingress owner");
-    assert.equal(saved?.delivery_cutover ?? null, null);
-    assert.equal(saved?.provider_ref?.execution_generation_id, "run-successor");
-
-    const detached: DaemonManifestEntry = {
-      ...entry, id: "cutover-detached", provider: "codex", delivery_mode: "mcp_polling",
-      observed_state: "failed", work_attempt_id: "attempt-detached", provider_ref: undefined,
-      delivery_cutover: {
-        work_attempt_id: "attempt-detached", execution_generation_id: "run-detached",
-        provider_continuation_id: "thread-detached", provider_turn_id: "turn-detached-A",
-        phase: "uncertain", error: "daemon crashed", updated_at: "2026-08-05T12:03:00.000Z",
-      },
-    };
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: detached })).ok, true);
-    await internals.deliveryCutovers.start(detached.id);
-    saved = await internals.store.getEntry(detached.id);
-    assert.equal(saved?.delivery_mode, "daemon_inbox", "terminal durability closes a detached cutover instead of leaving a permanent tombstone");
-    assert.equal(saved?.delivery_cutover ?? null, null);
-  } finally {
-    await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
 });

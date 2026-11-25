@@ -1,3 +1,4 @@
+export const REVIEW_ARCHIVE_MIN_USER_VERSION: 1005;
 export class InvalidInlineReviewError extends Error {}
 export type ReviewArchiveReference = { size: number; key: Buffer };
 export function reviewArchiveReference(value: unknown): ReviewArchiveReference | null;

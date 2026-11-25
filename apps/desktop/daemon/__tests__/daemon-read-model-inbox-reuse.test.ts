@@ -95,7 +95,7 @@ test("the inbox versions move per agent for every committed write, by this conne
     assert.equal(afterOwnWrite!.scope, first.scope);
 
     // A writer that never tells the inbox store, on its own connection.
-    other.prepare("UPDATE supervised_agent_inbox SET last_error='changed elsewhere' WHERE source_message_id='1'").run();
+    other.prepare("UPDATE inbox_items SET last_error='changed elsewhere' WHERE source_message_id='1'").run();
     const afterOtherWrite = await env.store.inboxStateVersions();
     assert.ok(version(afterOtherWrite, entry.id) > version(afterOwnWrite, entry.id));
 
@@ -144,7 +144,7 @@ test("an unchanged database reuses the inbox inputs, and any write shows on the 
     assert.equal(env.reads.receipts, 2);
 
     // Invalidation by a write on another connection that no hook reports.
-    other.prepare("UPDATE supervised_agent_inbox SET last_error='changed elsewhere' WHERE source_message_id='2'").run();
+    other.prepare("UPDATE inbox_items SET last_error='changed elsewhere' WHERE source_message_id='2'").run();
     const afterOther = await env.watch();
     assert.equal(afterOther[0]?.delivery_receipts?.find((receipt) => receipt.source_message_id === "2")?.error, "changed elsewhere");
     assert.equal(env.reads.receipts, 3);
@@ -249,7 +249,7 @@ test("a write for one agent costs no other agent a read, whichever connection wr
       messages: [{ source_message_id: "9", source_message: { id: "9", text: "hello" }, activation: { for_current_agent: true } }] });
     await env.watch([entry, second]);
     assert.deepEqual(env.reads, { receipts: 4, repairs: 4, ingress: 4 });
-    other.prepare("UPDATE supervised_agent_inbox SET last_error='changed elsewhere' WHERE agent_id='agent_2'").run();
+    other.prepare("UPDATE inbox_items SET last_error='changed elsewhere' WHERE agent_id='agent_2'").run();
     const views = await env.watch([entry, second]);
     assert.deepEqual(env.reads, { receipts: 5, repairs: 5, ingress: 5 });
     assert.equal(views[1]?.delivery_receipts?.[0]?.error, "changed elsewhere");

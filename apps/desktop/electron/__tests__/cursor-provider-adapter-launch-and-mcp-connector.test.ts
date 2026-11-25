@@ -23,12 +23,12 @@ import {
   cursorCliEnv,
   cursorLaunchPolicyArgs,
   defaultLaunchTurn,
-} from "../main/agents/cursor-provider-adapter.js";
-import { boundedClaudeRoomTurnPrompt } from "../main/agents/claude-code-provider-adapter.js";
-import { cursorMcpConnectorListenPath } from "../main/agents/cursor/windows-turn.js";
-import { cursorSupervisedMcpServerName } from "../main/agents/cursor-managed-profile.js";
-import { prepareCursorResumeOwnershipLock } from "../main/agents/cursor-sandbox-policy.js";
-import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
+import { boundedClaudeRoomTurnPrompt } from "#provider-runtime/agents/claude-code-provider-adapter.js";
+import { cursorMcpConnectorListenPath } from "#provider-runtime/agents/cursor/windows-turn.js";
+import { cursorSupervisedMcpServerName } from "#provider-runtime/agents/cursor-managed-profile.js";
+import { prepareCursorResumeOwnershipLock } from "#provider-runtime/agents/cursor-sandbox-policy.js";
+import { LETAGENTS_MCP_RUNTIME_VERSION } from "#provider-runtime/agents/letagents-mcp-runtime.js";
 import {
   birthIdentity,
   argValue,
@@ -53,43 +53,12 @@ import {
   endsWithPath,
 } from "./cursor-provider-adapter.fixture.js";
 import { macOsSandboxOnly, needsPosixProcessGroups, needsWindowsFakeCursorAgent, writeFakeProvider, expectedCursorSandbox } from "./platform.js";
-import { CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS } from "../main/agents/cursor-provider-constants.js";
+import { CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS } from "#provider-runtime/agents/cursor-provider-constants.js";
 
 /** A turn's private local-worker root: under /tmp on POSIX (/private/tmp on macOS), under the temporary folder on Windows. */
 const RUNTIME_DATA_DIR = process.platform === "win32"
   ? new RegExp(`^${cursorTmp.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}\\\\letagents-cursor-data-[A-Za-z0-9]{6}$`, "i")
   : /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/;
-
-test("spawn runs one per-turn child with verbatim policy flags and the prompt as a positional argument", async () => {
-  const harness = createHarness();
-  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
-
-  assert.equal(harness.launches.length, 1);
-  const args = harness.launches[0]!.args;
-  assert.equal(args[0], "-p");
-  assert.ok(args.join(" ").includes("--output-format stream-json"));
-  assert.ok(args.includes("--trust"), "headless workspace-trust suppression is adapter-owned");
-  assert.equal(args.includes("--disable-project-configs"), false, "legacy Cursor keeps project config enabled");
-  assert.equal(args.includes("--approve-mcps"), false, "legacy Cursor has no sealed profile to scope approval, so it never blanket-approves MCPs");
-  assert.ok(args.join(" ").includes(`--workspace ${WA_CURSOR_CWD}`));
-  assert.ok(args.join(" ").includes("--mode ask"), "native policy flag passed verbatim");
-  assert.ok(args.join(" ").includes(`--sandbox ${expectedCursorSandbox("enabled")}`));
-  assert.equal(args.includes("--resume"), false);
-  const prompt = args[args.length - 1]!;
-  assert.ok(prompt.includes("Cursor worker"), "prompt is provider-labelled and positional");
-  assert.ok(prompt.includes('"cursor:'), "register_agent_session runtime uses the cursor key");
-
-  // spawn resolves while the turn is still RUNNING: live pid, working state.
-  assert.equal(handle.observedState(), "working");
-  assert.equal(handle.pid, 5200);
-  assert.deepEqual(handle.providerConnection, {
-    kind: "cursor_cli",
-    pid: 5200,
-    processIdentity: birthIdentity(5200),
-  });
-  assert.equal(handle.providerContinuationId, "sess-cursor-1", "session id captured from the stream");
-});
 
 test("Cursor resume ownership rejects occupied or unsafe structures without changing native state", { skip: macOsSandboxOnly }, () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "cursor-resume-ownership-")));
@@ -301,7 +270,7 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
       supervisorWorkerSession: { agentSessionId: "agent_session_cursor_1", roomCursor: "msg_7", apiUrl: "letagents-local://rooms" },
     }));
 
-    assert.deepEqual(adapter.capabilities().deliveryModes, ["mcp_polling", "daemon_inbox"]);
+    assert.deepEqual(adapter.capabilities().deliveryModes, ["daemon_inbox"]);
     assert.equal(adapter.capabilities().midTurnCorrection, false);
     assert.equal(harness.launches.length, 0, "lane creation performs no unjournaled bootstrap inference");
     assert.equal(handle.observedState(), "idle");

@@ -1,8 +1,6 @@
 import { ProviderLiveDisplay, liveDisplayFeedPlacement } from "./provider-live-display.js";
-import { publishWorkerNativeActivity } from "./cloud-http.js";
 import { liveActivitySummaryForEvent, type LiveActivitySummaryStatus } from "./live-activity-summary-relay.js";
 import { sanitizeDaemonActivityEvent } from "./credential-redaction.js";
-import type { WorkDurabilityStore } from "./durability-store.js";
 import type {
   ProviderActionHandle,
   ProviderActionConnectionRef,
@@ -19,8 +17,6 @@ import {
   isSupervisedQuietPollContinuation,
   isSupervisedWaitProviderEvent,
   providerStreamLifecycle,
-  supervisedWaitEvidenceFromProviderEvent,
-  type SupervisedWaitEvidence,
 } from "./provider-stream-policy.js";
 import type {
   DaemonActivityEvent,
@@ -34,17 +30,7 @@ import type {
   LiveBindingIdentity,
   WorkerRuntimeCustody,
 } from "./worker-runtime-custody.js";
-import {
-  isLifecycleProjectionProvider,
-  lifecycleProjectionProviders,
-  unavailableLifecycleProjectionDiagnostics,
-  type LifecycleCaptureAdmissionDiagnostics,
-  type LifecycleCaptureAdmissionStatus,
-  type LifecycleProjectionDiagnostics,
-  type LifecycleProjectionObservation,
-  type LifecycleProjectionProvider,
-} from "./lifecycle-projection-ledger.js";
-import type { LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
+import type { LifecycleCaptureAdmissionStatus } from "./execution-capture-coordinator.js";
 import { launchProgress } from "./launch-progress.js";
 import { turnStartLatency } from "./turn-start-latency.js";
 
@@ -59,7 +45,7 @@ export type ProviderInstallationToken = Readonly<{
   providerContinuationId: string;
   providerConnection: ProviderActionConnectionRef;
   configurationRevision: number;
-  authorityMode: LifecycleAuthorityMode | null;
+  authorityMode: "typed" | null;
 }>;
 
 type ProviderListenerLease = {
@@ -88,64 +74,6 @@ const ENDED_HANDLE_HAND_OFF_MAX_GAP_TICKS = 20;
 /** How long the read model holds a Cursor lane's readiness through one turn boundary. */
 export const CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS = 60_000;
 
-export type ProviderRecoveryDiagnostics = {
-  daemon_inbox_wait_evidence_dependency: number;
-  lifecycle_projection: LifecycleProjectionDiagnostics;
-  lifecycle_capture_admission: LifecycleCaptureAdmissionDiagnostics;
-  lifecycle_local_conformance_eligible: Record<LifecycleProjectionProvider, boolean>;
-};
-
-function providerForLifecycleConnection(
-  connection: ProviderActionHandle["providerConnection"],
-): LifecycleProjectionProvider | null {
-  if (connection?.kind === "codex_app_server") return "codex";
-  if (connection?.kind === "claude_cli") return "claude-code";
-  if (connection?.kind === "cursor_cli") return "cursor";
-  if (connection?.kind === "opencode_server") return "open-model";
-  if (connection?.kind === "antigravity_acp") return "antigravity";
-  return null;
-}
-
-/**
- * Evidence-present-and-clean is only a local conformance prerequisite. It is
- * not soak sufficiency or authority to flip a provider. Projection totals are
- * monotonic, so any recorded mismatch, conflict, or unavailable observation
- * keeps that provider ineligible until a separately designed evidence epoch
- * exists; this read-time predicate never caches or persists a second result.
- */
-export function lifecycleLocalConformanceEligibility(
-  projection: LifecycleProjectionDiagnostics,
-  daemonInboxWaitEvidenceDependency: number,
-  captureAdmission: LifecycleCaptureAdmissionDiagnostics,
-): Record<LifecycleProjectionProvider, boolean> {
-  const cleanWaitAuthority = Number.isSafeInteger(daemonInboxWaitEvidenceDependency)
-    && daemonInboxWaitEvidenceDependency === 0;
-  return Object.fromEntries(lifecycleProjectionProviders.map((provider) => {
-    const evidence = projection.providers?.[provider];
-    const counters = evidence && [
-      evidence.comparedSegments,
-      evidence.matched,
-      evidence.missingInTyped,
-      evidence.missingInLegacy,
-      evidence.pairedButDifferent,
-      evidence.conflicts,
-      evidence.observationUnavailable,
-    ];
-    const validCounters = Boolean(counters?.every((value) => Number.isSafeInteger(value) && value >= 0));
-    const eligible = projection.available === true
-      && cleanWaitAuthority
-      && captureAdmission[provider] === "ready"
-      && validCounters
-      && evidence.comparedSegments >= 1
-      && evidence.missingInTyped === 0
-      && evidence.missingInLegacy === 0
-      && evidence.pairedButDifferent === 0
-      && evidence.conflicts === 0
-      && evidence.observationUnavailable === 0;
-    return [provider, eligible];
-  })) as Record<LifecycleProjectionProvider, boolean>;
-}
-
 export type ProviderStreamManifest = {
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
   /**
@@ -169,20 +97,12 @@ export type ProviderStreamManifest = {
     executionGenerationId: string;
     providerConnection: ProviderActionConnectionRef;
     configurationRevision: number;
-  }): Promise<LifecycleAuthorityMode | null>;
+  }): Promise<"typed" | null>;
 };
 
 export type ProviderStreamBindings = Pick<
   WorkerBindingStore,
-  | "get"
-  | "credentialFor"
-  | "verifyAndAdvanceExecutionGeneration"
-  | "checkpointCursorMonotonic"
->;
-
-export type ProviderStreamDurability = Pick<
-  WorkDurabilityStore,
-  "getAttempt" | "checkpoint"
+  "get"
 >;
 
 export type ProviderStreamRuntimeCustody = Pick<
@@ -190,10 +110,6 @@ export type ProviderStreamRuntimeCustody = Pick<
   | "liveBinding"
   | "installLiveBinding"
   | "deleteLiveBinding"
-  | "pendingResumeBinding"
-  | "hasPendingResumeBinding"
-  | "installPendingResumeBinding"
-  | "deletePendingResumeBinding"
 >;
 
 export type ProviderStreamTransition = (
@@ -222,11 +138,6 @@ export type ProviderStreamCoordinatorOptions = {
   observeExecution?(installation: ProviderInstallationToken): () => void;
   /** Advance an existing capture lease to a newly committed Cursor child birth. */
   advanceExecution?(installation: ProviderInstallationToken): void;
-  /** Raw legacy-classifier witness. This is comparison evidence, never lifecycle authority. */
-  observeLegacyLifecycle?(observation: LifecycleProjectionObservation): void;
-  markLifecycleProjectionUnavailable?(provider: LifecycleProjectionProvider): void;
-  lifecycleProjectionDiagnostics?(): LifecycleProjectionDiagnostics;
-  captureAdmission?(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus;
   typedLifecycleAdmission?(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus;
   /** A lasting reason this installation's execution record cannot be continued, or null. */
   recordBlock?(installation: ProviderInstallationToken): string | null;
@@ -234,7 +145,6 @@ export type ProviderStreamCoordinatorOptions = {
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   manifest: ProviderStreamManifest;
   bindings: ProviderStreamBindings;
-  durability: ProviderStreamDurability;
   runtimeCustody: ProviderStreamRuntimeCustody;
   serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   serializeManifest<T>(operation: () => Promise<T>): Promise<T>;
@@ -274,7 +184,6 @@ export type ProviderStreamCoordinatorOptions = {
   };
   delivery: {
     start(entryId: string): Promise<unknown>;
-    startCutover(entryId: string): Promise<unknown>;
   };
   heartbeat: {
     intervalMs: number;
@@ -287,7 +196,6 @@ export type ProviderStreamCoordinatorOptions = {
     ): Promise<boolean>;
     requestConvergence(entryId: string): void;
   };
-  publishWorkerActivity?: typeof publishWorkerNativeActivity;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
   setTimeout?: typeof setTimeout;
@@ -318,8 +226,6 @@ export class ProviderStreamCoordinator {
     admission: "ready" | null;
     boundarySinceMs: number;
   }>();
-  private daemonInboxWaitEvidenceDependencies = 0;
-  private readonly publishWorkerActivity: typeof publishWorkerNativeActivity;
   private readonly setHeartbeat: typeof setInterval;
   private readonly clearHeartbeat: typeof clearInterval;
   private readonly setRetryTimeout: typeof setTimeout;
@@ -327,7 +233,6 @@ export class ProviderStreamCoordinator {
 
   constructor(private readonly options: ProviderStreamCoordinatorOptions) {
     this.liveHandles = options.liveHandles ?? new Map<string, ProviderActionHandle>();
-    this.publishWorkerActivity = options.publishWorkerActivity ?? publishWorkerNativeActivity;
     this.setHeartbeat = options.setInterval ?? setInterval;
     this.clearHeartbeat = options.clearInterval ?? clearInterval;
     this.setRetryTimeout = options.setTimeout ?? setTimeout;
@@ -357,7 +262,6 @@ export class ProviderStreamCoordinator {
   async settleCursorLifecycleBeforeIdle(
     agent: { agentId: string; handle: ProviderActionHandle | null; executionGenerationId: string },
     capture: { flush(installation: ProviderInstallationToken): void } | null | undefined,
-    effects: { settle(agentId: string): Promise<void> } | null | undefined,
   ): Promise<void> {
     const installation = this.currentInstallation(agent.agentId);
     if (!installation || installation.handle !== agent.handle
@@ -365,62 +269,17 @@ export class ProviderStreamCoordinator {
       throw new Error("Cursor lifecycle settlement lost its exact installed child birth.");
     }
     if (installation.authorityMode !== "typed") return;
-    if (!capture || !effects) throw new Error("Typed Cursor lifecycle settlement is unavailable.");
+    if (!capture) throw new Error("Typed Cursor lifecycle settlement is unavailable.");
     // The child is about to leave the handle before its idle checkpoint lands.
+    // capture.flush() synchronously drains facts and projects lifecycle onto
+    // `agents` in one transaction on the shared connection.
     const lease = this.listenerLeases.get(agent.agentId);
     if (lease?.handle === agent.handle) this.beginCursorTurnBoundary(lease, installation);
     capture.flush(installation);
-    await effects.settle(agent.agentId);
   }
 
   isLatestInstallation(installation: ProviderInstallationToken): boolean {
     return this.latestInstallations.get(installation.entryId) === installation;
-  }
-
-  recoveryDiagnostics(): ProviderRecoveryDiagnostics {
-    const daemonInboxWaitEvidenceDependency = this.daemonInboxWaitEvidenceDependencies;
-    const lifecycleProjection = this.options.lifecycleProjectionDiagnostics?.()
-      ?? unavailableLifecycleProjectionDiagnostics();
-    const lifecycleCaptureAdmission = this.lifecycleCaptureAdmission();
-    return {
-      daemon_inbox_wait_evidence_dependency: daemonInboxWaitEvidenceDependency,
-      lifecycle_projection: lifecycleProjection,
-      lifecycle_capture_admission: lifecycleCaptureAdmission,
-      lifecycle_local_conformance_eligible: lifecycleLocalConformanceEligibility(
-        lifecycleProjection,
-        daemonInboxWaitEvidenceDependency,
-        lifecycleCaptureAdmission,
-      ),
-    };
-  }
-
-  private lifecycleCaptureAdmission(): LifecycleCaptureAdmissionDiagnostics {
-    const admissions = Object.fromEntries(lifecycleProjectionProviders
-      .map((provider) => [provider, "unavailable"])) as LifecycleCaptureAdmissionDiagnostics;
-    const seen = new Set<LifecycleProjectionProvider>();
-    const priority = { ready: 0, pending: 1, unavailable: 2 } as const;
-    for (const [entryId, handle] of this.liveHandles) {
-      const provider = providerForLifecycleConnection(handle.providerConnection);
-      if (!provider) continue;
-      const installation = this.currentInstallation(entryId);
-      let current: LifecycleCaptureAdmissionStatus = "unavailable";
-      if (installation) {
-        const admission = installation.authorityMode === "typed"
-          ? this.options.typedLifecycleAdmission
-          : this.options.captureAdmission;
-        try { current = admission?.(installation) ?? "unavailable"; }
-        catch { current = "unavailable"; }
-      }
-      if (!seen.has(provider) || priority[current] > priority[admissions[provider]]) admissions[provider] = current;
-      seen.add(provider);
-    }
-    return admissions;
-  }
-
-  private acceptsLegacyWaitAuthority(entry: DaemonManifestEntry): boolean {
-    if ((entry.delivery_mode ?? "mcp_polling") === "mcp_polling") return true;
-    if (entry.delivery_mode === "daemon_inbox") this.daemonInboxWaitEvidenceDependencies += 1;
-    return false;
   }
 
   /** Remove only one exact installation; handle identity alone is never enough. */
@@ -787,12 +646,9 @@ export class ProviderStreamCoordinator {
     const { entryId, handle } = installation;
     const disposeStream = provider.onStream
       ? await provider.onStream(handle, (event) => {
-          const currentInstallation = this.currentInstallationForLease(lease);
-          if (!currentInstallation) {
-            this.markLifecycleProjectionUnavailableForEvent(event);
-            return;
-          }
-          this.track(this.enqueueInstalled(currentInstallation, event));
+        const currentInstallation = this.currentInstallationForLease(lease);
+        if (!currentInstallation) return;
+        this.track(this.enqueueInstalled(currentInstallation, event));
         })
       : () => {};
     if (!this.adoptLeaseDisposer(lease, disposeStream)) return;
@@ -889,7 +745,7 @@ export class ProviderStreamCoordinator {
     entry: DaemonManifestEntry;
     handle: ProviderActionHandle;
     executionGenerationId: string;
-    authorityMode?: LifecycleAuthorityMode | null;
+    authorityMode?: "typed" | null;
   }): ProviderInstallationToken {
     const { entry, handle, executionGenerationId } = input;
     const connection = entry.provider_ref?.provider_connection;
@@ -918,7 +774,7 @@ export class ProviderStreamCoordinator {
     if (idle ? authorityMode !== null : !connection.processIdentity?.trim() || authorityMode == null) {
       throw new Error("Cursor runtime token requires authority for exactly one committed process birth.");
     }
-    const frozenAuthorityMode = authorityMode as LifecycleAuthorityMode | null;
+    const frozenAuthorityMode = authorityMode as "typed" | null;
     if (this.entryMatchesInstallation(entry, prior)
       && prior.authorityMode === frozenAuthorityMode
       && this.matchesInstallationSnapshot(prior)) return prior;
@@ -1092,161 +948,6 @@ export class ProviderStreamCoordinator {
     return false;
   }
 
-  async stageWorkerBindingAfterResume(
-    entry: DaemonManifestEntry,
-    priorBinding: WorkerSessionBinding,
-    successorExecutionGenerationId: string,
-    handle: ProviderActionHandle,
-  ): Promise<void> {
-    if (!this.acceptsLegacyWaitAuthority(entry)) {
-      throw new Error("Only legacy polling can await provider worker-wait evidence.");
-    }
-    const ref = entry.provider_ref;
-    if (!ref
-      || priorBinding.entry_id !== entry.id
-      || priorBinding.room_id !== entry.room_id
-      || priorBinding.work_attempt_id !== ref.work_attempt_id
-      || ref.execution_generation_id !== successorExecutionGenerationId
-      || handle.workAttemptId !== ref.work_attempt_id
-      || handle.providerContinuationId !== ref.provider_continuation_id) {
-      throw new Error("Resumed provider does not match the durable worker continuation identity.");
-    }
-    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
-    const predecessor = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === priorBinding.execution_generation_id,
-    );
-    const successor = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === successorExecutionGenerationId,
-    );
-    if (!predecessor?.terminal) {
-      throw new Error("Worker binding predecessor execution is not durably terminal.");
-    }
-    if (predecessor.terminal.provider_continuation_id !== ref.provider_continuation_id) {
-      throw new Error("Worker binding predecessor belongs to a different provider continuation.");
-    }
-    if (!successor || successor.terminal
-      || attempt.execution_generations.filter((candidate) => candidate.terminal === null).length !== 1) {
-      throw new Error("Worker binding successor is not the single live execution generation.");
-    }
-    const current = await this.readScalarEntry(entry.id);
-    if (!current || !this.acceptsLegacyWaitAuthority(current)
-      || current.room_id !== entry.room_id
-      || current.work_attempt_id !== ref.work_attempt_id
-      || current.provider_ref?.execution_generation_id !== successorExecutionGenerationId
-      || current.provider_ref.provider_continuation_id !== ref.provider_continuation_id) {
-      throw new Error("Provider authority changed before legacy worker-wait staging.");
-    }
-    this.options.runtimeCustody.installPendingResumeBinding(entry.id, {
-      roomId: entry.room_id,
-      workAttemptId: ref.work_attempt_id,
-      predecessorExecutionGenerationId: priorBinding.execution_generation_id,
-      successorExecutionGenerationId,
-      agentSessionId: priorBinding.agent_session_id,
-      providerContinuationId: ref.provider_continuation_id,
-    });
-  }
-
-  async restoreWorkerBindingFromWait(
-    entryId: string,
-    evidence: SupervisedWaitEvidence,
-  ): Promise<boolean> {
-    const entry = await this.readScalarEntry(entryId);
-    if (!entry || !this.acceptsLegacyWaitAuthority(entry)) return false;
-    const pending = this.options.runtimeCustody.pendingResumeBinding(entryId);
-    if (!pending || evidence.agentSessionId !== pending.agentSessionId) return false;
-    const handle = this.liveHandles.get(entryId);
-    if (!entry || !handle
-      || entry.room_id !== pending.roomId
-      || entry.work_attempt_id !== pending.workAttemptId
-      || entry.provider_ref?.execution_generation_id !== pending.successorExecutionGenerationId
-      || entry.provider_ref.provider_continuation_id !== pending.providerContinuationId
-      || handle.workAttemptId !== pending.workAttemptId
-      || handle.providerContinuationId !== pending.providerContinuationId) {
-      throw new Error("Resumed wait evidence does not match the staged provider continuation.");
-    }
-    const attempt = await this.options.durability.getAttempt(pending.workAttemptId);
-    const predecessor = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === pending.predecessorExecutionGenerationId,
-    );
-    const successor = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === pending.successorExecutionGenerationId,
-    );
-    if (!predecessor?.terminal) {
-      throw new Error("Worker binding predecessor execution is not durably terminal.");
-    }
-    if (predecessor.terminal.provider_continuation_id !== pending.providerContinuationId) {
-      throw new Error("Worker binding predecessor belongs to a different provider continuation.");
-    }
-    if (!successor || successor.terminal
-      || attempt.execution_generations.filter((candidate) => candidate.terminal === null).length !== 1) {
-      throw new Error("Worker binding successor is not the single live execution generation.");
-    }
-    const method = "native_harness.resumed_binding";
-    const result = await this.options.bindings.verifyAndAdvanceExecutionGeneration({
-      entryId,
-      roomId: pending.roomId,
-      workAttemptId: pending.workAttemptId,
-      fromExecutionGenerationId: pending.predecessorExecutionGenerationId,
-      toExecutionGenerationId: pending.successorExecutionGenerationId,
-      agentSessionId: pending.agentSessionId,
-    }, async ({ binding, sequence, observed_at }) => {
-      const credential = await this.options.bindings.credentialFor(binding);
-      if (!credential) {
-        throw new Error("Worker credential is unavailable until desktop credential delivery.");
-      }
-      return {
-        accepted: await this.publishWorkerActivity({
-          apiUrl: binding.api_url,
-          roomId: binding.room_id,
-          agentSessionId: binding.agent_session_id,
-          bearer: credential,
-          observedAt: observed_at,
-          sequence,
-          method,
-          status: "working",
-          operation: "resumed credential verification",
-        }),
-      };
-    });
-    if (!result.accepted) {
-      throw new Error("Native activity endpoint rejected the retained worker credential.");
-    }
-    const verified = result.binding;
-    this.options.runtimeCustody.installLiveBinding(entry.id, {
-      agentSessionId: verified.agent_session_id,
-      executionGenerationId: verified.execution_generation_id,
-      updatedAt: verified.updated_at,
-    });
-    await this.options.manifest.updateEntry(entry.id, (current) => {
-      if (!this.acceptsLegacyWaitAuthority(current)
-        || current.room_id !== pending.roomId
-        || current.work_attempt_id !== pending.workAttemptId
-        || current.provider_ref?.execution_generation_id !== pending.successorExecutionGenerationId
-        || current.provider_ref.provider_continuation_id !== pending.providerContinuationId) {
-        throw new Error("Manifest moved while restoring the resumed worker binding.");
-      }
-      return {
-        ...current,
-        observed_state: "working" as const,
-        condition: "none" as const,
-        last_error: null,
-        workplace_liveness: {
-          state: "reachable" as const,
-          observed_at: verified.updated_at,
-          detail: "exact persisted worker session restored after native resume",
-        },
-        last_worker_binding: {
-          agent_session_id: verified.agent_session_id,
-          work_attempt_id: verified.work_attempt_id,
-          execution_generation_id: verified.execution_generation_id,
-          updated_at: verified.updated_at,
-        },
-      };
-    });
-    this.options.runtimeCustody.deletePendingResumeBinding(entryId);
-    return true;
-  }
-
   async enqueue(
     entryId: string,
     handle: ProviderActionHandle,
@@ -1256,7 +957,6 @@ export class ProviderStreamCoordinator {
     const installation = this.currentInstallation(entryId);
     if (!installation || installation.handle !== handle
       || (executionGenerationId && installation.executionGenerationId !== executionGenerationId)) {
-      this.markLifecycleProjectionUnavailableForEvent(event);
       return;
     }
     return this.enqueueInstalled(installation, event);
@@ -1267,7 +967,6 @@ export class ProviderStreamCoordinator {
     event: ProviderActionStreamEvent,
   ): Promise<void> {
     if (!this.eventMatchesInstallation(event, installation)) {
-      this.markLifecycleProjectionUnavailableForEvent(event, true);
       return;
     }
     const entryId = installation.entryId;
@@ -1292,7 +991,6 @@ export class ProviderStreamCoordinator {
     const installation = this.currentInstallation(entryId);
     if (!installation || installation.handle !== handle
       || (executionGenerationId && installation.executionGenerationId !== executionGenerationId)) {
-      this.markLifecycleProjectionUnavailableForEvent(event);
       return;
     }
     return this.handleInstalled(installation, event);
@@ -1389,48 +1087,20 @@ export class ProviderStreamCoordinator {
     event: ProviderActionStreamEvent,
   ): Promise<void> {
     const installation = this.resolveCurrentInstallation(sourceInstallation, event);
-    if (!installation) {
-      this.markLifecycleProjectionUnavailableForEvent(event);
-      return;
-    }
-    const { entryId, handle, executionGenerationId } = installation;
+    if (!installation) return;
+    const { entryId, handle } = installation;
     const entry = await (this.options.manifest.getRecentEntry?.(entryId) ?? this.options.manifest.getEntry(entryId));
-    const observedLifecycle = providerStreamLifecycle(event, entry?.delivery_mode === "daemon_inbox");
+    const observedLifecycle = providerStreamLifecycle(event, true);
     if (!entry || !this.entryMatchesInstallation(entry, installation)
       || !this.isCurrentInstallation(installation)) {
-      this.markLifecycleProjectionUnavailableForEvent(event);
       return;
     }
     if (event.liveDisplayOnly) {
       this.pushLiveDisplayOnly(entryId, event);
       return;
     }
-    if (event.lifecycleProjectionOnly && !isLifecycleProjectionOnlyFrame(event)) {
-      if (isLifecycleProjectionProvider(event.provider)) this.options.markLifecycleProjectionUnavailable?.(event.provider);
-      return;
-    }
-    const projectionObserved = this.observeLegacyLifecycle(
-      entry,
-      sourceInstallation,
-      installation,
-      event,
-      observedLifecycle,
-      executionGenerationId,
-    );
-    if (event.lifecycleProjectionOnly) {
-      if (!projectionObserved) this.markLifecycleProjectionUnavailableForEvent(event);
-      return;
-    }
-    const daemonInbox = entry.delivery_mode === "daemon_inbox";
-    const typedDaemonInbox = daemonInbox
-      && this.typedDaemonInboxInstallations.has(installation);
-    const custodialPolling = !daemonInbox && await this.options.heartbeat.requiresHostGrant(entry);
-    const legacyCodexCutover = entry.provider === "codex"
-      && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
-      && !custodialPolling
-      && entry.desired_state === "running";
-    const effectiveLifecycle = (daemonInbox || custodialPolling || legacyCodexCutover)
-      && observedLifecycle === "terminal"
+    const typedDaemonInbox = this.typedDaemonInboxInstallations.has(installation);
+    const effectiveLifecycle = observedLifecycle === "terminal"
       ? "idle"
       : observedLifecycle;
     const addressedWaitResult = observedLifecycle === "idle"
@@ -1443,7 +1113,7 @@ export class ProviderStreamCoordinator {
       || isSupervisedQuietPollContinuation(event, entry.activity ?? []);
     const status: DaemonActivityEvent["status"] = lifecycle === "failed"
       ? "blocked"
-      : lifecycle === "terminal" || quietlyPolling ? "idle" : lifecycle;
+      : quietlyPolling ? "idle" : lifecycle;
     const sanitizedEvent = sanitizeDaemonActivityEvent({
       observed_at: event.observedAt,
       sequence,
@@ -1475,7 +1145,7 @@ export class ProviderStreamCoordinator {
         if (!this.isCurrentInstallation(installation)) return;
         // Its position was read before this write was serialized; a notice may have taken it since.
         await this.options.appendNativeActivity(entryId, sanitizedEvent,
-          daemonInbox && this.typedDaemonInboxInstallations.has(installation), "after_latest");
+          this.typedDaemonInboxInstallations.has(installation), "after_latest");
       });
       if (!this.isCurrentInstallation(installation)) return;
     }
@@ -1486,37 +1156,6 @@ export class ProviderStreamCoordinator {
       : isHumanRoomActivityEvent(event) ? liveActivitySummaryForEvent(sanitizedEvent) : undefined;
     if (activityLine !== undefined) {
       this.options.observeActivitySummary?.(entryId, activityLine, () => this.activitySummaryPublicationStatus(installation));
-    }
-    const waitEvidence = (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
-      && !custodialPolling
-      ? supervisedWaitEvidenceFromProviderEvent(event)
-      : null;
-    if (waitEvidence) {
-      const pending = this.options.runtimeCustody.pendingResumeBinding(entryId);
-      if (pending && waitEvidence.agentSessionId === pending.agentSessionId) {
-        try {
-          await this.options.serializeEntry(
-            entryId,
-            () => this.restoreWorkerBindingFromWait(entryId, waitEvidence),
-          );
-        } catch (error) {
-          await this.options.serializeEntry(entryId, () => this.options.transition(
-            entryId,
-            "recovering",
-            "coordination_blocked",
-            `resumed provider credential verification failed: ${error instanceof Error ? error.message : "unknown credential verification failure"}`,
-            "daemon-provider-stream",
-          ));
-          return;
-        }
-      }
-      if (!this.options.runtimeCustody.hasPendingResumeBinding(entryId)) {
-        await this.checkpointObservedWaitCursor(
-          entry,
-          waitEvidence.roomCursor,
-          waitEvidence.agentSessionId,
-        );
-      }
     }
     if (!typedDaemonInbox && lifecycle === "failed" && entry.observed_state !== "failed") {
       await this.options.transition(
@@ -1540,10 +1179,7 @@ export class ProviderStreamCoordinator {
         event.observedAt,
       ).catch(() => undefined);
     }
-    if (legacyCodexCutover && observedLifecycle === "terminal") {
-      void this.options.delivery.startCutover(entryId).catch(() => undefined);
-    }
-    if (!typedDaemonInbox && (lifecycle === "failed" || lifecycle === "terminal")
+    if (!typedDaemonInbox && lifecycle === "failed"
       && this.isCurrentInstallation(installation)
       && !["stopping", "stopped"].includes(handle.observedState)) {
       try {
@@ -1560,49 +1196,6 @@ export class ProviderStreamCoordinator {
           "daemon-provider-stream",
         );
       }
-    }
-  }
-
-  private observeLegacyLifecycle(
-    entry: DaemonManifestEntry,
-    sourceInstallation: ProviderInstallationToken,
-    currentInstallation: ProviderInstallationToken,
-    event: ProviderActionStreamEvent, state: "failed" | "terminal" | "idle" | "working",
-    executionGenerationId: string | undefined,
-  ): boolean {
-    if (!event.nativeEventId || !event.nativeLifecyclePhase || !this.options.observeLegacyLifecycle) return false;
-    const expectedProvider = entry.provider;
-    if (!isLifecycleProjectionProvider(expectedProvider)) return false;
-    const providerRef = entry.provider_ref;
-    // The listener closure owns the generation installed with this handle.
-    // A mutable successor manifest must neither relabel nor erase its tail.
-    if (entry.provider !== event.provider
-      || event.workAttemptId !== sourceInstallation.workAttemptId
-      || event.workAttemptId !== currentInstallation.workAttemptId
-      || event.workAttemptId !== entry.work_attempt_id || event.workAttemptId !== providerRef?.work_attempt_id
-      || !event.providerContinuationId
-      || event.providerContinuationId !== sourceInstallation.providerContinuationId
-      || providerRef.provider_continuation_id !== currentInstallation.providerContinuationId
-      || sourceInstallation.executionGenerationId !== currentInstallation.executionGenerationId
-      || !executionGenerationId) {
-      this.options.markLifecycleProjectionUnavailable?.(expectedProvider);
-      return false;
-    }
-    try {
-      this.options.observeLegacyLifecycle({
-        agentId: entry.id,
-        provider: expectedProvider,
-        workAttemptId: event.workAttemptId,
-        executionGenerationId,
-        nativeEventId: event.nativeEventId,
-        phase: event.nativeLifecyclePhase,
-        state,
-      });
-      return true;
-    } catch {
-      this.options.markLifecycleProjectionUnavailable?.(expectedProvider);
-      // Optional shadow observation never changes provider delivery or lifecycle.
-      return false;
     }
   }
 
@@ -1642,63 +1235,6 @@ export class ProviderStreamCoordinator {
       || !this.eventMatchesInstallation(event, source)
       || !this.eventMatchesInstallation(event, current)) return null;
     return current;
-  }
-
-  private markLifecycleProjectionUnavailableForEvent(
-    event: ProviderActionStreamEvent,
-    exactCursorBirthMissing = false,
-  ): void {
-    if (event.lifecycleProjectionOnly) {
-      if (isLifecycleProjectionProvider(event.provider)) this.options.markLifecycleProjectionUnavailable?.(event.provider);
-      return;
-    }
-    if (exactCursorBirthMissing && event.provider === "cursor") {
-      this.options.markLifecycleProjectionUnavailable?.("cursor");
-      return;
-    }
-    if (!event.nativeEventId || !event.nativeLifecyclePhase) return;
-    if (!isLifecycleProjectionProvider(event.provider)) return;
-    this.options.markLifecycleProjectionUnavailable?.(event.provider);
-  }
-
-  async checkpointObservedWaitCursor(
-    entry: DaemonManifestEntry,
-    roomCursor: string,
-    agentSessionId: string,
-  ): Promise<void> {
-    if (!this.acceptsLegacyWaitAuthority(entry)) return;
-    await this.options.serializeEntry(entry.id, () => this.serializeCursorCheckpoint(entry.id, async () => {
-      const executionGenerationId = entry.provider_ref?.execution_generation_id;
-      if (!entry.work_attempt_id || !executionGenerationId) return;
-      const currentEntry = await this.readScalarEntry(entry.id);
-      if (!currentEntry
-        || !this.acceptsLegacyWaitAuthority(currentEntry)
-        || currentEntry.room_id !== entry.room_id
-        || currentEntry.work_attempt_id !== entry.work_attempt_id
-        || currentEntry.provider_ref?.execution_generation_id !== executionGenerationId) return;
-      const binding = await this.options.bindings.get(entry.id);
-      if (!binding
-        || binding.entry_id !== entry.id
-        || binding.room_id !== entry.room_id
-        || binding.work_attempt_id !== entry.work_attempt_id
-        || binding.agent_session_id !== agentSessionId
-        || binding.execution_generation_id !== executionGenerationId) return;
-      const checkpoint = await this.options.bindings.checkpointCursorMonotonic(
-        entry.id,
-        binding.agent_session_id,
-        executionGenerationId,
-        roomCursor,
-      );
-      const durableAttempt = await this.options.durability.getAttempt(entry.work_attempt_id);
-      const durableCursor = checkpoint.binding.room_cursor;
-      if (!durableCursor
-        || (!checkpoint.advanced
-          && durableAttempt.checkpoints.at(-1)?.room_cursor === durableCursor)) return;
-      await this.options.durability.checkpoint(entry.work_attempt_id, {
-        room_cursor: durableCursor,
-        provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
-      });
-    }));
   }
 
   /** Shared compatibility lane for worker RPC and provider-stream cursor commits. */
@@ -1803,16 +1339,4 @@ export class ProviderStreamCoordinator {
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) throw new AggregateError(failures, message);
   }
-}
-
-/**
- * Open Model and Antigravity emit a dedicated projection-only frame for each
- * native turn edge: comparator evidence that is never shown or applied.
- */
-function isLifecycleProjectionOnlyFrame(event: ProviderActionStreamEvent): boolean {
-  return (event.provider === "open-model" || event.provider === "antigravity")
-    && event.kind === "turn_lifecycle"
-    && typeof event.nativeEventId === "string"
-    && ((event.method === "turn/started" && event.nativeLifecyclePhase === "turn_active")
-      || (event.method === "turn/completed" && event.nativeLifecyclePhase === "turn_terminal"));
 }

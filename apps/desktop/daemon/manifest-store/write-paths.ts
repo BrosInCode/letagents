@@ -1,13 +1,20 @@
 /**
- * Pre-membership room-move failure, journal and targeted write paths, serialization and file permissions.
+ * Pre-membership room-move failure, journal and per-agent versioned write paths,
+ * serialization and file permissions.
  *
  * Where new code goes: a ManifestStore method goes in the module of its concern
  * (see the module list in store.ts); shared row helpers and types go in shared.ts.
  * A method name may be defined in only one module; store.ts throws on a duplicate.
  */
 import type { DatabaseSync } from "node:sqlite";
+import {
+  BOUNDED_MCP_EFFECT_KIND,
+  failPreparedJoinRoomEffectInTransaction,
+  retireRoomMoveEffectsForOperationInTransaction,
+  rowToBoundedMcpEffect,
+} from "../effect-journal/index.js";
 import { pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
-import { type Row, type PreMembershipRoomMoveCancellation, ManifestConflictError, bool, nullableString, storeMethods } from "./shared.js";
+import { type Row, type PreMembershipRoomMoveCancellation, ManifestConflictError, nullableString, storeMethods } from "./shared.js";
 import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 
 export const writePaths = storeMethods({
@@ -32,15 +39,8 @@ export const writePaths = storeMethods({
       );
     }
     if (moves.length === 0) return;
-    const runtime = database.prepare(`SELECT
-      m.room_id,
-      d.work_attempt_id_present,
-      d.work_attempt_id,
-      d.provider_ref_present,
-      d.provider_execution_generation_id
-      FROM agent_room_memberships m
-      JOIN runtime_deployments d USING(agent_id)
-      WHERE m.agent_id=?`).get(input.agentId) as Row | undefined;
+    const runtime = database.prepare(`SELECT room_id, work_attempt_id, provider_execution_generation_id
+      FROM agents WHERE agent_id=?`).get(input.agentId) as Row | undefined;
     if (!runtime) {
       throw new ManifestConflictError("Pre-membership room-move cancellation lost its exact agent runtime.");
     }
@@ -48,19 +48,12 @@ export const writePaths = storeMethods({
     const updateMove = database.prepare(`UPDATE agent_room_moves
       SET phase='failed',error=?,updated_at=?
       WHERE operation_id=? AND agent_id=? AND phase IN ('prepared','waiting_for_current_turn')`);
-    const updateEffect = database.prepare(`UPDATE supervised_agent_effects
-      SET state='failed',error=?,updated_at=?
-      WHERE effect_id=? AND agent_id=? AND room_id=?
-        AND execution_generation_id=? AND provider_turn_id=?
-        AND tool_name='join_room' AND state='prepared'`);
     for (const row of moves) {
       const sourceRoomId = String(row.source_room_id);
       const workAttemptId = nullableString(row.work_attempt_id);
       const executionGenerationId = nullableString(row.execution_generation_id);
       if (String(runtime.room_id) !== sourceRoomId
-        || !bool(runtime.work_attempt_id_present)
         || nullableString(runtime.work_attempt_id) !== workAttemptId
-        || !bool(runtime.provider_ref_present)
         || nullableString(runtime.provider_execution_generation_id) !== executionGenerationId
         || workAttemptId === null || executionGenerationId === null) {
         throw new ManifestConflictError("Pre-membership room move no longer matches the exact source runtime.");
@@ -83,7 +76,7 @@ export const writePaths = storeMethods({
           b.work_attempt_id AS binding_work_attempt_id,
           b.origin_execution_generation_id,
           b.provider_turn_id AS binding_provider_turn_id
-          FROM supervised_agent_inbox i
+          FROM inbox_items i
           JOIN supervised_agent_provider_turn_bindings b USING(inbox_item_id)
           WHERE i.inbox_item_id=?`).get(activatingInboxItemId) as Row | undefined;
         if (!authority
@@ -97,28 +90,28 @@ export const writePaths = storeMethods({
           throw new ManifestConflictError("Pre-membership room move is detached from its exact activating provider turn.");
         }
         const originExecutionGenerationId = String(authority.origin_execution_generation_id);
-        const effect = database.prepare(`SELECT agent_id,room_id,execution_generation_id,provider_turn_id,tool_name,state
-          FROM supervised_agent_effects WHERE effect_id=?`).get(effectId) as Row | undefined;
+        const effectRow = database.prepare("SELECT * FROM effects WHERE id=? AND kind=?").get(effectId, BOUNDED_MCP_EFFECT_KIND) as Row | undefined;
+        const effect = effectRow ? rowToBoundedMcpEffect(effectRow) : null;
         if (!effect
-          || String(effect.agent_id) !== input.agentId
-          || String(effect.room_id) !== sourceRoomId
-          || String(effect.execution_generation_id) !== originExecutionGenerationId
-          || String(effect.provider_turn_id) !== providerTurnId
-          || String(effect.tool_name) !== "join_room"
-          || !["prepared", "failed"].includes(String(effect.state))) {
+          || effect.agent_id !== input.agentId
+          || effect.room_id !== sourceRoomId
+          || effect.execution_generation_id !== originExecutionGenerationId
+          || effect.provider_turn_id !== providerTurnId
+          || effect.tool_name !== "join_room"
+          || !["prepared", "failed"].includes(effect.state)) {
           throw new ManifestConflictError("Pre-membership room move is detached from its exact unresolved effect journal.");
         }
-        if (String(effect.state) === "prepared") {
-          const effectChanged = updateEffect.run(
-            input.detail,
-            timestamp,
+        if (effect.state === "prepared") {
+          const effectChanged = failPreparedJoinRoomEffectInTransaction(database, {
             effectId,
-            input.agentId,
-            sourceRoomId,
-            originExecutionGenerationId,
+            agentId: input.agentId,
+            roomId: sourceRoomId,
+            executionGenerationId: originExecutionGenerationId,
             providerTurnId,
-          );
-          if (Number(effectChanged.changes) !== 1) {
+            error: input.detail,
+            updatedAt: timestamp,
+          });
+          if (effectChanged !== 1) {
             throw new ManifestConflictError("Pre-membership room-move effect changed during lifecycle cancellation.");
           }
         }
@@ -127,77 +120,96 @@ export const writePaths = storeMethods({
       if (Number(changed.changes) !== 1) {
         throw new ManifestConflictError("Pre-membership room-move phase changed during lifecycle cancellation.");
       }
+      retireRoomMoveEffectsForOperationInTransaction(database, {
+        agentId: input.agentId,
+        operationId: String(row.operation_id),
+        expectedEpoch: Number(row.daemon_generation),
+        error: "room_move_cancelled",
+        nowIso: timestamp,
+      });
     }
     pruneSupervisedAgentHistory(database, input.agentId, () => timestamp);
   },
 
-  /** Journal-first transaction helper. A manifest projection must perform its
-   * generation CAS inside the mutation so the projection and journal settle together. */
+  /** Journal-first transaction helper with in-transaction generation fence check. */
   writeOperationalJournal<T>(mutation: (database: DatabaseSync) => T, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<T> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      let open = false;
       let committed = false;
       let value!: T;
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Operational journal transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          open = true;
+      const commit = async () => {
+        if (committed) throw new Error("Operational journal transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          this.writeFence?.();
           value = mutation(database);
           database.exec("COMMIT");
-          open = false;
           committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Operational journal fence returned without committing the transaction.");
-        return value;
-      } catch (error) {
-        if (open) { try { database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ } }
-        throw error;
-      }
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+          throw error;
+        }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Operational journal fence returned without committing the transaction.");
+      return value;
     });
   },
 
-  writeTargeted<T>(
-    expectedGeneration: number,
-    mutation: (database: DatabaseSync) => T,
+  /**
+   * Per-agent optimistic concurrency write helper. Verifies `agents.version ===
+   * expectedVersion` and runs the generation fence check inside BEGIN IMMEDIATE.
+   * When `bumpVersion` is true (default), advances `agents.version` atomically
+   * unless `mutation` already incremented it via `updateProjection`.
+   */
+  writeAgent<T>(
+    agentId: string,
+    expectedVersion: number,
+    mutation: (database: DatabaseSync, existingRow: Row) => T,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; value: T }> {
+    options: { bumpVersion?: boolean } = {},
+  ): Promise<{ version: number; value: T }> {
+    const bumpVersion = options.bumpVersion ?? true;
     return this.serialize(async () => {
       const database = await this.getDatabase();
       let committed = false;
-      let transactionOpen = false;
       let value!: T;
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Manifest transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          transactionOpen = true;
-          const result = database.prepare(`
-            UPDATE manifest_metadata SET generation = generation + 1
-            WHERE singleton = 1 AND generation = ?
-          `).run(expectedGeneration);
-          if (Number(result.changes) !== 1) {
-            const current = Number((this.reads.get(database, "generation").get() as Row).generation);
-            throw new ManifestConflictError(`Manifest generation ${current} does not match expected ${expectedGeneration}.`);
+      const commit = async () => {
+        if (committed) throw new Error("Manifest transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          this.writeFence?.();
+          const row = database.prepare("SELECT * FROM agents WHERE agent_id = ?").get(agentId) as Row | undefined;
+          if (!row) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
+          if (Number(row.version) !== expectedVersion) {
+            throw new ManifestConflictError(`Agent ${agentId} version ${String(row.version)} does not match expected ${expectedVersion}.`);
           }
-          value = mutation(database);
+          value = mutation(database, row);
+          if (bumpVersion) {
+            const after = database.prepare("SELECT version FROM agents WHERE agent_id = ?").get(agentId) as Row | undefined;
+            if (!after) throw new Error(`Daemon manifest entry disappeared during write: ${agentId}`);
+            if (Number(after.version) === expectedVersion) {
+              const advanced = database.prepare("UPDATE agents SET version = version + 1 WHERE agent_id = ? AND version = ?")
+                .run(agentId, expectedVersion);
+              if (Number(advanced.changes) !== 1) {
+                throw new ManifestConflictError(`Agent ${agentId} version changed during write.`);
+              }
+            } else if (Number(after.version) !== expectedVersion + 1) {
+              throw new ManifestConflictError(`Agent ${agentId} version changed unexpectedly during write.`);
+            }
+          }
           database.exec("COMMIT");
-          transactionOpen = false;
           committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
-        return { generation: expectedGeneration + 1, value };
-      } catch (error) {
-        if (transactionOpen) {
+        } catch (error) {
           try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+          throw error;
         }
-        throw error;
-      }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
+      return { version: bumpVersion ? expectedVersion + 1 : expectedVersion, value };
     });
   },
 

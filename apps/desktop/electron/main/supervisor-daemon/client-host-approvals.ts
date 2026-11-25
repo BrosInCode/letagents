@@ -1,44 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
+import {
+  hostApprovalCandidateSchema as approvalCandidate,
+  hostApprovalChallengeSchema as approvalChallenge,
+  hostApprovalIdSchema as approvalId,
+  hostApprovalStatusSchema as approvalStatus,
+  hostToolRuleSchema as hostToolRule,
+} from "#daemon-contract/index.js";
 import type { HostApprovalChallenge } from "../../../shared/host-approval-auth.js";
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalCandidate, HostApprovalSelection, HostApprovalStatus } from "../../../shared/host-approvals.js";
 import type { HostApprovalSigner } from "../host-approval-auth.js";
-import { MANIFEST_LIST_REQUEST_TIMEOUT_MS } from "./constants.js";
 import { mapAgentConfiguration } from "./agent-mapping.js";
 import { record } from "./wire-values.js";
 import { SupervisorDaemonLifecycleClient } from "./client-lifecycle.js";
-
-const approvalId = z.string().min(1).max(256);
-const approvalSha = z.string().regex(/^[a-f0-9]{64}$/);
-const approvalStatus = z.enum(["pending", "decision_recorded", "decision_sent", "uncertain", "request_closed", "resolved", "unavailable"]);
-const approvalChallenge = z.strictObject({ daemonGeneration: z.number().int().positive().safe(),
-  bootNonce: z.string().regex(/^[A-Za-z0-9_-]{43}$/), keyFingerprint: approvalSha });
-const hostToolLabel = approvalId.regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+$/);
-const projectHostToolScope = z.strictObject({
-  agentId: approvalId, accountId: approvalId, projectId: approvalSha, projectName: hostToolLabel, sourceRepoPath: z.string().min(1).max(4096),
-  canonicalSourcePath: z.string().min(1).max(4096), repository: z.string().min(1).max(4096), remoteUrl: z.string().min(1).max(4096),
-  provider: z.enum(["codex", "claude-code", "open-model", "antigravity"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
-});
-const hostToolScope = z.union([projectHostToolScope, z.strictObject({
-  kind: z.literal("room_workspace"), version: z.literal(1), agentId: approvalId, accountId: approvalId, roomId: approvalId,
-  workAttemptId: z.string().uuid(), workspacePath: z.string().min(1).max(4096), canonicalWorkspacePath: z.string().min(1).max(4096),
-  provider: z.enum(["codex", "claude-code", "open-model", "antigravity"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
-})]);
-const hostToolRule = z.strictObject({ id: approvalId, revision: z.number().int().positive().safe(), ownerId: approvalId,
-  scope: hostToolScope, createdAtMs: z.number().int().nonnegative().safe() });
-const approvalCandidate = z.strictObject({
-  reference: z.strictObject({ requestId: approvalId, requestVersion: z.number().int().positive().safe(), requestSha256: approvalSha,
-    agentId: approvalId, roomId: approvalId, executionGenerationId: approvalId, runtimeGenerationId: approvalId,
-    turnId: approvalId, providerContinuationId: approvalId, providerTurnId: approvalId, connectionId: approvalId,
-    nativeRequestId: z.union([approvalId, z.number().int().nonnegative().safe()]) }).nullable(),
-  presentation: z.strictObject({ agentId: approvalId, displayName: z.string().max(256),
-    provider: z.enum(["codex", "open-model", "claude-code", "antigravity"]), title: z.enum(["Run a command", "Run a tool", "Change files", "Grant for this turn", "Approval unavailable"]),
-    details: z.string().max(24 * 1024), denyScope: z.enum(["request", "session_pending"]), alwaysAllow: hostToolScope.optional() }),
-  status: approvalStatus, detail: z.string().max(1024).nullable(),
-  recordedDecision: z.strictObject({ decisionId: approvalId, actorId: approvalId,
-    decision: z.enum(["allow_once", "deny"]), projectionSha256: approvalSha.nullable() }).nullable(),
-});
 
 export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemonLifecycleClient {
   /** Main computes and remembers what it actually presents; renderer IDs carry no authority. */
@@ -49,15 +24,14 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
       // Wait only for startup already owned by the app; an absent or failed
       // service still returns unavailable without initiating any recovery.
       await this.waitForStartup();
-      const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
+      const rawChallenge = await this.call("supervisor.host_approval_challenge");
       if (rawChallenge === null) {
         this.clearApprovalPresentations(roomId);
         return { available: false, approvals: [], error: "Host approval signing was not enrolled. Unlock secure storage and restart the background service before approving." };
       }
       const challenge = approvalChallenge.parse(rawChallenge);
       const signer = await this.signerForApproval(challenge);
-      const raw = await this.request<unknown>("supervisor.host_approval_request",
-        signer.sign(challenge, "list", { roomId }), undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+      const raw = await this.call("supervisor.host_approval_request", signer.sign(challenge, "list", { roomId }));
       if (!Array.isArray(raw) || raw.length > 128) throw new Error("Invalid approval presentation.");
       for (const candidate of raw) {
         const parsed = approvalCandidate.safeParse(candidate);
@@ -69,7 +43,8 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
           || (!parsed.data.reference && parsed.data.status !== "unavailable")
           || (parsed.data.presentation.title === "Approval unavailable" && parsed.data.status !== "unavailable"
             && !(parsed.data.status === "uncertain" && parsed.data.reference && parsed.data.recordedDecision))
-          || (parsed.data.presentation.provider === "open-model") !== (parsed.data.presentation.denyScope === "session_pending")) {
+          || (parsed.data.presentation.provider === "open-model") !== (parsed.data.presentation.denyScope === "session_pending")
+          || (parsed.data.presentation.denyScope === "request_and_turn" && parsed.data.presentation.provider !== "codex")) {
           throw new Error("Invalid approval presentation.");
         }
       }
@@ -170,7 +145,7 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
     const presented = cached.candidate;
     const expected = structuredClone(cached.candidate.reference);
     const signer = await this.signerForApproval(cached.challenge);
-    const challenge = approvalChallenge.parse(await this.request<unknown>("supervisor.host_approval_challenge"));
+    const challenge = approvalChallenge.parse(await this.call("supervisor.host_approval_challenge"));
     if (JSON.stringify(challenge) !== JSON.stringify(cached.challenge)) throw new Error("The background service changed. Refresh the approval before deciding.");
     assertCaller?.();
     assertEligible();
@@ -183,14 +158,15 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
     cached.view.status = "uncertain";
     cached.view.retryDecision = null;
     try {
-      const status = await this.request<HostApprovalStatus>("supervisor.host_approval_request", envelope,
-        undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, () => {
+      const status = await this.call("supervisor.host_approval_request", envelope, {
+        assertDispatch: () => {
           assertCaller?.();
           if (this.approvalPresentations.get(selection.id) !== cached || cached.candidate !== presented
             || this.now().getTime() - cached.touchedAt > 30 * 60 * 1000 || cached.decision !== decision) {
             throw new Error("The approval changed before dispatch.");
           }
-        });
+        },
+      }) as HostApprovalStatus;
       if (!approvalStatus.safeParse(status).success || status === "pending") throw new Error();
       if (cached.candidate === presented && cached.decision === decision) {
         cached.view.status = status;
@@ -210,9 +186,9 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
   async listHostToolRules(agentId: string): Promise<import("../../../shared/host-tool-rules.js").HostToolRule[]> {
     approvalId.parse(agentId);
     await this.waitForStartup();
-    const challenge = approvalChallenge.parse(await this.request<unknown>("supervisor.host_approval_challenge"));
+    const challenge = approvalChallenge.parse(await this.call("supervisor.host_approval_challenge"));
     const signer = await this.signerForApproval(challenge);
-    const raw = await this.request<unknown>("supervisor.host_approval_request", signer.sign(challenge, "list_tool_rules", { agentId }));
+    const raw = await this.call("supervisor.host_approval_request", signer.sign(challenge, "list_tool_rules", { agentId }));
     const rules = z.array(hostToolRule).parse(raw);
     if (rules.some(rule => rule.scope.agentId !== agentId || rule.ownerId !== `host-${challenge.keyFingerprint}`)) throw new Error("Invalid saved permissions.");
     return rules;
@@ -222,11 +198,10 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
     const value = z.strictObject({ agentId: approvalId, ruleId: approvalId, revision: z.number().int().positive().safe() }).parse(input);
     assertCaller?.();
     await this.waitForStartup();
-    const challenge = approvalChallenge.parse(await this.request<unknown>("supervisor.host_approval_challenge"));
+    const challenge = approvalChallenge.parse(await this.call("supervisor.host_approval_challenge"));
     const signer = await this.signerForApproval(challenge);
     assertCaller?.();
-    await this.request("supervisor.host_approval_request", signer.sign(challenge, "revoke_tool_rule", value),
-      undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, assertCaller);
+    await this.call("supervisor.host_approval_request", signer.sign(challenge, "revoke_tool_rule", value), { assertDispatch: assertCaller });
   }
 
   /**
@@ -245,15 +220,15 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
     }).parse(input);
     assertCaller?.();
     await this.waitForStartup();
-    const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
+    const rawChallenge = await this.call("supervisor.host_approval_challenge");
     if (rawChallenge === null) {
       return { outcome: "invalid", error: "This app could not prove the change came from you. Unlock secure storage and restart the background service, then try again." };
     }
     const challenge = approvalChallenge.parse(rawChallenge);
     const signer = await this.signerForApproval(challenge);
     assertCaller?.();
-    const result = record(await this.request<unknown>("supervisor.host_approval_request", signer.sign(challenge, "set_home_harness", value),
-      undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, assertCaller)) ?? {};
+    const result = record(await this.call("supervisor.host_approval_request", signer.sign(challenge, "set_home_harness", value),
+      { assertDispatch: assertCaller })) ?? {};
     if (result.outcome === "invalid") {
       if (typeof result.error !== "string" || !result.error.trim()) throw new Error("Supervisor returned an invalid configuration error response.");
       return { outcome: "invalid", error: result.error };
@@ -279,15 +254,15 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
     }).parse(input);
     assertCaller?.();
     await this.waitForStartup();
-    const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
+    const rawChallenge = await this.call("supervisor.host_approval_challenge");
     if (rawChallenge === null) {
       return { outcome: "invalid", error: "This app could not prove the request came from you. Unlock secure storage and restart the background service, then try again." };
     }
     const challenge = approvalChallenge.parse(rawChallenge);
     const signer = await this.signerForApproval(challenge);
     assertCaller?.();
-    const result = record(await this.request<unknown>("supervisor.host_approval_request", signer.sign(challenge, "stop_background_command", value),
-      undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, assertCaller)) ?? {};
+    const result = record(await this.call("supervisor.host_approval_request", signer.sign(challenge, "stop_background_command", value),
+      { assertDispatch: assertCaller })) ?? {};
     if (result.outcome === "invalid") return { outcome: "invalid", error: typeof result.error === "string" && result.error.trim() ? result.error : "The command could not be stopped." };
     if (result.outcome === "stopping" || result.outcome === "not_running" || result.outcome === "failed") return { outcome: result.outcome };
     throw new Error("Supervisor returned an invalid stop result.");
@@ -307,15 +282,15 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
     }).parse(input);
     assertCaller?.();
     await this.waitForStartup();
-    const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
+    const rawChallenge = await this.call("supervisor.host_approval_challenge");
     if (rawChallenge === null) {
       return { outcome: "invalid", error: "This app could not prove the change came from you. Unlock secure storage and restart the background service, then try again." };
     }
     const challenge = approvalChallenge.parse(rawChallenge);
     const signer = await this.signerForApproval(challenge);
     assertCaller?.();
-    const result = record(await this.request<unknown>("supervisor.host_approval_request", signer.sign(challenge, "set_live_sharing", value),
-      undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, assertCaller)) ?? {};
+    const result = record(await this.call("supervisor.host_approval_request", signer.sign(challenge, "set_live_sharing", value),
+      { assertDispatch: assertCaller })) ?? {};
     if (result.outcome === "invalid") {
       if (typeof result.error !== "string" || !result.error.trim()) throw new Error("Supervisor returned an invalid configuration error response.");
       return { outcome: "invalid", error: result.error };

@@ -81,8 +81,6 @@ export type RuntimeConfigurationApplyCoordinatorOptions = {
     | "getEntry"
     | "getAgentConfiguration"
     | "pendingRoomMoves"
-    | "unresolvedDeliveryDrain"
-    | "unresolvedPollingActivation"
   >;
   inbox: Pick<SupervisedAgentInboxStore, "head">;
   delivery: Pick<SupervisedAgentDelivery, "reserveIdle"> | null;
@@ -552,9 +550,7 @@ export class RuntimeConfigurationApplyCoordinator {
       if (entry.turn_control && entry.turn_control.status !== "completed") {
         return { outcome: "busy_active_turn" };
       }
-      if ((await this.options.store.pendingRoomMoves(input.entryId)).length > 0
-        || await this.options.store.unresolvedDeliveryDrain(input.entryId)
-        || await this.options.store.unresolvedPollingActivation(input.entryId)) {
+      if ((await this.options.store.pendingRoomMoves(input.entryId)).length > 0) {
         return { outcome: "conflict" };
       }
       const head = await this.options.inbox.head(input.entryId);

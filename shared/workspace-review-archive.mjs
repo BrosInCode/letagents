@@ -7,6 +7,12 @@ import { dirname, join } from 'node:path';
 import { assertOwnerPrivateSync, createPrivateDirSync, openNoFollowSync, syncDirectorySync, writePrivateFileAtomicallySync } from './owner-private-fs.mjs';
 import { REVIEW_LIMIT, REVIEW_PAGE_SIZE } from './workspace-review.mjs';
 
+// On feat/modern-daemon (LAD1), legacy application_id=0 databases are moved
+// aside by assertDaemonStateVersionSupported before reaching backup or store
+// code. Externalized review archives begin at modern schema v5 (user_version 1005);
+// earlier modern versions (1001..1004) never write @review1: references.
+export const REVIEW_ARCHIVE_MIN_USER_VERSION = 1005;
+
 const prefix = '@review1:';
 const tagSize = 16;
 const readRegular = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0);
@@ -113,7 +119,7 @@ function verifyMirror(directory, reference, digest, useReceipt) {
 /** Caller holds the original source transaction. An envelope alone cannot
  * supersede an existing recovery set until all of its archive refs resolve. */
 export function verifyWorkspaceReviewRecoverySet(databasePath, database) {
-  if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 54
+  if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < REVIEW_ARCHIVE_MIN_USER_VERSION
     || !database.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='room_workspace_reviews'").get()) return;
   const [primary, recovery] = folders(databasePath);
   for (const row of database.prepare("SELECT digest,data FROM room_workspace_reviews WHERE data GLOB '@*'").iterate()) {
@@ -170,9 +176,10 @@ export function archiveWorkspaceReview(databasePath, data, digest) {
     cipher.final();
     offset += cipher.getAuthTag().copy(bytes, offset);
   }
-  // The independent recovery copy is made once at capture. A v54+ supervisor
-  // snapshot contains the envelope/key and refers to the sibling recovery
-  // directory; later provider upgrades do not have to copy this object again.
+  // The independent recovery copy is made once at capture. A modern v5+
+  // (user_version 1005+) supervisor snapshot contains the envelope/key and
+  // refers to the sibling recovery directory; later upgrades do not have to
+  // copy this object again.
   const reference = prefix + data.length + ':' + key.toString('hex');
   try {
     const [primary, recovery] = folders(databasePath);

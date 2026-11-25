@@ -7,7 +7,7 @@ import { Readable } from "node:stream";
 import { guessMessageAttachmentMimeType } from "../../../../../shared/message-attachments.mjs";
 import { readStoredAuth } from "../auth.js";
 import { DESKTOP_USER_AGENT } from "../client-identity.js";
-import { apiUrl } from "../paths.js";
+import { apiUrl } from "#provider-runtime/paths.js";
 import { realLocalAttachmentPath, resolveLocalAttachmentPath } from "./links.js";
 
 // An image tag never runs script; this keeps it so if a file is opened as a page.

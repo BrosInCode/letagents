@@ -1,8 +1,8 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodexProviderAdapter, COMMAND_OUTPUT_WINDOW_MS } from "../main/agents/codex-provider-adapter.js";
-import type { ProviderStreamEvent } from "../main/agents/provider-adapter.js";
+import { CodexProviderAdapter, COMMAND_OUTPUT_WINDOW_MS } from "#provider-runtime/agents/codex-provider-adapter.js";
+import type { ProviderStreamEvent } from "#provider-runtime/agents/provider-adapter.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import {
   createHarness,
@@ -178,7 +178,7 @@ test("a command that prints thousands of chunks at once leaves no gap in the age
       "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
     assert.equal(observer.max, observer.last, "the record has no gap");
     assert.deepEqual(agent.read<{ provider_turn_id: string; state: string }>(
-      "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=?"), [{ provider_turn_id: "turn-1", state: "terminal" }]);
+      "SELECT provider_turn_id,state FROM runs WHERE agent_id=?"), [{ provider_turn_id: "turn-1", state: "terminal" }]);
     const output = agent.read<{ facts: number; bytes: number }>(
       "SELECT COUNT(*) AS facts, SUM(output_bytes) AS bytes FROM execution_facts WHERE agent_id=? AND kind='output'")[0]!;
     assert.equal(output.bytes, printed, "every byte the commands printed is counted");
@@ -400,7 +400,7 @@ for (const [left, shape] of Object.entries(RECORDS_LEFT_BEHIND)) {
         agent.write("INSERT INTO execution_message_attempts VALUES(?,?,?,?,?,?,?,?)", attempt, agent.id, "room_1", `message-${turn}`,
           "failed", "failed", before + index, before + 60_000);
         agent.write("INSERT INTO execution_attempt_generations VALUES(?,?,?,?,?,?)", attempt, agent.id, "room_1", damagedGeneration, agent.workAttemptId, before + index);
-        agent.write(`INSERT INTO execution_turns(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+        agent.write(`INSERT INTO runs(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
           provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms) VALUES(?,?,?,?,?,?,?,?,?,'none',?,?)`,
           turn, attempt, agent.id, "room_1", damagedGeneration, damaged, agent.threadId, turn, state, before + index, state === "lost" ? before + 60_000 : null);
       }
@@ -459,7 +459,7 @@ for (const state of ["lost", "active"] as const) {
       const before = Date.parse("2026-01-01T00:00:00.000Z");
       agent.write("INSERT INTO execution_message_attempts VALUES(?,?,?,?,?,?,?,?)", "attempt-left-open", agent.id, "room_1", "message-left-open", "failed", "failed", before, before + 60_000);
       agent.write("INSERT INTO execution_attempt_generations VALUES(?,?,?,?,?,?)", "attempt-left-open", agent.id, "room_1", generation, agent.workAttemptId, before);
-      agent.write(`INSERT INTO execution_turns(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+      agent.write(`INSERT INTO runs(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
         provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms) VALUES(?,?,?,?,?,?,?,?,?,'none',?,?)`,
         "turn-left-open", "attempt-left-open", agent.id, "room_1", generation, earlier, agent.threadId, "turn-left-open", state, before, state === "lost" ? before + 60_000 : null);
 
@@ -510,13 +510,15 @@ test("an agent's activity that a notice overtakes on its way to being written is
   const agent = await codexDaemonFixture();
   type Activity = Array<{ sequence: number; summary: string; method?: string }>;
   const activity = async () => ((await agent.request("manifest.list")).result[0] as { activity?: Activity }).activity ?? [];
+  let writes: ReturnType<typeof agent.holdActivityWrites> | undefined;
   try {
     await agent.deliver(1, { answer: "Answer 1." });
     await agent.turnsRecorded(1);
+    await agent.eventually(async () => (await activity()).length > 0, "turn 1 activity commits");
     // The app-server reports something; the daemon has taken the next position for it, and its write is held there.
-    const writes = agent.holdActivityWrites();
+    writes = agent.holdActivityWrites();
     agent.client.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
-    await agent.eventually(() => writes.waiting() > 0, "the daemon starts writing the agent's activity");
+    await agent.eventually(() => writes!.waiting() > 0, "the daemon starts writing the agent's activity");
     // Notices are written meanwhile, as the notice of an exit that could not be recorded is, until one takes that position.
     for (let exit = 1; (await activity()).at(-1)!.sequence < writes.heldSequence(); exit += 1) {
       const before = (await activity()).at(-1)!.sequence;
@@ -526,11 +528,13 @@ test("an agent's activity that a notice overtakes on its way to being written is
     const notice = (await activity()).at(-1)!;
     assert.deepEqual([notice.summary, notice.sequence], [EXIT_UNSETTLED_NOTICE, writes.heldSequence()], "a notice holds the position the held write took");
     writes.release();
+    writes = undefined;
     const after = async () => (await activity()).filter((event) => event.sequence > notice.sequence);
     await agent.eventually(async () => (await after()).some((event) => event.method === "thread/status/changed"), "the held activity is written");
     // Every write that was held goes after the notice, in turn, and none is refused for the position the notice took.
     assert.deepEqual((await after()).map((event) => event.sequence), Array.from({ length: (await after()).length }, (_unused, index) => notice.sequence + 1 + index));
   } finally {
+    writes?.release();
     // A refused write would fail the stop here.
     await agent.cleanup();
   }
@@ -717,14 +721,11 @@ test("an agent whose record is full keeps answering, and its next runtime starts
     const filled = record.observer()!;
     const generation = agent.read<{ id: string }>("SELECT execution_generation_id AS id FROM execution_generations WHERE agent_id=?")[0]!.id;
     agent.write(`WITH RECURSIVE positions(value) AS (SELECT 1000001 UNION ALL SELECT value+1 FROM positions WHERE value<1010000)
-      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,
+        observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
         source_sequence,domain,kind,state,side_effects,observed_at_ms)
-      SELECT 'filler-'||value,?,?,?,1,value,'control','state_changed','responsive','none',value FROM positions`, agent.id, generation, filled.runtime);
-    // Each with its settled effect, as every recorded fact has.
-    agent.write(`INSERT INTO execution_lifecycle_effects(fact_id,fact_sequence,agent_id,observer_execution_generation_id,observer_runtime_generation_id,
-        observer_epoch,subject_authority_mode,observer_authority_mode,effect_kind,state,created_at_ms,disposed_at_ms)
-      SELECT fact_id,sequence,agent_id,execution_generation_id,runtime_generation_id,1,'typed','typed','none','applied',observed_at_ms,observed_at_ms
-      FROM execution_facts WHERE agent_id=? AND fact_id LIKE 'filler-%'`, agent.id);
+      SELECT 'filler-'||value,?,?,?,?,?,1,value,'control','state_changed','responsive','none',value FROM positions`,
+      agent.id, generation, filled.runtime, generation, filled.runtime);
 
     // The next turn cannot be recorded. It is still delivered and answered, and the owner is told the record stopped.
     await agent.deliver(2, { answer: "Answer 2." });

@@ -7,6 +7,7 @@ import { EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS } from "../../../shared/
 import type { HostApprovalCandidate, HostApprovalDecision, HostApprovalPresentation, HostApprovalReference, HostApprovalStatus } from "../shared/host-approvals.js";
 import type { CodexPermissionFileChange, ProviderPermissionRequest, ProviderPermissionObservation } from "../shared/provider-permissions.js";
 import { ApprovalExecutionReconciler } from "./approval-execution-reconciler.js";
+import { codexDenyDecision } from "#provider-runtime/agents/codex/deny-decision.js";
 import { ApprovalJournalError, type ApprovalAuthority, type ExecutionApprovalRecord } from "./execution-approval-journal.js";
 import type { ExecutionApprovalProjectionRecord } from "./execution-approval-projection-journal.js";
 import {
@@ -211,14 +212,19 @@ export class HostApprovalBroker {
         return;
       }
       if (event.type === "snapshot" && event.requests.length <= MAX_REQUESTS) {
-        if (lane.state !== "pending" || lane.connectionId !== event.connectionId) lane.revision += 1;
+        // A snapshot after a lost lane or on another connection starts a new authority. The requests that it
+        // names are the only ones that can be answered; an equal request of the earlier authority is not kept.
+        const sameAuthority = lane.state === "pending" && lane.connectionId === event.connectionId;
+        if (!sameAuthority) lane.revision += 1;
         lane.state = "pending";
         lane.connectionId = event.connectionId;
-        // An unrelated new request or an identical OpenCode re-list does not
-        // revoke this request. Codex callbacks retain exact object identity;
+        // Under one authority, an unrelated new request or an identical OpenCode
+        // re-list does not revoke this request. Codex callbacks retain exact object identity;
         // a new callback with a reused JSON-RPC ID is never the old request.
-        lane.requests = event.requests.map(request => lane.requests.find(previous => previous.provider === request.provider
-          && (request.provider === "codex" ? previous.native === request.native : isDeepStrictEqual(previous.native, request.native))) ?? request);
+        lane.requests = sameAuthority
+          ? event.requests.map(request => lane.requests.find(previous => previous.provider === request.provider
+            && (request.provider === "codex" ? previous.native === request.native : isDeepStrictEqual(previous.native, request.native))) ?? request)
+          : [...event.requests];
       } else {
         lane.revision += 1;
         lane.state = event.type === "unavailable" ? "unavailable" : "degraded";
@@ -474,7 +480,9 @@ export class HostApprovalBroker {
     const raw = literal(inspectedRequest(native, fileChanges));
     return { agentId: entry.id, displayName: entry.display_name, provider: native.provider, title,
       details: Buffer.byteLength(raw) <= MAX_PRESENTATION_BYTES ? raw : "The request is too large to present safely. No decision can be sent.",
-      denyScope: native.provider === "open-model" ? "session_pending" : "request" };
+      denyScope: native.provider === "open-model" ? "session_pending"
+        : native.provider === "codex" && codexDenyDecision(native.native.method, native.native.params) === "cancel"
+          ? "request_and_turn" : "request" };
   }
 
   private async prepareCore(lane: Lane, native: ProviderPermissionRequest) {

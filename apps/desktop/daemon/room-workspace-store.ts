@@ -1,7 +1,8 @@
 import { encodeWorkspaceReview, REVIEW_LIMIT, REVIEW_PAGE_SIZE, type WorkspaceReview, type WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
-import { InvalidInlineReviewError, archiveWorkspaceReview, discardUncommittedReviewArchive, pruneUnreferencedReviewArchives, readArchivedReviewPage, reviewArchiveReference } from '../../../shared/workspace-review-archive.mjs';
+import { InvalidInlineReviewError, REVIEW_ARCHIVE_MIN_USER_VERSION, archiveWorkspaceReview, discardUncommittedReviewArchive, pruneUnreferencedReviewArchives, readArchivedReviewPage, reviewArchiveReference } from '../../../shared/workspace-review-archive.mjs';
 import type { DatabaseSync } from 'node:sqlite';
 import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from '../../../shared/room-agent-work.mjs';
+import { DaemonFenceLostError } from './singleton.js';
 
 const schema = `CREATE TABLE room_workspace_captures (
   agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
@@ -47,34 +48,67 @@ export class RoomWorkspaceStore {
   private finishedArchiveMigration = false;
   private pruneAfter = 0;
   private archiveRetryAt = 0;
-  constructor(private readonly db: DatabaseSync) {
+  constructor(
+    private readonly db: DatabaseSync,
+    private readonly assertWriteFence?: () => void,
+  ) {
     // In-memory inspection/test databases are self-contained. Only a fenced
-    // v54+ on-disk supervisor may commit an external archive reference.
+    // modern v5+ (PRAGMA user_version >= 1005) on-disk supervisor may commit an
+    // external archive reference; legacy application_id=0 databases are moved
+    // aside before opening by assertDaemonStateVersionSupported.
     const file = db.prepare("SELECT file FROM pragma_database_list WHERE name='main'").get()?.file;
-    this.databasePath = file && Number(db.prepare('PRAGMA user_version').get()?.user_version) >= 54 ? String(file) : null;
+    this.databasePath = file && Number(db.prepare('PRAGMA user_version').get()?.user_version) >= REVIEW_ARCHIVE_MIN_USER_VERSION ? String(file) : null;
     // Reviews are gzip/base64 ASCII. In UTF-8, byte length comes from SQLite's
     // record metadata, without reading an already-uploaded archive again.
     // Other database encodings retain the original character-count semantics.
     this.reviewSizeSql = db.prepare('PRAGMA encoding').get()?.encoding === 'UTF-8'
       ? 'octet_length(data)' : 'length(data)';
   }
-  begin(key: WorkspaceCaptureIdentity): boolean {
-    // A second native invocation for the same source is ambiguous. Do not reuse a
-    // previous invocation's baseline, even if the provider never returned a turn id.
-    const existing = this.db.prepare('SELECT 1 FROM room_workspace_captures WHERE agent_id=? AND room_id=? AND source_message_id=?').get(...keys(key).slice(0, 3));
-    if (existing) {
-      this.db.prepare('UPDATE room_workspace_captures SET baseline=NULL WHERE agent_id=? AND room_id=? AND source_message_id=? AND settled_json IS NULL').run(...keys(key).slice(0, 3));
-      return false;
+  private writeTransaction<T>(body: () => T): T {
+    if (this.db.isTransaction) {
+      this.db.exec('SAVEPOINT room_workspace_write');
+      try {
+        this.assertWriteFence?.();
+        const result = body();
+        this.db.exec('RELEASE room_workspace_write');
+        return result;
+      } catch (error) {
+        try { this.db.exec('ROLLBACK TO room_workspace_write; RELEASE room_workspace_write'); } catch { /* Already rolled back. */ }
+        throw error;
+      }
     }
-    this.db.prepare('INSERT INTO room_workspace_captures(agent_id,room_id,source_message_id,work_attempt_id,inbox_item_id) VALUES(?,?,?,?,?)').run(...keys(key));
-    return true;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.assertWriteFence?.();
+      const result = body();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { /* Already rolled back. */ }
+      throw error;
+    }
+  }
+  begin(key: WorkspaceCaptureIdentity): boolean {
+    return this.writeTransaction(() => {
+      // A second native invocation for the same source is ambiguous. Do not reuse a
+      // previous invocation's baseline, even if the provider never returned a turn id.
+      const existing = this.db.prepare('SELECT 1 FROM room_workspace_captures WHERE agent_id=? AND room_id=? AND source_message_id=?').get(...keys(key).slice(0, 3));
+      if (existing) {
+        this.db.prepare('UPDATE room_workspace_captures SET baseline=NULL WHERE agent_id=? AND room_id=? AND source_message_id=? AND settled_json IS NULL').run(...keys(key).slice(0, 3));
+        return false;
+      }
+      this.db.prepare('INSERT INTO room_workspace_captures(agent_id,room_id,source_message_id,work_attempt_id,inbox_item_id) VALUES(?,?,?,?,?)').run(...keys(key));
+      return true;
+    });
   }
   baseline(key: WorkspaceCaptureIdentity): string | null {
     const row = this.db.prepare('SELECT baseline FROM room_workspace_captures WHERE agent_id=? AND room_id=? AND source_message_id=? AND work_attempt_id=? AND inbox_item_id=?').get(...keys(key));
     return typeof row?.baseline === 'string' ? row.baseline : null;
   }
   setBaseline(key: WorkspaceCaptureIdentity, tree: string | null): void {
-    this.db.prepare('UPDATE room_workspace_captures SET baseline=? WHERE agent_id=? AND room_id=? AND source_message_id=? AND work_attempt_id=? AND inbox_item_id=? AND settled_json IS NULL').run(tree, ...keys(key));
+    this.writeTransaction(() => {
+      this.db.prepare('UPDATE room_workspace_captures SET baseline=? WHERE agent_id=? AND room_id=? AND source_message_id=? AND work_attempt_id=? AND inbox_item_id=? AND settled_json IS NULL').run(tree, ...keys(key));
+    });
   }
   settled(agentId: string, roomId: string, sourceMessageId: string): RoomAgentWorkSummary | null {
     const row = this.db.prepare('SELECT settled_json FROM room_workspace_captures WHERE agent_id=? AND room_id=? AND source_message_id=?').get(agentId, roomId, sourceMessageId);
@@ -88,8 +122,11 @@ export class RoomWorkspaceStore {
     catch (error) { if (!(error instanceof RangeError)) throw error; } // Optional archive capacity must never discard a valid preview.
     let newArchive: string | undefined;
     let committing = false;
-    this.db.exec('SAVEPOINT workspace_review');
+    const nested = this.db.isTransaction;
+    const rollbackSql = nested ? 'ROLLBACK TO workspace_review; RELEASE workspace_review' : 'ROLLBACK';
+    this.db.exec(nested ? 'SAVEPOINT workspace_review' : 'BEGIN IMMEDIATE');
     try {
+      this.assertWriteFence?.();
       const result = this.db.prepare('UPDATE room_workspace_captures SET settled_json=? WHERE agent_id=? AND room_id=? AND source_message_id=? AND work_attempt_id=? AND inbox_item_id=? AND settled_json IS NULL').run(JSON.stringify(parsed), ...keys(key));
       if (result.changes && encoded) {
         let data = encoded.data;
@@ -108,9 +145,9 @@ export class RoomWorkspaceStore {
           .run(...keys(key).slice(0, 3), encoded.digest, data);
       }
       committing = true;
-      this.db.exec('RELEASE workspace_review');
+      this.db.exec(nested ? 'RELEASE workspace_review' : 'COMMIT');
     } catch (error) {
-      this.rollbackArchive('ROLLBACK TO workspace_review; RELEASE workspace_review', committing, newArchive);
+      this.rollbackArchive(rollbackSql, committing, newArchive);
       throw error;
     }
   }
@@ -123,6 +160,7 @@ export class RoomWorkspaceStore {
     let committing = false;
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      this.assertWriteFence?.();
       if (!this.finishedArchiveMigration) {
         const row = this.db.prepare(`SELECT rowid,digest,data FROM room_workspace_reviews
           WHERE rowid>? AND (${this.reviewSizeSql}>90 OR data NOT GLOB '@review1:*') ORDER BY rowid LIMIT 1`).get(this.lastArchiveRow);
@@ -148,7 +186,7 @@ export class RoomWorkspaceStore {
       this.db.exec('COMMIT');
       return false;
     } catch (error) {
-      if (!(error instanceof InvalidInlineReviewError)) this.archiveRetryAt = now + 30_000;
+      if (!(error instanceof InvalidInlineReviewError) && !(error instanceof DaemonFenceLostError)) this.archiveRetryAt = now + 30_000;
       this.rollbackArchive('ROLLBACK', committing, newArchive);
       throw error;
     }
@@ -192,7 +230,9 @@ export class RoomWorkspaceStore {
     return { digest, index, total, data };
   }
   acknowledgePage(agentId: string, roomId: string, sourceMessageId: string, page: WorkspaceReviewPage): void {
-    this.db.prepare('UPDATE room_workspace_reviews SET uploaded_pages=uploaded_pages+1 WHERE agent_id=? AND room_id=? AND source_message_id=? AND digest=? AND uploaded_pages=?')
-      .run(agentId, roomId, sourceMessageId, page.digest, page.index);
+    this.writeTransaction(() => {
+      this.db.prepare('UPDATE room_workspace_reviews SET uploaded_pages=uploaded_pages+1 WHERE agent_id=? AND room_id=? AND source_message_id=? AND digest=? AND uploaded_pages=?')
+        .run(agentId, roomId, sourceMessageId, page.digest, page.index);
+    });
   }
 }

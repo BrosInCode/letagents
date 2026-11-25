@@ -7,9 +7,8 @@
  */
 import { sameProviderActionConnectionSnapshot } from "../provider-action-port.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
-import type { LifecycleAuthorityMode } from "../lifecycle-authority-mode.js";
 import type { DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
-import { type Row, ManifestConflictError, nullableString, run, storeMethods } from "./shared.js";
+import { type Row, ManifestConflictError, json, nullableString, run, storeMethods } from "./shared.js";
 
 export const cursorTurns = storeMethods({
   /**
@@ -19,7 +18,7 @@ export const cursorTurns = storeMethods({
    * sides of the durable boundary.
    */
   async checkpointCursorPreparedTurn(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       agentId: string;
       roomId: string;
@@ -35,11 +34,11 @@ export const cursorTurns = storeMethods({
       expectedProviderConnection: DaemonProviderConnection | null;
       providerConnection: Extract<DaemonProviderConnection, { kind: "cursor_cli" }>;
       configurationRevision: number;
-      requestedAuthorityMode: LifecycleAuthorityMode;
+      requestedAuthorityMode?: "typed";
       observedAt: string;
     },
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode }> {
+  ): Promise<{ version: number; entry: DaemonManifestEntry; authorityMode: "typed" }> {
     if (!input.providerTurnId.trim() || !input.inboxItemId.trim() || !input.providerContinuationId.trim()) {
       throw new Error("Cursor prepared-turn checkpoint requires exact inbox and provider turn ids.");
     }
@@ -51,7 +50,7 @@ export const cursorTurns = storeMethods({
     }
     const processPid = input.providerConnection.pid;
     const processIdentity = input.providerConnection.processIdentity;
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
+    const result = await this.writeAgent(input.agentId, expectedVersion, (database, existingRow) => {
       const entry = this.readEntryFromDatabase(database, input.agentId);
       if (!entry
         || entry.room_id !== input.roomId
@@ -74,21 +73,18 @@ export const cursorTurns = storeMethods({
         || String(binding.api_url) !== input.apiUrl) {
         throw new ManifestConflictError("Cursor prepared turn lost its exact worker binding.");
       }
-      const configuration = database.prepare(`SELECT config_revision,runtime_configuration_revision
-        FROM agent_configurations WHERE agent_id=?`).get(input.agentId) as Row | undefined;
-      if (!configuration
-        || Number(configuration.runtime_configuration_revision) !== input.configurationRevision
-        || input.configurationRevision > Number(configuration.config_revision)) {
+      if (Number(existingRow.runtime_configuration_revision) !== input.configurationRevision
+        || input.configurationRevision > Number(existingRow.config_revision)) {
         throw new ManifestConflictError("Cursor prepared turn lost its exact applied configuration.");
       }
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inboxItemId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM inbox_items WHERE inbox_item_id=?").get(input.inboxItemId) as Row | undefined;
       if (!row
         || String(row.agent_id) !== input.agentId
         || String(row.room_id) !== input.roomId
         || String(row.state) !== "dispatching") {
         throw new ManifestConflictError("Cursor prepared turn no longer owns the exact dispatching FIFO item.");
       }
-      const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
+      const head = database.prepare(`SELECT inbox_item_id FROM inbox_items
         WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
       if (!head || String(head.inbox_item_id) !== input.inboxItemId) {
@@ -122,29 +118,30 @@ export const cursorTurns = storeMethods({
         throw new ManifestConflictError("Cursor prepared turn lost its expected provider-state revision.");
       }
       if (!matchesPrepared) {
-        run(database.prepare(`UPDATE runtime_deployments
-          SET provider_connection_kind='cursor_cli', provider_connection_url=NULL,
-              provider_server_auth_path=NULL, provider_connection_pid=?,
-              provider_process_identity_present=1, provider_process_identity=?
+        run(database.prepare(`UPDATE agents
+          SET provider_connection_json=?
           WHERE agent_id=? AND provider_execution_generation_id=?`),
-        input.providerConnection.pid, input.providerConnection.processIdentity,
-        input.agentId, input.executionGenerationId);
+        json(input.providerConnection), input.agentId, input.executionGenerationId);
       }
       const runtimeGenerationId = executionRuntimeStorageIdentity(input.agentId,
         input.executionGenerationId, input.providerConnection.kind,
         processPid, processIdentity);
-      const authorityMode = materializeRuntimeIdentity(database, {
+      const persistedAuthority = materializeRuntimeIdentity(database, {
         agentId: input.agentId,
         executionGenerationId: input.executionGenerationId,
         runtimeGenerationId,
         provider: "cursor",
-        authorityMode: input.requestedAuthorityMode,
+        authorityMode: "typed",
         configRevision: input.configurationRevision,
         createdAtMs: Date.parse(input.observedAt),
       });
+      if (persistedAuthority !== "typed") {
+        throw new Error("Cursor prepared turn retained an incompatible frozen lifecycle authority.");
+      }
+      const authorityMode: "typed" = "typed";
       if (!persistedTurnId) {
         const nextAttemptCount = Number(row.attempt_count) + 1;
-        run(database.prepare(`UPDATE supervised_agent_inbox
+        run(database.prepare(`UPDATE inbox_items
           SET provider_turn_id=?, attempt_count=?, updated_at=?
           WHERE inbox_item_id=? AND state='dispatching' AND provider_turn_id IS NULL`),
         input.providerTurnId, nextAttemptCount, input.observedAt, input.inboxItemId);
@@ -162,12 +159,12 @@ export const cursorTurns = storeMethods({
       if (!persisted) throw new Error("Cursor prepared-turn entry disappeared during checkpoint.");
       return { entry: persisted, authorityMode };
     }, commitFence);
-    return { generation: result.generation, ...result.value };
+    return { version: result.version, ...result.value };
   },
 
   /** CAS a later Cursor runtime edge against the exact durable inbox turn. */
   async checkpointCursorProviderState(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       agentId: string;
       roomId: string;
@@ -185,8 +182,8 @@ export const cursorTurns = storeMethods({
       observedAt: string;
     },
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
+  ): Promise<{ version: number; entry: DaemonManifestEntry }> {
+    const result = await this.writeAgent(input.agentId, expectedVersion, (database) => {
       const entry = this.readEntryFromDatabase(database, input.agentId);
       if (!entry
         || entry.room_id !== input.roomId
@@ -208,7 +205,7 @@ export const cursorTurns = storeMethods({
         || String(binding.api_url) !== input.apiUrl) {
         throw new ManifestConflictError("Cursor provider-state transition lost its exact worker binding.");
       }
-      const inbox = database.prepare("SELECT agent_id,room_id,state,provider_turn_id FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inboxItemId) as Row | undefined;
+      const inbox = database.prepare("SELECT agent_id,room_id,state,provider_turn_id FROM inbox_items WHERE inbox_item_id=?").get(input.inboxItemId) as Row | undefined;
       if (!inbox
         || String(inbox.agent_id) !== input.agentId
         || String(inbox.room_id) !== input.roomId
@@ -256,22 +253,17 @@ export const cursorTurns = storeMethods({
         throw new ManifestConflictError("Cursor provider-state transition found a stale turn-control target revision.");
       }
       if (!matchesNext) {
-        run(database.prepare(`UPDATE runtime_deployments
-          SET provider_continuation_id=?, provider_connection_kind='cursor_cli',
-              provider_connection_url=NULL, provider_server_auth_path=NULL,
-              provider_connection_pid=?, provider_process_identity_present=?,
-              provider_process_identity=?
+        run(database.prepare(`UPDATE agents
+          SET provider_continuation_id=?, provider_connection_json=?
           WHERE agent_id=? AND provider_execution_generation_id=?`),
-        input.providerContinuationId, input.providerConnection.pid,
-        Number(input.providerConnection.processIdentity !== undefined),
-        input.providerConnection.processIdentity ?? null,
+        input.providerContinuationId, json(input.providerConnection),
         input.agentId, input.executionGenerationId);
         run(database.prepare(`UPDATE supervised_agent_provider_turn_bindings
           SET provider_continuation_id=?
           WHERE inbox_item_id=? AND provider_turn_id=? AND provider_continuation_id=?`),
         input.providerContinuationId, input.inboxItemId, input.providerTurnId, input.expectedProviderContinuationId);
       }
-      if (controlTargetsTurn && !controlMatchesNext && controlCanAdvanceFromPending) {
+      if (controlTargetsTurn && !controlMatchesNext && controlCanAdvanceFromPending && control) {
         // A human control can be admitted after the paused wrapper is bound
         // but before Cursor publishes its real session id. The runtime,
         // provider-turn binding, and that exact control target are one
@@ -279,17 +271,20 @@ export const cursorTurns = storeMethods({
         // retry and reopen would observe different authority coordinates.
         // Keep this outside `!matchesNext`: an idempotent callback also heals
         // the exact predecessor state where runtime+binding committed first.
-        run(database.prepare(`UPDATE turn_control_journals
-          SET target_provider_continuation_id=?,updated_at=?
-          WHERE agent_id=? AND turn_control_present=1 AND inbox_item_id=?
-            AND provider_turn_id=? AND target_provider_continuation_id LIKE 'cursor-pending:%'`),
-        input.providerContinuationId, input.observedAt, input.agentId,
-        input.inboxItemId, input.providerTurnId);
+        const updatedControl = {
+          ...control,
+          target_provider_continuation_id: input.providerContinuationId,
+          updated_at: input.observedAt,
+        };
+        run(database.prepare(`UPDATE agents
+          SET turn_control_json=?
+          WHERE agent_id=? AND turn_control_inbox_item_id=? AND turn_control_json IS NOT NULL`),
+        json(updatedControl), input.agentId, input.inboxItemId);
       }
       const persisted = this.readEntryFromDatabase(database, input.agentId);
       if (!persisted) throw new Error("Cursor provider-state entry disappeared during checkpoint.");
       return persisted;
     }, commitFence);
-    return { generation: result.generation, entry: result.value };
+    return { version: result.version, entry: result.value };
   },
 });

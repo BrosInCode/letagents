@@ -1,6 +1,7 @@
+import { FOLLOW_UP_REASONS } from "#daemon-contract/index.js";
 import { normalizeAgentAvatar } from "../../../../../shared/agent-avatar.mjs";
 import type { DesktopSupervisorActivityEvent, DesktopSupervisorManifestEntry } from "../../ipc-types.js";
-import { redactCredentialText, safeStreamPayload } from "../agents/provider-evidence.js";
+import { redactCredentialText, safeStreamPayload } from "#provider-runtime/agents/provider-evidence.js";
 import type { WireActivityEvent, WireEntry } from "./types.js";
 import { enumValue, nonEmptyString, nullableNonEmptyString, nullableString, record } from "./wire-values.js";
 
@@ -27,8 +28,7 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
     condition: entry.condition,
     lastError: entry.last_error ?? null,
     permissionProfileId: entry.permission_profile_id,
-    deliveryMode: entry.delivery_mode ?? "mcp_polling",
-    ...(entry.polling_contract === "custodial_polling_v1" ? { pollingContract: entry.polling_contract } : {}),
+    deliveryMode: entry.delivery_mode ?? "daemon_inbox",
     ...(entry.home_harness === "on" || entry.home_harness === "after_restart" || entry.home_harness === "until_restart"
       ? { homeHarness: entry.home_harness } : {}),
     ...(entry.permission_pending === true ? { permissionPending: true as const } : {}),
@@ -241,9 +241,6 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
       ...(followUp ? { followUp } : {}), timeline }];
   });
 }
-
-/** Keep in sync with FOLLOW_UP_REASONS in daemon/task-continuity.ts. A test reads both. */
-const FOLLOW_UP_REASONS = ["stopped_by_owner", "skipped", "agent_changed", "task_not_held", "uncertain_action", "uncertain_resolved", "attempts_failed", "ownership_unverified", "other"] as const;
 
 /** A follow-up is shown only when every part of it is what the daemon writes; anything else reads as none. */
 function projectFollowUp(value: unknown): import("../../ipc-types/agents.js").DesktopRoomAgentFollowUp | null {

@@ -24,14 +24,14 @@ import {
 import {
   firstRedactedCodexAppServerOutputLine,
   sensitiveCodexAppServerEnvValues,
-} from "./codex-app-server.js";
-import { resolveCodexExecutable } from "./codex-executable.js";
-import { cachedProbe, clearProbeCache, probeKey } from "./provider-probe-cache.js";
+} from "#provider-runtime/agents/codex-app-server.js";
+import { resolveCodexExecutable } from "#provider-runtime/agents/codex-executable.js";
+import { cachedProbe, clearProbeCache, probeKey } from "#provider-runtime/provider-probe-cache.js";
 import {
   openCodeInstallCommand,
   resolveOpenCodeBinary,
-} from "./opencode-runtime.js";
-import { getOpenModelSettingsStatus } from "./open-model-settings.js";
+} from "#provider-runtime/agents/opencode-runtime.js";
+import { getOpenModelSettingsStatus } from "#provider-runtime/agents/open-model-settings.js";
 import { runDesktopCursorProviderPreflight } from "./cursor-provider-preflight.js";
 import {
   normalizeManagedAgentModel,
@@ -42,23 +42,23 @@ import {
   branchScopedGitRoomName,
   gitRoomFromBranchRoomIdentifier,
 } from "./managed-agent-branch-scope.js";
-import { claudeApprovalProfileLabel, inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
+import { claudeApprovalProfileLabel, inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "#provider-runtime/agents/claude-code-version.js";
 import {
   getDesktopAgentProvider,
   isDesktopAgentProviderId,
 } from "./provider-registry.js";
 import { providerSetupConfirmationResult } from "./provider-setup-confirmation.js";
 import { missingExternalRuntimePreflight } from "./external-runtime-preflight.js";
-import { ANTIGRAVITY_MIN_VERSION, antigravityChildEnvironment, antigravityVersionAtLeast, parseAntigravityVersion, resolveAntigravityExecutable } from "./antigravity/launch.js";
+import { ANTIGRAVITY_MIN_VERSION, antigravityChildEnvironment, antigravityVersionAtLeast, parseAntigravityVersion, resolveAntigravityExecutable } from "#provider-runtime/agents/antigravity/launch.js";
+import { ownerAntigravityTokenFileExists } from "#provider-runtime/agents/antigravity/sign-in.js";
 import {
   desktopRuntimeEnvironment,
   desktopShellEnvironmentReady,
   refreshDesktopShellEnvironment,
-} from "../desktop-shell-environment.js";
+} from "#provider-runtime/desktop-shell-environment.js";
 import { SupervisorPreparationPendingError, SupervisorStatePreparationError } from "../supervisor-state-recovery.js";
 import { supervisorDaemonClient } from "../supervisor-daemon.js";
 import { supervisorDaemonAllowed } from "../platform-capabilities.js";
-import { ownerAntigravityTokenFileExists } from "./antigravity/sign-in.js";
 
 export { listDesktopAgentProviders } from "./provider-registry.js";
 

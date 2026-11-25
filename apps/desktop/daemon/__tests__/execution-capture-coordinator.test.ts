@@ -7,13 +7,12 @@ import test from "node:test";
 import { DaemonStateSchema } from "../daemon-state-database.js";
 import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity } from "../execution-shadow-store.js";
-import { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
-import { ProviderExecutionObserver } from "../../electron/main/agents/provider-execution-observer.js";
+import { ProviderExecutionObserver } from "#provider-runtime/agents/provider-execution-observer.js";
 import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
 import type { ProviderActionConnectionRef, ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { projectRoomAgentManifestEntry } from "../room-agent-state-projection.js";
-import { archiveExitedRuntimes } from "../runtime-recovery-journal.js";
+import { archiveExitedRuntimes, archiveExitedUndispatchedCursorRuntime } from "../runtime-recovery-journal.js";
 import type { DaemonManifestEntry } from "../types.js";
 
 const now = "2026-08-31T00:00:00.000Z";
@@ -34,30 +33,28 @@ function successor(f: ReturnType<typeof fixture>, birth: string): ProviderAction
   const handle = { ...f.handle, appliedConfigurationRevision: 2,
     providerConnection: { ...f.handle.providerConnection!, processIdentity: birth } };
   f.handles.set("agent", handle);
-  f.db.prepare("UPDATE runtime_deployments SET provider_process_identity=?").run(birth);
+  f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'").run(JSON.stringify(handle.providerConnection));
   new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
     runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", handle.providerConnection!.kind,
       handle.providerConnection!.pid!, birth),
-    provider: "codex", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+    provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
   return handle;
 }
 
 function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server", onExecution?: NonNullable<ProviderActionPort["onExecution"]>, changed?: (agentId: string) => void,
-  db = new DatabaseSync(":memory:"), authorityMode: "typed_shadow" | "typed" = "typed_shadow") {
+  db = new DatabaseSync(":memory:"), authorityMode: "typed" = "typed") {
   db.exec("PRAGMA foreign_keys=ON");
   new DaemonStateSchema().createSchema(db);
-  db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${now}',0);
-    INSERT INTO agent_configurations(agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,config_revision,runtime_configuration_revision)
-      VALUES('agent','claude-code','charter','daemon_inbox',0,0,9,2);
-    INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
-      VALUES('workspace','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','${now}');
-    INSERT INTO work_attempt_executions VALUES('generation','workspace','${now}','test',1,NULL);
-    INSERT INTO runtime_deployments(agent_id,observed_state,workspace_path_present,work_attempt_id_present,work_attempt_id,
-      provider_ref_present,provider_work_attempt_id,provider_continuation_id,provider_connection_kind,provider_connection_url,provider_server_auth_path,
-      provider_connection_pid,provider_process_identity_present,provider_process_identity,provider_execution_generation_id,
-      workplace_liveness_present,native_liveness_present,activity_present)
-      VALUES('agent','working',0,1,'workspace',1,'workspace','continuation','${kind}','http://localhost/runtime','/private/auth',42,1,'birth-secret','generation',0,0,0);`);
   const connection = { kind, pid: 42, processIdentity: "birth-secret", url: "http://localhost/runtime", serverAuthPath: "/private/auth" } as ProviderActionConnectionRef;
+  db.prepare(`INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+    VALUES('workspace','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active',?)`).run(now);
+  db.prepare(`INSERT INTO work_attempt_executions VALUES('generation','workspace',?,'test',1,NULL)`).run(now);
+  db.prepare(`INSERT INTO agents(
+    agent_id,sort_order,version,created_by,created_at,display_name,room_id,provider,charter,
+    config_revision,runtime_configuration_revision,desired_state,observed_state,condition,
+    work_attempt_id,provider_work_attempt_id,provider_continuation_id,provider_execution_generation_id,provider_connection_json
+  ) VALUES('agent',0,1,'owner',?,'Agent','room','claude-code','charter',9,2,'running','working','none','workspace','workspace','continuation','generation',?)`)
+    .run(now, JSON.stringify(connection));
   const handle: ProviderActionHandle = { workAttemptId: "workspace", pid: 42, providerContinuationId: "continuation", observedState: "working", providerConnection: connection, appliedConfigurationRevision: 2 };
   const handles = new Map([["agent", handle]]);
   const provider = { codex_app_server: "codex", claude_cli: "claude-code", cursor_cli: "cursor", opencode_server: "open-model" } as const;
@@ -103,9 +100,9 @@ function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server",
   const position = () => db.prepare("SELECT last_source_sequence,max_observed_sequence FROM execution_observers").get();
   const bindTurn = (turn = "native-turn", source = "message",
     state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "retryable" | "blocked" = "awaiting_result") => {
-    db.prepare(`INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
+    db.prepare(`INSERT INTO inbox_items(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
       VALUES(?,'agent','room',?,'{"text":"PRIVATE PROMPT"}','{}',?,?,1,?,?,?, ?,?)`)
-      .run(turn, source, Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1, state, `action-${turn}`, `reply-${turn}`, turn, now, now);
+      .run(turn, source, Number(db.prepare("SELECT COUNT(*) n FROM inbox_items").get()!.n) + 1, state, `action-${turn}`, `reply-${turn}`, turn, now, now);
     db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room','workspace','generation','continuation',?)").run(turn, turn);
   };
   return { db, handle, handles, observer, capture, diagnostics, stopped, install, advance, admission, typedAdmission, tokenFor, emit, facts, position, bindTurn };
@@ -119,17 +116,14 @@ function secondCaptureLane(f: ReturnType<typeof fixture>) {
   for (const [table, key, original] of [
     ["work_attempts", "work_attempt_id", "workspace"],
     ["work_attempt_executions", "execution_generation_id", "generation"],
-    ["agent_identities", "agent_id", "agent"],
-    ["agent_configurations", "agent_id", "agent"],
-    ["runtime_deployments", "agent_id", "agent"],
+    ["agents", "agent_id", "agent"],
   ]) {
     const row = f.db.prepare(`SELECT * FROM ${table} WHERE ${key}=?`).get(original)!;
     if ("agent_id" in row) row.agent_id = agentId;
     if ("work_attempt_id" in row) row.work_attempt_id = workspace;
     if (table === "work_attempts") { row.task_id = agentId; row.lease_id = agentId; row.workspace_path = "/private/second-workspace"; }
     if (table === "work_attempt_executions") row.execution_generation_id = generation;
-    if (table === "agent_identities") row.sort_order = 1;
-    if (table === "runtime_deployments") { row.provider_execution_generation_id = generation; row.provider_work_attempt_id = workspace; }
+    if (table === "agents") { row.sort_order = 1; row.provider_execution_generation_id = generation; row.provider_work_attempt_id = workspace; }
     const columns = Object.keys(row);
     f.db.prepare(`INSERT INTO ${table}(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`).run(...Object.values(row));
   }
@@ -139,7 +133,7 @@ function secondCaptureLane(f: ReturnType<typeof fixture>) {
     executionGenerationId: generation, handle, nonce: Symbol("second-installation") });
   new ExecutionShadowStore(f.db).registerRuntime({ agentId, executionGenerationId: generation,
     runtimeGenerationId: executionRuntimeStorageIdentity(agentId, generation, "codex_app_server", 42, "birth-secret"),
-    provider: "codex", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+    provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
   return { agentId, handle, token };
 }
 
@@ -181,8 +175,8 @@ test("Codex reattach admission requires the exact durable outstanding turn", asy
       "runtime readiness alone cannot prove the native turn boundary");
     exact.emit(active); await flush();
     assert.equal(exact.admission(), "ready");
-    assert.equal(exact.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'")
-      .get()?.observed_state, "working", "typed-shadow reconstruction cannot mutate legacy authority");
+    assert.equal(exact.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'")
+      .get()?.observed_state, "working", "capture reconstruction alone cannot mutate runtime deployment state");
   } finally { exact.capture.close(); }
 
   const mismatched = fixture();
@@ -212,24 +206,17 @@ test("Codex reattach admission requires the exact durable outstanding turn", asy
   }
 });
 
-test("typed lifecycle admission requires a caught-up source and fully disposed fact journal", async () => {
-  const shadow = fixture();
-  try {
-    await shadow.install(); await flush();
-    assert.equal(shadow.typedAdmission(), "unavailable", "typed-shadow observation never grows authority");
-  } finally { shadow.capture.close(); }
-
+test("typed lifecycle admission requires a caught-up source and projects lifecycle directly onto agents", async () => {
   const typed = fixture("codex_app_server", undefined, undefined, new DatabaseSync(":memory:"), "typed");
   try {
+    typed.db.prepare("UPDATE agents SET observed_state='idle' WHERE agent_id='agent'").run();
     await typed.install(); await flush();
-    assert.equal(typed.typedAdmission(), "ready", "an exact empty typed source is fully disposed");
+    assert.equal(typed.typedAdmission(), "ready", "an exact empty typed source is immediately ready");
     typed.bindTurn(); typed.emit(active); await flush();
-    assert.equal(typed.typedAdmission(), "pending", "capture alone cannot outrun its durable effect");
-    typed.db.prepare(`UPDATE execution_lifecycle_effects SET state='applied',disposed_at_ms=created_at_ms
-      WHERE state='pending'`).run();
-    assert.equal(typed.typedAdmission(), "ready");
-    typed.db.prepare("DELETE FROM execution_lifecycle_effects").run();
-    assert.equal(typed.typedAdmission(), "unavailable", "a missing disposition fails closed");
+    assert.equal(typed.typedAdmission(), "ready", "direct in-transaction projection leaves no pending effect queue");
+    assert.equal(typed.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+    typed.db.prepare("DELETE FROM execution_observer_sources").run();
+    assert.equal(typed.typedAdmission(), "unavailable", "a missing observer source fails closed");
   } finally { typed.capture.close(); }
 });
 
@@ -252,165 +239,6 @@ test("Cursor identity retirement synchronously captures the exact child tail", a
       "an exited child is never delivery-ready even though its source tail is durably settled");
     assert.throws(() => f.capture.flush(f.tokenFor({ ...f.handle })), /identity_mismatch/,
       "the barrier cannot settle a copied or successor handle");
-  } finally { f.capture.close(); }
-});
-
-test("typed lifecycle settlement drains one agent to a durable terminal disposition", async () => {
-  let pending = Array.from({ length: 40 }, (_, index) => ({
-    factId: `settle-${index}`, agentId: "agent", factSequence: index + 1,
-    observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
-    effectKind: "manifest_idle" as const, observedAtMs: 100 + index,
-  })).concat({ factId: "unrelated", agentId: "other", factSequence: 100,
-    observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
-    effectKind: "manifest_idle" as const, observedAtMs: 200 });
-  const coordinator = new TypedLifecycleEffectCoordinator({
-    store: {
-      listPendingTypedLifecycleEffects: async (agentId, limit) => pending
-        .filter(effect => !agentId || effect.agentId === agentId).slice(0, limit),
-      applyTypedLifecycleEffect: async (generation, effect) => {
-        if (effect.agentId === "other") throw new Error("unrelated retry");
-        pending = pending.filter(candidate => candidate.factId !== effect.factId);
-        return { generation, disposition: "applied" as const };
-      },
-    },
-    currentInstallation: () => undefined,
-    authority: { serialize: operation => operation(), assertCurrent: async () => {},
-      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
-    isClosing: () => false, nowMs: () => 200, diagnostic: (_agentId, error) => { throw error; },
-  });
-  try {
-    coordinator.changed("other");
-    await Promise.all([coordinator.settle("agent"), coordinator.settle("agent")]);
-    assert.deepEqual(pending.map(effect => effect.factId), ["unrelated"],
-      "a requested settlement is serialized and cannot be blocked by another agent's retry");
-  } finally { await coordinator.close(); }
-
-  const backgroundEntered = deferred<void>();
-  const releaseBackground = deferred<void>();
-  const targetEntered = deferred<void>();
-  const releaseTarget = deferred<void>();
-  let backgroundLists = 0;
-  let activeApplies = 0;
-  let maximumConcurrentApplies = 0;
-  let targetPending = true;
-  let backgroundPending = true;
-  const serialized = new TypedLifecycleEffectCoordinator({
-    store: {
-      listPendingTypedLifecycleEffects: async (agentId) => {
-        if (agentId === "background" && backgroundLists++ === 0) {
-          backgroundEntered.resolve();
-          await releaseBackground.promise;
-          throw new Error("retry background drain");
-        }
-        if (agentId === "target" && targetPending) return [{ factId: "target", agentId: "target", factSequence: 1,
-          observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
-          effectKind: "manifest_idle" as const, observedAtMs: 100 }];
-        if (agentId === "background" && backgroundPending) return [{ factId: "background", agentId: "background", factSequence: 2,
-          observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
-          effectKind: "manifest_idle" as const, observedAtMs: 100 }];
-        return [];
-      },
-      applyTypedLifecycleEffect: async (generation, effect) => {
-        activeApplies += 1;
-        maximumConcurrentApplies = Math.max(maximumConcurrentApplies, activeApplies);
-        try {
-          if (effect.agentId === "target") {
-            targetEntered.resolve();
-            await releaseTarget.promise;
-            targetPending = false;
-          } else {
-            backgroundPending = false;
-          }
-          return { generation, disposition: "applied" as const };
-        } finally {
-          activeApplies -= 1;
-        }
-      },
-    },
-    currentInstallation: () => undefined,
-    authority: { serialize: operation => operation(), assertCurrent: async () => {},
-      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
-    isClosing: () => false, nowMs: () => 200, diagnostic: () => {},
-  });
-  try {
-    serialized.changed("background");
-    await delay(0);
-    await backgroundEntered.promise;
-    const settlement = serialized.settle("target");
-    releaseBackground.resolve();
-    await targetEntered.promise;
-    await delay(1_050);
-    assert.equal(maximumConcurrentApplies, 1,
-      "a retry timer scheduled by the prior drain cannot overlap the exact-agent settlement barrier");
-    releaseTarget.resolve();
-    await settlement;
-    for (let i = 0; i < 20 && backgroundPending; i += 1) await delay(10);
-    assert.equal(backgroundPending, false, "the unrelated retry resumes after exact-agent settlement");
-    assert.equal(maximumConcurrentApplies, 1);
-  } finally {
-    releaseBackground.resolve();
-    releaseTarget.resolve();
-    await serialized.close();
-  }
-
-  const blocked = new TypedLifecycleEffectCoordinator({
-    store: {
-      listPendingTypedLifecycleEffects: async () => [{ factId: "pending", agentId: "agent", factSequence: 1,
-        observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
-        effectKind: "manifest_idle" as const, observedAtMs: 100 }],
-      applyTypedLifecycleEffect: async generation => ({ generation, disposition: "pending" as const }),
-    },
-    currentInstallation: () => undefined,
-    authority: { serialize: operation => operation(), assertCurrent: async () => {},
-      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
-    isClosing: () => false, nowMs: () => 200, diagnostic: () => {},
-  });
-  try {
-    await assert.rejects(() => blocked.settle("agent"), /did not settle/);
-  } finally { await blocked.close(); }
-});
-
-test("typed lifecycle startup scan advances past a full unavailable batch", async () => {
-  const effects = Array.from({ length: 33 }, (_, index) => ({
-    factId: `fact-${index + 1}`, agentId: index < 32 ? "unavailable-agent" : "later-agent",
-    factSequence: index + 1, observerExecutionGenerationId: "generation",
-    observerRuntimeGenerationId: "runtime", effectKind: "manifest_working" as const, observedAtMs: 100,
-  }));
-  const visited: string[] = [];
-  const coordinator = new TypedLifecycleEffectCoordinator({
-    store: {
-      listPendingTypedLifecycleEffects: async (agentId, limit, after) => effects
-        .filter(effect => (!agentId || effect.agentId === agentId) && effect.factSequence > (after ?? 0))
-        .slice(0, limit),
-      applyTypedLifecycleEffect: async (_generation, effect) => {
-        visited.push(effect.factId);
-        return { generation: 0, disposition: "pending" as const };
-      },
-    },
-    currentInstallation: () => undefined,
-    authority: { serialize: operation => operation(), assertCurrent: async () => {},
-      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
-    isClosing: () => false, nowMs: () => 200, diagnostic: (_agentId, error) => { throw error; },
-  });
-  try {
-    coordinator.start(); await delay(10); await flush();
-    assert.deepEqual(visited, effects.map(effect => effect.factId));
-  } finally { await coordinator.close(); }
-});
-
-test("capture preserves a pre-existing birth mode and rejects policy mismatch", async () => {
-  const f = fixture();
-  try {
-    const runtimeGenerationId = executionRuntimeStorageIdentity("agent", "generation", "codex_app_server", 42, "birth-secret");
-    const shadow = new ExecutionShadowStore(f.db);
-    f.db.prepare("DELETE FROM execution_runtime_generations WHERE runtime_generation_id=?").run(runtimeGenerationId);
-    assert.equal(shadow.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId,
-      provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: 100 }), "typed");
-    await f.install(); f.emit(ready); await flush();
-    assert.equal(f.db.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE runtime_generation_id=?")
-      .get(runtimeGenerationId)?.authority_mode, "typed", "capture cannot rewrite the exact birth to the current release policy");
-    assert.equal(f.admission(), "unavailable",
-      "the installed typed-shadow expectation never silently adopts a different frozen mode");
   } finally { f.capture.close(); }
 });
 
@@ -442,32 +270,10 @@ test("drain remembers a found runtime birth but never a missing one", async (t) 
     const before = lookups;
     new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
       runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", "codex_app_server", 42, late),
-      provider: "codex", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+      provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
     f.capture.refresh("agent"); await flush();
     assert.ok(lookups > before, "the earlier miss was not remembered");
     assert.equal(f.facts().length, 23, "the late birth's fact is captured");
-  } finally { f.capture.close(); }
-});
-
-test("Open Model births use the same closed typed-shadow release policy", async () => {
-  const f = fixture("opencode_server");
-  try {
-    f.bindTurn();
-    await f.install();
-    f.emit(ready);
-    f.emit({ ...active, nativeEventId: "open-model-active" });
-    f.emit({ ...terminal, nativeEventId: "open-model-terminal" });
-    await flush();
-    assert.deepEqual({ ...f.db.prepare("SELECT provider,authority_mode FROM execution_runtime_generations").get() },
-      { provider: "open-model", authority_mode: "typed_shadow" });
-    assert.equal(f.admission(), "ready");
-    assert.deepEqual(f.db.prepare(`SELECT native_event_id,typed_phase,typed_state FROM lifecycle_projection_pairs
-      ORDER BY typed_sequence`).all().map(row => ({ ...row })), [
-      { native_event_id: "open-model-active", typed_phase: "turn_active", typed_state: "working" },
-      { native_event_id: "open-model-terminal", typed_phase: "turn_terminal", typed_state: "terminal" },
-    ]);
-    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'").get()?.observed_state,
-      "working", "Open Model shadow capture cannot become operational authority");
   } finally { f.capture.close(); }
 });
 
@@ -538,9 +344,10 @@ test("capture admission recovers from durable observer rows after coordinator re
       assert.equal(restarted.captureAdmission(first.tokenFor()), "ready");
       assert.equal(database.prepare("SELECT daemon_generation_id FROM execution_observers WHERE agent_id='agent'").get()!.daemon_generation_id, "2",
         "restart readiness is re-derived from a newly committed observer, not the old in-memory lane");
-    } finally { restarted.close(); }
+    } finally { restarted.close(); if (database.isOpen) database.close(); }
   } finally {
     first.capture.close();
+    if (first.db.isOpen) first.db.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -577,76 +384,17 @@ test("capture replays native facts only after the exact committed turn binding, 
     assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 4 });
     assert.deepEqual(f.diagnostics, ["identity_unavailable"]);
     f.bindTurn();
-    const receipt = f.db.prepare("SELECT * FROM supervised_agent_inbox").all();
+    const receipt = f.db.prepare("SELECT * FROM inbox_items").all();
     f.capture.refresh(); await flush();
     assert.equal(f.facts().length, 4);
     assert.deepEqual({ ...f.position() }, { last_source_sequence: 4, max_observed_sequence: 4 });
-    assert.deepEqual(f.db.prepare("SELECT * FROM supervised_agent_inbox").all(), receipt);
+    assert.deepEqual(f.db.prepare("SELECT * FROM inbox_items").all(), receipt);
     assert.deepEqual({ ...f.db.prepare("SELECT provider,config_revision,runtime_state,authority_mode FROM execution_runtime_generations").get() },
-      { provider: "codex", config_revision: 2, runtime_state: "ready", authority_mode: "typed_shadow" }, "actual running provider/applied revision, not desired configuration");
-    assert.equal(f.db.prepare("SELECT state FROM execution_turns").get()!.state, "terminal");
+      { provider: "codex", config_revision: 2, runtime_state: "ready", authority_mode: "typed" }, "actual running provider/applied revision, not desired configuration");
+    assert.equal(f.db.prepare("SELECT state FROM runs").get()!.state, "terminal");
     assert.doesNotMatch(JSON.stringify(f.facts()), /PRIVATE|birth-secret|localhost|private/);
     await f.install(); await flush();
     assert.equal(f.facts().length, 4, "same-source reconnect skips the committed replay prefix");
-  } finally { f.capture.close(); }
-});
-
-test("typed and legacy lifecycle checkpoints meet in the durable comparator without changing execution", async () => {
-  const f = fixture();
-  try {
-    f.bindTurn(); await f.install(); f.emit(ready);
-    f.emit({ ...active, nativeEventId: "native-active" });
-    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
-      executionGenerationId: "generation", nativeEventId: "native-active", phase: "turn_active", state: "working" });
-    f.emit({ ...terminal, nativeEventId: "native-terminal" });
-    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
-      executionGenerationId: "generation", nativeEventId: "native-terminal", phase: "turn_terminal", state: "terminal" });
-    await flush();
-    assert.deepEqual(f.capture.lifecycleProjectionDiagnostics().providers.codex, {
-      comparedSegments: 1, matched: 2, missingInTyped: 0, missingInLegacy: 0,
-      pairedButDifferent: 0, conflicts: 0, observationUnavailable: 0,
-    });
-    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'").get()!.observed_state, "working");
-  } finally { f.capture.close(); }
-});
-
-test("busy lifecycle storage retries the bounded raw witness without blocking or losing it", async () => {
-  const f = fixture();
-  const exec = f.db.exec.bind(f.db);
-  let busy = true;
-  try {
-    f.db.exec = sql => {
-      if (busy && sql === "BEGIN IMMEDIATE") { busy = false; throw new Error("database is locked"); }
-      return exec(sql);
-    };
-    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
-      executionGenerationId: "generation", nativeEventId: "raw-active", phase: "turn_active", state: "working" });
-    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0,
-      "the provider callback performs no synchronous SQLite write");
-    await flush();
-    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0);
-    f.db.exec = exec;
-    await delay(40); await flush();
-    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 1);
-    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 0,
-      "a retained witness is retried rather than declared lost");
-  } finally { f.db.exec = exec; f.capture.close(); }
-});
-
-test("raw lifecycle queue overflow is bounded and becomes durable unavailability", async () => {
-  const f = fixture();
-  try {
-    for (let index = 0; index < 257; index++) f.capture.recordLegacyLifecycle({
-      agentId: "agent", provider: "codex", workAttemptId: "workspace", executionGenerationId: "generation",
-      nativeEventId: `raw-${index}`, phase: "turn_active", state: "working",
-    });
-    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 1);
-    for (let attempt = 0; attempt < 30
-      && Number(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count) < 256; attempt++) {
-      await delay(5);
-    }
-    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 256);
-    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 1);
   } finally { f.capture.close(); }
 });
 
@@ -708,15 +456,15 @@ test("scoped refresh settles receipts independently of capture gaps and late nat
         await flush(); assert.ok(f.diagnostics.includes("source_gap"));
       }
       assert.equal(f.db.prepare("SELECT state FROM execution_message_attempts").get()!.state, "active");
-      f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',
+      f.db.prepare(`UPDATE inbox_items SET state='acknowledged_no_reply',
         outcome=?,acknowledged_at=?,updated_at=?`).run(JSON.stringify({ kind: "no_reply", text: null }), now, now);
-      const operational = f.db.prepare("SELECT * FROM supervised_agent_inbox").all();
+      const operational = f.db.prepare("SELECT * FROM inbox_items").all();
       const beforeSettlement = hints;
       f.capture.refresh("agent"); await flush();
       assert.equal(hints, beforeSettlement + 1, "receipt-only progress notifies even when capture is suspended");
       const settled = f.db.prepare("SELECT state,conclusion,settled_at_ms FROM execution_message_attempts").get();
       assert.deepEqual({ ...settled }, { state: "cleanly_concluded", conclusion: "acknowledged_no_reply", settled_at_ms: Date.parse(now) });
-      assert.equal(f.db.prepare("SELECT state FROM execution_turns").get()!.state, "active", "receipt settlement is not native-turn lifecycle authority");
+      assert.equal(f.db.prepare("SELECT state FROM runs").get()!.state, "active", "receipt settlement is not native-turn lifecycle authority");
       if (!gap) {
         f.emit(terminal);
         f.emit({ ...nativeTurn, domain: "execution", kind: "completed", executionId: "late-read", operation: "file_read", outcome: "failed", sideEffects: "none" });
@@ -726,7 +474,7 @@ test("scoped refresh settles receipts independently of capture gaps and late nat
       f.capture.refresh("agent"); await flush();
       assert.equal(hints, beforeRefresh, "already settled receipts do not notify again");
       assert.deepEqual(f.db.prepare("SELECT state,conclusion,settled_at_ms FROM execution_message_attempts").get(), settled);
-      assert.deepEqual(f.db.prepare("SELECT * FROM supervised_agent_inbox").all(), operational);
+      assert.deepEqual(f.db.prepare("SELECT * FROM inbox_items").all(), operational);
     } finally { f.capture.close(); }
   }
 });
@@ -773,7 +521,7 @@ test("capture change hints follow fact and receipt commits, survive callback fai
   });
   try {
     f.bindTurn();
-    f.db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?")
+    f.db.prepare("UPDATE inbox_items SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?")
       .run(JSON.stringify({ kind: "no_reply", text: null }), now);
     await f.install(); f.emit(ready); f.emit(active); f.emit(terminal); await flush();
     assert.deepEqual(snapshots.at(-1), { agentId: "agent", facts: 3, state: "cleanly_concluded", transaction: false },
@@ -788,6 +536,26 @@ test("capture change hints follow fact and receipt commits, survive callback fai
     f.emit(ready); f.capture.close(); f.emit(ready); await flush();
     assert.equal(snapshots.length, calls, "shutdown frontier preservation and queued facts never request publication");
   } finally { f.capture.close(); }
+});
+
+test("a lost last observation that the source reports as a gap suspends capture with no later observation", async () => {
+  for (const reportGap of [false, true]) {
+    let latestSequence = 0;
+    let gap: (() => void) | undefined;
+    const f = fixture("codex_app_server", async (_handle, _listener, onGap) => {
+      gap = onGap;
+      return { sourceId: "source-lost-tail", position: () => ({ firstRetainedSequence: latestSequence + 1, latestSequence }), dispose() {} };
+    });
+    try {
+      await f.install(); await flush();
+      assert.equal(f.diagnostics.includes("source_gap"), false);
+      // The source made observation 1 and could not deliver it. Nothing follows it.
+      latestSequence = 1;
+      if (reportGap) gap!();
+      await flush();
+      assert.equal(f.diagnostics.includes("source_gap"), reportGap, reportGap ? "the gap call wakes capture" : "with no gap call nothing wakes capture");
+    } finally { f.capture.close(); f.db.close(); }
+  }
 });
 
 test("an empty capture source announces admission once, then stays quiet until progress", async () => {
@@ -822,7 +590,7 @@ test("capture announces partial committed progress but not repeated failed no-op
     await f.install(); await flush();
     f.bindTurn(); f.capture.refresh(); await flush();
     const before = hints;
-    f.db.exec(`CREATE TRIGGER reject_native_turn BEFORE INSERT ON execution_turns
+    f.db.exec(`CREATE TRIGGER reject_native_turn BEFORE INSERT ON runs
       BEGIN SELECT RAISE(ABORT,'native turn unavailable'); END`);
     f.emit(active); await flush();
     assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts").get()!.n, 1);
@@ -845,17 +613,17 @@ test("scoped receipt batches revisit corrected earlier receipts and settle late 
     await f.install(); f.emit(ready); await flush();
     const runtime = String(f.db.prepare("SELECT runtime_generation_id FROM execution_runtime_generations").get()!.runtime_generation_id);
     f.bindTurn("native-late", "late-message");
-    f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=? WHERE inbox_item_id='native-late'`)
+    f.db.prepare(`UPDATE inbox_items SET state='acknowledged_no_reply',outcome=?,acknowledged_at=? WHERE inbox_item_id='native-late'`)
       .run(JSON.stringify({ kind: "no_reply", text: null }), now);
     for (let index = 0; index < 40; index++) {
       const turn = `native-${index}`; const source = `message-${index}`; const attempt = `attempt-${index}`;
       f.bindTurn(turn, source);
-      f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=? WHERE inbox_item_id=?`)
+      f.db.prepare(`UPDATE inbox_items SET state='acknowledged_no_reply',outcome=?,acknowledged_at=? WHERE inbox_item_id=?`)
         .run(JSON.stringify({ kind: index === 0 ? "unreadable" : "no_reply", text: null }), now, turn);
       f.db.prepare(`INSERT INTO execution_message_attempts(attempt_id,agent_id,room_id,source_message_id,state,created_at_ms)
         VALUES(?,'agent','room',?,'active',?)`).run(attempt, source, Date.parse(now));
       f.db.prepare(`INSERT INTO execution_attempt_generations VALUES(?,'agent','room','generation','workspace',?)`).run(attempt, Date.parse(now));
-      f.db.prepare(`INSERT INTO execution_turns(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+      f.db.prepare(`INSERT INTO runs(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
         provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms)
         VALUES(?,?,'agent','room','generation',?,'continuation',?,'terminal','none',?,?)`)
         .run(turn, attempt, runtime, turn, Date.parse(now), Date.parse(now));
@@ -868,7 +636,7 @@ test("scoped receipt batches revisit corrected earlier receipts and settle late 
       "downstream settlement diagnostics do not revoke native capture admission");
     // A later authoritative correction rechecks earlier receipts rather than
     // treating the in-memory scan cursor as durable settlement authority.
-    f.db.prepare("UPDATE supervised_agent_inbox SET outcome=? WHERE inbox_item_id='native-0'").run(JSON.stringify({ kind: "no_reply", text: null }));
+    f.db.prepare("UPDATE inbox_items SET outcome=? WHERE inbox_item_id='native-0'").run(JSON.stringify({ kind: "no_reply", text: null }));
     f.capture.refresh("agent"); await flush();
     assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts WHERE state='cleanly_concluded'").get()!.n, 40);
     // No new operational mutation: native capture itself must reconsider the
@@ -884,7 +652,7 @@ test("settlement diagnostics never hide a native capture failure", async () => {
   try {
     f.bindTurn(); await f.install(); f.emit(ready); f.emit(active); await flush();
     assert.equal(f.admission(), "ready");
-    f.db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?")
+    f.db.prepare("UPDATE inbox_items SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?")
       .run(JSON.stringify({ kind: "no_reply", text: null }), now);
     f.db.exec(`CREATE TRIGGER reject_capture_fact BEFORE INSERT ON execution_facts
       BEGIN SELECT RAISE(ABORT,'injected capture failure'); END;
@@ -1016,7 +784,7 @@ test("planned capture handoff defers on a real storage lock without detaching ob
     assert.deepEqual({ ...f.position() }, { last_source_sequence: 3, max_observed_sequence: 3 });
   } finally {
     if (competing.isTransaction) competing.exec("ROLLBACK");
-    competing.close(); f.capture.close(); rmSync(directory, { recursive: true, force: true });
+    competing.close(); f.capture.close(); if (f.db.isOpen) f.db.close(); rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -1096,9 +864,9 @@ test("the daemon archives an exited runtime only when nothing else can complete 
     assert.equal(f.db.prepare("SELECT observer_epoch FROM execution_observers").get()!.observer_epoch, Number(before.observer_epoch) + 1);
     assert.deepEqual({ ...f.db.prepare("SELECT runtime_state,control_state FROM execution_runtime_generations WHERE runtime_generation_id=?").get(first) },
       { runtime_state: "exited", control_state: "lost" });
-    assert.deepEqual(f.db.prepare("SELECT state FROM execution_turns").all().map(turn => turn.state), ["lost"], "its open turn is lost, not finished");
+    assert.deepEqual(f.db.prepare("SELECT state FROM runs").all().map(turn => turn.state), ["lost"], "its open turn is lost, not finished");
     assert.equal(f.facts().length, 2, "no fact is added");
-    assert.equal(f.db.prepare("SELECT state FROM supervised_agent_inbox").get()!.state, "awaiting_result", "and no message is cancelled");
+    assert.equal(f.db.prepare("SELECT state FROM inbox_items").get()!.state, "awaiting_result", "and no message is cancelled");
     assert.equal(f.db.prepare("SELECT state FROM execution_message_attempts").get()!.state, "active", "nor any attempt marked lost");
     assert.deepEqual(f.archive(), [], "one boundary per runtime");
   } finally { f.capture.close(); }
@@ -1112,7 +880,7 @@ test("a turn whose message is still to be settled is left for its replacement, a
     f.emit({ ...active, state: "lost" }); await flush();
     f.endGeneration();
     assert.deepEqual(f.archive(), [], "the replacement reads this turn's ending back and records it");
-    f.db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_failed'").run();
+    f.db.prepare("UPDATE inbox_items SET state='acknowledged_failed'").run();
     const first = f.runtimeOf(f.handle);
 
     // The runtime the manifest still names is checked against the operating system.
@@ -1173,7 +941,7 @@ test("a Cursor child whose turn a replaced daemon left open is archived once the
     f.install(); f.emit(ready); await flush();
     f.bindTurn(); f.emit(active); await flush();
     const child = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
-    assert.deepEqual(f.db.prepare("SELECT state FROM execution_turns").all().map(turn => turn.state), ["active"],
+    assert.deepEqual(f.db.prepare("SELECT state FROM runs").all().map(turn => turn.state), ["active"],
       "the daemon that saw the turn start was replaced before it saw the turn end");
     const lane = (connection: ProviderActionConnectionRef) => ({ id: "agent", room_id: "room", delivery_mode: "daemon_inbox",
       desired_state: "running", provider: "cursor", provider_ref: { work_attempt_id: "workspace", execution_generation_id: "generation",
@@ -1187,15 +955,15 @@ test("a Cursor child whose turn a replaced daemon left open is archived once the
 
     assert.deepEqual(archive(lane(f.handle.providerConnection!)), [], "the child the saved reference names is the lane's own");
     assert.deepEqual(archive(idle), [], "a turn whose message is still to be settled is left for its recovery to read back");
-    f.db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged'").run();
+    f.db.prepare("UPDATE inbox_items SET state='acknowledged'").run();
     assert.deepEqual(archive(lane(f.handle.providerConnection!)), [], "nor while the saved reference still names the child");
     assert.deepEqual(archive(idle), [child],
       "once the lane is idle again and the message is settled, the child is archived");
-    assert.deepEqual(f.db.prepare("SELECT state FROM execution_turns").all().map(turn => turn.state), ["lost"], "its open turn is lost, not finished");
+    assert.deepEqual(f.db.prepare("SELECT state FROM runs").all().map(turn => turn.state), ["lost"], "its open turn is lost, not finished");
     assert.deepEqual({ ...f.db.prepare("SELECT runtime_state FROM execution_runtime_generations WHERE runtime_generation_id=?").get(child) },
       { runtime_state: "exited" });
     assert.equal(f.db.prepare("SELECT terminal_json FROM work_attempt_executions").get()!.terminal_json, null, "the lane's generation goes on");
-    assert.equal(f.db.prepare("SELECT state FROM supervised_agent_inbox").get()!.state, "acknowledged", "and no message is changed");
+    assert.equal(f.db.prepare("SELECT state FROM inbox_items").get()!.state, "acknowledged", "and no message is changed");
     assert.deepEqual(archive(idle), [], "one boundary per child");
 
     // A child the saved reference still names is the lane's own until the lane has settled its exit, even once its
@@ -1206,7 +974,7 @@ test("a Cursor child whose turn a replaced daemon left open is archived once the
       sameBirthIdentity: (actual: string, expected: string) => actual.trim() === expected.trim() };
     const ended = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 44, birth);
     store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: ended,
-      provider: "cursor", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+      provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
     store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation", runtimeGenerationId: ended,
       attemptId: store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "ended-message", executionGenerationId: "generation",
         workspaceId: "workspace", createdAtMs: Date.parse(now) }),
@@ -1217,7 +985,7 @@ test("a Cursor child whose turn a replaced daemon left open is archived once the
     // The next child's turn is no longer refused by the one left open, and that child is the lane's own.
     const next = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 43, "birth-next");
     store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: next,
-      provider: "cursor", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+      provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
     f.bindTurn("next-native-turn", "next-message", "dispatching");
     const attemptId = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "next-message",
       executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: Date.parse(now) });
@@ -1237,7 +1005,7 @@ test("outside Cursor, a runtime of a generation without a recorded terminal is n
       const provider = { codex_app_server: "codex", claude_cli: "claude-code", opencode_server: "open-model" } as const;
       const other = executionRuntimeStorageIdentity("agent", "generation", kind, 43, "birth-other");
       store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: other,
-        provider: provider[kind], authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+        provider: provider[kind], authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
       store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation", runtimeGenerationId: other,
         attemptId: store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "settled-message", executionGenerationId: "generation",
           workspaceId: "workspace", createdAtMs: Date.parse(now) }),
@@ -1389,16 +1157,16 @@ test("administrative close records only the admitted source frontier and tolerat
     const f = fixture(); const close = f.db.close.bind(f.db); const exec = f.db.exec.bind(f.db);
     try {
       await f.install(); f.emit(ready); await flush();
-      const operational = f.db.prepare("SELECT * FROM runtime_deployments").all();
+      const operational = f.db.prepare("SELECT * FROM agents").all();
       f.emit(ready); f.emit(ready);
       let closes = 0; f.db.close = () => { closes++; };
       if (busy) f.db.exec = sql => { if (sql === "BEGIN IMMEDIATE") throw new Error("database is busy"); return exec(sql); };
       assert.doesNotThrow(() => f.capture.close());
       assert.equal(f.admission(), "unavailable");
-      assert.equal(closes, 1);
+      assert.equal(closes, 0, "coordinator borrows the shared database handle and never closes it");
       assert.equal(f.facts().length, 1, "shutdown must not drain queued facts");
       assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: busy ? 1 : 3 });
-      assert.deepEqual(f.db.prepare("SELECT * FROM runtime_deployments").all(), operational);
+      assert.deepEqual(f.db.prepare("SELECT * FROM agents").all(), operational);
       assert.equal(f.handles.get("agent"), f.handle);
       assert.equal(f.handle.observedState, "working");
       if (busy) assert.ok(f.diagnostics.includes("storage_unavailable"));
@@ -1429,7 +1197,7 @@ test("unverified process birth and a wrong binding cannot borrow the current FIF
   try {
     f.bindTurn("other-turn"); await f.install(); f.emit(ready); f.emit(active, "unknown-birth"); await flush();
     assert.equal(f.facts().length, 1);
-    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_turns").get()!.n, 0);
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM runs").get()!.n, 0);
     assert.equal(f.position()!.max_observed_sequence, 2);
     f.capture.refresh(); await flush();
     assert.equal(f.facts().length, 1);
@@ -1446,7 +1214,7 @@ test("paused Cursor checkpoint preserves a completed child birth after the handl
     f.emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence: "process_exit", sideEffects: "none" });
     f.emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
     f.handle.providerConnection = { kind: "cursor_cli", pid: null, processIdentity: null };
-    f.db.exec("UPDATE runtime_deployments SET provider_connection_pid=NULL,provider_process_identity=NULL");
+    f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'").run(JSON.stringify(f.handle.providerConnection));
     await flush();
     assert.equal(f.facts().length, 5);
     assert.equal(f.db.prepare("SELECT runtime_state FROM execution_runtime_generations").get()!.runtime_state, "exited");
@@ -1491,7 +1259,8 @@ test("a bootstrap-ready replacement with a retired source gap stays visibly bloc
       .run(JSON.stringify({ ended_at: now, terminal_cause: "stopped", actor: "test", generation: 1,
         provider_continuation_id: "continuation", native_runtime_death: { kind: "claude_cli", pid: 42, processIdentity: "birth-secret" } }));
     f.db.prepare("INSERT INTO work_attempt_executions VALUES('replacement-generation','workspace',?,'test',2,NULL)").run(now);
-    f.db.exec("UPDATE runtime_deployments SET observed_state='recovering',provider_connection_pid=43,provider_process_identity='replacement-birth',provider_execution_generation_id='replacement-generation'");
+    f.db.prepare("UPDATE agents SET observed_state='recovering',provider_connection_json=?,provider_execution_generation_id='replacement-generation' WHERE agent_id='agent'")
+      .run(JSON.stringify(current.providerConnection));
     new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "replacement-generation",
       runtimeGenerationId: executionRuntimeStorageIdentity("agent", "replacement-generation", "claude_cli", 43, "replacement-birth"),
       provider: "claude-code", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
@@ -1524,7 +1293,7 @@ test("a bootstrap-ready replacement with a retired source gap stays visibly bloc
     assert.deepEqual(diagnostics, ["source_gap"], "unchanged evidence does not repeat the diagnostic");
     assert.deepEqual(f.db.prepare("SELECT * FROM execution_observers").get(), oldObserver);
     assert.equal(f.facts().length, 1, "the replacement ready fact cannot cross the missing history");
-    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments").get()?.observed_state, "recovering");
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents").get()?.observed_state, "recovering");
   } finally {
     replacement?.close(); f.capture.close(); f.db.close = close; if (f.db.isOpen) close();
   }
@@ -1536,10 +1305,10 @@ test("same-source Cursor advance keeps identical process evidence separate when 
     await f.install(); f.emit(ready); f.emit({ ...ready, state: "exited", controlEvidence: "process_exit" }); await flush();
     const next = { kind: "cursor_cli" as const, pid: 43, processIdentity: "birth-secret" };
     f.handle.providerConnection = next;
-    f.db.exec("UPDATE runtime_deployments SET provider_connection_pid=43,provider_process_identity='birth-secret'");
+    f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'").run(JSON.stringify(next));
     new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
       runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 43, "birth-secret"),
-      provider: "cursor", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+      provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
     f.advance(); f.capture.prepared({ agentId: "agent", handle: f.handle, executionGenerationId: "generation", connection: next, configurationRevision: 2 });
     f.emit(ready, "birth-secret", 43); await flush();
     assert.equal(f.facts().length, 3);
@@ -1559,11 +1328,11 @@ test("one idle Cursor observer advances to its first committed child without rei
   try {
     const connection = { ...f.handle.providerConnection! };
     f.handle.providerConnection = { kind: "cursor_cli", pid: null, processIdentity: null };
-    f.db.exec("UPDATE runtime_deployments SET provider_connection_pid=NULL,provider_process_identity=NULL");
+    f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'").run(JSON.stringify(f.handle.providerConnection));
     await f.install(); await flush();
     assert.equal(subscriptions, 1);
     f.handle.providerConnection = connection;
-    f.db.exec("UPDATE runtime_deployments SET provider_connection_pid=42,provider_process_identity='birth-secret'");
+    f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'").run(JSON.stringify(connection));
     f.advance();
     f.capture.prepared({ agentId: "agent", handle: f.handle, executionGenerationId: "generation", connection, configurationRevision: 2 });
     observer.emit(ready, "birth-secret", 42); await flush();
@@ -1580,7 +1349,7 @@ test("older-generation recovery without captured original runtime proof stays un
     f.db.exec("UPDATE supervised_agent_provider_turn_bindings SET origin_execution_generation_id='uncaptured-old-generation'");
     await f.install(); f.emit(ready); f.emit(active); await flush();
     assert.equal(f.facts().length, 1);
-    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_turns").get()!.n, 0);
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM runs").get()!.n, 0);
     assert.equal(f.diagnostics.at(-1), "identity_unavailable");
     assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 2 });
   } finally { f.capture.close(); }
@@ -1608,7 +1377,7 @@ for (const initialFact of [false, true]) test(`capture automatically revalidates
     assert.deepEqual(f.facts(), before, "the successful frontier is not repeatedly ingested");
   } finally {
     if (competing.isTransaction) competing.exec("ROLLBACK");
-    competing.close(); f.capture.close(); rmSync(directory, { recursive: true, force: true });
+    competing.close(); f.capture.close(); if (f.db.isOpen) f.db.close(); rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -1632,7 +1401,7 @@ for (const release of ["close", "replace"] as const) test(`capture storage retry
     t.mock.timers.tick(30_000); await flush();
     assert.equal(f.facts().length, 0, "a retry cannot admit observations for a closed or replaced owner");
     assert.equal(f.admission(), "unavailable");
-    assert.equal(closed, release === "close");
+    assert.equal(closed, false, "coordinator never closes the shared database handle");
   } finally { f.db.exec = exec; f.capture.close(); f.db.close = close; close(); }
 });
 
@@ -1662,7 +1431,7 @@ test("synchronous exit cleanup keeps final facts ahead of successor observation 
   try {
     f.handle.appliedConfigurationRevision = 2;
     f.bindTurn();
-    f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?`)
+    f.db.prepare(`UPDATE inbox_items SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?`)
       .run(JSON.stringify({ kind: "no_reply", text: null }), now);
     const detach = await f.install(); await Promise.resolve(); await Promise.resolve();
     f.emit(ready);
@@ -1700,7 +1469,7 @@ test("raw content is rejected, not persisted or promoted to an operational failu
     assert.equal(f.facts().length, 0);
     assert.equal(f.position()!.max_observed_sequence, 1);
     assert.equal(f.diagnostics.at(-1), "invalid_observation");
-    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments").get()!.observed_state, "working");
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents").get()!.observed_state, "working");
   } finally { f.capture.close(); }
 });
 
@@ -1717,6 +1486,505 @@ test("shutdown fences queued work and disposes a subscription that arrives late"
   assert.equal(subscribed, 1); capture.close();
   resolve({ sourceId: "source", position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose: () => { disposed++; } });
   await flush(); assert.equal(disposed, 1);
-  assert.throws(() => db.prepare("SELECT 1"), /not open/);
+  assert.doesNotThrow(() => db.prepare("SELECT 1").get(), "shared database stays open for its owner to close");
   await capture.install(f.tokenFor()); await flush(); assert.equal(subscribed, 1);
+  db.close();
+});
+
+test("pending lifecycle projection keeps typedLifecycleAdmission pending until installation aligns and retries on refresh and advance", async () => {
+  // 1. Refresh path: agent row temporarily lags installation continuation id, then aligns and retries on refresh().
+  const f = fixture();
+  try {
+    f.db.prepare("UPDATE agents SET observed_state='idle', provider_continuation_id='lagging-continuation' WHERE agent_id='agent'").run();
+    f.bindTurn();
+    await f.install();
+    f.emit(ready);
+    f.emit(active);
+    await flush();
+
+    assert.equal(f.admission(), "ready", "capture admission is ready once the source cursor is durable");
+    assert.equal(f.capture.typedLifecycleAdmission(f.tokenFor()), "pending",
+      "typedLifecycleAdmission must remain pending while a non-stale lifecycle projection awaits alignment");
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle",
+      "mismatched projection must not prematurely overwrite agents.observed_state");
+
+    // Align the manifest row and refresh; retryLifecycleProjection must apply the held transition.
+    f.db.prepare("UPDATE agents SET provider_continuation_id='continuation' WHERE agent_id='agent'").run();
+    f.capture.refresh("agent");
+    await flush();
+
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+    assert.equal(f.capture.typedLifecycleAdmission(f.tokenFor()), "ready");
+  } finally {
+    f.capture.close();
+    if (f.db.isOpen) f.db.close();
+  }
+
+  // 2. Advance path: Cursor installation starts idle (pid: null) while facts arrive, then advances to the committed child token.
+  const c = fixture("cursor_cli");
+  try {
+    const committed = { ...c.handle.providerConnection! };
+    c.db.prepare("UPDATE agents SET observed_state='idle' WHERE agent_id='agent'").run();
+    c.bindTurn();
+    const laggingToken = { ...c.tokenFor(), providerContinuationId: "lagging-cursor-continuation" };
+    await c.capture.install(laggingToken);
+    c.emit(ready);
+    c.emit(active);
+    await flush();
+
+    assert.equal(c.capture.typedLifecycleAdmission(laggingToken), "pending");
+    assert.equal(c.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    const alignedToken = { ...laggingToken, providerContinuationId: "continuation", providerConnection: committed };
+    c.capture.advance(alignedToken);
+    await flush();
+
+    assert.equal(c.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+    assert.equal(c.capture.typedLifecycleAdmission(alignedToken), "ready");
+  } finally {
+    c.capture.close();
+    if (c.db.isOpen) c.db.close();
+  }
+});
+
+test("superseded runtime ready fact does not erase an unrelated pending active-turn projection", async () => {
+  const f = fixture();
+  try {
+    f.db.prepare("UPDATE agents SET observed_state='idle', provider_continuation_id='lagging-continuation' WHERE agent_id='agent'").run();
+    f.bindTurn();
+    await f.install();
+    f.emit(ready);
+    f.emit(active);
+    await flush();
+
+    assert.equal(f.capture.typedLifecycleAdmission(f.tokenFor()), "pending");
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    // Emit another runtime ready fact while alignment is still lagging:
+    // runtime/ready is superseded (agent is already idle), but MUST NOT clear the pending active-turn projection.
+    f.emit(ready);
+    await flush();
+
+    assert.equal(f.capture.typedLifecycleAdmission(f.tokenFor()), "pending",
+      "superseded runtime/ready must not clear an unrelated pending turn/active projection");
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    // Align continuation and refresh: the preserved pending turn/active projection must apply.
+    f.db.prepare("UPDATE agents SET provider_continuation_id='continuation' WHERE agent_id='agent'").run();
+    f.capture.refresh("agent");
+    await flush();
+
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+    assert.equal(f.capture.typedLifecycleAdmission(f.tokenFor()), "ready");
+    assert.equal(f.db.prepare("SELECT pending_lifecycle_fact_id FROM execution_observers WHERE agent_id='agent'").get()?.pending_lifecycle_fact_id, null);
+  } finally {
+    f.capture.close();
+    if (f.db.isOpen) f.db.close();
+  }
+});
+
+test("pending lifecycle projection survives coordinator restart and reconciles once alignment completes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-pending-restart-"));
+  const dbPath = join(root, "daemon.sqlite");
+  const first = fixture("claude_cli", undefined, undefined, new DatabaseSync(dbPath));
+  try {
+    first.db.prepare("UPDATE agents SET observed_state='idle', provider_continuation_id='lagging-continuation' WHERE agent_id='agent'").run();
+    first.bindTurn();
+    await first.install();
+    first.emit(ready);
+    first.emit(active);
+    await flush();
+
+    assert.equal(first.capture.typedLifecycleAdmission(first.tokenFor()), "pending");
+    assert.equal(first.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+    assert.notEqual(first.db.prepare("SELECT pending_lifecycle_fact_id FROM execution_observers WHERE agent_id='agent'").get()?.pending_lifecycle_fact_id, null);
+    first.capture.close();
+
+    // Restart coordinator on a fresh handle against the same durable SQLite file.
+    const database = new DatabaseSync(dbPath);
+    const observer = new ProviderExecutionObserver(() => now);
+    const projected: string[] = [];
+    const restarted = new ExecutionCaptureCoordinator(database, {
+      provider: { onExecution: (_handle, listener) => observer.subscribe(listener) },
+      currentHandle: () => first.handle,
+      daemonGeneration: () => 2,
+      diagnostic: () => {},
+      lifecycleProjected: (_agentId, observedState) => { projected.push(observedState); },
+    });
+    try {
+      await restarted.install(first.tokenFor());
+      await flush();
+
+      assert.equal(restarted.captureAdmission(first.tokenFor()), "ready");
+      assert.equal(restarted.typedLifecycleAdmission(first.tokenFor()), "pending",
+        "restarted coordinator must keep typedLifecycleAdmission pending while durable pending_lifecycle_json awaits alignment");
+      assert.equal(database.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+      // Complete manifest alignment and refresh on the restarted coordinator.
+      database.prepare("UPDATE agents SET provider_continuation_id='continuation' WHERE agent_id='agent'").run();
+      restarted.refresh("agent");
+      await flush();
+
+      assert.equal(database.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "working");
+      assert.deepEqual(projected, ["working"]);
+      assert.equal(restarted.typedLifecycleAdmission(first.tokenFor()), "ready");
+      assert.equal(database.prepare("SELECT pending_lifecycle_fact_id FROM execution_observers WHERE agent_id='agent'").get()?.pending_lifecycle_fact_id, null);
+    } finally {
+      restarted.close();
+      if (database.isOpen) database.close();
+    }
+  } finally {
+    first.capture.close();
+    if (first.db.isOpen) first.db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached-lane runtimeFailure stays pending until both subject and observer runtimes are exited", () => {
+  // 1. Cursor turn/lost (manifest_failed) with liveInstallation: null while runtime is still live -> pending until runtime exits.
+  const c = fixture("cursor_cli");
+  try {
+    c.db.prepare("UPDATE agents SET observed_state='idle' WHERE agent_id='agent'").run();
+    const store = new ExecutionShadowStore(c.db);
+    const runtimeId = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
+    const attemptId = store.trackMessage({
+      agentId: "agent",
+      roomId: "room",
+      sourceMessageId: "msg_1",
+      executionGenerationId: "generation",
+      workspaceId: "workspace",
+      createdAtMs: Date.parse(now),
+    });
+    store.trackNativeTurn({
+      agentId: "agent",
+      roomId: "room",
+      executionGenerationId: "generation",
+      runtimeGenerationId: runtimeId,
+      attemptId,
+      turnId: "turn-cursor-lost",
+      providerContinuationId: "continuation",
+      providerTurnId: "provider-turn-lost",
+      createdAtMs: Date.parse(now),
+    });
+    const observer = store.bindObserver({
+      agentId: "agent",
+      subjectRuntimeGenerationId: runtimeId,
+      observerRuntimeGenerationId: runtimeId,
+      sourceId: "detached-cursor-source",
+      daemonGenerationId: "1",
+      expectedEpoch: 0,
+      boundAtMs: Date.parse(now),
+    });
+    const lostFact = {
+      factId: "detached-cursor-turn-lost",
+      agentId: "agent",
+      executionGenerationId: "generation",
+      runtimeGenerationId: runtimeId,
+      observerEpoch: observer.epoch,
+      sourceSequence: 1,
+      observedAtMs: Date.parse(now) + 10,
+      domain: "turn" as const,
+      kind: "state_changed" as const,
+      state: "lost" as const,
+      sideEffects: "none" as const,
+      turnId: "turn-cursor-lost",
+      providerContinuationId: "continuation",
+      providerTurnId: "provider-turn-lost",
+    };
+    const first = store.ingest("detached-cursor-source", observer, lostFact, { liveInstallation: null });
+    assert.equal(first.status, "accepted");
+    assert.deepEqual(first.lifecycleProjection, { status: "pending" },
+      "detached runtimeFailure must stay pending while runtime is not yet exited");
+    assert.equal(c.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    c.db.prepare("UPDATE execution_runtime_generations SET runtime_state='exited', ended_at_ms=? WHERE runtime_generation_id=?")
+      .run(Date.parse(now) + 20, runtimeId);
+    const retried = store.retryLifecycleProjection({
+      fact: lostFact,
+      observerExecutionGenerationId: observer.observerExecutionGenerationId,
+      observerRuntimeGenerationId: observer.observerRuntimeGenerationId,
+    }, null);
+    assert.deepEqual(retried, { status: "applied", observedState: "failed" });
+    assert.equal(c.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "failed");
+  } finally {
+    c.capture.close();
+    if (c.db.isOpen) c.db.close();
+  }
+
+  // 2. Cross-runtime recovery: subject runtime is exited while observer runtime is still ready -> pending until observer also exits.
+  const f = fixture("cursor_cli");
+  try {
+    f.db.prepare("UPDATE agents SET observed_state='idle' WHERE agent_id='agent'").run();
+    const store = new ExecutionShadowStore(f.db);
+    const subjectRuntimeId = executionRuntimeStorageIdentity("agent", "subject-generation", "cursor_cli", 99, "subject-birth");
+    const observerRuntimeId = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
+    store.registerRuntime({
+      agentId: "agent",
+      executionGenerationId: "subject-generation",
+      runtimeGenerationId: subjectRuntimeId,
+      provider: "cursor",
+      authorityMode: "typed",
+      configRevision: 2,
+      createdAtMs: Date.parse(now),
+    });
+    const attemptId = store.trackMessage({
+      agentId: "agent",
+      roomId: "room",
+      sourceMessageId: "msg_2",
+      executionGenerationId: "subject-generation",
+      workspaceId: "workspace",
+      createdAtMs: Date.parse(now),
+    });
+    const recovery = {
+      turnId: "turn-cross-runtime",
+      providerContinuationId: "continuation",
+      providerTurnId: "provider-turn-cross",
+    };
+    store.trackNativeTurn({
+      agentId: "agent",
+      roomId: "room",
+      executionGenerationId: "subject-generation",
+      runtimeGenerationId: subjectRuntimeId,
+      attemptId,
+      ...recovery,
+      createdAtMs: Date.parse(now),
+    });
+    f.db.prepare("UPDATE execution_runtime_generations SET runtime_state='exited', ended_at_ms=? WHERE runtime_generation_id=?")
+      .run(Date.parse(now) + 5, subjectRuntimeId);
+    const observer = store.bindObserver({
+      agentId: "agent",
+      subjectRuntimeGenerationId: subjectRuntimeId,
+      observerRuntimeGenerationId: observerRuntimeId,
+      sourceId: "detached-source",
+      daemonGenerationId: "1",
+      expectedEpoch: 0,
+      boundAtMs: Date.parse(now),
+      recovery,
+    });
+    const lostTurnFact = {
+      factId: "detached-cross-turn-lost",
+      agentId: "agent",
+      executionGenerationId: "subject-generation",
+      runtimeGenerationId: subjectRuntimeId,
+      observerEpoch: observer.epoch,
+      sourceSequence: 1,
+      observedAtMs: Date.parse(now) + 10,
+      domain: "turn" as const,
+      kind: "state_changed" as const,
+      state: "lost" as const,
+      sideEffects: "none" as const,
+      ...recovery,
+    };
+    const first = store.ingest("detached-source", observer, lostTurnFact, { liveInstallation: null });
+    assert.equal(first.status, "accepted");
+    assert.deepEqual(first.lifecycleProjection, { status: "pending" },
+      "detached runtimeFailure must remain pending while observer runtime is not yet exited");
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
+
+    f.db.prepare("UPDATE execution_runtime_generations SET runtime_state='exited', ended_at_ms=? WHERE runtime_generation_id=?")
+      .run(Date.parse(now) + 20, observerRuntimeId);
+    const retried = store.retryLifecycleProjection({
+      fact: lostTurnFact,
+      observerExecutionGenerationId: observer.observerExecutionGenerationId,
+      observerRuntimeGenerationId: observer.observerRuntimeGenerationId,
+    }, null);
+    assert.deepEqual(retried, { status: "applied", observedState: "failed" });
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "failed");
+  } finally {
+    f.capture.close();
+    if (f.db.isOpen) f.db.close();
+  }
+});
+
+test("capture flush stays fail-closed on a suspended lane and reused-handle archival fences late facts from the archived child", async () => {
+  // 1. Suspended lane must fail closed on flush() (never bypass suspension).
+  {
+    const f = fixture("cursor_cli");
+    try {
+      f.install();
+      f.emit(ready);
+      await flush();
+      f.observer.markUnavailable();
+      f.emit(ready);
+      await flush();
+      assert.equal(f.admission(), "unavailable");
+      assert.equal(f.capture.recordBlock(f.tokenFor()), "source_gap");
+      assert.throws(() => f.capture.flush(f.tokenFor()), /identity_mismatch/);
+    } finally {
+      f.capture.close();
+      if (f.db.isOpen) f.db.close();
+    }
+  }
+
+  // 2. After archiving an exited undispatched Cursor runtime on a reused handle, a late fact from the
+  //    archived child still fails closed, while a new child advances cleanly to ready with recordBlock=null.
+  {
+    const f = fixture("cursor_cli");
+    try {
+      f.bindTurn("turn-1", "msg-1", "dispatching");
+      f.install();
+      await flush();
+      f.emit({ domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none", providerContinuationId: "continuation", providerTurnId: "turn-1" });
+      f.emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence: "process_exit", sideEffects: "none" });
+      f.emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
+      f.capture.flush(f.tokenFor());
+      const child1 = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
+
+      // Move live manifest off child1 before archiving (exact post-compensation state).
+      f.db.prepare("UPDATE agents SET provider='cursor', provider_connection_json=? WHERE agent_id='agent'")
+        .run(JSON.stringify({ kind: "cursor_cli", pid: null, processIdentity: null }));
+      f.db.exec("BEGIN IMMEDIATE");
+      try {
+        const archived = archiveExitedUndispatchedCursorRuntime(f.db, {
+          inbox_item_id: "inbox-1",
+          agent_id: "agent",
+          room_id: "room",
+          work_attempt_id: "workspace",
+          origin_execution_generation_id: "generation",
+          provider_continuation_id: "continuation",
+          provider_turn_id: "turn-1",
+        }, now);
+        assert.equal(archived, child1);
+        f.db.exec("COMMIT");
+      } catch (error) {
+        f.db.exec("ROLLBACK");
+        throw error;
+      }
+
+      // Advance the SAME lane to a fresh child (pid 43, birth-next) on the same source.
+      const nextConnection = { kind: "cursor_cli" as const, pid: 43, processIdentity: "birth-next" };
+      const child2 = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 43, "birth-next");
+      new ExecutionShadowStore(f.db).registerRuntime({
+        agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: child2,
+        provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) + 100,
+      });
+      f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'").run(JSON.stringify(nextConnection));
+      f.handle.pid = 43;
+      f.handle.providerConnection = nextConnection;
+      const nextToken = f.tokenFor();
+      f.capture.advance(nextToken);
+      f.observer.emit(ready, "birth-next", 43);
+      await flush();
+
+      assert.equal(f.capture.captureAdmission(nextToken), "ready", "reused lane admits the next Cursor child cleanly");
+      assert.equal(f.capture.recordBlock(nextToken), null);
+      const observer = f.db.prepare("SELECT observer_runtime_generation_id,observer_epoch FROM execution_observers WHERE agent_id='agent'")
+        .get() as { observer_runtime_generation_id: string; observer_epoch: number };
+      assert.deepEqual({ ...observer }, { observer_runtime_generation_id: child2, observer_epoch: 3 });
+
+      // A late fact claiming the archived exited child1 still fails closed.
+      f.observer.emit(ready, "birth-secret", 42);
+      await flush();
+      assert.equal(f.capture.captureAdmission(nextToken), "unavailable");
+      assert.equal(f.capture.recordBlock(nextToken), "invalid_observation");
+      assert.throws(() => f.capture.flush(nextToken), /identity_mismatch/);
+    } finally {
+      f.capture.close();
+      if (f.db.isOpen) f.db.close();
+    }
+  }
+
+  // 3. A detached+suspended lane whose cached observer was archived never calls bind() or mutates execution_observers.
+  {
+    const f = fixture("cursor_cli");
+    try {
+      f.bindTurn("turn-ds", "msg-ds", "dispatching");
+      const detach = f.install();
+      await flush();
+      f.emit({ domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none", providerContinuationId: "continuation", providerTurnId: "turn-ds" });
+      f.emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence: "process_exit", sideEffects: "none" });
+      f.emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
+      f.capture.flush(f.tokenFor());
+      const child1 = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
+
+      // Suspend the lane cleanly with a genuine source gap on a fresh fact, then register child2 and archive child1
+      // after detaching so schedule() still drains the detached+suspended lane to preserve frontier.
+      const child2 = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 45, "birth-ds-next");
+      new ExecutionShadowStore(f.db).registerRuntime({
+        agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: child2,
+        provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) + 100,
+      });
+      f.observer.markUnavailable();
+      f.observer.emit(ready, "birth-ds-next", 45);
+      await flush();
+      assert.equal(f.capture.recordBlock(f.tokenFor()), "source_gap");
+
+      // Manually record a recovery boundary for child1 (simulating operator archival) and detach the suspended lane.
+      f.db.exec("BEGIN IMMEDIATE");
+      try {
+        f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES(?,?,?,?,?,'resume','complete',?,NULL,?,?)")
+          .run("op-detached-suspended", "agent", "room", "generation", child1,
+            JSON.stringify({ work_attempt_id: "workspace", execution_generation_id: "generation", provider_continuation_id: "continuation", provider_connection: null }),
+            now, now);
+        f.db.prepare("UPDATE execution_observers SET observer_epoch=observer_epoch+1 WHERE agent_id='agent' AND observer_runtime_generation_id=?")
+          .run(child1);
+        f.db.exec("COMMIT");
+      } catch (error) {
+        f.db.exec("ROLLBACK");
+        throw error;
+      }
+      const beforeObserver = f.db.prepare("SELECT observer_runtime_generation_id,observer_epoch FROM execution_observers WHERE agent_id='agent'")
+        .get() as { observer_runtime_generation_id: string; observer_epoch: number };
+      detach();
+      f.capture.refresh("agent");
+      await flush();
+      const afterObserver = f.db.prepare("SELECT observer_runtime_generation_id,observer_epoch FROM execution_observers WHERE agent_id='agent'")
+        .get() as { observer_runtime_generation_id: string; observer_epoch: number };
+      assert.deepEqual({ ...afterObserver }, { ...beforeObserver },
+        "a detached+suspended lane must never rebind execution_observers even after its cached observer was archived");
+    } finally {
+      f.capture.close();
+      if (f.db.isOpen) f.db.close();
+    }
+  }
+});
+
+test("healthy fact drain does not record max_observed_sequence ahead of last_source_sequence before ingest", async () => {
+  const f = fixture("opencode_server");
+  const originalTrackNativeTurn = ExecutionShadowStore.prototype.trackNativeTurn;
+  let positionBeforeIngest: Record<string, unknown> | undefined;
+  let simulateMidDrainCrash = true;
+  try {
+    await f.install();
+    f.emit(ready);
+    await flush();
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 1 });
+
+    f.bindTurn("turn-healthy", "msg-healthy", "dispatching");
+    ExecutionShadowStore.prototype.trackNativeTurn = function patchedTrackNativeTurn(...args) {
+      const result = originalTrackNativeTurn.apply(this, args);
+      if (simulateMidDrainCrash) {
+        simulateMidDrainCrash = false;
+        positionBeforeIngest = { ...f.position() };
+        const busy = Object.assign(new Error("simulated crash before ingest"), { code: "ERR_SQLITE_ERROR", errcode: 5 });
+        throw busy;
+      }
+      return result;
+    };
+
+    f.emit({ ...active, providerTurnId: "turn-healthy" });
+    await flush();
+
+    assert.deepEqual(positionBeforeIngest, { last_source_sequence: 1, max_observed_sequence: 1 },
+      "drain must not advance max_observed_sequence ahead of last_source_sequence before ingest commits");
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 1 },
+      "an abrupt stop before ingest leaves no synthetic source_gap on disk");
+
+    // A restarted daemon binding a fresh source on the same surviving runtime must succeed without source_gap.
+    const runtimeId = executionRuntimeStorageIdentity("agent", "generation", "opencode_server", 42, "birth-secret");
+    const replacement = new ExecutionShadowStore(f.db);
+    assert.doesNotThrow(() => replacement.bindObserver({
+      agentId: "agent",
+      subjectRuntimeGenerationId: runtimeId,
+      observerRuntimeGenerationId: runtimeId,
+      sourceId: "restarted-daemon-source",
+      daemonGenerationId: "2",
+      expectedEpoch: 1,
+      boundAtMs: Date.parse(now) + 1_000,
+    }));
+  } finally {
+    ExecutionShadowStore.prototype.trackNativeTurn = originalTrackNativeTurn;
+    f.capture.close();
+    if (f.db.isOpen) f.db.close();
+  }
 });

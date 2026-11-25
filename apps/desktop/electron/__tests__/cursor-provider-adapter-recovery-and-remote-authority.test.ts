@@ -23,10 +23,10 @@ import {
   defaultLaunchTurn,
   type CursorCliChild,
   type CursorProviderAdapterDependencies,
-} from "../main/agents/cursor-provider-adapter.js";
-import type { ProviderRoomTurnResult, ProviderTerminalPayload } from "../main/agents/provider-adapter.js";
-import { relocateCursorConversationNamespace } from "../main/agents/cursor-managed-profile.js";
-import { cursorAuthorityUnprovenDetail } from "../main/agents/cursor-turn-settlement.js";
+} from "#provider-runtime/agents/cursor-provider-adapter.js";
+import type { ProviderRoomTurnResult, ProviderTerminalPayload } from "#provider-runtime/agents/provider-adapter.js";
+import { relocateCursorConversationNamespace } from "#provider-runtime/agents/cursor-managed-profile.js";
+import { cursorAuthorityUnprovenDetail } from "#provider-runtime/agents/cursor-turn-settlement.js";
 import {
   productionPersonalIdentityDependencies,
   wrapperHostedMcpFixture,
@@ -647,6 +647,56 @@ test("Cursor recovery distinguishes a prepared wrapper that never dispatched nat
     await assert.rejects(
       adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-prepared", providerTurnId: turnId }),
       (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched",
+    );
+    assert.equal(harness.launches.length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Cursor not-dispatched recovery keeps the wrapper's recorded cause, redacted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-not-dispatched-cause-"));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const turnId = "cursor:prepared-cause";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    writeFileSync(statePath, "");
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+      type: "not_started",
+      error: "Cursor wrapper startup failed: proxy refused Authorization: Bearer task21-secret-token\nsecond line",
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      remote_authority_revoked: true,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      init: null,
+      result: null,
+    }));
+    const harness = createHarness();
+    const adapter = new CursorProviderAdapter({
+      dependencies: harness.dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { NPM_CONFIG_CACHE: join(root, "npm-cache") },
+      }),
+    });
+    const request = daemonSpawnRequest();
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: "sess-safe",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    await assert.rejects(
+      adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-prepared", providerTurnId: turnId }),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.equal((error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome, "not_dispatched");
+        assert.match(message, /Wrapper cause: Cursor wrapper startup failed: proxy refused/);
+        assert.doesNotMatch(message, /task21-secret-token/, "the recorded cause is redacted");
+        assert.doesNotMatch(message, /\n/, "the recorded cause stays on one line");
+        return true;
+      },
     );
     assert.equal(harness.launches.length, 0);
   } finally {

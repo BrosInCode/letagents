@@ -11,9 +11,9 @@ import { ReplyAttachmentSpool } from "../reply-attachment-spool.js";
 import { createLiveActivitySession, updateLiveActivitySession, withdrawLiveActivity } from "../cloud-http.js";
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { DaemonAuthority } from "../daemon-authority.js";
-import { DeliveryCutoverCoordinator } from "../delivery-cutover-coordinator.js";
 import { schedulerErrorDetail } from "../daemon-error-policy.js";
 import { DaemonStateWatch, STATE_WATCH_NOTIFICATION_COALESCE_MS } from "../daemon-state-watch.js";
+import { AsyncRpcEffectCoordinator, EffectFenceError } from "../effect-journal/index.js";
 import { WorkDurabilityStore } from "../durability-store.js";
 import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
@@ -39,6 +39,7 @@ import type { SupervisorDaemonArgs } from "./state.js";
 
 export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
   protected readonly stateDatabasePath: string;
+  protected readonly workspaceRoot: string;
   protected readonly singleton: DaemonSingleton;
   protected readonly authority: DaemonAuthority;
   protected readonly store: ManifestStore;
@@ -62,9 +63,9 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
   protected readonly replyAttachmentSpool: ReplyAttachmentSpool;
   /** Images on the message that wakes an agent, staged for one turn under the daemon's own folder. */
   protected readonly roomTurnAttachments: RoomTurnAttachmentStager;
+  protected readonly asyncRpcEffects: AsyncRpcEffectCoordinator;
   protected readonly stateWatch: DaemonStateWatch;
   protected readonly entryConcurrency: EntryConcurrencyGate;
-  protected readonly deliveryCutovers: DeliveryCutoverCoordinator;
   protected readonly agentStreamRegistry: AgentStreamRegistry;
   protected readonly liveRoomShare: LiveRoomSharePublisher;
 
@@ -86,11 +87,7 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
     this.entryConcurrency = new EntryConcurrencyGate({
       isHandoffScheduled: () => this.handoffScheduled || this.handoffDraining,
     });
-    this.deliveryCutovers = new DeliveryCutoverCoordinator({
-      isHandoffScheduled: () => this.handoffScheduled,
-      drive: (entryId, signal) => this.deliveryCutoverExecution.drive(entryId, signal),
-    });
-    this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath, undefined, undefined, /* schemaPrepared */ true);
+    this.store = new ManifestStore(paths.manifestPath);
     this.activityWrites = new DaemonActivityWrites({ authority: this.authority, store: this.store,
       isHandoffScheduled: () => this.handoffScheduled, admittedFence: (commit) => this.fenceAdmittedTransitionCommit(commit) });
     this.manifestAdministration = new ManifestAdministrationCoordinator({
@@ -99,8 +96,6 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
         serialize: (operation) => this.serializeManifestMutation(operation),
         assertCurrent: () => this.singleton.assertCurrent(),
         currentDaemonGeneration: () => this.singleton.currentGeneration,
-        currentManifestGeneration: () => this.manifestGeneration,
-        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
         fenceCommit: (commit) => this.fenceDaemonCommit(commit),
       },
       policies: {
@@ -122,8 +117,6 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
     this.manifestTransitions = new ManifestTransitionCoordinator({
       store: this.store,
       authority: {
-        currentManifestGeneration: () => this.manifestGeneration,
-        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
         assertCurrent: () => this.singleton.assertCurrent(),
         serializeMutation: (operation) => this.serializeManifestMutation(operation),
         serializeCommit: (operation) => this.serializeManifestCommit(operation),
@@ -133,6 +126,7 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       nowMs: () => this.nowMs(),
     });
     const root = paths.workspaceRoot ?? dirname(paths.manifestPath);
+    this.workspaceRoot = root;
     this.roomTurnAttachments = new RoomTurnAttachmentStager(join(root, "room-turn-attachments"));
     const gitCommand = createGitCommand(root);
     this.gitCommand = gitCommand;
@@ -146,23 +140,29 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       undefined,
       undefined,
       undefined,
-      paths.manifestPath, undefined, /* schemaPrepared */ true,
+      paths.manifestPath,
     );
     this.provisioner = new WorkspaceProvisioner(root, gitCommand);
     this.ephemeralProvisioner = new EphemeralWorkspaceProvisioner(root);
     this.workerBindings = new WorkerBindingStore(
       paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`,
       (commit, notification) => this.fenceDaemonCommit(commit, notification),
-      paths.manifestPath, undefined, /* schemaPrepared */ true,
+      paths.manifestPath,
     );
     this.nativeActivity = new NativeActivityPublicationCoordinator({
       bindings: this.workerBindings,
       updateEntry: (entryId, update, options) => this.updateManifestEntry(entryId, update, undefined, options),
       startDelivery: (entryId) => this.startSupervisedDelivery(entryId),
     }, { heartbeatIntervalMs: this.nativeHeartbeatIntervalMs });
+    this.asyncRpcEffects = new AsyncRpcEffectCoordinator({
+      getExecutor: () => this.effectExecutor,
+      notifyImmediate: () => this.stateWatch.notifyImmediate(),
+    });
     this.stateWatch = new DaemonStateWatch({
       ...daemonAuthority, coalesceMs: STATE_WATCH_NOTIFICATION_COALESCE_MS,
       entries: async () => this.readModel.entriesWithDerivedLiveness((await this.store.loadForStateWatch()).entries, { reuseUnchangedInboxInputs: true }),
+      rpcEffects: (generation) => this.asyncRpcEffects.listForGeneration(generation),
+      rpcEffectEvictionVersion: (generation) => this.asyncRpcEffects.evictionVersion(generation),
     });
     this.agentStreamRegistry = new AgentStreamRegistry({
       isHandoffScheduled: () => this.handoffScheduled,
@@ -200,8 +200,6 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       durability: this.durability,
       authority: {
         currentDaemonGeneration: () => this.singleton.currentGeneration,
-        currentManifestGeneration: () => this.manifestGeneration,
-        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
         assertCurrent: () => this.singleton.assertCurrent(),
         fenceCommit: (commit) => this.fenceDaemonCommit(commit),
         serializeManifestMutation: (operation) => this.serializeManifestMutation(operation),
@@ -215,15 +213,24 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       hasLiveHandle: (entryId) => this.liveHandles.has(entryId),
       ...(providerPort ? { provider: providerPort } : {}),
       runtimeCustody: this.workerRuntimeCustody,
-      deleteAgentStream: (entryId) => { this.agentStreamRegistry.delete(entryId); this.liveRoomShare.forget(entryId); },
+      deleteAgentStream: (entryId) => { this.agentStreamRegistry.delete(entryId); this.liveRoomShare.forget(entryId); this.roomMoves?.clearRecovery(entryId); },
+      reconcileRoomWorkForPurge: (entryId) => { this.roomWorkPublisher?.recoverInactiveExecutingForAgent(entryId); },
+      reconcileApprovalPublicationsForPurge: (entryId) => { this.executionDelegations?.recoverInactiveApprovalPublicationsForPurge(entryId); },
+      reconcileRoomMovesForPurge: (entryId) => { this.roomMoves?.recoverInactiveExecutingForAgent?.(entryId); },
+      reconcileRuntimeRecoveriesForPurge: (entryId) => { this.runtimeRecovery?.recoverInactiveExecutingForAgent?.(entryId); },
+      retireStaleRuntimeRecoveryEffects: (entryId) => {
+        try {
+          this.runtimeRecovery?.retireStalePreparedEffects?.(entryId);
+        } catch (error) {
+          if (!(error instanceof EffectFenceError)) throw error;
+        }
+      },
       ephemeralProvisioner: this.ephemeralProvisioner,
       nowMs: () => this.nowMs(),
     });
-    // Inbox state belongs to the canonical daemon database. The worker-binding
-    // path is a legacy JSON import source and must never become a second SQLite
-    // authority for delivery receipts.
+    // Inbox state belongs to the canonical daemon database.
     this.supervisedInbox = new SupervisedAgentInboxStore(
-      paths.manifestPath, undefined, (agentId) => this.notifyStateChanged(agentId), /* schemaPrepared */ true,
+      paths.manifestPath, undefined, (agentId) => this.notifyStateChanged(agentId),
     );
     this.replyAttachmentSpool = new ReplyAttachmentSpool(join(dirname(paths.manifestPath), "reply-attachments"));
     this.convergencePacer = new ConvergencePacer({ nowMs: recoveryClock.nowMs, random: recoveryClock.random,

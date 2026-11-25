@@ -1,9 +1,11 @@
 import { z } from "zod";
 import { hostGrantApiOrigin } from "./cloud-http.js";
+import { markExecutingBoundedMutationsUncertainInTransaction } from "./effect-journal/index.js";
 import { executionIdentity, nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import { processBirthState, type ProcessIdentity } from "./process-identity.js";
 import type { DatabaseSync } from "node:sqlite";
-import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef } from "./provider-action-port.js";
+import { isIdleCursorConnection, isLiveCursorConnection } from "./provider-state-policy.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity } from "./execution-shadow-store.js";
 import type { DaemonManifestEntry, DaemonProviderRuntimeReference } from "./types.js";
 import type { SupervisedProviderTurnBinding } from "./supervised-agent-inbox-store.js";
@@ -37,7 +39,7 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
   const suppliedByRuntime = new Map(supplied.map(value => [value.runtimeGenerationId, value]));
   if (suppliedByRuntime.size !== supplied.length) throw new Error("Retired runtime evidence contains duplicate identities.");
   const observer = database.prepare("SELECT * FROM execution_observers WHERE agent_id=?").get(entry.id);
-  if (!["claude-code", "codex"].includes(entry.provider)) {
+  if (!["claude-code", "codex", "antigravity"].includes(entry.provider)) {
     if (supplied.length) throw new Error("This provider does not support retired process evidence.");
     return { evidence: [], suppliedEvidence: supplied, observerJson: null };
   }
@@ -46,8 +48,8 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
   // through the same death checks; never manufacture a historical grant receipt.
   const rows = database.prepare(`SELECT r.*,e.work_attempt_id,e.terminal_json,e.started_at,e.actor,e.generation,
     (EXISTS(SELECT 1 FROM execution_observers o WHERE o.agent_id=r.agent_id AND o.observer_runtime_generation_id=r.runtime_generation_id)
-      OR EXISTS(SELECT 1 FROM execution_turns t WHERE t.agent_id=r.agent_id AND t.runtime_generation_id=r.runtime_generation_id AND t.state IN ('none','active','lost'))
-      OR EXISTS(SELECT 1 FROM supervised_agent_provider_turn_bindings b JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id
+      OR EXISTS(SELECT 1 FROM runs t WHERE t.agent_id=r.agent_id AND t.runtime_generation_id=r.runtime_generation_id AND t.state IN ('none','active','lost'))
+      OR EXISTS(SELECT 1 FROM supervised_agent_provider_turn_bindings b JOIN inbox_items i ON i.inbox_item_id=b.inbox_item_id
         WHERE b.agent_id=r.agent_id AND b.room_id=? AND b.work_attempt_id=e.work_attempt_id AND b.origin_execution_generation_id=r.execution_generation_id
         AND i.state NOT IN ('publishing','acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_user','cancelled_by_room_move'))
       OR EXISTS(SELECT 1 FROM (
@@ -80,7 +82,7 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
     const witnessed = nativeRuntimeDeathSchema.safeParse(terminal.native_runtime_death);
     if (terminal.native_runtime_death !== undefined && !witnessed.success) throw new Error("The predecessor death record is invalid.");
     const death = provided?.death ?? (witnessed.success ? witnessed.data : null);
-    const kind = row.provider === "claude-code" ? "claude_cli" : row.provider === "codex" ? "codex_app_server" : null;
+    const kind = row.provider === "claude-code" ? "claude_cli" : row.provider === "codex" ? "codex_app_server" : row.provider === "antigravity" ? "antigravity_acp" : null;
     if (!death) throw new Error("An older runtime needs verified process identity evidence before recovery can continue.");
     if (provided && (provided.executionGenerationId !== row.execution_generation_id || (witnessed.success
       && (provided.death.kind !== witnessed.data.kind || provided.death.pid !== witnessed.data.pid || provided.death.processIdentity !== witnessed.data.processIdentity)))) {
@@ -90,7 +92,7 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
       || executionRuntimeStorageIdentity(entry.id, String(row.execution_generation_id), death.kind, death.pid, death.processIdentity) !== row.runtime_generation_id) {
       throw new Error("Retired runtime evidence does not match its recorded process owner.");
     }
-    if (database.prepare(`SELECT 1 FROM execution_turns WHERE agent_id=? AND runtime_generation_id=? AND provider_continuation_id<>? LIMIT 1`)
+    if (database.prepare(`SELECT 1 FROM runs WHERE agent_id=? AND runtime_generation_id=? AND provider_continuation_id<>? LIMIT 1`)
       .get(entry.id, String(row.runtime_generation_id), terminal.provider_continuation_id)
       || database.prepare(`SELECT 1 FROM supervised_agent_provider_turn_bindings WHERE agent_id=? AND work_attempt_id=? AND origin_execution_generation_id=? AND provider_continuation_id<>? LIMIT 1`)
         .get(entry.id, String(row.work_attempt_id), String(row.execution_generation_id), terminal.provider_continuation_id)) {
@@ -210,7 +212,7 @@ export function prepareRuntimeRecovery(database: DatabaseSync, request: RuntimeR
     .run(request.operationId, request.entryId, request.roomId, request.executionGenerationId, request.runtimeGenerationId, request.mode, JSON.stringify(entry.provider_ref), at, at);
   // This intent survives daemon death. Neither convergence nor FIFO admission
   // may silently start a replacement after an interrupted operator action.
-  database.prepare("UPDATE agent_launch_intents SET desired_state='paused' WHERE agent_id=?").run(request.entryId);
+  database.prepare("UPDATE agents SET desired_state='paused' WHERE agent_id=?").run(request.entryId);
   return readRuntimeRecovery(database, request.operationId)!;
 }
 
@@ -240,20 +242,23 @@ function settleStoppedRuntimeWork(database: DatabaseSync,
     WHERE agent_id=? AND observer_runtime_generation_id=?`)
     .run(record.agent_id, record.runtime_generation_id);
   // A process exit does not prove a mutating operation succeeded or failed.
-  database.prepare(`UPDATE supervised_agent_effects SET state='uncertain',error=?,updated_at=?
-    WHERE agent_id=? AND execution_generation_id=? AND mutation=1 AND state='executing'`)
-    .run("The runtime was restarted before this action's result was confirmed. Check its result before repeating it.", at, record.agent_id, record.execution_generation_id);
+  markExecutingBoundedMutationsUncertainInTransaction(database, {
+    agentId: record.agent_id,
+    executionGenerationId: record.execution_generation_id,
+    error: "The runtime was restarted before this action's result was confirmed. Check its result before repeating it.",
+    updatedAt: at,
+  });
   database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
     ended_at_ms=MAX(created_at_ms,?) WHERE agent_id=? AND runtime_generation_id=?`)
     .run(Date.parse(at), record.agent_id, record.runtime_generation_id);
-  database.prepare(`UPDATE execution_turns SET state='lost',ended_at_ms=MAX(created_at_ms,?)
+  database.prepare(`UPDATE runs SET state='lost',ended_at_ms=MAX(created_at_ms,?)
     WHERE agent_id=? AND runtime_generation_id=? AND state IN ('none','active')`)
     .run(Date.parse(at), record.agent_id, record.runtime_generation_id);
-  database.prepare(`UPDATE supervised_agent_inbox SET state='cancelled_by_user',last_error=?,
+  database.prepare(`UPDATE inbox_items SET state='cancelled_by_user',last_error=?,
     updated_at=?,acknowledged_at=?,next_attempt_at_ms=NULL,blocked_by_inbox_item_id=NULL
     WHERE agent_id=? AND room_id=?
     AND COALESCE(CASE WHEN json_valid(outcome) THEN json_extract(outcome,'$.kind') END,'') NOT IN ('reply','no_reply','failed','interrupted')
-    AND NOT EXISTS (SELECT 1 FROM supervised_agent_terminal_results terminal WHERE terminal.inbox_item_id=supervised_agent_inbox.inbox_item_id AND terminal.outcome IN ('reply','no_reply','failed','interrupted'))
+    AND NOT EXISTS (SELECT 1 FROM supervised_agent_terminal_results terminal WHERE terminal.inbox_item_id=inbox_items.inbox_item_id AND terminal.outcome IN ('reply','no_reply','failed','interrupted'))
     AND state NOT IN ('publishing','acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
     AND ((?=1 AND state='dispatching' AND provider_turn_id IS NULL) OR inbox_item_id IN
       (SELECT inbox_item_id FROM supervised_agent_provider_turn_bindings WHERE agent_id=? AND room_id=? AND work_attempt_id=? AND origin_execution_generation_id=?))`)
@@ -261,8 +266,8 @@ function settleStoppedRuntimeWork(database: DatabaseSync,
       at, at, record.agent_id, record.room_id, includeUnboundDispatch ? 1 : 0, record.agent_id, record.room_id, workAttemptId, record.execution_generation_id);
   database.prepare(`UPDATE execution_message_attempts SET state='lost',conclusion='lost',settled_at_ms=MAX(created_at_ms,?)
     WHERE agent_id=? AND state='active' AND attempt_id IN
-      (SELECT attempt_id FROM execution_turns WHERE agent_id=? AND runtime_generation_id=?)
-    AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i WHERE i.agent_id=execution_message_attempts.agent_id
+      (SELECT attempt_id FROM runs WHERE agent_id=? AND runtime_generation_id=?)
+    AND NOT EXISTS (SELECT 1 FROM inbox_items i WHERE i.agent_id=execution_message_attempts.agent_id
       AND i.room_id=execution_message_attempts.room_id AND i.source_message_id=execution_message_attempts.source_message_id
       AND ((CASE WHEN json_valid(i.outcome) THEN json_extract(i.outcome,'$.kind') END) IN ('reply','no_reply','failed','interrupted')
         OR EXISTS (SELECT 1 FROM supervised_agent_terminal_results terminal WHERE terminal.inbox_item_id=i.inbox_item_id AND terminal.outcome IN ('reply','no_reply','failed','interrupted'))))`)
@@ -333,9 +338,9 @@ export function exitedRuntimesToArchive(database: DatabaseSync, entry: DaemonMan
       AND (EXISTS (SELECT 1 FROM execution_observers o WHERE o.agent_id=r.agent_id
           AND o.observer_runtime_generation_id=r.runtime_generation_id
           AND (o.source_id IS NULL OR o.max_observed_sequence > o.last_source_sequence))
-        OR EXISTS (SELECT 1 FROM execution_turns t JOIN execution_message_attempts a ON a.attempt_id=t.attempt_id
+        OR EXISTS (SELECT 1 FROM runs t JOIN execution_message_attempts a ON a.attempt_id=t.attempt_id
           WHERE t.agent_id=r.agent_id AND t.runtime_generation_id=r.runtime_generation_id AND t.state IN ('none','active','lost')
-            AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i WHERE i.agent_id=a.agent_id AND i.room_id=a.room_id
+            AND NOT EXISTS (SELECT 1 FROM inbox_items i WHERE i.agent_id=a.agent_id AND i.room_id=a.room_id
               AND i.source_message_id=a.source_message_id
               AND i.state IN ('pending','dispatching','awaiting_result','result_recovery','retryable','blocked'))))
     ORDER BY r.runtime_generation_id`).all(entry.id, saved?.execution_generation_id ?? null) as Array<Record<string, string | number | null>>)
@@ -380,7 +385,7 @@ function archiveSelectedRuntimes(database: DatabaseSync, entry: DaemonManifestEn
     database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
       ended_at_ms=COALESCE(ended_at_ms,MAX(created_at_ms,?)) WHERE agent_id=? AND runtime_generation_id=?`)
       .run(Date.parse(at), entry.id, runtimeId);
-    database.prepare(`UPDATE execution_turns SET state='lost',ended_at_ms=MAX(created_at_ms,?)
+    database.prepare(`UPDATE runs SET state='lost',ended_at_ms=MAX(created_at_ms,?)
       WHERE agent_id=? AND runtime_generation_id=? AND state IN ('none','active')`).run(Date.parse(at), entry.id, runtimeId);
     archived.push(runtimeId);
   }
@@ -400,7 +405,7 @@ export function recoveredRuntime(database: DatabaseSync, agentId: string, runtim
 /** The caller proved the exact Cursor turn's origin execution terminal and owns the reset transaction. */
 export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: SupervisedProviderTurnBinding, at: string, laneRetirement?: CursorLaneRetirement): string | null {
   if (!database.isTransaction) throw new Error("Runtime recovery requires a fenced transaction.");
-  let runtime = database.prepare(`SELECT r.runtime_generation_id FROM execution_turns t
+  let runtime = database.prepare(`SELECT r.runtime_generation_id FROM runs t
     JOIN execution_runtime_generations r ON r.agent_id=t.agent_id
       AND r.execution_generation_id=t.execution_generation_id AND r.runtime_generation_id=t.runtime_generation_id
     JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
@@ -415,7 +420,7 @@ export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: Su
     runtime = database.prepare(`SELECT DISTINCT r.runtime_generation_id FROM execution_observers o
       JOIN execution_runtime_generations r ON r.agent_id=o.agent_id
         AND r.execution_generation_id=o.observer_execution_generation_id AND r.runtime_generation_id=o.observer_runtime_generation_id
-      JOIN execution_turns t ON t.agent_id=r.agent_id AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
+      JOIN runs t ON t.agent_id=r.agent_id AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
       JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
         AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id
       WHERE o.agent_id=? AND o.observer_execution_generation_id=? AND o.execution_generation_id=o.observer_execution_generation_id
@@ -465,12 +470,187 @@ export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: Su
     WHERE agent_id=? AND observer_runtime_generation_id=?`).run(turn.agent_id, runtimeId);
   database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
     ended_at_ms=MAX(created_at_ms,?) WHERE agent_id=? AND runtime_generation_id=? AND runtime_state<>'exited'`).run(Date.parse(at), turn.agent_id, runtimeId);
-  database.prepare(`UPDATE execution_turns SET state='lost',ended_at_ms=MAX(created_at_ms,?)
+  database.prepare(`UPDATE runs SET state='lost',ended_at_ms=MAX(created_at_ms,?)
     WHERE agent_id=? AND runtime_generation_id=? AND state IN ('none','active')`).run(Date.parse(at), turn.agent_id, runtimeId);
-  database.prepare(`UPDATE supervised_agent_effects SET state='uncertain',error=?,updated_at=?
-    WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND mutation=1 AND state='executing'`)
-    .run("The runtime was recovered before this action's result was confirmed. Check its result before repeating it.",
-      at, turn.agent_id, turn.origin_execution_generation_id, turn.provider_turn_id);
+  markExecutingBoundedMutationsUncertainInTransaction(database, {
+    agentId: turn.agent_id,
+    executionGenerationId: turn.origin_execution_generation_id,
+    providerTurnId: turn.provider_turn_id,
+    error: "The runtime was recovered before this action's result was confirmed. Check its result before repeating it.",
+    updatedAt: at,
+  });
+  return runtimeId;
+}
+
+/**
+ * Atomically archive the exact exited Cursor child runtime captured for an
+ * undispatched turn before resetting its inbox binding back to pending.
+ *
+ * Unlike `recordInterruptedCursorRecovery`, this helper never marks a runtime
+ * exited, never forces open turns to lost, and never rewrites another turn's
+ * authority: the captured Cursor runtime must already be recorded as `exited`
+ * with exactly this `lost`, side-effect-free turn and no live manifest claim.
+ */
+export function archiveExitedUndispatchedCursorRuntime(
+  database: DatabaseSync,
+  turn: SupervisedProviderTurnBinding,
+  at: string,
+): string | null {
+  if (!database.isTransaction) throw new Error("Runtime recovery requires a fenced transaction.");
+  if (!runtimeRecoveryStorageAvailable(database)
+    || !database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'").get()) {
+    return null;
+  }
+  const hasAgentsTable = Boolean(
+    database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agents'").get(),
+  );
+  const agent = hasAgentsTable
+    ? database.prepare(
+      "SELECT provider,provider_execution_generation_id,provider_connection_json FROM agents WHERE agent_id=?",
+    ).get(turn.agent_id) as {
+      provider: string;
+      provider_execution_generation_id: string | null;
+      provider_connection_json: string | null;
+    } | undefined
+    : undefined;
+  const rows = database.prepare(`SELECT t.turn_id,t.room_id,t.execution_generation_id,t.runtime_generation_id,
+      t.provider_continuation_id,t.state,t.side_effects,r.provider,r.runtime_state,g.workspace_id
+    FROM runs t
+    JOIN execution_runtime_generations r ON r.agent_id=t.agent_id
+      AND r.execution_generation_id=t.execution_generation_id AND r.runtime_generation_id=t.runtime_generation_id
+    JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
+      AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id
+    WHERE t.agent_id=? AND t.provider_turn_id=?`)
+    .all(turn.agent_id, turn.provider_turn_id) as Array<{
+      turn_id: string;
+      room_id: string;
+      execution_generation_id: string;
+      runtime_generation_id: string;
+      provider_continuation_id: string | null;
+      state: string;
+      side_effects: string;
+      provider: string;
+      runtime_state: string;
+      workspace_id: string;
+    }>;
+  if (rows.length === 0) return null;
+  // This archive is Cursor-only: skip cleanly when both the agent (if present)
+  // and all captured run rows are consistently non-Cursor, while still failing
+  // closed on any cross-provider mismatch involving Cursor.
+  if ((!agent || agent.provider !== "cursor") && rows.every((candidate) => candidate.provider !== "cursor")) {
+    return null;
+  }
+  if (rows.length > 1) {
+    throw new Error("Undispatched Cursor runtime archive found ambiguous captured turn evidence.");
+  }
+  const row = rows[0]!;
+  if (agent && agent.provider !== "cursor") {
+    throw new Error("Undispatched Cursor runtime archive requires a Cursor agent.");
+  }
+  if (row.provider !== "cursor"
+    || row.room_id !== turn.room_id
+    || row.execution_generation_id !== turn.origin_execution_generation_id
+    || row.provider_continuation_id !== turn.provider_continuation_id
+    || row.workspace_id !== turn.work_attempt_id) {
+    throw new Error("Undispatched Cursor runtime archive does not match the exact bound turn authority.");
+  }
+  if (row.runtime_state !== "exited") {
+    throw new Error("Undispatched Cursor runtime archive requires a runtime already recorded as exited.");
+  }
+  if (row.state !== "lost" || row.side_effects !== "none") {
+    throw new Error("Undispatched Cursor runtime archive requires a lost turn with no recorded side effects.");
+  }
+  const runtimeId = row.runtime_generation_id;
+  if (database.prepare(
+    "SELECT 1 FROM execution_facts WHERE agent_id=? AND runtime_generation_id=? AND domain='execution' LIMIT 1",
+  ).get(turn.agent_id, runtimeId)) {
+    throw new Error("Undispatched Cursor runtime archive refused a runtime with recorded execution activity.");
+  }
+  if (database.prepare(
+    "SELECT 1 FROM runs WHERE agent_id=? AND runtime_generation_id=? AND turn_id<>? LIMIT 1",
+  ).get(turn.agent_id, runtimeId, row.turn_id)) {
+    throw new Error("Undispatched Cursor runtime archive refused a runtime carrying another turn.");
+  }
+  if (pendingRuntimeRecovery(database, turn.agent_id)) {
+    throw new Error("Undispatched Cursor runtime archive cannot run while a runtime recovery is pending.");
+  }
+  if (agent && agent.provider_connection_json !== null) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(agent.provider_connection_json);
+    } catch {
+      throw new Error("Undispatched Cursor runtime archive could not verify the live agent connection.");
+    }
+    const raw = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+    const validShape = raw !== null
+      && (raw.processIdentity === undefined || raw.processIdentity === null || typeof raw.processIdentity === "string");
+    const connection = validShape ? raw as ProviderActionConnectionRef : null;
+    const idle: boolean = isIdleCursorConnection(connection);
+    if (idle) {
+      // Idle Cursor lane holds no live child birth.
+    } else if (isLiveCursorConnection(connection)) {
+      if (!agent.provider_execution_generation_id?.trim()) {
+        throw new Error("Undispatched Cursor runtime archive could not verify the live agent connection.");
+      }
+      const liveRuntimeId = executionRuntimeStorageIdentity(
+        turn.agent_id,
+        agent.provider_execution_generation_id,
+        connection.kind,
+        connection.pid!,
+        connection.processIdentity!,
+      );
+      if (liveRuntimeId === runtimeId) {
+        throw new Error("Undispatched Cursor runtime archive refused a runtime still referenced by the live agent.");
+      }
+    } else {
+      throw new Error("Undispatched Cursor runtime archive could not verify the live agent connection.");
+    }
+  }
+  if (recoveredRuntime(database, turn.agent_id, runtimeId)) {
+    return runtimeId;
+  }
+  const observer = database.prepare(
+    "SELECT * FROM execution_observers WHERE agent_id=? AND observer_runtime_generation_id=?",
+  ).get(turn.agent_id, runtimeId) as Record<string, string | number | null> | undefined;
+  if (observer) {
+    const sourceId = typeof observer.source_id === "string" && observer.source_id.trim()
+      ? observer.source_id
+      : null;
+    const verifiedSource = sourceId !== null && Boolean(
+      database.prepare("SELECT 1 FROM execution_observer_sources WHERE agent_id=? AND source_id=?")
+        .get(turn.agent_id, sourceId),
+    );
+    if (!verifiedSource
+      || Number(observer.max_observed_sequence) !== Number(observer.last_source_sequence)
+      || observer.pending_lifecycle_fact_id !== null) {
+      throw new Error("Undispatched Cursor runtime archive refused an incomplete or unverified observer record.");
+    }
+  }
+  const ref: DaemonProviderRuntimeReference = {
+    work_attempt_id: turn.work_attempt_id,
+    execution_generation_id: turn.origin_execution_generation_id,
+    provider_continuation_id: turn.provider_continuation_id,
+    provider_connection: null,
+  };
+  database.prepare("INSERT INTO agent_runtime_recoveries VALUES(?,?,?,?,?,'resume','complete',?,?,?,?)")
+    .run(
+      executionStorageIdentity("cursor-undispatched-reset", turn.agent_id, runtimeId),
+      turn.agent_id,
+      turn.room_id,
+      turn.origin_execution_generation_id,
+      runtimeId,
+      JSON.stringify(ref),
+      observer ? JSON.stringify(observer) : null,
+      at,
+      at,
+    );
+  if (observer) {
+    database.prepare(
+      "UPDATE execution_observers SET observer_epoch=observer_epoch+1 WHERE agent_id=? AND observer_runtime_generation_id=?",
+    ).run(turn.agent_id, runtimeId);
+  }
   return runtimeId;
 }
 

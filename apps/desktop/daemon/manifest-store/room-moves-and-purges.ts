@@ -6,11 +6,24 @@
  * A method name may be defined in only one module; store.ts throws on a duplicate.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { assertNoPollingActivation } from "../custodial-polling-activation.js";
-import { assertNoDeliveryDrain } from "../delivery-drain.js";
+import {
+  BOUNDED_MCP_EFFECT_KIND,
+  completePreparedEffectAtomicallyInTransaction,
+  failPreparedJoinRoomEffectInTransaction,
+  retireExecutionApprovalEffectsForPurgeInTransaction,
+  retireExecutionApprovalEffectsForRoomMoveInTransaction,
+  retireRoomMoveEffectsForOperationInTransaction,
+  retireRoomMoveEffectsForPurgeInTransaction,
+  retireRoomWorkEffectsForPurgeInTransaction,
+  retireRoomWorkEffectsInTransaction,
+  retireRuntimeRecoveryEffectsForPurgeInTransaction,
+  ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+  ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+  rowToBoundedMcpEffect,
+} from "../effect-journal/index.js";
 import { cancelInterruptedSupervisedTurn, pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
 import type { DaemonPurgePhase, DaemonPurgeRecord, DaemonPurgeWorkerSessionAttestation, DaemonRoomMovePhase, DaemonRoomMoveRecord } from "../types.js";
-import { type Row, roomMoveFromRow, purgeFromRow, ManifestConflictError, bool, nullableString, json, run, storeMethods } from "./shared.js";
+import { type Row, roomMoveFromRow, purgeFromRow, ManifestConflictError, nullableString, json, parseJson, run, storeMethods } from "./shared.js";
 
 export const roomMovesAndPurges = storeMethods({
   async prepareRoomMove(
@@ -19,26 +32,24 @@ export const roomMovesAndPurges = storeMethods({
   ): Promise<{ created: boolean; move: DaemonRoomMoveRecord }> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      let transactionOpen = false;
       let committed = false;
       let result!: { created: boolean; move: DaemonRoomMoveRecord };
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Room-move preparation transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          transactionOpen = true;
+      const commit = async () => {
+        if (committed) throw new Error("Room-move preparation transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          this.writeFence?.();
           const existing = database.prepare("SELECT * FROM agent_room_moves WHERE request_id=?").get(input.request_id) as Row | undefined;
           if (existing) {
             const move = roomMoveFromRow(existing);
             if (move.operation_id !== input.operation_id || move.agent_id !== input.agent_id || move.source_room_id !== input.source_room_id || move.destination_room_id !== input.destination_room_id || move.execution_generation_id !== input.execution_generation_id) throw new Error("Room-move request id is already bound to different coordinates.");
             result = { created: false, move };
           } else {
-            assertNoDeliveryDrain(database, input.agent_id);
-            assertNoPollingActivation(database, input.agent_id);
-            const unresolvedControl = database.prepare(`SELECT action_id FROM turn_control_journals
-              WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id) as Row | undefined;
-            if (unresolvedControl) {
-              throw new ManifestConflictError(`Room move is blocked by unresolved turn-control action '${String(unresolvedControl.action_id)}'.`);
+            const unresolvedControl = database.prepare(`SELECT turn_control_json FROM agents
+              WHERE agent_id=? AND turn_control_status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id) as Row | undefined;
+            if (unresolvedControl?.turn_control_json) {
+              const actionId = parseJson<{ action_id?: string }>(unresolvedControl.turn_control_json).action_id ?? "unknown";
+              throw new ManifestConflictError(`Room move is blocked by unresolved turn-control action '${actionId}'.`);
             }
             const now = new Date().toISOString();
             const sourceCursor = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?")
@@ -50,17 +61,16 @@ export const roomMovesAndPurges = storeMethods({
             result = { created: true, move: roomMoveFromRow(row) };
           }
           database.exec("COMMIT");
-          transactionOpen = false;
           committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Room-move preparation fence returned without committing the transaction.");
-        return result;
-      } catch (error) {
-        if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
-        throw error;
-      }
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
+        }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Room-move preparation fence returned without committing the transaction.");
+      return result;
     });
   },
 
@@ -88,14 +98,13 @@ export const roomMovesAndPurges = storeMethods({
   ): Promise<DaemonRoomMoveRecord> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      let transactionOpen = false;
       let committed = false;
       let updated!: DaemonRoomMoveRecord;
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Room-move transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          transactionOpen = true;
+      const commit = async () => {
+        if (committed) throw new Error("Room-move transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          this.writeFence?.();
           const row = database.prepare("SELECT * FROM agent_room_moves WHERE operation_id=?").get(input.operationId) as Row | undefined;
           if (!row) throw new Error("Unknown room-move operation.");
           const current = roomMoveFromRow(row);
@@ -111,10 +120,11 @@ export const roomMovesAndPurges = storeMethods({
               i.agent_id AS inbox_agent_id,i.room_id AS inbox_room_id,i.provider_turn_id AS inbox_provider_turn_id,
               b.agent_id AS binding_agent_id,b.room_id AS binding_room_id,b.work_attempt_id AS binding_work_attempt_id,
               b.origin_execution_generation_id,b.provider_turn_id AS binding_provider_turn_id
-              FROM supervised_agent_inbox i
+              FROM inbox_items i
               JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
               WHERE i.inbox_item_id=?`).get(updated.activating_inbox_item_id) as Row | undefined;
-            const effectRow = database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(updated.effect_id) as Row | undefined;
+            const effectRow = database.prepare("SELECT * FROM effects WHERE id=? AND kind=?").get(updated.effect_id, BOUNDED_MCP_EFFECT_KIND) as Row | undefined;
+            const effectView = effectRow ? rowToBoundedMcpEffect(effectRow) : null;
             if (!authority
               || String(authority.inbox_agent_id) !== updated.agent_id
               || String(authority.inbox_room_id) !== updated.source_room_id
@@ -123,52 +133,97 @@ export const roomMovesAndPurges = storeMethods({
               || String(authority.binding_room_id) !== updated.source_room_id
               || String(authority.binding_work_attempt_id) !== updated.work_attempt_id
               || nullableString(authority.binding_provider_turn_id) !== updated.provider_turn_id
-              || !effectRow
-              || String(effectRow.agent_id) !== updated.agent_id
-              || String(effectRow.room_id) !== updated.source_room_id
-              || String(effectRow.execution_generation_id) !== String(authority.origin_execution_generation_id)
-              || nullableString(effectRow.provider_turn_id) !== updated.provider_turn_id
-              || String(effectRow.tool_name) !== "join_room"
-              || String(effectRow.state) !== "prepared") {
+              || !effectView
+              || effectView.agent_id !== updated.agent_id
+              || effectView.room_id !== updated.source_room_id
+              || effectView.execution_generation_id !== String(authority.origin_execution_generation_id)
+              || effectView.provider_turn_id !== updated.provider_turn_id
+              || effectView.tool_name !== "join_room"
+              || effectView.state !== "prepared") {
               throw new ManifestConflictError("Terminal room move lost its exact activating binding or prepared join-room effect.");
             }
-            const resultJson = input.to === "active"
-              ? json({
-                phase: "active",
-                moved: true,
-                old_room: updated.source_room_id,
-                destination_room: updated.remote_room_id ?? updated.destination_room_id,
-                destination_cursor: updated.destination_cursor,
-              })
-              : null;
-            const effectError = input.to === "failed"
-              ? (updated.error ?? "The room move failed before its effect journal was settled.").slice(0, 32_768)
-              : null;
-            run(database.prepare("UPDATE supervised_agent_effects SET state=?,result_json=?,error=?,updated_at=? WHERE effect_id=? AND state='prepared'"),
-              input.to === "active" ? "completed" : "failed", resultJson, effectError, updatedAt, updated.effect_id);
+            if (input.to === "active") {
+              completePreparedEffectAtomicallyInTransaction(database, {
+                id: updated.effect_id,
+                outcomeJson: json({
+                  phase: "active",
+                  moved: true,
+                  old_room: updated.source_room_id,
+                  destination_room: updated.remote_room_id ?? updated.destination_room_id,
+                  destination_cursor: updated.destination_cursor,
+                }),
+                updatedAt,
+                minEpoch: updated.daemon_generation,
+              });
+            } else {
+              const changed = failPreparedJoinRoomEffectInTransaction(database, {
+                effectId: updated.effect_id,
+                agentId: updated.agent_id,
+                roomId: updated.source_room_id,
+                executionGenerationId: String(authority.origin_execution_generation_id),
+                providerTurnId: updated.provider_turn_id,
+                error: updated.error ?? "The room move failed before its effect journal was settled.",
+                updatedAt,
+              });
+              if (changed !== 1) {
+                throw new ManifestConflictError("Terminal room move lost its exact activating binding or prepared join-room effect.");
+              }
+            }
+          }
+          if (input.to === "rollback_required") {
+            retireRoomMoveEffectsForOperationInTransaction(database, {
+              agentId: input.agentId,
+              operationId: input.operationId,
+              expectedEpoch: updated.daemon_generation,
+              kinds: [ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND, ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND],
+              error: "room_move_rollback_required",
+              nowIso: updatedAt,
+            });
+          }
+          if (input.to === "active") {
+            retireRoomWorkEffectsInTransaction(database, {
+              agentId: input.agentId,
+              expectedEpoch: updated.daemon_generation,
+              roomId: updated.source_room_id,
+              error: "room_moved",
+              nowIso: updatedAt,
+            });
+            retireExecutionApprovalEffectsForRoomMoveInTransaction(database, {
+              agentId: input.agentId,
+              expectedEpoch: updated.daemon_generation,
+              roomId: updated.source_room_id,
+              error: "room_moved",
+              nowIso: updatedAt,
+            });
           }
           if (input.to === "active" || input.to === "failed") {
+            retireRoomMoveEffectsForOperationInTransaction(database, {
+              agentId: input.agentId,
+              operationId: input.operationId,
+              expectedEpoch: updated.daemon_generation,
+              error: input.to === "active" ? "room_move_active" : "room_move_failed",
+              nowIso: updatedAt,
+            });
             // Reaching a terminal room-move phase releases the compensation rows
             // protected by the shared retention policy. Compact only after the
             // exact effect reached the same terminal boundary.
             pruneSupervisedAgentHistory(database, input.agentId, () => updatedAt);
           }
           database.exec("COMMIT");
-          transactionOpen = false;
           committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Room-move commit fence returned without committing the transaction.");
-        return updated;
-      } catch (error) {
-        if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
-        throw error;
-      }
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
+        }
+      };
+      if (commitFence) await commitFence(commit);
+      else await commit();
+      if (!committed) throw new Error("Room-move commit fence returned without committing the transaction.");
+      return updated;
     });
   },
 
-  async preparePurge(expectedGeneration: number, input: {
+  async preparePurge(expectedVersion: number, input: {
     operationId: string;
     requestId: string;
     agentId: string;
@@ -176,13 +231,16 @@ export const roomMovesAndPurges = storeMethods({
     externalRevokeRequired: boolean;
     workerSessionAttestation: DaemonPurgeWorkerSessionAttestation;
     agentSessionId: string | null;
-  }): Promise<{ generation: number; created: boolean; purge: DaemonPurgeRecord }> {
+  }): Promise<{ version: number; created: boolean; purge: DaemonPurgeRecord }> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
-        const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
-        if (generation !== expectedGeneration) throw new ManifestConflictError("Manifest generation changed before purge preparation.");
+        this.writeFence?.();
+        const agentRow = database.prepare("SELECT version FROM agents WHERE agent_id=?").get(input.agentId) as Row | undefined;
+        if (!agentRow) throw new ManifestConflictError(`Purge target '${input.agentId}' does not exist.`);
+        const version = Number(agentRow.version);
+        if (version !== expectedVersion) throw new ManifestConflictError("Agent version changed before purge preparation.");
         const existing = database.prepare("SELECT * FROM agent_purge_operations WHERE request_id=?").get(input.requestId) as Row | undefined;
         if (existing) {
           const purge = purgeFromRow(existing);
@@ -192,10 +250,30 @@ export const roomMovesAndPurges = storeMethods({
             throw new Error("Purge request id is already bound to another operation or worker session.");
           }
           database.exec("COMMIT");
-          return { generation, created: false, purge };
+          return { version, created: false, purge };
         }
         const now = new Date().toISOString();
         this.settleGivenAgentInboxForPurge(database, input.agentId, now);
+        retireRoomWorkEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
+        retireExecutionApprovalEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
+        retireRoomMoveEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
+        retireRuntimeRecoveryEffectsForPurgeInTransaction(database, {
+          agentId: input.agentId,
+          expectedEpoch: input.daemonGeneration,
+          nowIso: now,
+        });
         const attachment = this.assertPurgePreconditions(database, input.agentId);
         const phase: DaemonPurgePhase = input.externalRevokeRequired
           ? input.workerSessionAttestation === "unknown" ? "reprepare_credentials" : "revoking_credentials"
@@ -214,7 +292,7 @@ export const roomMovesAndPurges = storeMethods({
           attachment.attachedWorkAttemptId, attachment.preservedWorkspacePath, input.workerSessionAttestation, input.agentSessionId ?? null);
         const purge = purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row);
         database.exec("COMMIT");
-        return { generation, created: true, purge };
+        return { version, created: true, purge };
       } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
     });
   },
@@ -232,7 +310,7 @@ export const roomMovesAndPurges = storeMethods({
    * Resolve only durable worker-session evidence. A mint attempt is an
    * irreversible uncertainty boundary until its idempotent remote response is
    * recorded. Exact evidence outranks older explicit-none facts, while
-   * conflicting exact ids and legacy omissions fail closed.
+   * conflicting exact ids and unattested omissions fail closed.
    */
   async durablePurgeWorkerSessionAttestation(agentId: string): Promise<{
     workerSessionAttestation: "exact" | "none" | "unknown";
@@ -251,9 +329,12 @@ export const roomMovesAndPurges = storeMethods({
     };
     if (mint?.phase === "exact") addExact(mint.agent_session_id);
 
-    const retained = database.prepare("SELECT last_worker_binding_present,binding_agent_session_id FROM retained_worker_bindings WHERE agent_id=?").get(agentId) as Row | undefined;
-    if (retained && bool(retained.last_worker_binding_present)) {
-      addExact(retained.binding_agent_session_id);
+    const agentRow = database.prepare("SELECT last_worker_binding_json FROM agents WHERE agent_id=?").get(agentId) as Row | undefined;
+    const retainedBinding = agentRow?.last_worker_binding_json != null
+      ? parseJson<{ agent_session_id?: string | null }>(agentRow.last_worker_binding_json)
+      : null;
+    if (retainedBinding) {
+      addExact(retainedBinding.agent_session_id);
     }
     const current = database.prepare("SELECT agent_session_id FROM supervised_worker_sessions WHERE agent_id=?").get(agentId) as Row | undefined;
     addExact(current?.agent_session_id);
@@ -268,8 +349,7 @@ export const roomMovesAndPurges = storeMethods({
     if (ids.size === 1) return { workerSessionAttestation: "exact", agentSessionId: [...ids][0]! };
     if (ids.size > 1) return { workerSessionAttestation: "unknown", agentSessionId: null };
 
-    const retainedProvesNone = Boolean(retained && bool(retained.last_worker_binding_present)
-      && nullableString(retained.binding_agent_session_id) === null);
+    const retainedProvesNone = Boolean(agentRow && agentRow.last_worker_binding_json === null);
     if (retainedProvesNone && mint?.phase === "never_minted") {
       return { workerSessionAttestation: "none", agentSessionId: null };
     }
@@ -281,6 +361,7 @@ export const roomMovesAndPurges = storeMethods({
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
+        this.writeFence?.();
         const row = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
         if (!row) throw new Error("Unknown purge operation.");
         const purge = purgeFromRow(row);
@@ -304,6 +385,7 @@ export const roomMovesAndPurges = storeMethods({
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
+        this.writeFence?.();
         const row = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
         if (!row) throw new Error("Unknown purge operation.");
         const purge = purgeFromRow(row);
@@ -332,6 +414,7 @@ export const roomMovesAndPurges = storeMethods({
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
+        this.writeFence?.();
         const row = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
         if (!row) throw new Error("Unknown purge operation.");
         const purge = purgeFromRow(row);
@@ -357,6 +440,7 @@ export const roomMovesAndPurges = storeMethods({
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
       try {
+        this.writeFence?.();
         const row = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
         if (!row) throw new Error("Unknown purge operation.");
         const purge = purgeFromRow(row);
@@ -373,48 +457,75 @@ export const roomMovesAndPurges = storeMethods({
     });
   },
 
-  /** One transaction proves all durable preconditions, removes every agent-owned row, advances generation, and completes the journal. */
-  async commitPurge(expectedGeneration: number, input: { operationId: string; agentId: string; daemonGeneration: number }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; purge: DaemonPurgeRecord }> {
+  /** One transaction proves all durable preconditions, removes every agent-owned row, and completes the journal. */
+  async commitPurge(expectedVersion: number, input: { operationId: string; agentId: string; daemonGeneration: number }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ version: number; purge: DaemonPurgeRecord }> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      let transactionOpen = false;
       let committed = false;
       const commit = async () => {
-        database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
-        const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
-        if (generation !== expectedGeneration) throw new ManifestConflictError("Manifest generation changed before purge commit.");
-        const purgeRow = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
-        if (!purgeRow) throw new Error("Unknown purge operation.");
-        const purge = purgeFromRow(purgeRow);
-        if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.daemonGeneration || purge.phase !== "local_commit") throw new ManifestConflictError("Purge is not authorized for local commit.");
-        // A message that reached the stopped guest after preparation is settled here as well; otherwise the commit would refuse for good.
-        this.settleGivenAgentInboxForPurge(database, input.agentId, new Date().toISOString());
-        const attachment = this.assertPurgePreconditions(database, input.agentId);
-        if (attachment.attachedWorkAttemptId !== purge.attached_work_attempt_id || attachment.preservedWorkspacePath !== purge.preserved_workspace_path) {
-          throw new ManifestConflictError("Purge target attachment changed after preparation.");
+        if (committed) throw new Error("Purge transaction was already committed.");
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          this.writeFence?.();
+          const agentRow = database.prepare("SELECT version FROM agents WHERE agent_id=?").get(input.agentId) as Row | undefined;
+          if (!agentRow) throw new Error("Purge target disappeared before local commit.");
+          if (Number(agentRow.version) !== expectedVersion) throw new ManifestConflictError("Agent version changed before purge commit.");
+          const purgeRow = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
+          if (!purgeRow) throw new Error("Unknown purge operation.");
+          const purge = purgeFromRow(purgeRow);
+          if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.daemonGeneration || purge.phase !== "local_commit") throw new ManifestConflictError("Purge is not authorized for local commit.");
+          // A message that reached the stopped guest after preparation is settled here as well; otherwise the commit would refuse for good.
+          const commitNow = new Date().toISOString();
+          this.settleGivenAgentInboxForPurge(database, input.agentId, commitNow);
+          retireRoomWorkEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
+          retireExecutionApprovalEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
+          retireRoomMoveEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
+          retireRuntimeRecoveryEffectsForPurgeInTransaction(database, {
+            agentId: input.agentId,
+            expectedEpoch: input.daemonGeneration,
+            nowIso: commitNow,
+          });
+          const attachment = this.assertPurgePreconditions(database, input.agentId);
+          if (attachment.attachedWorkAttemptId !== purge.attached_work_attempt_id || attachment.preservedWorkspacePath !== purge.preserved_workspace_path) {
+            throw new ManifestConflictError("Purge target attachment changed after preparation.");
+          }
+          for (const [table, column] of [
+            ["effects", "agent_id"], ["effect_tombstones", "agent_id"], ["execution_approval_publications", "agent_id"],
+            ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
+            ["supervised_agent_ingress_cursors", "agent_id"], ["supervised_agent_history_boundaries", "agent_id"], ["supervised_agent_pruned_sources", "agent_id"],
+            ["supervised_worker_mint_states", "agent_id"], ["supervised_worker_sessions", "agent_id"], ["inbox_items", "agent_id"], ["worker_binding_publications", "entry_id"],
+            ["worker_generation_verifications", "entry_id"], ["worker_binding_watermarks", "entry_id"], ["worker_session_bindings", "entry_id"],
+            ["agent_room_moves", "agent_id"], ["reconciliation_action_tombstones", "agent_id"],
+          ] as const) run(database.prepare(`DELETE FROM ${table} WHERE ${column}=?`), input.agentId);
+          if (purge.attached_work_attempt_id !== null) {
+            const deletedAttempt = database.prepare("DELETE FROM work_attempts WHERE work_attempt_id=?").run(purge.attached_work_attempt_id);
+            if (Number(deletedAttempt.changes) !== 1) throw new ManifestConflictError("Purge work attempt disappeared before local commit.");
+          }
+          const deleted = database.prepare("DELETE FROM agents WHERE agent_id=? AND version=?").run(input.agentId, expectedVersion);
+          if (Number(deleted.changes) !== 1) throw new ManifestConflictError("Purge target disappeared or changed before local commit.");
+          run(database.prepare("UPDATE agent_purge_operations SET phase='complete',error=NULL,updated_at=? WHERE operation_id=?"), new Date().toISOString(), input.operationId);
+          database.exec("COMMIT");
+          committed = true;
+        } catch (error) {
+          try { database.exec("ROLLBACK"); } catch {}
+          throw error;
         }
-        for (const [table, column] of [
-          ["supervised_agent_effects", "agent_id"], ["supervised_agent_effect_tombstones", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
-          ["supervised_agent_ingress_cursors", "agent_id"], ["supervised_agent_history_boundaries", "agent_id"], ["supervised_agent_pruned_sources", "agent_id"],
-          ["supervised_worker_mint_states", "agent_id"], ["supervised_worker_sessions", "agent_id"], ["supervised_agent_inbox", "agent_id"], ["worker_binding_publications", "entry_id"],
-          ["worker_generation_verifications", "entry_id"], ["worker_binding_watermarks", "entry_id"], ["worker_session_bindings", "entry_id"],
-          ["agent_room_moves", "agent_id"], ["turn_control_sequence_watermarks", "agent_id"],
-          ["reconciliation_action_tombstones", "agent_id"],
-        ] as const) run(database.prepare(`DELETE FROM ${table} WHERE ${column}=?`), input.agentId);
-        if (purge.attached_work_attempt_id !== null) {
-          const deletedAttempt = database.prepare("DELETE FROM work_attempts WHERE work_attempt_id=?").run(purge.attached_work_attempt_id);
-          if (Number(deletedAttempt.changes) !== 1) throw new ManifestConflictError("Purge work attempt disappeared before local commit.");
-        }
-        const deleted = database.prepare("DELETE FROM agent_identities WHERE agent_id=?").run(input.agentId);
-        if (Number(deleted.changes) !== 1) throw new Error("Purge target disappeared before local commit.");
-        const advanced = database.prepare("UPDATE manifest_metadata SET generation=generation+1 WHERE singleton=1 AND generation=?").run(expectedGeneration);
-        if (Number(advanced.changes) !== 1) throw new ManifestConflictError("Manifest generation changed during purge commit.");
-        run(database.prepare("UPDATE agent_purge_operations SET phase='complete',error=NULL,updated_at=? WHERE operation_id=?"), new Date().toISOString(), input.operationId);
-        database.exec("COMMIT"); transactionOpen = false; committed = true;
       };
-      try { if (commitFence) await commitFence(commit); else await commit(); if (!committed) throw new Error("Purge commit fence returned without committing."); }
-      catch (error) { if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} } throw error; }
-      return { generation: expectedGeneration + 1, purge: purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row) };
+      if (commitFence) await commitFence(commit); else await commit();
+      if (!committed) throw new Error("Purge commit fence returned without committing.");
+      return { version: expectedVersion + 1, purge: purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row) };
     });
   },
 
@@ -434,12 +545,11 @@ export const roomMovesAndPurges = storeMethods({
    */
   settleGivenAgentInboxForPurge(database: DatabaseSync, agentId: string, timestamp: string): number {
     if (!agentId.startsWith("supervised_rental_")) return 0;
-    const lifecycle = database.prepare(`SELECT l.desired_state,d.observed_state FROM agent_launch_intents l
-      JOIN runtime_deployments d USING(agent_id) WHERE l.agent_id=?`).get(agentId) as Row | undefined;
+    const lifecycle = database.prepare("SELECT desired_state,observed_state FROM agents WHERE agent_id=?").get(agentId) as Row | undefined;
     if (!lifecycle || lifecycle.desired_state !== "stopped" || !["absent", "stopped", "failed"].includes(String(lifecycle.observed_state))) return 0;
     let cancelled = 0;
     for (;;) {
-      const head = database.prepare(`SELECT inbox_item_id,state,provider_turn_id FROM supervised_agent_inbox WHERE agent_id=?
+      const head = database.prepare(`SELECT inbox_item_id,state,provider_turn_id FROM inbox_items WHERE agent_id=?
         AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence LIMIT 1`).get(agentId) as Row | undefined;
       if (!head || !["pending", "retryable", "blocked"].includes(String(head.state)) || head.provider_turn_id !== null) break;
@@ -451,15 +561,15 @@ export const roomMovesAndPurges = storeMethods({
   },
 
   assertPurgePreconditions(database: DatabaseSync, agentId: string): { attachedWorkAttemptId: string | null; preservedWorkspacePath: string | null } {
-    const state = database.prepare(`SELECT l.desired_state,d.observed_state,d.workspace_path_present,d.workspace_path,d.work_attempt_id_present,d.work_attempt_id,
-        d.provider_ref_present,d.provider_work_attempt_id,d.provider_execution_generation_id,t.turn_control_present,t.status AS turn_status
-      FROM agent_launch_intents l JOIN runtime_deployments d USING(agent_id) JOIN turn_control_journals t USING(agent_id) WHERE l.agent_id=?`).get(agentId) as Row | undefined;
+    const state = database.prepare(`SELECT desired_state,observed_state,workspace_path,work_attempt_id,
+        provider_work_attempt_id,provider_execution_generation_id,turn_control_status
+      FROM agents WHERE agent_id=?`).get(agentId) as Row | undefined;
     if (!state || state.desired_state !== "stopped" || !["absent", "stopped", "failed"].includes(String(state.observed_state))) throw new Error("Purge requires a fully stopped durable lifecycle.");
-    const runtimeAttempt = bool(state.work_attempt_id_present) ? nullableString(state.work_attempt_id) : null;
-    const providerAttempt = bool(state.provider_ref_present) ? nullableString(state.provider_work_attempt_id) : null;
+    const runtimeAttempt = nullableString(state.work_attempt_id);
+    const providerAttempt = nullableString(state.provider_work_attempt_id);
     if (runtimeAttempt !== null && providerAttempt !== null && runtimeAttempt !== providerAttempt) throw new Error("Purge encountered conflicting durable work-attempt attachments.");
     const attachedWorkAttemptId = runtimeAttempt ?? providerAttempt;
-    let preservedWorkspacePath = bool(state.workspace_path_present) ? nullableString(state.workspace_path) : null;
+    let preservedWorkspacePath = nullableString(state.workspace_path);
     if (attachedWorkAttemptId !== null) {
       const attempt = database.prepare("SELECT workspace_path FROM work_attempts WHERE work_attempt_id=?").get(attachedWorkAttemptId) as Row | undefined;
       if (!attempt || typeof attempt.workspace_path !== "string") throw new Error("Purge cannot prove the attached work attempt.");
@@ -468,8 +578,8 @@ export const roomMovesAndPurges = storeMethods({
       if (database.prepare("SELECT 1 FROM work_attempt_executions WHERE work_attempt_id=? AND terminal_json IS NULL LIMIT 1").get(attachedWorkAttemptId)) {
         throw new Error("Purge cannot remove a work attempt with a live provider execution.");
       }
-      if (database.prepare(`SELECT 1 FROM runtime_deployments
-          WHERE agent_id<>? AND ((work_attempt_id_present=1 AND work_attempt_id=?) OR (provider_ref_present=1 AND provider_work_attempt_id=?)) LIMIT 1`)
+      if (database.prepare(`SELECT 1 FROM agents
+          WHERE agent_id<>? AND (work_attempt_id=? OR provider_work_attempt_id=?) LIMIT 1`)
         .get(agentId, attachedWorkAttemptId, attachedWorkAttemptId)) {
         throw new Error("Purge cannot remove a work attempt attached to another agent.");
       }
@@ -479,11 +589,11 @@ export const roomMovesAndPurges = storeMethods({
       const execution = database.prepare("SELECT terminal_json FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=?").get(state.provider_execution_generation_id, attachedWorkAttemptId) as Row | undefined;
       if (!execution || execution.terminal_json === null) throw new Error("Purge cannot remove an agent with a live provider execution.");
     }
-    if (bool(state.turn_control_present) && ![null, "completed"].includes(state.turn_status as string | null)) throw new Error("Purge cannot remove an agent with nonterminal turn control.");
+    if (state.turn_control_status !== null && state.turn_control_status !== "completed") throw new Error("Purge cannot remove an agent with nonterminal turn control.");
     const blockers = [
       database.prepare("SELECT 1 FROM worker_session_bindings WHERE entry_id=? LIMIT 1").get(agentId),
-      database.prepare("SELECT 1 FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') LIMIT 1").get(agentId),
-      database.prepare("SELECT 1 FROM supervised_agent_effects WHERE agent_id=? AND state IN ('prepared','executing') LIMIT 1").get(agentId),
+      database.prepare("SELECT 1 FROM inbox_items WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') LIMIT 1").get(agentId),
+      database.prepare("SELECT 1 FROM effects WHERE agent_id=? AND state IN ('prepared','executing') LIMIT 1").get(agentId),
       database.prepare("SELECT 1 FROM supervised_agent_ingress_health WHERE agent_id=? AND state NOT IN ('stopped','blocked') LIMIT 1").get(agentId),
       database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') LIMIT 1").get(agentId),
     ];

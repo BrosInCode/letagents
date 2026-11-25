@@ -1,3 +1,4 @@
+import type { DaemonLegacyStateReset } from "#daemon-contract/index.js";
 import {
   NATIVE_LIVENESS_STALE_AFTER_MS,
   workplaceLivenessStaleAfterMs,
@@ -6,8 +7,7 @@ import type { WorkDurabilityStore } from "./durability-store.js";
 import { executionRuntimeStorageIdentity } from "./execution-shadow-store.js";
 import type { ProviderActionHandle } from "./provider-action-port.js";
 import { homeHarnessAvailability, homeHarnessRosterState, latestPermissionChange, permissionChangedSince } from "./provider-configuration.js";
-import type { ProviderRecoveryDiagnostics } from "./provider-stream-coordinator.js";
-import type { LifecycleCaptureAdmissionStatus } from "./lifecycle-projection-ledger.js";
+import type { LifecycleCaptureAdmissionStatus } from "./execution-capture-coordinator.js";
 import {
   bindingMatchesRoomAgentGeneration,
   hasExactRoomAgentDeliveryOwner,
@@ -40,12 +40,12 @@ export type DaemonReadModelPorts = {
   currentDaemonGeneration(): number;
   nowMs(): number;
   startedAt: string;
+  legacyStateReset?(): DaemonLegacyStateReset | null;
   capabilities: {
     hasDelivery(): boolean;
     supportsRoomTurns(): boolean;
     supportsContinuationRepair(): boolean;
   };
-  recoveryDiagnostics(): ProviderRecoveryDiagnostics;
   deliveryAdmission(entry: DaemonManifestEntry): LifecycleCaptureAdmissionStatus | null;
   /**
    * For an entry whose delivery is held because its execution record cannot
@@ -65,7 +65,7 @@ export type DaemonReadModelPorts = {
     "detail" | "ingressHealth" | "latestContinuationRepair" | "receiptProjection"
   > & Partial<Pick<SupervisedAgentInboxStore, "blockedHeadSkip" | "inboxStateVersions">>;
   durability: Pick<WorkDurabilityStore, "getAttempt">;
-  workerAuthority: Pick<WorkerAuthorityCoordinator, "currentHostGrant" | "pollingContract">;
+  workerAuthority: Pick<WorkerAuthorityCoordinator, "currentHostGrant">;
   liveHandles: Map<string, ProviderActionHandle>;
   delivery: Pick<SupervisedAgentDelivery, "activeTurn"> | null;
 };
@@ -98,6 +98,7 @@ export class DaemonReadModel {
   constructor(private readonly ports: DaemonReadModelPorts) {}
 
   status() {
+    const legacyStateReset = this.ports.legacyStateReset?.() ?? null;
     return {
       healthy: true,
       protocol_version: DAEMON_PROTOCOL_VERSION,
@@ -120,13 +121,12 @@ export class DaemonReadModel {
         agent_runtime_recovery_v2: true,
         agent_state_subscription_v1: true,
         agent_activity_stream_v1: true,
-        custodialPollingV1: true,
-        custodialPollingOffersV1: true,
+        async_rpc_effects_v1: true,
       },
       generation: this.ports.currentDaemonGeneration(),
       pid: process.pid,
       started_at: this.ports.startedAt,
-      recovery_diagnostics: this.ports.recoveryDiagnostics(),
+      ...(legacyStateReset ? { legacy_state_reset: legacyStateReset } : {}),
     };
   }
 
@@ -272,7 +272,7 @@ export class DaemonReadModel {
           providerConnection: entry.provider_ref?.provider_connection ?? null,
           executionGenerationId: binding.execution_generation_id,
           daemonGeneration: this.ports.currentDaemonGeneration(),
-          deliveryMode: entry.delivery_mode ?? "mcp_polling",
+          deliveryMode: "daemon_inbox",
         }) ?? null
       : null;
     const projected = projectRoomAgentManifestEntry({
@@ -287,7 +287,6 @@ export class DaemonReadModel {
       workplaceLivenessStaleAfterMs: workplaceLivenessStaleAfterMs(),
       nativeLivenessStaleAfterMs: NATIVE_LIVENESS_STALE_AFTER_MS,
     });
-    const pollingContract = await this.ports.workerAuthority.pollingContract(entry);
     const recovery = await this.ports.manifest.pendingRuntimeRecovery(entry.id);
     // The entry carries no revision: the one the agent last started at is the store's. Nothing is read for an agent that may not have the setup
     // and whose access level was never changed.
@@ -325,7 +324,6 @@ export class DaemonReadModel {
       runtime_recovery: recovery ? { operationId: recovery.operation_id, roomId: recovery.room_id,
         executionGenerationId: recovery.execution_generation_id, runtimeGenerationId: recovery.runtime_generation_id,
         mode: recovery.mode, phase: recovery.phase as "prepared" | "stopped" } : null,
-      ...(pollingContract ? { polling_contract: pollingContract } : {}),
       ...(homeHarness ? { home_harness: homeHarness } : {}),
       ...(permissionPending ? { permission_pending: true as const } : {}) };
   }

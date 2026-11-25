@@ -12,7 +12,11 @@ export type HostApprovalPresentation = {
   title: "Run a command" | "Run a tool" | "Change files" | "Grant for this turn" | "Approval unavailable";
   /** Plain text, host-ephemeral only. Control characters are displayed literally. */
   details: string;
-  denyScope: "request" | "session_pending";
+  /**
+   * What a Deny covers. `request_and_turn`: Codex lists `cancel` and not `decline` for this request, so a Deny
+   * is sent as `cancel`, which can also end the agent's current turn.
+   */
+  denyScope: "request" | "request_and_turn" | "session_pending";
   alwaysAllow?: import("./host-tool-rules.js").HostToolScope;
 };
 export type HostApprovalStatus = "pending" | "decision_recorded" | "decision_sent" | "uncertain" | "request_closed" | "resolved" | "unavailable";

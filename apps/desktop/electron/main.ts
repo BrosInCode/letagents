@@ -2,13 +2,13 @@ import { drainLocalAttachmentDeletions } from "./main/rooms/local-content-deleti
 import { app, autoUpdater, protocol } from "electron";
 import { join } from "node:path";
 
-import { desktopProductName } from "./main/preview-mode.js";
+import { desktopProductName } from "#provider-runtime/preview-mode.js";
 import { claimDesktopInstance, registerAskLinks } from "./main/ask-links.js";
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
 import { prepareCompanyLinks } from "./main/company-links.js";
 import { configureApplicationMenu } from "./main/menu.js";
-import { startDesktopShellEnvironmentHydration } from "./main/desktop-shell-environment.js";
+import { startDesktopShellEnvironmentHydration } from "#provider-runtime/desktop-shell-environment.js";
 import {
   initializeDesktopNotifications,
   prepareDesktopNotificationLaunch,
@@ -16,7 +16,7 @@ import {
   setDesktopNotificationBadgeCount,
 } from "./main/notifications.js";
 import { letagentsHomePath } from "../../../shared/letagents-home.mjs";
-import { attachmentProtocolScheme, htmlDemoProtocolScheme, pageProtocolScheme, workspaceRoot } from "./main/paths.js";
+import { attachmentProtocolScheme, htmlDemoProtocolScheme, pageProtocolScheme, workspaceRoot } from "#provider-runtime/paths.js";
 import {
   setExecutionDelegationInvalidationHandler,
   stopDesktopRoomStream,

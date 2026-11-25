@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -20,9 +21,15 @@ import type {
   ProviderActionTerminal,
 } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";
-import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
+import type { DaemonManifestEntry } from "../types.js";
+import { daemonSocketRequest } from "../../electron/__tests__/daemon-socket-request.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
+import {
+  OpenModelProviderAdapter,
+  type OpenModelProviderAdapterDependencies,
+} from "#provider-runtime/agents/open-model-provider-adapter.js";
+import type { ProviderProcessExit } from "#provider-runtime/agents/provider-evidence.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt-native-resolution",
@@ -30,15 +37,56 @@ const TEST_PROVIDER_TURN_AUTHORITY = {
   provider_continuation_id: "thread-native-resolution",
 } as const;
 import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
-import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 import type { ClaudeNativePermissionRequest, ProviderPermissionObservation, ProviderPermissionRequest } from "../../shared/provider-permissions.js";
-import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
+import { noWorkLeaseHttp, runtimeReadySubscription, testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 
 const execFileAsync = promisify(execFile);
+
+const ownedTestDeliveryHttp = {
+  latest: async () => ({ messages: [] }),
+  poll: async ({ signal }: { signal: AbortSignal }) => new Promise<{ messages: never[] }>((resolve) => {
+    if (signal.aborted) resolve({ messages: [] });
+    else signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+  }),
+  publish: async () => {},
+};
+
+const ownedTestGrantHttp = {
+  ...noWorkLeaseHttp,
+  createWorkerSession: async ({ agentInstanceId }: { agentInstanceId: string }) => ({
+    sessionId: `session_${agentInstanceId.replace(/:/g, "_")}`,
+    bearer: `bearer_${agentInstanceId}`,
+    bearerId: `bearer_id_${agentInstanceId}`,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  }),
+};
+
+async function installOwnedTestGrant(socketPath: string, entryId: string, roomId: string): Promise<void> {
+  const generation = ((await daemonRequest(socketPath, "daemon.status")).result as { generation: number }).generation;
+  const installed = await daemonRequest(socketPath, "supervisor.install_host_grant", {
+    entry_id: entryId,
+    room_id: roomId,
+    agent_key: `owner/${entryId}`,
+    grant_id: `grant_${entryId}_${generation}`,
+    supervisor_grant: `grant-secret-${entryId}`,
+    grant_generation: generation,
+    api_url: "http://127.0.0.1:9",
+    daemon_generation: generation,
+    host_id: "host-test",
+    installation_id: "installation-test",
+    grant_expires_at: "2099-01-01T00:00:00.000Z",
+  });
+  assert.equal(installed.ok, true, installed.error);
+  const bootstrapped = await daemonRequest(socketPath, "supervisor.bootstrap_room_ingress", {
+    entry_id: entryId,
+    daemon_generation: generation,
+  });
+  assert.equal(bootstrapped.ok, true, bootstrapped.error);
+}
 
 async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 4_000 * WAIT_SCALE): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -50,19 +98,7 @@ async function eventually(predicate: () => Promise<boolean>, label: string, time
 }
 
 async function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
-  return new Promise((resolve, reject) => {
-    const socket = connectDaemon(socketPath);
-    let body = "";
-    socket.setEncoding("utf8");
-    socket.once("error", reject);
-    socket.on("data", (chunk) => {
-      body += chunk;
-      if (!body.includes("\n")) return;
-      socket.end();
-      resolve(JSON.parse(body.slice(0, body.indexOf("\n"))));
-    });
-    socket.once("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "router-test", method, params })}\n`));
-  });
+  return daemonSocketRequest(socketPath, method, params);
 }
 
 type FakeProvider = "codex" | "claude-code" | "open-model" | "antigravity";
@@ -271,6 +307,51 @@ test("permission routing snapshots OpenCode payloads and refuses replacement dur
   assert.equal(sends, 1);
 });
 
+test("Codex file-change routing requires inspected edits and fences replacement during inspection", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const spawn = { provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+  const native = Object.freeze({ id: 1, method: "item/fileChange/requestApproval", connectionId: "socket-1",
+    params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 }) });
+  const request = { provider: "codex" as const, native };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+  const changes = [{ path: "/repo/new.txt", kind: { type: "add" as const }, diff: "exact contents" }];
+  adapter.inspectPermissionFileChanges = async (_handle, expected) => { assert.equal(expected, native); return changes; };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlated",
+    providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "file_change", fileChanges: changes });
+  adapter.replyPermission = async (_handle, expected, _reply, options) => {
+    assert.equal(expected, native); assert.deepEqual(options!.expectedFileChanges, changes);
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!();
+    return { outcome: "sent", scope: "request" };
+  };
+  await router.replyPermission(handle, request, "once", { expectedFileChanges: changes, beforeNativeDispatch: async () => {} });
+  adapter.inspectPermissionFileChanges = async () => { await router.spawn(spawn); return changes; };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+});
+
+test("permission correlation and post-dispatch results reject replacement across native awaits", async () => {
+  const adapter = fakeAdapter("open-model", []);
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const spawn = { provider: "open-model", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  let handle = await router.spawn(spawn);
+  const request = { provider: "open-model" as const, native: { id: "request", sessionID: handle.providerContinuationId!, permission: "bash", patterns: [], metadata: {}, always: [] } };
+  adapter.correlatePermissionTurn = async nativeHandle => {
+    await router.spawn(spawn);
+    return { outcome: "correlated", providerContinuationId: nativeHandle.providerContinuationId!, providerTurnId: "turn" };
+  };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+  handle = await router.spawn(spawn);
+  let sends = 0;
+  adapter.replyPermission = async (_handle, _request, _reply, options) => {
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); sends++;
+    await router.spawn(spawn);
+    throw Object.assign(new Error("native response lost"), { outcome: "not_pending" });
+  };
+  await assert.rejects(router.replyPermission(handle, request, "reject", { beforeNativeDispatch: async () => {} }), { outcome: "uncertain" });
+  assert.equal(sends, 1);
+});
+
 // Antigravity's adapter sends Claude Code's native shape. The router tags it with its own provider and
 // answers it as Claude's; only the approval kind follows the tool it names.
 for (const provider of ["claude-code", "antigravity"] as const) {
@@ -364,84 +445,6 @@ test("Antigravity's approval kind follows the tool its adapter names", () => {
   for (const name of ["WebFetch", "WebSearch"]) assert.equal(antigravityApprovalKind(name), "network", name);
 });
 
-test("Codex file-change routing requires inspected edits and fences replacement during inspection", async () => {
-  const adapter = fakeAdapter("codex", []);
-  const router = new ProviderActionPortRouter({ codex: async () => adapter });
-  const spawn = { provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
-  const handle = await router.spawn(spawn);
-  const native = Object.freeze({ id: 1, method: "item/fileChange/requestApproval", connectionId: "socket-1",
-    params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 }) });
-  const request = { provider: "codex" as const, native };
-  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
-  const changes = [{ path: "/repo/new.txt", kind: { type: "add" as const }, diff: "exact contents" }];
-  adapter.inspectPermissionFileChanges = async (_handle, expected) => { assert.equal(expected, native); return changes; };
-  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlated",
-    providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "file_change", fileChanges: changes });
-  adapter.replyPermission = async (_handle, expected, _reply, options) => {
-    assert.equal(expected, native); assert.deepEqual(options!.expectedFileChanges, changes);
-    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!();
-    return { outcome: "sent", scope: "request" };
-  };
-  await router.replyPermission(handle, request, "once", { expectedFileChanges: changes, beforeNativeDispatch: async () => {} });
-  adapter.inspectPermissionFileChanges = async () => { await router.spawn(spawn); return changes; };
-  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
-});
-
-test("permission correlation and post-dispatch results reject replacement across native awaits", async () => {
-  const adapter = fakeAdapter("open-model", []);
-  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
-  const spawn = { provider: "open-model", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
-  let handle = await router.spawn(spawn);
-  const request = { provider: "open-model" as const, native: { id: "request", sessionID: handle.providerContinuationId!, permission: "bash", patterns: [], metadata: {}, always: [] } };
-  adapter.correlatePermissionTurn = async nativeHandle => {
-    await router.spawn(spawn);
-    return { outcome: "correlated", providerContinuationId: nativeHandle.providerContinuationId!, providerTurnId: "turn" };
-  };
-  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
-  handle = await router.spawn(spawn);
-  let sends = 0;
-  adapter.replyPermission = async (_handle, _request, _reply, options) => {
-    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); sends++;
-    await router.spawn(spawn);
-    throw Object.assign(new Error("native response lost"), { outcome: "not_pending" });
-  };
-  await assert.rejects(router.replyPermission(handle, request, "reject", { beforeNativeDispatch: async () => {} }), { outcome: "uncertain" });
-  assert.equal(sends, 1);
-});
-
-test("custodial activation router forwards exact Codex callbacks and refuses unsupported or forged handles", async () => {
-  const calls: string[] = [];
-  const adapter = fakeAdapter("codex", calls);
-  adapter.activateCustodialPolling = async (_handle, _request, options) => {
-    await options.beforeNativeDispatch();
-    calls.push("native:start");
-    await options.checkpointTurnStarted("native-exact");
-    return { providerTurnId: "native-exact" };
-  };
-  const router = new ProviderActionPortRouter({ codex: async () => adapter, "claude-code": async () => fakeAdapter("claude-code", calls) });
-  const spawn = { workAttemptId: "activation", roomId: "room", cwd: "/repo", launchPolicy: {}, provider: "codex" };
-  const handle = await router.spawn(spawn);
-  const request = { operationId: "operation", roomId: "room", cwd: "/repo", agentDisplayName: "Garden",
-    workerSession: { agentSessionId: "session", roomCursor: "msg_4" },
-    launchReceipt: { contract: "custodial_polling_v1" as const, agentSessionId: "session", configurationRevision: 1,
-      workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection! } };
-  const options = { beforeNativeDispatch: async () => { calls.push("intent"); }, checkpointTurnStarted: async (id: string) => { calls.push(`checkpoint:${id}`); } };
-  assert.deepEqual(await router.activateCustodialPolling(handle, request, options), { providerTurnId: "native-exact" });
-  assert.deepEqual(calls.slice(-3), ["intent", "native:start", "checkpoint:native-exact"]);
-  await assert.rejects(router.activateCustodialPolling({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "forged" } }, request, options));
-  delete adapter.activateCustodialPolling;
-  await assert.rejects(router.activateCustodialPolling(handle, request, options), /unavailable/);
-  const other = await router.spawn({ ...spawn, workAttemptId: "other", provider: "claude-code" });
-  await assert.rejects(router.activateCustodialPolling(other, request, options), /exact owned Codex/);
-  assert.equal(calls.filter(value => value === "native:start").length, 1);
-  assert.deepEqual(await router.inspectCustodialPollingActivation(other, "native-exact"), { state: "unknown" });
-  assert.deepEqual(await router.inspectCustodialPollingActivation(handle, "native-exact"), { state: "unknown" });
-  adapter.inspectCustodialPollingActivation = async (_handle, id) => {
-    assert.equal(id, "native-exact"); return { state: "terminal", outcome: "failed" };
-  };
-  assert.deepEqual(await router.inspectCustodialPollingActivation(handle, "native-exact"), { state: "terminal", outcome: "failed" });
-});
-
 function fakeAdapter(provider: FakeProvider, calls: string[]): NativeProviderAdapter {
   const handles = new Map<string, ReturnType<typeof nativeHandle>>();
   let nextPid = provider === "codex" ? 100 : provider === "claude-code" ? 200 : provider === "antigravity" ? 400 : 300;
@@ -480,7 +483,7 @@ function fakeAdapter(provider: FakeProvider, calls: string[]): NativeProviderAda
       return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
     },
     async runRoomTurn(handle, request, options) {
-      await options?.markDispatched?.();
+      await options?.beforeNativeDispatch?.();
       calls.push(`${provider}:room-turn:${handle.workAttemptId}:${request.inboxItemId}`);
       return { turnId: `turn:${request.inboxItemId}`, outcome: "reply", text: "bounded reply" };
     },
@@ -519,23 +522,6 @@ function nativeHandle(
     observedState: () => "working" as const,
   };
 }
-
-test("provider router preflights only Codex custody without launching or controlling a provider", async () => {
-  const calls: string[] = [];
-  const seen: unknown[] = [];
-  const adapter = { ...fakeAdapter("codex", calls), preflightCustodialPolling: async (input: { devMcpServerEntryPath?: string }) => { seen.push(input); } };
-  const router = new ProviderActionPortRouter({ codex: async () => adapter });
-  const request = { provider: "codex", devMcpServerEntryPath: "/trusted/dev/dist/mcp/server.js" };
-  const pending = router.preflightCustodialPolling(request);
-  request.devMcpServerEntryPath = "/changed/after-dispatch";
-  await pending;
-  assert.deepEqual(seen, [{ devMcpServerEntryPath: "/trusted/dev/dist/mcp/server.js" }]);
-  await assert.rejects(router.preflightCustodialPolling({ provider: "cursor" }), /only supported by Codex/);
-  await assert.rejects(new ProviderActionPortRouter({ codex: async () => fakeAdapter("codex", calls) }).preflightCustodialPolling({ provider: "codex" }), /does not expose/);
-  adapter.preflightCustodialPolling = async () => { throw new Error("unsupported installed runtime"); };
-  await assert.rejects(router.preflightCustodialPolling({ provider: "codex" }), /unsupported installed runtime/);
-  assert.deepEqual(calls, []);
-});
 
 test("provider router prefers exact Codex stopRef over a remembered protocol terminal with no fallback", async () => {
   const calls: string[] = [];
@@ -579,6 +565,127 @@ test("provider router preserves Cursor's remembered-stop path", async () => {
   assert.deepEqual(calls, ["claude-code:stop:cursor-stop"]);
 });
 
+test("provider router routes Open Model exact stopRef past a retired cached handle and preserves birth checks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-router-open-model-retired-"));
+  try {
+    const pid = 9401;
+    const birth = `opencode-birth-${pid}`;
+    let identityState: string | null | undefined = birth;
+    let identityReads = 0;
+    let resolveExit!: (exit: ProviderProcessExit) => void;
+    const exited = new Promise<ProviderProcessExit>((resolve) => { resolveExit = resolve; });
+    const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+    const adapter = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot: join(root, "opencode-runtime"),
+      stopGraceMs: 25,
+      startTimeoutMs: 10_000,
+      dependencies: {
+        resolveMcpRuntime: () => ({ entryPath: join(root, "letagents-mcp-entry.js"), readRoots: [] }),
+        launch: () => {
+          const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+          Object.assign(child, { pid, unref() {} });
+          return { child, exited };
+        },
+        getProcessIdentity: (candidatePid) => {
+          if (candidatePid !== pid) return null;
+          identityReads += 1;
+          return identityState;
+        },
+        observeProcessExit: () => exited,
+        signalProcess: (candidatePid, signal, identity) => {
+          signals.push({ pid: candidatePid, signal, identity });
+        },
+        allocatePort: async () => 44881,
+        discoverRuntimeConnection: async () => null,
+        probeGit: async () => null,
+        fetch: async (input, init) => {
+          const url = new URL(input);
+          if (url.pathname.endsWith("/models")) {
+            return new Response(JSON.stringify({ data: [{ id: "qwen/qwen3-coder", context_length: 262144 }] }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (url.pathname === "/global/health") {
+            return new Response(JSON.stringify({ healthy: true, version: "1.18.20" }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (url.pathname === "/session" && init?.method === "POST") {
+            return new Response(JSON.stringify({ id: "ses-retired-cached" }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      },
+    });
+    const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+    const cwd = join(root, "workspace");
+    await mkdir(cwd, { recursive: true });
+    const handle = await router.spawn({
+      provider: "open-model",
+      workAttemptId: "wa-retired-cached",
+      roomId: "room-1",
+      cwd,
+      workspaceKind: "git_worktree",
+      deliveryMode: "daemon_inbox",
+      lifecycleAuthorityMode: "typed",
+      permissionProfileId: "full_access",
+      launchPolicy: { permission: { "*": "allow" } },
+      configurationRevision: 1,
+      supervisorEntryId: "entry-retired-cached",
+      supervisorSocketPath: join(root, "daemon.sock"),
+      supervisorExecutionGenerationId: "gen-retired-cached",
+      supervisorWorkerSession: { agentSessionId: "session-retired-cached", roomCursor: null },
+      providerCredential: {
+        apiKey: "test-key",
+        baseUrl: "https://models.example.test/v1",
+        model: "qwen/qwen3-coder",
+      },
+    });
+    const ref: ProviderActionRef = {
+      provider: "open-model",
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId!,
+      providerConnection: structuredClone(handle.providerConnection),
+    };
+
+    // Process exits -> OpenModelProviderAdapter.finish() deletes the handle from adapter.handles,
+    // while ProviderActionPortRouter retains the retired handle entry for custody.
+    const exitedObserved = new Promise<void>((resolve) => {
+      void router.onExit(handle, () => resolve());
+    });
+    identityState = null;
+    resolveExit({ type: "exit", code: 0, signal: "SIGTERM" });
+    await exitedObserved;
+
+    // 1. Unverifiable birth still fails closed through adapter.stopRef (never stale adapter.stop).
+    identityReads = 0;
+    identityState = undefined;
+    await assert.rejects(
+      router.stopRef(ref, { graceMs: 20 }),
+      /process birth cannot be verified/,
+    );
+    assert.ok(identityReads >= 1);
+    assert.equal(signals.length, 0);
+
+    // 2. Confirmed absence settles cleanly via adapter.stopRef without "handle is stale or foreign".
+    identityReads = 0;
+    identityState = null;
+    const terminal = await router.stopRef(ref, { graceMs: 20, actionId: "stop-retired-om" });
+    assert.ok(identityReads >= 1);
+    assert.equal(terminal.terminalCause, "stopped");
+    assert.equal(terminal.providerContinuationId, "ses-retired-cached");
+    assert.equal(signals.length, 0);
+  } finally {
+    await removeTestDirectory(root);
+  }
+});
+
 test("provider router carries native shadow facts and probes without invoking legacy actions", async () => {
   const calls: string[] = [];
   let listener: ((event: NativeExecutionObservation) => void) | undefined;
@@ -599,7 +706,11 @@ test("provider router carries native shadow facts and probes without invoking le
   const handle = await router.spawn(request);
   const received: NativeExecutionObservation[] = [];
   const observed = await router.onExecution(handle, (event) => received.push(event));
-  assert.equal(observed, subscription, "the router forwards the source's subscription without inventing identity or positions");
+  // The adapter's subscription object stays behind the boundary. The daemon gets the same identity and
+  // positions as data, with no value that the router made up.
+  assert.notEqual(observed, subscription);
+  assert.equal(observed.sourceId, subscription.sourceId);
+  assert.deepEqual(observed.position(), subscription.position());
   assert.equal(observed.sourceId, "opaque-observer-source");
   assert.deepEqual(observed.position(), { firstRetainedSequence: 1, latestSequence: 0 });
   const observation: NativeExecutionObservation = {
@@ -870,8 +981,6 @@ test("provider router accepts a missing connection only for the exact remembered
   assert.deepEqual(forwardedPolicy, policy, "cached port handles must forward recovered permission authority to the native adapter");
   assert.deepEqual(await router.attach({ ...alphaRef, providerConnection: null, launchPolicy: policy }), alpha);
   assert.deepEqual(forwardedConnection, alpha.providerConnection, "verified policy preserves repair from the exact cached connection");
-  assert.equal(await router.attach({ ...alphaRef, lifecycleAuthorityMode: "typed_shadow" }), null);
-  assert.equal(await router.attach({ ...alphaRef, lifecycleAuthorityMode: undefined }), null);
   assert.equal(await router.attach({ ...alphaRef, providerContinuationId: bravo.providerContinuationId! }), null);
   assert.equal(await router.attach({ ...alphaRef, providerConnection: bravo.providerConnection }), null);
   assert.deepEqual(
@@ -998,39 +1107,6 @@ test("provider router selects Antigravity from an exact ACP connection and refus
   ]);
 });
 
-test("provider router only reuses an Open Model handle under its frozen lifecycle authority", async () => {
-  const calls: string[] = [];
-  const adapter = fakeAdapter("open-model", calls);
-  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
-  const handle = await router.spawn({
-    provider: "open-model",
-    workAttemptId: "open-model-typed",
-    roomId: "room",
-    cwd: "/tmp/open-model",
-    launchPolicy: { permission: { "*": "allow" } },
-    deliveryMode: "daemon_inbox",
-    lifecycleAuthorityMode: "typed",
-    providerCredential: {
-      apiKey: "provider-secret",
-      baseUrl: "https://models.example.test/v1",
-      model: "open-model/test",
-    },
-  });
-  const ref: ProviderActionRef = {
-    provider: "open-model",
-    workAttemptId: handle.workAttemptId,
-    providerContinuationId: handle.providerContinuationId!,
-    providerConnection: handle.providerConnection,
-    lifecycleAuthorityMode: "typed",
-  };
-
-  assert.deepEqual(await router.attach(ref), handle);
-  assert.deepEqual(await router.attach({ ...ref, providerConnection: null }), handle);
-  assert.equal(await router.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
-  assert.equal(await router.attach({ ...ref, lifecycleAuthorityMode: undefined }), null);
-  assert.deepEqual(calls, ["open-model:spawn:open-model-typed"]);
-});
-
 test("devMcpServerEntryFromEnv returns path only when both env gates are set", () => {
   assert.equal(devMcpServerEntryFromEnv({}), null, "both absent → null");
   assert.equal(devMcpServerEntryFromEnv({ LETAGENTS_DESKTOP_DEV_SERVER_URL: "http://localhost:3000" }), null, "entry absent → null");
@@ -1088,6 +1164,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
         return () => set.delete(listener);
       },
       onStream: () => () => {},
+      onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
     };
   }
 
@@ -1106,11 +1183,12 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       id: "dev_gate_codex", room_id: "room", display_name: "CodexAgent", provider: "codex", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
       permission_profile_id: "full_access", provider_launch_policy: { promptForInstallation: false }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
     };
-    const daemon1 = new SupervisorDaemon(paths1, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter("codex") }), true);
+    const daemon1 = new SupervisorDaemon(paths1, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter("codex") }), true, 15_000, undefined, {}, ownedTestDeliveryHttp, ownedTestGrantHttp);
     try {
       await daemon1.start();
       assert.equal((await daemonRequest(paths1.socketPath, "manifest.put", { entry: codexEntry })).ok, true);
-      await eventually(async () => ((await daemonRequest(paths1.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "codex dev-gate spawn");
+      await installOwnedTestGrant(paths1.socketPath, codexEntry.id, codexEntry.room_id);
+      await eventually(async () => ((await daemonRequest(paths1.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "idle", "codex dev-gate spawn");
       assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, "/absolute/dist/mcp/server.js", "codex + both gates: devMcpServerEntryPath must reach adapter");
     } finally {
       await daemon1.stop();
@@ -1134,11 +1212,17 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       "darwin",
       new ProviderActionPortRouter({ cursor: async () => makeDevAdapter("cursor") }),
       true,
+      15_000,
+      undefined,
+      {},
+      ownedTestDeliveryHttp,
+      ownedTestGrantHttp,
     );
     try {
       await cursorDaemon.start();
       assert.equal((await daemonRequest(cursorPaths.socketPath, "manifest.put", { entry: cursorEntry })).ok, true);
-      await eventually(async () => ((await daemonRequest(cursorPaths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "Cursor dev-gate spawn");
+      await installOwnedTestGrant(cursorPaths.socketPath, cursorEntry.id, cursorEntry.room_id);
+      await eventually(async () => ((await daemonRequest(cursorPaths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "idle", "Cursor dev-gate spawn");
       assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, "/absolute/dist/mcp/server.js");
     } finally {
       await cursorDaemon.stop();
@@ -1154,10 +1238,11 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       id: "dev_gate_claude", room_id: "room", display_name: "ClaudeAgent", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
       permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
     };
-    const daemon2 = new SupervisorDaemon(paths2, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter("claude-code") }), true);
+    const daemon2 = new SupervisorDaemon(paths2, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter("claude-code") }), true, 15_000, undefined, {}, ownedTestDeliveryHttp, ownedTestGrantHttp);
     try {
       await daemon2.start();
       assert.equal((await daemonRequest(paths2.socketPath, "manifest.put", { entry: claudeEntry })).ok, true);
+      await installOwnedTestGrant(paths2.socketPath, claudeEntry.id, claudeEntry.room_id);
       await eventually(async () => capturedSpawns.length === 1, "Claude approval-profile spawn");
       assert.equal(capturedSpawns.length, 1);
       assert.equal((capturedSpawns[0]!.launchPolicy as Record<string, unknown>).permissionMode, "default");
@@ -1173,7 +1258,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       lockPath: join(root, "d3.lock"), ...testNamedDaemonEndpoint(root, "d3"), manifestPath: join(root, "manifest3.json"), auditPath: join(root, "audit3.jsonl"),
       attemptsPath: join(root, "attempts3.json"), attemptsRoot: join(root, "attempts3"), workspaceRoot: root,
     };
-    const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter("claude-code") }), true);
+    const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter("claude-code") }), true, 15_000, undefined, {}, ownedTestDeliveryHttp, ownedTestGrantHttp);
     try {
       await daemon3.start();
       assert.equal((await daemonRequest(paths3.socketPath, "manifest.put", { entry: {
@@ -1182,7 +1267,8 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
         permission_profile_id: null,
         provider_launch_policy: { permissionMode: "acceptEdits" },
       } })).ok, true);
-      await eventually(async () => ((await daemonRequest(paths3.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "Claude supervised default spawn");
+      await installOwnedTestGrant(paths3.socketPath, "dev_gate_claude_legacy_default", claudeEntry.room_id);
+      await eventually(async () => ((await daemonRequest(paths3.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "idle", "Claude supervised default spawn");
       assert.equal(capturedSpawns[0]?.permissionProfileId, "read_only");
       assert.deepEqual(capturedSpawns[0]?.launchPolicy, {
         permissionMode: "dontAsk",
@@ -1203,11 +1289,12 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       lockPath: join(root, "d4.lock"), ...testNamedDaemonEndpoint(root, "d4"), manifestPath: join(root, "manifest4.json"), auditPath: join(root, "audit4.jsonl"),
       attemptsPath: join(root, "attempts4.json"), attemptsRoot: join(root, "attempts4"), workspaceRoot: root,
     };
-    const daemon4 = new SupervisorDaemon(paths4, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter("codex") }), true);
+    const daemon4 = new SupervisorDaemon(paths4, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter("codex") }), true, 15_000, undefined, {}, ownedTestDeliveryHttp, ownedTestGrantHttp);
     try {
       await daemon4.start();
       assert.equal((await daemonRequest(paths4.socketPath, "manifest.put", { entry: { ...codexEntry, id: "dev_gate_codex_nourl" } })).ok, true);
-      await eventually(async () => ((await daemonRequest(paths4.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "codex no-dev-url spawn");
+      await installOwnedTestGrant(paths4.socketPath, "dev_gate_codex_nourl", codexEntry.room_id);
+      await eventually(async () => ((await daemonRequest(paths4.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "idle", "codex no-dev-url spawn");
       assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "codex + missing dev-url: devMcpServerEntryPath must be absent");
     } finally {
       await daemon4.stop();
@@ -1351,6 +1438,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
       return () => listeners.delete(listener);
     },
     onStream: () => () => {},
+    onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
   const exitListeners = new Map<string, Set<(terminal: ProviderActionTerminal) => void>>();
   function lifecycleHandle(workAttemptId: string) {
@@ -1369,7 +1457,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", router, true);
+  const daemon = new SupervisorDaemon(paths, "darwin", router, true, 15_000, undefined, {}, ownedTestDeliveryHttp, ownedTestGrantHttp);
   const entry: DaemonManifestEntry = {
     id: "claude_supervised", room_id: "room", display_name: "Claude", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
     permission_profile_id: "full_access", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
@@ -1377,21 +1465,21 @@ test("daemon convergence drives Claude through the router across stop and same-a
   try {
     await daemon.start();
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry })).ok, true);
-    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "Claude router start");
+    await installOwnedTestGrant(paths.socketPath, entry.id, entry.room_id);
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as Array<DaemonManifestEntry & {
+        worker_binding?: { execution_generation_id: string } | null;
+      }>)[0];
+      return current?.observed_state === "idle"
+        && current.condition === "none"
+        && Boolean(current.provider_ref?.execution_generation_id)
+        && current.worker_binding?.execution_generation_id === current.provider_ref?.execution_generation_id;
+    }, "Claude router start");
     const first = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(first.provider_ref?.provider_connection?.kind, "claude_cli");
     assert.ok(first.work_attempt_id);
     const firstGeneration = first.provider_ref?.execution_generation_id;
     assert.ok(firstGeneration);
-    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).bind({
-      entry_id: entry.id,
-      room_id: entry.room_id,
-      work_attempt_id: first.work_attempt_id!,
-      execution_generation_id: firstGeneration!,
-      agent_session_id: "agent_session_exact",
-      agent_session_token: "test-session-token",
-      api_url: "https://letagents.test",
-    });
     const controlParams = {
       id: entry.id,
       daemon_generation: ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation,
@@ -1425,7 +1513,6 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.match(unowned.error ?? "", /exact room message|exact room turn|durable authority binding/i);
     assert.equal(calls.some((call) => call.startsWith("control:")), false,
       "session-level provider control is never dispatched without an exact daemon-owned room turn");
-    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).unbind(entry.id);
     const fenceDirectory = join(dirname(first.workspace_path!), ".letagents-supervisor-workspace.fences");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "stopped" })).ok, true);
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "stopped", "Claude router stop");
@@ -1433,7 +1520,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "running" })).ok, true);
     await eventually(async () => {
       const resumed = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
-      return resumed.observed_state === "working" && resumed.provider_ref?.execution_generation_id !== firstGeneration;
+      return resumed.observed_state === "idle" && resumed.provider_ref?.execution_generation_id !== firstGeneration;
     }, "Claude router same-attempt resume");
     const resumed = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(resumed.work_attempt_id, first.work_attempt_id);
@@ -1444,115 +1531,6 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.ok(calls.some((call) => call.startsWith("resume:")));
   } finally {
     await daemon.stop();
-    await removeTestDirectory(root);
-  }
-});
-
-test("an mcp-polling provider cannot receive Inspector control without an exact daemon-owned turn", async () => {
-  // Regression guard for the Cursor routing bug: Cursor advertises only
-  // mcp_polling but applies a correction natively (its controlTurn stops the
-  // child and beginTurns the same session with the correction). Such a provider
-  // must NOT be routed into daemon stop-then-resend, which would strip the
-  // correction and enqueue a synthetic daemon-inbox row its mcp_polling lane
-  // could never pump. The fake below is that Cursor shape (mcp_polling +
-  // midTurnCorrection), registered under a proven-spawnable provider key so the
-  // daemon's capability-based routing is what's under test, not one provider's
-  // spawn lifecycle.
-  const root = await mkdtemp(join(tmpdir(), "letagents-router-native-correction-"));
-  const source = join(root, "source");
-  await mkdir(source);
-  await execFileAsync("git", ["init", source]);
-  await execFileAsync("git", ["-C", source, "config", "user.email", "router@example.invalid"]);
-  await execFileAsync("git", ["-C", source, "config", "user.name", "Router Test"]);
-  await writeFile(join(source, "README.md"), "router\n");
-  await execFileAsync("git", ["-C", source, "add", "README.md"]);
-  await execFileAsync("git", ["-C", source, "commit", "-m", "fixture"]);
-  await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
-
-  const calls: string[] = [];
-  let nextPid = 6000;
-  const continuation = "native-correction-continuation";
-  const exitListeners = new Map<string, Set<(terminal: ProviderActionTerminal) => void>>();
-  function lifecycleHandle(workAttemptId: string) {
-    const pid = ++nextPid;
-    return {
-      workAttemptId, pid, providerContinuationId: continuation,
-      providerConnection: { kind: "claude_cli" as const, pid, processIdentity: `native:${pid}` },
-      observedState: () => "working" as const,
-    };
-  }
-  const adapter: NativeProviderAdapter = {
-    // mcp_polling lane, but midTurnCorrection: it resumes the correction through
-    // its own controlTurn (restart+resume), so the daemon routes natively rather
-    // than stripping the correction into a daemon-inbox row nothing could pump.
-    capabilities: () => ({ resume: true, midTurnInjection: false, midTurnCorrection: true, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "restart_resume" }),
-    async spawn(input) { calls.push(`spawn:${input.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
-    async attach() { return null; },
-    async resume(ref, input) { calls.push(`resume:${ref.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
-    async poke() { throw new Error("poke unavailable"); },
-    async controlTurn(handle, correction, options) {
-      await options?.markDispatched?.();
-      calls.push(`control:${handle.workAttemptId}:${correction ?? "stop"}`);
-      // The native path receives the correction verbatim and resumes the session.
-      return { capability: "restart_resume" as const, interrupted: true, resumed: Boolean(correction), state: correction ? "working" as const : "idle" as const };
-    },
-    async stop(handle) {
-      calls.push(`stop:${handle.workAttemptId}`);
-      const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
-      queueMicrotask(() => exitListeners.get(handle.workAttemptId)?.forEach((listener) => listener(terminal)));
-      return terminal;
-    },
-    onExit(handle, listener) {
-      const listeners = exitListeners.get(handle.workAttemptId) ?? new Set<(terminal: ProviderActionTerminal) => void>();
-      listeners.add(listener); exitListeners.set(handle.workAttemptId, listeners);
-      return () => listeners.delete(listener);
-    },
-    onStream: () => () => {},
-  };
-  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
-  const paths = {
-    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
-    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
-    workerBindingsPath: join(root, "worker-bindings.json"),
-  };
-  const daemon = new SupervisorDaemon(paths, "darwin", router, true);
-  const entry: DaemonManifestEntry = {
-    id: "native_correction_supervised", room_id: "room", display_name: "NativeCorrection", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
-    permission_profile_id: "full_access", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
-  };
-  try {
-    await daemon.start();
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry })).ok, true);
-    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "native-correction router start");
-    const first = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
-    const firstGeneration = first.provider_ref?.execution_generation_id;
-    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).bind({
-      entry_id: entry.id, room_id: entry.room_id, work_attempt_id: first.work_attempt_id!, execution_generation_id: firstGeneration!,
-      agent_session_id: "agent_session_exact", agent_session_token: "test-session-token", api_url: "https://letagents.test",
-    });
-    const controlled = await daemonRequest(paths.socketPath, "manifest.control_turn", {
-      id: entry.id,
-      daemon_generation: ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation,
-      room_id: entry.room_id, work_attempt_id: first.work_attempt_id, execution_generation_id: firstGeneration,
-      provider_continuation_id: continuation, provider_turn_id: "missing-turn",
-      inbox_item_id: "missing-inbox", source_message_id: "missing-message",
-      action_id: "human-control-1", action_sequence: 1, correction: "Use the revised direction",
-    });
-    assert.equal(controlled.ok, false);
-    assert.match(controlled.error ?? "", /daemon-owned exact room turn/i);
-    assert.deepEqual(calls.filter((call) => call.startsWith("control:")), [],
-      "Inspector authority is room-turn scoped, never a provider-session-wide interrupt");
-  } finally {
-    await daemon.stop();
-    // No synthetic correction row was enqueued into a lane that could never pump it.
-    const inbox = new SupervisedAgentInboxStore(paths.manifestPath);
-    try {
-      assert.equal(
-        (await inbox.receipts(entry.id)).find((receipt) => receipt.source_message_id === "correction:human-control-1"),
-        undefined,
-        "a native-correction provider must not enqueue a daemon-inbox correction row",
-      );
-    } finally { await inbox.close(); }
     await removeTestDirectory(root);
   }
 });
@@ -1640,7 +1618,7 @@ test("daemon restart quarantines pre-target turn controls for explicit resolutio
     },
   };
   try {
-    await new ManifestStore(paths.manifestPath).write(0, [entry, preparedEntry, appliedEntry, historicalEntry]);
+    await new ManifestStore(paths.manifestPath).write([entry, preparedEntry, appliedEntry, historicalEntry]);
     await daemon.start();
     const recoveredEntries = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     const recovered = recoveredEntries.find((candidate) => candidate.id === entry.id)?.turn_control;
@@ -1765,7 +1743,7 @@ test("operator-applied legacy native correction settles its interrupted FIFO row
   const router = new ProviderActionPortRouter({ codex: async () => fakeAdapter("codex", []) });
   let daemon: SupervisorDaemon | null = null;
   try {
-    await store.write(0, [{ ...seeded, turn_control: undefined }]);
+    await store.write([{ ...seeded, turn_control: undefined }]);
     const row = await inbox.enqueueCorrection({
       agent_id: seeded.id, room_id: seeded.room_id, source_message_id: "native-A",
       source_message: { text: "A" }, activation: { decision: "activate" },
@@ -1843,7 +1821,7 @@ test("operator resolution remains available after the controlled runtime is deta
   const store = new ManifestStore(paths.manifestPath);
   let daemon: SupervisorDaemon | null = null;
   try {
-    await store.write(0, [detached, replaced]);
+    await store.write([detached, replaced]);
     await store.close();
     const database = new DatabaseSync(paths.manifestPath);
     database.prepare(`INSERT INTO work_attempts

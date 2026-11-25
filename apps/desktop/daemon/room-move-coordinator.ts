@@ -1,9 +1,47 @@
+import type { DatabaseSync } from "node:sqlite";
 import { codexAgentIsReadOnly } from "./bounded-effect-coordinator.js";
 import { lastRoomMessageId } from "./cloud-http.js";
+import { shouldReplaceRecoveryDeadline } from "./convergence-policy.js";
 import {
   authoritativeRoomJoinRejection,
   schedulerErrorDetail,
 } from "./daemon-error-policy.js";
+import {
+  checkRoomMoveSagaPhaseInTransaction,
+  classifyRoomMoveEffectError,
+  completeEffectInTransaction,
+  computeEffectBackoffMs,
+  EffectClaimRefusedError,
+  EffectExecutor,
+  EffectFenceError,
+  failEffectInTransaction,
+  getEffectByIdempotencyKey,
+  listActiveRoomMoveEffectsForAgent,
+  parseRoomMoveBootstrapTailPayload,
+  parseRoomMoveJoinDestinationPayload,
+  parseRoomMoveRollbackSourcePayload,
+  pruneTerminalRoomMoveEffectsInTransaction,
+  rescheduleEffectForRetryInTransaction,
+  retireStaleRoomMoveEffectsInTransaction,
+  ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+  ROOM_MOVE_EFFECT_BACKOFF,
+  ROOM_MOVE_EFFECT_MAX_ATTEMPTS,
+  ROOM_MOVE_EFFECT_MAX_RETRY_DELAY_MS,
+  ROOM_MOVE_EFFECT_RETRY_DELAY_MS,
+  ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+  ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
+  roomMoveBootstrapTailIdempotencyKey,
+  roomMoveEffectSagaCheck,
+  roomMoveJoinDestinationIdempotencyKey,
+  roomMoveRollbackSourceIdempotencyKey,
+  withFencedEffectTransaction,
+  type EffectHandler,
+  type EffectRecord,
+  type RoomMoveBootstrapTailEffectPayload,
+  type RoomMoveJoinDestinationEffectPayload,
+  type RoomMoveRollbackSourceEffectPayload,
+  type RoomMoveSagaPhaseCheck,
+} from "./effect-journal/index.js";
 import type { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
 import type { ManifestStore } from "./manifest-store.js";
 import type { ProviderActionHandle } from "./provider-action-port.js";
@@ -62,7 +100,7 @@ export type RoomMoveCoordinatorPorts = {
   runtimeCustody: RoomMoveRuntimeCustodyPort;
   deliveryHttp: Pick<SupervisedDeliveryHttp, "joinRoom" | "latest">;
   authority: RoomMoveAuthorityPort;
-  entryConcurrency: Pick<EntryConcurrencyGate, "runRoomMove">;
+  entryConcurrency: Pick<EntryConcurrencyGate, "runRoomMove"> & Partial<Pick<EntryConcurrencyGate, "isLifecycleActive">>;
   serializeEntry: <T>(entryId: string, operation: () => Promise<T>) => Promise<T>;
   updateManifestEntry: (
     entryId: string,
@@ -71,7 +109,11 @@ export type RoomMoveCoordinatorPorts = {
   currentHandle: (entryId: string) => ProviderActionHandle | null | undefined;
   pauseIngress: (entryId: string) => void;
   restartDelivery: (entryId: string) => Promise<void>;
-  scheduleRecovery: (entryId: string, delayMs: number) => void;
+  scheduleRecovery?: (entryId: string, delayMs: number) => void;
+  autoConverge?: boolean;
+  setTimeout?: typeof setTimeout;
+  clearTimeout?: typeof clearTimeout;
+  nowMs?: () => number;
   nowIso?: () => string;
   externalEffectSignal?: () => AbortSignal;
 };
@@ -97,18 +139,125 @@ export type RollbackInspectorRoomMoveInput = CommitInspectorRoomMoveInput & {
   detail: string;
 };
 
+type RoomMoveDispatchContext = {
+  apiUrl: string;
+  bearer: string;
+  roomId: string;
+  agentSessionId: string;
+  workAttemptId: string | null;
+  executionGenerationId: string | null;
+};
+
+class RoomMoveSettlementStorageError extends Error {
+  constructor(cause: unknown) {
+    super("Room-move effect settlement storage write failed.", { cause });
+    this.name = "RoomMoveSettlementStorageError";
+  }
+}
+
+const ROOM_MOVE_LIFECYCLE_EXCLUDED_RETRY_DELAY_MS = 250;
+
 /**
  * Owns the durable room-move phase machine and compensation saga. Process
  * authority, durable stores, worker secrets, delivery loops, and lifecycle
- * exclusion remain explicit ports owned by SupervisorDaemon.
+ * exclusion remain explicit ports owned by SupervisorDaemon. Outbound HTTP
+ * sub-actions (`room_move_join_destination`, `room_move_rollback_source`,
+ * `room_move_bootstrap_tail`) execute through the shared `EffectExecutor`.
  */
 export class RoomMoveCoordinator {
+  private readonly nowMs: () => number;
   private readonly nowIso: () => string;
   private readonly externalEffectSignal: () => AbortSignal;
+  private readonly autoConverge: boolean;
+  private readonly setRecoveryTimeout: typeof setTimeout;
+  private readonly clearRecoveryTimeout: typeof clearTimeout;
+  private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly recoveryDueAtMs = new Map<string, number>();
+  private effectExecutor: EffectExecutor | null = null;
+  private effectDatabase: DatabaseSync | null = null;
+  private effectWriteFence: () => void = () => {};
+  private readonly pendingDispatchContext = new Map<string, RoomMoveDispatchContext>();
+  private readonly lastSanitizedDiagnostic = new Map<string, string>();
 
   constructor(private readonly ports: RoomMoveCoordinatorPorts) {
-    this.nowIso = ports.nowIso ?? (() => new Date().toISOString());
+    this.nowMs = ports.nowMs ?? (ports.nowIso
+      ? () => {
+          const parsed = Date.parse(ports.nowIso!());
+          return Number.isFinite(parsed) ? parsed : Date.now();
+        }
+      : () => Date.now());
+    this.nowIso = ports.nowIso ?? (() => new Date(this.nowMs()).toISOString());
     this.externalEffectSignal = ports.externalEffectSignal ?? (() => AbortSignal.timeout(10_000));
+    this.autoConverge = ports.autoConverge ?? true;
+    this.setRecoveryTimeout = ports.setTimeout ?? setTimeout;
+    this.clearRecoveryTimeout = ports.clearTimeout ?? clearTimeout;
+  }
+
+  /**
+   * Dedicated per-agent retry timer for pending room-move sagas. Runs
+   * `reconcilePrepared` directly instead of routing through provider
+   * convergence, so retries progress across every move phase (including
+   * `bootstrapping_destination_tail` and `rollback_required`) without waiting
+   * on unrelated provider/cursor preconditions or competing with launch timers.
+   */
+  scheduleRecovery(entryId: string, delayMs: number): void {
+    if (this.ports.scheduleRecovery) {
+      this.ports.scheduleRecovery(entryId, delayMs);
+      return;
+    }
+    if (this.ports.authority.isHandoffScheduled() || !this.autoConverge) return;
+    const boundedDelayMs = Math.max(1, Math.round(delayMs));
+    const dueAtMs = this.nowMs() + boundedDelayMs;
+    const existingDueAtMs = this.recoveryDueAtMs.get(entryId);
+    if (!shouldReplaceRecoveryDeadline(this.recoveryTimers.has(entryId), existingDueAtMs, dueAtMs)) return;
+    this.clearRecovery(entryId);
+    const timer = this.setRecoveryTimeout(() => {
+      this.recoveryTimers.delete(entryId);
+      this.recoveryDueAtMs.delete(entryId);
+      if (this.ports.authority.isHandoffScheduled() || !this.autoConverge) return;
+      if (this.ports.entryConcurrency.isLifecycleActive?.(entryId)) {
+        this.scheduleRecovery(entryId, ROOM_MOVE_LIFECYCLE_EXCLUDED_RETRY_DELAY_MS);
+        return;
+      }
+      void this.reconcilePrepared(entryId).catch(() => {
+        if (!this.ports.authority.isHandoffScheduled() && this.autoConverge) {
+          this.scheduleRecovery(entryId, ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
+        }
+      });
+    }, boundedDelayMs);
+    timer.unref?.();
+    this.recoveryTimers.set(entryId, timer);
+    this.recoveryDueAtMs.set(entryId, dueAtMs);
+  }
+
+  clearRecovery(entryId: string): void {
+    const timer = this.recoveryTimers.get(entryId);
+    this.recoveryDueAtMs.delete(entryId);
+    if (!timer) return;
+    this.clearRecoveryTimeout(timer);
+    this.recoveryTimers.delete(entryId);
+  }
+
+  clearRecoveryTimers(): void {
+    for (const timer of this.recoveryTimers.values()) {
+      this.clearRecoveryTimeout(timer);
+    }
+    this.recoveryTimers.clear();
+    this.recoveryDueAtMs.clear();
+  }
+
+  /** Attaches the shared process-wide EffectExecutor and registers all room-move HTTP sub-action handlers. */
+  attachEffectExecutor(
+    executor: EffectExecutor,
+    database: DatabaseSync,
+    assertWriteFence: () => void = () => {},
+  ): void {
+    this.effectExecutor = executor;
+    this.effectDatabase = database;
+    this.effectWriteFence = assertWriteFence;
+    executor.registerHandler(ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND, this.createJoinDestinationHandler());
+    executor.registerHandler(ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND, this.createRollbackSourceHandler());
+    executor.registerHandler(ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND, this.createBootstrapTailHandler());
   }
 
   async commitPreparedRoomMove(input: {
@@ -123,22 +272,98 @@ export class RoomMoveCoordinator {
         await this.reconcile(move);
       }
     } catch {
-      this.ports.scheduleRecovery(input.agent.agentId, 1_000);
+      this.scheduleRecovery(input.agent.agentId, 1_000);
     }
   }
 
   async reconcilePrepared(agentId?: string): Promise<void> {
+    if (this.ports.authority.isHandoffScheduled()) return;
+    this.retireStalePreparedEffects(agentId);
     // Effect-first repair is required because terminal moves are omitted from
     // pendingRoomMoves even when their prepared join effect was not settled.
     for (const effect of await this.ports.inbox.preparedRoomMoves(agentId)) {
+      if (this.ports.authority.isHandoffScheduled()) return;
       await this.reconcilePreparedEffect(effect).catch(() => {
-        this.ports.scheduleRecovery(effect.agent_id, 1_000);
+        if (!this.ports.authority.isHandoffScheduled()) {
+          this.scheduleRecovery(effect.agent_id, 1_000);
+        }
       });
     }
+    if (this.ports.authority.isHandoffScheduled()) return;
     for (const move of await this.ports.store.pendingRoomMoves(agentId)) {
+      if (this.ports.authority.isHandoffScheduled()) return;
       await this.reconcile(move).catch(() => {
-        this.ports.scheduleRecovery(move.agent_id, 1_000);
+        if (!this.ports.authority.isHandoffScheduled()) {
+          this.scheduleRecovery(move.agent_id, 1_000);
+        }
       });
+    }
+  }
+
+  /**
+   * Recovers any inactive in-process `executing` room-move HTTP effects for
+   * `agentId` before purge preflight. Live in-flight executions
+   * (`isEffectActive === true`) and future-epoch rows are left untouched so
+   * purge fails closed against them.
+   */
+  recoverInactiveExecutingForAgent(agentId: string): number {
+    if (!this.effectExecutor
+      || !this.effectDatabase
+      || !this.effectDatabase.isOpen
+      || this.ports.authority.isHandoffScheduled()) {
+      return 0;
+    }
+    const currentGeneration = this.ports.authority.currentGeneration();
+    let recovered = 0;
+    for (const effect of listActiveRoomMoveEffectsForAgent(this.effectDatabase, agentId)) {
+      if (effect.state !== "executing") continue;
+      if (this.effectExecutor.isEffectActive(effect.id)) continue;
+      if (effect.epoch > currentGeneration) continue;
+      if (effect.attempt_count < 1) continue;
+      const check = roomMoveEffectSagaCheck(effect);
+      try {
+        const next = this.rescheduleExecutingEffectSafe(
+          effect,
+          "recovered_inactive_executing_effect",
+          undefined,
+          check?.ok ? check.sagaCheck : null,
+          check && !check.ok ? check.error : null,
+        );
+        if (next.state !== "executing") recovered += 1;
+      } catch (error) {
+        if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) {
+          if (this.ports.authority.isHandoffScheduled()) break;
+          throw error;
+        }
+        // Fail closed on unexpected storage errors: leave row executing so purge refuses.
+      }
+    }
+    return recovered;
+  }
+
+  private retireStalePreparedEffects(agentId?: string): void {
+    if (!this.effectDatabase
+      || !this.effectDatabase.isOpen
+      || this.ports.authority.isHandoffScheduled()) {
+      return;
+    }
+    try {
+      withFencedEffectTransaction(this.effectDatabase, this.effectWriteFence, () => {
+        if (this.ports.authority.isHandoffScheduled()) {
+          throw new EffectFenceError("Supervisor handoff fenced stale room-move effect retirement.");
+        }
+        retireStaleRoomMoveEffectsInTransaction(this.effectDatabase!, {
+          agentId,
+          expectedEpoch: this.ports.authority.currentGeneration(),
+          nowIso: this.nowIso(),
+        });
+      });
+    } catch (error) {
+      if (this.ports.authority.isHandoffScheduled()
+        && (error instanceof DaemonFenceLostError || error instanceof EffectFenceError)) {
+        return;
+      }
+      throw error;
     }
   }
 
@@ -162,14 +387,30 @@ export class RoomMoveCoordinator {
 
   /** Run one idempotent reconciliation through the existing entry admission gate. */
   async reconcile(initial: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord> {
+    let entered = false;
     try {
-      return await this.ports.entryConcurrency.runRoomMove(
+      const result = await this.ports.entryConcurrency.runRoomMove(
         initial.agent_id,
         initial,
-        () => this.reconcileAdmitted(initial),
+        () => {
+          entered = true;
+          return this.reconcileAdmitted(initial);
+        },
       );
+      if (result.phase === "active" || result.phase === "failed") {
+        this.clearRecovery(initial.agent_id);
+      }
+      if (!entered
+        && !this.ports.authority.isHandoffScheduled()
+        && !["active", "failed"].includes(initial.phase)) {
+        // Lifecycle exclusion deferred this reconciliation; re-arm recovery so
+        // a retry timer that overlapped a brief lifecycle action is not dropped.
+        this.scheduleRecovery(initial.agent_id, ROOM_MOVE_LIFECYCLE_EXCLUDED_RETRY_DELAY_MS);
+      }
+      return result;
     } catch (error) {
-      if (this.ports.authority.isHandoffScheduled() && error instanceof DaemonFenceLostError) {
+      if (this.ports.authority.isHandoffScheduled()
+        && (error instanceof DaemonFenceLostError || error instanceof EffectFenceError)) {
         return initial;
       }
       throw error;
@@ -298,6 +539,9 @@ export class RoomMoveCoordinator {
           expectedExecutionGenerationId: move.execution_generation_id,
           from: [move.phase],
           to: "rollback_required",
+          ...(input.daemonGeneration > move.daemon_generation
+            ? { adoptDaemonGeneration: input.daemonGeneration }
+            : {}),
           error: `Destination credential preparation failed: ${schedulerErrorDetail(new Error(input.detail))}`,
         }, this.commitFence);
       }
@@ -400,7 +644,7 @@ export class RoomMoveCoordinator {
         to: phase,
         error: "The exact provider generation or room membership changed during the move.",
       }, this.commitFence);
-      if (phase === "rollback_required") this.ports.scheduleRecovery(move.agent_id, 1_000);
+      if (phase === "rollback_required") this.scheduleRecovery(move.agent_id, 1_000);
       return move;
     }
 
@@ -437,7 +681,7 @@ export class RoomMoveCoordinator {
       detail: string,
     ): Promise<DaemonRoomMoveRecord> => {
       await advance(move.phase, terminal, { error: detail });
-      if (terminal === "rollback_required") this.ports.scheduleRecovery(move.agent_id, 1_000);
+      if (terminal === "rollback_required") this.scheduleRecovery(move.agent_id, 1_000);
       return move;
     };
 
@@ -524,36 +768,47 @@ export class RoomMoveCoordinator {
       }
       let remoteRoomId: string;
       try {
-        if (!this.ports.deliveryHttp.joinRoom) {
-          throw new Error("Durable room join transport is unavailable.");
-        }
-        await this.assertExternalAuthority();
-        remoteRoomId = (await this.ports.deliveryHttp.joinRoom({
-          roomId: move.destination_room_id,
+        const joinOutcome = await this.executeDestinationJoinEffect(move, {
           apiUrl: binding.api_url,
           bearer: credential,
-          signal: this.externalEffectSignal(),
-        })).roomId.trim();
-        await this.assertExternalAuthority();
-        if (!remoteRoomId
-          || remoteRoomId === move.source_room_id
-          || remoteRoomId.length > 1_024
-          || /[\u0000-\u001f\u007f]/.test(remoteRoomId)) {
-          throw new Error("Destination join response omitted a valid distinct canonical room identity.");
-        }
-      } catch (error) {
-        if (this.ports.authority.isHandoffScheduled() && error instanceof DaemonFenceLostError) throw error;
-        if (!authoritativeRoomJoinRejection(error)) {
-          await advance("joining_destination", "joining_destination", {
-            error: `Destination join outcome was ambiguous and will retry: ${schedulerErrorDetail(error)}`,
+          roomId: binding.room_id,
+          agentSessionId: binding.agent_session_id,
+          workAttemptId: move.work_attempt_id,
+          executionGenerationId: move.execution_generation_id,
+        });
+        if (joinOutcome.kind === "rejected") {
+          await advance("joining_destination", "failed", {
+            error: `Destination join was authoritatively rejected before local membership changed: ${joinOutcome.detail}`,
           });
-          this.ports.scheduleRecovery(move.agent_id, 1_000);
+          this.restartDelivery(move.agent_id);
           return move;
         }
-        await advance("joining_destination", "failed", {
-          error: `Destination join was authoritatively rejected before local membership changed: ${schedulerErrorDetail(error)}`,
+        if (joinOutcome.kind === "rollback_required") {
+          await advance("joining_destination", "rollback_required", {
+            error: `Destination join retry was rejected after a prior attempt may have committed remote membership; compensating back to source room: ${joinOutcome.detail}`,
+          });
+          this.scheduleRecovery(move.agent_id, ROOM_MOVE_EFFECT_RETRY_DELAY_MS);
+          return move;
+        }
+        if (joinOutcome.kind === "retry") {
+          if (!joinOutcome.backedOff) {
+            await advance("joining_destination", "joining_destination", {
+              error: `Destination join outcome was ambiguous and will retry: ${joinOutcome.detail}`,
+            });
+          }
+          this.scheduleRecovery(move.agent_id, joinOutcome.retryAfterMs);
+          return move;
+        }
+        remoteRoomId = joinOutcome.remoteRoomId;
+      } catch (error) {
+        if (this.ports.authority.isHandoffScheduled()
+          && (error instanceof DaemonFenceLostError || error instanceof EffectFenceError)) {
+          throw error;
+        }
+        await advance("joining_destination", "joining_destination", {
+          error: `Destination join outcome was ambiguous and will retry: ${schedulerErrorDetail(error)}`,
         });
-        this.restartDelivery(move.agent_id);
+        this.scheduleRecovery(move.agent_id, 1_000);
         return move;
       }
 
@@ -563,22 +818,33 @@ export class RoomMoveCoordinator {
         || entry.work_attempt_id !== move.work_attempt_id
         || entry.provider_ref?.execution_generation_id !== move.execution_generation_id) {
         try {
-          await this.assertExternalAuthority();
-          await this.ports.deliveryHttp.joinRoom({
-            roomId: move.source_room_id,
+          const rollbackOutcome = await this.executeRollbackSourceEffect(move, {
             apiUrl: binding.api_url,
             bearer: credential,
-            signal: this.externalEffectSignal(),
+            roomId: binding.room_id,
+            agentSessionId: binding.agent_session_id,
+            workAttemptId: move.work_attempt_id,
+            executionGenerationId: move.execution_generation_id,
           });
-          await this.assertExternalAuthority();
-          await advance("joining_destination", "failed", {
-            error: "Runtime authority changed after remote join; remote membership was rolled back to the source room.",
-          });
+          if (rollbackOutcome.kind === "completed") {
+            await advance("joining_destination", "failed", {
+              error: "Runtime authority changed after remote join; remote membership was rolled back to the source room.",
+            });
+          } else {
+            await advance("joining_destination", "rollback_required", {
+              error: `Runtime authority changed after remote join and remote rollback failed: ${rollbackOutcome.detail}`,
+            });
+            this.scheduleRecovery(move.agent_id, rollbackOutcome.retryAfterMs);
+          }
         } catch (error) {
+          if (this.ports.authority.isHandoffScheduled()
+            && (error instanceof DaemonFenceLostError || error instanceof EffectFenceError)) {
+            throw error;
+          }
           await advance("joining_destination", "rollback_required", {
             error: `Runtime authority changed after remote join and remote rollback failed: ${schedulerErrorDetail(error)}`,
           });
-          this.ports.scheduleRecovery(move.agent_id, 1_000);
+          this.scheduleRecovery(move.agent_id, 1_000);
         }
         return move;
       }
@@ -609,22 +875,33 @@ export class RoomMoveCoordinator {
         || entry.work_attempt_id !== move.work_attempt_id
         || entry.provider_ref?.execution_generation_id !== move.execution_generation_id) {
         try {
-          await this.assertExternalAuthority();
-          await this.ports.deliveryHttp.joinRoom({
-            roomId: move.source_room_id,
+          const rollbackOutcome = await this.executeRollbackSourceEffect(move, {
             apiUrl: binding.api_url,
             bearer: credential,
-            signal: this.externalEffectSignal(),
+            roomId: binding.room_id,
+            agentSessionId: binding.agent_session_id,
+            workAttemptId: move.work_attempt_id,
+            executionGenerationId: move.execution_generation_id,
           });
-          await this.assertExternalAuthority();
-          await advance("joining_destination", "failed", {
-            error: "Local membership commit lost its fence; remote membership was rolled back to the source room.",
-          });
+          if (rollbackOutcome.kind === "completed") {
+            await advance("joining_destination", "failed", {
+              error: "Local membership commit lost its fence; remote membership was rolled back to the source room.",
+            });
+          } else {
+            await advance("joining_destination", "rollback_required", {
+              error: `Local membership commit and remote rollback both failed: ${rollbackOutcome.detail}`,
+            });
+            this.scheduleRecovery(move.agent_id, rollbackOutcome.retryAfterMs);
+          }
         } catch (error) {
+          if (this.ports.authority.isHandoffScheduled()
+            && (error instanceof DaemonFenceLostError || error instanceof EffectFenceError)) {
+            throw error;
+          }
           await advance("joining_destination", "rollback_required", {
             error: `Local membership commit and remote rollback both failed: ${schedulerErrorDetail(error)}`,
           });
-          this.ports.scheduleRecovery(move.agent_id, 1_000);
+          this.scheduleRecovery(move.agent_id, 1_000);
         }
         return move;
       }
@@ -700,14 +977,19 @@ export class RoomMoveCoordinator {
         || !this.ports.deliveryHttp.latest) {
         return move;
       }
-      await this.assertExternalAuthority();
-      const tail = await this.ports.deliveryHttp.latest({
-        roomId: destination,
+      const tailOutcome = await this.executeBootstrapTailEffect(move, destination, {
         apiUrl: binding.api_url,
         bearer: credential,
-        signal: this.externalEffectSignal(),
+        roomId: binding.room_id,
+        agentSessionId: binding.agent_session_id,
+        workAttemptId: move.work_attempt_id,
+        executionGenerationId: move.execution_generation_id,
       });
-      await this.assertExternalAuthority();
+      if (tailOutcome.kind === "retry") {
+        this.scheduleRecovery(move.agent_id, tailOutcome.retryAfterMs);
+        return move;
+      }
+      const cursor = tailOutcome.cursor;
       if (!await runtimeIsExact([destination])) {
         return failFence("rollback_required", "Runtime authority changed while destination tail was observed.");
       }
@@ -719,7 +1001,6 @@ export class RoomMoveCoordinator {
         || exactBinding.agent_session_id !== binding.agent_session_id) {
         return move;
       }
-      const cursor = lastRoomMessageId(tail.messages ?? []);
       await this.ports.inbox.commitRoomMoveCursor({
         agent_id: move.agent_id,
         source_room_id: move.source_room_id,
@@ -741,7 +1022,10 @@ export class RoomMoveCoordinator {
   private async compensateRollback(initial: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord> {
     let move = initial;
     const destination = move.remote_room_id ?? move.destination_room_id;
-    const retry = async (detail: string): Promise<DaemonRoomMoveRecord> => {
+    const retry = async (
+      detail: string,
+      delayMs = ROOM_MOVE_EFFECT_RETRY_DELAY_MS,
+    ): Promise<DaemonRoomMoveRecord> => {
       move = await this.ports.store.advanceRoomMove({
         operationId: move.operation_id,
         agentId: move.agent_id,
@@ -751,7 +1035,7 @@ export class RoomMoveCoordinator {
         to: "rollback_required",
         error: detail,
       }, this.commitFence);
-      this.ports.scheduleRecovery(move.agent_id, 1_000);
+      this.scheduleRecovery(move.agent_id, delayMs);
       return move;
     };
 
@@ -783,19 +1067,29 @@ export class RoomMoveCoordinator {
       return retry("Room-move rollback transport is unavailable.");
     }
     try {
-      await this.assertExternalAuthority();
-      const joined = await this.ports.deliveryHttp.joinRoom({
-        roomId: move.source_room_id,
+      const rollbackOutcome = await this.executeRollbackSourceEffect(move, {
         apiUrl: binding.api_url,
         bearer: credential,
-        signal: this.externalEffectSignal(),
+        roomId: binding.room_id,
+        agentSessionId: binding.agent_session_id,
+        workAttemptId: move.work_attempt_id,
+        executionGenerationId: move.execution_generation_id,
       });
-      await this.assertExternalAuthority();
-      if (joined.roomId.trim() !== move.source_room_id) {
-        throw new Error("Source rejoin returned a different canonical room identity.");
+      if (rollbackOutcome.kind !== "completed") {
+        if (rollbackOutcome.backedOff) {
+          this.scheduleRecovery(move.agent_id, rollbackOutcome.retryAfterMs);
+          return move;
+        }
+        return retry(
+          `Source-room rollback join failed and will retry: ${rollbackOutcome.detail}`,
+          rollbackOutcome.retryAfterMs,
+        );
       }
     } catch (error) {
-      if (this.ports.authority.isHandoffScheduled() && error instanceof DaemonFenceLostError) throw error;
+      if (this.ports.authority.isHandoffScheduled()
+        && (error instanceof DaemonFenceLostError || error instanceof EffectFenceError)) {
+        throw error;
+      }
       return retry(`Source-room rollback join failed and will retry: ${schedulerErrorDetail(error)}`);
     }
 
@@ -865,13 +1159,709 @@ export class RoomMoveCoordinator {
     return move;
   }
 
+  private requireEffectHost(): { executor: EffectExecutor; database: DatabaseSync } {
+    if (!this.effectExecutor || !this.effectDatabase || !this.effectDatabase.isOpen) {
+      throw new EffectFenceError("Room-move effect executor is unavailable.");
+    }
+    return { executor: this.effectExecutor, database: this.effectDatabase };
+  }
+
+  private recordSanitizedDiagnostic(effectId: string, error: unknown): void {
+    if (!this.pendingDispatchContext.has(effectId)) return;
+    this.lastSanitizedDiagnostic.set(
+      effectId,
+      typeof error === "string" ? error : schedulerErrorDetail(error),
+    );
+  }
+
+  private retryDelayMsFor(effect: EffectRecord | null): number {
+    if (effect?.next_attempt_at_ms !== null && effect?.next_attempt_at_ms !== undefined) {
+      return Math.max(1, effect.next_attempt_at_ms - this.nowMs());
+    }
+    return ROOM_MOVE_EFFECT_RETRY_DELAY_MS;
+  }
+
+  private async resolveDispatchContext(
+    claimed: EffectRecord,
+    allowedBindingRooms: readonly string[],
+    workAttemptId: string | null,
+    executionGenerationId: string | null,
+  ): Promise<RoomMoveDispatchContext | null> {
+    const cached = this.pendingDispatchContext.get(claimed.id);
+    if (cached) return cached;
+    const binding = await this.ports.bindings.get(claimed.agent_id);
+    const credential = binding ? await this.ports.bindings.credentialFor(binding) : null;
+    if (!binding
+      || !credential
+      || !allowedBindingRooms.includes(binding.room_id)
+      || (workAttemptId !== null && binding.work_attempt_id !== workAttemptId)
+      || (executionGenerationId !== null && binding.execution_generation_id !== executionGenerationId)) {
+      return null;
+    }
+    return {
+      apiUrl: binding.api_url,
+      bearer: credential,
+      roomId: binding.room_id,
+      agentSessionId: binding.agent_session_id,
+      workAttemptId: binding.work_attempt_id,
+      executionGenerationId: binding.execution_generation_id,
+    };
+  }
+
+  private createJoinDestinationHandler(): EffectHandler {
+    return {
+      retryable: true,
+      autoPump: false,
+      defaultMaxAttempts: ROOM_MOVE_EFFECT_MAX_ATTEMPTS,
+      backoff: ROOM_MOVE_EFFECT_BACKOFF,
+      authorizeClaim: (database, effect) => {
+        const payload = parseRoomMoveJoinDestinationPayload(effect.payload);
+        if (!payload) return "invalid_payload";
+        return checkRoomMoveSagaPhaseInTransaction(database, {
+          operationId: payload.operation_id,
+          agentId: effect.agent_id,
+          workAttemptId: payload.work_attempt_id,
+          executionGenerationId: payload.execution_generation_id,
+          allowedPhases: ["joining_destination"],
+        });
+      },
+      execute: async (claimed, context) => {
+        const payload = parseRoomMoveJoinDestinationPayload(claimed.payload);
+        if (!payload) {
+          return { status: "failed", error: "invalid_payload" };
+        }
+        let dispatch: RoomMoveDispatchContext | null;
+        try {
+          dispatch = await this.resolveDispatchContext(
+            claimed,
+            [payload.source_room_id],
+            payload.work_attempt_id,
+            payload.execution_generation_id,
+          );
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+          this.recordSanitizedDiagnostic(claimed.id, error);
+          return { status: "retry", error: "dispatch_context_resolution_failed" };
+        }
+        if (!dispatch) {
+          this.recordSanitizedDiagnostic(claimed.id, "Room-move source credential binding is unavailable.");
+          return { status: "retry", error: "dispatch_context_unavailable" };
+        }
+        try {
+          if (!this.ports.deliveryHttp.joinRoom) {
+            this.recordSanitizedDiagnostic(claimed.id, "Durable room join transport is unavailable.");
+            return { status: "retry", error: "transport_unavailable" };
+          }
+          await this.assertExternalAuthority();
+          const signal = AbortSignal.any([context.signal, this.externalEffectSignal()]);
+          const remoteRoomId = (await this.ports.deliveryHttp.joinRoom({
+            roomId: payload.destination_room_id,
+            apiUrl: dispatch.apiUrl,
+            bearer: dispatch.bearer,
+            signal,
+          })).roomId.trim();
+          await this.assertExternalAuthority();
+          if (!remoteRoomId
+            || remoteRoomId === payload.source_room_id
+            || remoteRoomId.length > 1_024
+            || /[\u0000-\u001f\u007f]/.test(remoteRoomId)) {
+            this.recordSanitizedDiagnostic(
+              claimed.id,
+              "Destination join response omitted a valid distinct canonical room identity.",
+            );
+            return { status: "retry", error: "invalid_remote_room_id" };
+          }
+          return { status: "completed", outcome: { remote_room_id: remoteRoomId } };
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+          this.recordSanitizedDiagnostic(claimed.id, error);
+          const errorCode = classifyRoomMoveEffectError(error);
+          if (authoritativeRoomJoinRejection(error)) {
+            if (claimed.attempt_count === 1) {
+              return { status: "failed", error: errorCode, outcome: { authoritative_rejection: true } };
+            }
+            // Attempt >= 2: a prior attempt (lost response, crash, or failed
+            // settlement write) may already have moved remote membership.
+            // Never claim pre-membership rejection; require source compensation.
+            return {
+              status: "failed",
+              error: errorCode,
+              outcome: { authoritative_rejection: false, ambiguous_prior_attempt: true },
+            };
+          }
+          return { status: "retry", error: errorCode };
+        }
+      },
+      settle: async (claimed, executionResult, defaultSettle) => {
+        const payload = parseRoomMoveJoinDestinationPayload(claimed.payload);
+        return this.settleRoomMoveEffect(claimed, executionResult, defaultSettle, payload
+          ? {
+              operationId: payload.operation_id,
+              agentId: claimed.agent_id,
+              workAttemptId: payload.work_attempt_id,
+              executionGenerationId: payload.execution_generation_id,
+              allowedPhases: ["joining_destination"],
+            }
+          : null);
+      },
+    };
+  }
+
+  private createRollbackSourceHandler(): EffectHandler {
+    return {
+      retryable: true,
+      autoPump: false,
+      defaultMaxAttempts: ROOM_MOVE_EFFECT_MAX_ATTEMPTS,
+      backoff: ROOM_MOVE_EFFECT_BACKOFF,
+      authorizeClaim: (database, effect) => {
+        const payload = parseRoomMoveRollbackSourcePayload(effect.payload);
+        if (!payload) return "invalid_payload";
+        return checkRoomMoveSagaPhaseInTransaction(database, {
+          operationId: payload.operation_id,
+          agentId: effect.agent_id,
+          workAttemptId: payload.work_attempt_id,
+          executionGenerationId: payload.execution_generation_id,
+          allowedPhases: ["joining_destination", "rollback_required"],
+        });
+      },
+      execute: async (claimed, context) => {
+        const payload = parseRoomMoveRollbackSourcePayload(claimed.payload);
+        if (!payload) {
+          return { status: "failed", error: "invalid_payload" };
+        }
+        let dispatch: RoomMoveDispatchContext | null;
+        try {
+          const allowedRooms = [payload.source_room_id, payload.destination_room_id];
+          if (!this.pendingDispatchContext.has(claimed.id)) {
+            const moveRow = await this.ports.store.getRoomMove(payload.operation_id);
+            if (moveRow?.remote_room_id) allowedRooms.push(moveRow.remote_room_id);
+          }
+          dispatch = await this.resolveDispatchContext(
+            claimed,
+            allowedRooms,
+            null,
+            null,
+          );
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+          this.recordSanitizedDiagnostic(claimed.id, error);
+          return { status: "retry", error: "dispatch_context_resolution_failed" };
+        }
+        if (!dispatch) {
+          this.recordSanitizedDiagnostic(
+            claimed.id,
+            "Room-move rollback is waiting for a current source-or-destination credential.",
+          );
+          return { status: "retry", error: "dispatch_context_unavailable" };
+        }
+        try {
+          if (!this.ports.deliveryHttp.joinRoom) {
+            this.recordSanitizedDiagnostic(claimed.id, "Room-move rollback transport is unavailable.");
+            return { status: "retry", error: "transport_unavailable" };
+          }
+          await this.assertExternalAuthority();
+          const signal = AbortSignal.any([context.signal, this.externalEffectSignal()]);
+          const joined = await this.ports.deliveryHttp.joinRoom({
+            roomId: payload.source_room_id,
+            apiUrl: dispatch.apiUrl,
+            bearer: dispatch.bearer,
+            signal,
+          });
+          await this.assertExternalAuthority();
+          if (joined.roomId.trim() !== payload.source_room_id) {
+            this.recordSanitizedDiagnostic(
+              claimed.id,
+              "Source rejoin returned a different canonical room identity.",
+            );
+            return { status: "retry", error: "source_rejoin_room_mismatch" };
+          }
+          return { status: "completed", outcome: { remote_room_id: payload.source_room_id } };
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+          this.recordSanitizedDiagnostic(claimed.id, error);
+          return { status: "retry", error: classifyRoomMoveEffectError(error) };
+        }
+      },
+      settle: async (claimed, executionResult, defaultSettle) => {
+        const payload = parseRoomMoveRollbackSourcePayload(claimed.payload);
+        return this.settleRoomMoveEffect(claimed, executionResult, defaultSettle, payload
+          ? {
+              operationId: payload.operation_id,
+              agentId: claimed.agent_id,
+              workAttemptId: payload.work_attempt_id,
+              executionGenerationId: payload.execution_generation_id,
+              allowedPhases: ["joining_destination", "rollback_required"],
+            }
+          : null);
+      },
+    };
+  }
+
+  private createBootstrapTailHandler(): EffectHandler {
+    return {
+      retryable: true,
+      autoPump: false,
+      defaultMaxAttempts: ROOM_MOVE_EFFECT_MAX_ATTEMPTS,
+      backoff: ROOM_MOVE_EFFECT_BACKOFF,
+      authorizeClaim: (database, effect) => {
+        const payload = parseRoomMoveBootstrapTailPayload(effect.payload);
+        if (!payload) return "invalid_payload";
+        return checkRoomMoveSagaPhaseInTransaction(database, {
+          operationId: payload.operation_id,
+          agentId: effect.agent_id,
+          workAttemptId: payload.work_attempt_id,
+          executionGenerationId: payload.execution_generation_id,
+          allowedPhases: ["bootstrapping_destination_tail"],
+        });
+      },
+      execute: async (claimed, context) => {
+        const payload = parseRoomMoveBootstrapTailPayload(claimed.payload);
+        if (!payload) {
+          return { status: "failed", error: "invalid_payload" };
+        }
+        let dispatch: RoomMoveDispatchContext | null;
+        try {
+          dispatch = await this.resolveDispatchContext(
+            claimed,
+            [payload.destination_room_id],
+            payload.work_attempt_id,
+            payload.execution_generation_id,
+          );
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+          this.recordSanitizedDiagnostic(claimed.id, error);
+          return { status: "retry", error: "dispatch_context_resolution_failed" };
+        }
+        if (!dispatch) {
+          this.recordSanitizedDiagnostic(claimed.id, "Room-move destination credential binding is unavailable.");
+          return { status: "retry", error: "dispatch_context_unavailable" };
+        }
+        try {
+          if (!this.ports.deliveryHttp.latest) {
+            this.recordSanitizedDiagnostic(claimed.id, "Destination tail transport is unavailable.");
+            return { status: "retry", error: "transport_unavailable" };
+          }
+          await this.assertExternalAuthority();
+          const signal = AbortSignal.any([context.signal, this.externalEffectSignal()]);
+          const tail = await this.ports.deliveryHttp.latest({
+            roomId: payload.destination_room_id,
+            apiUrl: dispatch.apiUrl,
+            bearer: dispatch.bearer,
+            signal,
+          });
+          await this.assertExternalAuthority();
+          const cursor = lastRoomMessageId(tail.messages ?? []);
+          return { status: "completed", outcome: { destination_cursor: cursor } };
+        } catch (error) {
+          if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+          this.recordSanitizedDiagnostic(claimed.id, error);
+          return { status: "retry", error: classifyRoomMoveEffectError(error) };
+        }
+      },
+      settle: async (claimed, executionResult, defaultSettle) => {
+        const payload = parseRoomMoveBootstrapTailPayload(claimed.payload);
+        return this.settleRoomMoveEffect(claimed, executionResult, defaultSettle, payload
+          ? {
+              operationId: payload.operation_id,
+              agentId: claimed.agent_id,
+              workAttemptId: payload.work_attempt_id,
+              executionGenerationId: payload.execution_generation_id,
+              allowedPhases: ["bootstrapping_destination_tail"],
+            }
+          : null);
+      },
+    };
+  }
+
+  private settleRoomMoveEffect(
+    claimed: EffectRecord,
+    executionResult: Parameters<NonNullable<EffectHandler["settle"]>>[1],
+    defaultSettle: () => EffectRecord,
+    sagaCheck: RoomMoveSagaPhaseCheck | null,
+  ): EffectRecord {
+    if (this.ports.authority.isHandoffScheduled()) {
+      throw new EffectFenceError("Supervisor handoff fenced a stale room-move effect settlement.");
+    }
+    const { database } = this.requireEffectHost();
+    if (executionResult.status === "uncertain") {
+      try {
+        return defaultSettle();
+      } catch (error) {
+        if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+        throw new RoomMoveSettlementStorageError(error);
+      }
+    }
+    try {
+      return withFencedEffectTransaction(database, this.effectWriteFence, () => {
+        if (this.ports.authority.isHandoffScheduled()) {
+          throw new EffectFenceError("Supervisor handoff fenced a stale room-move effect settlement.");
+        }
+        const phaseRefusal = sagaCheck
+          ? checkRoomMoveSagaPhaseInTransaction(database, sagaCheck)
+          : null;
+        if (phaseRefusal !== null) {
+          const failed = failEffectInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            error: phaseRefusal,
+            outcome: null,
+            nowIso: this.nowIso(),
+          });
+          pruneTerminalRoomMoveEffectsInTransaction(database, claimed.agent_id);
+          return failed;
+        }
+        if (executionResult.status === "retry") {
+          if (claimed.attempt_count >= claimed.max_attempts) {
+            const failed = failEffectInTransaction(database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              error: executionResult.error,
+              nowIso: this.nowIso(),
+            });
+            pruneTerminalRoomMoveEffectsInTransaction(database, claimed.agent_id);
+            return failed;
+          }
+          const computed = computeEffectBackoffMs(claimed.attempt_count, ROOM_MOVE_EFFECT_BACKOFF);
+          const delayMs = executionResult.retryAfterMs !== undefined
+            ? Math.max(0, Math.min(ROOM_MOVE_EFFECT_MAX_RETRY_DELAY_MS, Math.round(executionResult.retryAfterMs)))
+            : computed;
+          return rescheduleEffectForRetryInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            nextAttemptAtMs: Math.max(0, this.nowMs()) + delayMs,
+            error: executionResult.error,
+            nowIso: this.nowIso(),
+          });
+        }
+        const settled = executionResult.status === "completed"
+          ? completeEffectInTransaction(database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            })
+          : failEffectInTransaction(database, {
+              id: claimed.id,
+              expectedEpoch: claimed.epoch,
+              expectedAttemptCount: claimed.attempt_count,
+              error: executionResult.error,
+              outcome: executionResult.outcome,
+              nowIso: this.nowIso(),
+            });
+        pruneTerminalRoomMoveEffectsInTransaction(database, claimed.agent_id);
+        return settled;
+      });
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError || error instanceof EffectFenceError) throw error;
+      return this.rescheduleExecutingEffectSafe(claimed, "settlement_write_failed", error, sagaCheck);
+    }
+  }
+
+  private rescheduleExecutingEffectSafe(
+    claimed: EffectRecord,
+    errorCode: string,
+    originalError?: unknown,
+    sagaCheck: RoomMoveSagaPhaseCheck | null = null,
+    immediateFailureCode: string | null = null,
+  ): EffectRecord {
+    const { database } = this.requireEffectHost();
+    try {
+      return withFencedEffectTransaction(database, this.effectWriteFence, () => {
+        if (this.ports.authority.isHandoffScheduled()) {
+          throw new EffectFenceError("Supervisor handoff fenced a stale room-move effect recovery.");
+        }
+        const phaseRefusal = immediateFailureCode
+          ?? (sagaCheck ? checkRoomMoveSagaPhaseInTransaction(database, sagaCheck) : null);
+        if (phaseRefusal !== null) {
+          const failed = failEffectInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            error: phaseRefusal,
+            outcome: null,
+            nowIso: this.nowIso(),
+          });
+          pruneTerminalRoomMoveEffectsInTransaction(database, claimed.agent_id);
+          return failed;
+        }
+        if (claimed.attempt_count < claimed.max_attempts) {
+          const retryDelayMs = computeEffectBackoffMs(
+            Math.max(1, claimed.attempt_count),
+            ROOM_MOVE_EFFECT_BACKOFF,
+          );
+          return rescheduleEffectForRetryInTransaction(database, {
+            id: claimed.id,
+            expectedEpoch: claimed.epoch,
+            expectedAttemptCount: claimed.attempt_count,
+            nextAttemptAtMs: Math.max(0, this.nowMs()) + retryDelayMs,
+            error: errorCode,
+            nowIso: this.nowIso(),
+          });
+        }
+        const failed = failEffectInTransaction(database, {
+          id: claimed.id,
+          expectedEpoch: claimed.epoch,
+          expectedAttemptCount: claimed.attempt_count,
+          error: errorCode,
+          nowIso: this.nowIso(),
+        });
+        pruneTerminalRoomMoveEffectsInTransaction(database, claimed.agent_id);
+        return failed;
+      });
+    } catch (retryError) {
+      if (retryError instanceof DaemonFenceLostError || retryError instanceof EffectFenceError) throw retryError;
+      throw new RoomMoveSettlementStorageError(originalError ?? retryError);
+    }
+  }
+
+  private async runRoomMoveEffect(input: {
+    agentId: string;
+    kind:
+      | typeof ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND
+      | typeof ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND
+      | typeof ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND;
+    idempotencyKey: string;
+    payload:
+      | RoomMoveJoinDestinationEffectPayload
+      | RoomMoveRollbackSourceEffectPayload
+      | RoomMoveBootstrapTailEffectPayload;
+    dispatch: RoomMoveDispatchContext;
+  }): Promise<{ effect: EffectRecord; diagnostic: string | null; backedOff: boolean }> {
+    const { executor, database } = this.requireEffectHost();
+    const existing = getEffectByIdempotencyKey(database, input.agentId, input.kind, input.idempotencyKey);
+    if (existing?.state === "executing") {
+      if (executor.isEffectActive(existing.id)) {
+        const activeSettled = await executor.runEffect(existing.id);
+        return { effect: activeSettled, diagnostic: null, backedOff: false };
+      }
+      if (existing.epoch > this.ports.authority.currentGeneration()) {
+        throw new EffectFenceError(
+          `Room-move effect ${existing.id} belongs to future daemon generation ${existing.epoch}.`,
+        );
+      }
+      if (existing.attempt_count >= 1) {
+        const check = roomMoveEffectSagaCheck(existing);
+        const recovered = this.rescheduleExecutingEffectSafe(
+          existing,
+          "recovered_inactive_executing_effect",
+          undefined,
+          check?.ok ? check.sagaCheck : null,
+          check && !check.ok ? check.error : null,
+        );
+        return { effect: recovered, diagnostic: null, backedOff: recovered.state === "prepared" };
+      }
+    }
+    const prepared = await executor.prepare({
+      agent_id: input.agentId,
+      kind: input.kind,
+      idempotency_key: input.idempotencyKey,
+      payload: input.payload,
+      retryable: true,
+      max_attempts: ROOM_MOVE_EFFECT_MAX_ATTEMPTS,
+    });
+    if (prepared.effect.state === "completed" || prepared.effect.state === "failed") {
+      return { effect: prepared.effect, diagnostic: null, backedOff: false };
+    }
+    if (prepared.effect.state === "prepared"
+      && prepared.effect.next_attempt_at_ms !== null
+      && prepared.effect.next_attempt_at_ms > this.nowMs()) {
+      return { effect: prepared.effect, diagnostic: null, backedOff: true };
+    }
+    const effectId = prepared.effect.id;
+    this.pendingDispatchContext.set(effectId, input.dispatch);
+    this.lastSanitizedDiagnostic.delete(effectId);
+    try {
+      const settled = await executor.runEffect(effectId);
+      const diagnostic = this.lastSanitizedDiagnostic.get(effectId) ?? null;
+      return { effect: settled, diagnostic, backedOff: false };
+    } finally {
+      this.pendingDispatchContext.delete(effectId);
+      this.lastSanitizedDiagnostic.delete(effectId);
+    }
+  }
+
+  private async executeDestinationJoinEffect(
+    move: DaemonRoomMoveRecord,
+    dispatch: RoomMoveDispatchContext,
+  ): Promise<
+    | { kind: "completed"; remoteRoomId: string }
+    | { kind: "rejected"; detail: string }
+    | { kind: "rollback_required"; detail: string }
+    | { kind: "retry"; detail: string; retryAfterMs: number; backedOff?: boolean }
+  > {
+    const payload: RoomMoveJoinDestinationEffectPayload = {
+      operation_id: move.operation_id,
+      source_room_id: move.source_room_id,
+      destination_room_id: move.destination_room_id,
+      work_attempt_id: move.work_attempt_id,
+      execution_generation_id: move.execution_generation_id,
+    };
+    const idempotencyKey = roomMoveJoinDestinationIdempotencyKey({
+      operationId: move.operation_id,
+      destinationRoomId: move.destination_room_id,
+    });
+    let runResult: { effect: EffectRecord; diagnostic: string | null; backedOff: boolean };
+    try {
+      runResult = await this.runRoomMoveEffect({
+        agentId: move.agent_id,
+        kind: ROOM_MOVE_JOIN_DESTINATION_EFFECT_KIND,
+        idempotencyKey,
+        payload,
+        dispatch,
+      });
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      if (error instanceof EffectFenceError) {
+        if (this.ports.authority.isHandoffScheduled()) throw error;
+        return { kind: "retry", detail: schedulerErrorDetail(error), retryAfterMs: ROOM_MOVE_EFFECT_RETRY_DELAY_MS };
+      }
+      if (error instanceof EffectClaimRefusedError || error instanceof RoomMoveSettlementStorageError) {
+        return { kind: "retry", detail: schedulerErrorDetail(error), retryAfterMs: ROOM_MOVE_EFFECT_RETRY_DELAY_MS };
+      }
+      throw error;
+    }
+    const { effect: settled, diagnostic, backedOff } = runResult;
+    const detail = diagnostic ?? settled.last_error ?? "destination join did not complete";
+    if (settled.state === "completed") {
+      const outcome = settled.outcome as { remote_room_id?: unknown } | null;
+      const remoteRoomId = typeof outcome?.remote_room_id === "string" ? outcome.remote_room_id.trim() : "";
+      if (!remoteRoomId || remoteRoomId === move.source_room_id) {
+        return {
+          kind: "retry",
+          detail: "Destination join response omitted a valid distinct canonical room identity.",
+          retryAfterMs: this.retryDelayMsFor(settled),
+        };
+      }
+      return { kind: "completed", remoteRoomId };
+    }
+    const outcome = settled.outcome as {
+      authoritative_rejection?: unknown;
+      ambiguous_prior_attempt?: unknown;
+    } | null;
+    if (settled.state === "failed" && outcome?.authoritative_rejection === true && settled.attempt_count === 1) {
+      return { kind: "rejected", detail: diagnostic ?? settled.last_error ?? "authoritative join rejection" };
+    }
+    if (settled.state === "failed" && outcome?.ambiguous_prior_attempt === true) {
+      return { kind: "rollback_required", detail: diagnostic ?? settled.last_error ?? "retry join rejection" };
+    }
+    return {
+      kind: "retry",
+      detail,
+      retryAfterMs: this.retryDelayMsFor(settled),
+      backedOff,
+    };
+  }
+
+  private async executeRollbackSourceEffect(
+    move: DaemonRoomMoveRecord,
+    dispatch: RoomMoveDispatchContext,
+  ): Promise<{ kind: "completed" } | { kind: "retry"; detail: string; retryAfterMs: number; backedOff?: boolean }> {
+    const payload: RoomMoveRollbackSourceEffectPayload = {
+      operation_id: move.operation_id,
+      source_room_id: move.source_room_id,
+      destination_room_id: move.destination_room_id,
+      work_attempt_id: move.work_attempt_id,
+      execution_generation_id: move.execution_generation_id,
+    };
+    const idempotencyKey = roomMoveRollbackSourceIdempotencyKey({
+      operationId: move.operation_id,
+      sourceRoomId: move.source_room_id,
+    });
+    let runResult: { effect: EffectRecord; diagnostic: string | null; backedOff: boolean };
+    try {
+      runResult = await this.runRoomMoveEffect({
+        agentId: move.agent_id,
+        kind: ROOM_MOVE_ROLLBACK_SOURCE_EFFECT_KIND,
+        idempotencyKey,
+        payload,
+        dispatch,
+      });
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      if (error instanceof EffectFenceError) {
+        if (this.ports.authority.isHandoffScheduled()) throw error;
+        return { kind: "retry", detail: schedulerErrorDetail(error), retryAfterMs: ROOM_MOVE_EFFECT_RETRY_DELAY_MS };
+      }
+      if (error instanceof EffectClaimRefusedError || error instanceof RoomMoveSettlementStorageError) {
+        return { kind: "retry", detail: schedulerErrorDetail(error), retryAfterMs: ROOM_MOVE_EFFECT_RETRY_DELAY_MS };
+      }
+      throw error;
+    }
+    const { effect: settled, diagnostic, backedOff } = runResult;
+    if (settled.state === "completed") return { kind: "completed" };
+    return {
+      kind: "retry",
+      detail: diagnostic ?? settled.last_error ?? "source rollback join did not complete",
+      retryAfterMs: this.retryDelayMsFor(settled),
+      backedOff,
+    };
+  }
+
+  private async executeBootstrapTailEffect(
+    move: DaemonRoomMoveRecord,
+    destination: string,
+    dispatch: RoomMoveDispatchContext,
+  ): Promise<
+    | { kind: "completed"; cursor: string | null }
+    | { kind: "retry"; detail: string; retryAfterMs: number; backedOff?: boolean }
+  > {
+    const payload: RoomMoveBootstrapTailEffectPayload = {
+      operation_id: move.operation_id,
+      destination_room_id: destination,
+      work_attempt_id: move.work_attempt_id,
+      execution_generation_id: move.execution_generation_id,
+    };
+    const idempotencyKey = roomMoveBootstrapTailIdempotencyKey({
+      operationId: move.operation_id,
+      destinationRoomId: destination,
+    });
+    let runResult: { effect: EffectRecord; diagnostic: string | null; backedOff: boolean };
+    try {
+      runResult = await this.runRoomMoveEffect({
+        agentId: move.agent_id,
+        kind: ROOM_MOVE_BOOTSTRAP_TAIL_EFFECT_KIND,
+        idempotencyKey,
+        payload,
+        dispatch,
+      });
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      if (error instanceof EffectFenceError) {
+        if (this.ports.authority.isHandoffScheduled()) throw error;
+        return { kind: "retry", detail: schedulerErrorDetail(error), retryAfterMs: ROOM_MOVE_EFFECT_RETRY_DELAY_MS };
+      }
+      if (error instanceof EffectClaimRefusedError || error instanceof RoomMoveSettlementStorageError) {
+        return { kind: "retry", detail: schedulerErrorDetail(error), retryAfterMs: ROOM_MOVE_EFFECT_RETRY_DELAY_MS };
+      }
+      throw error;
+    }
+    const { effect: settled, diagnostic, backedOff } = runResult;
+    if (settled.state !== "completed") {
+      return {
+        kind: "retry",
+        detail: diagnostic ?? settled.last_error ?? "Destination tail bootstrap did not complete.",
+        retryAfterMs: this.retryDelayMsFor(settled),
+        backedOff,
+      };
+    }
+    const outcome = settled.outcome as { destination_cursor?: unknown } | null;
+    return {
+      kind: "completed",
+      cursor: typeof outcome?.destination_cursor === "string" ? outcome.destination_cursor : null,
+    };
+  }
+
   private async assertExternalAuthority(): Promise<void> {
     if (this.ports.authority.isHandoffScheduled()) {
-      throw new DaemonFenceLostError("Supervisor handoff fenced a stale room-move effect.");
+      throw new EffectFenceError("Supervisor handoff fenced a stale room-move effect.");
     }
     await this.ports.authority.assertCurrent();
     if (this.ports.authority.isHandoffScheduled()) {
-      throw new DaemonFenceLostError("Supervisor handoff fenced a stale room-move effect.");
+      throw new EffectFenceError("Supervisor handoff fenced a stale room-move effect.");
     }
   }
 

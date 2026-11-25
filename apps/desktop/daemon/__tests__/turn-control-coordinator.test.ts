@@ -169,7 +169,7 @@ test("completed operator resolution is idempotent but rejects the opposite answe
 
 test("native stop preserves prepare-dispatch-provider-commit-delivery ordering", async () => {
   const events: string[] = [];
-  let generation = 7;
+  let version = 7;
   let current = entry();
   const handle = {
     workAttemptId: "attempt-1",
@@ -182,13 +182,12 @@ test("native stop preserves prepare-dispatch-provider-commit-delivery ordering",
     authority: {
       currentGeneration: () => 7,
       assertCurrent: async () => { events.push("authority"); },
-      manifestGeneration: () => generation,
-      setManifestGeneration: (next) => { generation = next; },
       fenceCommit: async (commit) => commit(),
     },
     store: {
       getEntry: async () => current,
-      load: async () => ({ generation, entries: [current] }),
+      getEntryWithVersion: async () => ({ entry: current, version }),
+      load: async () => ({ entries: [current], versions: { [current.id]: version } }),
       prepareTurnControlState: async (_expected, input) => {
         events.push("journal.prepare");
         current = {
@@ -218,9 +217,9 @@ test("native stop preserves prepare-dispatch-provider-commit-delivery ordering",
             updated_at: input.recordedAt,
           },
         };
-        generation += 1;
+        version += 1;
         return {
-          generation,
+          version,
           entry: current,
           linkedInboxItemId: "inbox-1",
           providerTurnId: "turn-1",
@@ -236,9 +235,9 @@ test("native stop preserves prepare-dispatch-provider-commit-delivery ordering",
           correctionInboxItemId: null,
           providerTurnId: "turn-1",
         });
-        generation += 1;
+        version += 1;
         return {
-          generation,
+          version,
           entry: current,
           original: "cancelled",
           correctionInboxItemId: null,
@@ -383,19 +382,13 @@ test("a hard runtime failure after provider control cannot be committed as healt
   }
 });
 
-test("daemon-inbox correction is stop-then-resend while a legacy lane keeps native correction", async () => {
+test("daemon-inbox correction is stop-then-resend", async () => {
   const daemonInbox = effectFixture({ deliveryMode: "daemon_inbox" });
   const daemonResult = await daemonInbox.subject.control({ ...turnInput(), correction: "redirect" });
   assert.deepEqual(daemonInbox.nativeCorrections, [null]);
   assert.deepEqual(daemonInbox.preparedStrategies, ["stop_then_resend"]);
   assert.deepEqual(daemonInbox.commitActivations, [true]);
   assert.equal(daemonResult.resumed, true, "durable correction activation is the resumed outcome");
-
-  const legacy = effectFixture({ deliveryMode: "mcp_polling" });
-  await legacy.subject.control({ ...turnInput(), correction: "redirect" });
-  assert.deepEqual(legacy.nativeCorrections, ["redirect"]);
-  assert.deepEqual(legacy.preparedStrategies, ["native"]);
-  assert.deepEqual(legacy.commitActivations, [false]);
 });
 
 test("provider uncertain freezes while explicit not-applied resumes, and both redact durable errors", async () => {
@@ -581,8 +574,9 @@ test("historical terminal execution permits exact uncertain operator resolution"
     }],
   });
   ports.store.getEntry = async () => current;
-  ports.store.load = async () => ({ generation: 8, entries: [current] });
-  ports.store.commitTurnControlState = async (_generation, input, buildEntry) => {
+  ports.store.getEntryWithVersion = async () => ({ entry: current, version: 8 });
+  ports.store.load = async () => ({ entries: [current], versions: { [current.id]: 8 } });
+  ports.store.commitTurnControlState = async (_version, input, buildEntry) => {
     committedMode = input.mode;
     current = buildEntry(current, {
       original: "none",
@@ -590,7 +584,7 @@ test("historical terminal execution permits exact uncertain operator resolution"
       correctionInboxItemId: null,
       providerTurnId: "turn-1",
     });
-    return { generation: 9, entry: current, original: "none", correctionInboxItemId: null, providerTurnId: "turn-1" };
+    return { version: 9, entry: current, original: "none", correctionInboxItemId: null, providerTurnId: "turn-1" };
   };
   ports.wakeDelivery = async () => { throw new Error("wake unavailable"); };
   ports.scheduleRecovery = () => { recoveryScheduled += 1; };
@@ -628,7 +622,7 @@ function effectFixture(options: {
 } = {}) {
   const deliveryMode = options.deliveryMode ?? "daemon_inbox";
   let current = entry({ delivery_mode: deliveryMode });
-  let generation = 7;
+  let version = 7;
   let runtimeState: "working" | "failed" = "working";
   const handle = {
     workAttemptId: "attempt-1",
@@ -653,8 +647,6 @@ function effectFixture(options: {
     authority: {
       currentGeneration: () => 7,
       assertCurrent: async () => undefined,
-      manifestGeneration: () => generation,
-      setManifestGeneration: (next) => { generation = next; },
       fenceCommit: async (commit) => {
         if (providerCalls > 0 && options.runtimeFailureBeforeCommit) {
           if (options.runtimeFailureBeforeCommit !== "durable_only") runtimeState = "failed";
@@ -667,7 +659,8 @@ function effectFixture(options: {
     },
     store: {
       getEntry: async () => current,
-      load: async () => ({ generation, entries: [current] }),
+      getEntryWithVersion: async () => ({ entry: current, version }),
+      load: async () => ({ entries: [current], versions: { [current.id]: version } }),
       prepareTurnControlState: async (_expected, input) => {
         prepares += 1;
         const linkedInboxItemId = deliveryMode === "daemon_inbox" ? input.expectedInboxItemId : null;
@@ -700,9 +693,9 @@ function effectFixture(options: {
             updated_at: input.recordedAt,
           },
         };
-        generation += 1;
+        version += 1;
         if (options.preparePostCommitError) throw new Error("prepare transport failed after commit");
-        return { generation, entry: current, linkedInboxItemId, providerTurnId, linkedState: "awaiting_result" };
+        return { version, entry: current, linkedInboxItemId, providerTurnId, linkedState: "awaiting_result" };
       },
       checkpointTurnControlTarget: async (_expected, input) => {
         checkpointedTurns.push(input.providerTurnId);
@@ -710,11 +703,11 @@ function effectFixture(options: {
           ...current,
           turn_control: { ...current.turn_control!, provider_turn_id: input.providerTurnId },
         };
-        generation += 1;
+        version += 1;
         if (options.checkpointHandleSwap) {
           activeHandle = { ...handle, providerContinuationId: "continuation-replacement" };
         }
-        return { generation, entry: current };
+        return { version, entry: current };
       },
       commitTurnControlState: async (_expected, input, buildEntry, commitFence) => {
         let committed!: Awaited<ReturnType<TurnControlCoordinatorPorts["store"]["commitTurnControlState"]>>;
@@ -730,9 +723,9 @@ function effectFixture(options: {
             correctionInboxItemId: input.activateCorrection ? "correction-1" : null,
             providerTurnId: deliveryMode === "daemon_inbox" ? "turn-1" : null,
           });
-          generation += 1;
+          version += 1;
           committed = {
-            generation,
+            version,
             entry: current,
             original,
             correctionInboxItemId: input.activateCorrection ? "correction-1" : null,
@@ -852,7 +845,7 @@ function fixture(options: {
   manifestEntry?: DaemonManifestEntry;
   nowMs?: () => number;
 } = {}) {
-  let manifestGeneration = 7;
+  const agentVersion = 7;
   let assertCurrent: () => Promise<void> = async () => undefined;
   let admissions = 0;
   let releases = 0;
@@ -865,13 +858,12 @@ function fixture(options: {
     authority: {
       currentGeneration: () => 7,
       assertCurrent: () => assertCurrent(),
-      manifestGeneration: () => manifestGeneration,
-      setManifestGeneration: (generation) => { manifestGeneration = generation; },
       fenceCommit: async (commit) => commit(),
     },
     store: {
       getEntry: async () => manifestEntry,
-      load: async () => ({ generation: manifestGeneration, entries: [manifestEntry] }),
+      getEntryWithVersion: async () => ({ entry: manifestEntry, version: agentVersion }),
+      load: async () => ({ entries: [manifestEntry], versions: { [manifestEntry.id]: agentVersion } }),
       checkpointTurnControlTarget: async () => { throw new Error("unexpected checkpoint"); },
       commitTurnControlState: async () => { throw new Error("unexpected commit"); },
       prepareTurnControlState: async () => { throw new Error("unexpected prepare"); },

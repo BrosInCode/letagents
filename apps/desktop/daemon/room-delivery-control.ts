@@ -66,7 +66,7 @@ export class RoomDeliveryControl {
       providerConnection: handle.providerConnection ?? null,
       executionGenerationId: binding.execution_generation_id,
       daemonGeneration: this.options.currentGeneration(),
-      deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      deliveryMode: "daemon_inbox",
     };
     if (!await this.options.isExactAuthority(agent)) {
       throw new Error("The room delivery binding is no longer current; refresh before retrying.");
@@ -129,7 +129,7 @@ export class RoomDeliveryControl {
       providerConnection: entry.provider_ref?.provider_connection ?? null,
       executionGenerationId: binding.execution_generation_id,
       daemonGeneration: this.options.currentGeneration(),
-      deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      deliveryMode: "daemon_inbox",
     };
     if (!await this.options.isExactAuthority(agent)) {
       throw new Error("The room delivery authority changed; refresh the agent before continuing.");

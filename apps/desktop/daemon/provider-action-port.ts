@@ -9,7 +9,7 @@ import type { ProviderPermissionRequest, ProviderPermissionObservation, Provider
 export type ProviderActionCapabilities = {
   execution?: NativeExecutionCapabilities;
   /** Explicit adapter admission for durable room-ingress ownership. */
-  deliveryModes?: ReadonlyArray<"mcp_polling" | "daemon_inbox">;
+  deliveryModes?: ReadonlyArray<"daemon_inbox">;
   resume: boolean;
   midTurnInjection: boolean;
   transcriptAccess: boolean;
@@ -36,32 +36,12 @@ export type ProviderActionConnectionRef =
   /** Antigravity's headless `agy acp` stdio child; it cannot be reattached once its daemon is gone. */
   | { kind: "antigravity_acp"; pid: number | null; processIdentity?: string | null };
 
-/**
- * Compare the complete durable identity of two native provider connections.
- * A missing connection, PID, or process-birth identity is unknown evidence and
- * therefore never sufficient to authenticate a cached live handle.
- */
-export function sameProviderActionConnectionIdentity(
-  expected: ProviderActionConnectionRef | null | undefined,
-  actual: ProviderActionConnectionRef | null | undefined,
-): boolean {
-  if (!expected || !actual || expected.kind !== actual.kind) return false;
-  if (expected.pid === null || actual.pid === null) return false;
-  if (expected.pid !== actual.pid) return false;
-  if (!expected.processIdentity || !actual.processIdentity) return false;
-  if (expected.processIdentity !== actual.processIdentity) return false;
-  if (expected.kind === "codex_app_server") {
-    return actual.kind === "codex_app_server" && Boolean(expected.url) && expected.url === actual.url;
-  }
-  if (expected.kind === "opencode_server") {
-    return actual.kind === "opencode_server"
-      && Boolean(expected.url)
-      && expected.url === actual.url
-      && Boolean(expected.serverAuthPath)
-      && expected.serverAuthPath === actual.serverAuthPath;
-  }
-  return true;
-}
+// The comparison of the complete durable identity of two provider connections
+// has one definition, in the provider runtime package. A missing connection,
+// PID or process-birth identity is unknown evidence there, and so it is never
+// sufficient to authenticate a cached live handle. The adapters use the same
+// function, so the daemon and an adapter cannot disagree on it.
+export { sameProviderConnectionIdentity as sameProviderActionConnectionIdentity } from "#provider-runtime/agents/provider-adapter.js";
 
 /**
  * Compare durable provider-state snapshots, including the honest idle shape
@@ -90,9 +70,9 @@ export function sameProviderActionConnectionSnapshot(
   return true;
 }
 
-export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; launchPolicy?: unknown; provider?: string; providerConnection?: ProviderActionConnectionRef | null; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; /** The daemon's records say this process was started with its owner's own setup, or cannot say. Absent for an agent that never had it. */ ownerSetup?: true | "unknown" };
-export type ProviderActionSpawn = { onProgress?: () => void; /** The native process is up; the rest of startup is a remote model round trip. */ onNativeStarted?: () => void; workAttemptId: string; roomId: string; cwd: string; workspaceKind?: "git_worktree" | "room_scratch"; launchPolicy: unknown; /** The owner lets this agent use their own provider setup. Never set for a rental. */ homeHarness?: true; /** The owner says this Open Model agent's model reads images. */ imageInput?: true; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "daemon_inbox"; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; pollingContract?: "custodial_polling_v1"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null; apiUrl?: string }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string; contextWindow?: number | null } };
-export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; managedLaunchContract?: string; custodyLaunchAgentSessionId?: string; /** Owner-visible warnings from this launch, recorded in the agent's activity. */ launchNotices?: readonly string[]; /** This process was started with its owner's own setup. */ ownerSetup?: true; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
+export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; launchPolicy?: unknown; provider?: string; providerConnection?: ProviderActionConnectionRef | null; lifecycleAuthorityMode?: "typed"; /** The daemon's records say this process was started with its owner's own setup, or cannot say. Absent for an agent that never had it. */ ownerSetup?: true | "unknown" };
+export type ProviderActionSpawn = { onProgress?: () => void; /** The native process is up; the rest of startup is a remote model round trip. */ onNativeStarted?: () => void; workAttemptId: string; roomId: string; cwd: string; workspaceKind?: "git_worktree" | "room_scratch"; launchPolicy: unknown; /** The owner lets this agent use their own provider setup. Never set for a rental. */ homeHarness?: true; /** The owner says this Open Model agent's model reads images. */ imageInput?: true; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "daemon_inbox"; lifecycleAuthorityMode?: "typed"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null; apiUrl?: string }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string; contextWindow?: number | null } };
+export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; managedLaunchContract?: string; /** Owner-visible warnings from this launch, recorded in the agent's activity. */ launchNotices?: readonly string[]; /** This process was started with its owner's own setup. */ ownerSetup?: true; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
 export type ProviderActionTerminal = { nativeRuntimeDeath?: import("../shared/execution-protocol.js").NativeRuntimeDeath; endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
 /** Validate death against the immutable handle/ref before retaining it as operational evidence. */
 export function validatedNativeRuntimeDeath(terminal: Pick<ProviderActionTerminal, "nativeRuntimeDeath">,
@@ -107,20 +87,6 @@ export function validatedNativeRuntimeDeath(terminal: Pick<ProviderActionTermina
 }
 
 export type ProviderActionAttachTerminal = { state: "terminal"; terminal: ProviderActionTerminal; /** Lines for the owner, when the adapter itself stopped the runtime it found. */ notices?: readonly string[] };
-export type CustodialPollingActivationRequest = {
-  operationId: string; roomId: string; cwd: string; agentDisplayName: string;
-  workerSession: { agentSessionId: string; roomCursor: string };
-  /** Internal daemon attestation from the persisted applied launch, never controller input. */
-  launchReceipt: {
-    contract: "custodial_polling_v1"; configurationRevision: number; workAttemptId: string; agentSessionId: string;
-    providerContinuationId: string; providerConnection: ProviderActionConnectionRef;
-  };
-};
-export type CustodialPollingActivationOptions = {
-  beforeNativeDispatch: () => Promise<void>;
-  checkpointTurnStarted: (id: string) => Promise<void>;
-  detachSignal?: AbortSignal;
-};
 export type ProviderActionAttachment = { state: "attached"; handle: ProviderActionHandle } | { state: "absent" } | { state: "ambiguous"; reason: string };
 export type ProviderActionStreamEvent = {
   workAttemptId: string;
@@ -138,8 +104,6 @@ export type ProviderActionStreamEvent = {
   nativeProcessPid?: number;
   /** Structural boundary for the correlated lifecycle checkpoint; never provider-authored text. */
   nativeLifecyclePhase?: "turn_active" | "turn_terminal";
-  /** Shadow-comparison evidence only; consumers must not derive operational state from this frame. */
-  lifecycleProjectionOnly?: true;
   /**
    * For the owner's live feed only: the live output of a running command, or
    * the state of a background command. Never activity, lifecycle evidence or
@@ -336,7 +300,8 @@ export interface ProviderActionPort {
   stopBackgroundCommand?(handle: ProviderActionHandle, taskId: string): Promise<"stopping" | "not_running" | "failed">;
   compactionProgress?(workAttemptId: string, provider: string): { state: "compacting"; startedAt: string } | null;
   runtimeCustody?(workAttemptId: string, provider: string): ProviderRuntimeCustody;
-  onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription>;
+  /** `onGap` is called when one or more observations of this subscription were lost and can not be delivered. */
+  onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void, onGap?: () => void): Promise<NativeExecutionSubscription>;
   probeControl?(handle: ProviderActionHandle): Promise<ControlProbeResult>;
   observePermissions?(handle: ProviderActionHandle, listener: (event: ProviderPermissionObservation) => void, signal: AbortSignal): Promise<void>;
   /** `roomTurnId` is the durable turn the caller expects; a provider uses it only where its transcript proves it. */
@@ -352,10 +317,6 @@ export interface ProviderActionPort {
    * without it does not wait; every launch still verifies the runtime itself.
    */
   verifyBundledRuntime?(): Promise<void>;
-  /** Verify the selected polling runtime before an existing writer is stopped. */
-  preflightCustodialPolling?(input: { provider: string; devMcpServerEntryPath?: string }): Promise<void>;
-  activateCustodialPolling?(handle: ProviderActionHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;
-  inspectCustodialPollingActivation?(handle: ProviderActionHandle, providerTurnId: string): Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }>;
   spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle>;
   attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null>;
   /** How this running runtime takes the activating message's images; absent or null means it cannot. */

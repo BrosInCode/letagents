@@ -1,65 +1,98 @@
 import { normalizeAgentAvatar } from "../../../../shared/agent-avatar.mjs";
 /**
- * Entry rows to and from the decomposed domain projection tables.
+ * Entry rows to and from the schema v1 `agents` domain table.
  *
  * Where new code goes: a ManifestStore method goes in the module of its concern
  * (see the module list in store.ts); shared row helpers and types go in shared.ts.
  * A method name may be defined in only one module; store.ts throws on a duplicate.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { assertNoPollingActivation } from "../custodial-polling-activation.js";
-import { assertNoDeliveryDrain } from "../delivery-drain.js";
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "../reconciler-state.js";
 import { STATE_WATCH_ACTIVITY_SUMMARY_LIMIT } from "../state-watch-projection.js";
 import { projectDaemonManifestEntry, type DaemonManifestDomainProjection } from "../manifest-entry-projection.js";
-import type { DaemonAgentConfiguration, DaemonManifestEntry, DaemonProviderConnection, DaemonProviderRuntimeReference, DaemonTurnControlEffect, ExecutionTerminalPayload, ReconciliationNotice, ReconciliationState } from "../types.js";
-import { type Row, liveSharingState, bool, nullableString, nullableNumber, json, parseJson, activityEventFromRow, canonicalManifestEntry, run, storeMethods } from "./shared.js";
+import type { DaemonAgentConfiguration, DaemonManifestEntry, DaemonProviderConnection, DaemonProviderRuntimeReference, DaemonTurnControlEffect, DaemonWorkerBindingProjection, ReconciliationNotice, ReconciliationState } from "../types.js";
+import { type Row, ManifestConflictError, liveSharingState, bool, nullableString, json, parseJson, activityEventFromRow, canonicalManifestEntry, run, storeMethods } from "./shared.js";
+
+function encodeProjectionValues(
+  projection: DaemonManifestDomainProjection,
+  durableWatermark: number,
+) {
+  const {
+    identity, profile, membership, configuration, launch_intent: launch,
+    runtime_deployment: runtime, lifecycle, readiness, turn_control_journal: turnJournal,
+    retained_worker_binding: bindingRecord, reconciliation: reconciliationRecord,
+  } = projection;
+  const turn = turnJournal.turn_control ?? null;
+  if (!Number.isSafeInteger(durableWatermark) || durableWatermark < 0) {
+    throw new Error("Turn-control sequence watermark must be a non-negative safe integer.");
+  }
+  if (turn && (!Number.isSafeInteger(turn.action_sequence) || turn.action_sequence < 1)) {
+    throw new Error("Persisted turn control requires a positive exact action sequence.");
+  }
+  if (turn && turn.action_sequence !== durableWatermark) {
+    throw new Error("Persisted turn control does not exactly match its durable sequence watermark.");
+  }
+  const providerRef = runtime.provider_ref ?? null;
+  const policyJson = Object.hasOwn(configuration, "provider_launch_policy")
+    && configuration.provider_launch_policy !== undefined
+    ? json(configuration.provider_launch_policy)
+    : null;
+  const reconciliationState = reconciliationRecord.reconciliation
+    ? {
+      ...reconciliationRecord.reconciliation,
+      completed_action_ids: reconciliationRecord.reconciliation.completed_action_ids.slice(-MAX_PROJECTED_COMPLETED_ACTION_IDS),
+    }
+    : null;
+  return {
+    agent_id: identity.agent_id,
+    created_by: identity.created_by,
+    created_at: identity.created_at,
+    display_name: profile.display_name,
+    avatar_json: profile.avatar ? json(profile.avatar) : null,
+    room_id: membership.room_id,
+    local_room_id: membership.local_room_id ?? null,
+    provider: configuration.provider,
+    model: configuration.model,
+    reasoning_effort: configuration.reasoning_effort ?? null,
+    charter: configuration.charter,
+    permission_profile_id: configuration.permission_profile_id,
+    config_revision: configuration.config_revision ?? 1,
+    runtime_configuration_revision: configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1,
+    provider_launch_policy_json: policyJson,
+    image_input: configuration.image_input === true ? 1 : 0,
+    live_sharing: liveSharingState(configuration.live_sharing),
+    desired_state: launch.desired_state,
+    source_repo_path: launch.source_repo_path ?? null,
+    deployment_id: runtime.deployment_id,
+    run_id: runtime.run_id,
+    observed_state: runtime.observed_state,
+    workspace_path: runtime.workspace_path ?? null,
+    work_attempt_id: runtime.work_attempt_id ?? null,
+    provider_work_attempt_id: providerRef?.work_attempt_id ?? null,
+    provider_continuation_id: providerRef?.provider_continuation_id ?? null,
+    provider_execution_generation_id: providerRef?.execution_generation_id ?? null,
+    provider_connection_json: providerRef?.provider_connection ? json(providerRef.provider_connection) : null,
+    workplace_liveness_json: runtime.workplace_liveness ? json(runtime.workplace_liveness) : null,
+    native_liveness_json: runtime.native_liveness ? json(runtime.native_liveness) : null,
+    condition: lifecycle.condition,
+    last_error: lifecycle.last_error ?? null,
+    ready_reached_at: readiness.ready_reached_at ?? null,
+    last_turn_control_sequence: durableWatermark,
+    turn_control_inbox_item_id: turn?.inbox_item_id ?? null,
+    turn_control_status: turn?.status ?? null,
+    turn_control_json: turn ? json(turn) : null,
+    last_worker_binding_json: bindingRecord.last_worker_binding ? json(bindingRecord.last_worker_binding) : null,
+    reconciliation_json: reconciliationState ? json(reconciliationState) : null,
+    reconciliation_notices_json: reconciliationRecord.reconciliation_notices !== undefined
+      ? json(reconciliationRecord.reconciliation_notices)
+      : null,
+  };
+}
 
 export const projections = storeMethods({
-  replaceEntries(database: DatabaseSync, entries: DaemonManifestEntry[], initializeNewMintStates = true): void {
-    const configurations = new Map((database.prepare("SELECT * FROM agent_configurations").all() as Row[]).map((row) => [String(row.agent_id), row]));
-    const existingIdentities = new Set((database.prepare("SELECT agent_id FROM agent_identities").all() as Row[])
-      .map((row) => String(row.agent_id)));
-    database.exec("DELETE FROM agent_identities");
-    entries.forEach((entry, index) => {
-      const normalized = canonicalManifestEntry(entry);
-      const projection = projectDaemonManifestEntry(normalized);
-      const configuration = configurations.get(normalized.id);
-      if (configuration) {
-        this.preserveInspectorConfiguration(projection, configuration);
-      }
-      this.insertProjection(database, projection, index);
-      if (initializeNewMintStates && !existingIdentities.has(normalized.id)
-        && (normalized.delivery_mode ?? "mcp_polling") === "daemon_inbox"
-        && Object.hasOwn(normalized, "last_worker_binding")) {
-        const binding = normalized.last_worker_binding ?? null;
-        run(database.prepare(`
-          INSERT OR IGNORE INTO supervised_worker_mint_states
-            (agent_id,room_id,agent_instance_id,phase,agent_session_id,updated_at)
-          VALUES (?,?,?,?,?,?)
-        `), normalized.id, normalized.room_id, `daemon:${normalized.id}`,
-        binding ? "exact" : "never_minted", binding?.agent_session_id ?? null,
-        binding?.updated_at ?? new Date().toISOString());
-      }
-    });
-    // Full replacement is also the explicit deletion boundary. Targeted
-    // replacement deliberately preserves the constant-size sequence authority.
-    database.exec(`DELETE FROM turn_control_sequence_watermarks
-      WHERE NOT EXISTS (
-        SELECT 1 FROM agent_identities identities
-        WHERE identities.agent_id = turn_control_sequence_watermarks.agent_id
-      )`);
-    database.exec(`DELETE FROM reconciliation_action_tombstones
-      WHERE NOT EXISTS (
-        SELECT 1 FROM agent_identities identities
-        WHERE identities.agent_id = reconciliation_action_tombstones.agent_id
-      )`);
-  },
-
   preserveInspectorConfiguration(projection: DaemonManifestDomainProjection, row: Row): void {
-    // Custody, like Inspector revisions, is database-owned and cannot be
-    // replaced by the compatibility manifest's stale or caller-supplied fields.
-    projection.configuration.polling_contract = nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"];
+    // Inspector revisions are database-owned and cannot be replaced by stale
+    // compatibility manifest fields during lifecycle/runtime updates.
     projection.configuration.provider = String(row.provider);
     projection.configuration.model = nullableString(row.model);
     projection.configuration.reasoning_effort = nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"];
@@ -69,285 +102,270 @@ export const projections = storeMethods({
     projection.configuration.runtime_configuration_revision = Number(row.runtime_configuration_revision);
     projection.configuration.image_input = bool(row.image_input);
     projection.configuration.live_sharing = liveSharingState(row.live_sharing);
-    if (bool(row.provider_launch_policy_present)) {
-      projection.configuration.provider_launch_policy = bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json);
+    if (row.provider_launch_policy_json !== null && row.provider_launch_policy_json !== undefined) {
+      projection.configuration.provider_launch_policy = parseJson(row.provider_launch_policy_json);
     } else {
       delete projection.configuration.provider_launch_policy;
     }
   },
 
-  insertProjection(database: DatabaseSync, projection: DaemonManifestDomainProjection, sortOrder: number): void {
-    const { identity, profile, membership, configuration, launch_intent: launch, runtime_deployment: runtime, lifecycle, readiness, turn_control_journal: turnJournal, retained_worker_binding: bindingRecord, reconciliation: reconciliationRecord } = projection;
-    // Legacy cutover preparation commits through all projection replacement
-    // paths; a preflight check alone would race native drain acceptance.
-    if (configuration.delivery_cutover) {
-      assertNoDeliveryDrain(database, identity.agent_id);
-      assertNoPollingActivation(database, identity.agent_id);
-    }
-    run(database.prepare("INSERT INTO agent_identities VALUES (?, ?, ?, ?)"), identity.agent_id, identity.created_by, identity.created_at, sortOrder);
-    run(database.prepare("INSERT INTO agent_profiles(agent_id, display_name, avatar_json) VALUES (?, ?, ?)"), identity.agent_id, profile.display_name, profile.avatar ? json(profile.avatar) : null);
-    run(database.prepare("INSERT INTO agent_room_memberships(agent_id, room_id, local_room_id) VALUES (?, ?, ?)"), identity.agent_id, membership.room_id, membership.local_room_id ?? null);
-    const policyPresent = Object.hasOwn(configuration, "provider_launch_policy");
-    const policyUndefined = policyPresent && configuration.provider_launch_policy === undefined;
+  initializeMintStateIfExplicit(database: DatabaseSync, entry: DaemonManifestEntry): void {
+    if (!Object.hasOwn(entry, "last_worker_binding")) return;
+    const binding = entry.last_worker_binding ?? null;
     run(database.prepare(`
-      INSERT INTO agent_configurations(
-        agent_id, provider, model, reasoning_effort, charter, permission_profile_id, config_revision, runtime_configuration_revision, delivery_mode, delivery_cutover_json,
-        provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json, polling_contract, image_input, live_sharing
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null, configuration.polling_contract ?? null, configuration.image_input === true ? 1 : 0, liveSharingState(configuration.live_sharing));
-    const sourcePresent = Object.hasOwn(launch, "source_repo_path");
-    run(database.prepare("INSERT INTO agent_launch_intents VALUES (?, ?, ?, ?)"), identity.agent_id, launch.desired_state, Number(sourcePresent), sourcePresent ? launch.source_repo_path ?? null : null);
+      INSERT OR IGNORE INTO supervised_worker_mint_states
+        (agent_id,room_id,agent_instance_id,phase,agent_session_id,updated_at)
+      VALUES (?,?,?,?,?,?)
+    `), entry.id, entry.room_id, `daemon:${entry.id}`,
+    binding ? "exact" : "never_minted", binding?.agent_session_id ?? null,
+    binding?.updated_at ?? new Date().toISOString());
+  },
 
-    const providerPresent = Object.hasOwn(runtime, "provider_ref");
-    const providerRef = runtime.provider_ref ?? null;
-    const connection = providerRef?.provider_connection ?? null;
-    const workspacePresent = Object.hasOwn(runtime, "workspace_path");
-    const attemptPresent = Object.hasOwn(runtime, "work_attempt_id");
-    const workplacePresent = Object.hasOwn(runtime, "workplace_liveness");
-    const nativePresent = Object.hasOwn(runtime, "native_liveness");
-    const activityPresent = Object.hasOwn(runtime, "activity");
-    const processIdentityPresent = Boolean(connection && Object.hasOwn(connection, "processIdentity") && connection.processIdentity !== undefined);
-    run(database.prepare(`
-      INSERT INTO runtime_deployments(
-        agent_id, deployment_id, run_id, observed_state,
-        workspace_path_present, workspace_path, work_attempt_id_present, work_attempt_id,
-        provider_ref_present, provider_work_attempt_id, provider_continuation_id,
-        provider_connection_kind, provider_connection_url, provider_server_auth_path,
-        provider_connection_pid,
-        provider_process_identity_present, provider_process_identity, provider_execution_generation_id, custodial_launch_agent_session_id,
-        workplace_liveness_present, workplace_liveness_state, workplace_liveness_observed_at, workplace_liveness_detail,
-        native_liveness_present, native_liveness_state, native_liveness_observed_at, native_liveness_detail,
-        activity_present
-      ) VALUES (${Array.from({ length: 28 }, () => "?").join(", ")})
-    `),
-      identity.agent_id, runtime.deployment_id, runtime.run_id, runtime.observed_state,
-      Number(workspacePresent), workspacePresent ? runtime.workspace_path ?? null : null,
-      Number(attemptPresent), attemptPresent ? runtime.work_attempt_id ?? null : null,
-      Number(providerPresent), providerRef?.work_attempt_id ?? null, providerRef?.provider_continuation_id ?? null,
-      connection?.kind ?? null,
-      connection?.kind === "codex_app_server" || connection?.kind === "opencode_server"
-        ? connection.url
-        : null,
-      connection?.kind === "opencode_server" ? connection.serverAuthPath : null,
-      connection?.pid ?? null, Number(processIdentityPresent), connection?.processIdentity ?? null,
-      providerRef?.execution_generation_id ?? null,
-      providerRef?.custodial_launch_agent_session_id ?? null,
-      Number(workplacePresent), runtime.workplace_liveness?.state ?? null,
-      runtime.workplace_liveness?.observed_at ?? null, runtime.workplace_liveness?.detail ?? null,
-      Number(nativePresent), runtime.native_liveness?.state ?? null,
-      runtime.native_liveness?.observed_at ?? null, runtime.native_liveness?.detail ?? null,
-      Number(activityPresent));
+  replaceActivityEvents(database: DatabaseSync, agentId: string, events: DaemonManifestEntry["activity"]): void {
+    run(database.prepare("DELETE FROM activity_events WHERE agent_id = ?"), agentId);
     const insertActivity = database.prepare("INSERT INTO activity_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    (runtime.activity ?? []).forEach((event, index) => run(insertActivity,
-      identity.agent_id, index, event.observed_at, event.sequence, event.provider, event.kind,
+    (events ?? []).forEach((event, index) => run(insertActivity,
+      agentId, index, event.observed_at, event.sequence, event.provider, event.kind,
       event.method, event.summary, event.status, json(event.payload), Number(event.payload_truncated),
       Number(event.payload_redacted), event.durable_payload_ref));
+  },
 
-    const errorPresent = Object.hasOwn(lifecycle, "last_error");
-    run(database.prepare("INSERT INTO agent_lifecycle_states VALUES (?, ?, ?, ?)"), identity.agent_id, lifecycle.condition, Number(errorPresent), errorPresent ? lifecycle.last_error ?? null : null);
-    const readyPresent = Object.hasOwn(readiness, "ready_reached_at");
-    run(database.prepare("INSERT INTO agent_readiness VALUES (?, ?, ?)"), identity.agent_id, Number(readyPresent), readyPresent ? readiness.ready_reached_at ?? null : null);
-
-    const turnPresent = Object.hasOwn(turnJournal, "turn_control");
-    const turn = turnJournal.turn_control ?? null;
-    const projectedWatermark = turnJournal.last_turn_control_sequence;
-    if (!Number.isSafeInteger(projectedWatermark) || projectedWatermark < 0) {
-      throw new Error("Turn-control sequence watermark must be a non-negative safe integer.");
-    }
-    if (turn && (!Number.isSafeInteger(turn.action_sequence) || turn.action_sequence < 1)) {
-      throw new Error("Persisted turn control requires a positive exact action sequence.");
-    }
-    const existingWatermark = database.prepare("SELECT last_sequence FROM turn_control_sequence_watermarks WHERE agent_id=?")
-      .get(identity.agent_id) as Row | undefined;
-    if (!existingWatermark && projectedWatermark > 0) {
-      run(database.prepare("INSERT INTO turn_control_sequence_watermarks(agent_id,last_sequence) VALUES (?,?)"),
-        identity.agent_id, projectedWatermark);
-    }
-    const durableWatermark = existingWatermark ? Number(existingWatermark.last_sequence) : projectedWatermark;
-    if (turn && turn.action_sequence !== durableWatermark) {
-      throw new Error("Persisted turn control does not exactly match its durable sequence watermark.");
-    }
+  insertProjection(database: DatabaseSync, projection: DaemonManifestDomainProjection, sortOrder: number): void {
+    const projectedWatermark = projection.turn_control_journal.last_turn_control_sequence;
+    const values = encodeProjectionValues(projection, projectedWatermark);
     run(database.prepare(`
-      INSERT INTO turn_control_journals(
-        agent_id, turn_control_present, action_id, action_sequence, turn_work_attempt_id,
-        turn_execution_generation_id, target_room_id, target_source_message_id, target_provider_continuation_id,
-        inbox_item_id, provider_turn_id, has_correction, correction_text, correction_strategy, operator_resolution, status,
-        capability, interrupted, resumed, turn_state, error, recorded_at, updated_at
-      ) VALUES (${Array.from({ length: 23 }, () => "?").join(", ")})
+      INSERT INTO agents(
+        agent_id, sort_order, version, created_by, created_at, display_name, avatar_json,
+        room_id, local_room_id, provider, model, reasoning_effort, charter, permission_profile_id,
+        config_revision, runtime_configuration_revision, provider_launch_policy_json,
+        image_input, live_sharing, desired_state, source_repo_path,
+        deployment_id, run_id, observed_state, workspace_path, work_attempt_id,
+        provider_work_attempt_id, provider_continuation_id, provider_execution_generation_id,
+        provider_connection_json, workplace_liveness_json, native_liveness_json,
+        condition, last_error, ready_reached_at,
+        last_turn_control_sequence, turn_control_inbox_item_id, turn_control_status, turn_control_json,
+        last_worker_binding_json, reconciliation_json, reconciliation_notices_json
+      ) VALUES (${Array.from({ length: 42 }, () => "?").join(", ")})
     `),
-      identity.agent_id, Number(turnPresent), turn?.action_id ?? null, turn?.action_sequence ?? null, turn?.work_attempt_id ?? null,
-      turn?.execution_generation_id ?? null, turn?.target_room_id ?? null, turn?.target_source_message_id ?? null,
-      turn?.target_provider_continuation_id ?? null, turn?.inbox_item_id ?? null, turn?.provider_turn_id ?? null, turn ? Number(turn.has_correction) : null,
-      turn?.correction_text ?? null, turn?.correction_strategy ?? null, turn?.operator_resolution ?? null, turn?.status ?? null, turn?.capability ?? null,
-      turn?.interrupted === null || turn?.interrupted === undefined ? null : Number(turn.interrupted),
-      turn?.resumed === null || turn?.resumed === undefined ? null : Number(turn.resumed),
-      turn?.state ?? null, turn?.error ?? null, turn?.recorded_at ?? null, turn?.updated_at ?? null);
-    const insertStage = database.prepare("INSERT INTO turn_control_stages VALUES (?, ?, ?)");
-    (turn?.stages ?? []).forEach((stage, index) => run(insertStage, identity.agent_id, index, stage));
+      values.agent_id, sortOrder, 1, values.created_by, values.created_at, values.display_name, values.avatar_json,
+      values.room_id, values.local_room_id, values.provider, values.model, values.reasoning_effort, values.charter, values.permission_profile_id,
+      values.config_revision, values.runtime_configuration_revision, values.provider_launch_policy_json,
+      values.image_input, values.live_sharing, values.desired_state, values.source_repo_path,
+      values.deployment_id, values.run_id, values.observed_state, values.workspace_path, values.work_attempt_id,
+      values.provider_work_attempt_id, values.provider_continuation_id, values.provider_execution_generation_id,
+      values.provider_connection_json, values.workplace_liveness_json, values.native_liveness_json,
+      values.condition, values.last_error, values.ready_reached_at,
+      values.last_turn_control_sequence, values.turn_control_inbox_item_id, values.turn_control_status, values.turn_control_json,
+      values.last_worker_binding_json, values.reconciliation_json, values.reconciliation_notices_json);
+    this.replaceActivityEvents(database, values.agent_id, projection.runtime_deployment.activity);
+  },
 
-    const bindingPresent = Object.hasOwn(bindingRecord, "last_worker_binding");
-    const binding = bindingRecord.last_worker_binding ?? null;
-    run(database.prepare("INSERT INTO retained_worker_bindings VALUES (?, ?, ?, ?, ?, ?)"), identity.agent_id, Number(bindingPresent), binding?.agent_session_id ?? null, binding?.work_attempt_id ?? null, binding?.execution_generation_id ?? null, binding?.updated_at ?? null);
+  updateProjection(
+    database: DatabaseSync,
+    projection: DaemonManifestDomainProjection,
+    existingRow: Row,
+    expectedVersion: number,
+    options: { turnControlSequenceOverride?: number; appliedRuntimeRevision?: number } = {},
+  ): void {
+    this.preserveInspectorConfiguration(projection, existingRow);
+    if (options.appliedRuntimeRevision !== undefined) {
+      projection.configuration.runtime_configuration_revision = options.appliedRuntimeRevision;
+    }
+    const durableWatermark = options.turnControlSequenceOverride ?? Number(existingRow.last_turn_control_sequence);
+    const values = encodeProjectionValues(projection, durableWatermark);
+    const updated = database.prepare(`
+      UPDATE agents SET
+        version = version + 1,
+        created_by = ?, created_at = ?, display_name = ?, avatar_json = ?,
+        room_id = ?, local_room_id = ?, provider = ?, model = ?, reasoning_effort = ?,
+        charter = ?, permission_profile_id = ?, config_revision = ?, runtime_configuration_revision = ?,
+        provider_launch_policy_json = ?, image_input = ?, live_sharing = ?,
+        desired_state = ?, source_repo_path = ?,
+        deployment_id = ?, run_id = ?, observed_state = ?, workspace_path = ?, work_attempt_id = ?,
+        provider_work_attempt_id = ?, provider_continuation_id = ?, provider_execution_generation_id = ?,
+        provider_connection_json = ?, workplace_liveness_json = ?, native_liveness_json = ?,
+        condition = ?, last_error = ?, ready_reached_at = ?,
+        last_turn_control_sequence = ?, turn_control_inbox_item_id = ?, turn_control_status = ?, turn_control_json = ?,
+        last_worker_binding_json = ?, reconciliation_json = ?, reconciliation_notices_json = ?
+      WHERE agent_id = ? AND version = ?
+    `).run(
+      values.created_by, values.created_at, values.display_name, values.avatar_json,
+      values.room_id, values.local_room_id, values.provider, values.model, values.reasoning_effort,
+      values.charter, values.permission_profile_id, values.config_revision, values.runtime_configuration_revision,
+      values.provider_launch_policy_json, values.image_input, values.live_sharing,
+      values.desired_state, values.source_repo_path,
+      values.deployment_id, values.run_id, values.observed_state, values.workspace_path, values.work_attempt_id,
+      values.provider_work_attempt_id, values.provider_continuation_id, values.provider_execution_generation_id,
+      values.provider_connection_json, values.workplace_liveness_json, values.native_liveness_json,
+      values.condition, values.last_error, values.ready_reached_at,
+      values.last_turn_control_sequence, values.turn_control_inbox_item_id, values.turn_control_status, values.turn_control_json,
+      values.last_worker_binding_json, values.reconciliation_json, values.reconciliation_notices_json,
+      values.agent_id, expectedVersion,
+    );
+    if (Number(updated.changes) !== 1) {
+      throw new ManifestConflictError(`Agent ${values.agent_id} version does not match expected ${expectedVersion}.`);
+    }
+    this.replaceActivityEvents(database, values.agent_id, projection.runtime_deployment.activity);
+  },
 
-    const reconciliationPresent = Object.hasOwn(reconciliationRecord, "reconciliation");
-    const state = reconciliationRecord.reconciliation;
-    const terminalPresent = Boolean(state?.last_terminal);
-    const terminal = state?.last_terminal;
-    const noticesPresent = Object.hasOwn(reconciliationRecord, "reconciliation_notices");
-    run(database.prepare(`
-      INSERT INTO reconciliation_records(
-        agent_id, reconciliation_present, consecutive_action_failures, last_observed_state,
-        next_restart_at_ms, last_action_sequence, pending_action_id, pending_action_sequence,
-        pending_action_kind, pending_action_recorded_at_ms, last_terminal_present,
-        terminal_ended_at, terminal_exit_code, terminal_signal, terminal_stdio_archive_ref,
-        terminal_stdio_tail, terminal_cause, terminal_actor, terminal_generation,
-        terminal_provider_continuation_id, reconciliation_notices_present
-      ) VALUES (${Array.from({ length: 21 }, () => "?").join(", ")})
-    `),
-      identity.agent_id, Number(reconciliationPresent), state?.consecutive_action_failures ?? null, state?.last_observed_state ?? null,
-      state?.next_restart_at_ms ?? null, state?.last_action_sequence ?? null,
-      state?.pending_action?.id ?? null, state?.pending_action?.sequence ?? null,
-      state?.pending_action?.kind ?? null, state?.pending_action?.recorded_at_ms ?? null,
-      Number(terminalPresent), terminal?.ended_at ?? null, terminal?.exit_code ?? null,
-      terminal?.signal ?? null, terminal?.stdio_archive_ref ?? null, terminal?.stdio_tail ?? null,
-      terminal?.terminal_cause ?? null, terminal?.actor ?? null, terminal?.generation ?? null,
-      terminal?.provider_continuation_id ?? null, Number(noticesPresent));
-    const insertExitTimestamp = database.prepare("INSERT INTO reconciliation_exit_timestamps VALUES (?, ?, ?)");
-    (state?.exit_timestamps_ms ?? []).forEach((timestamp, index) => run(insertExitTimestamp, identity.agent_id, index, timestamp));
-    const completedActionIds = state?.completed_action_ids ?? [];
-    const projectedActionIds = completedActionIds.slice(-MAX_PROJECTED_COMPLETED_ACTION_IDS);
-    const insertAction = database.prepare("INSERT INTO reconciliation_completed_actions VALUES (?, ?, ?)");
-    projectedActionIds.forEach((actionId, index) => run(insertAction, identity.agent_id, index, actionId));
-    const insertNotice = database.prepare(`INSERT INTO reconciliation_notices VALUES (${Array.from({ length: 15 }, () => "?").join(", ")})`);
-    (reconciliationRecord.reconciliation_notices ?? []).forEach((notice, index) => {
-      const noticeTerminal = notice.terminal;
-      run(insertNotice, identity.agent_id, index, notice.at, notice.kind, notice.cause,
-        Number(Boolean(noticeTerminal)), noticeTerminal?.ended_at ?? null, noticeTerminal?.exit_code ?? null,
-        noticeTerminal?.signal ?? null, noticeTerminal?.stdio_archive_ref ?? null,
-        noticeTerminal?.stdio_tail ?? null, noticeTerminal?.terminal_cause ?? null,
-        noticeTerminal?.actor ?? null, noticeTerminal?.generation ?? null,
-        noticeTerminal?.provider_continuation_id ?? null);
+  replaceEntries(
+    database: DatabaseSync,
+    entries: DaemonManifestEntry[],
+    expectedVersions: Readonly<Record<string, number>> | null = null,
+    initializeNewMintStates = true,
+  ): Record<string, number> {
+    const existingRows = new Map(
+      (database.prepare("SELECT * FROM agents ORDER BY sort_order").all() as Row[])
+        .map((row) => [String(row.agent_id), row]),
+    );
+    if (expectedVersions !== null) {
+      for (const [agentId, row] of existingRows) {
+        const expected = expectedVersions[agentId];
+        if (expected !== undefined && Number(row.version) !== expected) {
+          throw new ManifestConflictError(`Agent ${agentId} version ${String(row.version)} does not match expected ${expected}.`);
+        }
+      }
+      for (const [agentId, expected] of Object.entries(expectedVersions)) {
+        if (!existingRows.has(agentId)) {
+          throw new ManifestConflictError(`Agent ${agentId} no longer exists (expected version ${expected}).`);
+        }
+      }
+    }
+    const nextIds = new Set(entries.map((entry) => entry.id));
+    for (const agentId of existingRows.keys()) {
+      if (!nextIds.has(agentId)) {
+        run(database.prepare("DELETE FROM agents WHERE agent_id = ?"), agentId);
+      }
+    }
+    // Park surviving sort_order values above the max so reordering never
+    // collides with UNIQUE(sort_order).
+    const maxOrder = Number((database.prepare("SELECT COALESCE(MAX(sort_order), -1) AS value FROM agents").get() as Row).value);
+    const offset = maxOrder + entries.length + 1;
+    database.prepare("UPDATE agents SET sort_order = sort_order + ?").run(offset);
+
+    const versions: Record<string, number> = {};
+    entries.forEach((entry, index) => {
+      const normalized = canonicalManifestEntry(entry);
+      const projection = projectDaemonManifestEntry(normalized);
+      const existing = existingRows.get(normalized.id);
+      if (existing) {
+        const currentVersion = Number(existing.version);
+        this.updateProjection(database, projection, existing, currentVersion);
+        run(database.prepare("UPDATE agents SET sort_order = ? WHERE agent_id = ?"), index, normalized.id);
+        versions[normalized.id] = currentVersion + 1;
+      } else {
+        this.insertProjection(database, projection, index);
+        if (initializeNewMintStates) this.initializeMintStateIfExplicit(database, normalized);
+        versions[normalized.id] = 1;
+      }
     });
+    return versions;
   },
 
   projectionFromRow(database: DatabaseSync, row: Row, activityMode: "full" | "summary" = "full"): DaemonManifestDomainProjection {
     const agentId = String(row.agent_id);
-    let providerRef: DaemonProviderRuntimeReference | null | undefined;
-    if (bool(row.provider_ref_present)) {
-      if (row.provider_execution_generation_id === null) providerRef = null;
-      else {
-        let providerConnection: DaemonProviderConnection | null = null;
-        if (row.provider_connection_kind === "codex_app_server") providerConnection = { kind: "codex_app_server", url: String(row.provider_connection_url), pid: nullableNumber(row.provider_connection_pid), ...(bool(row.provider_process_identity_present) ? { processIdentity: nullableString(row.provider_process_identity) } : {}) };
-        else if (row.provider_connection_kind === "claude_cli") providerConnection = { kind: "claude_cli", pid: nullableNumber(row.provider_connection_pid), ...(bool(row.provider_process_identity_present) ? { processIdentity: nullableString(row.provider_process_identity) } : {}) };
-        else if (row.provider_connection_kind === "cursor_cli") providerConnection = { kind: "cursor_cli", pid: nullableNumber(row.provider_connection_pid), ...(bool(row.provider_process_identity_present) ? { processIdentity: nullableString(row.provider_process_identity) } : {}) };
-        else if (row.provider_connection_kind === "antigravity_acp") providerConnection = { kind: "antigravity_acp", pid: nullableNumber(row.provider_connection_pid), ...(bool(row.provider_process_identity_present) ? { processIdentity: nullableString(row.provider_process_identity) } : {}) };
-        else if (row.provider_connection_kind === "opencode_server") providerConnection = {
-          kind: "opencode_server",
-          url: String(row.provider_connection_url),
-          pid: nullableNumber(row.provider_connection_pid),
-          ...(bool(row.provider_process_identity_present)
-            ? { processIdentity: nullableString(row.provider_process_identity) }
-            : {}),
-          serverAuthPath: String(row.provider_server_auth_path),
-        };
-        providerRef = {
-          work_attempt_id: String(row.provider_work_attempt_id),
-          provider_continuation_id: String(row.provider_continuation_id),
-          provider_connection: providerConnection,
-          execution_generation_id: String(row.provider_execution_generation_id),
-          ...(row.custodial_launch_agent_session_id != null
-            ? { custodial_launch_agent_session_id: String(row.custodial_launch_agent_session_id) } : {}),
-        };
-      }
+    let providerRef: DaemonProviderRuntimeReference | undefined;
+    if (row.provider_execution_generation_id !== null && row.provider_execution_generation_id !== undefined) {
+      providerRef = {
+        work_attempt_id: String(row.provider_work_attempt_id),
+        provider_continuation_id: String(row.provider_continuation_id),
+        provider_connection: row.provider_connection_json === null || row.provider_connection_json === undefined
+          ? null
+          : parseJson<DaemonProviderConnection>(row.provider_connection_json),
+        execution_generation_id: String(row.provider_execution_generation_id),
+      };
     }
     // Bound the database read itself: state watchers never need raw payloads.
-    // sort_order breaks sequence ties exactly as the stable wire projection does.
-    const activity = bool(row.activity_present)
-      ? (activityMode === "summary"
-        ? (this.reads.get(database, "activitySummary")
-          .all(agentId, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT) as Row[]).reverse()
-        : this.reads.get(database, "activity").all(agentId) as Row[])
-        .map((event) => activityEventFromRow(event, activityMode === "summary" ? null : parseJson(event.payload_json)))
-      : [];
-    const stages = bool(row.turn_control_present) && row.action_id !== null
-      ? (this.reads.get(database, "stages").all(agentId) as Row[]).map((stage) => String(stage.stage)) as DaemonTurnControlEffect["stages"]
-      : [];
-    const reconciliationPresent = bool(row.reconciliation_present);
-    const completedActions = reconciliationPresent
-      ? (this.reads.get(database, "completedActions").all(agentId, MAX_PROJECTED_COMPLETED_ACTION_IDS) as Row[])
-        .map((action) => String(action.action_id)).reverse()
-      : [];
-    const exitTimestamps = reconciliationPresent
-      ? (this.reads.get(database, "exitTimestamps").all(agentId) as Row[]).map((item) => Number(item.timestamp_ms))
-      : [];
-    const notices = bool(row.reconciliation_notices_present)
-      ? (this.reads.get(database, "notices").all(agentId) as Row[]).map((notice): ReconciliationNotice => ({
-        at: String(notice.at), kind: String(notice.kind) as ReconciliationNotice["kind"], cause: String(notice.cause),
-        ...(bool(notice.terminal_present) ? { terminal: this.terminalFromRow(notice, "terminal_") } : {}),
-      }))
-      : [];
+    const activityRows = activityMode === "summary"
+      ? (this.reads.get(database, "activitySummary")
+        .all(agentId, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT) as Row[]).reverse()
+      : this.reads.get(database, "activity").all(agentId) as Row[];
+    const activity = activityRows.map((event) => activityEventFromRow(event, activityMode === "summary" ? null : parseJson(event.payload_json)));
 
     const runtime: DaemonManifestDomainProjection["runtime_deployment"] = {
       agent_id: agentId,
       deployment_id: nullableString(row.deployment_id),
       run_id: nullableString(row.run_id),
       observed_state: String(row.observed_state) as DaemonManifestEntry["observed_state"],
-      ...(bool(row.workspace_path_present) ? { workspace_path: nullableString(row.workspace_path) } : {}),
-      ...(bool(row.work_attempt_id_present) ? { work_attempt_id: nullableString(row.work_attempt_id) } : {}),
-      ...(bool(row.provider_ref_present) ? { provider_ref: providerRef ?? null } : {}),
-      ...(bool(row.workplace_liveness_present) ? { workplace_liveness: { state: String(row.workplace_liveness_state) as "reachable" | "stale" | "unknown", observed_at: nullableString(row.workplace_liveness_observed_at), detail: nullableString(row.workplace_liveness_detail) } } : {}),
-      ...(bool(row.native_liveness_present) ? { native_liveness: { state: String(row.native_liveness_state) as "active" | "idle" | "stale" | "terminal" | "unknown", observed_at: nullableString(row.native_liveness_observed_at), detail: nullableString(row.native_liveness_detail) } } : {}),
-      ...(bool(row.activity_present) ? { activity } : {}),
+      ...(row.workspace_path !== null && row.workspace_path !== undefined ? { workspace_path: String(row.workspace_path) } : {}),
+      ...(row.work_attempt_id !== null && row.work_attempt_id !== undefined ? { work_attempt_id: String(row.work_attempt_id) } : {}),
+      ...(providerRef !== undefined ? { provider_ref: providerRef } : {}),
+      ...(row.workplace_liveness_json !== null && row.workplace_liveness_json !== undefined
+        ? { workplace_liveness: parseJson(row.workplace_liveness_json) }
+        : {}),
+      ...(row.native_liveness_json !== null && row.native_liveness_json !== undefined
+        ? { native_liveness: parseJson(row.native_liveness_json) }
+        : {}),
+      activity,
     };
-    let turn: DaemonTurnControlEffect | null | undefined;
-    if (bool(row.turn_control_present)) turn = row.action_id === null ? null : {
-      action_id: String(row.action_id), action_sequence: Number(row.action_sequence), work_attempt_id: String(row.turn_work_attempt_id),
-      execution_generation_id: String(row.turn_execution_generation_id), has_correction: bool(row.has_correction),
-      ...(nullableString(row.target_room_id) ? { target_room_id: nullableString(row.target_room_id) } : {}),
-      ...(nullableString(row.target_source_message_id) ? { target_source_message_id: nullableString(row.target_source_message_id) } : {}),
-      ...(nullableString(row.target_provider_continuation_id) ? { target_provider_continuation_id: nullableString(row.target_provider_continuation_id) } : {}),
-      ...(nullableString(row.inbox_item_id) ? { inbox_item_id: nullableString(row.inbox_item_id) } : {}),
-      ...(nullableString(row.provider_turn_id) ? { provider_turn_id: nullableString(row.provider_turn_id) } : {}),
-      ...(nullableString(row.correction_text) ? { correction_text: nullableString(row.correction_text) } : {}),
-      ...(nullableString(row.correction_strategy) ? { correction_strategy: nullableString(row.correction_strategy) as "native" | "stop_then_resend" } : {}),
-      ...(nullableString(row.operator_resolution) ? { operator_resolution: nullableString(row.operator_resolution) as "applied" | "not_applied" } : {}),
-      status: String(row.turn_status) as DaemonTurnControlEffect["status"], capability: String(row.capability) as DaemonTurnControlEffect["capability"],
-      interrupted: row.interrupted === null ? null : bool(row.interrupted), resumed: row.resumed === null ? null : bool(row.resumed),
-      state: row.turn_state === null ? null : String(row.turn_state) as "idle" | "working", stages,
-      error: nullableString(row.turn_error), recorded_at: String(row.recorded_at), updated_at: String(row.updated_at),
-    };
-    let reconciliation: ReconciliationState | undefined;
-    if (bool(row.reconciliation_present)) reconciliation = {
-      exit_timestamps_ms: exitTimestamps,
-      consecutive_action_failures: Number(row.consecutive_action_failures),
-      last_observed_state: String(row.last_observed_state) as ReconciliationState["last_observed_state"],
-      next_restart_at_ms: nullableNumber(row.next_restart_at_ms), completed_action_ids: completedActions,
-      last_action_sequence: Number(row.last_action_sequence),
-      pending_action: row.pending_action_id === null ? null : { id: String(row.pending_action_id), sequence: Number(row.pending_action_sequence), kind: String(row.pending_action_kind) as "poke" | "restart_fresh" | "restart_with_resume" | "stop", recorded_at_ms: Number(row.pending_action_recorded_at_ms) },
-      ...(bool(row.last_terminal_present) ? { last_terminal: this.terminalFromRow(row, "terminal_") } : {}),
-    };
+    const turn = row.turn_control_json !== null && row.turn_control_json !== undefined
+      ? parseJson<DaemonTurnControlEffect>(row.turn_control_json)
+      : undefined;
+    const reconciliation = row.reconciliation_json !== null && row.reconciliation_json !== undefined
+      ? parseJson<ReconciliationState>(row.reconciliation_json)
+      : undefined;
+    const notices = row.reconciliation_notices_json !== null && row.reconciliation_notices_json !== undefined
+      ? parseJson<ReconciliationNotice[]>(row.reconciliation_notices_json)
+      : undefined;
+    const lastWorkerBinding = row.last_worker_binding_json !== null && row.last_worker_binding_json !== undefined
+      ? parseJson<DaemonWorkerBindingProjection>(row.last_worker_binding_json)
+      : undefined;
+
     return {
       identity: { agent_id: agentId, created_by: String(row.created_by), created_at: String(row.created_at) },
-      profile: { agent_id: agentId, display_name: String(row.display_name), ...(row.avatar_json ? { avatar: normalizeAgentAvatar(parseJson(row.avatar_json)) } : {}) },
-      membership: { agent_id: agentId, room_id: String(row.room_id), ...(row.local_room_id == null ? {} : { local_room_id: String(row.local_room_id) }) },
-      configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), ...(row.delivery_mode !== "mcp_polling" ? { delivery_mode: String(row.delivery_mode) as DaemonManifestEntry["delivery_mode"] } : {}), ...(row.delivery_cutover_json === null ? {} : { delivery_cutover: parseJson(row.delivery_cutover_json) }), ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
-      launch_intent: { agent_id: agentId, desired_state: String(row.desired_state) as DaemonManifestEntry["desired_state"], ...(bool(row.source_repo_path_present) ? { source_repo_path: nullableString(row.source_repo_path) } : {}) },
+      profile: {
+        agent_id: agentId,
+        display_name: String(row.display_name),
+        ...(row.avatar_json ? { avatar: normalizeAgentAvatar(parseJson(row.avatar_json)) } : {}),
+      },
+      membership: {
+        agent_id: agentId,
+        room_id: String(row.room_id),
+        ...(row.local_room_id == null ? {} : { local_room_id: String(row.local_room_id) }),
+      },
+      configuration: {
+        agent_id: agentId,
+        provider: String(row.provider),
+        model: nullableString(row.model),
+        reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"],
+        charter: String(row.charter),
+        permission_profile_id: nullableString(row.permission_profile_id),
+        config_revision: Number(row.config_revision),
+        runtime_configuration_revision: Number(row.runtime_configuration_revision),
+        delivery_mode: "daemon_inbox",
+        ...(row.provider_launch_policy_json !== null && row.provider_launch_policy_json !== undefined
+          ? { provider_launch_policy: parseJson(row.provider_launch_policy_json) }
+          : {}),
+      },
+      launch_intent: {
+        agent_id: agentId,
+        desired_state: String(row.desired_state) as DaemonManifestEntry["desired_state"],
+        ...(row.source_repo_path !== null && row.source_repo_path !== undefined ? { source_repo_path: String(row.source_repo_path) } : {}),
+      },
       runtime_deployment: runtime,
-      lifecycle: { agent_id: agentId, condition: String(row.condition) as DaemonManifestEntry["condition"], ...(bool(row.last_error_present) ? { last_error: nullableString(row.last_error) } : {}) },
-      readiness: { agent_id: agentId, ...(bool(row.ready_reached_at_present) ? { ready_reached_at: nullableString(row.ready_reached_at) } : {}) },
-      turn_control_journal: { agent_id: agentId, last_turn_control_sequence: Number(row.last_turn_control_sequence), ...(bool(row.turn_control_present) ? { turn_control: turn ?? null } : {}) },
-      retained_worker_binding: { agent_id: agentId, ...(bool(row.last_worker_binding_present) ? { last_worker_binding: row.binding_agent_session_id === null ? null : { agent_session_id: String(row.binding_agent_session_id), work_attempt_id: String(row.binding_work_attempt_id), execution_generation_id: String(row.binding_execution_generation_id), updated_at: String(row.binding_updated_at) } } : {}) },
-      reconciliation: { agent_id: agentId, ...(bool(row.reconciliation_present) ? { reconciliation } : {}), ...(bool(row.reconciliation_notices_present) ? { reconciliation_notices: notices } : {}) },
-    };
-  },
-
-  terminalFromRow(row: Row, prefix: string): ExecutionTerminalPayload {
-    return {
-      ended_at: String(row[`${prefix}ended_at`]), exit_code: nullableNumber(row[`${prefix}exit_code`]),
-      signal: nullableString(row[`${prefix}signal`]), stdio_archive_ref: nullableString(row[`${prefix}stdio_archive_ref`]),
-      stdio_tail: String(row[`${prefix}stdio_tail`]), terminal_cause: String(row[`${prefix}cause`]),
-      actor: String(row[`${prefix}actor`]), generation: Number(row[`${prefix}generation`]),
-      provider_continuation_id: nullableString(row[`${prefix}provider_continuation_id`]),
+      lifecycle: {
+        agent_id: agentId,
+        condition: String(row.condition) as DaemonManifestEntry["condition"],
+        ...(row.last_error !== null && row.last_error !== undefined ? { last_error: String(row.last_error) } : {}),
+      },
+      readiness: {
+        agent_id: agentId,
+        ...(row.ready_reached_at !== null && row.ready_reached_at !== undefined ? { ready_reached_at: String(row.ready_reached_at) } : {}),
+      },
+      turn_control_journal: {
+        agent_id: agentId,
+        last_turn_control_sequence: Number(row.last_turn_control_sequence),
+        ...(turn !== undefined ? { turn_control: turn } : {}),
+      },
+      retained_worker_binding: {
+        agent_id: agentId,
+        ...(lastWorkerBinding !== undefined ? { last_worker_binding: lastWorkerBinding } : {}),
+      },
+      reconciliation: {
+        agent_id: agentId,
+        ...(reconciliation !== undefined ? { reconciliation } : {}),
+        ...(notices !== undefined ? { reconciliation_notices: notices } : {}),
+      },
     };
   },
 });

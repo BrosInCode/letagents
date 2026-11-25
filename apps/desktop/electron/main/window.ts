@@ -9,7 +9,8 @@ import { installInlineHtmlDemoHost } from "./attachments/html-demo-inline.js";
 import { installRoomPageHost } from "./pages/page-host.js";
 import { classifyLinkNavigation } from "./link-routing.js";
 import { openExternalWebUrl } from "./external-url.js";
-import { devServerUrl, electronMainDir, rendererDistPath } from "./paths.js";
+import { devServerUrl, rendererDistPath } from "#provider-runtime/paths.js";
+import { electronMainDir } from "./electron-main-dir.js";
 import { supervisedAgentsSupported } from "./platform-capabilities.js";
 import { windowsSmokeNotificationSettled } from "./windows-app-identity.js";
 

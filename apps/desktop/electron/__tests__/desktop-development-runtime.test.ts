@@ -33,20 +33,37 @@ test("desktop development builds every runtime before starting its watchers and 
   );
   assert.equal(
     desktopManifest.scripts?.dev,
-    "npm run build:dev && concurrently -k \"npm:dev:renderer\" \"npm:watch:mcp\" \"npm:watch:electron\" \"npm:watch:daemon\" \"npm:serve:electron\"",
+    "npm run build:dev && concurrently -k \"npm:dev:renderer\" \"npm:watch:mcp\" \"npm:watch:daemon-contract\" \"npm:watch:provider-runtime\" \"npm:watch:electron\" \"npm:watch:daemon\" \"npm:serve:electron\"",
   );
   assert.equal(
     desktopManifest.scripts?.["build:dev"],
     "npm run build:mcp && npm run build:electron && npm run build:daemon",
   );
   assert.equal(desktopManifest.scripts?.["build:mcp"], "npm --prefix ../.. run build");
+  // Electron and the daemon import the daemon contract and provider runtime
+  // from their build outputs, so each of their builds compiles both first and
+  // development watches both.
+  for (const script of ["build:electron", "build:daemon"]) {
+    assert.match(
+      desktopManifest.scripts?.[script] ?? "",
+      /^npm run build:daemon-contract && npm run build:provider-runtime && /,
+    );
+  }
+  assert.equal(
+    desktopManifest.scripts?.["watch:daemon-contract"],
+    "tsc -p tsconfig.daemon-contract.json --watch --preserveWatchOutput",
+  );
+  assert.equal(
+    desktopManifest.scripts?.["watch:provider-runtime"],
+    "tsc -p tsconfig.provider-runtime.json --watch --preserveWatchOutput",
+  );
   assert.equal(
     desktopManifest.scripts?.["watch:mcp"],
     "tsc -p ../../tsconfig.json --watch --preserveWatchOutput",
   );
   assert.equal(
     desktopManifest.scripts?.["serve:electron"],
-    "wait-on tcp:5174 ../../dist/mcp/server.js dist-electron/main.js dist-daemon/main.js && cross-env LETAGENTS_DESKTOP_DEV_SERVER_URL=http://127.0.0.1:5174 electron .",
+    "wait-on tcp:5174 ../../dist/mcp/server.js dist-daemon-contract/index.js dist-provider-runtime/provider-probe-cache.js dist-electron/main.js dist-daemon/main.js && cross-env LETAGENTS_DESKTOP_DEV_SERVER_URL=http://127.0.0.1:5174 electron .",
   );
   assert.equal(
     desktopManifest.scripts?.["test:electron"],

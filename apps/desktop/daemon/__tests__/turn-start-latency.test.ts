@@ -546,7 +546,7 @@ test("the daemon entrypoint writes start-up samples to their own file, created o
         launch.markProcessReturned();
         launch.complete("fresh");` : ""}
       `;
-      const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { stdio: "ignore", timeout: 10_000 });
+      const child = spawnSync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", script], { stdio: "ignore", timeout: 10_000 });
       assert.ifError(child.error);
       assert.equal(child.status, 0);
       assert.equal(existsSync(turnPath), sample, sample ? "the first sample creates the file" : "no sample, no file");

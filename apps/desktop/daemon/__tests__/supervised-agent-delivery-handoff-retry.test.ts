@@ -749,7 +749,7 @@ test("daemon socket retry accepts only the exact blocked binding and reports com
     const completionHints: string[] = [];
     const settled = internals.roomWorkPublisher.settled.bind(internals.roomWorkPublisher);
     t.mock.method(internals.roomWorkPublisher, "settled", (agentId: string) => {
-      const row = observed.prepare("SELECT state FROM supervised_agent_inbox WHERE agent_id=? AND source_message_id='msg_1'").get(agentId);
+      const row = observed.prepare("SELECT state FROM inbox_items WHERE agent_id=? AND source_message_id='msg_1'").get(agentId);
       if (row?.state === "acknowledged_no_reply") completionHints.push(agentId);
       settled(agentId);
     });

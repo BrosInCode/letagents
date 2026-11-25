@@ -33,14 +33,13 @@ import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry } from "../types.js";
 import type { ProviderActionHandle, ProviderActionPort, ProviderActionStreamEvent } from "../provider-action-port.js";
-import { CodexProviderAdapter } from "../../electron/main/agents/codex-provider-adapter.js";
-import { CodexRpcClient } from "../../electron/main/agents/codex-rpc-client.js";
+import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { CodexRpcClient } from "#provider-runtime/agents/codex-rpc-client.js";
 import type { NativeExecutionFact, NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/host-approvals.js";
 import type { CodexPermissionFileChange, ProviderPermissionObservation, ProviderPermissionRequest } from "../../shared/provider-permissions.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 import { WAIT_SCALE } from "./helpers/daemon-fixture.js";
-import { restorePreAntigravityProviderFixture } from "./helpers/pre-antigravity-fixture.js";
 
 // Windows reads when a process started through the process-tree helper; the test run says where the built one is.
 if (WINDOWS_TEST_HELPER && !process.env.LETAGENTS_PROCESS_TREE_HELPER) process.env.LETAGENTS_PROCESS_TREE_HELPER = WINDOWS_TEST_HELPER;
@@ -76,7 +75,7 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" | "ant
     entry.source_repo_path = workspace;
   }
   if (roomWorkspace) entry.workspace_path = workspace;
-  await store.write(0, [entry]);
+  await store.write([entry]);
   const db = new DatabaseSync(path); db.exec("PRAGMA foreign_keys=ON");
   db.prepare(`INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,
     workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
@@ -185,12 +184,214 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" | "ant
     get permissionChanges() { return permissionChanges; },
     get broker() { return broker; },
     reinstall() { broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation"); emit(); },
+    /** A new broker whose permission observation is the given one, for example a real router's. */
+    observeThrough(observe: ProviderActionPort["observePermissions"]) {
+      (provider as { observePermissions: unknown }).observePermissions = observe;
+      broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation");
+    },
+    /** A new broker whose permission operations are the given ones, for example a real router's. */
+    permissionsThrough(port: Pick<ProviderActionPort, "observePermissions" | "correlatePermissionTurn" | "replyPermission">) {
+      Object.assign(provider, port);
+      broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation");
+    },
     async close() { broker.close(); db.close(); await inbox.close(); await store.close(); await removeTestDirectory(root); } };
 }
 
 function idleInstallation(f: Awaited<ReturnType<typeof fixture>>) {
   return { entryId: "agent", handle: f.handle, executionGenerationId: "generation",
     providerConnection: f.handle.providerConnection! };
+}
+
+test("through the real router: a known permission event with unreadable fields invalidates a reserved idle lane", async () => {
+  const f = await fixture();
+  try {
+    let native!: Parameters<NonNullable<NativeProviderAdapter["observePermissions"]>>[1];
+    const adapter = { id: "codex",
+      capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: true }),
+      spawn: async (request: { workAttemptId: string }) => ({ workAttemptId: request.workAttemptId, pid: 4311, providerContinuationId: "continuation",
+        providerConnection: f.handle.providerConnection, observedState: () => "idle" }),
+      onExit: () => () => undefined, onStream: () => () => undefined,
+      observePermissions: async (_handle: unknown, listener: typeof native) => { native = listener; } } as unknown as NativeProviderAdapter;
+    const router = new ProviderActionPortRouter({ codex: async () => adapter });
+    const routed = await router.spawn({ provider: "codex", workAttemptId: "routed", roomId: "room", cwd: f.workspace, launchPolicy: {} });
+    f.observeThrough((_handle, listener, signal) => router.observePermissions(routed, listener, signal));
+    for (let turn = 0; turn < 50 && !native; turn += 1) await new Promise(resolve => setImmediate(resolve));
+    assert.ok(native, "the broker's observation reached the adapter through the router");
+    const exact = idleInstallation(f);
+    const healthy = { type: "snapshot" as const, connectionId: "connection", requests: [] };
+    const malformed = [{ type: "snapshot", connectionId: "connection", requests: null }, { type: "snapshot", connectionId: "connection" },
+      { type: "snapshot", connectionId: "connection", requests: [null] }, { type: "request_closed", request: null }, { type: "made_up" }];
+    for (const event of malformed) {
+      native(healthy);
+      const reservation = f.broker.reserveIdle(exact);
+      assert.ok(reservation, `a healthy empty lane before ${JSON.stringify(event)}`);
+      reservation.assertCurrent();
+      const changes = f.permissionChanges;
+      native(event as never);
+      assert.throws(reservation.assertCurrent, /permissions changed/, JSON.stringify(event));
+      assert.equal(f.permissionChanges, changes + 1, `one change notice for ${JSON.stringify(event)}`);
+      assert.equal(f.broker.reserveIdle(exact), null);
+      reservation.release();
+    }
+  } finally { await f.close(); }
+});
+
+/** The native connection ids of the first and the second snapshot for each change of the native connection. */
+const connectionChanges: Record<string, [string | undefined, string | undefined]> = {
+  "changed connection id": ["socket-1", "socket-2"],
+  "connection id added": [undefined, "socket-1"],
+  "connection id removed": ["socket-1", undefined],
+};
+const snapshotIds = (gap: unknown): [string | undefined, string | undefined] =>
+  typeof gap === "string" && gap in connectionChanges ? connectionChanges[gap]! : ["socket-1", "socket-1"];
+
+test("through the real router: a request that is listed again after the lane was lost can be answered", async () => {
+  const gaps: Record<string, unknown[]> = {
+    "no gap": [], degraded: [{ type: "degraded" }], unavailable: [{ type: "unavailable" }], malformed: [{ type: "snapshot", requests: null }],
+    "changed connection id": [], "connection id added": [], "connection id removed": [],
+  };
+  for (const providerId of ["open-model", "claude-code"] as const) {
+    for (const [gap, events] of Object.entries(gaps)) {
+      const label = `${providerId}, ${gap}`;
+      const f = await fixture(providerId);
+      try {
+        let native!: (event: unknown) => void;
+        let writes = 0;
+        const adapter = { id: providerId,
+          capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: true }),
+          spawn: async (request: { workAttemptId: string }) => ({ workAttemptId: request.workAttemptId, pid: 4311, providerContinuationId: "continuation",
+            providerConnection: f.handle.providerConnection, observedState: () => "working" }),
+          onExit: () => () => undefined, onStream: () => () => undefined,
+          observePermissions: async (_handle: unknown, listener: typeof native) => { native = listener; },
+          correlatePermissionTurn: async () => ({ outcome: "correlated", providerContinuationId: "continuation", providerTurnId: f.state.turnId }),
+          replyPermission: async (_handle: unknown, _request: unknown, _reply: unknown, options: { beforeNativeDispatch(): Promise<void>; assertNativeDispatch?(): void }) => {
+            await options.beforeNativeDispatch();
+            options.assertNativeDispatch?.();
+            writes += 1;
+            return providerId === "open-model" ? { outcome: "processed", nativeScope: "request" } : { outcome: "sent", scope: "request" };
+          } } as unknown as NativeProviderAdapter;
+        const router = new ProviderActionPortRouter({ [providerId]: async () => adapter });
+        const routed = await router.spawn({ provider: providerId, workAttemptId: "routed", roomId: "room", cwd: f.workspace, launchPolicy: {} });
+        f.permissionsThrough({
+          observePermissions: (_handle, listener, signal) => router.observePermissions(routed, listener, signal),
+          correlatePermissionTurn: (_handle, request, options) => router.correlatePermissionTurn(routed, request, options),
+          replyPermission: (_handle, request, reply, options) => router.replyPermission(routed, request, reply, options),
+        });
+        for (let turn = 0; turn < 50 && !native; turn += 1) await new Promise(resolve => setImmediate(resolve));
+        assert.ok(native, label);
+        const snapshot = (connectionId: string | undefined) => ({ type: "snapshot",
+          ...(connectionId === undefined ? {} : { connectionId }), requests: [structuredClone(f.native.native)] });
+        const [first, second] = snapshotIds(gap);
+        native(snapshot(first));
+        for (const event of events) native(event);
+        // The provider lists the same request again: an equal value in a new object.
+        native(snapshot(second));
+        const [candidate] = await f.broker.list("room");
+        assert.ok(candidate?.reference, `${label}: the request is listed as pending`);
+        const result = await f.broker.decide(decision(candidate));
+        assert.equal(writes, 1, `${label}: one native write`);
+        assert.equal(result, providerId === "open-model" ? "resolved" : "decision_sent", label);
+      } finally { await f.close(); }
+    }
+  }
+});
+
+/** A real router over one controlled adapter that counts its native permission writes for each native process. */
+async function routedPermissions(f: Awaited<ReturnType<typeof fixture>>, providerId: "open-model" | "claude-code") {
+  const listeners = new Map<number, (event: unknown) => void>();
+  const writes = new Map<number, number>();
+  let pid = 4311;
+  const adapter = { id: providerId,
+    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: true }),
+    spawn: async (request: { workAttemptId: string }) => {
+      const own = pid++;
+      return { workAttemptId: request.workAttemptId, pid: own, providerContinuationId: `continuation-${own}`,
+        providerConnection: { ...f.handle.providerConnection, processIdentity: `native-birth-${own}` }, observedState: () => "working" };
+    },
+    onExit: () => () => undefined, onStream: () => () => undefined,
+    observePermissions: async (handle: { pid: number }, listener: (event: unknown) => void) => { listeners.set(handle.pid, listener); },
+    replyPermission: async (handle: { pid: number }, _request: unknown, _reply: unknown, dispatch: { beforeNativeDispatch(): Promise<void>; assertNativeDispatch?(): void }) => {
+      await dispatch.beforeNativeDispatch();
+      dispatch.assertNativeDispatch?.();
+      writes.set(handle.pid, (writes.get(handle.pid) ?? 0) + 1);
+      return providerId === "open-model" ? { outcome: "processed", nativeScope: "request" } : { outcome: "sent", scope: "request" };
+    } } as unknown as NativeProviderAdapter;
+  const router = new ProviderActionPortRouter({ [providerId]: async () => adapter });
+  const observe = async (workAttemptId: string) => {
+    const handle = await router.spawn({ provider: providerId, workAttemptId, roomId: "room", cwd: f.workspace, launchPolicy: {} });
+    const seen: ProviderPermissionObservation[] = [];
+    await router.observePermissions(handle, (event) => seen.push(event), new AbortController().signal);
+    const native = listeners.get(handle.pid!)!;
+    assert.ok(native, "the observation reached the adapter");
+    return { handle, native, writes: () => writes.get(handle.pid!) ?? 0,
+      /** The provider lists the fixture's request: an equal value in a new object. The daemon's object for it is returned. */
+      list(connectionId: string | null = "socket-1") {
+        native({ type: "snapshot", ...(connectionId === null ? {} : { connectionId }), requests: [structuredClone(f.native.native)] });
+        return (seen.at(-1) as Extract<ProviderPermissionObservation, { type: "snapshot" }>).requests[0]!;
+      } };
+  };
+  const options = { beforeNativeDispatch: async () => undefined, assertNativeDispatch: () => undefined };
+  const refused = (error: Error & { outcome?: string }) => error.outcome === "not_dispatched";
+  return { router, observe, options, refused };
+}
+
+for (const providerId of ["open-model", "claude-code"] as const) {
+  test(`through the real router: a request of an ended authority is refused and the request of the new authority is answered (${providerId})`, async () => {
+    for (const gap of [{ type: "unavailable" }, { type: "degraded" }, { type: "snapshot", requests: null },
+      "changed connection id", "connection id added", "connection id removed"] as const) {
+      const f = await fixture(providerId);
+      try {
+        const { router, observe, options, refused } = await routedPermissions(f, providerId);
+        const lane = await observe("routed");
+        const [first, second] = snapshotIds(gap);
+        const held = lane.list(first ?? null);
+        if (typeof gap !== "string") {
+          lane.native(gap);
+          await assert.rejects(router.replyPermission(lane.handle, held, "once", options), refused, "no answer while the lane is lost");
+        }
+        const fresh = lane.list(second ?? null);
+        assert.notEqual(fresh, held);
+        await assert.rejects(router.replyPermission(lane.handle, held, "once", options), refused, `${JSON.stringify(gap)}: the older object stays refused`);
+        assert.equal(lane.writes(), 0);
+        await router.replyPermission(lane.handle, fresh, "once", options);
+        assert.equal(lane.writes(), 1, JSON.stringify(gap));
+      } finally { await f.close(); }
+    }
+  });
+
+  test(`through the real router: a request of one runtime is not answered on another runtime (${providerId})`, async () => {
+    const f = await fixture(providerId);
+    try {
+      const { router, observe, options, refused } = await routedPermissions(f, providerId);
+      const a = await observe("runtime-a");
+      const b = await observe("runtime-b");
+      const fromA = a.list();
+      const fromB = b.list();
+      assert.deepEqual(fromA, fromB, "the two runtimes report equal requests");
+      await assert.rejects(router.replyPermission(b.handle, fromA, "once", options), refused);
+      await assert.rejects(router.replyPermission(a.handle, fromB, "once", options), refused);
+      assert.deepEqual([a.writes(), b.writes()], [0, 0]);
+      await router.replyPermission(b.handle, fromB, "once", options);
+      await router.replyPermission(a.handle, fromA, "once", options);
+      assert.deepEqual([a.writes(), b.writes()], [1, 1]);
+    } finally { await f.close(); }
+  });
+
+  test(`through the real router: a request that a snapshot removed is not answered when an equal request comes later (${providerId})`, async () => {
+    const f = await fixture(providerId);
+    try {
+      const { router, observe, options, refused } = await routedPermissions(f, providerId);
+      const lane = await observe("routed");
+      const removed = lane.list();
+      lane.native({ type: "snapshot", connectionId: "socket-1", requests: [] });
+      await assert.rejects(router.replyPermission(lane.handle, removed, "once", options), refused);
+      const reused = lane.list();
+      await assert.rejects(router.replyPermission(lane.handle, removed, "once", options), refused);
+      assert.equal(lane.writes(), 0);
+      await router.replyPermission(lane.handle, reused, "once", options);
+      assert.equal(lane.writes(), 1);
+    } finally { await f.close(); }
+  });
 }
 
 test("idle permission reservation requires a healthy empty exact lane and cannot revive after activity", async () => {
@@ -356,25 +557,16 @@ test("request closure needs the dispatched native object and never acknowledges 
   } finally { await f.close(); }
 });
 
-test("v41 approval history upgrades without inventing a closure or changing a decision", async () => {
+test("damaged approval closure storage fails closed on reopen", async () => {
   const f = await fixture();
   try {
     const [candidate] = await f.broker.list("room");
     const selected = decision(candidate!);
     await f.broker.decide(selected);
-    const before = f.db.prepare("SELECT * FROM execution_approval_decisions").all();
     await f.store.close();
-    restorePreAntigravityProviderFixture(f.db);
-    f.db.exec("DROP TABLE execution_approval_request_closures; PRAGMA user_version=41; UPDATE manifest_metadata SET schema_version=41");
-    const upgraded = new ManifestStore(f.path);
-    try {
-      assert.equal((await upgraded.getExecutionApproval(selected.expected))!.request.closedAtMs, null);
-      assert.deepEqual(f.db.prepare("SELECT * FROM execution_approval_decisions").all(), before);
-      assert.equal(f.db.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
-    } finally { await upgraded.close(); }
     f.db.exec("DROP TABLE execution_approval_request_closures");
     const damaged = new ManifestStore(f.path);
-    try { await assert.rejects(damaged.load(), /closure storage is missing or invalid/); }
+    try { await assert.rejects(damaged.load(), /schema|closure|mismatch/i); }
     finally { await damaged.close(); }
   } finally { await f.close(); }
 });
@@ -415,7 +607,7 @@ test("host approvals use exact operational turns without capture and commit sele
   for (const provider of ["codex", "open-model", "claude-code", "antigravity"] as const) {
     const f = await fixture(provider);
     try {
-      assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_turns").get()!.n, 0);
+      assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM runs").get()!.n, 0);
       const [candidate] = await f.broker.list("room"); assert.ok(candidate?.reference, "operational turn must admit an approval without capture");
       assert.equal(candidate.status, "pending");
       assert.equal(candidate.presentation.title, provider === "claude-code" || provider === "antigravity" ? "Run a tool" : "Run a command");
@@ -430,7 +622,7 @@ test("host approvals use exact operational turns without capture and commit sele
         assert.match(candidate.presentation.details, /\\u001b/); assert.match(candidate.presentation.details, /\\u202e/);
         assert.doesNotMatch(candidate.presentation.details, /[\u001b\u202e]/);
       }
-      assert.equal(f.db.prepare("SELECT state FROM execution_turns").get()!.state, "none");
+      assert.equal(f.db.prepare("SELECT state FROM runs").get()!.state, "none");
       assert.equal(await f.broker.decide(decision(candidate, { decision: provider === "codex" ? "allow_once" : "deny" })), provider !== "open-model" ? "decision_sent" : "resolved");
       assert.deepEqual(f.order, ["decision_committed", "dispatch_committed", "native_write"]);
       assert.deepEqual(f.sends, [provider === "codex" ? "once" : "reject"]);
@@ -489,6 +681,27 @@ test("an Antigravity request closes on its own process death witness and on no o
     f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'").run(JSON.stringify(terminal));
     assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 1);
     assert.equal((await f.store.getExecutionApproval(expected))!.request.closedAtMs, now + 30);
+  } finally { await f.close(); }
+});
+
+test("a Codex command that lists cancel and not decline is presented as a deny that also stops the turn", async () => {
+  const f = await fixture();
+  try {
+    assert.equal(f.native.provider, "codex");
+    const cases: Array<[unknown, string]> = [
+      [["accept", "acceptWithExecpolicyAmendment", "cancel"], "request_and_turn"],
+      [["accept", "decline", "cancel"], "request"],
+      [["accept"], "request"],
+      [undefined, "request"],
+    ];
+    for (const [availableDecisions, denyScope] of cases) {
+      const params = { ...(f.native.native.params as Record<string, unknown>), availableDecisions };
+      if (availableDecisions === undefined) delete params.availableDecisions;
+      f.emit([{ provider: "codex", native: { ...f.native.native, params } }]);
+      const [candidate] = await f.broker.list("room"); assert.ok(candidate?.reference);
+      assert.equal(candidate.status, "pending");
+      assert.equal(candidate.presentation.denyScope, denyScope, JSON.stringify(availableDecisions));
+    }
   } finally { await f.close(); }
 });
 
@@ -686,9 +899,9 @@ test("host approval rejects uncorrelated turns, stale presentations and replaced
     for (const change of [{ projectionSha256: "a".repeat(64) }, { expected: { ...selected.expected, nativeRequestId: "1" } },
       { expected: { ...selected.expected, providerTurnId: "other" } }]) await assert.rejects(f.broker.decide({ ...selected, ...change }));
     f.state.owned = false; await assert.rejects(f.broker.decide(selected)); f.state.owned = true;
-    f.db.exec("UPDATE runtime_deployments SET provider_process_identity='other-birth'");
+    f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'").run(JSON.stringify({ ...f.handle.providerConnection!, processIdentity: "other-birth" }));
     await assert.rejects(f.broker.decide(selected));
-    f.db.exec("UPDATE runtime_deployments SET provider_process_identity='native-birth'");
+    f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'").run(JSON.stringify({ ...f.handle.providerConnection!, processIdentity: "native-birth" }));
     assert.equal((await f.broker.list("room"))[0]!.status, "pending");
     assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions").get()!.n, 0);
     assert.deepEqual(f.sends, []);
@@ -838,11 +1051,11 @@ for (const [provider, name] of [["claude-code", "Claude"], ["antigravity", "Anti
 // request. The runtime keeps the mode it started with until it restarts, so
 // the request is still the live runtime's request and still the owner's to answer.
 async function saveNewPermissionMode(f: Awaited<ReturnType<typeof fixture>>) {
-  const { generation } = await f.store.load();
-  const saved = await f.store.updateAgentConfiguration(generation, { agentId: "agent", expectedRevision: 1, model: null,
+  const { versions } = await f.store.load();
+  const saved = await f.store.updateAgentConfiguration(versions["agent"]!, { agentId: "agent", expectedRevision: 1, model: null,
     reasoningEffort: null, charter: "Help", permissionProfileId: "auto_review", providerLaunchPolicy: {} });
   assert.equal(saved.outcome, "updated");
-  assert.deepEqual({ ...f.db.prepare("SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id='agent'").get() },
+  assert.deepEqual({ ...f.db.prepare("SELECT config_revision,runtime_configuration_revision FROM agents WHERE agent_id='agent'").get() },
     { config_revision: 2, runtime_configuration_revision: 1 }, "a save moves only the saved revision");
 }
 
@@ -880,7 +1093,7 @@ test("once a restart has applied the saved permission mode, the old runtime's re
     const [candidate] = await f.broker.list("room");
     await saveNewPermissionMode(f);
     // The restart: a new native birth that runs the saved configuration.
-    f.db.exec("UPDATE agent_configurations SET runtime_configuration_revision=2");
+    f.db.exec("UPDATE agents SET runtime_configuration_revision=2");
     retireRuntime(f, "replaced");
     const outcome = await f.broker.decide(decision(candidate!)).catch(() => "rejected");
     assert.ok(outcome === "rejected" || outcome === "unavailable", `answered the old runtime's request: ${outcome}`);
@@ -920,9 +1133,9 @@ test("a permission-mode save does not let a request be answered for another runt
     await assert.rejects(f.store.validateExecutionApprovalAuthority(seen.expected, { ...seen.authority, ownerAnswer: true } as typeof seen.authority),
       error => error instanceof ApprovalJournalError && error.code === "invalid_input", "a caller cannot assert the owner answered");
     await rejects({ ...seen.authority, configurationRevision: 2 }); // Authority from a runtime that never started.
-    f.db.exec("UPDATE agent_configurations SET runtime_configuration_revision=2 WHERE agent_id='agent'");
+    f.db.exec("UPDATE agents SET runtime_configuration_revision=2 WHERE agent_id='agent'");
     await rejects(seen.authority); // A runtime already replaced at the saved revision.
-    f.db.exec("UPDATE agent_configurations SET config_revision=1 WHERE agent_id='agent'");
+    f.db.exec("UPDATE agents SET config_revision=1 WHERE agent_id='agent'");
     await rejects({ ...seen.authority, configurationRevision: 2 }); // A saved revision can never trail the applied one.
   } finally { await f.close(); }
 });
@@ -948,11 +1161,11 @@ for (const chooser of ["owner", "automatic review", "saved rule"] as const) {
         projectionSha256: selection.projectionSha256, atMs: now + 20 };
       const answers = chooser === "owner"; // Only a person's own Allow once or Deny.
 
-      f.db.exec("UPDATE agent_configurations SET config_revision=2");
+      f.db.exec("UPDATE agents SET config_revision=2");
       if (answers) await select(); else await refused(select());
-      f.db.exec("UPDATE agent_configurations SET config_revision=1");
+      f.db.exec("UPDATE agents SET config_revision=1");
       if (!answers) await select(); // Recorded while the saved and applied settings agree.
-      f.db.exec("UPDATE agent_configurations SET config_revision=2");
+      f.db.exec("UPDATE agents SET config_revision=2");
       // The same stored decision, read again after the save: retry validation, dispatch and the final send.
       const stillValid = f.store.validateExecutionApprovalAuthority(selection.expected, authority);
       if (answers) {
@@ -978,7 +1191,7 @@ test("a saved rule's recorded choice that was not sent is not retried by the own
     f.state.failBefore = false;
     assert.equal(f.db.prepare("SELECT count(*) AS n FROM host_tool_rule_decisions").get()!.n, 1);
     // A saved edit that leaves the card alone.
-    f.db.exec("UPDATE agent_configurations SET config_revision=2");
+    f.db.exec("UPDATE agents SET config_revision=2");
     const [card] = await f.broker.list("room");
     assert.notEqual(card?.status, "decision_recorded", "the rule's decision is not offered as the owner's to retry");
     assert.equal(card?.detail, "The decision was recorded but not sent.");
@@ -1064,7 +1277,7 @@ test("an owner's recorded choice that was not sent stays retryable while a saved
     await assert.rejects(f.broker.decide(decision(candidate!)), /recorded but could not be sent/);
     f.state.failBefore = false;
     // A saved edit that leaves the card's presentation alone: the same choice can be retried.
-    f.db.exec("UPDATE agent_configurations SET config_revision=2");
+    f.db.exec("UPDATE agents SET config_revision=2");
     const [again] = await f.broker.list("room");
     assert.equal(again?.status, "decision_recorded", again?.detail ?? "");
     assert.equal(await f.broker.decide(decision(again!)), "decision_sent");
@@ -1127,8 +1340,8 @@ test("host approval final synchronous native fence catches state changes after a
   for (const mutate of [
     (f: Awaited<ReturnType<typeof fixture>>) => f.db.exec("UPDATE agent_launch_intents SET desired_state='paused'"),
     // A runtime replaced at a newer configuration is another runtime. A save alone is not (see the permission-mode tests).
-    (f: Awaited<ReturnType<typeof fixture>>) => f.db.exec("UPDATE agent_configurations SET config_revision=2,runtime_configuration_revision=2"),
-    (f: Awaited<ReturnType<typeof fixture>>) => f.db.exec("UPDATE supervised_agent_inbox SET outcome='{}'"),
+    (f: Awaited<ReturnType<typeof fixture>>) => f.db.exec("UPDATE agents SET config_revision=2,runtime_configuration_revision=2"),
+    (f: Awaited<ReturnType<typeof fixture>>) => f.db.exec("UPDATE inbox_items SET outcome='{}'"),
     (f: Awaited<ReturnType<typeof fixture>>) => { f.state.current = false; },
   ]) {
     const f = await fixture();
@@ -1651,8 +1864,7 @@ for (const roomWorkspace of [false, true]) for (const stage of ["before-intent",
 test("turning the owner's own setup on pauses an Always-allowed tool, turning it off again restores it, and the record of the change does neither", async () => {
   const f = await savedRuleFixture("codex");
   const native = { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } };
-  const store = (policy: Record<string, unknown>) => f.db.prepare(`UPDATE agent_configurations SET provider_launch_policy_present=1,
-    provider_launch_policy_undefined=0, provider_launch_policy_json=? WHERE agent_id='agent'`).run(JSON.stringify(policy));
+  const store = (policy: Record<string, unknown>) => f.db.prepare(`UPDATE agents SET provider_launch_policy_json=? WHERE agent_id='agent'`).run(JSON.stringify(policy));
   let serial = 0;
   /** Whether the next request of the same tool is answered from the saved rule. */
   const answeredByRule = async () => {
@@ -1936,33 +2148,19 @@ test(`${name} closure does not discard later exact success evidence`, async () =
 });
 
 
-test("v44 migration preserves Codex closure receipts and refuses a damaged v45 schema", async () => {
+test("tampered approval closure constraints fail closed on reopen", async () => {
   const f = await fixture();
   try {
     const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
     await f.broker.decide(selected); f.closed();
     await waitForClosure(f, selected.expected);
-    const before = f.db.prepare("SELECT * FROM execution_approval_request_closures").all();
     await f.store.close();
-    restorePreAntigravityProviderFixture(f.db);
     const sql = String(f.db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get()!.sql)
       .replace("decision_id TEXT REFERENCES", "decision_id TEXT NOT NULL REFERENCES")
       .replace("dispatch_id TEXT,", "dispatch_id TEXT NOT NULL,");
-    f.db.exec(`CREATE TEMP TABLE saved_closures AS SELECT * FROM execution_approval_request_closures;
-      DROP TABLE execution_approval_request_closures; ${sql};
-      INSERT INTO execution_approval_request_closures SELECT * FROM saved_closures; DROP TABLE saved_closures;
-      PRAGMA user_version=44; UPDATE manifest_metadata SET schema_version=44`);
-    const upgraded = new ManifestStore(f.path);
-    try {
-      assert.equal((await upgraded.getExecutionApproval(selected.expected))!.request.closedAtMs, now + 10);
-      assert.deepEqual(f.db.prepare("SELECT * FROM execution_approval_request_closures").all(), before);
-      assert.equal(f.db.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
-      assert.deepEqual(f.db.prepare("PRAGMA foreign_key_check").all(), []);
-    } finally { await upgraded.close(); }
-    // A current database must not silently recreate even the old valid schema.
     f.db.exec(`DROP TABLE execution_approval_request_closures; ${sql}`);
     const damaged = new ManifestStore(f.path);
-    try { await assert.rejects(damaged.load(), /closure storage is missing or invalid/); }
+    try { await assert.rejects(damaged.load(), /schema|closure|mismatch/i); }
     finally { await damaged.close(); }
   } finally { await f.close(); }
 });
@@ -1993,21 +2191,16 @@ for (const wrong of ["turn", "tool", "retired", "missing_snapshot", "other_provi
 function terminalTurnWitness(f: Awaited<ReturnType<typeof fixture>>, expected: HostApprovalReference,
   variant = "completed") {
   const turnId = variant === "foreign_turn" ? "other-turn" : expected.turnId;
-  if (variant === "foreign_turn") f.db.prepare(`INSERT INTO execution_turns
+  if (variant === "foreign_turn") f.db.prepare(`INSERT INTO runs
     SELECT ?,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
       provider_continuation_id,'other-native-turn',state,side_effects,created_at_ms,ended_at_ms
-    FROM execution_turns WHERE turn_id=?`).run(turnId, expected.turnId);
+    FROM runs WHERE turn_id=?`).run(turnId, expected.turnId);
   const terminalAt = variant === "earlier" ? now + 1 : now + 20;
   const state = variant === "lost" ? "lost" : "terminal";
-  f.db.prepare("UPDATE execution_turns SET state=?,ended_at_ms=? WHERE turn_id=?").run(state, terminalAt, turnId);
+  f.db.prepare("UPDATE runs SET state=?,ended_at_ms=? WHERE turn_id=?").run(state, terminalAt, turnId);
   if (variant === "projection_only") return;
   const outcome = variant === "null_outcome" || state === "lost" ? null
     : ["failed", "interrupted", "unreadable"].includes(variant) ? variant : "completed";
-  f.db.prepare(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,
-    observer_epoch,source_sequence,native_event_id,turn_id,domain,kind,state,side_effects,observed_at_ms,turn_outcome)
-    VALUES('terminal-fact',?,?,?,?,1,'native-terminal',?,'turn','state_changed',?,'possible',?,?)`)
-    .run(expected.agentId, expected.executionGenerationId, expected.runtimeGenerationId, 1, turnId, state, terminalAt, outcome);
-  if (variant === "missing_receipt") return;
   let observerRuntime = expected.runtimeGenerationId;
   if (variant === "different_birth") {
     observerRuntime = "replacement-runtime";
@@ -2015,12 +2208,12 @@ function terminalTurnWitness(f: Awaited<ReturnType<typeof fixture>>, expected: H
       authority_mode,runtime_state,control_state,continuation_state,config_revision,created_at_ms,ended_at_ms
       FROM execution_runtime_generations WHERE runtime_generation_id=?`).run(observerRuntime, expected.runtimeGenerationId);
   }
-  const mode = variant === "legacy" ? "legacy" : variant === "shadow" ? "typed_shadow" : "typed";
-  const disposition = ["pending", "superseded"].includes(variant) ? variant : variant === "shadow" ? "shadowed" : "applied";
-  f.db.prepare(`INSERT INTO execution_lifecycle_effects
-    SELECT fact_id,sequence,agent_id,?,?,observer_epoch,?,?,'manifest_idle',?,observed_at_ms,?
-    FROM execution_facts WHERE fact_id='terminal-fact'`)
-    .run(expected.executionGenerationId, observerRuntime, mode, mode, disposition, disposition === "pending" ? null : now + 25);
+  f.db.prepare(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,
+    observer_execution_generation_id,observer_runtime_generation_id,
+    observer_epoch,source_sequence,native_event_id,turn_id,domain,kind,state,side_effects,observed_at_ms,turn_outcome)
+    VALUES('terminal-fact',?,?,?,?,?,?,1,'native-terminal',?,'turn','state_changed',?,'possible',?,?)`)
+    .run(expected.agentId, expected.executionGenerationId, expected.runtimeGenerationId,
+      expected.executionGenerationId, observerRuntime, 1, turnId, state, terminalAt, outcome);
 }
 
 for (const provider of ["claude-code", "codex", "antigravity"] as const) {
@@ -2062,12 +2255,12 @@ const approvalExpiry = now + 10 + EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS
 function retireRuntime(f: Awaited<ReturnType<typeof fixture>>, how: "replaced" | "stopped" | "removed") {
   // No death witness: a replacement birth, a daemon stop recorded before witnesses
   // existed, or a stopped agent with no provider reference left.
-  if (how === "replaced") f.db.prepare(`UPDATE runtime_deployments SET provider_connection_pid=4312,
-    provider_process_identity='replacement-birth' WHERE agent_id='agent'`).run();
+  if (how === "replaced") f.db.prepare(`UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'`)
+    .run(JSON.stringify({ ...f.handle.providerConnection!, pid: 4312, processIdentity: "replacement-birth" }));
   else if (how === "stopped") f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'")
     .run(JSON.stringify({ ended_at: new Date(now + 20).toISOString(), exit_code: null, signal: null, stdio_archive_ref: null,
       stdio_tail: "", terminal_cause: "stopped", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation" }));
-  else f.db.prepare("UPDATE runtime_deployments SET provider_execution_generation_id=NULL WHERE agent_id='agent'").run();
+  else f.db.prepare("UPDATE agents SET provider_execution_generation_id=NULL WHERE agent_id='agent'").run();
   f.emit([]);
 }
 
@@ -2155,11 +2348,12 @@ for (const live of ["current", "recovered_turn", "unverifiable_birth", "stopped"
         f.db.prepare("INSERT INTO work_attempt_executions VALUES('recovery-generation','workspace',?,'provider',2,NULL)")
           .run(new Date(now + 21).toISOString());
         const manifest = await f.store.load(); const [entry] = manifest.entries;
-        await f.store.write(manifest.generation, [{ ...entry!, run_id: "recovery-generation",
+        await f.store.write([{ ...entry!, run_id: "recovery-generation",
           deployment_id: serializeDaemonDeploymentId("agent", "recovery-generation"),
           provider_ref: { ...entry!.provider_ref!, execution_generation_id: "recovery-generation" } }]);
       } else if (live === "unverifiable_birth") {
-        f.db.prepare("UPDATE runtime_deployments SET provider_connection_pid=NULL WHERE agent_id='agent'").run();
+        f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'")
+          .run(JSON.stringify({ ...f.handle.providerConnection!, pid: null }));
       } else if (live === "stopped" || live === "removed") retireRuntime(f, live);
       assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30,
         async () => { throw new Error("a runtime that may be alive must not request a write"); }), 0);
@@ -2209,11 +2403,12 @@ for (const live of ["current", "recovered_turn", "unverifiable_birth"] as const)
         f.db.prepare("INSERT INTO work_attempt_executions VALUES('recovery-generation','workspace',?,'provider',2,NULL)")
           .run(new Date(now + 21).toISOString());
         const manifest = await f.store.load(); const [entry] = manifest.entries;
-        await f.store.write(manifest.generation, [{ ...entry!, run_id: "recovery-generation",
+        await f.store.write([{ ...entry!, run_id: "recovery-generation",
           deployment_id: serializeDaemonDeploymentId("agent", "recovery-generation"),
           provider_ref: { ...entry!.provider_ref!, execution_generation_id: "recovery-generation" } }]);
       } else if (live === "unverifiable_birth") {
-        f.db.prepare("UPDATE runtime_deployments SET provider_connection_pid=NULL WHERE agent_id='agent'").run();
+        f.db.prepare("UPDATE agents SET provider_connection_json=? WHERE agent_id='agent'")
+          .run(JSON.stringify({ ...f.handle.providerConnection!, pid: null }));
       }
       assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => approvalExpiry + 60_000,
         async () => { throw new Error("a live runtime's prompt must not request a write"); }), 0);
@@ -2274,8 +2469,8 @@ for (const outcome of ["failed", "interrupted"] as const) {
   });
 }
 
-for (const weak of ["projection_only", "missing_receipt", "null_outcome", "unreadable", "lost", "legacy", "shadow",
-  "pending", "superseded", "different_birth", "foreign_turn", "earlier"] as const) {
+for (const weak of ["projection_only", "null_outcome", "unreadable", "lost",
+  "different_birth", "foreign_turn", "earlier"] as const) {
   test(`${weak} turn evidence cannot close an approval`, async () => {
     const f = await fixture();
     try {
@@ -2439,10 +2634,10 @@ test("saved rules do not self-requeue a managed refresh when native idle proof i
     await new Promise(resolve => setTimeout(resolve, 30));
     assert.equal((await f.broker.listToolRules({ agentId: "agent" })).length, 1);
     const manifest = await f.store.load();
-    await f.store.replaceEntry(manifest.generation, { ...manifest.entries[0]!, observed_state: "idle" });
+    await f.store.replaceEntry(manifest.versions["agent"]!, { ...manifest.entries[0]!, observed_state: "idle" });
     f.handle.observedState = "idle";
     const installation = { ...idleInstallation(f), nonce: Symbol(), listenerLeaseNonce: Symbol(),
-      workAttemptId: "workspace", providerContinuationId: "continuation", configurationRevision: 1, authorityMode: "typed_shadow" as const };
+      workAttemptId: "workspace", providerContinuationId: "continuation", configurationRevision: 1, authorityMode: "typed" as const };
     coordinator = new RuntimeConfigurationApplyCoordinator({
       store: f.store, inbox: { head: async () => null }, delivery: { reserveIdle: async () => () => {} },
       streams: { currentInstallation: () => installation },
@@ -2733,7 +2928,7 @@ for (const provider of ["codex", "open-model", "claude-code"] as const) {
     // An agent whose owner has saved a change and applied it by restarting it.
     const applied = await fixture(provider);
     try {
-      applied.db.exec("UPDATE agent_configurations SET config_revision=2, runtime_configuration_revision=2");
+      applied.db.exec("UPDATE agents SET config_revision=2, runtime_configuration_revision=2");
       const [candidate] = await applied.broker.list("room");
       assert.equal(candidate?.status, "pending", candidate?.detail ?? "");
       assert.ok(candidate.reference, "the request is journaled");
@@ -2744,7 +2939,7 @@ for (const provider of ["codex", "open-model", "claude-code"] as const) {
     // A saved change the runtime has not applied yet does not change what this runtime asked.
     const unapplied = await fixture(provider);
     try {
-      unapplied.db.exec("UPDATE agent_configurations SET config_revision=3, runtime_configuration_revision=2");
+      unapplied.db.exec("UPDATE agents SET config_revision=3, runtime_configuration_revision=2");
       const [candidate] = await unapplied.broker.list("room");
       assert.equal(candidate?.status, "pending", candidate?.detail ?? "");
       assert.ok(candidate.reference, "the request is journaled");

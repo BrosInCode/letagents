@@ -5,14 +5,14 @@ import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 
-import { requireSupportedClaudeCodeVersion } from "../main/agents/claude-code-version.js";
+import { requireSupportedClaudeCodeVersion } from "#provider-runtime/agents/claude-code-version.js";
 import {
   exactClaudeCommandLifecycleState,
   exactClaudeStreamTerminal,
   recoverExactClaudeTurnFromSession,
   type ClaudeEvidenceRecord,
   type ClaudeExactTurnResult,
-} from "../main/agents/claude-room-turn-evidence.js";
+} from "#provider-runtime/agents/claude-room-turn-evidence.js";
 
 const LIVE_SPIKE_ENV = "LETAGENTS_RUN_LIVE_CLAUDE_SPIKE";
 const TURN_TIMEOUT_MS = 60_000;

@@ -9,7 +9,7 @@ const {
   extractThreadStatus,
   extractTurnStatus,
   isActiveCodexTurnStatus,
-} = await import("../main/agents/codex-session-status.js");
+} = await import("#provider-runtime/agents/codex-session-status.js");
 
 test("active Codex turn statuses are recognised so turns do not overlap", () => {
   for (const status of ["inProgress", "active", "running", "queued", "pending", "cancelling"]) {

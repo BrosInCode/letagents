@@ -11,7 +11,7 @@ import type {
   RepoStatus,
 } from "../../ipc-types.js";
 import { buildRepoStatus } from "../../repo-status.js";
-import { workspaceRoot } from "../paths.js";
+import { workspaceRoot } from "#provider-runtime/paths.js";
 import { startRepoStatusWatch, stopRepoStatusWatch } from "../repo-status-watch.js";
 import { connectProjectToRoom, createProjectRoom, createRepoRoomWorktree, openRepoRoomFromPath, pickNewProjectParent, pickRepoRoom } from "../rooms.js";
 import {

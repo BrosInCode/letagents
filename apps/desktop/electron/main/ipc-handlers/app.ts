@@ -18,11 +18,11 @@ import type {
 } from "../../ipc-types.js";
 import { getAppAgentSettingsStatus, saveAppAgentSettings } from "../app-agent/settings.js";
 import { listDesktopAppAgentActions, runDesktopAppAgent } from "../app-agent/runner.js";
-import { getOpenModelSettingsStatus, saveOpenModelSettings } from "../agents/open-model-settings.js";
+import { getOpenModelSettingsStatus, saveOpenModelSettings } from "#provider-runtime/agents/open-model-settings.js";
 import {
   getManagedAgentCommitIdentitySettings,
   setManagedAgentCommitUsesHostIdentity,
-} from "../agents/managed-agent-commit-identity.js";
+} from "#provider-runtime/agents/managed-agent-commit-identity.js";
 import { getDesktopDemoSettings, setDesktopDemoCdnLibraries } from "../attachments/html-demo-session.js";
 import { openDesktopCredentialStorage } from "../credential-storage.js";
 import { openAllowedExternalUrl, openExternalWebUrl } from "../external-url.js";
@@ -34,7 +34,7 @@ import {
   setDesktopNotificationsEnabled,
   takePendingDesktopNotificationActivation,
 } from "../notifications.js";
-import { apiUrl, workspaceRoot } from "../paths.js";
+import { apiUrl, workspaceRoot } from "#provider-runtime/paths.js";
 import { supervisedAgentsSupported, type DesktopPlatformCapabilities } from "../platform-capabilities.js";
 import { desktopUpdater } from "../updates.js";
 

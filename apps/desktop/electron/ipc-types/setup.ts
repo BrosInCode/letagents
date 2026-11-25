@@ -1,24 +1,12 @@
-export type DesktopMcpInstallTargetId = "claude-code" | "antigravity" | "cursor" | "codex";
-
-export interface DesktopMcpInstallConfigPath {
-  path: string;
-  label: string;
-  status: "not_installed" | "installed" | "needs_attention";
-  hasLetAgents: boolean;
-  issue: string | null;
-}
-
-export interface DesktopMcpInstallTarget {
-  id: DesktopMcpInstallTargetId;
-  name: string;
-  description: string;
-  configPath: string;
-  configPaths: DesktopMcpInstallConfigPath[];
-  configIssue: string | null;
-  status: "not_installed" | "installed" | "needs_attention";
-  lastInstalledAt: string | null;
-  restartHint: string;
-}
+import type {
+  DesktopMcpInstallTarget,
+  DesktopMcpInstallTargetId,
+} from "../../shared/provider-desktop-types.js";
+export type {
+  DesktopMcpInstallConfigPath,
+  DesktopMcpInstallTarget,
+  DesktopMcpInstallTargetId,
+} from "../../shared/provider-desktop-types.js";
 
 export interface DesktopMcpInstallState {
   completed: boolean;

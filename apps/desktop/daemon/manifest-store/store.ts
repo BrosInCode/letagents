@@ -1,18 +1,18 @@
 /**
- * The ManifestStore class: fields, constructor, ensureDatabase, and the method composition.
+ * The ManifestStore class: fields, constructor, shared-connection attach, and method composition.
  *
  * Modules:
- * - entry-reads.ts: Manifest and entry reads, runtime lifecycle authority, and typed lifecycle effects.
+ * - entry-reads.ts: Manifest and entry reads, per-agent versions, runtime lifecycle authority.
  * - approvals.ts: Execution approvals, host tool rules, managed-runtime checks and execution delegation.
- * - delivery-and-polling.ts: Delivery drains, agent configuration reads, live sharing, and custodial polling activation and offers.
+ * - delivery-and-polling.ts: Agent configuration reads and live sharing.
  * - room-moves-and-purges.ts: Room-move and purge journals.
- * - entries-and-recovery.ts: Agent configuration updates, entry replacement, provider birth checkpoints and runtime recovery.
+ * - entries-and-recovery.ts: Agent creation, configuration updates, entry replacement, provider birth checkpoints and runtime recovery.
  * - turn-control.ts: Turn-control preparation, target checkpoints and commit.
  * - cursor-turns.ts: Cursor prepared-turn and provider-state checkpoints.
  * - activity.ts: Batch entry replacement and removal, runtime configuration, activity writes and workplace liveness.
- * - persistence.ts: Connection lifecycle: close, the guarded write, database open and schema, legacy JSON import.
- * - projections.ts: Entry rows to and from the decomposed domain projection tables.
- * - write-paths.ts: Pre-membership room-move failure, journal and targeted write paths, serialization and file permissions.
+ * - persistence.ts: Connection lifecycle: attach/close, bulk write, standalone open and schema v1.
+ * - projections.ts: Entry rows to and from the `agents` domain table.
+ * - write-paths.ts: Pre-membership room-move failure, journal and per-agent versioned write paths, serialization and file permissions.
  *
  * Where new code goes: a ManifestStore method goes in the module of its concern
  * (see the module list in store.ts); shared row helpers and types go in shared.ts.
@@ -35,31 +35,45 @@ import { projections } from "./projections.js";
 import { writePaths } from "./write-paths.js";
 
 /**
- * SQLite-backed durable state for the daemon's compatibility manifest.
- *
- * The flat manifest entry remains the control-socket contract only. Each row is
- * decomposed into records with distinct ownership before persistence, and reads
- * recompose the same flat projection for existing callers.
+ * SQLite-backed durable state for the daemon's agents and operational journals
+ * on schema v1. Uses the process's single shared SQLite connection when
+ * attached by SupervisorDaemon, or opens one lazily for standalone tests.
  */
 export class ManifestStore {
   readonly reads = new PreparedReadStatements(MANIFEST_READS);
   database: DatabaseSync | null = null;
+  ownsDatabase = false;
   initializing: Promise<DatabaseSync> | null = null;
   writes: Promise<void> = Promise.resolve();
   closed = false;
+  writeFence: (() => void) | null = null;
   pendingActivityState: ((agentId: string) => { observedState: DaemonManifestEntry["observed_state"] | null } | null) | null = null;
   /** The entries loadForStateWatch last projected, each under the manifest version read before it; see entry-reads.ts. */
   stateWatchEntries: { database: DatabaseSync; byAgent: Map<string, { version: number; entry: DaemonManifestEntry }> } | null = null;
 
   constructor(
     readonly path: string,
-    readonly legacyJsonPath?: string,
     readonly permissionHousekeeping?: (paths: string[]) => Promise<void>,
     readonly schemaInitializationHook?: (database: DatabaseSync) => void,
-    readonly schemaPrepared = false,
   ) {}
 
-  /** Initialise/upgrade the shared daemon database without retaining a handle. */
+  /** Attach the process's single shared SQLite handle without taking ownership of closing it. */
+  attachDatabase(database: DatabaseSync, writeFence?: () => void): void {
+    this.reads.clear();
+    this.stateWatchEntries = null;
+    this.database = database;
+    this.ownsDatabase = false;
+    this.initializing = null;
+    this.closed = false;
+    if (writeFence) this.writeFence = writeFence;
+  }
+
+  /** Bind a synchronous generation fence check invoked inside every BEGIN IMMEDIATE transaction. */
+  bindWriteFence(writeFence: () => void): void {
+    this.writeFence = writeFence;
+  }
+
+  /** Initialise the daemon database without retaining a handle. */
   static async ensureDatabase(path: string): Promise<void> {
     const store = new ManifestStore(path);
     try { await store.load(); } finally { await store.close(); }

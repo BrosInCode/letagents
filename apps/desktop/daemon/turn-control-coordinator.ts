@@ -68,12 +68,10 @@ export type TurnControlCoordinatorPorts = {
   authority: {
     currentGeneration(): number;
     assertCurrent(): Promise<void>;
-    manifestGeneration(): number;
-    setManifestGeneration(generation: number): void;
     fenceCommit: CommitFence;
   };
   store: Pick<ManifestStore,
-    "checkpointTurnControlTarget" | "commitTurnControlState" | "getEntry" | "load" | "prepareTurnControlState"
+    "checkpointTurnControlTarget" | "commitTurnControlState" | "getEntry" | "getEntryWithVersion" | "load" | "prepareTurnControlState"
   >;
   durability: Pick<WorkDurabilityStore, "getAttempt">;
   workerBindings: Pick<WorkerBindingStore, "get">;
@@ -205,7 +203,8 @@ export class TurnControlCoordinator {
     try {
       committed = await this.ports.serializeEntry(input.entryId, () => this.ports.serializeManifest(async () => {
         await this.ports.authority.assertCurrent();
-        const current = await this.ports.store.getEntry(input.entryId);
+        const loaded = await this.ports.store.getEntryWithVersion(input.entryId);
+        const current = loaded?.entry;
         const control = current?.turn_control;
         const currentRuntimeMatches = current?.provider_ref?.execution_generation_id === input.executionGenerationId;
         const controlledAttempt = current?.work_attempt_id === input.workAttemptId && !currentRuntimeMatches
@@ -213,7 +212,7 @@ export class TurnControlCoordinator {
           : null;
         const controlledExecutionTerminal = Boolean(controlledAttempt?.execution_generations.some((candidate) =>
           candidate.execution_generation_id === input.executionGenerationId && candidate.terminal));
-        if (!current
+        if (!current || !loaded
           || !control
           || control.action_id !== input.actionId
           || control.work_attempt_id !== input.workAttemptId
@@ -225,7 +224,7 @@ export class TurnControlCoordinator {
         if (control.status !== "uncertain") {
           throw new Error("Only an uncertain turn-control outcome requires operator resolution.");
         }
-        const checkpoint = await this.ports.store.commitTurnControlState(this.manifestGeneration, {
+        const checkpoint = await this.ports.store.commitTurnControlState(loaded.version, {
           agentId: current.id,
           roomId: current.room_id,
           actionId: input.actionId,
@@ -298,14 +297,13 @@ export class TurnControlCoordinator {
             },
           };
         }, this.ports.authority.fenceCommit);
-        this.manifestGeneration = checkpoint.generation;
         return checkpoint;
       }));
     } catch (error) {
-      const recoveredManifest = await this.ports.store.load().catch(() => null);
-      const recoveredEntry = recoveredManifest?.entries.find((candidate) => candidate.id === input.entryId);
+      const recoveredLoaded = await this.ports.store.getEntryWithVersion(input.entryId).catch(() => undefined);
+      const recoveredEntry = recoveredLoaded?.entry;
       const recoveredControl = recoveredEntry?.turn_control;
-      if (!recoveredManifest
+      if (!recoveredLoaded
         || recoveredEntry?.work_attempt_id !== input.workAttemptId
         || recoveredControl?.action_id !== input.actionId
         || recoveredControl.work_attempt_id !== input.workAttemptId
@@ -326,8 +324,7 @@ export class TurnControlCoordinator {
           : input.resolution === "not_applied" && recoveredInbox
             ? "resumed" as const
             : "none" as const;
-      this.manifestGeneration = recoveredManifest.generation;
-      committed = { generation: recoveredManifest.generation, entry: recoveredEntry, original, correctionInboxItemId: null, providerTurnId: recoveredControl.provider_turn_id ?? null };
+      committed = { version: recoveredLoaded.version, entry: recoveredEntry, original, correctionInboxItemId: null, providerTurnId: recoveredControl.provider_turn_id ?? null };
     }
 
     this.ports.delivery?.finishActiveDeliveryInterruptByAction(
@@ -357,14 +354,6 @@ export class TurnControlCoordinator {
     this.turnControlAdmissions.set(entryId, recent);
   }
 
-  private get manifestGeneration(): number {
-    return this.ports.authority.manifestGeneration();
-  }
-
-  private set manifestGeneration(generation: number) {
-    this.ports.authority.setManifestGeneration(generation);
-  }
-
   private async controlOnce(input: TurnControlInput): Promise<DaemonTurnControlResult> {
     await this.ports.authority.assertCurrent();
     if (input.daemonGeneration !== this.ports.authority.currentGeneration()) {
@@ -390,7 +379,7 @@ export class TurnControlCoordinator {
     const capabilities = await this.ports.providerPort?.capabilities(input.workAttemptId, entry.provider);
     const capability = capabilities?.turnControl ?? "unsupported";
     const correction = input.correction?.trim() || null;
-    const stopThenResend = Boolean(correction) && (entry.delivery_mode ?? "mcp_polling") === "daemon_inbox";
+    const stopThenResend = Boolean(correction);
     let nativeCorrection = stopThenResend ? null : correction;
     let correctionStrategy: "native" | "stop_then_resend" | null = correction
       ? stopThenResend ? "stop_then_resend" : "native"
@@ -490,11 +479,11 @@ export class TurnControlCoordinator {
       providerConnection: ref.provider_connection ?? null,
       executionGenerationId: binding.execution_generation_id,
       daemonGeneration: this.ports.authority.currentGeneration(),
-      deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      deliveryMode: "daemon_inbox" as const,
     };
     const interruptedDelivery: { current: SupervisedDeliveryInterruptReservation | null } = { current: null };
     let foldCompletedRetryWithoutNativeControl = false;
-    if (retryingControl && existingControl?.inbox_item_id && (entry.delivery_mode ?? "mcp_polling") === "daemon_inbox") {
+    if (retryingControl && existingControl?.inbox_item_id) {
       await this.ports.wakeDelivery(entry.id);
       for (let observation = 0; observation < 500; observation += 1) {
         const active = this.ports.delivery?.activeTurn(deliveryAgent);
@@ -513,7 +502,9 @@ export class TurnControlCoordinator {
     try {
       prepared = await this.ports.serializeEntry(entry.id, () => this.ports.serializeManifest(async () => {
         await this.ports.authority.assertCurrent();
-        const checkpoint = await this.ports.store.prepareTurnControlState(this.manifestGeneration, {
+        const loaded = await this.ports.store.getEntryWithVersion(entry.id);
+        if (!loaded) throw new Error(`Unknown daemon manifest entry: ${entry.id}`);
+        const checkpoint = await this.ports.store.prepareTurnControlState(loaded.version, {
           agentId: entry.id,
           roomId: entry.room_id,
           expectedInboxItemId: input.inboxItemId,
@@ -525,27 +516,25 @@ export class TurnControlCoordinator {
           executionGenerationId: input.executionGenerationId,
           providerContinuationId: ref.provider_continuation_id,
           providerConnection: ref.provider_connection,
-          deliveryMode: entry.delivery_mode ?? "mcp_polling",
+          deliveryMode: "daemon_inbox",
           hasCorrection: Boolean(correction),
           correctionText: correction,
           correctionStrategy,
           capability,
           recordedAt,
         }, this.ports.authority.fenceCommit);
-        this.manifestGeneration = checkpoint.generation;
         return checkpoint;
       }));
     } catch (error) {
-      const recoveredManifest = await this.ports.store.load().catch(() => null);
-      const recoveredEntry = recoveredManifest?.entries.find((candidate) => candidate.id === entry.id);
+      const recoveredLoaded = await this.ports.store.getEntryWithVersion(entry.id).catch(() => undefined);
+      const recoveredEntry = recoveredLoaded?.entry;
       const recovered = recoveredEntry?.turn_control;
-      if (!recoveredManifest
+      if (!recoveredLoaded
         || recoveredEntry?.room_id !== entry.room_id
         || recoveredEntry.work_attempt_id !== input.workAttemptId
         || recoveredEntry.provider_ref?.execution_generation_id !== input.executionGenerationId
         || recoveredEntry.provider_ref.provider_continuation_id !== ref.provider_continuation_id
         || !sameProviderActionConnectionSnapshot(recoveredEntry.provider_ref.provider_connection, ref.provider_connection)
-        || (recoveredEntry.delivery_mode ?? "mcp_polling") !== (entry.delivery_mode ?? "mcp_polling")
         || recovered?.action_id !== input.actionId
         || recovered.target_room_id !== input.roomId
         || recovered.target_source_message_id !== input.sourceMessageId
@@ -564,16 +553,15 @@ export class TurnControlCoordinator {
       const linked = recovered.inbox_item_id
         ? await this.ports.inbox.get(recovered.inbox_item_id).catch(() => null)
         : null;
-      this.manifestGeneration = recoveredManifest.generation;
       prepared = {
-        generation: recoveredManifest.generation,
+        version: recoveredLoaded.version,
         entry: recoveredEntry,
         linkedInboxItemId: recovered.inbox_item_id ?? null,
         providerTurnId: recovered.provider_turn_id ?? null,
         linkedState: linked?.state ?? null,
       };
     }
-    if ((entry.delivery_mode ?? "mcp_polling") === "daemon_inbox") {
+    {
       if (prepared.linkedInboxItemId) {
         interruptedDelivery.current = this.ports.delivery?.captureActiveDeliveryInterrupt(deliveryAgent, input.actionId) ?? null;
         if (interruptedDelivery.current?.inboxItemId !== prepared.linkedInboxItemId) {
@@ -626,7 +614,9 @@ export class TurnControlCoordinator {
             const checkpointedAt = new Date().toISOString();
             const checkpoint = await this.ports.serializeManifest(async () => {
               await this.ports.authority.assertCurrent();
-              const result = await this.ports.store.checkpointTurnControlTarget(this.manifestGeneration, {
+              const loaded = await this.ports.store.getEntryWithVersion(entry.id);
+              if (!loaded) throw new Error(`Unknown daemon manifest entry: ${entry.id}`);
+              const result = await this.ports.store.checkpointTurnControlTarget(loaded.version, {
                 agentId: entry.id,
                 roomId: entry.room_id,
                 actionId: input.actionId,
@@ -634,21 +624,20 @@ export class TurnControlCoordinator {
                 executionGenerationId: input.executionGenerationId,
                 providerContinuationId: ref.provider_continuation_id,
                 providerConnection: ref.provider_connection,
-                deliveryMode: entry.delivery_mode ?? "mcp_polling",
+                deliveryMode: "daemon_inbox",
                 providerTurnId: turnId,
                 observedAt: checkpointedAt,
               }, this.ports.authority.fenceCommit);
-              this.manifestGeneration = result.generation;
               return result;
             });
             if (this.ports.currentHandle(entry.id) !== handle) {
               throw new Error("Turn control provider changed after exact target checkpoint.");
             }
-            prepared = { ...prepared, generation: checkpoint.generation, entry: checkpoint.entry, providerTurnId: turnId };
+            prepared = { ...prepared, version: checkpoint.version, entry: checkpoint.entry, providerTurnId: turnId };
           },
           markDispatched: async () => {
             if (dispatchMarked) return;
-            if ((entry.delivery_mode ?? "mcp_polling") === "daemon_inbox" && !interruptedDelivery.current) {
+            if (!interruptedDelivery.current) {
               throw new Error("Turn control cannot dispatch without reserving the exact active daemon-inbox invocation.");
             }
             await this.ports.updateManifestEntry(entry.id, (current) => {
@@ -659,7 +648,6 @@ export class TurnControlCoordinator {
                 || current.provider_ref?.execution_generation_id !== input.executionGenerationId
                 || current.provider_ref.provider_continuation_id !== ref.provider_continuation_id
                 || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, ref.provider_connection)
-                || (current.delivery_mode ?? "mcp_polling") !== (entry.delivery_mode ?? "mcp_polling")
                 || this.ports.currentHandle(entry.id) !== handle) {
                 throw new Error("Turn control lost its durable prepared journal before native dispatch.");
               }
@@ -757,7 +745,9 @@ export class TurnControlCoordinator {
           }
           await commit();
         });
-        const checkpoint = await this.ports.store.commitTurnControlState(this.manifestGeneration, {
+        const loaded = await this.ports.store.getEntryWithVersion(entry.id);
+        if (!loaded) throw new Error(`Unknown daemon manifest entry: ${entry.id}`);
+        const checkpoint = await this.ports.store.commitTurnControlState(loaded.version, {
           agentId: entry.id,
           roomId: entry.room_id,
           actionId: input.actionId,
@@ -844,18 +834,17 @@ export class TurnControlCoordinator {
             },
           };
         }, fenceHealthyRuntime);
-        this.manifestGeneration = checkpoint.generation;
         return checkpoint;
       }));
     } catch (error) {
-      const recoveredManifest = await this.ports.store.load().catch(() => null);
-      const recoveredEntry = recoveredManifest?.entries.find((candidate) => candidate.id === entry.id);
+      const recoveredLoaded = await this.ports.store.getEntryWithVersion(entry.id).catch(() => undefined);
+      const recoveredEntry = recoveredLoaded?.entry;
       const recoveredControl = recoveredEntry?.turn_control;
       const expectedInboxItemId = reservation?.inboxItemId
         ?? prepared.linkedInboxItemId
         ?? existingControl?.inbox_item_id
         ?? null;
-      if (recoveredManifest
+      if (recoveredLoaded
         && recoveredEntry?.room_id === entry.room_id
         && recoveredEntry.work_attempt_id === input.workAttemptId
         && recoveredEntry.provider_ref?.execution_generation_id === input.executionGenerationId
@@ -878,8 +867,7 @@ export class TurnControlCoordinator {
           : recoveredInbox && ["publishing", "acknowledged", "acknowledged_no_reply"].includes(recoveredInbox.state)
             ? "publication_won" as const
             : "none" as const;
-        this.manifestGeneration = recoveredManifest.generation;
-        committed = { generation: recoveredManifest.generation, entry: recoveredEntry, original, correctionInboxItemId: null, providerTurnId: recoveredControl.provider_turn_id ?? null };
+        committed = { version: recoveredLoaded.version, entry: recoveredEntry, original, correctionInboxItemId: null, providerTurnId: recoveredControl.provider_turn_id ?? null };
       } else {
         const nativeOutcomeMayExist = dispatchMarked && !foldCompletedRetryWithoutNativeControl;
         this.ports.delivery?.finishActiveDeliveryInterrupt(

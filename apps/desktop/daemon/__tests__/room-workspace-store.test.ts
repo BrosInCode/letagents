@@ -3,11 +3,12 @@ import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdtempSync, statSync, utimesSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { archiveWorkspaceReview, readArchivedReview, reviewArchiveReference, verifyWorkspaceReviewRecoverySet } from '../../../../shared/workspace-review-archive.mjs';
+import { REVIEW_ARCHIVE_MIN_USER_VERSION, archiveWorkspaceReview, readArchivedReview, reviewArchiveReference, verifyWorkspaceReviewRecoverySet } from '../../../../shared/workspace-review-archive.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { REVIEW_PAGE_SIZE } from '../../../../shared/workspace-review.mjs';
 import { RoomWorkspaceStore } from '../room-workspace-store.js';
+import { DaemonFenceLostError } from '../singleton.js';
 
 for (const encoding of ['UTF-8', 'UTF-16le', 'UTF-16be']) {
   test(`review paging keeps exact bytes and skips completed page reads in ${encoding}`, () => {
@@ -55,7 +56,7 @@ test('historical reviews move durably, resume the same page and survive clear th
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  db.exec(`PRAGMA user_version=54; CREATE TABLE room_workspace_reviews (
+  db.exec(`PRAGMA user_version=${REVIEW_ARCHIVE_MIN_USER_VERSION}; CREATE TABLE room_workspace_reviews (
     agent_id TEXT, room_id TEXT, source_message_id TEXT, digest TEXT, data TEXT, uploaded_pages INTEGER)`);
   const data = 'A'.repeat(REVIEW_PAGE_SIZE) + 'B'.repeat(REVIEW_PAGE_SIZE) + 'LAST';
   const digest = createHash('sha256').update(data).digest('hex');
@@ -123,7 +124,7 @@ test('a missing or invalid historical digest leaves its only local bytes intact'
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  db.exec(`PRAGMA user_version=54; CREATE TABLE room_workspace_reviews (
+  db.exec(`PRAGMA user_version=${REVIEW_ARCHIVE_MIN_USER_VERSION}; CREATE TABLE room_workspace_reviews (
     agent_id TEXT, room_id TEXT, source_message_id TEXT, digest TEXT, data TEXT, uploaded_pages INTEGER);
     INSERT INTO room_workspace_reviews VALUES('a','r','m','invalid','retained',0)`);
   const next = 'Good next row';
@@ -143,7 +144,7 @@ test('recovery verifies copied archives, repairs missing or changed ciphertext, 
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  db.exec('PRAGMA user_version=54; CREATE TABLE room_workspace_reviews(digest TEXT,data TEXT)');
+  db.exec(`PRAGMA user_version=${REVIEW_ARCHIVE_MIN_USER_VERSION}; CREATE TABLE room_workspace_reviews(digest TEXT,data TEXT)`);
   const data = 'original'.repeat(REVIEW_PAGE_SIZE);
   const digest = createHash('sha256').update(data).digest('hex');
   const envelope = archiveWorkspaceReview(path, data, digest);
@@ -181,4 +182,32 @@ test('recovery verifies copied archives, repairs missing or changed ciphertext, 
   writeFileSync(mirror, damaged);
   assert.throws(() => verifyWorkspaceReviewRecoverySet(path, db));
   assert.deepEqual(readFileSync(mirror), damaged);
+});
+
+test('pre-v5 databases stay inline and maintainArchives honors the daemon write fence', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'review-archive-fence-'));
+  const path = join(dir, 'state.sqlite');
+  const db = new DatabaseSync(path);
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const data = 'Inline review payload';
+  const digest = createHash('sha256').update(data).digest('hex');
+  db.exec(`PRAGMA user_version=${REVIEW_ARCHIVE_MIN_USER_VERSION - 1}; CREATE TABLE room_workspace_reviews (
+    agent_id TEXT, room_id TEXT, source_message_id TEXT, digest TEXT, data TEXT, uploaded_pages INTEGER)`);
+  db.prepare("INSERT INTO room_workspace_reviews VALUES('a','r','m',?,?,0)").run(digest, data);
+  assert.equal(new RoomWorkspaceStore(db).maintainArchives(0), false, 'v4 (1004) never externalizes reviews');
+  assert.equal(existsSync(path + '.reviews'), false);
+
+  db.exec(`PRAGMA user_version=${REVIEW_ARCHIVE_MIN_USER_VERSION}`);
+  let fenceChecks = 0;
+  const fencedStore = new RoomWorkspaceStore(db, () => {
+    fenceChecks += 1;
+    throw new DaemonFenceLostError('fence lost before archive maintenance');
+  });
+  assert.throws(() => fencedStore.maintainArchives(0), DaemonFenceLostError);
+  assert.equal(fenceChecks, 1);
+  assert.equal(existsSync(path + '.reviews'), false, 'lost write fence must not write archive files');
+  assert.equal(db.prepare('SELECT data FROM room_workspace_reviews').get()!.data, data);
 });

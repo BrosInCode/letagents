@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
+import { DAEMON_STATE_USER_VERSION } from "../daemon-state-database.js";
 import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
@@ -14,7 +14,6 @@ import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/
 import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
-import { restorePreAntigravityProviderFixture } from "./helpers/pre-antigravity-fixture.js";
 
 /**
  * A real daemon on its own socket and database. An agent's tools hold the
@@ -164,12 +163,12 @@ test("live sharing is off for a new agent and only the desktop app's signed requ
 
     const database = new DatabaseSync(manifestPath, { readOnly: true });
     try {
-      assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
-      assert.deepEqual({ ...database.prepare("SELECT type,\"notnull\" AS required,dflt_value FROM pragma_table_info('agent_configurations') WHERE name='live_sharing'").get() },
+      assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_USER_VERSION);
+      assert.deepEqual({ ...database.prepare("SELECT type,\"notnull\" AS required,dflt_value FROM pragma_table_info('agents') WHERE name='live_sharing'").get() },
         { type: "TEXT", required: 1, dflt_value: "'off'" });
-      assert.equal(database.prepare("SELECT live_sharing FROM agent_configurations WHERE agent_id='supervised_owner'").get()!.live_sharing, "withdrawing",
+      assert.equal(database.prepare("SELECT live_sharing FROM agents WHERE agent_id='supervised_owner'").get()!.live_sharing, "withdrawing",
         "turned off after sharing, the removal of what the room shows is remembered until the room confirms it");
-      assert.equal(database.prepare("SELECT live_sharing FROM agent_configurations WHERE agent_id='supervised_flat'").get()!.live_sharing, "off");
+      assert.equal(database.prepare("SELECT live_sharing FROM agents WHERE agent_id='supervised_flat'").get()!.live_sharing, "off");
     } finally { database.close(); }
   });
 });
@@ -178,53 +177,43 @@ async function setSharingAt(socketPath: string, signed: (operation: HostApproval
   return daemonRequest(socketPath, "supervisor.host_approval_request", signed("set_live_sharing", { entryId: "supervised_owner", daemonGeneration, enabled: true }));
 }
 
-test("an agent that fetches its own messages, or a rented agent, cannot share its live activity", { timeout: 60_000 * WAIT_SCALE }, async () => {
+test("a rented agent cannot share its live activity", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, configuration, setSharing }) => {
-    assert.equal((await daemonRequest(socketPath, "manifest.put", { entry: agent("supervised_polling", { delivery_mode: "mcp_polling" }) })).ok, true);
-    assert.equal((await configuration("supervised_polling")).live_sharing_availability, "polling");
-    const refused = await setSharing("supervised_polling", true);
+    assert.equal((await daemonRequest(socketPath, "manifest.put", { entry: agent("supervised_rental_1234") })).ok, true);
+    assert.equal((await configuration("supervised_rental_1234")).live_sharing_availability, "rental");
+    const refused = await setSharing("supervised_rental_1234", true);
     assert.equal((refused.result as { outcome?: string }).outcome, "invalid");
-    assert.match((refused.result as { error?: string }).error ?? "", /fetches its own room messages/);
-    assert.equal((await configuration("supervised_polling")).share_live_activity, false);
+    assert.match((refused.result as { error?: string }).error ?? "", /rented agent works for someone else/);
+    assert.equal((await configuration("supervised_rental_1234")).share_live_activity, false);
     // Turning it off is always allowed.
-    assert.equal(((await setSharing("supervised_polling", false)).result as { outcome?: string }).outcome, "updated");
+    assert.equal(((await setSharing("supervised_rental_1234", false)).result as { outcome?: string }).outcome, "updated");
   });
 });
 
-test("a schema 50 database gains the live sharing column off for every existing agent", async () => {
-  assert.ok(DAEMON_STATE_SCHEMA_VERSION >= 51, "the live sharing column shipped in schema v51");
+test("schema v1 stores live sharing off by default and enforces valid transitions", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-live-sharing-schema-"));
   const databasePath = join(root, "daemon-state.sqlite");
   try {
-    const original = new ManifestStore(databasePath);
-    await original.write(0, [agent("agent_1"), agent("agent_2")]);
-    await original.close();
-    const old = new DatabaseSync(databasePath);
-    // Schema v50 has the image input column and no live sharing column.
-    restorePreAntigravityProviderFixture(old);
-    old.exec("ALTER TABLE agent_configurations DROP COLUMN live_sharing; UPDATE manifest_metadata SET schema_version=50; PRAGMA user_version=50");
-    old.exec("UPDATE agent_configurations SET image_input=1 WHERE agent_id='agent_1'");
-    old.close();
-    const migrated = new ManifestStore(databasePath);
+    const store = new ManifestStore(databasePath);
     try {
-      assert.equal((await migrated.getAgentConfiguration("agent_1"))?.live_sharing, "off");
-      assert.equal((await migrated.getAgentConfiguration("agent_1"))?.image_input, true, "the v50 image input choice survives the upgrade");
-      assert.equal((await migrated.getAgentConfiguration("agent_2"))?.live_sharing, "off");
-      assert.equal(await migrated.setAgentLiveSharing({ agentId: "agent_1", enabled: true }), "on");
-      assert.equal(await migrated.setAgentLiveSharing({ agentId: "agent_2", enabled: false }), "off", "an agent that never shared has nothing to remove");
-      assert.deepEqual([...(await migrated.liveSharingByAgent()).entries()].sort(), [["agent_1", "on"], ["agent_2", "off"]]);
-      assert.equal(await migrated.setAgentLiveSharing({ agentId: "agent_1", enabled: false }), "withdrawing");
-      assert.equal(await migrated.setAgentLiveSharing({ agentId: "agent_1", enabled: true }), "on", "on again wins over a pending removal");
-      assert.equal(await migrated.markLiveSharingWithdrawn("agent_1"), "on", "a removal confirmed late never turns sharing off");
-      assert.equal(await migrated.setAgentLiveSharing({ agentId: "agent_1", enabled: false }), "withdrawing");
-      assert.equal(await migrated.markLiveSharingWithdrawn("agent_1"), "off");
-      assert.equal(await migrated.setAgentLiveSharing({ agentId: "missing", enabled: true }), null);
+      await store.write([agent("agent_1"), agent("agent_2")]);
+      assert.equal((await store.getAgentConfiguration("agent_1"))?.live_sharing, "off");
+      assert.equal((await store.getAgentConfiguration("agent_2"))?.live_sharing, "off");
+      assert.equal(await store.setAgentLiveSharing({ agentId: "agent_1", enabled: true }), "on");
+      assert.equal(await store.setAgentLiveSharing({ agentId: "agent_2", enabled: false }), "off", "an agent that never shared has nothing to remove");
+      assert.deepEqual([...(await store.liveSharingByAgent()).entries()].sort(), [["agent_1", "on"], ["agent_2", "off"]]);
+      assert.equal(await store.setAgentLiveSharing({ agentId: "agent_1", enabled: false }), "withdrawing");
+      assert.equal(await store.setAgentLiveSharing({ agentId: "agent_1", enabled: true }), "on", "on again wins over a pending removal");
+      assert.equal(await store.markLiveSharingWithdrawn("agent_1"), "on", "a removal confirmed late never turns sharing off");
+      assert.equal(await store.setAgentLiveSharing({ agentId: "agent_1", enabled: false }), "withdrawing");
+      assert.equal(await store.markLiveSharingWithdrawn("agent_1"), "off");
+      assert.equal(await store.setAgentLiveSharing({ agentId: "missing", enabled: true }), null);
       const inspection = new DatabaseSync(databasePath);
       try {
-        assert.equal(inspection.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
-        assert.throws(() => inspection.prepare("UPDATE agent_configurations SET live_sharing='maybe'").run(), /CHECK/);
+        assert.equal(inspection.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_USER_VERSION);
+        assert.throws(() => inspection.prepare("UPDATE agents SET live_sharing='maybe'").run(), /CHECK/);
       } finally { inspection.close(); }
-    } finally { await migrated.close(); }
+    } finally { await store.close(); }
   } finally {
     await removeTestDirectory(root);
   }

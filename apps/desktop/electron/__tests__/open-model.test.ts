@@ -9,20 +9,20 @@ import {
   assertManagedAgentPermissionProfileAvailable,
   defaultManagedAgentPermissionProfileId,
   listManagedAgentPermissionProfiles,
-} from "../main/agents/managed-agent-permission-profiles.js";
-import { resolveOpenModelLimits } from "../main/agents/open-model-limits.js";
-import { openCodeConfig, parseConfiguredOpenModelImageInput } from "../main/agents/opencode-launch-contract.js";
+} from "#provider-runtime/agents/managed-agent-permission-profiles.js";
+import { resolveOpenModelLimits } from "#provider-runtime/agents/open-model-limits.js";
+import { openCodeConfig, parseConfiguredOpenModelImageInput } from "#provider-runtime/agents/opencode-launch-contract.js";
 import {
   OPENCODE_RUNTIME_VERSION,
   openCodeInstallCommand,
   resolveOpenCodeBinary,
-} from "../main/agents/opencode-runtime.js";
+} from "#provider-runtime/agents/opencode-runtime.js";
 import {
   DEFAULT_OPEN_MODEL_BASE_URL,
   getOpenModelSettingsStatus,
   readOpenModelSettings,
   saveOpenModelSettings,
-} from "../main/agents/open-model-settings.js";
+} from "#provider-runtime/agents/open-model-settings.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
 import { writeFakeProvider } from "./platform.js";
 import {

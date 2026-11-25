@@ -1,83 +1,62 @@
 import type { AgentAvatar } from "../../../shared/agent-avatar.mjs";
-export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.288";
+import {
+  DAEMON_IMPLEMENTATION_VERSION,
+  DAEMON_PROTOCOL_VERSION,
+  type DaemonActivityEvent,
+  type DaemonAgentDeliveryMode,
+  type DaemonAgentStreamEvent,
+  type DaemonManifestEntry,
+  type DaemonManifestEntryView,
+  type DaemonProviderConnection,
+  type DaemonProviderRuntimeReference,
+  type DaemonRequest,
+  type DaemonResponse,
+  type DaemonRoomMovePhase,
+  type DaemonRoomMoveRecord,
+  type DaemonTurnControlEffect,
+  type DaemonWorkerBindingProjection,
+  type DesiredState,
+  type ExecutionTerminalPayload,
+  type NativeExecutionActivity,
+  type ObservedState,
+  type PolicyCondition,
+  type ReconciliationNotice,
+  type ReconciliationState,
+  type WorkplaceReachability,
+} from "#daemon-contract/index.js";
 
-export type DesiredState = "running" | "paused" | "stopped";
-export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
-export type PolicyCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
-
-/** Persisted by the daemon so a restart cannot erase crash-loop/backoff state. */
-export type ReconciliationState = {
-  /** Terminal process exits only; this rolling window determines quarantine. */
-  exit_timestamps_ms: number[];
-  /** Consecutive failed recovery actions only; this determines retry backoff. */
-  consecutive_action_failures: number;
-  last_observed_state: ObservedState;
-  next_restart_at_ms: number | null;
-  /** Bounded compatibility/debug projection; last_action_sequence is the replay fence. */
-  completed_action_ids: string[];
-  last_action_sequence: number;
-  pending_action: { id: string; sequence: number; kind: "poke" | "restart_fresh" | "restart_with_resume" | "stop"; recorded_at_ms: number } | null;
-  /** Most recent immutable provider death evidence; copied into escalations. */
-  last_terminal?: ExecutionTerminalPayload;
+export {
+  DAEMON_IMPLEMENTATION_VERSION,
+  DAEMON_PROTOCOL_VERSION,
 };
-
-export type ReconciliationNotice = { at: string; kind: "quarantine_death" | "coordination_escalation"; cause: string; terminal?: ExecutionTerminalPayload };
-
-export type WorkplaceReachability = "reachable" | "stale" | "unknown";
-export type NativeExecutionActivity = "active" | "idle" | "stale" | "terminal" | "unknown";
+export type {
+  DaemonActivityEvent,
+  DaemonAgentDeliveryMode,
+  DaemonAgentStreamEvent,
+  DaemonManifestEntry,
+  DaemonManifestEntryView,
+  DaemonProviderConnection,
+  DaemonProviderRuntimeReference,
+  DaemonRequest,
+  DaemonResponse,
+  DaemonRoomMovePhase,
+  DaemonRoomMoveRecord,
+  DaemonTurnControlEffect,
+  DaemonWorkerBindingProjection,
+  DesiredState,
+  ExecutionTerminalPayload,
+  NativeExecutionActivity,
+  ObservedState,
+  PolicyCondition,
+  ReconciliationNotice,
+  ReconciliationState,
+  WorkplaceReachability,
+};
 
 export type DaemonLivenessAxis<TState extends string> = {
   state: TState;
   observed_at: string | null;
   detail: string | null;
-};
-
-/** Bounded, redacted provider evidence. This is activity, never hidden thoughts. */
-export type DaemonActivityEvent = {
-  observed_at: string;
-  sequence: number;
-  provider: string;
-  kind: string;
-  method: string;
-  summary: string;
-  status: "idle" | "working" | "reviewing" | "blocked";
-  payload: unknown;
-  payload_truncated: boolean;
-  payload_redacted: boolean;
-  durable_payload_ref: string | null;
-};
-
-/**
- * One event on the ephemeral per-agent live feed (reasoning/assistant-text
- * deltas + tool calls). Redacted like activity, but NOT persisted to the
- * manifest — it exists only in an in-memory ring buffer for the focused agent
- * inspector, so a token firehose never touches durable state.
- */
-export type DaemonAgentStreamEvent = {
-  sequence: number;
-  observed_at: string;
-  kind: string;
-  method: string;
-  summary: string | null;
-  payload: unknown;
-  /**
-   * Set on a latest value (the live output of a running command, or the state
-   * of a background command): a consumer keeps only the newest event of a key.
-   */
-  latest_key?: string;
-};
-
-/**
- * Renderer-safe projection of the daemon-private worker binding. Credentials
- * and API authority never leave WorkerBindingStore; this identity-only view
- * lets UI controls resolve a room worker to one exact supervisor entry.
- */
-export type DaemonWorkerBindingProjection = {
-  agent_session_id: string;
-  work_attempt_id: string;
-  execution_generation_id: string;
-  updated_at: string;
 };
 
 /** Stable identity plus creation provenance; everything else may change independently. */
@@ -100,33 +79,6 @@ export type DaemonAgentRoomMembership = {
   room_id: string;
   /** Pinned local storage identity; absent means the existing cloud transport. */
   local_room_id?: string;
-};
-
-export type DaemonRoomMovePhase = "prepared" | "waiting_for_current_turn" | "joining_destination" | "membership_committed" | "rotating_credentials" | "bootstrapping_destination_tail" | "active" | "failed" | "rollback_required";
-export type DaemonRoomMoveRecord = {
-  operation_id: string;
-  request_id: string;
-  agent_id: string;
-  source_room_id: string;
-  destination_room_id: string;
-  daemon_generation: number;
-  work_attempt_id: string | null;
-  execution_generation_id: string | null;
-  agent_session_id: string | null;
-  activating_inbox_item_id: string | null;
-  provider_turn_id: string | null;
-  effect_id: string | null;
-  phase: DaemonRoomMovePhase;
-  remote_room_id: string | null;
-  destination_cursor: string | null;
-  /** Electron durably acknowledged revocation of the exact source session. */
-  source_credentials_revoked: boolean;
-  /** Exact pre-move ingress authority captured by the prepare transaction. */
-  source_cursor_present: boolean;
-  source_cursor: string | null;
-  error: string | null;
-  created_at: string;
-  updated_at: string;
 };
 
 export type DaemonPurgePhase = "prepared" | "reprepare_credentials" | "revoking_credentials" | "local_commit" | "complete" | "failed";
@@ -164,12 +116,8 @@ export type DaemonAgentConfiguration = {
   config_revision?: number;
   /** Revision most recently consumed by the current provider runtime. */
   runtime_configuration_revision?: number;
-  /** Explicit inbox owner; never infer daemon delivery from native policy. */
+  /** Explicit inbox owner; daemon_inbox is the sole supervised delivery mode. */
   delivery_mode?: DaemonAgentDeliveryMode;
-  /** Daemon-owned polling custody, never accepted from the flat manifest. */
-  polling_contract?: "custodial_polling_v1" | null;
-  /** Present only while a legacy Codex polling turn is being fenced. */
-  delivery_cutover?: DaemonDeliveryCutover | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
   provider_launch_policy?: unknown;
   /**
@@ -187,79 +135,12 @@ export type DaemonAgentConfiguration = {
   live_sharing?: "off" | "on" | "withdrawing";
 };
 
-/** Durable owner of room ingress for one supervised provider execution. */
-export type DaemonAgentDeliveryMode = "mcp_polling" | "daemon_inbox";
-
-/** Durable one-way handoff from legacy polling to daemon-owned ingress. */
-export type DaemonDeliveryCutover = {
-  work_attempt_id: string;
-  execution_generation_id: string;
-  provider_continuation_id: string;
-  /** Null only before the one permitted active-turn discovery completes. */
-  provider_turn_id: string | null;
-  phase: "prepared" | "retryable" | "dispatching" | "uncertain";
-  /** Redacted operator-facing reason when the handoff remains fenced. */
-  error?: string | null;
-  updated_at: string;
-};
-
 /** Requested launch/control state. This is intent, not agent identity or observed runtime. */
 export type DaemonAgentLaunchIntent = {
   agent_id: string;
   desired_state: DesiredState;
   /** Read-only source checkout used only to resolve remote + revision. */
   source_repo_path?: string | null;
-};
-
-/** Process evidence owned by one replaceable provider deployment. */
-export type DaemonProviderConnection =
-  | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
-  | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
-  | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null }
-  | { kind: "opencode_server"; url: string; pid: number | null; processIdentity?: string | null; serverAuthPath: string }
-  | { kind: "antigravity_acp"; pid: number | null; processIdentity?: string | null };
-
-export type DaemonProviderRuntimeReference = {
-  /** Non-secret worker identity actually installed in this native runtime's MCP environment. */
-  custodial_launch_agent_session_id?: string | null;
-  work_attempt_id: string;
-  provider_continuation_id: string;
-  provider_connection: DaemonProviderConnection | null;
-  execution_generation_id: string;
-};
-
-/** Durable human turn-control effect journal for one agent. */
-export type DaemonTurnControlEffect = {
-  action_id: string;
-  /** Daemon-enforced exact-next sequence; bounds replay authority to O(1). */
-  action_sequence: number;
-  work_attempt_id: string;
-  execution_generation_id: string;
-  /** Exact causal target. Nullable/absent values exist only for legacy
-   * completed journals that predate durable target fencing. */
-  target_room_id?: string | null;
-  target_source_message_id?: string | null;
-  target_provider_continuation_id?: string | null;
-  /** Exact daemon FIFO row reserved before the native control side effect. */
-  inbox_item_id?: string | null;
-  /** Exact native turn fenced before the first interrupt side effect. */
-  provider_turn_id?: string | null;
-  has_correction: boolean;
-  /** Exact bounded correction, persisted before native dispatch for replay and idempotency. */
-  correction_text?: string | null;
-  /** Durable correction semantics; recovery must never re-derive this from mutable provider capabilities. */
-  correction_strategy?: "native" | "stop_then_resend" | null;
-  /** Exact operator decision, persisted so opposite retries cannot share an acknowledgement. */
-  operator_resolution?: "applied" | "not_applied" | null;
-  status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
-  capability: "native_interrupt" | "restart_resume" | "unsupported";
-  interrupted: boolean | null;
-  resumed: boolean | null;
-  state: "idle" | "working" | null;
-  stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
-  error: string | null;
-  recorded_at: string;
-  updated_at: string;
 };
 
 /**
@@ -316,148 +197,10 @@ export type DaemonReconciliationRecord = {
   reconciliation_notices?: ReconciliationNotice[];
 };
 
-/**
- * Backward-compatible flat manifest wire contract. Domain code should project
- * this transport record into the narrower records above before reasoning about
- * identity, configuration, runtime, or lifecycle ownership.
- */
-export type DaemonManifestEntry = {
-  id: string;
-  avatar?: AgentAvatar | null;
-  room_id: string;
-  local_room_id?: string;
-  display_name: string;
-  provider: string;
-  model: string | null;
-  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
-  charter: string;
-  /**
-   * Neither revision is ever on an entry read back from the store, so no
-   * reader may use them from a flat entry: read them from the store
-   * (`getAgentConfiguration`), where they are the record.
-   */
-  config_revision?: number;
-  runtime_configuration_revision?: number;
-  desired_state: DesiredState;
-  observed_state: ObservedState;
-  condition: PolicyCondition;
-  last_error?: string | null;
-  permission_profile_id: string | null;
-  delivery_mode?: DaemonAgentDeliveryMode;
-  delivery_cutover?: DaemonDeliveryCutover | null;
-  provider_launch_policy?: unknown;
-  created_by: string;
-  created_at: string;
-  source_repo_path?: string | null;
-  workspace_path?: string | null;
-  work_attempt_id?: string | null;
-  /** Durable runtime identity, explicit when it cannot be derived from provider_ref. */
-  run_id?: string | null;
-  deployment_id?: string | null;
-  provider_ref?: DaemonProviderRuntimeReference | null;
-  workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
-  native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
-  ready_reached_at?: string | null;
-  activity?: DaemonActivityEvent[];
-  /** O(1) durable replay watermark for human turn-control actions. */
-  last_turn_control_sequence?: number;
-  turn_control?: DaemonTurnControlEffect | null;
-  last_worker_binding?: DaemonWorkerBindingProjection | null;
-  reconciliation?: ReconciliationState;
-  reconciliation_notices?: ReconciliationNotice[];
-};
-
-export type DaemonManifestEntryView = DaemonManifestEntry & {
-  /** Current child-owned progress only; never durable lifecycle or readiness. */
-  provider_progress?: { state: "compacting"; startedAt: string } | null;
-  /** Live start-up progress of the latest launch in this daemon; memory only. */
-  launch_progress?: import("./launch-progress.js").LaunchProgressView | null;
-  /** Commands the agent runs in the background now, from its live feed; memory only, changed only on a start or an end. */
-  background_commands?: import("./agent-stream-registry.js").RunningBackgroundCommand[];
-  runtime_recovery?: {
-    operationId: string; roomId: string; executionGenerationId: string; runtimeGenerationId: string;
-    mode: "resume" | "fresh"; phase: "prepared" | "stopped";
-  } | null;
-  /** Opaque exact native process birth; absent on older supervisors. */
-  runtime_generation_id?: string | null;
-  /** Read-only credential contract from configuration, never caller-owned manifest input. */
-  polling_contract?: "custodial_polling_v1" | null;
-  /**
-   * Read-only: this agent uses its owner's own provider setup ("on"), will
-   * once it restarts, or still does until it restarts. Absent means off.
-   */
-  home_harness?: import("./provider-configuration.js").HomeHarnessState;
-  /**
-   * Read-only: the owner saved another access level (permission mode) after
-   * this agent's process started, and the process has not been replaced yet.
-   * Absent means the process runs with the saved level.
-   */
-  permission_pending?: true;
-  worker_binding?: DaemonWorkerBindingProjection | null;
-  /** Ephemeral causal delivery projection; never persisted in the manifest. */
-  room_agent_state?: {
-    connection: { state: "connected" | "reconnecting" | "disconnected"; observed_at: string | null; detail: string | null };
-    ingress: { state: "starting" | "observing" | "backoff" | "blocked" | "stopped"; observed_at: string | null; detail: string | null };
-    inbox: { state: "empty" | "queued" | "blocked" | "restoring_conversation" | "waiting_for_desktop_credentials"; pending_count: number; blocked_by_message_id: string | null; detail: string | null };
-    turn: { state: "idle" | "dispatching" | "responding" | "publishing" | "retrying" | "failed"; inbox_item_id: string | null; source_message_id: string | null; provider_turn_id: string | null; detail: string | null };
-    task: { state: "none" | "assigned" | "working" | "blocked"; task_id: string | null; title: string | null };
-  } | null;
-  /**
-   * Ephemeral, never persisted. Set while the agent's oldest unsettled room
-   * message is blocked: later messages wait behind it until a person retries
-   * or skips it. `condition` keeps describing only the runtime.
-   */
-  delivery_attention?: {
-    reason: "message_blocked";
-    source_message_id: string;
-    blocked_since: string;
-    detail: string | null;
-    /** Messages waiting behind the blocked one. */
-    waiting_count: number;
-    /** The message reached the provider, or may have. */
-    provider_work_started: boolean;
-    /** What Retry delivery does: re-read the saved turn (never rerun it), post the saved reply, start the turn, or restore the conversation first. */
-    retry: "reread_saved_turn" | "publish_saved_reply" | "start_turn" | "restore_conversation";
-    /** Skip is accepted now; skipping never reruns the turn and drops any answer it had. */
-    can_skip: boolean;
-    skip_unavailable_reason: string | null;
-  } | null;
-  delivery_receipts?: Array<{
-    inbox_item_id: string; source_message_id: string; fifo_sequence: number;
-    /** Deterministic publication identity used even before a canonical id was checkpointed. */
-    reply_client_message_id: string;
-    /** Exact room message created by this inbox item's final-answer publication. */
-    canonical_message_id: string | null;
-    state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "acknowledged_failed" | "retryable" | "blocked" | "restoring_conversation" | "cancelled_by_room_move" | "cancelled_by_user" | "queued_behind_blocked";
-    attempt_count: number; provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; updated_at: string;
-    /**
-     * Set on a follow-up, which has no room message of its own: the room message the failed work began with (null
-     * when that receipt is no longer kept), and where the follow-up stands. `scheduled`: the daemon starts it by
-     * itself at `at_ms`, as automatic attempt `attempt` of `attempts`, after a provider fault or a turn without a
-     * reply. `waiting_for_owner`: it is blocked. `ended`: it ended with nothing started, and its `error` says why.
-     */
-    follow_up?: {
-      for_message_id: string | null;
-      state: "scheduled" | "waiting_for_owner" | "ended";
-      /**
-       * Why it waits for its owner or ended, from a closed set (`FOLLOW_UP_REASONS` in task-continuity.ts). Absent while
-       * it waits for its time. Anything that reads this must tolerate a reason that it does not know.
-       */
-      reason?: "stopped_by_owner" | "skipped" | "agent_changed" | "task_not_held" | "uncertain_action" | "uncertain_resolved" | "attempts_failed" | "ownership_unverified" | "other";
-      /**
-       * Only for an ended follow-up whose note asks its owner to send a message (`stopped_by_owner`, `agent_changed`): whether a turn has
-       * started for a message of a person that came after it. Absent from a daemon that does not say, and then the note stays.
-       */
-      later_person_turn?: boolean;
-      scheduled: { at_ms: number; attempt: number; attempts: number; kind: "provider_fault" | "no_reply" } | null;
-    };
-    timeline: Array<{ event_sequence: number; phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled"; observed_at: string; detail: string | null }>;
-  }>;
-};
-
 export type DaemonManifest = {
-  generation: number;
   entries: DaemonManifestEntry[];
+  /** Per-agent optimistic concurrency version from `agents.version`. */
+  versions?: Record<string, number>;
 };
 
 export type Transition = {
@@ -470,9 +213,6 @@ export type Transition = {
   generation: number;
 };
 
-export type DaemonRequest = { version: number; id?: string; method: string; params?: unknown };
-export type DaemonResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
-
 export type WorkAttemptState = "active" | "ambiguous" | "coordination_blocked" | "quarantined" | "unreviewed" | "cleanly_concluded" | "abandoned" | "gc_pending" | "garbage_collected";
 
 export type LeaseEpoch = { lease_id: string; epoch: number; recorded_at: string };
@@ -480,19 +220,6 @@ export type LeaseEpoch = { lease_id: string; epoch: number; recorded_at: string 
 export type WorkAttemptCheckpoint = {
   at: string;
   room_cursor: string | null;
-  provider_continuation_id: string | null;
-};
-
-export type ExecutionTerminalPayload = {
-  native_runtime_death?: import("../shared/execution-protocol.js").NativeRuntimeDeath;
-  ended_at: string;
-  exit_code: number | null;
-  signal: string | null;
-  stdio_archive_ref: string | null;
-  stdio_tail: string;
-  terminal_cause: string;
-  actor: string;
-  generation: number;
   provider_continuation_id: string | null;
 };
 

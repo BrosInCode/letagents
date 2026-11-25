@@ -70,7 +70,7 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
   protected async completeBoundedEffectOnce(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
     providerTurnId: string;
-    effectId: string; result?: unknown; error?: string;
+    effectId: string; result?: unknown; error?: string; uncertain?: boolean;
   }, admittedDaemonExecution = false): Promise<{ completed: true }> {
     return this.boundedEffects.completeOnce(input, admittedDaemonExecution);
   }
@@ -227,20 +227,6 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
     );
   }
 
-  protected stageWorkerBindingAfterResume(
-    entry: DaemonManifestEntry,
-    priorBinding: WorkerSessionBinding,
-    successorExecutionGenerationId: string,
-    handle: ProviderActionHandle,
-  ): Promise<void> {
-    return this.providerStreams.stageWorkerBindingAfterResume(
-      entry,
-      priorBinding,
-      successorExecutionGenerationId,
-      handle,
-    );
-  }
-
   protected handleProviderStream(
     entryId: string,
     handle: ProviderActionHandle,
@@ -286,11 +272,11 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
     return { supervisor_id: this.singleton.lockPath, supervisor_generation: this.singleton.currentGeneration };
   }
 
-  async transition(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"]): Promise<void> {
-    return this.manifestTransitions.transition(entryId, to, condition, cause, actor, reconciliation);
+  async transition(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], expectedVersion?: number): Promise<void> {
+    return this.manifestTransitions.transition(entryId, to, condition, cause, actor, reconciliation, expectedVersion);
   }
 
-  protected async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], notice?: ReconciliationNotice["kind"], terminal?: ExecutionTerminalPayload, fence?: TerminalCommitFence): Promise<void> {
+  protected async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], notice?: ReconciliationNotice["kind"], terminal?: ExecutionTerminalPayload, fence?: TerminalCommitFence, expectedVersion?: number): Promise<void> {
     await this.manifestTransitions.transitionOnce(
       entryId,
       to,
@@ -300,7 +286,7 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
       reconciliation,
       notice,
       terminal,
-      fence,
+      fence, expectedVersion,
     );
   }
 
@@ -363,19 +349,6 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
 
   protected async serializeManifestMutation<T>(operation: () => Promise<T>): Promise<T> {
     return this.authority.serializeManifestMutation(operation);
-  }
-
-  protected writeManifest(
-    expectedGeneration: number,
-    entries: DaemonManifestEntry[],
-    roomMoveCancellation?: { agentId: string; detail: string },
-  ) {
-    return this.store.write(
-      expectedGeneration,
-      entries,
-      (commit) => this.fenceDaemonCommit(commit),
-      roomMoveCancellation,
-    );
   }
 
   protected fenceDaemonCommit(commit: () => Promise<void>, notification?: DaemonCommitNotification): Promise<void> {

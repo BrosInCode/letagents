@@ -8,15 +8,20 @@ import test from "node:test";
 import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "../../../../shared/provider-acquisition-evidence.mjs";
 import { validatedNativeRuntimeDeath } from "../provider-action-port.js";
 import { advanceReconciliationState } from "../reconciler-state.js";
-import { RETIREMENT_SETTLEMENT_WAIT_MS } from "../provider-execution-coordinator.js";
 import { ActivityWriteBatcher } from "../activity-write-batcher.js";
 import { SupervisedAgentDelivery, SupervisedRoomAuthorizationError } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-
 import {
+  CONVERGENCE_CONFLICT_RETRY_LIMIT,
+  ConvergenceConflictExhaustedError,
   ProviderExecutionCoordinator,
+  RETIREMENT_SETTLEMENT_WAIT_MS,
   type ProviderExecutionCoordinatorOptions,
 } from "../provider-execution-coordinator.js";
+import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
+import { ManifestTransitionCoordinator } from "../manifest-transition-coordinator.js";
+import { ProviderSchedulerFailureCoordinator } from "../provider-scheduler-failure-coordinator.js";
+import { DaemonFenceLostError } from "../singleton.js";
 import type {
   ProviderActionHandle,
   ProviderActionPort,
@@ -27,13 +32,19 @@ import type {
 import type { DaemonManifestEntry, ExecutionTerminalPayload, TaskWorkAttempt } from "../types.js";
 import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { BoundWorkerAuthorization, InstalledHostGrant } from "../worker-runtime-custody.js";
-import type { PollingActivationRecord } from "../custodial-polling-activation.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
 import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordinator.js";
 import { launchProgress } from "../launch-progress.js";
 import { setTurnStartLatencyReporter, type StartLatencyRecord } from "../turn-start-latency.js";
-import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-spawn-configuration.js";
+import { attestProviderSpawnPolicy } from "#provider-runtime/agents/provider-spawn-configuration.js";
+import { OpenModelProviderAdapter } from "#provider-runtime/agents/open-model-provider-adapter.js";
+import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { ProviderActionPortRouter } from "../provider-action-port-router.js";
+import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
+import { ExecutionProtocolError } from "../execution-protocol.js";
+import { ProviderStopError } from "../daemon-error-policy.js";
+import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -128,13 +139,13 @@ function harness(input: {
   workspaceIdentity?: TaskWorkAttempt["workspace_identity"];
 } = {}) {
   let manifestEntry = input.entry ?? baseEntry();
-  let manifestGeneration = 1;
+  let agentVersion = 1;
   let handoff = input.handoff ?? false;
   let controlEpoch = input.controlEpoch ?? 0;
   let frozenAuthorityMode: "legacy" | "typed_shadow" | "typed" | null =
     input.frozenAuthorityMode !== undefined
       ? input.frozenAuthorityMode
-      : manifestEntry.provider_ref?.provider_connection?.pid != null ? "legacy" : null;
+      : manifestEntry.provider_ref?.provider_connection?.pid != null ? "typed" : null;
   const liveHandles = new Map<string, ProviderActionHandle>();
   const installed: ProviderActionHandle[] = [];
   const stoppedDelivery: string[] = [];
@@ -154,11 +165,10 @@ function harness(input: {
     settleRuntimeApprovals: async () => {},
     provider: port,
     store: {
-      unresolvedDeliveryDrain: async () => null,
       pendingRuntimeRecovery: async () => null,
-      unresolvedPollingActivation: async () => null,
-      readGeneration: async () => manifestGeneration,
+      load: async () => ({ entries: [manifestEntry], versions: { [manifestEntry.id]: agentVersion } }),
       getEntry: async (entryId) => entryId === manifestEntry.id ? manifestEntry : undefined,
+      getEntryWithVersion: async (entryId) => entryId === manifestEntry.id ? { entry: manifestEntry, version: agentVersion } : undefined,
       getAgentConfiguration: async () => ({
         provider: manifestEntry.provider,
         model: manifestEntry.model,
@@ -169,35 +179,35 @@ function harness(input: {
         runtime_configuration_revision: 1,
       }),
       readRuntimeLifecycleAuthority: async () => frozenAuthorityMode,
-      checkpointProviderBirth: async (expectedGeneration, input, commitFence) => {
-        assert.equal(expectedGeneration, manifestGeneration);
+      checkpointProviderBirth: async (expectedVersion, input, commitFence) => {
+        assert.equal(expectedVersion, agentVersion);
         await commitFence(async () => {
           manifestEntry = input.entry;
-          manifestGeneration += 1;
+          agentVersion += 1;
         });
         if (input.providerConnection.pid !== null && frozenAuthorityMode === null) {
           frozenAuthorityMode = input.requestedAuthorityMode;
         }
         return {
-          generation: manifestGeneration,
+          version: agentVersion,
           entry: manifestEntry,
           authorityMode: input.providerConnection.pid === null
             ? null
             : frozenAuthorityMode,
         };
       },
-      replaceEntry: async (expectedGeneration, updated, commitFence) => {
-        assert.equal(expectedGeneration, manifestGeneration);
+      replaceEntry: async (expectedVersion, updated, commitFence) => {
+        assert.equal(expectedVersion, agentVersion);
         await commitFence(async () => {
           manifestEntry = updated;
-          manifestGeneration += 1;
+          agentVersion += 1;
         });
-        return { generation: manifestGeneration };
+        return { version: agentVersion };
       },
-      markRuntimeConfigurationApplied: async (expectedGeneration, _update, commitFence) => {
-        assert.equal(expectedGeneration, manifestGeneration);
-        await commitFence(async () => { manifestGeneration += 1; });
-        return { generation: manifestGeneration };
+      markRuntimeConfigurationApplied: async (expectedVersion, _update, commitFence) => {
+        assert.equal(expectedVersion, agentVersion);
+        await commitFence(async () => { agentVersion += 1; });
+        return { version: agentVersion };
       },
     },
     durability: {
@@ -271,8 +281,6 @@ function harness(input: {
     authority: {
       isHandoffScheduled: () => handoff,
       currentDaemonGeneration: () => 7,
-      currentManifestGeneration: () => manifestGeneration,
-      acceptManifestGeneration: (generation) => { manifestGeneration = generation; },
       assertCurrent: async () => {},
       ownsDaemonGeneration: async (generation) => !handoff && generation === 7,
       fenceCommit: async (commit) => {
@@ -289,16 +297,21 @@ function harness(input: {
     updateManifestEntry: async (_entryId, update) => {
       if (handoff) throw new (await import("../singleton.js")).DaemonFenceLostError("handoff");
       manifestEntry = update(manifestEntry);
-      manifestGeneration += 1;
+      agentVersion += 1;
       return manifestEntry;
     },
-    transition: async (_entryId, observedState, condition, cause) => {
+    transition: async (entryId, observedState, condition, cause, _actor, reconciliation, expectedVersion) => {
+      if (expectedVersion !== undefined && expectedVersion !== agentVersion) {
+        throw new ManifestConflictError(`Agent ${entryId} version ${agentVersion} does not match expected ${expectedVersion}.`);
+      }
       manifestEntry = {
         ...manifestEntry,
         observed_state: observedState,
         condition,
         last_error: condition === "none" ? null : cause,
+        ...(reconciliation !== undefined ? { reconciliation } : {}),
       };
+      agentVersion += 1;
     },
     terminalPayload: (value, actor) => ({
       ...(value.nativeRuntimeDeath ? { native_runtime_death: value.nativeRuntimeDeath } : {}),
@@ -362,7 +375,7 @@ function harness(input: {
     checkpoints,
     executionGenerations,
     entry: () => manifestEntry,
-    setEntry: (next: DaemonManifestEntry) => { manifestEntry = next; },
+    setEntry: (next: DaemonManifestEntry) => { manifestEntry = next; agentVersion += 1; },
     setHandoff: (next: boolean) => { handoff = next; },
     bumpControlEpoch: () => { controlEpoch += 1; },
   };
@@ -930,17 +943,6 @@ test("a launch waits for the daemon's runtime verification before it takes a lau
   assert.equal(bounded.phases.find((phase) => phase.phase === "runtime_verify")?.ms, 50);
 });
 
-test("delivery handoff freezes convergence and draining never creates a successor", async () => {
-  for (const phase of ["draining", "dispatching", "uncertain"] as const) {
-    let launches = 0;
-    const runtime = harness({ provider: provider({ spawn: async () => { launches++; return returnedHandle; }, resume: async () => { launches++; return returnedHandle; } }) });
-    runtime.options.store.unresolvedDeliveryDrain = async () => ({ phase } as never);
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(launches, 0, phase);
-    assert.equal(runtime.executionGenerations.length, 0, phase);
-  }
-});
-
 const repositoryWorkspaceIdentity: TaskWorkAttempt["workspace_identity"] = {
   repo: "repo", remote_url: "https://example.test/repo.git",
   resolved_revision: "a".repeat(40), bare_path: "/tmp/repo.git",
@@ -953,10 +955,10 @@ const scratchWorkspaceIdentity: TaskWorkAttempt["workspace_identity"] = {
 test("authorized worker routes reach the real provider MCP configuration on launch and resume", async () => {
   // Exercise default adapter factories, not helpers with a manually supplied
   // URL. Only native process creation is replaced; no credentials or network.
-  const { ClaudeCodeProviderAdapter } = await import(new URL("../../electron/main/agents/claude-code-provider-adapter.ts", import.meta.url).href);
-  const { CursorProviderAdapter } = await import(new URL("../../electron/main/agents/cursor-provider-adapter.ts", import.meta.url).href);
-  const { CodexProviderAdapter } = await import(new URL("../../electron/main/agents/codex-provider-adapter.ts", import.meta.url).href);
-  const { LETAGENTS_MCP_RUNTIME_VERSION } = await import(new URL("../../electron/main/agents/letagents-mcp-runtime.ts", import.meta.url).href);
+  const { ClaudeCodeProviderAdapter } = await import(new URL("../../provider-runtime/agents/claude-code-provider-adapter.ts", import.meta.url).href);
+  const { CursorProviderAdapter } = await import(new URL("../../provider-runtime/agents/cursor-provider-adapter.ts", import.meta.url).href);
+  const { CodexProviderAdapter } = await import(new URL("../../provider-runtime/agents/codex-provider-adapter.ts", import.meta.url).href);
+  const { LETAGENTS_MCP_RUNTIME_VERSION } = await import(new URL("../../provider-runtime/agents/letagents-mcp-runtime.ts", import.meta.url).href);
   const { letAgentsRuntimeContract } = await import(new URL("../../../../src/mcp/server/runtime-contract.ts", import.meta.url).href);
   const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-worker-route-")));
   const env = {
@@ -1717,7 +1719,7 @@ test("handoff during native dispatch journals the exact returned provider withou
   const port = provider({
     spawn: async () => {
       runtime.setHandoff(true);
-      return { ...returnedHandle, custodyLaunchAgentSessionId: "launched-worker" };
+      return returnedHandle;
     },
   });
   runtime = harness({ provider: port });
@@ -1726,7 +1728,6 @@ test("handoff during native dispatch journals the exact returned provider withou
 
   assert.equal(runtime.entry().provider_ref?.provider_continuation_id, "continuation-1");
   assert.equal(runtime.entry().provider_ref?.execution_generation_id, "generation-1");
-  assert.equal(runtime.entry().provider_ref?.custodial_launch_agent_session_id, "launched-worker");
   assert.deepEqual(
     runtime.checkpoints,
     [],
@@ -1741,7 +1742,7 @@ test("the handoff birth checkpoint retires the entry's pending activity right af
   const port = provider({
     spawn: async () => {
       runtime.setHandoff(true);
-      return { ...returnedHandle, custodyLaunchAgentSessionId: "launched-worker" };
+      return returnedHandle;
     },
   });
   runtime = harness({ provider: port });
@@ -1768,14 +1769,6 @@ test("the handoff birth checkpoint retires the entry's pending activity right af
   assert.equal(batcher.pendingState("agent-1"), null, "its pending events are dropped");
   await runtime.coordinator.drainDispatches();
   await batcher.close();
-});
-
-test("ordinary persistence keeps only the worker identity receipted by the native launch", async () => {
-  const runtime = harness();
-  await runtime.coordinator.persistProviderHandle("agent-1", { ...returnedHandle, custodyLaunchAgentSessionId: "launched-worker" }, "generation-1");
-  assert.equal(runtime.entry().provider_ref?.custodial_launch_agent_session_id, "launched-worker");
-  await runtime.coordinator.persistProviderHandle("agent-1", returnedHandle, "generation-2");
-  assert.equal(runtime.entry().provider_ref?.custodial_launch_agent_session_id, undefined, "a successor cannot inherit an unreceipted worker identity");
 });
 
 test("ordinary provider birth holds manifest mutation authority through generation acceptance", async () => {
@@ -1813,18 +1806,18 @@ test("ordinary provider birth holds manifest mutation authority through generati
     returnedHandle,
     "generation-1",
     1,
-    "typed_shadow",
+    "typed",
   );
   await checkpointStarted;
   let peerEntered = false;
   const peerMutation = runtime.options.authority.serializeManifestMutation(async () => {
     peerEntered = true;
-    const expectedGeneration = runtime.options.authority.currentManifestGeneration();
+    const before = (await runtime.options.store.getEntryWithVersion("agent-1"))?.version;
     await birthCommit;
     assert.equal(
-      runtime.options.authority.currentManifestGeneration(),
-      expectedGeneration,
-      "a peer manifest transition must not capture generation before provider birth commits",
+      (await runtime.options.store.getEntryWithVersion("agent-1"))?.version,
+      before,
+      "a peer manifest transition must not capture version before provider birth commits",
     );
   });
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1832,46 +1825,6 @@ test("ordinary provider birth holds manifest mutation authority through generati
   releaseCheckpoint();
 
   await Promise.all([persistence, peerMutation]);
-});
-
-test("legacy resume stages wait authority from the persisted successor rather than the predecessor snapshot", async () => {
-  const runtime = harness({
-    entry: {
-      ...baseEntry(), delivery_mode: "mcp_polling",
-      provider_ref: {
-        work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
-        provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection,
-      },
-    },
-    provider: provider({ capabilities: async () => ({
-      resume: true, midTurnInjection: false, transcriptAccess: false,
-      permissionPromptBridging: false, survivesRestart: false,
-    }) }),
-  });
-  runtime.executionGenerations.push({
-    execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
-    started_at: "2026-08-26T00:00:00.000Z", actor: "test", generation: 1,
-    terminal: runtime.options.terminalPayload(terminal(returnedHandle), "test"),
-  });
-  runtime.options.bindings.get = async () => ({
-    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
-    execution_generation_id: "generation-1", agent_session_id: "session-1",
-    credential_ref: "legacy-ref", api_url: "https://letagents.test", room_cursor: "7",
-    last_sequence: 9, last_observed_at_ms: 1_000, updated_at: "2026-08-26T00:00:00.000Z",
-  });
-  let stagedGeneration: string | null = null;
-  runtime.options.streams.stageWorkerBindingAfterResume = async (entry, prior, successor, handle) => {
-    assert.equal(entry.provider_ref?.execution_generation_id, successor);
-    assert.equal(entry.provider_ref?.execution_generation_id, runtime.entry().provider_ref?.execution_generation_id);
-    assert.equal(prior.execution_generation_id, "generation-1");
-    assert.equal(handle, returnedHandle);
-    stagedGeneration = successor;
-  };
-
-  await runtime.coordinator.converge("agent-1");
-
-  assert.equal(stagedGeneration, "generation-2");
-  assert.equal(runtime.entry().last_error, "resumed provider awaits exact worker wait evidence");
 });
 
 function ownedRecoveryHarness() {
@@ -2438,67 +2391,6 @@ test("daemon-owned reattach binds the current generation despite a still-present
   assert.equal(runtime.deliveryStarts, 1);
   assert.equal(runtime.waitStages, 0);
   assert.deepEqual(runtime.failures, []);
-});
-
-test("unresolved polling activation permits exact recovery and explicit stop but never a successor", async () => {
-  for (const phase of ["prepared", "dispatching", "uncertain", "active"] as const) {
-    const runtime = ownedRecoveryHarness();
-    runtime.setEntry({ ...runtime.entry(), delivery_mode: "mcp_polling", provider_ref: {
-      ...runtime.entry().provider_ref!, custodial_launch_agent_session_id: "session-1",
-    } });
-    runtime.options.store.getAgentConfiguration = async () => ({ provider: "codex", model: null, reasoning_effort: null,
-      permission_profile_id: "full_access", provider_launch_policy: {}, config_revision: 1,
-      runtime_configuration_revision: 1, polling_contract: "custodial_polling_v1" });
-    const activation: PollingActivationRecord = {
-      operation_id: "activation-1", request_id: "activate-1", reverse_operation_id: "reverse-1",
-      agent_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "generation-2",
-      native_continuation_id: "continuation-1", native_connection_kind: "codex_app_server", native_pid: 4242,
-      native_process_identity: "birth-4242", native_connection_sha256: createHash("sha256").update(JSON.stringify([
-        "codex_app_server", "http://127.0.0.1:4242", 4242, "birth-4242",
-      ])).digest("hex"), config_revision: 1, agent_session_id: "session-1", room_cursor: "7", phase,
-      provider_turn_id: phase === "active" ? "native-turn" : null, terminal_outcome: null, created_at_ms: 1, updated_at_ms: 1,
-    };
-    runtime.options.store.unresolvedPollingActivation = async () => activation;
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(runtime.installed.length, 1, phase);
-    assert.equal(runtime.mintCalls, 1, "the exact runtime can recover its worker without polling evidence");
-    assert.equal(runtime.waitStages, 0);
-    assert.equal(runtime.deliveryStarts, 0);
-    assert.equal(runtime.executionGenerations.length, 1);
-
-    runtime.executionGenerations[0]!.terminal = runtime.options.terminalPayload(terminal(returnedHandle), "test");
-    runtime.liveHandles.clear();
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(runtime.executionGenerations.length, 1, "a terminal runtime cannot replay an unresolved activation in a successor");
-    let stops = 0;
-    runtime.options.provider.stopRef = async (ref) => {
-      stops++;
-      assert.equal(ref.providerConnection?.processIdentity, activation.native_process_identity);
-      return terminal(returnedHandle);
-    };
-    runtime.options.provider.stop = async () => { throw new Error("cached stop cannot prove activation writer death"); };
-    runtime.setEntry({ ...runtime.entry(), desired_state: phase === "active" ? "stopped" : "paused" });
-    if (phase !== "uncertain") runtime.liveHandles.set("agent-1", returnedHandle);
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(stops, 1, "Pause/Stop is available both attached and after transport loss");
-    runtime.setEntry({ ...runtime.entry(), provider_ref: { ...runtime.entry().provider_ref!, provider_continuation_id: "successor" } });
-    await runtime.coordinator.converge("agent-1");
-    assert.equal(stops, 1, "the old activation never stops a replacement runtime");
-  }
-});
-
-test("draining preserves exact old-provider recovery while dispatching refuses attach", async () => {
-  const runtime = ownedRecoveryHarness();
-  runtime.options.store.unresolvedDeliveryDrain = async () => ({ phase: "draining" } as never);
-  await runtime.coordinator.converge("agent-1");
-  assert.equal(runtime.mintCalls, 1);
-  assert.equal(runtime.deliveryStarts, 1);
-  assert.equal(runtime.waitStages, 0);
-  runtime.options.store.unresolvedDeliveryDrain = async () => ({ phase: "dispatching" } as never);
-  assert.equal(await runtime.coordinator.attachLiveProvider(runtime.entry()), null);
-  await runtime.coordinator.converge("agent-1");
-  assert.equal(runtime.mintCalls, 1);
-  assert.equal(runtime.deliveryStarts, 1);
 });
 
 test("a resolved mint/bind call without exact read-back never makes an owned provider ready", async () => {
@@ -3168,8 +3060,1062 @@ test("while an agent is still to be replaced the scheduler converges again after
   assert.deepEqual(timers, [], "and it is not tried again behind the owner's back");
 });
 
-test("converge reads entries in summary mode while provider-birth checkpoints read generation before full entry and preserve activity", async () => {
-  const { ManifestConflictError } = await import("../manifest-store.js");
+test("Stop proves process death before releasing the fence even when an immutable protocol_error terminal already exists", async () => {
+  const existingProtocolError: ExecutionTerminalPayload = {
+    ended_at: "2026-08-26T00:01:00.000Z",
+    exit_code: null,
+    signal: null,
+    stdio_archive_ref: null,
+    stdio_tail: "",
+    terminal_cause: "protocol_error",
+    actor: "daemon-provider",
+    generation: 1,
+    provider_continuation_id: "ses-pre-typed",
+  };
+
+  // 1. Real OpenModelProviderAdapter + ProviderActionPortRouter + ProviderExecutionCoordinator
+  //    for both legacy and typed_shadow private server-auth.json sidecars.
+  for (const priorMode of ["legacy", "typed_shadow"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `letagents-stop-protocol-terminal-${priorMode}-`));
+    try {
+      const pid = 9101;
+      const birth = `opencode-birth-${priorMode}-${pid}`;
+      const attemptDir = join(root, `wa-${priorMode}`);
+      mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
+      const serverAuthPath = join(attemptDir, "server-auth.json");
+      await writePrivateFileAtomically(
+        serverAuthPath,
+        `${JSON.stringify({
+          username: "opencode",
+          password: "secret",
+          lifecycleAuthorityMode: priorMode,
+          connection: { url: "http://127.0.0.1:44991", pid, processIdentity: birth },
+        })}\n`,
+      );
+
+      let identityState: string | null | undefined = undefined;
+      let identityReads = 0;
+      let killOnSignal: NodeJS.Signals | null = null;
+      const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+      const adapter = new OpenModelProviderAdapter({
+        binary: "/opt/letagents/opencode",
+        runtimeRoot: root,
+        stopGraceMs: 25,
+        dependencies: {
+          getProcessIdentity: (candidatePid) => {
+            if (candidatePid !== pid) return null;
+            identityReads += 1;
+            return identityState;
+          },
+          signalProcess: (candidatePid, signal, identity) => {
+            signals.push({ pid: candidatePid, signal, identity });
+            if (killOnSignal === signal && identity === birth) identityState = null;
+          },
+          observeProcessExit: () => new Promise(() => {}),
+          discoverRuntimeConnection: async () => null,
+          probeGit: async () => null,
+        },
+      });
+      const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+
+      let fenceReleases = 0;
+      const stopEntry: DaemonManifestEntry = {
+        ...baseEntry(),
+        id: `agent-om-${priorMode}`,
+        provider: "open-model",
+        desired_state: "stopped",
+        observed_state: "recovering",
+        condition: "coordination_blocked",
+        work_attempt_id: `wa-${priorMode}`,
+        provider_ref: {
+          work_attempt_id: `wa-${priorMode}`,
+          execution_generation_id: `gen-${priorMode}`,
+          provider_continuation_id: "ses-pre-typed",
+          provider_connection: {
+            kind: "opencode_server",
+            url: "http://127.0.0.1:44991",
+            pid,
+            processIdentity: birth,
+            serverAuthPath,
+          },
+        },
+      };
+      const runtime = harness({ entry: stopEntry, provider: router });
+      runtime.executionGenerations.push({
+        execution_generation_id: `gen-${priorMode}`,
+        work_attempt_id: `wa-${priorMode}`,
+        started_at: "2026-08-26T00:00:00.000Z",
+        actor: "daemon-provider",
+        generation: 1,
+        terminal: { ...existingProtocolError },
+      });
+      runtime.options.durability.releaseTerminalExecutionFence = async () => { fenceReleases += 1; };
+
+      // 1a. Unverifiable birth: never signals, never releases fence, never reports stopped.
+      identityState = undefined;
+      await assert.rejects(
+        runtime.coordinator.converge(stopEntry.id),
+        (error: unknown) => error instanceof ProviderStopError
+          && /process birth cannot be verified/i.test(String(error.cause)),
+      );
+      assert.ok(identityReads >= 1, `${priorMode} must check process identity`);
+      assert.equal(signals.length, 0);
+      assert.equal(fenceReleases, 0);
+      assert.equal(runtime.terminalWrites.length, 0);
+      assert.notEqual(runtime.entry().observed_state, "stopped");
+
+      // 1b. Surviving stubborn process: escalates TERM -> KILL, never releases fence or reports stopped.
+      identityReads = 0;
+      identityState = birth;
+      killOnSignal = null;
+      await assert.rejects(
+        runtime.coordinator.converge(stopEntry.id),
+        (error: unknown) => error instanceof ProviderStopError
+          && /has not yet proved the recorded process birth is gone/i.test(String(error.cause)),
+      );
+      assert.ok(identityReads >= 1);
+      assert.deepEqual(signals, [
+        { pid, signal: "SIGTERM", identity: birth },
+        { pid, signal: "SIGKILL", identity: birth },
+      ]);
+      assert.equal(fenceReleases, 0);
+      assert.equal(runtime.terminalWrites.length, 0);
+      assert.notEqual(runtime.entry().observed_state, "stopped");
+
+      // 1c. Surviving process exits on SIGTERM: preserves immutable protocol_error, releases fence once, observes exit.
+      identityReads = 0;
+      signals.length = 0;
+      identityState = birth;
+      killOnSignal = "SIGTERM";
+      await runtime.coordinator.converge(stopEntry.id);
+      assert.ok(identityReads >= 1);
+      assert.deepEqual(signals, [{ pid, signal: "SIGTERM", identity: birth }]);
+      assert.equal(runtime.terminalWrites.length, 0, `${priorMode} must preserve existing immutable terminal record`);
+      assert.equal(runtime.executionGenerations[0]!.terminal?.terminal_cause, "protocol_error");
+      assert.equal(fenceReleases, 1, `${priorMode} releases fence only after confirmed process death`);
+      assert.equal(runtime.observedTerminals.length, 1);
+      assert.equal(runtime.observedTerminals[0]!.terminalCause, "stopped");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  // 2. Analogous stopRetiredPreTypedRuntime path (no stopRef, enters via identity_mismatch)
+  //    also refuses to release the fence on a protocol-only terminal without proven death.
+  let attachResponse: ProviderActionHandle | null = null;
+  let stopCalls = 0;
+  let retiredFenceReleases = 0;
+  const retiredEntry: DaemonManifestEntry = {
+    ...baseEntry(),
+    id: "agent-retired-protocol-terminal",
+    provider: "codex",
+    desired_state: "stopped",
+    observed_state: "recovering",
+    condition: "coordination_blocked",
+    work_attempt_id: "attempt-1",
+    provider_ref: {
+      work_attempt_id: "attempt-1",
+      execution_generation_id: "generation-1",
+      provider_continuation_id: "continuation-1",
+      provider_connection: returnedHandle.providerConnection,
+    },
+  };
+  const retired = harness({
+    entry: retiredEntry,
+    provider: provider({
+      attach: async () => attachResponse,
+      stop: async (handle) => {
+        stopCalls += 1;
+        return terminal(handle);
+      },
+    }),
+  });
+  retired.executionGenerations.push({
+    execution_generation_id: "generation-1",
+    work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z",
+    actor: "daemon-provider",
+    generation: 1,
+    terminal: { ...existingProtocolError, provider_continuation_id: "continuation-1" },
+  });
+  retired.options.store.readRuntimeLifecycleAuthority = async () => null;
+  retired.options.store.hasRetiredRuntimeLifecycleAuthority = async () => true;
+  retired.options.durability.releaseTerminalExecutionFence = async () => { retiredFenceReleases += 1; };
+  // Make attachLiveProvider throw identity_mismatch as happens for a frozen pre-typed row.
+  retired.coordinator.attachLiveProvider = async () => { throw new ExecutionProtocolError("identity_mismatch"); };
+
+  attachResponse = null;
+  await assert.rejects(
+    retired.coordinator.converge(retiredEntry.id),
+    (error: unknown) => error instanceof ProviderStopError
+      && /could not be attached or proven stopped/i.test(String(error.cause)),
+  );
+  assert.equal(stopCalls, 0);
+  assert.equal(retiredFenceReleases, 0);
+  assert.equal(retired.terminalWrites.length, 0);
+  assert.notEqual(retired.entry().observed_state, "stopped");
+
+  attachResponse = returnedHandle;
+  await retired.coordinator.converge(retiredEntry.id);
+  assert.equal(stopCalls, 1);
+  assert.equal(retired.terminalWrites.length, 0, "immutable protocol_error terminal is preserved");
+  assert.equal(retiredFenceReleases, 1, "fence released only after provider.stop confirmed termination");
+  assert.equal(retired.observedTerminals.length, 1);
+});
+
+test("a terminal record without a witnessed process death never lets a replacement start beside the recorded Codex process", async () => {
+  // The record that a daemon leaves when it ends between the terminal write and the stop of the process.
+  const protocolError: ExecutionTerminalPayload = {
+    ended_at: "2026-08-26T00:01:00.000Z", exit_code: null, signal: null, stdio_archive_ref: null, stdio_tail: "",
+    terminal_cause: "protocol_error", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation-1",
+  };
+  const pid = 9201;
+  const [birth, otherBirth] = process.platform === "win32"
+    ? ["win32-ft:134378009191465763", "win32-ft:134378009200000000"]
+    : ["Sat Nov 21 10:00:00 2026", "Sat Nov 21 11:30:00 2026"];
+  const scenario = async (run: (context: {
+    runtime: ReturnType<typeof harness>;
+    coordinator: ProviderExecutionCoordinator;
+    setIdentity(next: string | null | undefined): void;
+    dieOn(signal: NodeJS.Signals | null): void;
+    signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }>;
+    launches: () => number;
+    timers: number[];
+  }) => Promise<void>, recordedBirth: { processIdentity?: string | null } = { processIdentity: birth }) => {
+    let identity: string | null | undefined = birth;
+    let dieOn: NodeJS.Signals | null = null;
+    const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+    // The real Codex adapter decides what is proof and what is signalled; only the OS calls are fakes.
+    const adapter = new CodexProviderAdapter({ dependencies: {
+      getProcessIdentity: (candidate: number) => candidate === pid ? identity : null,
+      signalProcess: (candidate: number, signal: NodeJS.Signals, expected?: string | null) => {
+        signals.push({ pid: candidate, signal, identity: expected });
+        if (dieOn === signal && expected === birth) identity = null;
+      },
+    } });
+    const router = new ProviderActionPortRouter({ codex: async () => adapter });
+    let launches = 0;
+    const entry: DaemonManifestEntry = { ...baseEntry(), observed_state: "idle", provider_ref: {
+      work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+      provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:9201", pid, ...recordedBirth },
+    } };
+    const runtime = harness({ entry, provider: provider({
+      capabilities: async (...args) => ({ ...await router.capabilities(...args), resume: false }),
+      spawn: async () => { launches++; return returnedHandle; },
+      resume: async () => { launches++; return returnedHandle; },
+      stopRef: (ref, options) => router.stopRef(ref, { ...options, graceMs: 25 }),
+    }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: { ...protocolError } });
+    const timers: number[] = [];
+    const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+      setTimeout: ((_callback: () => void, delay: number) => { timers.push(delay); return { unref() {} }; }) as unknown as typeof setTimeout,
+      clearTimeout: (() => {}) as typeof clearTimeout,
+    });
+    // The adapter waits for the process with timers that do not hold the event loop open.
+    const keepAlive = setInterval(() => {}, 1_000);
+    try {
+      await run({ runtime, coordinator, signals, timers, launches: () => launches,
+        setIdentity: (next) => { identity = next; }, dieOn: (signal) => { dieOn = signal; } });
+    } finally {
+      clearInterval(keepAlive);
+    }
+  };
+
+  // The recorded process is alive and does not end: no second runtime, and the entry says why.
+  await scenario(async ({ runtime, coordinator, signals, launches, timers }) => {
+    await coordinator.converge("agent-1");
+    assert.equal(launches(), 0, "no replacement starts while the recorded process lives");
+    assert.deepEqual(signals, [
+      { pid, signal: "SIGTERM", identity: birth },
+      { pid, signal: "SIGKILL", identity: birth },
+    ], "only the exact recorded birth is signalled");
+    assert.equal(runtime.entry().observed_state, "recovering");
+    assert.equal(runtime.entry().condition, "coordination_blocked");
+    assert.match(String(runtime.entry().last_error), /not proven gone after its recorded end/);
+    assert.deepEqual(timers, [60_000], "the entry is checked again");
+    assert.equal(runtime.terminalWrites.length, 0, "the stored terminal record is not rewritten");
+  });
+
+  // The recorded process is alive and ends when it is asked: it is ended first, then one runtime starts.
+  await scenario(async ({ coordinator, signals, launches, dieOn }) => {
+    dieOn("SIGTERM");
+    await coordinator.converge("agent-1");
+    assert.deepEqual(signals, [{ pid, signal: "SIGTERM", identity: birth }]);
+    assert.equal(launches(), 1, "the replacement starts once the recorded process is gone");
+  });
+
+  // The process id now belongs to another process: nothing is signalled, and the replacement starts.
+  await scenario(async ({ coordinator, signals, launches, setIdentity }) => {
+    setIdentity(otherBirth);
+    await coordinator.converge("agent-1");
+    assert.deepEqual(signals, [], "a reused process id is never signalled");
+    assert.equal(launches(), 1);
+  });
+
+  // No process has the id: the replacement starts.
+  await scenario(async ({ coordinator, signals, launches, setIdentity }) => {
+    setIdentity(null);
+    await coordinator.converge("agent-1");
+    assert.deepEqual(signals, []);
+    assert.equal(launches(), 1);
+  });
+
+  // The birth of the process cannot be read: that is not proof, so nothing is signalled and nothing starts.
+  await scenario(async ({ runtime, coordinator, signals, launches, setIdentity }) => {
+    setIdentity(undefined);
+    await coordinator.converge("agent-1");
+    assert.deepEqual(signals, []);
+    assert.equal(launches(), 0);
+    assert.equal(runtime.entry().condition, "coordination_blocked");
+  });
+
+  // The reference has a process id and no recorded birth. No process can be matched to it, so it is
+  // never signalled and never treated as gone, whether or not a process has the id now.
+  for (const recorded of [{ processIdentity: null }, {}, { processIdentity: "  " }]) {
+    for (const osIdentity of [birth, null]) {
+      await scenario(async ({ runtime, coordinator, signals, launches, setIdentity, timers }) => {
+        setIdentity(osIdentity);
+        await coordinator.converge("agent-1");
+        assert.deepEqual(signals, [], "an incomplete reference is never signalled");
+        assert.equal(launches(), 0, "no replacement starts beside an incomplete process reference");
+        assert.equal(runtime.entry().observed_state, "recovering");
+        assert.equal(runtime.entry().condition, "coordination_blocked");
+        assert.deepEqual(timers, [60_000]);
+      }, recorded);
+    }
+  }
+});
+
+test("Stop of an entry whose ended generation has a process id and no recorded birth never reports stopped", async () => {
+  const protocolError: ExecutionTerminalPayload = {
+    ended_at: "2026-08-26T00:01:00.000Z", exit_code: null, signal: null, stdio_archive_ref: null, stdio_tail: "",
+    terminal_cause: "protocol_error", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation-1",
+  };
+  for (const recorded of [{ processIdentity: null }, {}] as Array<{ processIdentity?: string | null }>) {
+    let stopRefs = 0;
+    let attaches = 0;
+    const entry: DaemonManifestEntry = { ...baseEntry(), desired_state: "stopped", observed_state: "idle", provider_ref: {
+      work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+      provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:9401", pid: 9401, ...recorded },
+    } };
+    const runtime = harness({ entry, provider: provider({
+      attach: async () => { attaches++; return null; },
+      stopRef: async () => { stopRefs++; throw new Error("must not be called"); },
+    }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: { ...protocolError } });
+    let fenceReleases = 0;
+    runtime.options.durability.releaseTerminalExecutionFence = async () => { fenceReleases += 1; };
+    await assert.rejects(runtime.coordinator.converge("agent-1"),
+      (error: unknown) => error instanceof ProviderStopError && /no process birth/i.test(String(error.cause)));
+    assert.notEqual(runtime.entry().observed_state, "stopped");
+    assert.equal(stopRefs, 0, "an incomplete reference is never handed to a stop");
+    assert.equal(attaches, 0);
+    assert.equal(fenceReleases, 0);
+  }
+});
+
+test("Stop of a Codex entry never reports stopped while the process of its ended generation is not proven gone", async () => {
+  const protocolError: ExecutionTerminalPayload = {
+    ended_at: "2026-08-26T00:01:00.000Z", exit_code: null, signal: null, stdio_archive_ref: null, stdio_tail: "",
+    terminal_cause: "protocol_error", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation-1",
+  };
+  const pid = 9301;
+  const birth = process.platform === "win32" ? "win32-ft:134378009191465763" : "Sat Nov 21 10:00:00 2026";
+  let identity: string | null = birth;
+  let dieOn: NodeJS.Signals | null = null;
+  const signals: Array<{ pid: number; signal: NodeJS.Signals; identity: string | null | undefined }> = [];
+  const adapter = new CodexProviderAdapter({ dependencies: {
+    getProcessIdentity: (candidate: number) => candidate === pid ? identity : null,
+    signalProcess: (candidate: number, signal: NodeJS.Signals, expected?: string | null) => {
+      signals.push({ pid: candidate, signal, identity: expected });
+      if (dieOn === signal && expected === birth) identity = null;
+    },
+  } });
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  let attaches = 0;
+  const entry: DaemonManifestEntry = { ...baseEntry(), desired_state: "stopped", observed_state: "recovering",
+    condition: "coordination_blocked", provider_ref: {
+      work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+      provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:9301", pid, processIdentity: birth },
+    } };
+  const runtime = harness({ entry, provider: provider({
+    capabilities: (...args) => router.capabilities(...args),
+    attach: async () => { attaches++; return null; },
+    stopRef: (ref, options) => router.stopRef(ref, { ...options, graceMs: 25 }),
+  }) });
+  runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: { ...protocolError } });
+  let fenceReleases = 0;
+  runtime.options.durability.releaseTerminalExecutionFence = async () => { fenceReleases += 1; };
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    // The recorded process does not end: Stop fails, and the entry is not stopped.
+    await assert.rejects(runtime.coordinator.converge("agent-1"),
+      (error: unknown) => error instanceof ProviderStopError
+        && /has not yet proved the recorded process birth is gone/i.test(String(error.cause)));
+    assert.deepEqual(signals, [{ pid, signal: "SIGTERM", identity: birth }, { pid, signal: "SIGKILL", identity: birth }]);
+    assert.notEqual(runtime.entry().observed_state, "stopped");
+    assert.equal(fenceReleases, 0);
+
+    // The recorded process ends when it is asked: the stored record stays, and the stop is observed once.
+    signals.length = 0;
+    dieOn = "SIGTERM";
+    await runtime.coordinator.converge("agent-1");
+    assert.deepEqual(signals, [{ pid, signal: "SIGTERM", identity: birth }]);
+    assert.equal(runtime.terminalWrites.length, 0, "the stored terminal record is not rewritten");
+    assert.equal(fenceReleases, 1);
+    assert.equal(runtime.observedTerminals.length, 1);
+    assert.equal(runtime.observedTerminals[0]!.terminalCause, "stopped");
+    assert.equal(attaches, 0, "an ended generation is not attached again");
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+async function realSqliteSchedulerHarness(input: {
+  entry?: DaemonManifestEntry;
+  provider?: ProviderActionPort;
+  assertCurrent?: () => Promise<void>;
+  onBeforeTransition?: (attempt: number) => Promise<void>;
+  onDeliveryStop?: (entryId: string) => void;
+  refreshManagedRuntime?: ProviderExecutionCoordinatorOptions["refreshManagedRuntime"];
+} = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "letagents-pec-cas-"));
+  const store = new ManifestStore(join(dir, "manifest.sqlite"));
+  await store.initialize();
+  const initialEntry = input.entry ?? baseEntry();
+  launchProgress.begin(initialEntry.id);
+  launchProgress.settle(initialEntry.id);
+  await store.createEntry(initialEntry);
+  const workAttemptId = initialEntry.work_attempt_id ?? "attempt-1";
+  store.database!.prepare(`
+    INSERT INTO work_attempts (
+      work_attempt_id, task_id, lease_id, current_lease_epoch, workspace_path,
+      workspace_repo, workspace_remote_url, workspace_resolved_revision, workspace_bare_path,
+      state, created_at, concluded_at, conclusion_cause, postmortem_diff
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+  `).run(
+    workAttemptId,
+    initialEntry.id,
+    "lease-1",
+    1,
+    initialEntry.workspace_path,
+    "repo",
+    "https://example.test/repo.git",
+    "a".repeat(40),
+    "/tmp/repo.git",
+    "active",
+    "2026-08-26T00:00:00.000Z",
+  );
+  const liveHandles = new Map<string, ProviderActionHandle>();
+  const executionGenerations: Array<{
+    execution_generation_id: string;
+    work_attempt_id: string;
+    started_at: string;
+    actor: string;
+    generation: number;
+    terminal: ExecutionTerminalPayload | null;
+  }> = [];
+  const auditEvents: Array<{ from: string; to: string; cause: string; generation: number }> = [];
+  const schedulerFailures: unknown[] = [];
+  const scheduledRecoveryDelays: number[] = [];
+  let mutationChain: Promise<unknown> = Promise.resolve();
+  let entryChain: Promise<unknown> = Promise.resolve();
+  const serializeMutation = <T>(operation: () => Promise<T>): Promise<T> => {
+    const run = mutationChain.catch(() => undefined).then(operation);
+    mutationChain = run;
+    return run;
+  };
+  const serializeEntry = <T>(_entryId: string, operation: () => Promise<T>): Promise<T> => {
+    const run = entryChain.catch(() => undefined).then(operation);
+    entryChain = run;
+    return run;
+  };
+  const assertCurrent = input.assertCurrent ?? (async () => {});
+  const transitions = new ManifestTransitionCoordinator({
+    store,
+    authority: {
+      assertCurrent,
+      serializeMutation,
+      serializeCommit: async (operation) => operation(),
+      fenceCommit: async (commit) => commit(),
+    },
+    audit: {
+      append: async (event) => {
+        auditEvents.push({ from: event.from, to: event.to, cause: event.cause, generation: event.generation });
+      },
+    },
+    nowMs: () => 1_000,
+  });
+  let transitionCalls = 0;
+  let coordinator!: ProviderExecutionCoordinator;
+  const failures = new ProviderSchedulerFailureCoordinator({
+    nativeHeartbeatIntervalMs: 1_000,
+    currentDaemonGeneration: () => 7,
+    nowMs: () => 1_000,
+    serializeEntry,
+    serializeManifest: serializeMutation,
+    manifest: {
+      load: () => store.load(),
+      updateEntry: (entryId, update) => transitions.updateEntry(entryId, update),
+    },
+    transitionOnce: (entryId, to, condition, cause, actor, reconciliation, notice, terminalPayload) =>
+      transitions.transitionOnce(entryId, to, condition, cause, actor, reconciliation, notice, terminalPayload),
+    audit: {
+      append: async (event) => {
+        auditEvents.push({ from: event.from, to: event.to, cause: event.cause, generation: event.generation });
+      },
+    },
+    scheduleRecovery: (_entryId, delayMs) => { scheduledRecoveryDelays.push(delayMs); },
+  });
+  const port = input.provider ?? provider();
+  const options: ProviderExecutionCoordinatorOptions = {
+    ...(input.refreshManagedRuntime ? { refreshManagedRuntime: input.refreshManagedRuntime } : {}),
+    settleRuntimeApprovals: async () => {},
+    provider: port,
+    store,
+    durability: {
+      getAttempt: async () => ({
+        work_attempt_id: initialEntry.work_attempt_id ?? "attempt-1",
+        workspace_path: initialEntry.workspace_path,
+        workspace_identity: {
+          repo: "repo",
+          remote_url: "https://example.test/repo.git",
+          resolved_revision: "a".repeat(40),
+          bare_path: "/tmp/repo.git",
+        },
+        execution_generations: executionGenerations,
+        checkpoints: [],
+      }) as never,
+      createAttempt: async () => { throw new Error("existing attempt must be reused"); },
+      startGeneration: async (attemptId, actor, generation) => {
+        const execution = {
+          execution_generation_id: `generation-${generation}`,
+          work_attempt_id: attemptId,
+          started_at: "2026-08-26T00:00:01.000Z",
+          actor,
+          generation,
+          terminal: null,
+        };
+        store.database!.prepare(
+          "INSERT INTO work_attempt_executions VALUES (?, ?, ?, ?, ?, NULL)",
+        ).run(
+          execution.execution_generation_id,
+          execution.work_attempt_id,
+          execution.started_at,
+          execution.actor,
+          execution.generation,
+        );
+        executionGenerations.push(execution);
+        return execution;
+      },
+      recordTerminal: async () => ({}) as never,
+      releaseTerminalExecutionFence: async () => {},
+      recoverExecutionFence: async () => {},
+      checkpoint: async () => ({}) as never,
+    },
+    bindings: {
+      get: async () => null,
+      credentialFor: async () => null,
+      supervisedWorkerSession: async () => null,
+    },
+    streams: {
+      liveHandles,
+      get: (entryId) => liveHandles.get(entryId),
+      currentInstallation: () => undefined,
+      remove: () => false,
+      install: async (entryId, current) => { liveHandles.set(entryId, current); },
+      fenceTerminalOnce: async (current, actionId) => { await port.stop(current, { actionId }); },
+    },
+    authority: {
+      isHandoffScheduled: () => false,
+      currentDaemonGeneration: () => 7,
+      assertCurrent,
+      ownsDaemonGeneration: async (generation) => generation === 7,
+      fenceCommit: async (commit) => commit(),
+      serializeManifestMutation: serializeMutation,
+      serializeManifestCommit: async (operation) => operation(),
+    },
+    concurrency: {
+      currentControlEpoch: () => 0,
+      serializeEntry,
+    },
+    updateManifestEntry: (entryId, update) => transitions.updateEntry(entryId, update),
+    transition: async (entryId, to, condition, cause, actor, reconciliation, expectedVersion) => {
+      transitionCalls += 1;
+      await input.onBeforeTransition?.(transitionCalls);
+      await transitions.transition(entryId, to, condition, cause, actor, reconciliation, expectedVersion);
+    },
+    terminalPayload: (value, actor) => ({
+      ...(value.nativeRuntimeDeath ? { native_runtime_death: value.nativeRuntimeDeath } : {}),
+      ended_at: value.endedAt,
+      exit_code: value.exitCode,
+      signal: value.signal,
+      stdio_archive_ref: null,
+      stdio_tail: "",
+      terminal_cause: value.terminalCause,
+      actor,
+      generation: 7,
+      provider_continuation_id: value.providerContinuationId,
+    }),
+    observeProviderExit: async () => {},
+    completeTurnControlForRuntimeRecovery: async (current) => current,
+    delivery: {
+      stop: async (entryId) => { input.onDeliveryStop?.(entryId); },
+      start: async () => {},
+    },
+    inbox: {
+      head: async () => null,
+      cursor: async () => ({ agent_id: initialEntry.id, room_id: initialEntry.room_id, last_observed_message_id: "1" }),
+    },
+    host: {
+      requiresGrant: () => false,
+      currentGrant: () => null,
+      ensureGrantFresh: async () => null,
+      mintAuthorization: async () => null,
+      recordMintedSession: async () => null,
+      mintSession: async () => null,
+      bindMintedSession: async () => {},
+      awaitsBindingConfirmation: () => false,
+      confirmExactBinding: async () => {},
+      bearerNeedsRotation: async () => false,
+      blockExpiredAuthority: async () => {},
+      currentOpenModelCredential: () => null,
+      recordBindingRecoveryFailure: async () => {},
+      clearSuccessfulRecovery: () => {},
+    },
+    workspace: {
+      ephemeral: {
+        provision: async () => { throw new Error("unused"); },
+        ensureRepository: async () => "present" as const,
+      },
+      git: { provision: async () => { throw new Error("unused"); } },
+      gitCommand: async () => "",
+    },
+    socketPath: "/tmp/daemon.sock",
+    autoConverge: true,
+    nowMs: () => 1_000,
+    recordSchedulerFailure: async (entryId, error, actor) => {
+      schedulerFailures.push(error);
+      await failures.record(entryId, error, actor);
+    },
+    setTimeout: ((fn: () => void, delay?: number) => {
+      scheduledRecoveryDelays.push(delay ?? 0);
+      return { unref() {}, fn } as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+    clearTimeout: (() => {}) as typeof clearTimeout,
+  };
+  coordinator = new ProviderExecutionCoordinator(options);
+  return {
+    coordinator,
+    store,
+    transitions,
+    liveHandles,
+    executionGenerations,
+    auditEvents,
+    schedulerFailures,
+    scheduledRecoveryDelays,
+    transitionCalls: () => transitionCalls,
+    cleanup: async () => {
+      await store.close();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+test("request() recovers from a real concurrent manifest write on the running path without coordination_blocked or stale commands", async (t) => {
+  await t.test("benign concurrent write retries cleanly and spawns once", async () => {
+    let spawns = 0;
+    let injectedConcurrentWrite = false;
+    let env!: Awaited<ReturnType<typeof realSqliteSchedulerHarness>>;
+    env = await realSqliteSchedulerHarness({
+      provider: provider({
+        spawn: async () => {
+          spawns += 1;
+          return returnedHandle;
+        },
+      }),
+      onBeforeTransition: async () => {
+        if (injectedConcurrentWrite) return;
+        injectedConcurrentWrite = true;
+        // Real concurrent SQLite write outside serializeEntry, matching e.g. ProviderStreamCoordinator.
+        await env.transitions.updateEntry("agent-1", (current) => ({
+          ...current,
+          display_name: "Agent Updated Concurrently",
+        }));
+      },
+    });
+    try {
+      env.coordinator.request("agent-1");
+      await env.coordinator.drainConvergence();
+
+      assert.equal(injectedConcurrentWrite, true);
+      assert.equal(env.transitionCalls(), 3, "expected 1 conflicted starting transition, 1 retry starting transition, and 1 post-launch working transition");
+      assert.equal(env.schedulerFailures.length, 0, "concurrent conflict must not record a scheduler failure");
+      assert.equal(spawns, 1, "conflicted stale pass must not spawn; automatic retry spawns once");
+      const final = await env.store.getEntry("agent-1");
+      assert.equal(final?.display_name, "Agent Updated Concurrently");
+      assert.equal(final?.observed_state, "working");
+      assert.equal(final?.condition, "none");
+      assert.equal(final?.last_error ?? null, null);
+      assert.equal(env.auditEvents.some((event) => /coordination_blocked|convergence scheduler failure/i.test(event.cause)), false);
+      const progress = launchProgress.view("agent-1");
+      assert.equal(progress?.state, "launched", "retryable conflict must not leave launchProgress failed");
+      assert.equal(progress?.attempt, 1, "retryable conflict must not inflate launch attempt counter");
+      assert.equal(progress?.failure, null);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  await t.test("concurrent flip to stopped rejects stale starting transition and converges to stopped with 0 spawns", async () => {
+    let abortedSpawns = 0;
+    let flippedToStopped = false;
+    let flippedEnv!: Awaited<ReturnType<typeof realSqliteSchedulerHarness>>;
+    flippedEnv = await realSqliteSchedulerHarness({
+      provider: provider({
+        spawn: async () => {
+          abortedSpawns += 1;
+          return returnedHandle;
+        },
+      }),
+      onBeforeTransition: async () => {
+        if (flippedToStopped) return;
+        flippedToStopped = true;
+        await flippedEnv.transitions.updateEntry("agent-1", (current) => ({
+          ...current,
+          desired_state: "stopped",
+        }));
+      },
+    });
+    try {
+      flippedEnv.coordinator.request("agent-1");
+      await flippedEnv.coordinator.drainConvergence();
+
+      assert.equal(flippedToStopped, true);
+      assert.equal(abortedSpawns, 0, "stale running pass must not spawn after concurrent stop");
+      assert.equal(flippedEnv.schedulerFailures.length, 0);
+      assert.equal(flippedEnv.auditEvents.some((event) => event.to === "starting"), false, "rejected starting transition must never be committed or audited");
+      assert.equal(launchProgress.view("agent-1"), null, "aborted running pass flipped to stopped must not leave a failed launchProgress entry");
+      const final = await flippedEnv.store.getEntry("agent-1");
+      assert.equal(final?.desired_state, "stopped");
+      assert.equal(final?.observed_state, "stopped");
+      assert.equal(final?.condition, "none");
+    } finally {
+      await flippedEnv.cleanup();
+    }
+  });
+});
+
+test("request() recovers from a real concurrent manifest write on the stopped path without ProviderStopError or stale stop calls", async (t) => {
+  await t.test("benign concurrent write while stopping retries cleanly and stops once", async () => {
+    let stops = 0;
+    let injected = false;
+    let stoppedEnv!: Awaited<ReturnType<typeof realSqliteSchedulerHarness>>;
+    stoppedEnv = await realSqliteSchedulerHarness({
+      entry: { ...baseEntry(), desired_state: "stopped", observed_state: "working" },
+      provider: provider({
+        stop: async (current) => {
+          stops += 1;
+          return terminal(current);
+        },
+      }),
+      onBeforeTransition: async () => {
+        if (injected) return;
+        injected = true;
+        await stoppedEnv.transitions.updateEntry("agent-1", (current) => ({
+          ...current,
+          display_name: "Concurrent Write While Stopping",
+        }));
+      },
+    });
+    try {
+      stoppedEnv.liveHandles.set("agent-1", returnedHandle);
+      stoppedEnv.coordinator.request("agent-1");
+      await stoppedEnv.coordinator.drainConvergence();
+
+      assert.equal(injected, true);
+      assert.equal(stoppedEnv.transitionCalls(), 2, "expected 1 conflicted stopping transition plus 1 retry stopping transition");
+      assert.equal(stoppedEnv.schedulerFailures.length, 0, "stopped-path conflict must not become ProviderStopError");
+      assert.equal(stops, 1, "stale pass must not call provider.stop; retry stops once");
+      const final = await stoppedEnv.store.getEntry("agent-1");
+      assert.equal(final?.observed_state, "stopping");
+      assert.equal(final?.condition, "none");
+    } finally {
+      await stoppedEnv.cleanup();
+    }
+  });
+
+  await t.test("concurrent flip back to running aborts stale stop with 0 provider.stop calls", async () => {
+    let abortedStops = 0;
+    let flippedToRunning = false;
+    let flippedEnv!: Awaited<ReturnType<typeof realSqliteSchedulerHarness>>;
+    flippedEnv = await realSqliteSchedulerHarness({
+      entry: { ...baseEntry(), desired_state: "stopped", observed_state: "working" },
+      provider: provider({
+        stop: async (current) => {
+          abortedStops += 1;
+          return terminal(current);
+        },
+      }),
+      onBeforeTransition: async () => {
+        if (flippedToRunning) return;
+        flippedToRunning = true;
+        await flippedEnv.transitions.updateEntry("agent-1", (current) => ({
+          ...current,
+          desired_state: "running",
+        }));
+      },
+    });
+    try {
+      flippedEnv.liveHandles.set("agent-1", returnedHandle);
+      flippedEnv.coordinator.request("agent-1");
+      await flippedEnv.coordinator.drainConvergence();
+
+      assert.equal(flippedToRunning, true);
+      assert.equal(abortedStops, 0, "stale stop must abort without calling provider.stop when desired_state flipped to running");
+      assert.equal(flippedEnv.schedulerFailures.length, 0);
+      const final = await flippedEnv.store.getEntry("agent-1");
+      assert.equal(final?.desired_state, "running");
+      assert.equal(final?.observed_state, "working");
+      assert.equal(final?.condition, "none");
+    } finally {
+      await flippedEnv.cleanup();
+    }
+  });
+});
+
+test("retireUnprovenPredecessor re-reads the entry version after provider.stopRef writes before failing", async () => {
+  let stopRefCalls = 0;
+  let env!: Awaited<ReturnType<typeof realSqliteSchedulerHarness>>;
+  env = await realSqliteSchedulerHarness({
+    entry: {
+      ...baseEntry(),
+      desired_state: "running",
+      observed_state: "failed",
+      provider_ref: {
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-1",
+        provider_continuation_id: "continuation-1",
+        provider_connection: {
+          kind: "codex_app_server",
+          url: "http://127.0.0.1:4242",
+          pid: 4242,
+          processIdentity: "birth-4242",
+        },
+      },
+    },
+    provider: provider({
+      capabilities: async () => ({
+        deliveryModes: ["daemon_inbox"],
+        resume: false,
+        midTurnInjection: false,
+        transcriptAccess: false,
+        permissionPromptBridging: false,
+        survivesRestart: false,
+        exactProcessStop: true,
+      }),
+      attach: async () => null,
+      stopRef: async () => {
+        stopRefCalls += 1;
+        // Simulate a write to the manifest entry during stopRef before it fails.
+        await env.transitions.updateEntry("agent-1", (current) => ({
+          ...current,
+          display_name: "Written During stopRef",
+        }));
+        throw new Error("recorded process still alive");
+      },
+    }),
+  });
+  try {
+    env.executionGenerations.push({
+      execution_generation_id: "generation-1",
+      work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z",
+      actor: "daemon-provider",
+      generation: 1,
+      terminal: {
+        ended_at: "2026-08-26T00:00:01.000Z",
+        exit_code: 1,
+        signal: null,
+        stdio_archive_ref: null,
+        stdio_tail: "",
+        terminal_cause: "protocol_error",
+        actor: "daemon-provider",
+        generation: 1,
+        provider_continuation_id: "continuation-1",
+      },
+    });
+    env.coordinator.request("agent-1");
+    await env.coordinator.drainConvergence();
+
+    assert.equal(stopRefCalls, 1, "re-reading version after stopRef avoids a self-conflict retry");
+    assert.equal(env.schedulerFailures.length, 0);
+    const final = await env.store.getEntry("agent-1");
+    assert.equal(final?.display_name, "Written During stopRef");
+    assert.equal(final?.observed_state, "recovering");
+    assert.equal(final?.condition, "coordination_blocked");
+    assert.match(final?.last_error ?? "", /earlier provider process is not proven gone/i);
+    assert.equal(env.scheduledRecoveryDelays.length, 1);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("request() bounds persistent concurrent conflicts on both running and stopped paths with a clear named failure", async () => {
+  for (const desiredState of ["running", "stopped"] as const) {
+    let providerCalls = 0;
+    let concurrentWrites = 0;
+    let env!: Awaited<ReturnType<typeof realSqliteSchedulerHarness>>;
+    env = await realSqliteSchedulerHarness({
+      entry: {
+        ...baseEntry(),
+        desired_state: desiredState,
+        observed_state: desiredState === "stopped" ? "working" : "absent",
+      },
+      provider: provider({
+        spawn: async () => { providerCalls += 1; return returnedHandle; },
+        stop: async (current) => { providerCalls += 1; return terminal(current); },
+      }),
+      onBeforeTransition: async () => {
+        concurrentWrites += 1;
+        await env.transitions.updateEntry("agent-1", (current) => ({
+          ...current,
+          display_name: `Concurrent Write #${concurrentWrites}`,
+        }));
+      },
+    });
+    try {
+      if (desiredState === "stopped") env.liveHandles.set("agent-1", returnedHandle);
+      env.coordinator.request("agent-1");
+      await env.coordinator.drainConvergence();
+
+      assert.equal(
+        env.transitionCalls(),
+        CONVERGENCE_CONFLICT_RETRY_LIMIT + 1,
+        `${desiredState}: must stop after 1 initial attempt plus CONVERGENCE_CONFLICT_RETRY_LIMIT retries`,
+      );
+      assert.equal(providerCalls, 0, `${desiredState}: conflicted passes must execute zero provider commands`);
+      assert.equal(env.schedulerFailures.length, 1);
+      const failure = env.schedulerFailures[0];
+      if (desiredState === "stopped") {
+        assert.ok(failure instanceof ProviderStopError, "stopped-path exhaustion wraps in ProviderStopError");
+        assert.ok(failure.cause instanceof ConvergenceConflictExhaustedError);
+        assert.equal(failure.cause.code, "convergence_conflict_exhausted");
+      } else {
+        assert.ok(failure instanceof ConvergenceConflictExhaustedError);
+        assert.equal(failure.code, "convergence_conflict_exhausted");
+      }
+      const final = await env.store.getEntry("agent-1");
+      assert.equal(final?.condition, "coordination_blocked");
+      assert.match(
+        final?.last_error ?? "",
+        new RegExp(`Convergence conflict retry limit \\(${CONVERGENCE_CONFLICT_RETRY_LIMIT}\\) exhausted`),
+      );
+    } finally {
+      await env.cleanup();
+    }
+  }
+});
+
+test("request() never treats DaemonFenceLostError as a conflict retry and executes zero commands or volatile updates", async () => {
+  let spawns = 0;
+  let fenceLost = false;
+  const env = await realSqliteSchedulerHarness({
+    provider: provider({
+      spawn: async () => { spawns += 1; return returnedHandle; },
+    }),
+    assertCurrent: async () => {
+      if (fenceLost) throw new DaemonFenceLostError("daemon lost singleton fence");
+    },
+    onBeforeTransition: async () => {
+      fenceLost = true;
+    },
+  });
+  try {
+    env.coordinator.request("agent-1");
+    await env.coordinator.drainConvergence();
+
+    assert.equal(env.transitionCalls(), 1, "DaemonFenceLostError must never schedule a conflict retry");
+    assert.equal(spawns, 0, "fence-lost transition must execute zero provider commands");
+    assert.equal(env.scheduledRecoveryDelays.length, 0, "fence-lost transition must schedule zero recovery timers");
+    assert.equal(env.schedulerFailures.length, 1);
+    assert.ok(env.schedulerFailures[0] instanceof DaemonFenceLostError);
+    const final = await env.store.getEntry("agent-1");
+    assert.equal(final?.observed_state, "absent");
+    assert.equal(final?.condition, "none");
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("unsafe rental permission profile stops delivery fail-closed before quarantine transition even under persistent conflicts", async () => {
+  const order: string[] = [];
+  let concurrentWrites = 0;
+  let env!: Awaited<ReturnType<typeof realSqliteSchedulerHarness>>;
+  env = await realSqliteSchedulerHarness({
+    entry: {
+      ...baseEntry(),
+      id: "supervised_rental_1",
+      permission_profile_id: "full_access",
+      desired_state: "running",
+      observed_state: "working",
+    },
+    onDeliveryStop: () => {
+      order.push("delivery.stop");
+    },
+    onBeforeTransition: async (attempt) => {
+      order.push(`transition:${attempt}`);
+      concurrentWrites += 1;
+      await env.transitions.updateEntry("supervised_rental_1", (current) => ({
+        ...current,
+        display_name: `Concurrent Write #${concurrentWrites}`,
+      }));
+    },
+  });
+  try {
+    env.coordinator.request("supervised_rental_1");
+    await env.coordinator.drainConvergence();
+
+    assert.equal(order[0], "delivery.stop", "delivery must stop before the first quarantine transition attempt");
+    assert.equal(order[1], "transition:1");
+    assert.equal(env.transitionCalls(), CONVERGENCE_CONFLICT_RETRY_LIMIT + 1);
+    assert.equal(env.schedulerFailures.length, 1);
+    assert.ok(env.schedulerFailures[0] instanceof ConvergenceConflictExhaustedError);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("request() bounds persistent ManifestConflictError thrown during post-converge refreshManagedRuntime", async () => {
+  let refreshCalls = 0;
+  const env = await realSqliteSchedulerHarness({
+    entry: { ...baseEntry(), desired_state: "stopped", observed_state: "stopped" },
+    refreshManagedRuntime: async () => {
+      refreshCalls += 1;
+      throw new ManifestConflictError(`post-converge conflict #${refreshCalls}`);
+    },
+  });
+  try {
+    env.coordinator.request("agent-1");
+    await env.coordinator.drainConvergence();
+
+    assert.equal(
+      refreshCalls,
+      CONVERGENCE_CONFLICT_RETRY_LIMIT + 1,
+      "post-converge ManifestConflictError must not reset the conflict retry counter",
+    );
+    assert.equal(env.schedulerFailures.length, 1);
+    assert.ok(env.schedulerFailures[0] instanceof ProviderStopError);
+    assert.ok(env.schedulerFailures[0].cause instanceof ConvergenceConflictExhaustedError);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("converge reads entries in summary mode while provider-birth checkpoints read full entry with version and preserve activity", async () => {
   const fullActivity = Array.from({ length: 24 }, (_, index) => ({
     observed_at: "2026-08-26T00:00:00.000Z",
     sequence: index + 1,
@@ -3193,64 +4139,64 @@ test("converge reads entries in summary mode while provider-birth checkpoints re
   const stopped = harness({
     entry: { ...baseEntry(), desired_state: "stopped", observed_state: "stopped", activity: fullActivity },
   });
-  const baseStoppedGet = stopped.options.store.getEntry;
-  stopped.options.store.getEntry = async (id, mode) => {
+  const baseStoppedGetWithVersion = stopped.options.store.getEntryWithVersion;
+  stopped.options.store.getEntryWithVersion = async (id, mode) => {
     stoppedCalls.push(mode);
-    const entry = await baseStoppedGet(id, mode);
-    return entry && mode === "summary" ? summarize(entry) : entry;
+    const loaded = await baseStoppedGetWithVersion(id, mode);
+    return loaded && mode === "summary" ? { ...loaded, entry: summarize(loaded.entry) } : loaded;
   };
   await stopped.coordinator.converge("agent-1");
   assert.deepEqual(stoppedCalls, ["summary"]);
 
   // 2. Running launch: all read-only convergence reads use "summary", while
-  // persistProviderHandle reads generation BEFORE full entry, retries cleanly
+  // persistProviderHandle reads getEntryWithVersion("full"), retries cleanly
   // on ManifestConflictError, and preserves all 24 activity payloads intact.
   const ops: string[] = [];
   const running = harness({
     entry: { ...baseEntry(), desired_state: "running", observed_state: "absent", activity: fullActivity },
   });
-  let gen = 1;
+  let ver = 1;
   let conflictOnce = true;
-  running.options.store.readGeneration = async () => {
-    ops.push(`readGeneration:${gen}`);
-    return gen;
-  };
   const baseRunningGet = running.options.store.getEntry;
   running.options.store.getEntry = async (id, mode) => {
     ops.push(`getEntry:${mode ?? "default"}`);
     const entry = await baseRunningGet(id, mode);
     return entry && mode === "summary" ? summarize(entry) : entry;
   };
-  const baseCheckpoint = running.options.store.checkpointProviderBirth;
-  running.options.store.checkpointProviderBirth = async (expectedGeneration, input, commitFence) => {
-    ops.push(`checkpoint:${expectedGeneration}`);
+  const baseRunningGetWithVersion = running.options.store.getEntryWithVersion;
+  running.options.store.getEntryWithVersion = async (id, mode) => {
+    ops.push(`getEntryWithVersion:${mode ?? "default"}:${ver}`);
+    const loaded = await baseRunningGetWithVersion(id, mode);
+    if (!loaded) return undefined;
+    return {
+      version: ver,
+      entry: mode === "summary" ? summarize(loaded.entry) : loaded.entry,
+    };
+  };
+  running.options.store.checkpointProviderBirth = async (expectedVersion, input, commitFence) => {
+    ops.push(`checkpoint:${expectedVersion}`);
     if (conflictOnce) {
       conflictOnce = false;
-      gen += 1;
+      ver += 1;
       throw new ManifestConflictError("concurrent commit");
     }
-    assert.equal(expectedGeneration, gen);
-    // Align underlying harness generation before delegating.
+    assert.equal(expectedVersion, ver);
     running.setEntry(input.entry);
-    await commitFence(async () => { gen += 1; });
-    return { generation: gen, entry: input.entry, authorityMode: input.requestedAuthorityMode };
+    await commitFence(async () => { ver += 1; });
+    return { version: ver, entry: input.entry, authorityMode: input.requestedAuthorityMode };
   };
   await running.coordinator.converge("agent-1");
 
-  const fullIndexes = ops.flatMap((op, index) => op === "getEntry:full" ? [index] : []);
-  assert.equal(fullIndexes.length, 2, "only persistProviderHandle (initial + conflict retry) reads full mode");
-  for (const index of fullIndexes) {
-    assert.match(ops[index - 1] ?? "", /^readGeneration:/, "readGeneration must precede full getEntry");
-  }
-  assert.equal(ops.includes("getEntry:default"), false, "no untagged default full getEntry calls remain");
-  assert.ok(ops.includes("getEntry:summary"), "read-only convergence sites read in summary mode");
+  const fullOps = ops.filter((op) => op.startsWith("getEntryWithVersion:full:"));
+  assert.equal(fullOps.length, 2, `only persistProviderHandle (initial + conflict retry) reads full mode, saw ${JSON.stringify(ops)}`);
+  assert.equal(ops.some((op) => op.includes(":default")), false, `no untagged default reads remain, saw ${JSON.stringify(ops)}`);
+  assert.ok(ops.some((op) => op.startsWith("getEntryWithVersion:summary:")), "read-only convergence sites read in summary mode");
   assert.equal(running.entry().activity?.length, 24, "checkpointProviderBirth preserves full stored activity");
   assert.deepEqual(running.entry().activity?.[0]?.payload, { index: 1, blob: "x".repeat(64) });
   assert.deepEqual(running.entry().activity?.[23]?.payload, { index: 24, blob: "x".repeat(64) });
 
-  // 3. Handoff persistence (persistReturnedProviderForHandoff) and recovered
-  // connection checkpoint (attachReservedProvider) also read generation -> full entry
-  // and preserve all 24 activity payloads intact.
+  // 3. Handoff persistence (persistReturnedProviderForHandoff) reads full entry
+  // and preserves all 24 activity payloads intact.
   const handoffOps: string[] = [];
   const handoffRuntime = harness({
     entry: { ...baseEntry(), desired_state: "running", observed_state: "absent", activity: fullActivity },
@@ -3261,21 +4207,21 @@ test("converge reads entries in summary mode while provider-birth checkpoints re
       },
     }),
   });
-  handoffRuntime.options.store.readGeneration = async () => { handoffOps.push("readGeneration"); return 1; };
-  const baseHandoffGet = handoffRuntime.options.store.getEntry;
-  handoffRuntime.options.store.getEntry = async (id, mode) => {
-    handoffOps.push(`getEntry:${mode ?? "default"}`);
-    const entry = await baseHandoffGet(id, mode);
-    return entry && mode === "summary" ? summarize(entry) : entry;
+  const baseHandoffGetWithVersion = handoffRuntime.options.store.getEntryWithVersion;
+  handoffRuntime.options.store.getEntryWithVersion = async (id, mode) => {
+    handoffOps.push(`getEntryWithVersion:${mode ?? "default"}`);
+    const loaded = await baseHandoffGetWithVersion(id, mode);
+    return loaded && mode === "summary" ? { ...loaded, entry: summarize(loaded.entry) } : loaded;
   };
   await handoffRuntime.coordinator.converge("agent-1");
-  const handoffFullIdx = handoffOps.indexOf("getEntry:full");
-  assert.ok(handoffFullIdx > 0 && handoffOps[handoffFullIdx - 1] === "readGeneration",
-    "persistReturnedProviderForHandoff reads generation before full entry");
+  assert.equal(handoffOps.filter((op) => op === "getEntryWithVersion:full").length, 1,
+    `persistReturnedProviderForHandoff reads full entry once, saw ${JSON.stringify(handoffOps)}`);
+  assert.equal(handoffOps.includes("getEntryWithVersion:default"), false);
   assert.equal(handoffRuntime.entry().activity?.length, 24);
   assert.deepEqual(handoffRuntime.entry().activity?.[0]?.payload, { index: 1, blob: "x".repeat(64) });
 
-  // 4. attachReservedProvider recovered connection checkpoint path.
+  // 4. attachReservedProvider recovered connection checkpoint path reads full
+  // entry and preserves all 24 activity payloads intact.
   const attachOps: string[] = [];
   const attachRuntime = harness({
     entry: {
@@ -3301,19 +4247,60 @@ test("converge reads entries in summary mode while provider-birth checkpoints re
     generation: 1,
     terminal: null,
   });
-  attachRuntime.options.store.readGeneration = async () => { attachOps.push("readGeneration"); return 1; };
-  const baseAttachGet = attachRuntime.options.store.getEntry;
-  attachRuntime.options.store.getEntry = async (id, mode) => {
-    attachOps.push(`getEntry:${mode ?? "default"}`);
-    const entry = await baseAttachGet(id, mode);
-    return entry && mode === "summary" ? summarize(entry) : entry;
+  const baseAttachGetWithVersion = attachRuntime.options.store.getEntryWithVersion;
+  attachRuntime.options.store.getEntryWithVersion = async (id, mode) => {
+    attachOps.push(`getEntryWithVersion:${mode ?? "default"}`);
+    const loaded = await baseAttachGetWithVersion(id, mode);
+    return loaded && mode === "summary" ? { ...loaded, entry: summarize(loaded.entry) } : loaded;
   };
   await attachRuntime.coordinator.converge("agent-1");
-  const attachFullIdx = attachOps.indexOf("getEntry:full");
-  assert.ok(attachFullIdx > 0 && attachOps[attachFullIdx - 1] === "readGeneration",
-    "attachReservedProvider reads generation before full entry when checkpointing recovered connection");
-  assert.equal(attachOps.includes("getEntry:default"), false);
+  assert.equal(attachOps.filter((op) => op === "getEntryWithVersion:full").length, 1,
+    `attachReservedProvider reads full entry when checkpointing recovered connection, saw ${JSON.stringify(attachOps)}`);
+  assert.equal(attachOps.includes("getEntryWithVersion:default"), false);
   assert.equal(attachRuntime.entry().activity?.length, 24);
   assert.deepEqual(attachRuntime.entry().activity?.[0]?.payload, { index: 1, blob: "x".repeat(64) });
-  void baseCheckpoint;
+});
+
+test("request() and converge() invoke delivery.start outside serializeEntry so pending room-move runRoomMove cannot self-deadlock", async () => {
+  const gate = new EntryConcurrencyGate({ isHandoffScheduled: () => false });
+  let roomMoveEntries = 0;
+  const runtime = harness({
+    entry: {
+      ...baseEntry(),
+      delivery_mode: "daemon_inbox",
+      desired_state: "running",
+      observed_state: "working",
+      provider_ref: {
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-1",
+        provider_continuation_id: "continuation-1",
+        provider_connection: returnedHandle.providerConnection,
+      },
+    },
+  });
+  runtime.liveHandles.set("agent-1", { ...returnedHandle, observedState: "working" });
+  runtime.options.delivery.start = async (entryId, mode) => {
+    assert.equal(entryId, "agent-1");
+    assert.equal(mode, "ensure");
+    // Simulates SupervisedDeliveryLifecycleCoordinator.start -> RoomMoveCoordinator.reconcile -> entryConcurrency.runRoomMove.
+    const outcome = await gate.runRoomMove(entryId, "excluded", async () => {
+      roomMoveEntries += 1;
+      return "reconciled";
+    });
+    assert.equal(outcome, "reconciled");
+  };
+  runtime.options.concurrency.serializeEntry = (entryId, operation) => gate.run(entryId, operation);
+
+  runtime.coordinator.request("agent-1");
+  await Promise.race([
+    runtime.coordinator.drainConvergence(),
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("request() deadlocked on serializeEntry")), 2_000)),
+  ]);
+  assert.equal(roomMoveEntries, 1);
+
+  await Promise.race([
+    runtime.coordinator.converge("agent-1"),
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("converge() deadlocked on serializeEntry")), 2_000)),
+  ]);
+  assert.equal(roomMoveEntries, 2);
 });

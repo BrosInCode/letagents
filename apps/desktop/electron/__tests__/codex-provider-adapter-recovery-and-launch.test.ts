@@ -5,13 +5,13 @@ import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CodexProviderAdapter, codexMcpWorkplaceConfigOverrides } from "../main/agents/codex-provider-adapter.js";
-import { CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE, writeCodexSupervisorBridgeContext } from "../main/agents/codex-supervisor-bridge-context.js";
-import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
-import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+import { CodexProviderAdapter, codexMcpWorkplaceConfigOverrides } from "#provider-runtime/agents/codex-provider-adapter.js";
+import { CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE, writeCodexSupervisorBridgeContext } from "#provider-runtime/agents/codex-supervisor-bridge-context.js";
+import { ProviderContinuationMissingError } from "#provider-runtime/agents/provider-adapter.js";
+import { LETAGENTS_MCP_RUNTIME_VERSION } from "#provider-runtime/agents/letagents-mcp-runtime.js";
 import { assertOwnerPrivateFile } from "./harness.js";
 import { assertProviderHandle, custodialRuntimeContract, createHarness, spawnRequest, flush } from "./codex-provider-adapter.fixture.js";
-import { MCP_RUNTIME_CONTRACT_DEADLINE_MS, readMcpRuntimeContract } from "../main/agents/codex/launch-contract.js";
+import { MCP_RUNTIME_CONTRACT_DEADLINE_MS, readMcpRuntimeContract } from "#provider-runtime/agents/codex/launch-contract.js";
 
 // The probes below are small scripts, not the real runtime, so they start well
 // inside this deadline. The platform deadline (30 s on Windows) made one test
@@ -26,9 +26,7 @@ test("a hard runtime failure prevents bounded room-turn dispatch across the dura
     const client = harness.clients[0]!;
     client.requests.length = 0;
     const failRuntime = async () => {
-      client.emit({ method: "thread/status/changed", params: {
-        threadId: handle.providerContinuationId, status: { type: "systemError" },
-      } });
+      client.emit({ method: "process/systemError", params: {} });
       await flush();
     };
     if (failureTiming === "before") await failRuntime();
@@ -228,9 +226,7 @@ test("Codex continuation repair cannot replace authority after runtime failure w
     launchPolicy: spawnRequest().launchPolicy,
   }, {
     checkpointReplacement: async () => {
-      client.emit({ method: "thread/status/changed", params: {
-        threadId: handle.providerContinuationId, status: { type: "systemError" },
-      } });
+      client.emit({ method: "process/systemError", params: {} });
       await flush();
     },
   }), /lost exact provider authority/);
@@ -381,9 +377,7 @@ test("a runtime failure during recovery cannot be cleared by an active or termin
   let status = "inProgress";
   client.request = async <T>(method: string, params?: unknown): Promise<T> => {
     if (method === "thread/read") {
-      client.emit({ method: "thread/status/changed", params: {
-        threadId: handle.providerContinuationId, status: { type: "systemError" },
-      } });
+      client.emit({ method: "process/systemError", params: {} });
       await flush();
       return { thread: {
         id: handle.providerContinuationId,
@@ -478,7 +472,11 @@ test("Codex supervised launch passes only its daemon generation binding to the M
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
     LETAGENTS_SUPERVISOR_PROVIDER: "codex",
-    LETAGENTS_EXECUTION_PROFILE: "interactive_desktop",
+    LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+    LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+    LETAGENTS_TOKEN: "",
+    LETAGENTS_AGENT_SESSION_BEARER: "",
+    LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "",
   });
   assert.deepEqual(harness.supervisorBridgeContexts, [{
     cwd: "/tmp/letagents-work-attempt",
@@ -587,165 +585,7 @@ test("Codex bounded launches reject missing or unsafe managed MCP tool contracts
   }
 });
 
-test("explicit custodial activation dispatches once after intent and checkpoints its exact native ID", async () => {
-  for (const scenario of ["success", "recovered", "recovered_session_mismatch", "changed_session", "wrong_receipt", "active", "unknown", "lost_ack", "bad_id", "checkpoint_failure", "detached", "legacy"] as const) {
-    const harness = createHarness();
-    let adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
-    const request = spawnRequest({ configurationRevision: 4,
-      pollingContract: scenario === "legacy" ? undefined : "custodial_polling_v1", deliveryMode: scenario === "legacy" ? "daemon_inbox" : "mcp_polling",
-      supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact",
-      supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" },
-    });
-    let handle = await adapter.spawn(request);
-    assert.equal(handle.custodyLaunchAgentSessionId, scenario === "legacy" ? undefined : "agent_session_exact");
-    if (scenario === "recovered" || scenario === "recovered_session_mismatch") {
-      adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
-      const attached = await adapter.attach({ workAttemptId: handle.workAttemptId,
-        providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection!, launchPolicy: request.launchPolicy });
-      assertProviderHandle(attached);
-      handle = attached;
-    }
-    const client = harness.clients.at(-1)!;
-    const original = client.request.bind(client);
-    const events: string[] = [];
-    let starts = 0;
-    client.request = async <T>(method: string, params?: unknown): Promise<T> => {
-      if (method === "thread/read") return { thread: { id: handle.providerContinuationId, status: "idle", turns:
-        scenario === "unknown" ? undefined : scenario === "active" ? [{ id: "active", status: "inProgress" }] : [] } } as T;
-      if (method === "turn/start") {
-        starts++;
-        events.push("rpc");
-        const prompt = JSON.stringify(params);
-        assert.match(prompt, /agent_session_exact/);
-        assert.match(prompt, /msg_41/);
-        assert.match(prompt, /before processing/);
-        assert.doesNotMatch(prompt, /LOCAL_CODEX_ROOM_|join_code|Hard stop deadline/);
-        if (scenario === "lost_ack") throw new Error("lost acknowledgement");
-        return { turn: { id: scenario === "bad_id" ? "" : "native-activation" } } as T;
-      }
-      return original<T>(method, params);
-    };
-    const controller = new AbortController();
-    const activate = adapter.activateCustodialPolling(handle, {
-      operationId: "activation-1", roomId: request.roomId, cwd: request.cwd, agentDisplayName: "GardenPoint",
-      workerSession: { agentSessionId: scenario === "changed_session" ? "session_rotated" : "agent_session_exact", roomCursor: "msg_41" },
-      launchReceipt: { contract: "custodial_polling_v1", agentSessionId: scenario === "changed_session" || scenario === "recovered_session_mismatch" ? "session_rotated" : "agent_session_exact", configurationRevision: scenario === "wrong_receipt" ? 5 : 4, workAttemptId: handle.workAttemptId,
-        providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection! },
-    }, { detachSignal: controller.signal,
-      beforeNativeDispatch: async () => { events.push("intent"); if (scenario === "detached") controller.abort(); },
-      checkpointTurnStarted: async id => { assert.equal(id, "native-activation"); events.push("checkpoint"); if (scenario === "checkpoint_failure") throw new Error("checkpoint failed"); },
-    });
-    if (scenario === "success" || scenario === "recovered") {
-      assert.deepEqual(await activate, { providerTurnId: "native-activation" });
-      assert.deepEqual(events, ["intent", "rpc", "checkpoint"]);
-    } else await assert.rejects(activate);
-    assert.equal(starts, ["success", "recovered", "lost_ack", "bad_id", "checkpoint_failure"].includes(scenario) ? 1 : 0, scenario);
-    if (scenario === "success") {
-      for (const status of ["inProgress", "completed", "failed", "interrupted", "cancelled", "future"] as const) {
-        client.request = async <T>(method: string): Promise<T> => {
-          assert.equal(method, "thread/read", "inspection never starts, resumes, or interrupts");
-          return { thread: { id: handle.providerContinuationId, turns: [
-            { id: "native-activation", status }, { id: "latest-unrelated", status: "completed" },
-          ] } } as T;
-        };
-        assert.deepEqual(await adapter.inspectCustodialPollingActivation(handle, "native-activation"),
-          status === "inProgress" ? { state: "active" } : status === "future" ? { state: "unknown" }
-            : { state: "terminal", outcome: status === "cancelled" ? "interrupted" : status });
-        assert.deepEqual(await adapter.inspectCustodialPollingActivation(handle, "missing-exact"), { state: "unknown" });
-      }
-      client.request = async () => { throw new Error("connection lost"); };
-      assert.deepEqual(await adapter.inspectCustodialPollingActivation(handle, "native-activation"), { state: "unknown" });
-    }
-    harness.launches[0]!.resolveExit({ type: "exit", code: 0, signal: null });
-    await flush();
-  }
-});
-
-test("Codex custodial polling verifies its exact MCP runtime and leaves fresh and resumed threads idle", async () => {
-  const harness = createHarness();
-  const request = spawnRequest({
-    pollingContract: "custodial_polling_v1", deliveryMode: "mcp_polling",
-    supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
-    supervisorExecutionGenerationId: "execution_exact",
-    supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" },
-  });
-  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
-  assert.equal(first.observedState(), "idle");
-  harness.launches[0]!.resolveExit({ type: "exit", code: 0, signal: null });
-  await flush();
-  const second = await new CodexProviderAdapter({ dependencies: harness.dependencies }).resume({
-    workAttemptId: request.workAttemptId, providerContinuationId: first.providerContinuationId!,
-  }, { ...request, supervisorExecutionGenerationId: "execution_successor" });
-  assert.equal(second.observedState(), "idle");
-  assert.equal(second.providerContinuationId, first.providerContinuationId);
-  assert.deepEqual(harness.mcpRuntimeProbes, ["/verified/runtime/dist/mcp/server.js", "/verified/runtime/dist/mcp/server.js"]);
-  for (const [index, launch] of harness.launchOptions.entries()) {
-    assert.equal(harness.clients[index]!.requests.some((call) => call.method === "turn/start"), false);
-    const env = launch.options.env!;
-    assert.equal(env.LETAGENTS_EXECUTION_PROFILE, "supervised_mcp_polling");
-    assert.equal(env.LETAGENTS_SUPERVISED_BOUNDED_TURNS, "");
-    assert.equal(env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID, "");
-    assert.equal(env.LETAGENTS_TOKEN, "");
-    assert.equal(env.LETAGENTS_AGENT_SESSION_BEARER, "");
-    assert.equal(env.LETAGENTS_API_URL, "https://letagents.chat");
-    assert.equal(env.LETAGENTS_SUPERVISOR_AGENT_SESSION_ID, "agent_session_exact");
-    assert.equal(env.LETAGENTS_SUPERVISOR_ROOM_ID, request.roomId);
-    assert.equal(env.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID, index ? "execution_successor" : "execution_exact");
-    assert.equal(launch.options.configOverrides.length, 1, "pin the MCP executable, custody coordinates and advertised tools together");
-    const override = launch.options.configOverrides[0]!;
-    assert.ok(override.startsWith("mcp_servers.letagents={ "));
-    assert.ok(override.includes('default_tools_approval_mode = "writes"'));
-    assert.ok(!override.includes('approval_mode = "approve"'), "polling never receives a bounded-control exemption");
-    for (const name of custodialRuntimeContract.profiles.supervised_mcp_polling.tools) {
-      assert.ok(override.includes(`${JSON.stringify(name)} = { approval_mode = "writes" }`));
-    }
-    assert.ok(override.includes(`command = ${JSON.stringify(process.execPath)}`));
-    assert.ok(override.includes('args = ["/verified/runtime/dist/mcp/server.js"]'));
-    assert.ok(override.includes("env_vars = [], enabled = true"));
-    assert.ok(override.includes(`enabled_tools = ${JSON.stringify(custodialRuntimeContract.profiles.supervised_mcp_polling.tools)}, disabled_tools = []`));
-    for (const [key, value] of Object.entries({ ...env, ELECTRON_RUN_AS_NODE: "1" })) {
-      assert.ok(override.includes(`${JSON.stringify(key)} = ${JSON.stringify(value)}`), `exact MCP env ${key}`);
-    }
-    assert.doesNotMatch(override, /npx|interactive_desktop/);
-  }
-});
-
-test("Codex custodial polling fails closed on old runtime contracts and incomplete authority before native launch", async () => {
-  const request = spawnRequest({
-    pollingContract: "custodial_polling_v1", deliveryMode: "mcp_polling",
-    supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
-    supervisorExecutionGenerationId: "execution_exact",
-    supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" },
-  });
-  for (const report of [
-    { format: 1, profiles: { cursor_supervised_room_turn: { tools: ["complete_room_turn"] } } },
-    { ...custodialRuntimeContract, format: 2 },
-    { format: 1, profiles: { supervised_mcp_polling: { contract: "custodial_polling_v1", tools: ["read_messages", "send_message"] } } },
-    { format: 1, profiles: { supervised_mcp_polling: { contract: "custodial_polling_v1", tools: [...custodialRuntimeContract.profiles.supervised_mcp_polling.tools, "register_agent_session"] } } },
-  ]) {
-    const harness = createHarness();
-    harness.dependencies.readMcpRuntimeContract = async () => report;
-    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
-    await assert.rejects(adapter.preflightCustodialPolling({}), /does not support custodial_polling_v1/);
-    await assert.rejects(adapter.spawn(request), /does not support custodial_polling_v1/);
-    assert.deepEqual(harness.launches, []);
-    assert.deepEqual(harness.signals, []);
-    assert.deepEqual(harness.supervisorBridgeContexts, []);
-  }
-  for (const patch of [
-    { deliveryMode: "daemon_inbox" as const }, { supervisorSocketPath: undefined },
-    { supervisorWorkerSession: undefined },
-    { supervisorWorkerSession: { ...request.supervisorWorkerSession!, apiUrl: undefined } },
-    { supervisorWorkerSession: { ...request.supervisorWorkerSession!, apiUrl: "https://user:secret@example.test" } },
-  ]) {
-    const harness = createHarness();
-    await assert.rejects(new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn({ ...request, ...patch }), /coordinates|API origin/);
-    assert.deepEqual(harness.launches, []);
-    assert.deepEqual(harness.mcpRuntimeProbes, []);
-  }
-});
-
-test("Codex custodial polling reads the selected built executable contract without owner environment or fallback", async () => {
+test("Codex bounded launch reads the selected built executable contract without owner environment or fallback", async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-codex-contract-"));
   const entry = join(directory, "dist", "mcp", "server.js");
   const previousDev = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
@@ -757,7 +597,7 @@ test("Codex custodial polling reads the selected built executable contract witho
     await mkdir(join(directory, "node_modules"));
     await writeFile(join(directory, "package.json"), JSON.stringify({ name: "letagents", version: LETAGENTS_MCP_RUNTIME_VERSION, type: "module" }));
     const request = spawnRequest({
-      pollingContract: "custodial_polling_v1", deliveryMode: "mcp_polling", devMcpServerEntryPath: entry,
+      deliveryMode: "daemon_inbox", devMcpServerEntryPath: entry,
       supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
       supervisorExecutionGenerationId: "execution_exact",
       supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" },
@@ -769,18 +609,15 @@ test("Codex custodial polling reads the selected built executable contract witho
       readMcpRuntimeContract: (entryPath, apiUrl) => readMcpRuntimeContract(entryPath, apiUrl, PROBE_DEADLINE_MS),
     } });
     await writeFile(entry, `process.stdout.write(${JSON.stringify(JSON.stringify({ format: 1, profiles: {} }))});`);
-    await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), /does not support custodial_polling_v1/);
-    await assert.rejects(adapter.spawn(request), /does not support custodial_polling_v1/, "a matching package version cannot replace contract proof");
+    await assert.rejects(adapter.spawn(request), /does not support Codex supervised room tools/, "a matching package version cannot replace contract proof");
     assert.equal(harness.launches.length, 0);
     await writeFile(entry, "throw new Error('contract-probe-owner-canary');");
-    await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) => error instanceof Error
+    await assert.rejects(adapter.spawn(request), (error: unknown) => error instanceof Error
       && /contract could not be read/.test(error.message) && /Exit: 1; signal: none; killed: false; elapsed: \d+ms; output: 0 bytes\./.test(error.message)
       && !error.message.includes("contract-probe-owner-canary") && !error.message.includes(entry));
-    await assert.rejects(adapter.spawn(request), (error: unknown) => error instanceof Error
-      && /contract could not be read/.test(error.message) && !error.message.includes("contract-probe-owner-canary"));
     for (const source of ["process.exit(1)", "process.stdout.write('not JSON')", "process.stdout.write('x'.repeat(70000))", "process.kill(process.pid, 'SIGKILL')"]) {
       await writeFile(entry, source);
-      await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
+      await assert.rejects(adapter.spawn(request), (error: unknown) =>
         error instanceof Error && !(error as Error & { transientProviderStart?: boolean }).transientProviderStart);
     }
     // A healthy child can finish while the parent's event loop is delayed.
@@ -800,7 +637,7 @@ test("Codex custodial polling reads the selected built executable contract witho
           clearInterval(release);
           ${completion};
         }, 5);`);
-      const delayedProbe = adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry });
+      const delayedProbe = adapter.spawn(request);
       const delayedProbeAssertion = assert.rejects(delayedProbe, (error: unknown) =>
         error instanceof Error && (expected === "deadline"
           ? (error as Error & { transientProviderStart?: boolean }).transientProviderStart === true
@@ -824,7 +661,7 @@ test("Codex custodial polling reads the selected built executable contract witho
       setInterval(() => {}, 1000);`);
     const probeStartedAt = Date.now();
     try {
-      await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
+      await assert.rejects(adapter.spawn(request), (error: unknown) =>
         error instanceof Error && (error as Error & { transientProviderStart?: boolean }).transientProviderStart === true
         && /signal: SIGKILL/.test(error.message) && !error.message.includes(entry));
       assert.ok(Date.now() - probeStartedAt < PROBE_DEADLINE_MS + 7_000, "inherited output pipes must not extend the probe deadline to the descendant's lifetime");
@@ -839,10 +676,6 @@ test("Codex custodial polling reads the selected built executable contract witho
       "if (process.argv[2] !== '--letagents-runtime-contract' || process.env.LETAGENTS_TOKEN) process.exit(2);",
       `process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))});`,
     ].join("\n"));
-    await adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry });
-    assert.deepEqual(harness.launches, [], "preflight never launches a provider");
-    assert.deepEqual(harness.signals, []);
-    assert.deepEqual(harness.supervisorBridgeContexts, []);
     const handle = await adapter.spawn(request);
     assert.equal(handle.observedState(), "idle");
     assert.equal(harness.clients[0]!.requests.some((call) => call.method === "turn/start"), false);
@@ -854,7 +687,7 @@ test("Codex custodial polling reads the selected built executable contract witho
     const localHarness = createHarness();
     const { resolveMcpRuntime: _localResolve, readMcpRuntimeContract: _localRead, ...localDependencies } = localHarness.dependencies;
     const localAdapter = new CodexProviderAdapter({ dependencies: localDependencies });
-    await localAdapter.spawn({ ...request, deliveryMode: "daemon_inbox", pollingContract: undefined,
+    await localAdapter.spawn({ ...request, deliveryMode: "daemon_inbox",
       supervisorWorkerSession: { ...request.supervisorWorkerSession!, apiUrl: "letagents-local://rooms" },
     });
     assert.equal(localHarness.launches.length, 1, "credential-free contract subprocess receives the same local route as native MCP");

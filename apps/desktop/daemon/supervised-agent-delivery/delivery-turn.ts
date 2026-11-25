@@ -384,11 +384,12 @@ export abstract class SupervisedAgentDeliveryTurn extends SupervisedAgentDeliver
         const saved = JSON.parse(checkpointed.outcome!) as { kind: ProviderRoomTurnResult["outcome"]; text: string | null; evidence: "stream" | "transcript" | "none" };
         let acceptedResult: ProviderRoomTurnResult = publicationResult;
         if (saved.kind === "reply" && saved.text && (publicationResult.outcome !== "reply" || publicationResult.text !== saved.text)) {
+          // Leave the key out for "none": the step answer is JSON, and JSON has no `undefined`.
           acceptedResult = { turnId: publicationResult.turnId, outcome: "reply", text: saved.text,
-            evidence: saved.evidence === "none" ? undefined : saved.evidence };
+            ...(saved.evidence === "none" ? {} : { evidence: saved.evidence }) };
         } else if (saved.kind === "no_reply" && publicationResult.outcome !== "no_reply") {
           acceptedResult = { turnId: publicationResult.turnId, outcome: "no_reply", text: null,
-            evidence: saved.evidence === "none" ? undefined : saved.evidence };
+            ...(saved.evidence === "none" ? {} : { evidence: saved.evidence }) };
         } else if (saved.kind === "failed" || saved.kind === "interrupted") {
           if (!providerContinuationId || !await this.inbox.nativeFailure(item.inbox_item_id) || saved.evidence === "none") {
             throw new Error("Native failure lost its durable terminal proof.");
@@ -859,7 +860,18 @@ export abstract class SupervisedAgentDeliveryTurn extends SupervisedAgentDeliver
           });
           return;
         }
-        await retryFailure({ domain: "pre_dispatch", error: message, resetUndispatchedTurnId: current.provider_turn_id });
+        try {
+          await retryFailure({ domain: "pre_dispatch", error: message, resetUndispatchedTurnId: current.provider_turn_id });
+        } catch (resetError) {
+          if (resetError instanceof AuthorityLostError
+            || (resetError instanceof Error && resetError.name === "DaemonFenceLostError")) {
+            throw resetError;
+          }
+          await retryFailure({
+            domain: "result_recovery",
+            error: `Undispatched turn could not be safely reset and must retry exact recovery: ${resetError instanceof Error ? resetError.message : String(resetError)}`,
+          });
+        }
         return;
       }
       if (["ambiguous", "terminal_failure"].includes(

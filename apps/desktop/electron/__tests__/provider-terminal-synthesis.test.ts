@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { synthesizeTerminalPayload } from "../main/agents/provider-adapter.js";
-import type { ProviderTerminalCause } from "../main/agents/provider-adapter.js";
+import { synthesizeTerminalPayload } from "#provider-runtime/agents/provider-adapter.js";
+import type { ProviderTerminalCause } from "#provider-runtime/agents/provider-adapter.js";
 
 // task_28 cell (d): raw SIGKILL leaves no native terminal payload, so the
 // adapter derives one from the observed OS exit. These assert the code/signal →

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { resetDesktopShellEnvironmentForTests, startDesktopShellEnvironmentHydration } from "../main/desktop-shell-environment.js";
+import { resetDesktopShellEnvironmentForTests, startDesktopShellEnvironmentHydration } from "#provider-runtime/desktop-shell-environment.js";
 
 import {
   activeGitHubRoomIdentifier,

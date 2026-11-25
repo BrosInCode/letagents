@@ -34,7 +34,7 @@ test("foreign, incomplete, projected and display-only frames cannot yield a repl
   observer.admit("turn");
   for (const change of [
     { provider: "claude-code" }, { workAttemptId: "other" }, { providerContinuationId: "other" },
-    { payloadTruncated: true }, { payloadRedacted: true }, { lifecycleProjectionOnly: true as const },
+    { payloadTruncated: true }, { payloadRedacted: true },
     { method: "item/agentMessage/delta", summary: "Compacting context" },
     { payload: { threadId: "other", turnId: "turn", item: { id: "compact", type: "contextCompaction" } } },
     { payload: { threadId: "thread", turnId: "other", item: { id: "compact", type: "contextCompaction" } } },

@@ -205,7 +205,7 @@ test("separate local writers racing to claim a task create exactly one work leas
   const children = actors.map(actor => {
     const identity = { agent_key: actor.grant.agentKey, session_id: actor.session.session_id,
       actor_label: actor.session.actor_label, agent_instance_id: `daemon:${actor.grant.entryId}`, supervised: true };
-    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    const child = spawn(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", `
       const { claimLocalTaskWorkLease, getLocalTaskDatabase } = await import(${JSON.stringify(moduleUrl)});
       await getLocalTaskDatabase();
       process.stdout.write('ready');
@@ -580,7 +580,7 @@ test("daemon restart restores local authority and the unread cursor without clou
     permission_profile_id: "read_only", delivery_mode: "daemon_inbox", created_by: "test", created_at: new Date().toISOString(),
   };
   const store = new ManifestStore(paths.manifestPath);
-  await store.write(0, [entry]); await store.close();
+  await store.write([entry]); await store.close();
   let daemon = new SupervisorDaemon(paths, "darwin");
   try {
     await daemon.start();

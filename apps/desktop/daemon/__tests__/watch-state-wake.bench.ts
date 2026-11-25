@@ -49,7 +49,7 @@ function agentEntry(index: number, running: boolean): DaemonManifestEntry {
     id, room_id: `room_${index % 12}`, display_name: `Agent${index}`, provider: "codex", model: "gpt-5.6-codex",
     charter: "Work on the room's tasks.", desired_state: running ? "running" : "stopped",
     observed_state: running ? "idle" : "stopped", condition: "none", last_error: null,
-    permission_profile_id: "workspace-write", provider_launch_policy: { deliveryMode: "mcp_polling" },
+    permission_profile_id: "workspace-write", provider_launch_policy: {},
     created_by: "user_1", created_at: "2026-10-01T00:00:00.000Z",
     workplace_liveness: { state: "reachable", observed_at: "2026-10-19T00:01:00.000Z", detail: null },
     native_liveness: { state: "active", observed_at: "2026-10-19T00:01:01.000Z", detail: "streaming" },
@@ -58,7 +58,7 @@ function agentEntry(index: number, running: boolean): DaemonManifestEntry {
 }
 
 function seedInbox(database: DatabaseSync, agentId: string, roomId: string, receipts: number, offset: number): void {
-  const insert = database.prepare(`INSERT INTO supervised_agent_inbox
+  const insert = database.prepare(`INSERT INTO inbox_items
     (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
     VALUES (?,?,?,?,?,?,?,?,1,?,?,?,NULL,NULL,NULL,NULL,NULL,?,?,?)`);
   const event = database.prepare(`INSERT INTO supervised_agent_inbox_events(inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)

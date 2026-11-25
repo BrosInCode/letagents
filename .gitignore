@@ -3,6 +3,8 @@ dist/
 apps/desktop/dist-electron/
 apps/desktop/dist-renderer/
 apps/desktop/dist-daemon/
+apps/desktop/dist-daemon-contract/
+apps/desktop/dist-provider-runtime/
 apps/desktop/release/
 .secrets/
 *.log

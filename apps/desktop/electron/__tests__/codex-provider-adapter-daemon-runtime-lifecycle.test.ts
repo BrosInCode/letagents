@@ -1,7 +1,7 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodexProviderAdapter } from "../main/agents/codex-provider-adapter.js";
+import { CodexProviderAdapter } from "#provider-runtime/agents/codex-provider-adapter.js";
 import {
   ProviderActionPortRouter,
   createHarness,
@@ -50,7 +50,7 @@ for (const variant of ["", ", with an execution-capture gap from before", ", whi
       assert.ok(rows[1]!.last_error?.startsWith(refusal), "the provider's reason stays on the refused message");
     }
     assert.deepEqual(agent.published, ["Answer 3."], "the next message is delivered and answered without a person");
-    assert.deepEqual(agent.read<{ activation_json: string }>("SELECT activation_json FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence")
+    assert.deepEqual(agent.read<{ activation_json: string }>("SELECT activation_json FROM inbox_items WHERE agent_id=? ORDER BY fifo_sequence")
       .map((row) => Object.hasOwn(JSON.parse(row.activation_json), "task_continuity_refusal")), [false, false, false],
       "no refusal mark is left on a settled message");
 
@@ -66,9 +66,9 @@ for (const variant of ["", ", with an execution-capture gap from before", ", whi
       assert.ok(row.max > row.last, "the earlier gap is still there; delivery did not depend on closing it");
     } else {
       await agent.eventually(() => agent.read<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM execution_turns WHERE agent_id=? AND state='terminal'")[0]!.n === 3, "the capture records every turn");
+        "SELECT COUNT(*) AS n FROM runs WHERE agent_id=? AND state='terminal'")[0]!.n === 3, "the capture records every turn");
       assert.deepEqual(agent.read<{ provider_turn_id: string; state: string }>(
-        "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"), [
+        "SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"), [
         { provider_turn_id: "turn-1", state: "terminal" },
         { provider_turn_id: "turn-2", state: "terminal" },
         { provider_turn_id: "turn-3", state: "terminal" },
@@ -615,7 +615,7 @@ test("a convergence pass that runs while a configuration change's exit is being 
       "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
     assert.equal(observer.max, observer.last, "the replacement's activity is recorded without a gap");
     assert.deepEqual(agent.read<{ provider_turn_id: string; state: string }>(
-      "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"), [
+      "SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"), [
       { provider_turn_id: "turn-1", state: "terminal" },
       { provider_turn_id: "turn-2", state: "terminal" },
     ], "both turns are in the record");
@@ -687,7 +687,7 @@ for (const fault of Object.keys(EXIT_RECORDING_FAULTS) as Array<keyof typeof EXI
       assert.equal(entry.activity?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length, 1,
         "the owner reads once, in the agent's activity, that the exit could not be recorded in full");
       const generations = agent.read<{ ended: number }>(
-        "SELECT terminal_json IS NOT NULL AS ended FROM work_attempt_executions WHERE work_attempt_id=(SELECT work_attempt_id FROM agent_configurations c JOIN runtime_deployments d ON d.agent_id=c.agent_id WHERE c.agent_id=?) ORDER BY rowid");
+        "SELECT terminal_json IS NOT NULL AS ended FROM work_attempt_executions WHERE work_attempt_id=(SELECT work_attempt_id FROM agents WHERE agent_id=?) ORDER BY rowid");
       assert.deepEqual(generations.map((row) => row.ended), [1, 0], "the crashed process's terminal is saved: the first generation has ended, the second runs");
       const recorded = (await agent.transitionCauses()).filter((cause) => /provider terminal/.test(cause));
       // The last attempt goes on without the approvals step, so the crash is
@@ -754,7 +754,7 @@ for (const busy of ["the agent's queue", "the store that saves its terminal", "t
       assert.equal(entry.reconciliation?.exit_timestamps_ms?.length, 1, "it counts toward the agent's crash-loop limit");
       assert.equal(entry.activity?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length, 0, "and the owner is told nothing: no step was left out");
       const generations = agent.read<{ ended: number }>(
-        "SELECT terminal_json IS NOT NULL AS ended FROM work_attempt_executions WHERE work_attempt_id=(SELECT work_attempt_id FROM agent_configurations c JOIN runtime_deployments d ON d.agent_id=c.agent_id WHERE c.agent_id=?) ORDER BY rowid");
+        "SELECT terminal_json IS NOT NULL AS ended FROM work_attempt_executions WHERE work_attempt_id=(SELECT work_attempt_id FROM agents WHERE agent_id=?) ORDER BY rowid");
       assert.deepEqual(generations.map((row) => row.ended), [1, 0], "the crashed process's terminal is saved: the first generation has ended, the second runs");
       assert.equal(agent.harness.launches.length, 2, "one replacement");
     } finally {
@@ -831,7 +831,7 @@ test("an attempt to record a stop that is given up while it waits for the store 
     // refused, because the lock it had asked to free was no longer held. The recording ended there, without the stop.
     assert.deepEqual((await agent.transitionCauses()).filter((cause) => /provider terminal/.test(cause)), ["provider terminal: stopped"], "the stop is recorded, once");
     const current = await agent.view();
-    assert.deepEqual([current.observed_state, current.condition, current.last_error], ["stopped", "none", null]);
+    assert.deepEqual([current.observed_state, current.condition, current.last_error ?? null], ["stopped", "none", null]);
     assert.equal(agent.harness.launches.length, 1, "and nothing is started in its place");
   } finally {
     letGo();
@@ -1062,10 +1062,10 @@ for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
 
 for (const shown of ["still shows the turn as running", "does not hold the turn"] as const) for (const started of [true, false]) {
   test(`a turn whose runtime exited under it${started ? "" : " before the record saw it start"}, in a thread that ${shown}, is settled as cut off by the exit${started ? " and closed in the record" : ", with no ending recorded for it"}, and the next message is answered`, async () => {
-    const { PROCESS_ENDED_DURING_TURN } = await import("../main/agents/provider-adapter.js");
+    const { PROCESS_ENDED_DURING_TURN } = await import("#provider-runtime/agents/provider-adapter.js");
     const agent = await codexDaemonFixture({ holdExits: true });
     const turnStates = () => agent.read<{ provider_turn_id: string; state: string }>(
-      "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id");
+      "SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id");
     try {
       agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1", activation: { for_current_agent: { decision: "activate" } } });
       await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id), "msg_1 starts its turn");
@@ -1154,7 +1154,7 @@ test("a turn that is still running on its live process when the daemon is restar
 for (const ending of ["interrupted", "completed"] as const) test(`a turn whose runtime exited under it is closed in the record when its replacement reads that it was ${ending}, so later turns and later replacements are recorded too`, async () => {
   const agent = await codexDaemonFixture({ holdExits: true });
   const turnStates = () => agent.read<{ provider_turn_id: string; state: string }>(
-    "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id");
+    "SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id");
   const observer = () => agent.read<{ last: number; max: number }>(
     "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
   const replaced = (count: number) => agent.eventually(() => agent.harness.clients.length === count, `runtime ${count} is started`).catch(async (error) => {
@@ -1233,10 +1233,10 @@ test("a turn the record never saw start is still recovered by the replacement, a
 
     await answerOnReplacement(agent, 2);
     await agent.eventually(() => agent.read<{ state: string }>(
-      "SELECT state FROM execution_turns WHERE agent_id=? AND provider_turn_id='turn-2'")[0]?.state === "terminal", "the next turn is recorded to its end")
+      "SELECT state FROM runs WHERE agent_id=? AND provider_turn_id='turn-2'")[0]?.state === "terminal", "the next turn is recorded to its end")
       .catch((error) => { throw new Error(`${(error as Error).message}: observer ${JSON.stringify(observer())}`); });
     assert.equal(observer().max, observer().last, "the record has no gap");
-    assert.deepEqual(agent.read<{ provider_turn_id: string }>("SELECT provider_turn_id FROM execution_turns WHERE agent_id=?"),
+    assert.deepEqual(agent.read<{ provider_turn_id: string }>("SELECT provider_turn_id FROM runs WHERE agent_id=?"),
       [{ provider_turn_id: "turn-2" }], "and no turn it never saw start");
   } finally {
     await agent.cleanup();

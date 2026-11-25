@@ -1,14 +1,14 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodexProviderAdapter, type CodexPermissionObservation } from "../main/agents/codex-provider-adapter.js";
+import { CodexProviderAdapter, type CodexPermissionObservation } from "#provider-runtime/agents/codex-provider-adapter.js";
 import type {
   ProviderActivityEvent,
   ProviderConnectionRef,
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
-} from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/provider-adapter.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import {
   providerStreamLifecycle,
@@ -70,18 +70,12 @@ test("Codex resume reopens the exact native thread and preserves the same launch
     0,
     "resume must not mint a fresh provider thread",
   );
-  const readIndex = harness.clients[1]!.requests.findIndex((entry) => entry.method === "thread/read");
-  const turnIndex = harness.clients[1]!.requests.findIndex((entry) => entry.method === "turn/start");
-  assert.ok(readIndex >= 0 && readIndex < turnIndex, "prior transcript is read before the next turn");
-  const turn = harness.clients[1]!.requests[turnIndex]!.params as { input: Array<{ text: string }> };
-  assert.match(turn.input[0]!.text, /agent_session_exact/);
-  assert.match(turn.input[0]!.text, /msg_2819/);
-  assert.match(turn.input[0]!.text, /Do not call register_agent_session/);
-  assert.doesNotMatch(turn.input[0]!.text, /Suggested codename|Call set_agent_name/);
-  assert.ok(activity.some((event) =>
-    event.providerContinuationId === continuation
-      && event.source === "transcript_tail"
-      && event.summary === "Transcript checkpoint persisted."));
+  assert.equal(
+    harness.clients[1]!.requests.some((entry) => entry.method === "turn/start"),
+    false,
+    "daemon-inbox resume does not start an unjournaled polling turn",
+  );
+  assert.equal(resumed.observedState(), "idle");
 });
 
 test("Codex is given a thread's reasoning effort as the config override it takes, at a start, a repair and a resume", async () => {
@@ -494,14 +488,14 @@ test("a Codex agent is told about its reasoning effort when the line changes, no
     const client = createRpcClient(serverUrl, notify) as FakeRpc;
     const request = client.request.bind(client);
     client.request = async <T>(method: string, params?: unknown, options?: { timeoutMs?: number }) => {
-      // This agent collects its own room messages, so its start ends with a first turn.
-      if (method === "turn/start") throw new Error("the first turn was refused");
+      if (method === "thread/resume") throw new Error("resume failed after effort notice");
       return request<T>(method, params, options);
     };
     return client;
   };
   await assert.rejects(new CodexProviderAdapter({ dependencies: failing.dependencies })
-    .spawn(spawnRequest({ ...supervised("supervised_effort_failed"), deliveryMode: "mcp_polling", ...refused })), /the first turn was refused/);
+    .resume({ workAttemptId: spawnRequest().workAttemptId, providerContinuationId: "thread-1" },
+      spawnRequest({ ...supervised("supervised_effort_failed"), deliveryMode: "daemon_inbox", ...refused })), /resume failed after effort notice/);
   assert.deepEqual(await told("supervised_effort_failed", refused), [effortNotGiven("max", "gpt-5.5")]);
 });
 

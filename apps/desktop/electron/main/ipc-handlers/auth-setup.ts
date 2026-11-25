@@ -22,7 +22,7 @@ import {
   signOutDesktopAuth,
   startDeviceAuthFlow,
 } from "../auth.js";
-import { apiUrl } from "../paths.js";
+import { apiUrl } from "#provider-runtime/paths.js";
 import { openAllowedExternalUrl } from "../external-url.js";
 import {
   buildMcpInstallState,

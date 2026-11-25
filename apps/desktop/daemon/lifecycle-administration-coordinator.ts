@@ -21,6 +21,7 @@ export type LifecycleAdministrationStore = Pick<ManifestStore,
   | "commitPurge"
   | "durablePurgeWorkerSessionAttestation"
   | "getEntry"
+  | "getEntryWithVersion"
   | "getAgentConfiguration"
   | "getPurge"
   | "load"
@@ -64,8 +65,6 @@ export type LifecycleAdministrationRuntimeCustody = {
 
 export type LifecycleAdministrationAuthority = {
   currentDaemonGeneration(): number;
-  currentManifestGeneration(): number;
-  acceptManifestGeneration(generation: number): void;
   assertCurrent(): Promise<void>;
   fenceCommit: CommitFence;
   serializeManifestMutation<T>(operation: () => Promise<T>): Promise<T>;
@@ -89,6 +88,11 @@ export type LifecycleAdministrationPorts = {
   provider?: Pick<ProviderActionPort, "stopRef">;
   runtimeCustody: LifecycleAdministrationRuntimeCustody;
   deleteAgentStream(entryId: string): unknown;
+  reconcileRoomWorkForPurge?(entryId: string): void;
+  reconcileApprovalPublicationsForPurge?(entryId: string): void;
+  reconcileRoomMovesForPurge?(entryId: string): void;
+  reconcileRuntimeRecoveriesForPurge?(entryId: string): void;
+  retireStaleRuntimeRecoveryEffects?(entryId: string): void;
   ephemeralProvisioner: {
     garbageCollectOrphans(retainedAttemptIds: ReadonlySet<string>): Promise<string[]>;
   };
@@ -229,6 +233,7 @@ export class LifecycleAdministrationCoordinator {
             detail: "Retired agent has no active room worker session.",
           },
         }));
+        this.ports.retireStaleRuntimeRecoveryEffects?.(entryId);
         return {
           outcome: "retired",
           entry: await this.ports.entryWithDerivedLiveness(entry),
@@ -303,8 +308,10 @@ export class LifecycleAdministrationCoordinator {
         await this.ports.authority.assertCurrent();
         const operationId = `purge:${entryId}`;
         let purge = await this.ports.store.getPurge(operationId);
-        const entry = await this.ports.store.getEntry(entryId);
-        if (!entry) {
+        const loaded = await this.ports.store.getEntryWithVersion(entryId);
+        const entry = loaded?.entry;
+        let entryVersion = loaded?.version;
+        if (!entry || entryVersion === undefined) {
           return purge?.phase === "complete" || !purge
             ? {
               outcome: "purged",
@@ -323,14 +330,18 @@ export class LifecycleAdministrationCoordinator {
             error: "Purge requires no live provider or bounded delivery turn.",
           };
         }
+        this.ports.reconcileRoomWorkForPurge?.(entryId);
+        this.ports.reconcileApprovalPublicationsForPurge?.(entryId);
+        this.ports.reconcileRoomMovesForPurge?.(entryId);
+        this.ports.reconcileRuntimeRecoveriesForPurge?.(entryId);
         if (!purge) {
           try {
             const externalRevokeRequired = await this.requiresHostGrant(entry);
             const evidence = externalRevokeRequired
               ? await this.ports.store.durablePurgeWorkerSessionAttestation(entryId)
               : { workerSessionAttestation: "not_required" as const, agentSessionId: null };
-            purge = (await this.ports.store.preparePurge(
-              this.ports.authority.currentManifestGeneration(),
+            const prepared = await this.ports.store.preparePurge(
+              entryVersion,
               {
                 operationId,
                 requestId: operationId,
@@ -340,7 +351,9 @@ export class LifecycleAdministrationCoordinator {
                 workerSessionAttestation: evidence.workerSessionAttestation,
                 agentSessionId: evidence.agentSessionId,
               },
-            )).purge;
+            );
+            entryVersion = prepared.version;
+            purge = prepared.purge;
           } catch (error) {
             return { outcome: "invalid", error: schedulerErrorDetail(error) };
           }
@@ -416,12 +429,11 @@ export class LifecycleAdministrationCoordinator {
           if (purge.attached_work_attempt_id) {
             await this.removeEphemeralWorkAttempt(purge.attached_work_attempt_id);
           }
-          const committed = await this.ports.store.commitPurge(
-            this.ports.authority.currentManifestGeneration(),
+          await this.ports.store.commitPurge(
+            entryVersion,
             { operationId, agentId: entryId, daemonGeneration },
             this.ports.authority.fenceCommit,
           );
-          this.ports.authority.acceptManifestGeneration(committed.generation);
         } catch (error) {
           return { outcome: "invalid", error: schedulerErrorDetail(error) };
         }
@@ -463,7 +475,7 @@ export class LifecycleAdministrationCoordinator {
   }
 
   async recoverEphemeralWorkspaces(): Promise<void> {
-    // Only work attempt IDs are used: summary mode reads no activity payloads.
+    // Uses work_attempt_id and provider_ref.work_attempt_id of each entry; no activity.
     const manifest = await this.ports.store.load("summary");
     const attached = new Set<string>();
     for (const entry of manifest.entries) {
@@ -495,11 +507,8 @@ export class LifecycleAdministrationCoordinator {
     await this.ports.ephemeralProvisioner.garbageCollectOrphans(retained);
   }
 
-  private async requiresHostGrant(entry: DaemonManifestEntry): Promise<boolean> {
-    if (entry.delivery_mode === "daemon_inbox") return true;
-    const configuration = await this.ports.store.getAgentConfiguration(entry.id);
-    if (!configuration) throw new Error("Agent credential custody configuration is unavailable.");
-    return Boolean(configuration.polling_contract);
+  private async requiresHostGrant(_entry: DaemonManifestEntry): Promise<boolean> {
+    return true;
   }
 
   private providerRef(entry: DaemonManifestEntry): ProviderActionRef {

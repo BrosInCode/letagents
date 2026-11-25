@@ -7,7 +7,7 @@ import test from "node:test";
 import {
   installedCodexExecutablePath,
   resolveCodexExecutable,
-} from "../main/agents/codex-executable.js";
+} from "#provider-runtime/agents/codex-executable.js";
 
 // The host's own platform: the resolver reads real files, and on Windows it looks for codex.exe and uses a ";" PATH.
 const platform = process.platform;

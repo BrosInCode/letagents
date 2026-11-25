@@ -38,18 +38,18 @@ const {
   CODEX_TOKEN_SERVICE_OVERRIDES, CodexAgentHomeError, CodexAgentHomeSignInError, SIGN_IN_NOT_HIDDEN, checkCodexHonoursDeny, checkCodexKeepsLinkedSignIn,
   codexAgentHomeDirectory, codexHomeForSandboxedLaunch, codexSandboxedProfileId, codexSandboxedProfileOverrides, codexSignInPaths,
   folderHolds, linkCodexAgentHome, sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal,
-} = await import("../main/agents/codex-agent-home.js");
+} = await import("#provider-runtime/agents/codex-agent-home.js");
 const {
   SANDBOXED_PROJECT_KEYS, SANDBOX_KEYS_A_PROJECT_MAY_SET, assertLayersAddNoCommandRules, assertLiveCodexIsolationUnchanged, firstFolderEntries, inspectCodexSettings, pathFrom,
   projectCommandRulesRefusal, projectKeysRefusal, projectRuleFolders,
-} = await import("../main/agents/codex-home-harness.js");
+} = await import("#provider-runtime/agents/codex-home-harness.js");
 const { codexOwnerIsolationOverrides } = await import("../../../../shared/codex-owner-isolation.mjs");
 const {
   READ_ONLY_POLICY_WITHOUT_LEVEL, SIGN_IN_PROFILE_NOT_GIVEN, codexAppServerEnvironment, launchManagedCodexAppServer, terminateSpawnedProcess, waitForLaunchedCodexAppServer,
-} = await import("../main/agents/codex-app-server.js");
-const { CodexProviderAdapter } = await import("../main/agents/codex-provider-adapter.js");
-const { CodexRpcClient } = await import("../main/agents/codex-rpc-client.js");
-const { resolveCodexExecutable } = await import("../main/agents/codex-executable.js");
+} = await import("#provider-runtime/agents/codex-app-server.js");
+const { CodexProviderAdapter } = await import("#provider-runtime/agents/codex-provider-adapter.js");
+const { CodexRpcClient } = await import("#provider-runtime/agents/codex-rpc-client.js");
+const { resolveCodexExecutable } = await import("#provider-runtime/agents/codex-executable.js");
 
 let fixtureSerial = 0;
 function fixture(name: string): string {

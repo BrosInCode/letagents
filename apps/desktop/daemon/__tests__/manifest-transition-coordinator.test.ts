@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import test from "node:test";
 
 import { ManifestConflictError, ManifestStore, type ManifestTransitionCommit } from "../manifest-store.js";
 import { ManifestTransitionCoordinator } from "../manifest-transition-coordinator.js";
@@ -32,12 +34,15 @@ function harness() {
         reads.push(mode);
         return mode === "summary" ? { ...full, activity: full.activity!.slice(-1) } : full;
       },
-      replaceEntry: async (_generation, entry) => { replaced.push(entry); return { generation: 2, entry }; },
-      commitTransition: async (_generation, input) => { transitions.push(input); return { generation: 2 }; },
+      getEntryWithVersion: async (_id, mode = "full") => {
+        assert.equal(lockHeld, 1, "entry reads happen inside the manifest lock");
+        reads.push(mode);
+        return { version: 1, entry: mode === "summary" ? { ...full, activity: full.activity!.slice(-1) } : full };
+      },
+      replaceEntry: async (_version, entry) => { replaced.push(entry); return { version: 2, entry }; },
+      commitTransition: async (_version, input) => { transitions.push(input); return { version: 2 }; },
     },
     authority: {
-      currentManifestGeneration: () => 1,
-      acceptManifestGeneration: () => {},
       assertCurrent: async () => {},
       serializeMutation: async (operation) => { lockHeld += 1; try { return await operation(); } finally { lockHeld -= 1; } },
       serializeCommit: async (operation) => operation(),
@@ -117,6 +122,103 @@ test("another provider is left to its runtime fact", async () => {
   assert.equal(transitions.at(-1)?.readyReachedAt, undefined);
 });
 
+test("expectedVersion CAS on real SQLite ManifestStore rejects stale transitions under one lock without writing state or audit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "letagents-transition-cas-"));
+  const store = new ManifestStore(join(dir, "manifest.sqlite"));
+  try {
+    await store.initialize();
+    await store.createEntry({
+      id: "agent-cas",
+      room_id: "room-1",
+      display_name: "Agent CAS",
+      provider: "codex",
+      model: null,
+      charter: "Help",
+      desired_state: "running",
+      observed_state: "absent",
+      condition: "none",
+      permission_profile_id: "full_access",
+      provider_launch_policy: {},
+      created_by: "test",
+      created_at: "2026-10-19T00:00:00.000Z",
+      workspace_path: "/tmp/work",
+    });
+
+    const auditEvents: Array<{ from: string; to: string; generation: number }> = [];
+    let lockDepth = 0;
+    let maxLockDepth = 0;
+    const coordinator = new ManifestTransitionCoordinator({
+      store,
+      authority: {
+        assertCurrent: async () => {},
+        serializeMutation: async (operation) => {
+          lockDepth += 1;
+          maxLockDepth = Math.max(maxLockDepth, lockDepth);
+          assert.equal(lockDepth, 1, "expectedVersion CAS must not nest manifest mutation locks");
+          try { return await operation(); } finally { lockDepth -= 1; }
+        },
+        serializeCommit: async (operation) => operation(),
+        fenceCommit: async (commit) => commit(),
+      },
+      audit: {
+        append: async (event) => {
+          auditEvents.push({ from: event.from, to: event.to, generation: event.generation });
+        },
+      },
+      nowMs: () => 1_000,
+    });
+
+    const initial = await store.getEntryWithVersion("agent-cas");
+    assert.ok(initial);
+    // Simulate a concurrent writer advancing the row's version.
+    await store.replaceEntry(
+      initial.version,
+      { ...initial.entry, observed_state: "starting" },
+      async (commit) => commit(),
+    );
+
+    await assert.rejects(
+      coordinator.transition(
+        "agent-cas",
+        "failed",
+        "coordination_blocked",
+        "stale transition must not commit",
+        "daemon-convergence",
+        undefined,
+        initial.version,
+      ),
+      (error: unknown) => error instanceof ManifestConflictError
+        && error.message.includes(`version ${initial.version + 1} does not match expected ${initial.version}`),
+    );
+
+    const afterConflict = await store.getEntryWithVersion("agent-cas");
+    assert.equal(afterConflict?.version, initial.version + 1);
+    assert.equal(afterConflict?.entry.observed_state, "starting");
+    assert.equal(afterConflict?.entry.condition, "none");
+    assert.equal(auditEvents.length, 0, "conflicted transition must not emit audit entries");
+
+    // Retrying with the fresh version succeeds cleanly under one lock.
+    await coordinator.transition(
+      "agent-cas",
+      "idle",
+      "none",
+      "fresh snapshot commit",
+      "daemon-convergence",
+      undefined,
+      afterConflict!.version,
+    );
+
+    const afterSuccess = await store.getEntryWithVersion("agent-cas");
+    assert.equal(afterSuccess?.version, initial.version + 2);
+    assert.equal(afterSuccess?.entry.observed_state, "idle");
+    assert.equal(auditEvents.length, 1);
+    assert.equal(maxLockDepth, 1);
+  } finally {
+    await store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("transitionOnce persists via targeted SQL without reading or modifying stored activity payloads", async () => {
   const env = await fixture();
   const store = new ManifestStore(join(env.root, "daemon.sqlite"));
@@ -146,20 +248,21 @@ test("transitionOnce persists via targeted SQL without reading or modifying stor
         pending_action: { id: "act-2", sequence: 2, kind: "poke" as const, recorded_at_ms: 12_000 },
       },
     } as DaemonManifestEntry;
-    const saved = await store.write(0, [seedEntry]);
-    let manifestGeneration = saved.generation;
+    const saved = await store.write([seedEntry]);
+    const initialVersion = saved.versions["agent-rich"]!;
     const beforeWatch = await store.loadForStateWatch();
     assert.equal(beforeWatch.entries[0]!.observed_state, "starting");
 
-    const getEntryCalls: Array<string> = [];
+    const getEntryWithVersionCalls: string[] = [];
     let replaceCalls = 0;
     let fenceCalls = 0;
     const audits: Array<{ from: string; to: string; generation: number }> = [];
     const coordinator = new ManifestTransitionCoordinator({
       store: {
-        getEntry: (id, mode) => {
-          getEntryCalls.push(mode ?? "full");
-          return store.getEntry(id, mode);
+        getEntry: (id, mode) => store.getEntry(id, mode),
+        getEntryWithVersion: (id, mode) => {
+          getEntryWithVersionCalls.push(mode ?? "full");
+          return store.getEntryWithVersion(id, mode);
         },
         replaceEntry: async (...args) => {
           replaceCalls += 1;
@@ -168,8 +271,6 @@ test("transitionOnce persists via targeted SQL without reading or modifying stor
         commitTransition: (...args) => store.commitTransition(...args),
       },
       authority: {
-        currentManifestGeneration: () => manifestGeneration,
-        acceptManifestGeneration: (generation) => { manifestGeneration = generation; },
         assertCurrent: async () => {},
         serializeMutation: (operation) => operation(),
         serializeCommit: (operation) => operation(),
@@ -212,11 +313,10 @@ test("transitionOnce persists via targeted SQL without reading or modifying stor
       terminal,
     );
 
-    assert.deepEqual(getEntryCalls, ["summary"]);
+    assert.deepEqual(getEntryWithVersionCalls, ["summary"]);
     assert.equal(replaceCalls, 0);
     assert.equal(fenceCalls, 1);
-    assert.equal(manifestGeneration, saved.generation + 1);
-    assert.deepEqual(audits, [{ from: "starting", to: "failed", generation: saved.generation + 1 }]);
+    assert.deepEqual(audits, [{ from: "starting", to: "failed", generation: initialVersion + 1 }]);
 
     const afterFull = await store.getEntry("agent-rich", "full");
     assert.ok(afterFull);
@@ -244,18 +344,19 @@ test("transitionOnce persists via targeted SQL without reading or modifying stor
     assert.equal(afterWatch.entries[0]!.observed_state, "failed");
     assert.equal(afterWatch.entries[0]!.condition, "quarantined");
 
-    // Reaching idle on Cursor sets ready_reached_at via agent_readiness update.
+    // Reaching idle on Cursor sets ready_reached_at via targeted agents update.
     await coordinator.transition("agent-rich", "idle", "none", "recovered", "daemon-convergence");
-    const afterIdle = await store.getEntry("agent-rich", "full");
+    const afterIdleLoaded = await store.getEntryWithVersion("agent-rich", "full");
+    const afterIdle = afterIdleLoaded?.entry;
     assert.equal(afterIdle?.observed_state, "idle");
     assert.equal(afterIdle?.condition, "none");
-    assert.equal(afterIdle?.last_error, null);
+    assert.equal(afterIdle?.last_error ?? null, null);
     assert.equal(typeof afterIdle?.ready_reached_at, "string");
     assert.deepEqual(afterIdle?.activity, richActivity);
 
-    // Generation mismatch fails closed with ManifestConflictError.
+    // Per-agent version mismatch fails closed with ManifestConflictError.
     await assert.rejects(
-      store.commitTransition(manifestGeneration - 1, {
+      store.commitTransition(afterIdleLoaded!.version - 1, {
         agentId: "agent-rich",
         observedState: "stopped",
         condition: "none",

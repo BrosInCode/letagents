@@ -13,16 +13,16 @@ import {
   type ClaudeCliChild,
   type ClaudeCodeProviderAdapterDependencies,
   type ClaudeCodeProviderAdapterOptions,
-} from "../main/agents/claude-code-provider-adapter.js";
+} from "#provider-runtime/agents/claude-code-provider-adapter.js";
 import type {
   ProviderSpawnRequest,
   ProviderActivityEvent,
   ProviderRoomTurnResult,
   ProviderStreamEvent,
   NativeExecutionObservation,
-} from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/provider-adapter.js";
 import { CLAUDE_FAILURE_TEXT, CLAUDE_REAL_CAPTURES, claudeCapturedTask, realClaudeCapture } from "./claude-result-shapes.js";
-import { type ProviderProcessExit } from "../main/agents/provider-evidence.js";
+import { type ProviderProcessExit } from "#provider-runtime/agents/provider-evidence.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
 // separately compiled source tree into Electron's production rootDir.
@@ -345,19 +345,8 @@ export async function claudeDaemonFixture(options: {
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
   };
-  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
-    const socket = connectDaemon(paths.socketPath);
-    let received = "";
-    socket.setEncoding("utf8");
-    socket.once("error", reject);
-    socket.on("data", (chunk: string) => {
-      received += chunk;
-      if (!received.includes("\n")) return;
-      socket.end();
-      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
-    });
-    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
-  });
+  const { daemonSocketRequest } = await import("./daemon-socket-request.js");
+  const request = (method: string, params?: unknown) => daemonSocketRequest(paths.socketPath, method, params);
   const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = 15_000) => {
     const deadline = Date.now() + timeoutMs;
     while (!await check()) {
@@ -577,9 +566,9 @@ export async function claudeDaemonFixture(options: {
       },
       /** The turns in the agent's execution record, and whether the record has a gap. */
       recorded: () => ({
-        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM runs WHERE agent_id=? ORDER BY created_at_ms,rowid"),
         endings: read<{ provider_turn_id: string; n: number; outcome: string | null }>(`SELECT t.provider_turn_id, COUNT(*) AS n, MIN(f.turn_outcome) AS outcome
-          FROM execution_facts f JOIN execution_turns t USING(turn_id)
+          FROM execution_facts f JOIN runs t USING(turn_id)
           WHERE f.agent_id=? AND f.domain='turn' AND f.state='terminal' GROUP BY t.provider_turn_id ORDER BY MIN(f.sequence)`),
         gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
           .filter((observer) => observer.max !== observer.last).length,
@@ -917,7 +906,7 @@ export const WAITS_FOR_ANSWER = "Waiting for Claude's answer about background wo
  * The adapter looks at a held turn again at a short pace, so a limit that the clock has passed ends the turn
  * within a moment of real time.
  */
-export async function claudeBackgroundHarness(options: { lifecycleAuthorityMode?: "typed" | "typed_shadow"; /** An agent that asks its owner before it writes. */ asksForApproval?: boolean } = {}) {
+export async function claudeBackgroundHarness(options: { lifecycleAuthorityMode?: "typed"; /** An agent that asks its owner before it writes. */ asksForApproval?: boolean } = {}) {
   const harness = createHarness(options.asksForApproval ? { versionOutput: "2.1.278 (Claude Code)" } : {});
   const stream: ProviderStreamEvent[] = [];
   const activity: ProviderActivityEvent[] = [];

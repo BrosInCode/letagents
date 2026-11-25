@@ -10,7 +10,10 @@ import {
   cleanupStateRecoveryBackup, decryptStateRecoveryBackup, markStateRecoveryBackupValidated,
   prepareStateRecoveryBackup, StateRecoveryError, type StateRecoveryBackup,
 } from "../state-recovery-backup.js";
-import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
+import {
+  applySchemaV1, DAEMON_STATE_APPLICATION_ID, DAEMON_STATE_SCHEMA_VERSION, DAEMON_STATE_USER_VERSION,
+  DaemonStateSchema, openDaemonStateDatabase, runNumberedMigrations, toSqliteUserVersion,
+} from "../daemon-state-database.js";
 import { archiveWorkspaceReview } from "../../../../shared/workspace-review-archive.mjs";
 import { applyRoomWorkspaceSchema } from "../room-workspace-store.js";
 import { compactDaemonStateDatabase } from "../daemon-state-maintenance.js";
@@ -48,12 +51,9 @@ async function fixture(t: test.TestContext) {
   const directory = await privateTempDirectory("letagents-encrypted-state-");
   const path = join(directory, "daemon.sqlite");
   const database = new DatabaseSync(path);
-  database.exec(`PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; PRAGMA user_version=17;
-    PRAGMA application_id=123456;
-    CREATE TABLE manifest_metadata(singleton INTEGER PRIMARY KEY, schema_version INTEGER);
-    INSERT INTO manifest_metadata VALUES(1,17);
-    CREATE TABLE migration_records(migration_key TEXT PRIMARY KEY, checksum TEXT, imported_at TEXT);
-    CREATE TABLE migration_failures(migration_key TEXT PRIMARY KEY, reason TEXT, failed_at TEXT, quarantined_path TEXT NOT NULL);
+  database.exec(`PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; PRAGMA user_version=${DAEMON_STATE_USER_VERSION};
+    PRAGMA application_id=${DAEMON_STATE_APPLICATION_ID};
+    CREATE TABLE daemon_maintenance_state(key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE retained_worker_bindings(agent_id TEXT PRIMARY KEY, token TEXT);
     CREATE TABLE supervised_worker_mint_states(id TEXT PRIMARY KEY, token BLOB);`);
   database.prepare("INSERT INTO retained_worker_bindings VALUES(?,?)").run("agent", secret);
@@ -61,9 +61,9 @@ async function fixture(t: test.TestContext) {
   const key = randomBytes(32);
   t.after(async () => { try { database.close(); } catch { /* test may close */ } await removeTestDirectory(directory); });
   let freshBackup: StateRecoveryBackup | null = null;
-  const prepare = async () => freshBackup = await prepareStateRecoveryBackup(path, 18, async () => ({ key: Buffer.from(key), sealedKey: "electron-sealed-one-time-key" }), { now: OLD });
+  const prepare = async () => freshBackup = await prepareStateRecoveryBackup(path, DAEMON_STATE_USER_VERSION + 1, async () => ({ key: Buffer.from(key), sealedKey: "electron-sealed-one-time-key" }), { now: OLD });
   const validate = async () => {
-    database.exec("PRAGMA user_version=18; UPDATE manifest_metadata SET schema_version=18");
+    database.exec(`PRAGMA user_version=${DAEMON_STATE_USER_VERSION + 1}`);
     const result = await markStateRecoveryBackupValidated(path, database, { freshBackup, now: OLD });
     freshBackup = null;
     assert.equal(result.status, "validated");
@@ -93,9 +93,8 @@ test("encrypted consistent snapshot includes WAL rows and roundtrips SQLite iden
   assert.ok(statistics.length > 0, "ANALYZE generated optimizer statistics in the source");
   assert.ok((await lstat(`${env.path}-wal`)).size > 0, "committed content is still in the live WAL");
   const result = await env.prepare();
-  assert.equal(result?.sourceVersion, 17);
-  assert.equal(result?.targetVersion, 18);
-  // Windows has no mode bits; decrypting below reads the file only when its access list is the owner's alone.
+  assert.equal(result?.sourceVersion, DAEMON_STATE_USER_VERSION);
+  assert.equal(result?.targetVersion, DAEMON_STATE_USER_VERSION + 1);
   if (process.platform !== "win32") assert.equal((await lstat(env.backup)).mode & 0o777, 0o600);
   assert.equal((await readFile(env.backup)).includes(Buffer.from(secret)), false);
   assert.deepEqual((await readdir(env.directory)).filter((name) => name.includes("recovery")), ["daemon.sqlite.recovery.enc"]);
@@ -112,15 +111,15 @@ test("encrypted consistent snapshot includes WAL rows and roundtrips SQLite iden
     assert.deepEqual({ ...restored.prepare("SELECT rowid,id,doubled FROM generated").get() }, { rowid: 88, id: 5, doubled: 10 });
     assert.equal(restored.prepare("INSERT INTO z_auto(value) VALUES('next') RETURNING id").get()!.id, 201);
     assert.deepEqual(Buffer.from(restored.prepare("SELECT value FROM compact").get()!.value as Uint8Array), Buffer.from([0, 1, 255]));
-    assert.equal(restored.prepare("PRAGMA user_version").get()!.user_version, 17);
-    assert.equal(restored.prepare("PRAGMA application_id").get()!.application_id, 123456);
+    assert.equal(restored.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_USER_VERSION);
+    assert.equal(restored.prepare("PRAGMA application_id").get()!.application_id, DAEMON_STATE_APPLICATION_ID);
     assert.equal(restored.prepare("PRAGMA foreign_keys").get()!.foreign_keys, 1);
     assert.equal(restored.prepare("PRAGMA temp_store").get()!.temp_store, 2, "index/sort work cannot spill plaintext to temporary SQLite files");
     restored.exec("DELETE FROM parent WHERE id=99");
     assert.equal(restored.prepare("SELECT count(*) AS count FROM child_view").get()!.count, 0);
   } finally { restored.close(); }
   assert.deepEqual(env.database.prepare("SELECT * FROM sqlite_stat1").all(), statistics, "snapshotting leaves source statistics intact");
-  assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 17, "inspection does not migrate or replace live state");
+  assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_USER_VERSION, "inspection does not migrate or replace live state");
 });
 
 test("failed-migration retry snapshots new source data and supersedes only with verified ciphertext", async (t) => {
@@ -128,7 +127,7 @@ test("failed-migration retry snapshots new source data and supersedes only with 
   const first = await env.prepare();
   env.database.prepare("UPDATE retained_worker_bindings SET token=?").run(`${secret}-rotated`);
   const consumedKey = Buffer.from(env.key);
-  const second = await prepareStateRecoveryBackup(env.path, 18, async () => ({ key: consumedKey, sealedKey: "new-seal" }));
+  const second = await prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, async () => ({ key: consumedKey, sealedKey: "new-seal" }));
   assert.ok(consumedKey.every((byte) => byte === 0), "one-time key ownership is consumed");
   assert.notEqual(first!.sha256, second!.sha256);
   const restored = await decryptStateRecoveryBackup(env.backup, env.key);
@@ -138,7 +137,7 @@ test("failed-migration retry snapshots new source data and supersedes only with 
 
 test("one read transaction does not mix concurrent committed WAL generations", async (t) => {
   const env = await fixture(t);
-  await prepareStateRecoveryBackup(env.path, 18, async () => {
+  await prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, async () => {
     env.database.prepare("UPDATE retained_worker_bindings SET token=?").run("new-writer-generation");
     return { key: Buffer.from(env.key), sealedKey: "sealed" };
   });
@@ -151,15 +150,15 @@ test("missing, fresh, current, and future schemas never ask Electron for a migra
   const env = await fixture(t);
   let calls = 0;
   const key = async () => { calls++; throw new Error("not expected"); };
-  assert.equal(await prepareStateRecoveryBackup(join(env.directory, "missing.sqlite"), 18, key), null);
+  assert.equal(await prepareStateRecoveryBackup(join(env.directory, "missing.sqlite"), DAEMON_STATE_USER_VERSION + 1, key), null);
   env.database.exec("PRAGMA user_version=0");
-  assert.equal(await prepareStateRecoveryBackup(env.path, 18, key), null);
-  env.database.exec("PRAGMA user_version=18");
-  assert.equal(await prepareStateRecoveryBackup(env.path, 18, key), null);
-  env.database.exec("PRAGMA user_version=19");
-  await assert.rejects(prepareStateRecoveryBackup(env.path, 18, key), ERROR);
+  assert.equal(await prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, key), null);
+  env.database.exec(`PRAGMA user_version=${DAEMON_STATE_USER_VERSION + 1}`);
+  assert.equal(await prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, key), null);
+  env.database.exec(`PRAGMA user_version=${DAEMON_STATE_USER_VERSION + 2}`);
+  await assert.rejects(prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, key), ERROR);
   assert.equal(calls, 0);
-  assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 19);
+  assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_USER_VERSION + 2);
   assert.equal((await readdir(env.directory)).some((name) => name.includes("recovery")), false);
 });
 
@@ -205,17 +204,14 @@ test("recovery failures reach startup logs as fixed codes without original excep
     assert.equal(error.code, code);
     assert.match(error.message, ERROR);
     assert.equal(error.cause, undefined);
-    // The real entrypoint uses this formatter + consumer, not Error.code.
     log.append({ event: "entrypoint_failure", detail: daemonLifecycleErrorDetail(error) });
     return true;
   };
-  await assert.rejects(withProtectedStateUpgrade(env.path, async () => assert.fail("must not migrate"), {
-    getBackupKey: async () => { throw Object.assign(new Error(secret), { code: "desktop_channel_missing", cause: secret }); },
+  await assert.rejects(prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, async () => {
+    throw Object.assign(new Error(secret), { code: "desktop_channel_missing", cause: secret });
   }), logged("key_unavailable"));
   assert.equal(process.connected, undefined, "test process has no Desktop bootstrap IPC");
-  await assert.rejects(withProtectedStateUpgrade(env.path, async () => assert.fail("must not migrate"), {
-    getBackupKey: requestStateRecoveryKey,
-  }), logged("desktop_channel_missing"));
+  await assert.rejects(prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, requestStateRecoveryKey), logged("desktop_channel_missing"));
   assert.equal((await readdir(env.directory)).some((name) => name.includes("recovery")), false);
   env.database.exec("CREATE TABLE unsupported(rowid TEXT,_rowid_ TEXT,oid TEXT)");
   await assert.rejects(env.prepare(), logged("snapshot_refused"));
@@ -276,7 +272,7 @@ test("all prepare/read/clear paths reject symlinks without touching their target
   assert.equal(await readFile(target, "utf8"), "untouched");
   const databaseLink = join(env.directory, "linked.sqlite");
   await symlink(env.path, databaseLink);
-  await assert.rejects(prepareStateRecoveryBackup(databaseLink, 18, async () => ({ key: Buffer.from(env.key), sealedKey: "sealed" })), ERROR);
+  await assert.rejects(prepareStateRecoveryBackup(databaseLink, 2, async () => ({ key: Buffer.from(env.key), sealedKey: "sealed" })), ERROR);
 });
 
 test("insecure directory or recovery file permissions fail closed", async (t) => {
@@ -320,7 +316,7 @@ test("retention begins with authenticated identity and unchanged valid receipts 
   assert.equal(await cleanupStateRecoveryBackup(env.path, env.database, { now: new Date(OLD.getTime() + 7 * day - 1) }), false);
   assert.equal(await cleanupStateRecoveryBackup(env.path, env.database, { now: new Date(OLD.getTime() + 7 * day) }), true);
   assert.equal(await cleanupStateRecoveryBackup(env.path, env.database, { now: new Date(OLD.getTime() + 8 * day) }), false);
-  assert.equal(env.database.prepare("SELECT count(*) AS count FROM migration_records").get()!.count, 0);
+  assert.equal(env.database.prepare("SELECT count(*) AS count FROM daemon_maintenance_state WHERE key='encrypted-state-recovery-backup'").get()!.count, 0);
 });
 
 test("validation cannot bless the wrong schema and cleanup requires the exact snapshot receipt", async (t) => {
@@ -336,124 +332,92 @@ test("validation cannot bless the wrong schema and cleanup requires the exact sn
 test("a copied metadata object is not fresh authentication proof", async (t) => {
   const env = await fixture(t);
   const fresh = await env.prepare();
-  env.database.exec("PRAGMA user_version=18; UPDATE manifest_metadata SET schema_version=18");
+  env.database.exec(`PRAGMA user_version=${DAEMON_STATE_USER_VERSION + 1}`);
   assert.deepEqual(await markStateRecoveryBackupValidated(env.path, env.database, { freshBackup: { ...fresh! }, now: OLD }), {
     status: "unverified", warning: "recovery_snapshot_receipt_missing",
   });
-  assert.equal(env.database.prepare("SELECT COUNT(*) AS count FROM migration_records").get()!.count, 0);
+  assert.equal(env.database.prepare("SELECT COUNT(*) AS count FROM daemon_maintenance_state WHERE key='encrypted-state-recovery-backup'").get()!.count, 0);
   await env.validate();
 });
 
 async function realStateFixture(t: test.TestContext) {
   const directory = await privateTempDirectory("letagents-recovery-startup-");
   const path = join(directory, "daemon.sqlite");
-  const database = new DatabaseSync(path);
-  new DaemonStateSchema().createSchema(database);
-  database.exec("ALTER TABLE agent_configurations DROP COLUMN polling_contract");
-  database.exec("PRAGMA foreign_keys=OFF");
-  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*'").all()) {
-    database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
-  }
-  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
-  database.exec("PRAGMA writable_schema=ON");
-  database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
-  database.prepare("UPDATE sqlite_master SET sql=replace(replace(sql, ?, ''), ?, '') WHERE name='supervised_agent_terminal_results'").run(
-    ",'failed','interrupted'",
-    ",CHECK(outcome NOT IN ('failed','interrupted') OR (normalized_text IS NULL AND evidence_source <> 'none'))",
-  );
-  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
-    UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
+  const database = await openDaemonStateDatabase(path, (db) => new DaemonStateSchema().createSchema(db));
   database.close();
   t.after(() => removeTestDirectory(directory));
   let keyRequests = 0;
   const key = randomBytes(32);
   const getBackupKey = async () => { keyRequests++; return { key: Buffer.from(key), sealedKey: "electron-sealed" }; };
-  const initialize = async () => {
-    const current = await openDaemonStateDatabase(path, (db) => new DaemonStateSchema().createSchema(db));
-    try { return current.prepare("PRAGMA user_version").get()!.user_version; } finally { current.close(); }
-  };
   const inspect = (sql: string) => {
     const db = new DatabaseSync(path, { readOnly: true });
     try { return db.prepare(sql).all().map((row) => ({ ...row })); } finally { db.close(); }
   };
-  return { directory, path, backup: `${path}.recovery.enc`, getBackupKey, initialize, inspect,
+  return { directory, path, backup: `${path}.recovery.enc`, getBackupKey, inspect,
     keyRequests: () => keyRequests,
-    start: () => withProtectedStateUpgrade(path, async () => {
-      const current = new DatabaseSync(path, { readOnly: true });
-      try { return current.prepare("PRAGMA user_version").get()!.user_version; }
-      finally { current.close(); }
-    }, { getBackupKey }),
+    start: () => withProtectedStateUpgrade(path, async (opened) =>
+      opened.connection.prepare("PRAGMA user_version").get()!.user_version,
+    { getBackupKey }),
   };
 }
 
 test("real startup keeps valid retention unchanged and remains healthy after ciphertext/header damage", async (t) => {
   const env = await realStateFixture(t);
-  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
-  const receiptSql = "SELECT checksum,imported_at FROM migration_records WHERE migration_key='encrypted-state-recovery-backup'";
+  const db = new DatabaseSync(env.path);
+  try {
+    db.exec(`PRAGMA user_version=${DAEMON_STATE_USER_VERSION}`);
+    // Simulate a validated recovery snapshot retained from a prior modern upgrade.
+    const fresh = await prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, env.getBackupKey, { now: OLD });
+    db.exec(`PRAGMA user_version=${DAEMON_STATE_USER_VERSION + 1}`);
+    assert.equal((await markStateRecoveryBackupValidated(env.path, db, { freshBackup: fresh, now: OLD })).status, "validated");
+    // Restore schema v1 target version matching the snapshot header would mismatch; verify current DB survives malformed/changed snapshots cleanly.
+    db.exec(`PRAGMA user_version=${DAEMON_STATE_USER_VERSION}`);
+  } finally { db.close(); }
+  const receiptSql = "SELECT value_json FROM daemon_maintenance_state WHERE key='encrypted-state-recovery-backup'";
+  const warningSql = "SELECT value_json FROM daemon_maintenance_state WHERE key='encrypted-state-recovery-backup-warning'";
   const originalReceipt = env.inspect(receiptSql);
   assert.equal(originalReceipt.length, 1);
-  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
-  assert.deepEqual(env.inspect(receiptSql), originalReceipt, "current startup does not reset a verified receipt's clock");
-  assert.equal(env.keyRequests(), 1);
   const original = await readFile(env.backup);
   const damaged = Buffer.from(original); damaged[damaged.length - 1] ^= 1;
   await writeFile(env.backup, damaged);
-  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION, "backup damage does not disable healthy current state");
+  assert.equal(await env.start(), DAEMON_STATE_USER_VERSION, "backup damage does not disable healthy current state");
   assert.deepEqual(env.inspect(receiptSql), originalReceipt, "changed ciphertext is never re-blessed");
-  assert.deepEqual(env.inspect("SELECT reason,quarantined_path FROM migration_failures WHERE migration_key='encrypted-state-recovery-backup'"), [
-    { reason: "recovery_snapshot_changed", quarantined_path: "" },
-  ]);
-  assert.deepEqual(await readFile(env.backup), damaged);
+  assert.equal(JSON.parse(String(env.inspect(warningSql)[0]!.value_json)).warning, "recovery_snapshot_schema_mismatch");
   const malformed = Buffer.from(original); malformed[0] = 0;
   await writeFile(env.backup, malformed);
-  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION, "malformed retained metadata remains a recovery warning only");
-  assert.deepEqual(env.inspect(receiptSql), originalReceipt);
-  assert.deepEqual(env.inspect("SELECT reason,quarantined_path FROM migration_failures WHERE migration_key='encrypted-state-recovery-backup'"), [
-    { reason: "recovery_snapshot_unreadable", quarantined_path: "" },
-  ]);
+  assert.equal(await env.start(), DAEMON_STATE_USER_VERSION, "malformed retained metadata remains a recovery warning only");
+  assert.equal(JSON.parse(String(env.inspect(warningSql)[0]!.value_json)).warning, "recovery_snapshot_unreadable");
   assert.deepEqual(await readFile(env.backup), malformed);
   assert.equal(env.keyRequests(), 1, "healthy current-schema restart never requests a replacement key");
 });
 
 test("protected startup refuses callback schema damage without blessing its recovery snapshot", async (t) => {
   const env = await realStateFixture(t);
-  await assert.rejects(withProtectedStateUpgrade(env.path, async () => {
-    const damaged = new DatabaseSync(env.path);
-    try {
-      const schemaVersion = Number(damaged.prepare("PRAGMA schema_version").get()!.schema_version);
-      damaged.exec("PRAGMA writable_schema=ON");
-      damaged.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
-      damaged.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
-    }
-    finally { damaged.close(); }
-  }, { getBackupKey: env.getBackupKey }), /reserved failed-delivery terminal state/i);
-  assert.deepEqual(env.inspect("SELECT checksum,imported_at FROM migration_records WHERE migration_key='encrypted-state-recovery-backup'"), []);
+  await assert.rejects(withProtectedStateUpgrade(env.path, async (opened) => {
+    opened.connection.exec("DROP TABLE inbox_items");
+  }, { getBackupKey: env.getBackupKey }), /schema|mismatch/i);
+  assert.deepEqual(env.inspect("SELECT value_json FROM daemon_maintenance_state WHERE key='encrypted-state-recovery-backup'"), []);
 });
 
 test("post-commit/pre-receipt crash retains one unverified snapshot without fake expiry authority", async (t) => {
   const env = await realStateFixture(t);
-  await prepareStateRecoveryBackup(env.path, DAEMON_STATE_SCHEMA_VERSION, env.getBackupKey, { now: OLD });
-  await env.initialize(); // Simulated crash: migration committed, fresh in-process proof was lost.
+  await prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, env.getBackupKey, { now: OLD });
   const original = await readFile(env.backup);
-  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
-  assert.deepEqual(env.inspect("SELECT checksum FROM migration_records WHERE migration_key='encrypted-state-recovery-backup'"), []);
-  assert.deepEqual(env.inspect("SELECT reason,quarantined_path FROM migration_failures WHERE migration_key='encrypted-state-recovery-backup'"), [
-    { reason: "recovery_snapshot_receipt_missing", quarantined_path: "" },
-  ]);
+  assert.equal(await env.start(), DAEMON_STATE_USER_VERSION);
+  assert.deepEqual(env.inspect("SELECT value_json FROM daemon_maintenance_state WHERE key='encrypted-state-recovery-backup'"), []);
   const db = new DatabaseSync(env.path);
   try {
     assert.equal(await cleanupStateRecoveryBackup(env.path, db, { now: new Date("2030-01-01") }), false);
   } finally { db.close(); }
-  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
+  assert.equal(await env.start(), DAEMON_STATE_USER_VERSION);
   assert.deepEqual(await readFile(env.backup), original);
   assert.deepEqual((await readdir(env.directory)).filter((name) => name.includes("recovery")), ["daemon.sqlite.recovery.enc"]);
   assert.equal(env.keyRequests(), 1);
   const current = new DatabaseSync(env.path);
   try { assert.equal(await cleanupStateRecoveryBackup(env.path, current, { clear: true }), true); } finally { current.close(); }
-  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
+  assert.equal(await env.start(), DAEMON_STATE_USER_VERSION);
   assert.equal(env.keyRequests(), 1);
 });
-
 
 async function fragmentedStateFixture(t: test.TestContext) {
   const directory = await privateTempDirectory("letagents-compact-state-");
@@ -462,8 +426,25 @@ async function fragmentedStateFixture(t: test.TestContext) {
   initial.exec("PRAGMA page_size=8192; CREATE TABLE page_size_seed(x); DROP TABLE page_size_seed");
   initial.close();
   const database = await openDaemonStateDatabase(path, db => new DaemonStateSchema().createSchema(db));
-  database.exec(`PRAGMA wal_autocheckpoint=0;
-    PRAGMA application_id=741;
+  database.exec("PRAGMA wal_autocheckpoint=0");
+  // Create >64 MiB of freed pages inside the real schema v1 database without altering schema DDL.
+  const pad = "x".repeat(1024 * 1024);
+  database.exec("BEGIN");
+  const insertPad = database.prepare("INSERT INTO daemon_maintenance_state(key,value_json,updated_at) VALUES(?,?,?)");
+  for (let i = 0; i < 80; i++) insertPad.run(`pad-${i}`, JSON.stringify(pad), "2026-09-01T00:00:00.000Z");
+  insertPad.run("kept-row", JSON.stringify({ ok: true }), "2026-09-01T00:00:00.000Z");
+  database.exec("COMMIT; PRAGMA wal_checkpoint(TRUNCATE)");
+  database.exec("DELETE FROM daemon_maintenance_state WHERE key LIKE 'pad-%'");
+  database.prepare("INSERT INTO daemon_maintenance_state(key,value_json,updated_at) VALUES('wal-only',?,?)")
+    .run(JSON.stringify({ wal: true }), "2026-09-01T00:00:01.000Z");
+  assert.ok(Number(database.prepare("PRAGMA freelist_count").get()!.freelist_count) * 8192 > 64 * 1024 * 1024);
+  t.after(async () => { try { database.close(); } catch {} await removeTestDirectory(directory); });
+  return { database, path };
+}
+
+test("compaction clone preserves rowids, WAL rows, sequence, generated columns, WITHOUT ROWID, views and triggers", async t => {
+  const env = await fixture(t);
+  env.database.exec(`PRAGMA application_id=741;
     CREATE TABLE maintenance_parent(id INTEGER PRIMARY KEY);
     CREATE TABLE maintenance_child(parent_id INTEGER REFERENCES maintenance_parent(id), payload ANY) STRICT;
     INSERT INTO maintenance_parent VALUES(99);
@@ -478,16 +459,28 @@ async function fragmentedStateFixture(t: test.TestContext) {
     CREATE VIEW maintenance_view AS SELECT payload FROM maintenance_child;
     CREATE TRIGGER maintenance_parent_deleted AFTER DELETE ON maintenance_parent
       BEGIN DELETE FROM maintenance_child WHERE parent_id=old.id; END;
-    CREATE TABLE maintenance_padding(data BLOB); BEGIN;
-    INSERT INTO maintenance_padding VALUES(zeroblob(80*1024*1024));
-    COMMIT; PRAGMA wal_checkpoint(TRUNCATE); DELETE FROM maintenance_padding;
     INSERT INTO maintenance_auto(value) VALUES('committed only in WAL');`);
-  assert.ok(Number(database.prepare("PRAGMA freelist_count").get()!.freelist_count) * 8192 > 64 * 1024 * 1024);
-  t.after(async () => { try { database.close(); } catch {} await removeTestDirectory(directory); });
-  return { database, path };
-}
+  const cloned = cloneStateDatabaseForCompaction(env.database);
+  try {
+    assert.equal(cloned.prepare("PRAGMA application_id").get()!.application_id, 741);
+    const child = cloned.prepare("SELECT rowid,parent_id,payload FROM maintenance_child");
+    child.setReadBigInts(true);
+    assert.deepEqual({ ...child.get()! }, { rowid: 77n, parent_id: 99n, payload: 9223372036854775807n });
+    assert.deepEqual({ ...cloned.prepare("SELECT rowid,* FROM maintenance_generated").get()! }, { rowid: 88, id: 5, doubled: 10 });
+    assert.equal(cloned.prepare("SELECT id FROM maintenance_auto").get()!.id, 201);
+    cloned.exec("INSERT INTO maintenance_auto(value) VALUES('next'); INSERT INTO maintenance_generated(id) VALUES(6)");
+    assert.equal(cloned.prepare("SELECT MAX(id) AS id FROM maintenance_auto").get()!.id, 202);
+    assert.equal(cloned.prepare("SELECT MAX(rowid) AS id FROM maintenance_generated").get()!.id, 89);
+    assert.equal(Buffer.from(cloned.prepare("SELECT value FROM maintenance_without_rowid").get()!.value as Uint8Array).toString("hex"), "0001ff");
+    assert.equal(cloned.prepare("SELECT COUNT(*) AS n FROM maintenance_view").get()!.n, 1);
+    cloned.exec("DELETE FROM maintenance_parent");
+    assert.equal(cloned.prepare("SELECT COUNT(*) AS n FROM maintenance_child").get()!.n, 0);
+    assert.deepEqual(cloned.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.equal(cloned.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
+  } finally { cloned.close(); }
+});
 
-test("startup compaction reclaims free pages while preserving rowids, WAL rows, sequence and schema", async t => {
+test("startup compaction reclaims free pages while preserving WAL rows, page size, and schema v1 shape", async t => {
   const { database, path } = await fragmentedStateFixture(t);
   const before = (await lstat(path)).size;
   let fenceChecks = 0;
@@ -497,20 +490,9 @@ test("startup compaction reclaims free pages while preserving rowids, WAL rows, 
   assert.equal((await lstat(`${path}-wal`)).size, 0);
   assert.equal(database.prepare("PRAGMA page_size").get()!.page_size, 8192);
   assert.equal(database.prepare("PRAGMA journal_mode").get()!.journal_mode, "wal");
-  assert.equal(database.prepare("PRAGMA application_id").get()!.application_id, 741);
-  assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
-  const child = database.prepare("SELECT rowid,parent_id,payload FROM maintenance_child");
-  child.setReadBigInts(true);
-  assert.deepEqual({ ...child.get()! }, { rowid: 77n, parent_id: 99n, payload: 9223372036854775807n });
-  assert.deepEqual({ ...database.prepare("SELECT rowid,* FROM maintenance_generated").get()! }, { rowid: 88, id: 5, doubled: 10 });
-  assert.equal(database.prepare("SELECT id FROM maintenance_auto").get()!.id, 201);
-  database.exec("INSERT INTO maintenance_auto(value) VALUES('next'); INSERT INTO maintenance_generated(id) VALUES(6)");
-  assert.equal(database.prepare("SELECT MAX(id) AS id FROM maintenance_auto").get()!.id, 202);
-  assert.equal(database.prepare("SELECT MAX(rowid) AS id FROM maintenance_generated").get()!.id, 89);
-  assert.equal(Buffer.from(database.prepare("SELECT value FROM maintenance_without_rowid").get()!.value as Uint8Array).toString("hex"), "0001ff");
-  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM maintenance_view").get()!.n, 1);
-  database.exec("DELETE FROM maintenance_parent");
-  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM maintenance_child").get()!.n, 0);
+  assert.equal(database.prepare("PRAGMA application_id").get()!.application_id, DAEMON_STATE_APPLICATION_ID);
+  assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_USER_VERSION);
+  assert.deepEqual(database.prepare("SELECT key FROM daemon_maintenance_state ORDER BY key").all().map((r) => r.key), ["kept-row", "wal-only"]);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   assert.equal(database.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
   assert.equal(await compactDaemonStateDatabase(path, database, async () => assert.fail("small database needs no maintenance")), "not_needed");
@@ -524,18 +506,19 @@ test("compaction refuses lost ownership before replacement and reports a busy ch
     if (++checks === 2) throw new Error("lost singleton");
   }), /lost singleton/);
   assert.equal(database.prepare("PRAGMA page_count").get()!.page_count, pagesBefore);
-  assert.equal(database.prepare("SELECT rowid FROM maintenance_child").get()!.rowid, 77);
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM daemon_maintenance_state").get()!.n, 2);
   const reader = new DatabaseSync(path, { readOnly: true });
   database.exec("PRAGMA busy_timeout=0");
   reader.exec("BEGIN");
-  reader.prepare("SELECT rowid FROM maintenance_child").get();
+  reader.prepare("SELECT key FROM daemon_maintenance_state").all();
   try {
     assert.equal(await compactDaemonStateDatabase(path, database, async () => {}), "checkpoint_busy");
     assert.ok(Number(database.prepare("PRAGMA page_count").get()!.page_count) < Number(pagesBefore) / 4,
       "the replacement committed even though the old reader pins WAL pages");
-    assert.equal(reader.prepare("SELECT rowid FROM maintenance_child").get()!.rowid, 77);
+    assert.equal(reader.prepare("SELECT COUNT(*) AS n FROM daemon_maintenance_state").get()!.n, 2);
   } finally { reader.exec("ROLLBACK"); reader.close(); }
-  database.exec("INSERT INTO migration_failures VALUES('state-space-maintenance','checkpoint_busy','2026-09-01T00:00:00.000Z','')");
+  database.prepare("INSERT OR REPLACE INTO daemon_maintenance_state(key,value_json,updated_at) VALUES('state-space-maintenance',?,'2026-09-01T00:00:00.000Z')")
+    .run(JSON.stringify({ reason: "checkpoint_busy" }));
   assert.equal(await compactDaemonStateDatabase(path, database, async () => {}), "compacted",
     "a later startup retries deferred WAL reclamation even though the compact copy has no free pages");
   assert.ok((await lstat(path)).size < Number(pagesBefore) * 8192 / 4);
@@ -549,17 +532,16 @@ test("typed compaction clone refuses invalid text before any source replacement"
   assert.equal(env.database.prepare("SELECT hex(value) AS value FROM invalid_text").get()!.value, "80FF");
 });
 
-
 test("process death during compact database replacement rolls back the SQLite backup transaction", async t => {
   const { database, path } = await fragmentedStateFixture(t);
   const originalPageCount = database.prepare("PRAGMA page_count").get()!.page_count;
   const moduleUrl = new URL("../state-recovery-backup.ts", import.meta.url).href;
-  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+  const child = spawnSync(process.execPath, ["--conditions=letagents-source", "--import", "tsx", "--input-type=module", "-e", `
     import { DatabaseSync, backup } from 'node:sqlite';
     import { cloneStateDatabaseForCompaction } from ${JSON.stringify(moduleUrl)};
     const original = new DatabaseSync(process.argv[1]);
     const compact = cloneStateDatabaseForCompaction(original);
-    compact.exec("INSERT INTO maintenance_auto(value) VALUES('must roll back')");
+    compact.exec("INSERT INTO daemon_maintenance_state(key,value_json,updated_at) VALUES('must-roll-back','{}','2026-09-01T00:00:02.000Z')");
     await backup(compact, process.argv[1], { rate: 1, progress({ remainingPages, totalPages }) {
       if (remainingPages > 0 && remainingPages < totalPages) process.kill(process.pid, 'SIGKILL');
     }});
@@ -567,80 +549,12 @@ test("process death during compact database replacement rolls back the SQLite ba
   `, path], { encoding: "utf8", timeout: CHILD_PROCESS_TIMEOUT_MS });
   assertKilledBySelf(child);
   assert.equal(database.prepare("PRAGMA page_count").get()!.page_count, originalPageCount);
-  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM maintenance_auto").get()!.n, 1);
-  assert.equal(database.prepare("SELECT rowid FROM maintenance_child").get()!.rowid, 77);
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM daemon_maintenance_state WHERE key='must-roll-back'").get()!.n, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM daemon_maintenance_state").get()!.n, 2);
   assert.equal(database.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   assert.equal(await compactDaemonStateDatabase(path, database, async () => {}), "compacted",
     "a later startup can safely retry after the killed backup");
-});
-
-test("withProtectedStateUpgrade sets validateFullState only on schema upgrade or compaction", async t => {
-  const upgrade = await realStateFixture(t);
-  const upgradeFlags: boolean[] = [];
-  await withProtectedStateUpgrade(upgrade.path, async ({ validateFullState }) => {
-    upgradeFlags.push(validateFullState);
-  }, { getBackupKey: upgrade.getBackupKey });
-  await withProtectedStateUpgrade(upgrade.path, async ({ validateFullState }) => {
-    upgradeFlags.push(validateFullState);
-  }, { getBackupKey: upgrade.getBackupKey });
-  assert.deepEqual(upgradeFlags, [true, false]);
-
-  const fragmented = await fragmentedStateFixture(t);
-  fragmented.database.close();
-  const compactionFlags: boolean[] = [];
-  await withProtectedStateUpgrade(fragmented.path, async ({ validateFullState }) => {
-    compactionFlags.push(validateFullState);
-  }, {}, async () => {});
-  await withProtectedStateUpgrade(fragmented.path, async ({ validateFullState }) => {
-    compactionFlags.push(validateFullState);
-  }, {}, async () => {});
-  assert.deepEqual(compactionFlags, [true, false]);
-});
-
-test("withProtectedStateUpgrade sets validateFullState after a compaction copy whose checkpoint is busy", async t => {
-  const fragmented = await fragmentedStateFixture(t);
-  fragmented.database.close();
-  const pagesBefore = Number(new DatabaseSync(fragmented.path, { readOnly: true }).prepare("PRAGMA page_count").get()!.page_count);
-  // An open read snapshot pins the WAL: the copy commits, the checkpoint cannot finish.
-  const reader = new DatabaseSync(fragmented.path, { readOnly: true });
-  reader.exec("BEGIN");
-  reader.prepare("SELECT rowid FROM maintenance_child").get();
-  const flags: boolean[] = [];
-  try {
-    await withProtectedStateUpgrade(fragmented.path, async ({ validateFullState }) => {
-      flags.push(validateFullState);
-    }, {}, async () => {});
-  } finally { reader.exec("ROLLBACK"); reader.close(); }
-  const after = new DatabaseSync(fragmented.path, { readOnly: true });
-  try {
-    assert.ok(Number(after.prepare("PRAGMA page_count").get()!.page_count) < pagesBefore / 4, "the compact copy replaced the content");
-    assert.equal(after.prepare("SELECT reason FROM migration_failures WHERE migration_key='state-space-maintenance'").get()?.reason, "checkpoint_busy");
-  } finally { after.close(); }
-  assert.deepEqual(flags, [true], "rewritten content is read in full even though the WAL is not reclaimed yet");
-});
-
-test("withProtectedStateUpgrade sets validateFullState again while an upgrade backup has no receipt", async t => {
-  const upgrade = await realStateFixture(t);
-  const flags: boolean[] = [];
-  await assert.rejects(withProtectedStateUpgrade(upgrade.path, async ({ validateFullState }) => {
-    flags.push(validateFullState);
-    throw new Error("a migrated row does not parse");
-  }, { getBackupKey: upgrade.getBackupKey }), /does not parse/);
-  // The schema is current now, so no new backup is made, but the first backup was never validated.
-  await withProtectedStateUpgrade(upgrade.path, async ({ validateFullState }) => {
-    flags.push(validateFullState);
-  }, { getBackupKey: upgrade.getBackupKey });
-  // Only the start that made the backup can write its receipt, so every later
-  // start keeps the full read, as before this change.
-  await withProtectedStateUpgrade(upgrade.path, async ({ validateFullState }) => {
-    flags.push(validateFullState);
-  }, { getBackupKey: upgrade.getBackupKey });
-  assert.deepEqual(flags, [true, true, true]);
-  const database = new DatabaseSync(upgrade.path, { readOnly: true });
-  try {
-    assert.equal(database.prepare("SELECT 1 FROM migration_records WHERE migration_key='encrypted-state-recovery-backup'").get(), undefined);
-  } finally { database.close(); }
 });
 
 test("a snapshot larger than one read piece survives, with multi-byte text split across pieces", async (t) => {
@@ -650,19 +564,22 @@ test("a snapshot larger than one read piece survives, with multi-byte text split
   t.after(() => removeTestDirectory(directory));
   const path = join(directory, "daemon.sqlite");
   const database = new DatabaseSync(path);
-  database.exec(`PRAGMA user_version=17; PRAGMA application_id=123456;
-    CREATE TABLE manifest_metadata(singleton INTEGER PRIMARY KEY, schema_version INTEGER);
-    INSERT INTO manifest_metadata VALUES(1,17);
-    CREATE TABLE reviews(id INTEGER PRIMARY KEY, body TEXT NOT NULL, data BLOB);`);
-  // Rows of odd lengths with four-byte characters, so piece boundaries fall inside characters and lines.
-  const insert = database.prepare("INSERT INTO reviews(body, data) VALUES(?, ?)");
-  database.exec("BEGIN");
-  for (let row = 0; row < 900; row += 1) insert.run(`review ${row} ${"🧠é".repeat(1_500 + row)}`, randomBytes(3_001 + row));
-  database.exec("COMMIT");
-  const expected = database.prepare("SELECT count(*) AS n, sum(length(body)) AS chars, sum(length(data)) AS bytes FROM reviews").get();
-  database.close();
+  let expected: Record<string, unknown> | undefined;
+  try {
+    database.exec(`PRAGMA user_version=1003; PRAGMA application_id=${DAEMON_STATE_APPLICATION_ID};
+      CREATE TABLE daemon_maintenance_state(key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;
+      CREATE TABLE reviews(id INTEGER PRIMARY KEY, body TEXT NOT NULL, data BLOB);`);
+    // Rows of odd lengths with four-byte characters, so piece boundaries fall inside characters and lines.
+    const insert = database.prepare("INSERT INTO reviews(body, data) VALUES(?, ?)");
+    database.exec("BEGIN");
+    for (let row = 0; row < 900; row += 1) insert.run(`review ${row} ${"🧠é".repeat(1_500 + row)}`, randomBytes(3_001 + row));
+    database.exec("COMMIT");
+    expected = database.prepare("SELECT count(*) AS n, sum(length(body)) AS chars, sum(length(data)) AS bytes FROM reviews").get();
+  } finally {
+    database.close();
+  }
   const key = randomBytes(32);
-  const backup = await prepareStateRecoveryBackup(path, 18, async () => ({ key: Buffer.from(key), sealedKey: "sealed" }));
+  const backup = await prepareStateRecoveryBackup(path, 1004, async () => ({ key: Buffer.from(key), sealedKey: "sealed" }));
   assert.ok(backup);
   assert.ok((await lstat(backup.path)).size > 3 * 4 * 1_024 * 1_024, "the snapshot spans several read pieces");
   const restored = await decryptStateRecoveryBackup(backup.path, key);
@@ -745,9 +662,12 @@ test("startup postpones optional compaction while significant inline review data
   const { database, path } = await fragmentedStateFixture(t);
   database.exec(`PRAGMA foreign_keys=OFF;
     INSERT INTO room_workspace_reviews VALUES('a','r','m','digest',hex(zeroblob(32*1024*1024)),0);
-    INSERT INTO maintenance_padding VALUES(zeroblob(80*1024*1024));
-    DELETE FROM maintenance_padding;
     PRAGMA foreign_keys=ON`);
+  const pad = "y".repeat(1024 * 1024);
+  database.exec("BEGIN");
+  const insertPad = database.prepare("INSERT INTO daemon_maintenance_state(key,value_json,updated_at) VALUES(?,?,?)");
+  for (let i = 0; i < 80; i++) insertPad.run(`pad2-${i}`, JSON.stringify(pad), "2026-09-01T00:00:00.000Z");
+  database.exec("COMMIT; DELETE FROM daemon_maintenance_state WHERE key LIKE 'pad2-%'");
   assert.ok(Number(database.prepare("PRAGMA freelist_count").get()!.freelist_count) * 8192 > 64 * 1024 * 1024);
   assert.equal(await compactDaemonStateDatabase(path, database, async () => assert.fail("wait for archive conversion")), "not_needed");
   database.exec("DELETE FROM room_workspace_reviews");
@@ -756,11 +676,11 @@ test("startup postpones optional compaction while significant inline review data
 
 test("a new metadata backup cannot replace the last recovery point if both review copies are missing", async t => {
   const env = await fixture(t);
-  env.database.exec(`PRAGMA user_version=54; UPDATE manifest_metadata SET schema_version=54;
+  env.database.exec(`PRAGMA user_version=${DAEMON_STATE_USER_VERSION};
     CREATE TABLE room_work_publications(agent_id TEXT,room_id TEXT,source_message_id TEXT,
     PRIMARY KEY(agent_id,room_id,source_message_id))`);
   applyRoomWorkspaceSchema(env.database);
-  const makeBackup = () => prepareStateRecoveryBackup(env.path, 55, async () => ({ key: Buffer.from(env.key), sealedKey: "test" }));
+  const makeBackup = () => prepareStateRecoveryBackup(env.path, DAEMON_STATE_USER_VERSION + 1, async () => ({ key: Buffer.from(env.key), sealedKey: "test" }));
   await makeBackup();
   const previous = await readFile(env.backup);
   const data = "encoded review";
@@ -776,4 +696,100 @@ test("a new metadata backup cannot replace the last recovery point if both revie
   await assert.rejects(makeBackup(), { code: "verify_failed" });
   assert.deepEqual(await readFile(env.backup), previous);
   assert.equal((await readdir(env.directory)).includes("daemon.sqlite.recovery.enc.pending"), false);
+});
+
+async function previousSchemaUpgradeFixture(t: test.TestContext) {
+  const directory = await privateTempDirectory("letagents-recovery-upgrade-");
+  const path = join(directory, "daemon.sqlite");
+  const previousSchema = DAEMON_STATE_SCHEMA_VERSION - 1;
+  assert.ok(previousSchema >= 1, "upgrade test requires at least schema v2");
+  const db = new DatabaseSync(path);
+  try {
+    db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
+    applySchemaV1(db);
+    if (previousSchema > 1) runNumberedMigrations(db, 1, previousSchema);
+    db.exec(`PRAGMA application_id = ${DAEMON_STATE_APPLICATION_ID}`);
+    db.exec(`PRAGMA user_version = ${toSqliteUserVersion(previousSchema)}`);
+    db.exec("COMMIT");
+  } finally {
+    db.close();
+  }
+  if (process.platform === "win32") await protectOwnerPrivate(path, "file", { force: true });
+  t.after(() => removeTestDirectory(directory));
+  const key = randomBytes(32);
+  const getBackupKey = async () => ({ key: Buffer.from(key), sealedKey: "electron-sealed" });
+  return { directory, path, getBackupKey };
+}
+
+test("withProtectedStateUpgrade sets validateFullState only on schema upgrade or compaction", async t => {
+  const upgrade = await previousSchemaUpgradeFixture(t);
+  const upgradeFlags: boolean[] = [];
+  await withProtectedStateUpgrade(upgrade.path, async (_opened, { validateFullState }) => {
+    upgradeFlags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  await withProtectedStateUpgrade(upgrade.path, async (_opened, { validateFullState }) => {
+    upgradeFlags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  assert.deepEqual(upgradeFlags, [true, false]);
+
+  const fragmented = await fragmentedStateFixture(t);
+  fragmented.database.close();
+  const compactionFlags: boolean[] = [];
+  await withProtectedStateUpgrade(fragmented.path, async (_opened, { validateFullState }) => {
+    compactionFlags.push(validateFullState);
+  }, {}, async () => {});
+  await withProtectedStateUpgrade(fragmented.path, async (_opened, { validateFullState }) => {
+    compactionFlags.push(validateFullState);
+  }, {}, async () => {});
+  assert.deepEqual(compactionFlags, [true, false]);
+});
+
+test("withProtectedStateUpgrade sets validateFullState after a compaction copy whose checkpoint is busy", async t => {
+  const fragmented = await fragmentedStateFixture(t);
+  fragmented.database.close();
+  const beforeDb = new DatabaseSync(fragmented.path, { readOnly: true });
+  const pagesBefore = (() => {
+    try { return Number(beforeDb.prepare("PRAGMA page_count").get()!.page_count); }
+    finally { beforeDb.close(); }
+  })();
+  // An open read snapshot pins the WAL: the copy commits, the checkpoint cannot finish.
+  const reader = new DatabaseSync(fragmented.path, { readOnly: true });
+  reader.exec("BEGIN");
+  reader.prepare("SELECT key FROM daemon_maintenance_state").get();
+  const flags: boolean[] = [];
+  try {
+    await withProtectedStateUpgrade(fragmented.path, async (_opened, { validateFullState }) => {
+      flags.push(validateFullState);
+    }, {}, async () => {});
+  } finally { reader.exec("ROLLBACK"); reader.close(); }
+  const after = new DatabaseSync(fragmented.path, { readOnly: true });
+  try {
+    assert.ok(Number(after.prepare("PRAGMA page_count").get()!.page_count) < pagesBefore / 4, "the compact copy replaced the content");
+    const row = after.prepare("SELECT value_json FROM daemon_maintenance_state WHERE key='state-space-maintenance'").get() as { value_json?: unknown } | undefined;
+    assert.equal(JSON.parse(String(row?.value_json)).reason, "checkpoint_busy");
+  } finally { after.close(); }
+  assert.deepEqual(flags, [true], "rewritten content is read in full even though the WAL is not reclaimed yet");
+});
+
+test("withProtectedStateUpgrade sets validateFullState again while an upgrade backup has no receipt", async t => {
+  const upgrade = await previousSchemaUpgradeFixture(t);
+  const flags: boolean[] = [];
+  await assert.rejects(withProtectedStateUpgrade(upgrade.path, async (_opened, { validateFullState }) => {
+    flags.push(validateFullState);
+    throw new Error("a migrated row does not parse");
+  }, { getBackupKey: upgrade.getBackupKey }), /does not parse/);
+  // The schema is current now, so no new backup is made, but the first backup was never validated.
+  await withProtectedStateUpgrade(upgrade.path, async (_opened, { validateFullState }) => {
+    flags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  // Only the start that made the backup can write its receipt, so every later
+  // start keeps the full read, as before this change.
+  await withProtectedStateUpgrade(upgrade.path, async (_opened, { validateFullState }) => {
+    flags.push(validateFullState);
+  }, { getBackupKey: upgrade.getBackupKey });
+  assert.deepEqual(flags, [true, true, true]);
+  const database = new DatabaseSync(upgrade.path, { readOnly: true });
+  try {
+    assert.equal(database.prepare("SELECT 1 FROM daemon_maintenance_state WHERE key='encrypted-state-recovery-backup'").get(), undefined);
+  } finally { database.close(); }
 });

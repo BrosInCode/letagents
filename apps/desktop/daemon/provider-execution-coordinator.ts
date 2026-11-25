@@ -9,6 +9,7 @@ import {
   isEphemeralWorkspaceMarker,
   type EphemeralWorkspaceProvisioner,
 } from "./ephemeral-workspace-provisioner.js";
+import { ExecutionProtocolError } from "./execution-protocol.js";
 import { serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestConflictError } from "./manifest-store.js";
 import {
@@ -24,12 +25,6 @@ import {
 } from "./provider-action-port.js";
 import { deriveProviderConfigurationSnapshot, entryLaunchPolicy, ownerSetupRef } from "./provider-configuration.js";
 import { isCursorChildConnection } from "./provider-state-policy.js";
-import {
-  lifecycleAuthorityModeForProvider,
-  lifecycleAuthorityProviderSchema,
-  type LifecycleAuthorityMode,
-} from "./lifecycle-authority-mode.js";
-import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
 import { DaemonFenceLostError } from "./singleton.js";
 import {
   assertSupervisedPermissionProfileAvailable,
@@ -55,55 +50,66 @@ import type {
   MintedWorkerAuthorization,
 } from "./worker-runtime-custody.js";
 import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
-import type { SupervisedAgentInboxStore, SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
+import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 
 import { ProviderStopError } from "./daemon-error-policy.js";
-import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import { ACTIVITY_RECORD_CONTINUED_NOTICE, ACTIVITY_RECORD_STOPPED_NOTICE } from "./runtime-recovery-journal.js";
 import { EXIT_UNSETTLED_NOTICE } from "./provider-terminal-coordinator.js";
-import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 import type { ConvergencePacing } from "./convergence-pacer.js";
+import {
+  CONVERGENCE_CONFLICT_RETRY_LIMIT,
+  RETIREMENT_SETTLEMENT_WAIT_MS,
+  UNATTACHABLE_GENERATION_RECHECK_MAX_MS,
+  UNATTACHABLE_GENERATION_RECHECK_MS,
+  WORKSPACE_REPOSITORY_RETRY_MAX_MS,
+  WORKSPACE_REPOSITORY_RETRY_MS,
+  computeCappedBackoffMs,
+  evaluateFailedRestartGate,
+  evaluateRetirementHold,
+  recordedProcessState,
+  shouldReplaceRecoveryDeadline,
+  shouldScheduleConflictRetry,
+} from "./convergence-policy.js";
 import { launchProgress } from "./launch-progress.js";
 import { turnStartLatency } from "./turn-start-latency.js";
 
-// A live generation with no attachable handle resolves on its own once the
-// old process exits or answers again. Re-check with capped backoff so the
-// agent is not left blocked until some unrelated event wakes it, while a
-// runtime that stays unattachable costs one cheap check per half hour.
-const UNATTACHABLE_GENERATION_RECHECK_MS = 60_000;
-const UNATTACHABLE_GENERATION_RECHECK_MAX_MS = 30 * 60_000;
-const WORKSPACE_REPOSITORY_RETRY_MS = 5_000;
-const WORKSPACE_REPOSITORY_RETRY_MAX_MS = 5 * 60_000;
+export { CONVERGENCE_CONFLICT_RETRY_LIMIT, RETIREMENT_SETTLEMENT_WAIT_MS };
+
 /**
- * How long an ended runtime is left for the turn of its in-flight message to
- * be recorded. A provider reports a failed turn's result moments after the
- * failure; past this the result is not coming and the runtime is retired
- * without it.
+ * Raised when repeated snapshot-to-commit `ManifestConflictError` retries hit
+ * `CONVERGENCE_CONFLICT_RETRY_LIMIT` instead of looping indefinitely.
  */
-export const RETIREMENT_SETTLEMENT_WAIT_MS = 30_000;
+export class ConvergenceConflictExhaustedError extends Error {
+  readonly code = "convergence_conflict_exhausted" as const;
+
+  constructor(
+    readonly entryId: string,
+    readonly attempts: number,
+    cause: ManifestConflictError,
+  ) {
+    super(
+      `Convergence conflict retry limit (${attempts}) exhausted for ${entryId}: ${cause.message}`,
+      { cause },
+    );
+    this.name = "ConvergenceConflictExhaustedError";
+  }
+}
+
 /**
  * The longest a launch waits for the daemon's background check of the bundled
  * MCP runtime. That check only spares the launch its own first hash, which runs
  * regardless; a filesystem that never answers must not hold launches forever.
  */
 const RUNTIME_VERIFY_WAIT_MS = 180_000;
-/**
- * The inbox head has a turn that may still be running and no result saved for
- * it. A started turn handed back to `pending` counts: a delivery lane that
- * lets go of its turn leaves the row that way while the provider works on.
- */
-function turnInFlight(head: Pick<SupervisedInboxItem, "state" | "provider_turn_id" | "outcome"> | null): boolean {
-  return head !== null && (["dispatching", "awaiting_result", "result_recovery"].includes(head.state)
-    || (head.state === "pending" && Boolean(head.provider_turn_id) && !head.outcome));
-}
 const UNATTACHABLE_GENERATION_CAUSE = "durable execution generation remains live without an attachable provider handle";
+const INCOMPLETE_PROCESS_REF_ERROR = "The recorded provider process has a process id and no process birth, so its absence cannot be proved.";
+const UNPROVEN_PREDECESSOR_CAUSE = "the earlier provider process is not proven gone after its recorded end; no replacement starts until it is";
 
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
 export type ConvergenceRequestKind = "owned" | "rehydration";
 
 export type ProviderExecutionConfiguration = {
-  polling_contract?: "custodial_polling_v1" | null;
   provider: string;
   model: string | null;
   reasoning_effort: DaemonManifestEntry["reasoning_effort"];
@@ -119,44 +125,42 @@ export type ProviderExecutionStore = {
   pendingRuntimeRecovery(agentId: string): Promise<unknown>;
   /** Archive what the agent's exited runtimes left unfinished in its execution record. Resolves with the runtimes archived. */
   archiveExitedRuntimes?(agentId: string, commitFence: CommitFence): Promise<string[]>;
-  unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
-  unresolvedPollingActivation(agentId: string): Promise<PollingActivationRecord | null>;
-  readGeneration(): Promise<number>;
   getEntry(entryId: string, activityMode?: "full" | "summary"): Promise<DaemonManifestEntry | undefined>;
+  getEntryWithVersion(entryId: string, activityMode?: "full" | "summary"): Promise<{ entry: DaemonManifestEntry; version: number } | undefined>;
   getAgentConfiguration(entryId: string): Promise<ProviderExecutionConfiguration | undefined>;
   readRuntimeLifecycleAuthority(input: {
     agentId: string;
     executionGenerationId: string;
     providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
     configurationRevision: number;
-  }): Promise<LifecycleAuthorityMode | null>;
+  }): Promise<"typed" | null>;
   replaceEntry(
-    expectedGeneration: number,
+    expectedVersion: number,
     entry: DaemonManifestEntry,
     commitFence: CommitFence,
-  ): Promise<{ generation: number }>;
+  ): Promise<{ version: number }>;
   markRuntimeConfigurationApplied(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       agentId: string;
       executionGenerationId: string;
       appliedRevision: number;
     },
     commitFence: CommitFence,
-  ): Promise<{ generation: number }>;
+  ): Promise<{ version: number }>;
   checkpointProviderBirth(
-    expectedGeneration: number,
+    expectedVersion: number,
     input: {
       entry: DaemonManifestEntry;
       executionGenerationId: string;
       providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
       appliedRevision: number;
       managedLaunchContract?: string;
-      requestedAuthorityMode: LifecycleAuthorityMode;
+      requestedAuthorityMode: "typed";
       observedAtMs: number;
     },
     commitFence: CommitFence,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode | null }>;
+  ): Promise<{ version: number; entry: DaemonManifestEntry; authorityMode: "typed" | null }>;
 };
 
 export type ProviderExecutionDurability = Pick<
@@ -181,12 +185,6 @@ export type ProviderExecutionStreams = {
     executionGenerationId: string,
     mayStartDelivery?: () => boolean,
   ): Promise<void>;
-  stageWorkerBindingAfterResume(
-    entry: DaemonManifestEntry,
-    priorBinding: WorkerSessionBinding,
-    successorExecutionGenerationId: string,
-    handle: ProviderActionHandle,
-  ): Promise<void>;
   fenceTerminalOnce(handle: ProviderActionHandle, actionId: string): Promise<void>;
 };
 
@@ -202,8 +200,6 @@ export type ProviderExecutionCoordinatorOptions = {
     isHandoffScheduled(): boolean;
     isDispatchPaused?(): boolean;
     currentDaemonGeneration(): number;
-    currentManifestGeneration(): number;
-    acceptManifestGeneration(generation: number): void;
     assertCurrent(): Promise<void>;
     ownsDaemonGeneration(expectedGeneration: number): Promise<boolean>;
     fenceCommit: CommitFence;
@@ -233,6 +229,8 @@ export type ProviderExecutionCoordinatorOptions = {
     condition: DaemonManifestEntry["condition"],
     cause: string,
     actor: string,
+    reconciliation?: DaemonManifestEntry["reconciliation"],
+    expectedVersion?: number,
   ): Promise<void>;
   terminalPayload(terminal: ProviderActionTerminal, actor: string, connection?: ProviderActionHandle["providerConnection"]): ExecutionTerminalPayload;
   settleRuntimeApprovals(entryId: string): Promise<void>;
@@ -331,6 +329,7 @@ export class ProviderExecutionCoordinator {
   private readonly recoveryDueAtMs = new Map<string, number>();
   private readonly unattachableRechecks = new Map<string, number>();
   private readonly workspaceRepositoryRetries = new Map<string, number>();
+  private readonly conflictRetryAttempts = new Map<string, number>();
   private readonly dispatchReservations = new Map<Promise<void>, string>();
   private readonly activeDispatches = new Map<symbol, DispatchReservation>();
   private fatalDispatchError: unknown = null;
@@ -350,7 +349,7 @@ export class ProviderExecutionCoordinator {
    */
   async providerRef(
     entry: DaemonManifestEntry,
-    lifecycleAuthorityMode?: LifecycleAuthorityMode,
+    lifecycleAuthorityMode?: "typed",
     appliedRevision?: number,
   ): Promise<ProviderActionRef> {
     const ref = entry.provider_ref;
@@ -366,7 +365,7 @@ export class ProviderExecutionCoordinator {
     };
   }
 
-  private async frozenLifecycleAuthority(entry: DaemonManifestEntry): Promise<LifecycleAuthorityMode | null> {
+  private async frozenLifecycleAuthority(entry: DaemonManifestEntry): Promise<"typed" | null> {
     const ref = entry.provider_ref;
     if (!ref?.provider_connection) return null;
     const appliedRevision = (await this.options.store.getAgentConfiguration(entry.id))?.runtime_configuration_revision;
@@ -390,26 +389,78 @@ export class ProviderExecutionCoordinator {
     if (kind === "rehydration" && this.pendingReminders.has(entryId)) return;
     const reminder = kind === "rehydration" ? Symbol() : null;
     if (reminder) this.pendingReminders.set(entryId, reminder);
+    let ensureDelivery = false;
     const previous = this.convergenceRequests.get(entryId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
       .then(() => this.options.concurrency.serializeEntry(
         entryId,
-        () => {
+        async () => {
           if (reminder && this.pendingReminders.get(entryId) === reminder) this.pendingReminders.delete(entryId);
-          return this.converge(entryId, kind);
+          ({ ensureDelivery } = await this.convergeLocked(entryId, kind));
         },
       ))
       .then(async () => {
-        if (this.options.authority.isDispatchPaused?.()) return;
-        const pending = await this.options.refreshManagedRuntime?.(entryId);
-        if (!pending) return;
-        // The agent is still to be replaced. It is tried again from here, so
-        // a turn held back for the replacement never waits on another event.
-        this.scheduleRecovery(entryId, pending.retryAfterMs);
-        if (pending.notice) await this.recordLaunchNotices(entryId, [pending.notice]);
+        if (ensureDelivery
+          && !this.options.authority.isHandoffScheduled()
+          && !this.options.authority.isDispatchPaused?.()) {
+          // Run delivery/room-move admission after releasing `serializeEntry` so
+          // pending room-move reconciliation can enter `entryConcurrency.runRoomMove`
+          // without deadlocking behind this convergence pass.
+          await this.options.delivery.start(entryId, "ensure");
+        }
+        if (!this.options.authority.isDispatchPaused?.()) {
+          const pending = await this.options.refreshManagedRuntime?.(entryId);
+          if (pending) {
+            // The agent is still to be replaced. It is tried again from here, so
+            // a turn held back for the replacement never waits on another event.
+            this.scheduleRecovery(entryId, pending.retryAfterMs);
+            if (pending.notice) await this.recordLaunchNotices(entryId, [pending.notice]);
+          }
+        }
+        this.conflictRetryAttempts.delete(entryId);
       })
       .catch(async (error) => {
+        if (error instanceof ManifestConflictError) {
+          const attempts = (this.conflictRetryAttempts.get(entryId) ?? 0) + 1;
+          if (shouldScheduleConflictRetry(attempts)) {
+            if (!this.options.authority.isHandoffScheduled()
+              && !this.options.authority.isDispatchPaused?.()
+              && this.options.autoConverge) {
+              this.conflictRetryAttempts.set(entryId, attempts);
+              console.warn("[provider_execution] convergence_conflict_retry", JSON.stringify({
+                entryId,
+                kind,
+                attempt: attempts,
+                limit: CONVERGENCE_CONFLICT_RETRY_LIMIT,
+                error: error.message,
+              }));
+              // Queue the retry before `next` settles so `drainConvergence()`
+              // waits for it and the retry runs under `serializeEntry`.
+              this.request(entryId, kind);
+            } else {
+              this.conflictRetryAttempts.delete(entryId);
+            }
+            return;
+          }
+          this.conflictRetryAttempts.delete(entryId);
+          const exhausted = new ConvergenceConflictExhaustedError(
+            entryId,
+            CONVERGENCE_CONFLICT_RETRY_LIMIT,
+            error,
+          );
+          const current = await this.options.store.getEntry(entryId, "summary").catch(() => undefined);
+          const failure = current?.desired_state === "stopped"
+            ? new ProviderStopError(exhausted)
+            : exhausted;
+          await this.options.recordSchedulerFailure(
+            entryId,
+            failure,
+            "daemon-convergence",
+          ).catch(() => undefined);
+          return;
+        }
+        this.conflictRetryAttempts.delete(entryId);
         await this.options.recordSchedulerFailure(
           entryId,
           error,
@@ -430,7 +481,7 @@ export class ProviderExecutionCoordinator {
     // Keep whichever wake-up is sooner so a slow re-check never delays a
     // restart that another path scheduled for earlier.
     const existingDueAtMs = this.recoveryDueAtMs.get(entryId);
-    if (this.recoveryTimers.has(entryId) && (existingDueAtMs === undefined || existingDueAtMs <= dueAtMs)) return;
+    if (!shouldReplaceRecoveryDeadline(this.recoveryTimers.has(entryId), existingDueAtMs, dueAtMs)) return;
     this.clearRecovery(entryId);
     const timer = this.setRecoveryTimeout(() => {
       this.recoveryTimers.delete(entryId);
@@ -451,7 +502,9 @@ export class ProviderExecutionCoordinator {
   }
 
   async drainConvergence(): Promise<void> {
-    await Promise.all([...this.convergenceRequests.values()]);
+    while (this.convergenceRequests.size > 0) {
+      await Promise.all([...this.convergenceRequests.values()]);
+    }
   }
 
   /** In-flight convergence is authority-fenced; handoff never waits on its transport. */
@@ -459,6 +512,7 @@ export class ProviderExecutionCoordinator {
     this.convergenceRequests.clear();
     this.pendingReminders.clear();
     this.failedLaunchAdmissions.clear();
+    this.conflictRetryAttempts.clear();
   }
 
   clearRecoveryTimers(): void {
@@ -509,18 +563,30 @@ export class ProviderExecutionCoordinator {
     };
   }
 
+  private async loadVersionedEntry(
+    entryId: string,
+  ): Promise<{ entry: DaemonManifestEntry; version: number } | null> {
+    return (await this.options.store.getEntryWithVersion(entryId, "summary")) ?? null;
+  }
+
+  private async launchVersionedEntryIfCurrent(
+    entryId: string,
+    expectedEpoch: number,
+  ): Promise<{ entry: DaemonManifestEntry; version: number } | null> {
+    if (this.options.authority.isHandoffScheduled()
+      || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch) return null;
+    const loaded = await this.loadVersionedEntry(entryId);
+    if (this.options.authority.isHandoffScheduled()
+      || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch
+      || loaded?.entry.desired_state !== "running") return null;
+    return loaded;
+  }
+
   private async launchEntryIfCurrent(
     entryId: string,
     expectedEpoch: number,
   ): Promise<DaemonManifestEntry | null> {
-    if (this.options.authority.isHandoffScheduled()
-      || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch) return null;
-    const current = await this.options.store.getEntry(entryId, "summary");
-    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return null;
-    if (this.options.authority.isHandoffScheduled()
-      || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch
-      || current?.desired_state !== "running") return null;
-    return current;
+    return (await this.launchVersionedEntryIfCurrent(entryId, expectedEpoch))?.entry ?? null;
   }
 
   /**
@@ -785,7 +851,7 @@ export class ProviderExecutionCoordinator {
     handle: ProviderActionHandle,
     executionGenerationId: string,
     appliedRevision: number,
-    requestedAuthorityMode: LifecycleAuthorityMode,
+    requestedAuthorityMode: "typed",
   ): Promise<void> {
     const providerConnection = handle.providerConnection;
     if (!handle.providerContinuationId || !providerConnection) {
@@ -794,16 +860,14 @@ export class ProviderExecutionCoordinator {
     await this.options.authority.serializeManifestMutation(async () => {
       for (let attempt = 0; attempt < 8; attempt += 1) {
         await this.options.authority.assertCurrent();
-        // Read generation before the full entry so any concurrent commit
-        // between them causes checkpointProviderBirth to conflict and retry.
-        const generation = await this.options.store.readGeneration();
-        const current = await this.options.store.getEntry(entryId, "full");
-        if (!current || current.work_attempt_id !== handle.workAttemptId) {
+        const loaded = await this.options.store.getEntryWithVersion(entryId, "full");
+        const current = loaded?.entry;
+        if (!current || !loaded || current.work_attempt_id !== handle.workAttemptId) {
           throw new DaemonFenceLostError("Provider birth no longer matches the durable work attempt.");
         }
         try {
-          const next = await this.options.store.checkpointProviderBirth(
-            generation,
+          await this.options.store.checkpointProviderBirth(
+            loaded.version,
             {
               entry: this.providerBirthEntry(current, handle, executionGenerationId),
               executionGenerationId,
@@ -815,13 +879,12 @@ export class ProviderExecutionCoordinator {
             },
             this.options.authority.fenceCommit,
           );
-          this.options.authority.acceptManifestGeneration(next.generation);
           return;
         } catch (error) {
           if (!(error instanceof ManifestConflictError)) throw error;
         }
       }
-      throw new DaemonFenceLostError("Provider birth could not converge on the latest manifest generation.");
+      throw new DaemonFenceLostError("Provider birth could not converge on the latest agent version.");
     });
   }
 
@@ -842,7 +905,6 @@ export class ProviderExecutionCoordinator {
         provider_continuation_id: handle.providerContinuationId,
         provider_connection: structuredClone(handle.providerConnection),
         execution_generation_id: executionGenerationId,
-        ...(handle.custodyLaunchAgentSessionId ? { custodial_launch_agent_session_id: handle.custodyLaunchAgentSessionId } : {}),
       },
     };
   }
@@ -853,7 +915,7 @@ export class ProviderExecutionCoordinator {
     handle: ProviderActionHandle,
     executionGenerationId: string,
     appliedRevision: number,
-    requestedAuthorityMode: LifecycleAuthorityMode,
+    requestedAuthorityMode: "typed",
   ): Promise<void> {
     if (this.options.authority.isHandoffScheduled()) {
       await this.persistReturnedProviderForHandoff(
@@ -894,7 +956,7 @@ export class ProviderExecutionCoordinator {
     handle: ProviderActionHandle,
     executionGenerationId: string,
     appliedRevision: number,
-    requestedAuthorityMode: LifecycleAuthorityMode,
+    requestedAuthorityMode: "typed",
   ): Promise<void> {
     if (!handle.providerContinuationId) {
       throw new Error("Provider launch did not return a durable continuation id.");
@@ -915,9 +977,9 @@ export class ProviderExecutionCoordinator {
         || activeBeforeRead.daemonGeneration !== this.options.authority.currentDaemonGeneration()) {
         throw new DaemonFenceLostError("Retiring provider dispatch persistence gate closed.");
       }
-      const generation = await this.options.store.readGeneration();
-      const current = await this.options.store.getEntry(entryId, "full");
-      if (!current || current.work_attempt_id !== handle.workAttemptId) {
+      const loaded = await this.options.store.getEntryWithVersion(entryId, "full");
+      const current = loaded?.entry;
+      if (!current || !loaded || current.work_attempt_id !== handle.workAttemptId) {
         throw new DaemonFenceLostError(
           "Retiring provider dispatch no longer matches the durable work attempt.",
         );
@@ -928,8 +990,8 @@ export class ProviderExecutionCoordinator {
         // Deliberately bypass the ordinary manifest-mutation lane: handoff has
         // fenced new mutations, but the retiring daemon must still journal an
         // already-returned native birth before yielding singleton authority.
-        const next = await this.options.store.checkpointProviderBirth(
-          generation,
+        await this.options.store.checkpointProviderBirth(
+          loaded.version,
           {
             entry: updated,
             executionGenerationId,
@@ -953,14 +1015,13 @@ export class ProviderExecutionCoordinator {
             this.options.retirePendingActivity?.(entryId);
           }),
         );
-        this.options.authority.acceptManifestGeneration(next.generation);
         return;
       } catch (error) {
         if (!(error instanceof ManifestConflictError)) throw error;
       }
     }
     throw new DaemonFenceLostError(
-      "Retiring provider dispatch persistence could not converge on the latest manifest generation.",
+      "Retiring provider dispatch persistence could not converge on the latest agent version.",
     );
   }
 
@@ -987,9 +1048,6 @@ export class ProviderExecutionCoordinator {
     entry: DaemonManifestEntry,
     mayStartDelivery: () => boolean,
   ): Promise<ProviderActionHandle | null> {
-    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entry.id))) return null;
-    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
-    if (activation && !matchesPollingActivationRuntime(activation, entry)) return null;
     const ref = entry.provider_ref;
     if (!ref) return null;
     const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
@@ -1034,7 +1092,9 @@ export class ProviderExecutionCoordinator {
     }
     if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return null;
     const attachment = await this.options.provider.attach(attachRef);
-    if (!attachment) return null;
+    if (!attachment) {
+      return null;
+    }
     if (this.isAttachTerminal(attachment)) {
       const terminal = attachment.terminal;
       if (terminal.providerContinuationId
@@ -1063,9 +1123,6 @@ export class ProviderExecutionCoordinator {
       return null;
     }
     const handle = attachment;
-    if (activation && !matchesPollingActivationRuntime(activation, entry, handle)) {
-      throw new Error("Attached provider does not match the unresolved polling activation.");
-    }
     if (handle.workAttemptId !== ref.work_attempt_id
       || handle.providerContinuationId !== ref.provider_continuation_id) {
       throw new Error("Attached provider does not match the durable provider continuation.");
@@ -1098,10 +1155,10 @@ export class ProviderExecutionCoordinator {
       authoritativeEntry = await this.options.authority.serializeManifestMutation(async () => {
         for (let attemptIndex = 0; attemptIndex < 8; attemptIndex += 1) {
           await this.options.authority.assertCurrent();
-          const generation = await this.options.store.readGeneration();
-          const current = await this.options.store.getEntry(entry.id, "full");
+          const loaded = await this.options.store.getEntryWithVersion(entry.id, "full");
+          const current = loaded?.entry;
           const currentRef = current?.provider_ref;
-          if (!current || current.work_attempt_id !== ref.work_attempt_id
+          if (!current || !loaded || current.work_attempt_id !== ref.work_attempt_id
             || currentRef?.work_attempt_id !== ref.work_attempt_id
             || currentRef.execution_generation_id !== ref.execution_generation_id
             || currentRef.provider_continuation_id !== ref.provider_continuation_id) {
@@ -1120,7 +1177,7 @@ export class ProviderExecutionCoordinator {
           }
           try {
             const next = await this.options.store.checkpointProviderBirth(
-              generation,
+              loaded.version,
               {
                 entry: {
                   ...current,
@@ -1132,21 +1189,18 @@ export class ProviderExecutionCoordinator {
                 executionGenerationId: ref.execution_generation_id,
                 providerConnection: recoveredConnection,
                 appliedRevision: appliedRevision!,
-                // This process predates native-birth capture. Recovering its
-                // connection must not infer authority from the current release.
-                requestedAuthorityMode: "legacy",
+                requestedAuthorityMode: "typed",
                 observedAtMs: this.options.nowMs(),
               },
               this.options.authority.fenceCommit,
             );
-            this.options.authority.acceptManifestGeneration(next.generation);
             return next.entry;
           } catch (error) {
             if (!(error instanceof ManifestConflictError)) throw error;
           }
         }
         throw new DaemonFenceLostError(
-          "Recovered provider birth could not converge on the latest manifest generation.",
+          "Recovered provider birth could not converge on the latest agent version.",
         );
       });
     }
@@ -1157,50 +1211,39 @@ export class ProviderExecutionCoordinator {
       ref.execution_generation_id,
       mayStartDelivery,
     );
-    const binding = await this.options.bindings.get(authoritativeEntry.id);
-    if ((authoritativeEntry.delivery_mode ?? "mcp_polling") === "mcp_polling"
-      && !await this.options.host.requiresGrant(authoritativeEntry)
-      && binding && binding.execution_generation_id !== ref.execution_generation_id) {
-      try {
-        await this.options.streams.stageWorkerBindingAfterResume(
-          authoritativeEntry,
-          binding,
-          ref.execution_generation_id,
-          handle,
-        );
-        await this.options.transition(
-          authoritativeEntry.id,
-          "recovering",
-          "coordination_blocked",
-          "reattached resumed provider awaits exact worker wait evidence",
-          "daemon-convergence",
-        );
-      } catch (error) {
-        await this.options.transition(
-          authoritativeEntry.id,
-          "recovering",
-          "coordination_blocked",
-          `reattached provider worker binding could not be staged: ${error instanceof Error ? error.message : "unknown binding recovery failure"}`,
-          "daemon-convergence",
-        );
-      }
-    }
     return handle;
   }
 
   async converge(entryId: string, kind: ConvergenceRequestKind = "owned"): Promise<void> {
-    if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return;
+    const { ensureDelivery } = await this.convergeLocked(entryId, kind);
+    if (ensureDelivery
+      && !this.options.authority.isHandoffScheduled()
+      && !this.options.authority.isDispatchPaused?.()) {
+      await this.options.delivery.start(entryId, "ensure");
+    }
+  }
+
+  private async convergeLocked(
+    entryId: string,
+    kind: ConvergenceRequestKind = "owned",
+  ): Promise<{ ensureDelivery: boolean }> {
+    let ensureDelivery = false;
+    const markEnsureDelivery = () => { ensureDelivery = true; };
+    if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) {
+      return { ensureDelivery };
+    }
     // Owned lifecycle/terminal/timer work can retry even identical launch inputs.
     if (kind === "owned") this.failedLaunchAdmissions.delete(entryId);
     await this.options.settleRuntimeApprovals(entryId);
-    if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
-    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return;
-    let entry = await this.options.store.getEntry(entryId, "summary");
-    if (!entry) {
+    if (await this.options.store.pendingRuntimeRecovery(entryId)) return { ensureDelivery };
+    const loaded = await this.loadVersionedEntry(entryId);
+    if (!loaded) {
       this.failedLaunchAdmissions.delete(entryId);
       this.workspaceRepositoryRetries.delete(entryId);
-      return;
+      this.conflictRetryAttempts.delete(entryId);
+      return { ensureDelivery };
     }
+    let { entry, version } = loaded;
     let launchControlEpoch = this.options.concurrency.currentControlEpoch(entryId);
 
     const historicalControl = entry.turn_control;
@@ -1212,20 +1255,26 @@ export class ProviderExecutionCoordinator {
           === historicalControl.execution_generation_id,
       );
       if (controlledExecution?.terminal) {
-        entry = await this.options.completeTurnControlForRuntimeRecovery(entry);
+        await this.options.completeTurnControlForRuntimeRecovery(entry);
+        const refreshed = await this.loadVersionedEntry(entryId);
+        if (!refreshed) return { ensureDelivery };
+        entry = refreshed.entry;
+        version = refreshed.version;
       }
     }
 
     if (entry.desired_state === "running") {
-      await this.convergeRunning(entry, launchControlEpoch, kind);
-      return;
+      await this.convergeRunning(entry, version, launchControlEpoch, kind, markEnsureDelivery);
+      return { ensureDelivery };
     }
-    this.failedLaunchAdmissions.delete(entryId);
-    // A stopped agent starts its next attempt at the shortest wait.
-    this.workspaceRepositoryRetries.delete(entryId);
     try {
-      await this.convergeStopped(entry);
+      await this.convergeStopped(entry, version);
+      this.failedLaunchAdmissions.delete(entryId);
+      // A stopped agent starts its next attempt at the shortest wait.
+      this.workspaceRepositoryRetries.delete(entryId);
+      return { ensureDelivery };
     } catch (error) {
+      if (error instanceof ManifestConflictError || error instanceof DaemonFenceLostError) throw error;
       // A pause that fails is not a failed stop.
       throw entry.desired_state === "stopped" ? new ProviderStopError(error) : error;
     }
@@ -1233,12 +1282,13 @@ export class ProviderExecutionCoordinator {
 
   private async convergeRunning(
     initialEntry: DaemonManifestEntry,
+    initialVersion: number,
     initialControlEpoch: number,
     kind: ConvergenceRequestKind,
+    markEnsureDelivery: () => void,
   ): Promise<void> {
     let entry = initialEntry;
-    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
-    if (activation && !matchesPollingActivationRuntime(activation, entry, this.options.streams.get(entry.id))) return;
+    let version = initialVersion;
     let launchControlEpoch = initialControlEpoch;
     if (entry.condition === "quarantined") return;
     if (entry.id.startsWith("supervised_rental_")) {
@@ -1258,6 +1308,8 @@ export class ProviderExecutionCoordinator {
           "quarantined",
           error instanceof Error ? error.message : "Unsafe rental permission profile.",
           "daemon-convergence",
+          undefined,
+          version,
         );
         return;
       }
@@ -1268,36 +1320,37 @@ export class ProviderExecutionCoordinator {
       if (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id) return;
     }
     if (await this.options.host.requiresGrant(entry) && !await this.options.host.ensureGrantFresh(entry)) return;
-    const currentAfterGrant = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+    const currentAfterGrant = await this.launchVersionedEntryIfCurrent(entry.id, launchControlEpoch);
     if (!currentAfterGrant) return;
-    entry = currentAfterGrant;
+    entry = currentAfterGrant.entry;
+    version = currentAfterGrant.version;
     if (entry.desired_state !== "running"
       || this.options.concurrency.currentControlEpoch(entry.id) !== launchControlEpoch
       || this.options.authority.isHandoffScheduled()) return;
     if (entry.observed_state === "failed") {
-      const now = this.options.nowMs();
-      const exitsInWindow = (entry.reconciliation?.exit_timestamps_ms ?? [])
-        .filter((at) => at >= now - CRASH_LOOP_WINDOW_MS).length;
-      if (exitsInWindow >= CRASH_LOOP_EXIT_LIMIT) {
+      const gate = evaluateFailedRestartGate(entry.reconciliation, this.options.nowMs());
+      if (gate.kind === "quarantine") {
         await this.options.transition(
           entry.id,
           "failed",
           "quarantined",
           "crash-loop threshold reached before provider restart",
           "daemon-convergence",
+          undefined,
+          version,
         );
         return;
       }
-      const restartAt = entry.reconciliation?.next_restart_at_ms;
-      if (typeof restartAt === "number" && restartAt > now) {
-        this.scheduleRecovery(entry.id, restartAt - now);
+      if (gate.kind === "wait") {
+        this.scheduleRecovery(entry.id, gate.delayMs);
         return;
       }
     }
     entry = await this.ensureWorkAttempt(entry);
-    const currentAfterAttempt = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+    const currentAfterAttempt = await this.launchVersionedEntryIfCurrent(entry.id, launchControlEpoch);
     if (!currentAfterAttempt) return;
-    entry = currentAfterAttempt;
+    entry = currentAfterAttempt.entry;
+    version = currentAfterAttempt.version;
     let handle = this.options.streams.get(entry.id) ?? null;
     // The daemon lets go of a runtime the moment its process exits, and
     // records the exit after this pass. Until then the generation has no
@@ -1318,14 +1371,19 @@ export class ProviderExecutionCoordinator {
           "none",
           "exact Cursor turn wrapper is still finishing; retrying without launching a successor",
           "daemon-convergence",
+          undefined,
+          version,
         );
         this.scheduleRecovery(entry.id, 250);
         return;
       }
-      entry = await this.options.store.getEntry(entry.id, "summary") ?? entry;
+      const afterAttach = await this.loadVersionedEntry(entry.id);
+      if (!afterAttach || afterAttach.entry.desired_state !== "running") return;
+      entry = afterAttach.entry;
+      version = afterAttach.version;
     }
     if (handle) {
-      await this.convergeAttachedHandle(entry, handle);
+      await this.convergeAttachedHandle(entry, version, handle, markEnsureDelivery);
       return;
     }
     if (kind === "rehydration" && this.failedLaunchAdmissions.has(entry.id)) {
@@ -1334,9 +1392,9 @@ export class ProviderExecutionCoordinator {
       if (admission && admission === this.failedLaunchAdmissions.get(entry.id)) return;
     }
     try {
-      await this.launchProvider(entry, launchControlEpoch);
+      await this.launchProvider(entry, version, launchControlEpoch, markEnsureDelivery);
     } catch (error) {
-      launchProgress.fail(entry.id, error);
+      if (!(error instanceof ManifestConflictError)) launchProgress.fail(entry.id, error);
       throw error;
     } finally {
       launchProgress.settle(entry.id);
@@ -1363,7 +1421,7 @@ export class ProviderExecutionCoordinator {
     const { supervisorGrant: _secret, ...grantIdentity } = grant ?? { supervisorGrant: null };
     return createHash("sha256").update(JSON.stringify({
       entryId: entry.id, roomId: entry.room_id, provider: entry.provider,
-      deliveryMode: entry.delivery_mode ?? "mcp_polling", desiredState: entry.desired_state,
+      deliveryMode: entry.delivery_mode ?? "daemon_inbox", desiredState: entry.desired_state,
       daemonGeneration: this.options.authority.currentDaemonGeneration(), controlEpoch,
       configurationRevision: configuration.config_revision,
       workAttemptId: entry.work_attempt_id, workspace: entry.workspace_path,
@@ -1374,11 +1432,12 @@ export class ProviderExecutionCoordinator {
 
   private async convergeAttachedHandle(
     initialEntry: DaemonManifestEntry,
+    initialVersion: number,
     handle: ProviderActionHandle,
+    markEnsureDelivery: () => void,
   ): Promise<void> {
     let entry = initialEntry;
-    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
-    if (activation && !matchesPollingActivationRuntime(activation, entry, handle)) return;
+    let version = initialVersion;
     const grant = this.options.host.currentGrant(entry);
     const daemonGeneration = this.options.authority.currentDaemonGeneration();
     const controlEpoch = this.options.concurrency.currentControlEpoch(entry.id);
@@ -1400,7 +1459,10 @@ export class ProviderExecutionCoordinator {
           minted = await this.options.host.mintSession(entry, executionGenerationId);
           if (minted) {
             await this.options.host.bindMintedSession(entry.id, minted);
-            entry = await this.options.store.getEntry(entry.id, "summary") ?? entry;
+            const refreshed = await this.loadVersionedEntry(entry.id);
+            if (!refreshed) return;
+            entry = refreshed.entry;
+            version = refreshed.version;
           }
         } catch (error) {
           if (this.options.authority.isHandoffScheduled()
@@ -1434,7 +1496,10 @@ export class ProviderExecutionCoordinator {
         try {
           await this.options.host.confirmExactBinding(entry.id, () => !this.options.authority.isHandoffScheduled()
             && this.options.concurrency.currentControlEpoch(entry.id) === controlEpoch);
-          entry = await this.options.store.getEntry(entry.id, "summary") ?? entry;
+          const refreshed = await this.loadVersionedEntry(entry.id);
+          if (!refreshed) return;
+          entry = refreshed.entry;
+          version = refreshed.version;
         } catch (error) {
           if (this.options.authority.isHandoffScheduled()
             || this.options.authority.currentDaemonGeneration() !== daemonGeneration
@@ -1468,6 +1533,8 @@ export class ProviderExecutionCoordinator {
         entry.condition,
         "reattached durable provider handle",
         "daemon-convergence",
+        undefined,
+        version,
       );
     }
     // A typed lane takes its state from execution facts, not from the handle.
@@ -1493,7 +1560,7 @@ export class ProviderExecutionCoordinator {
       // A turn an earlier runtime left open, once its message is settled, would
       // refuse the next turn of this one. It is archived as soon as it is seen.
       await this.archiveExitedRuntimes(entry.id);
-      await this.options.delivery.start(entry.id, "ensure");
+      markEnsureDelivery();
     }
   }
 
@@ -1525,17 +1592,19 @@ export class ProviderExecutionCoordinator {
     typedHandleEnded: boolean,
   ): Promise<boolean> {
     const head = await this.options.inbox.head(entry.id);
-    if (turnInFlight(head)) {
-      const now = this.options.nowMs();
-      const deadline = this.retirementDeadlines.get(handle) ?? now + RETIREMENT_SETTLEMENT_WAIT_MS;
-      this.retirementDeadlines.set(handle, deadline);
-      if (now < deadline) {
-        this.scheduleRecovery(entry.id, deadline - now);
-        return true;
-      }
+    const decision = evaluateRetirementHold({
+      head,
+      nowMs: this.options.nowMs(),
+      existingDeadlineMs: this.retirementDeadlines.get(handle),
+      typedHandleEnded,
+      observedState: entry.observed_state,
+      roomRefusesAccess: this.options.delivery.roomRefusesAccess?.(entry.id) === true,
+    });
+    if (decision.deadlineMs !== undefined) this.retirementDeadlines.set(handle, decision.deadlineMs);
+    if (decision.hold && decision.delayMs !== undefined) {
+      this.scheduleRecovery(entry.id, decision.delayMs);
     }
-    return typedHandleEnded && !["failed", "stopped"].includes(entry.observed_state)
-      && this.options.delivery.roomRefusesAccess?.(entry.id) === true;
+    return decision.hold;
   }
 
   /** Delivery readiness comes from durable worker authority, never provider polling output. */
@@ -1594,17 +1663,79 @@ export class ProviderExecutionCoordinator {
       && this.options.concurrency.currentControlEpoch(entry.id) === controlEpoch);
   }
 
+  /**
+   * A stored terminal record ends a generation. It does not say that the
+   * process is gone, unless it carries the witnessed death of that exact
+   * process. A daemon that ended between the record and the stop of the
+   * process leaves a record without that witness and a process that still
+   * runs. Before a replacement starts, the adapter proves the recorded
+   * process birth gone: it signals that exact birth if it is alive, and it
+   * never signals a process id that another process now has. False means no
+   * replacement may start in this pass; the entry says why and is checked
+   * again.
+   */
+  private async retireUnprovenPredecessor(entry: DaemonManifestEntry): Promise<boolean> {
+    const ref = entry.provider_ref;
+    const connection = ref?.provider_connection;
+    const recorded = recordedProcessState(connection);
+    if (!ref || recorded === "none") return true;
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (!execution?.terminal || execution.terminal.native_runtime_death) return true;
+    try {
+      if (recorded === "incomplete") throw new Error(INCOMPLETE_PROCESS_REF_ERROR);
+      const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
+      if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return true;
+      await this.options.provider.stopRef(await this.providerRef(entry), {
+        actionId: `manifest:${entry.id}:retire-predecessor:${this.options.nowMs()}`,
+      });
+      return true;
+    } catch (error) {
+      console.warn("[provider_execution] predecessor_not_proven_gone", JSON.stringify({
+        entryId: entry.id, executionGenerationId: ref.execution_generation_id,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      // Re-read after `stopRef` so any write caused during predecessor stop
+      // cannot trigger a self-conflict on the subsequent coordination transition.
+      const latest = await this.loadVersionedEntry(entry.id);
+      if (!latest || latest.entry.desired_state !== "running") return false;
+      if (latest.entry.observed_state !== "recovering" || latest.entry.condition !== "coordination_blocked"
+        || latest.entry.last_error !== UNPROVEN_PREDECESSOR_CAUSE) {
+        await this.options.transition(
+          entry.id,
+          "recovering",
+          "coordination_blocked",
+          UNPROVEN_PREDECESSOR_CAUSE,
+          "daemon-convergence",
+          undefined,
+          latest.version,
+        );
+      }
+      const checks = (this.unattachableRechecks.get(entry.id) ?? 0) + 1;
+      this.unattachableRechecks.set(entry.id, checks);
+      this.scheduleRecovery(entry.id, computeCappedBackoffMs(
+        checks,
+        UNATTACHABLE_GENERATION_RECHECK_MS,
+        UNATTACHABLE_GENERATION_RECHECK_MAX_MS,
+      ));
+      return false;
+    }
+  }
+
   private async launchProvider(
     initialEntry: DaemonManifestEntry,
+    initialVersion: number,
     initialControlEpoch: number,
+    markEnsureDelivery: () => void,
   ): Promise<void> {
     // Unresolved native dispatch may recover its exact handle, never replay in a successor.
-    if (await this.options.store.pendingRuntimeRecovery(initialEntry.id)
-      || await this.options.store.unresolvedDeliveryDrain(initialEntry.id)
-      || await this.options.store.unresolvedPollingActivation(initialEntry.id)) return;
+    if (await this.options.store.pendingRuntimeRecovery(initialEntry.id)) return;
     const launchTiming = turnStartLatency.beginLaunch(initialEntry.id, initialEntry.provider);
     launchProgress.begin(initialEntry.id, () => (this.options.notifyLaunchProgressChanged ?? this.options.notifyProgressChanged)?.());
     let entry = initialEntry;
+    let version = initialVersion;
     let launchControlEpoch = initialControlEpoch;
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id!);
     const activeExecution = attempt.execution_generations.find(
@@ -1622,6 +1753,8 @@ export class ProviderExecutionCoordinator {
           "coordination_blocked",
           head.last_error ?? "The failed Cursor delivery needs attention before its runtime can recover.",
           "daemon-convergence",
+          undefined,
+          version,
         );
         return;
       }
@@ -1637,17 +1770,25 @@ export class ProviderExecutionCoordinator {
           "coordination_blocked",
           UNATTACHABLE_GENERATION_CAUSE,
           "daemon-convergence",
+          undefined,
+          version,
         );
       }
       const checks = (this.unattachableRechecks.get(entry.id) ?? 0) + 1;
       this.unattachableRechecks.set(entry.id, checks);
-      this.scheduleRecovery(entry.id, Math.min(
-        UNATTACHABLE_GENERATION_RECHECK_MS * 2 ** Math.min(checks - 1, 10),
+      this.scheduleRecovery(entry.id, computeCappedBackoffMs(
+        checks,
+        UNATTACHABLE_GENERATION_RECHECK_MS,
         UNATTACHABLE_GENERATION_RECHECK_MAX_MS,
       ));
       return;
     }
+    if (!await this.retireUnprovenPredecessor(entry)) return;
     this.unattachableRechecks.delete(entry.id);
+    const currentAfterPredecessor = await this.launchVersionedEntryIfCurrent(entry.id, launchControlEpoch);
+    if (!currentAfterPredecessor) return;
+    entry = currentAfterPredecessor.entry;
+    version = currentAfterPredecessor.version;
     await this.archiveExitedRuntimes(entry.id);
     if (!activeExecution && entry.turn_control && entry.turn_control.status !== "completed") {
       entry = await this.options.completeTurnControlForRuntimeRecovery(entry);
@@ -1664,29 +1805,28 @@ export class ProviderExecutionCoordinator {
           roomCursor: priorBinding.room_cursor ?? null,
         }
       : null;
-    // Resume must name the lifecycle authority the saved runtime was born
-    // under, exactly as attach does; without it a typed birth is read back as
-    // typed_shadow and every daemon-inbox resume is refused.
     const ref = entry.provider_ref ? await this.providerRef(entry, await this.frozenLifecycleAuthority(entry) ?? undefined) : null;
     const requiresGrant = await this.options.host.requiresGrant(entry);
     const mintedAuthorization = requiresGrant
       ? await this.options.host.mintAuthorization(entry)
       : null;
     if (requiresGrant && !mintedAuthorization) return;
-    const currentAfterMint = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+    const currentAfterMint = await this.launchVersionedEntryIfCurrent(entry.id, launchControlEpoch);
     if (!currentAfterMint) return;
-    entry = currentAfterMint;
+    entry = currentAfterMint.entry;
+    version = currentAfterMint.version;
     const capabilities = await this.options.provider.capabilities(
       attempt.work_attempt_id,
       entry.provider,
     );
-    const currentAfterCapabilities = await this.launchEntryIfCurrent(
+    const currentAfterCapabilities = await this.launchVersionedEntryIfCurrent(
       entry.id,
       launchControlEpoch,
     );
     if (!currentAfterCapabilities) return;
-    entry = currentAfterCapabilities;
-    const deliveryMode = entry.delivery_mode ?? "mcp_polling";
+    entry = currentAfterCapabilities.entry;
+    version = currentAfterCapabilities.version;
+    const deliveryMode = entry.delivery_mode ?? "daemon_inbox";
     if (capabilities.deliveryModes && !capabilities.deliveryModes.includes(deliveryMode)) {
       await this.options.transition(
         entry.id,
@@ -1694,13 +1834,12 @@ export class ProviderExecutionCoordinator {
         "coordination_blocked",
         `${supervisedProviderLabel(entry.provider)} does not support ${deliveryMode} room delivery.`,
         "daemon-convergence",
+        undefined,
+        version,
       );
       return;
     }
-    const requestedAuthorityMode = lifecycleAuthorityModeForProvider(
-      lifecycleAuthorityProviderSchema.parse(entry.provider),
-      deliveryMode,
-    );
+    const requestedAuthorityMode = "typed" as const;
     const resumed = Boolean(ref && capabilities.resume);
     if (requiresGrant) {
       const grant = this.options.host.currentGrant(entry);
@@ -1716,9 +1855,9 @@ export class ProviderExecutionCoordinator {
         this.workspaceRepositoryRetries.delete(entry.id);
       } catch (error) {
         const retries = (this.workspaceRepositoryRetries.get(entry.id) ?? 0) + 1;
-        this.workspaceRepositoryRetries.set(entry.id, retries);
-        const delayMs = Math.min(
-          WORKSPACE_REPOSITORY_RETRY_MS * 2 ** Math.min(retries - 1, 10),
+        const delayMs = computeCappedBackoffMs(
+          retries,
+          WORKSPACE_REPOSITORY_RETRY_MS,
           WORKSPACE_REPOSITORY_RETRY_MAX_MS,
         );
         await this.options.transition(
@@ -1727,7 +1866,10 @@ export class ProviderExecutionCoordinator {
           "coordination_blocked",
           `Could not prepare the agent's room-only workspace (${error instanceof Error ? error.message : String(error)}). Retrying in ${Math.round(delayMs / 1000)} seconds.`,
           "daemon-convergence",
+          undefined,
+          version,
         );
+        this.workspaceRepositoryRetries.set(entry.id, retries);
         this.scheduleRecovery(entry.id, delayMs);
         return;
       }
@@ -1740,6 +1882,8 @@ export class ProviderExecutionCoordinator {
         ? "recovering durable provider continuation"
         : "starting daemon-owned provider",
       "daemon-convergence",
+      undefined,
+      version,
     );
     const currentAfterTransition = await this.launchEntryIfCurrent(
       entry.id,
@@ -1846,9 +1990,8 @@ export class ProviderExecutionCoordinator {
       reasoningEffort: launchSnapshot.reasoningEffort,
       permissionProfileId: launchSnapshot.permissionProfileId,
       configurationRevision: launchSnapshot.configurationRevision,
-      deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      deliveryMode: entry.delivery_mode ?? "daemon_inbox",
       lifecycleAuthorityMode: requestedAuthorityMode,
-      ...(launchConfiguration.polling_contract ? { pollingContract: launchConfiguration.polling_contract } : {}),
       agentDisplayName: entry.display_name,
       actionId: `manifest:${entry.id}:generation:${generationNumber}`,
       supervisorEntryId: entry.id,
@@ -1885,9 +2028,7 @@ export class ProviderExecutionCoordinator {
           supervisorWorkerSession: {
             agentSessionId: mintedHostSession.agentSessionId,
             apiUrl: mintedHostSession.apiUrl,
-            roomCursor: launchConfiguration.polling_contract
-              ? resumeWorker?.roomCursor ?? attempt.checkpoints.at(-1)?.room_cursor ?? null
-              : null,
+            roomCursor: null,
           },
         });
       }
@@ -1968,9 +2109,7 @@ export class ProviderExecutionCoordinator {
           if (this.options.authority.isHandoffScheduled()) return;
           if (handle.launchNotices?.length) await this.recordLaunchNotices(entry.id, handle.launchNotices);
           await this.options.durability.checkpoint(attempt.work_attempt_id, {
-            room_cursor: launchConfiguration.polling_contract
-              ? spawn.supervisorWorkerSession?.roomCursor ?? null
-              : null,
+            room_cursor: null,
             provider_continuation_id: handle.providerContinuationId,
           });
           let control = await this.revalidateReturnedProviderControl(
@@ -2141,64 +2280,18 @@ export class ProviderExecutionCoordinator {
       releaseLaunchSlot();
     }
     if (!handle) throw new Error("Provider launch returned no handle.");
-    if (requestedAuthorityMode !== "typed" && (["failed", "stopped"].includes(handle.observedState)
-      || (handle.observedState === "idle" && !requiresGrant))) {
-      await this.options.streams.fenceTerminalOnce(
-        handle,
-        `manifest:${entry.id}:returned-terminal:${generationNumber}`,
-      );
-      return;
-    }
     // A live handle is the launch succeeding, whatever binding work follows.
     // Resetting here, not only on the plain path below, keeps grant-bound and
     // resumed agents from carrying exhausted retry budgets into their next
     // failure.
     this.options.host.clearSuccessfulRecovery(entry.id);
     if (requiresGrant) {
-      const current = await this.options.store.getEntry(entry.id, "summary");
-      if (current) await this.convergeAttachedHandle(current, handle);
+      const current = await this.loadVersionedEntry(entry.id);
+      if (current) await this.convergeAttachedHandle(current.entry, current.version, handle, markEnsureDelivery);
       return;
     }
-    if ((entry.delivery_mode ?? "mcp_polling") === "mcp_polling" && priorBinding && !resumed) {
-      await this.options.transition(
-        entry.id,
-        "recovering",
-        "coordination_blocked",
-        "fresh provider generation cannot inherit a terminal worker credential; awaiting exact bind",
-        "daemon-convergence",
-      );
-      return;
-    }
-    if ((entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
-      && resumed && priorBinding && !reusesActiveCursorExecution) {
-      try {
-        const current = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
-        if (!current) return;
-        await this.options.streams.stageWorkerBindingAfterResume(
-          current,
-          priorBinding,
-          execution.execution_generation_id,
-          handle,
-        );
-      } catch (error) {
-        await this.options.transition(
-          entry.id,
-          "recovering",
-          "coordination_blocked",
-          `resumed provider worker binding could not be staged: ${error instanceof Error ? error.message : "unknown binding recovery failure"}`,
-          "daemon-convergence",
-        );
-        return;
-      }
-      await this.options.transition(
-        entry.id,
-        "recovering",
-        "coordination_blocked",
-        "resumed provider awaits exact worker wait evidence",
-        "daemon-convergence",
-      );
-      return;
-    }
+    const currentAfterLaunch = await this.loadVersionedEntry(entry.id);
+    if (!currentAfterLaunch || currentAfterLaunch.entry.desired_state !== "running") return;
     await this.options.transition(
       entry.id,
       handle.observedState,
@@ -2207,70 +2300,51 @@ export class ProviderExecutionCoordinator {
         ? "provider resumed under daemon authority"
         : "provider launched under daemon authority",
       "daemon-convergence",
+      undefined,
+      currentAfterLaunch.version,
     );
   }
 
-  private async convergeStopped(entry: DaemonManifestEntry): Promise<void> {
+  private async convergeStopped(
+    initialEntry: DaemonManifestEntry,
+    initialVersion: number,
+  ): Promise<void> {
+    let entry = initialEntry;
+    let version = initialVersion;
     let handle = this.options.streams.get(entry.id) ?? null;
     // The exit being recorded is what stops or pauses this entry.
     if (!handle && this.options.exitSettling?.(entry.id)) return;
-    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
-    if (activation && !matchesPollingActivationRuntime(activation, entry, handle ?? undefined)) return;
-    if (activation && !this.options.provider.stopRef) throw new Error("Polling activation requires exact-reference provider stop.");
-    const exactActivationRef = activation ? entry.provider_ref : null;
     const exactCursorRef = entry.provider_ref?.provider_connection?.kind === "cursor_cli"
       ? entry.provider_ref
       : null;
-    const exactStopRef = exactActivationRef ?? (!handle ? exactCursorRef : null);
+    const exactStopRef = !handle ? exactCursorRef : null;
     if (exactStopRef && this.options.provider.stopRef) {
-      await this.options.transition(
-        entry.id,
-        "stopping",
-        entry.condition,
-        `desired state changed to ${entry.desired_state}`,
-        "daemon-convergence",
-      );
-      const terminal = await this.options.provider.stopRef(await this.providerRef(entry), {
-        actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
-      });
-      const attempt = await this.options.durability.getAttempt(exactStopRef.work_attempt_id);
-      const execution = attempt.execution_generations.find(
-        (candidate) => candidate.execution_generation_id
-          === exactStopRef.execution_generation_id,
-      );
-      if (!execution) {
-        throw new Error(
-          "Provider exact-reference stop has no matching durable execution generation.",
-        );
-      }
-      if (!execution.terminal) {
-        await this.options.durability.recordTerminal(
-          exactStopRef.work_attempt_id,
-          exactStopRef.execution_generation_id,
-          {
-            ...this.options.terminalPayload(terminal, execution.actor, exactStopRef.provider_connection),
-            actor: execution.actor,
-            generation: execution.generation,
-          },
-        );
-        await this.options.settleRuntimeApprovals(entry.id);
-        if (entry.desired_state === "stopped") {
-          await this.options.durability.releaseTerminalExecutionFence(
-            exactStopRef.work_attempt_id,
-            exactStopRef.execution_generation_id,
-          );
-        }
-      }
-      await this.options.observeProviderExit(
-        entry.id,
-        terminal,
-        "daemon-provider",
-        exactStopRef.execution_generation_id,
-        handle ?? undefined,
-      );
+      await this.stopUnattachedExactRef(entry, version, exactStopRef);
       return;
     }
-    if (!handle && entry.provider_ref) handle = await this.attachLiveProvider(entry);
+    if (!handle && entry.provider_ref) {
+      const ref = entry.provider_ref;
+      if (entry.provider === "open-model" || ref.provider_connection?.kind === "opencode_server") {
+        if (await this.stopUnattachedOpenModelRef(entry, version, ref)) return;
+      } else if (await this.stopEndedUnprovenRef(entry, version, ref)) {
+        return;
+      }
+      try {
+        handle = await this.attachLiveProvider(entry);
+      } catch (error) {
+        if (error instanceof ExecutionProtocolError && error.code === "identity_mismatch") {
+          const latest = await this.loadVersionedEntry(entry.id);
+          if (!latest || latest.entry.desired_state === "running") return;
+          await this.stopRetiredPreTypedRuntime(latest.entry, latest.version);
+          return;
+        }
+        throw error;
+      }
+      const afterAttach = await this.loadVersionedEntry(entry.id);
+      if (!afterAttach || afterAttach.entry.desired_state === "running") return;
+      entry = afterAttach.entry;
+      version = afterAttach.version;
+    }
     if (handle) {
       await this.options.transition(
         entry.id,
@@ -2278,6 +2352,8 @@ export class ProviderExecutionCoordinator {
         entry.condition,
         `desired state changed to ${entry.desired_state}`,
         "daemon-convergence",
+        undefined,
+        version,
       );
       await this.options.provider.stop(handle, {
         actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
@@ -2290,6 +2366,239 @@ export class ProviderExecutionCoordinator {
       "none",
       "desired state converged without a live provider",
       "daemon-convergence",
+      undefined,
+      version,
+    );
+  }
+
+  private async stopUnattachedExactRef(
+    entry: DaemonManifestEntry,
+    version: number,
+    ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
+    alreadySettledTerminal = false,
+  ): Promise<void> {
+    const targetState = entry.desired_state === "paused" ? "paused" : "stopped";
+    const settledAtTarget = alreadySettledTerminal
+      && entry.observed_state === targetState
+      && entry.condition === "none";
+    if (!settledAtTarget) {
+      await this.options.transition(
+        entry.id,
+        "stopping",
+        entry.condition,
+        `desired state changed to ${entry.desired_state}`,
+        "daemon-convergence",
+        undefined,
+        version,
+      );
+    }
+    const terminal = await this.options.provider.stopRef!(await this.providerRef(entry), {
+      actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
+    });
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (!execution) {
+      throw new Error(
+        "Provider exact-reference stop has no matching durable execution generation.",
+      );
+    }
+    if (!execution.terminal) {
+      await this.options.durability.recordTerminal(
+        ref.work_attempt_id,
+        ref.execution_generation_id,
+        {
+          ...this.options.terminalPayload(terminal, execution.actor, ref.provider_connection),
+          actor: execution.actor,
+          generation: execution.generation,
+        },
+      );
+    }
+    await this.options.settleRuntimeApprovals(entry.id);
+    if (entry.desired_state === "stopped") {
+      await this.options.durability.releaseTerminalExecutionFence(
+        ref.work_attempt_id,
+        ref.execution_generation_id,
+      );
+    }
+    if (!settledAtTarget) {
+      await this.options.observeProviderExit(
+        entry.id,
+        terminal,
+        "daemon-provider",
+        ref.execution_generation_id,
+        undefined,
+      );
+    }
+  }
+
+  /**
+   * Stop an unattached Open Model runtime via exact process-birth fencing so
+   * pre-typed sidecars ("legacy" / "typed_shadow"), unresponsive HTTP servers,
+   * or protocol-only terminals without proven native death never release the
+   * fence or report "stopped" before the exact process birth is confirmed gone.
+   */
+  private async stopUnattachedOpenModelRef(
+    entry: DaemonManifestEntry,
+    version: number,
+    ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
+  ): Promise<boolean> {
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (!execution) {
+      throw new Error(
+        "Provider exact-reference stop has no matching durable execution generation.",
+      );
+    }
+    if (execution.terminal?.native_runtime_death) {
+      validatedNativeRuntimeDeath(
+        { nativeRuntimeDeath: execution.terminal.native_runtime_death },
+        ref.provider_connection,
+      );
+      await this.options.settleRuntimeApprovals(entry.id);
+      if (entry.desired_state === "stopped") {
+        await this.options.durability.releaseTerminalExecutionFence(
+          ref.work_attempt_id,
+          ref.execution_generation_id,
+        );
+      }
+      await this.options.transition(
+        entry.id,
+        entry.desired_state === "paused" ? "paused" : "stopped",
+        "none",
+        "desired state converged without a live provider",
+        "daemon-convergence",
+        undefined,
+        version,
+      );
+      return true;
+    }
+    const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
+    if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return false;
+    await this.stopUnattachedExactRef(entry, version, ref, Boolean(execution.terminal));
+    return true;
+  }
+
+  /**
+   * Stop or pause of an entry whose generation has a stored terminal record
+   * with no witnessed process death. The record is not proof that the process
+   * is gone, so the entry is not reported stopped until the adapter has
+   * proved the recorded process birth gone. A generation with no terminal
+   * record keeps the ordinary path: attach, then stop the handle.
+   */
+  private async stopEndedUnprovenRef(
+    entry: DaemonManifestEntry,
+    version: number,
+    ref: NonNullable<DaemonManifestEntry["provider_ref"]>,
+  ): Promise<boolean> {
+    const recorded = recordedProcessState(ref.provider_connection);
+    if (recorded === "none") return false;
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (!execution?.terminal || execution.terminal.native_runtime_death) return false;
+    if (recorded === "incomplete") throw new Error(INCOMPLETE_PROCESS_REF_ERROR);
+    const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
+    if (!capabilities.exactProcessStop || !this.options.provider.stopRef) return false;
+    await this.stopUnattachedExactRef(entry, version, ref, true);
+    return true;
+  }
+
+  /**
+   * Stop a pre-upgrade runtime whose frozen authority_mode is not "typed"
+   * without promoting it into typed observation or delivery.
+   */
+  private async stopRetiredPreTypedRuntime(
+    entry: DaemonManifestEntry,
+    version: number,
+  ): Promise<void> {
+    const ref = entry.provider_ref;
+    if (!ref) return;
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find(
+      (candidate) => candidate.execution_generation_id === ref.execution_generation_id,
+    );
+    if (execution?.terminal?.native_runtime_death) {
+      validatedNativeRuntimeDeath(
+        { nativeRuntimeDeath: execution.terminal.native_runtime_death },
+        ref.provider_connection,
+      );
+      await this.options.settleRuntimeApprovals(entry.id);
+      if (entry.desired_state === "stopped") {
+        await this.options.durability.releaseTerminalExecutionFence(
+          ref.work_attempt_id,
+          ref.execution_generation_id,
+        );
+      }
+      await this.options.transition(
+        entry.id,
+        entry.desired_state === "paused" ? "paused" : "stopped",
+        "none",
+        "desired state converged without a live provider",
+        "daemon-convergence",
+        undefined,
+        version,
+      );
+      return;
+    }
+    const capabilities = await this.options.provider.capabilities(ref.work_attempt_id, entry.provider);
+    if (capabilities.exactProcessStop && this.options.provider.stopRef) {
+      await this.stopUnattachedExactRef(entry, version, ref);
+      return;
+    }
+    const attachment = await this.options.provider.attach(await this.providerRef(entry));
+    if (!attachment) {
+      throw new Error("Retired pre-typed runtime could not be attached or proven stopped.");
+    }
+    let terminal: ProviderActionTerminal;
+    if (this.isAttachTerminal(attachment)) {
+      terminal = attachment.terminal;
+    } else {
+      const latest = await this.loadVersionedEntry(entry.id);
+      if (!latest || latest.entry.desired_state === "running") return;
+      await this.options.transition(
+        entry.id,
+        "stopping",
+        latest.entry.condition,
+        `desired state changed to ${latest.entry.desired_state}`,
+        "daemon-convergence",
+        undefined,
+        latest.version,
+      );
+      terminal = await this.options.provider.stop(attachment, {
+        actionId: `manifest:${entry.id}:${latest.entry.desired_state}:${this.options.nowMs()}`,
+      });
+    }
+    if (execution) {
+      if (!execution.terminal) {
+        await this.options.durability.recordTerminal(
+          ref.work_attempt_id,
+          ref.execution_generation_id,
+          {
+            ...this.options.terminalPayload(terminal, execution.actor, ref.provider_connection),
+            actor: execution.actor,
+            generation: execution.generation,
+          },
+        );
+      }
+      await this.options.settleRuntimeApprovals(entry.id);
+      if (entry.desired_state === "stopped") {
+        await this.options.durability.releaseTerminalExecutionFence(
+          ref.work_attempt_id,
+          ref.execution_generation_id,
+        );
+      }
+    }
+    await this.options.observeProviderExit(
+      entry.id,
+      terminal,
+      "daemon-provider",
+      ref.execution_generation_id,
+      undefined,
     );
   }
 }

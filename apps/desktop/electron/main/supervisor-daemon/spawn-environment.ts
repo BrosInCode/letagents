@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { workspaceRoot } from "../paths.js";
-import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
-import { LETAGENTS_MCP_RUNTIME_TREE_SHA256 } from "../agents/letagents-mcp-runtime.js";
+import { workspaceRoot } from "#provider-runtime/paths.js";
+import { desktopRuntimeEnvironment } from "#provider-runtime/desktop-shell-environment.js";
+import { LETAGENTS_MCP_RUNTIME_TREE_SHA256 } from "#provider-runtime/agents/letagents-mcp-runtime.js";
 
 /**
  * Node flags go before the daemon script. The app's inspector fuse covers the

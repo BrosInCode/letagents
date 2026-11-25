@@ -2,14 +2,14 @@ import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NO_REPLY_FAILURE, noReplyFailureKind } from "../../../../shared/room-turn-no-reply.mjs";
-import { ClaudeCodeProviderAdapter } from "../main/agents/claude-code-provider-adapter.js";
+import { ClaudeCodeProviderAdapter } from "#provider-runtime/agents/claude-code-provider-adapter.js";
 import type {
   ProviderActivityEvent,
   ProviderRoomTurnResult,
   ProviderStreamEvent,
   NativeExecutionObservation,
-} from "../main/agents/provider-adapter.js";
-import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/provider-adapter.js";
+import { PROCESS_ENDED_DURING_TURN } from "#provider-runtime/agents/provider-adapter.js";
 import {
   CLAUDE_API_ERROR_CAPTURES,
   CLAUDE_API_FAILURE_POLICY,
@@ -276,7 +276,7 @@ for (const natural of [
   });
 }
 
-for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
+for (const lifecycleAuthorityMode of ["typed"] as const) {
   test(`Claude success-subtype API errors settle and recover without replay (${lifecycleAuthorityMode})`, async () => {
     const harness = createHarness();
     const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
@@ -315,7 +315,7 @@ for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
   });
 }
 
-for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
+for (const lifecycleAuthorityMode of ["typed"] as const) {
   test(`every Claude result shape ends its room turn once: no throw, no rerun, no answer it did not prove (${lifecycleAuthorityMode})`, async () => {
     const sessionRows: Array<Record<string, unknown>> = [];
     const harness = createHarness({ sessionRows });

@@ -13,8 +13,8 @@ import {
   claudeLaunchPolicyArgs,
   createEphemeralClaudeMcpConfig,
   createManagedClaudeMcpConfig,
-} from "../main/agents/claude-code-provider-adapter.js";
-import type { ProviderStreamEvent, NativeExecutionObservation } from "../main/agents/provider-adapter.js";
+} from "#provider-runtime/agents/claude-code-provider-adapter.js";
+import type { ProviderStreamEvent, NativeExecutionObservation } from "#provider-runtime/agents/provider-adapter.js";
 import {
   ProviderActionPortRouter,
   ProviderSchedulerFailureCoordinator,
@@ -123,16 +123,10 @@ test("Claude freezes lifecycle authority to the exact CLI process birth", async 
     ...ref,
     providerConnection: { kind: "claude_cli", pid: handle.pid, processIdentity: birthIdentity(9999) },
   }), null);
-  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
-  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: undefined }), null);
-  await assert.rejects(adapter.spawn(spawnRequest({
-    workAttemptId: "wa-claude-wrong-delivery",
-    deliveryMode: "mcp_polling",
-    lifecycleAuthorityMode: "typed",
-  })), /require daemon_inbox delivery/);
+  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: undefined }), handle);
 
   const resumed = await adapter.resume(
-    { ...ref, workAttemptId: "wa-claude-resumed", lifecycleAuthorityMode: "typed_shadow" },
+    { ...ref, workAttemptId: "wa-claude-resumed", lifecycleAuthorityMode: "typed" },
     spawnRequest({ workAttemptId: "wa-claude-resumed", lifecycleAuthorityMode: "typed" }),
   ) as typeof handle & { lifecycleAuthorityMode: string };
   assert.equal(resumed.lifecycleAuthorityMode, "typed",
@@ -176,26 +170,6 @@ test("typed Claude lifecycle ignores foreign failures and settles every exact re
   const nextId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
   child.emit({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: nextId, result: "ready" });
   assert.equal((await next).text, "ready");
-});
-
-test("typed-shadow Claude keeps malformed exact-result observation unchanged", async () => {
-  const harness = createHarness();
-  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed_shadow" }));
-  const child = harness.children[0]!;
-  const events: NativeExecutionObservation[] = [];
-  adapter.onExecution(handle, (event) => events.push(event));
-  const running = adapter.runRoomTurn(handle, {
-    inboxItemId: "shadow-malformed", actionId: "shadow-malformed", sourceMessage: {}, activation: {},
-  });
-  await flush();
-  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
-  child.emit({ type: "result", session_id: handle.providerContinuationId, user_message_uuid: turnId });
-
-  assert.equal((await running).outcome, "failed", "the delivery ends on the exact result under either authority");
-  assert.equal(handle.observedState(), "idle");
-  assert.equal(events.some((event) => event.fact.domain === "turn" && event.fact.state === "terminal"), false,
-    "the permissive exact-result terminal belongs only to typed authority");
 });
 
 test("Claude checkpoints an exact provider failure while retaining its reusable session", async () => {

@@ -232,7 +232,7 @@ test('workspace link decoration memoizes the editor per extension and bundle; op
   database.exec(`CREATE TABLE room_workspace_captures(agent_id TEXT, room_id TEXT, source_message_id TEXT, work_attempt_id TEXT, settled_json TEXT);
     CREATE TABLE room_work_publications(agent_id TEXT, room_id TEXT, source_message_id TEXT, agent_key TEXT, state TEXT, api_origin TEXT);
     CREATE TABLE work_attempts(work_attempt_id TEXT, workspace_path TEXT)`);
-  const { apiUrl } = await import('../main/paths.js');
+  const { apiUrl } = await import('#provider-runtime/paths.js');
   database.prepare('INSERT INTO room_workspace_captures VALUES (?, ?, ?, ?, ?)').run('agent', ROOM, 'msg_123', ATTEMPT, JSON.stringify({ ...summary(), version: 2, workspace }));
   database.prepare('INSERT INTO room_work_publications VALUES (?, ?, ?, ?, ?, ?)').run('agent', ROOM, 'msg_123', 'test/agent', 'open', apiUrl);
   database.prepare('INSERT INTO work_attempts VALUES (?, ?)').run(ATTEMPT, root);
@@ -433,7 +433,7 @@ for (const archived of [false, true]) test(`local review cache requires current 
   const { join } = await import('node:path');
   const { encodeWorkspaceReview } = await import('../../../../shared/workspace-review.mjs');
   const { WorkspaceReviewSession } = await import('../main/workspace-review.js');
-  const { apiUrl } = await import('../main/paths.js');
+  const { apiUrl } = await import('#provider-runtime/paths.js');
   const directory = mkdtempSync(join(tmpdir(), 'review-authority-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'state.sqlite');

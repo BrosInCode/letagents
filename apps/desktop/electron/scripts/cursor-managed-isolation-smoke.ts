@@ -10,9 +10,9 @@ import type {
 import {
   normalizeCursorMcpPolicy,
   prepareCursorManagedProfile,
-} from "../main/agents/cursor-managed-profile.js";
-import { cursorLaunchOptionsForPermissionProfile } from "../main/agents/cursor-permission-profile.js";
-import { buildCursorAgentArgs, buildCursorChildEnv } from "../main/agents/cursor-runner.js";
+} from "#provider-runtime/agents/cursor-managed-profile.js";
+import { cursorLaunchOptionsForPermissionProfile } from "#provider-runtime/agents/cursor-permission-profile.js";
+import { buildCursorAgentArgs, buildCursorChildEnv } from "#provider-runtime/agents/cursor-runner.js";
 
 type CommandResult = {
   ok: boolean;
