@@ -113,7 +113,7 @@ test("development MCP runtime accepts a canonical dependency target behind the w
 test("MCP runtime resolution fails closed for missing artifacts, wrong versions, and ungated development", () => {
   assert.throws(
     () => resolveLetAgentsMcpRuntime({ resourcesPath: join(tempDir, "missing"), env: {} }),
-    /packaged LetAgents MCP runtime is unavailable/,
+    /The packaged LetAgents MCP runtime is unavailable\. Reinstall LetAgents Desktop; LetAgents never downloads the MCP runtime at turn time\.$/,
   );
   const wrongRoot = join(tempDir, "wrong-version");
   const wrongEntry = writeRuntimePackage(wrongRoot, "0.0.0");

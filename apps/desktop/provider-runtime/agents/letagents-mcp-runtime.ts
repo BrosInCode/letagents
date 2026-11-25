@@ -83,7 +83,7 @@ export function resolveLetAgentsMcpRuntime(input: {
   }
 
   throw new Error(
-    "The packaged LetAgents MCP runtime is unavailable. Reinstall LetAgents Desktop; supervised Cursor never downloads executable bridge code at turn time.",
+    "The packaged LetAgents MCP runtime is unavailable. Reinstall LetAgents Desktop; LetAgents never downloads the MCP runtime at turn time.",
   );
 }
 
