@@ -133,3 +133,37 @@ the text of a `turn/start` input: that text is our prompt wording, not protocol.
    recorder that taps the same seam under the real adapter.
 3. Reuse `redaction.ts`. Add rules for what the new provider reveals.
 4. Record `simple` first. Then add one scenario for each real bug.
+
+## Daemon edge stand-in: Antigravity
+
+The daemon edge tests (`apps/desktop/daemon/__tests__/daemon-edge-antigravity.test.ts`)
+run the real daemon with a stand-in for `agy acp`:
+`apps/desktop/daemon/__tests__/edge/antigravity/replay-cli.mjs`. It plays a
+transcript with the protocol `antigravity.acp/stdio` over stdin and stdout.
+
+ACP is not a fixed sequence of lines, so the stand-in matches by meaning, not
+by position:
+
+- A daemon request is matched by its method. The recorded answer goes out with
+  the daemon's id.
+- The daemon's `letagents/probe` comes at times of its own. The stand-in answers
+  each probe at once with agy's recorded `-32601`, as agy does.
+- At `session/request_permission` the stand-in waits for the daemon's answer.
+  The recorded answer continues the recording. Another answer continues with the
+  plan file `branch-<label>-<optionId>.ndjson`, then with the recording after the
+  end of the turn.
+
+The `approval` plan was recorded on agy 1.5.16 under Ask before writes: one room
+turn whose write was allowed and whose command was denied (`launch-1`), and the
+`session/resume` of a new agy process after a daemon kill (`launch-2`, no model
+turn). The two other answers were not recorded. `derive-branches.mjs` builds
+their turns from frames of the same recording, and each branch header says
+`DERIVED, not recorded`. The reply text in `branch-permission-2-allow` is not
+agy's.
+
+To record again: point `LETAGENTS_ANTIGRAVITY_BIN` at `record-cli.mjs` and run a
+real turn through the edge harness. Then make the fixture with
+`redact-capture.mjs`, and the branches with `derive-branches.mjs`. A recording
+spends real model turns. On macOS, agy finds its keychain sign-in through
+`$HOME`, so a recording under the harness's scratch HOME needs the keychain
+(see `record-cli.mjs`).
