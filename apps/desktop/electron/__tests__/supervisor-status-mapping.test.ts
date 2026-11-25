@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { DAEMON_IMPLEMENTATION_VERSION } from "#daemon-contract/index.js";
 import { mapStatus } from "../main/supervisor-daemon/status-mapping.js";
 
 test("mapStatus preserves optional legacy_state_reset payload and omits it when absent or malformed", () => {
   const base = {
     healthy: true,
     protocol_version: 3,
-    implementation_version: "2.0.289",
+    implementation_version: DAEMON_IMPLEMENTATION_VERSION,
     capabilities: {
       room_delivery_retry: true,
       provider_continuation_repair: true,
