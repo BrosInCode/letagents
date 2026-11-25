@@ -8,7 +8,7 @@
         <span>{{ reviewState === 'loading' ? 'Loading complete review…' : reviewState === 'pending' ? 'The host is still sharing this review.' : reviewState === 'error' ? 'Couldn’t load the complete review.' : 'Only the original preview is available for this capture.' }}</span>
         <button v-if="reviewState !== 'loading'" type="button" @click="retryReview++">Try again</button>
       </div>
-      <WorkspaceDiff v-if="!readerOpen" :snapshot="snapshot" :view-key="`${activeRequestId}:${turn}`" :load-page="reviewState === 'ready' ? loadPage : undefined" />
+      <WorkspaceDiff v-if="!readerOpen" :snapshot="snapshot" :view-key="`${activeRequestId}:${turn}:${requestVersion ?? ''}`" :initial-path="turn ? filePath : undefined" :load-page="reviewState === 'ready' ? loadPage : undefined" />
       <WorkspaceReader :open="readerOpen" :snapshot="snapshot" :view-key="`${activeRequestId}:${turn}`" :load-page="reviewState === 'ready' ? loadPage : undefined" :review-message="reviewMessage" :can-retry="reviewState !== 'loading'" @close="readerOpen = false" @retry="retryReview++" />
     </template>
     <div v-else class="agent-workspace-empty"><FileDiff :size="28" aria-hidden="true" /><h3>No workspace snapshot available</h3><p>Changes appear here after this agent finishes a turn and its host shares a snapshot.</p></div>
@@ -22,7 +22,7 @@ import ContributionDescription from '../room-chat/ContributionDescription.vue';
 import { formatShortDateTime } from '../../../../domain/time';
 import WorkspaceDiff from './WorkspaceDiff.vue';
 import WorkspaceReader from './WorkspaceReader.vue';
-const props = defineProps<{ work: readonly DesktopRoomAgentWork[]; agentKey: string | null; sourceMessageId?: string | null; requestVersion?: number; status: string }>();
+const props = defineProps<{ work: readonly DesktopRoomAgentWork[]; agentKey: string | null; sourceMessageId?: string | null; requestVersion?: number; filePath?: string; status: string }>();
 const selected = ref<DesktopRoomAgentWork | null>(null);
 const turn = ref(false);
 const readerOpen = ref(false);

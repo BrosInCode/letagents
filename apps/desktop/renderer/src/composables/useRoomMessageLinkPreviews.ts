@@ -61,7 +61,7 @@ export function useRoomMessageLinkPreviews(room: Readonly<Ref<string>>, reposito
   });
   onScopeDispose(() => store.reset());
   return {
-    revision, contextKey,
+    revision, contextKey, repository,
     previewsFor(id: string) {
       let version = versions.get(id);
       if (!version) {

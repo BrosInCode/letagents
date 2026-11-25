@@ -11,7 +11,7 @@
     @drop.stop.prevent="handleAttachmentDrop"
     @keydown.escape.stop.prevent="$emit('close')"
   >
-    <section ref="bodyElement" @scroll="handleScroll" @scrollend="finishMessageReveal" class="room-thread-body" tabindex="0" aria-label="Thread replies">
+    <section ref="bodyElement" @wheel.passive="handleWheel" @scroll="handleScroll" @scrollend="finishMessageReveal" class="room-thread-body" tabindex="0" aria-label="Thread replies">
       <div v-if="loadingOlderReplies" class="room-thread-history-state" data-testid="room-thread-loading-earlier">
         <span class="room-thread-history-spinner" aria-hidden="true"></span>
         <span>Loading earlier replies...</span>
@@ -69,14 +69,16 @@
           @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
           @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
         />
-        <RoomContribution v-for="work in contributionsFor(reply.id)" :key="work.attemptId" :work="work" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="$emit('open-agent', workspaceAgentTarget($event, participants))" />
+        <RoomContribution class="is-thread-context" v-for="work in contributionsFor(reply.id)" :key="work.attemptId" :work="work" :source-message="reply" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="$emit('open-agent', $event)" />
       </template>
 
       <div v-if="!replies.length" class="room-thread-empty" data-testid="room-thread-empty">
-        <MessageSquarePlus :size="18" aria-hidden="true" />
-        <div>
-          <span>No replies yet.</span>
-        </div>
+        <span v-if="loadingReplies" role="status">Loading replies…</span>
+        <template v-else-if="(parent.thread?.replyCount ?? 0) > 0">
+          <span>Couldn’t load replies.</span>
+          <button type="button" @click="$emit('retry-replies')">Retry</button>
+        </template>
+        <span v-else>No replies yet.</span>
       </div>
       </div>
     </section>
@@ -143,7 +145,7 @@
       </div>
       <div v-if="selectedGif">GIF · {{ selectedGif.title }} <button type="button" aria-label="Remove selected GIF" @click="selectedGif = null">×</button></div>
       <div class="room-thread-composer-footer">
-        <button type="button" class="room-thread-latest" :class="{ available: isScrolledUp }" :disabled="!isScrolledUp" :aria-hidden="!isScrolledUp" aria-label="Latest replies" @click="scrollToLatest">Latest ↓</button>
+        <button type="button" class="room-thread-latest" :class="{ available: isScrolledUp }" :disabled="!isScrolledUp" :aria-hidden="!isScrolledUp" aria-label="Latest replies" title="Latest replies" @click="scrollToLatest"><ArrowDown :size="13" aria-hidden="true" /></button>
         <p v-if="sendError || attachmentError" class="room-thread-composer-error" data-testid="room-thread-send-error">
           {{ sendError || attachmentError }}
         </p>
@@ -174,12 +176,12 @@ import type { RoomGif } from "../../../../../../../../shared/room-expressions.mj
 import RoomGifPicker from "./RoomGifPicker.vue";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import RoomContribution from "./RoomContribution.vue";
-import { contributionChanges, workspaceAgentTarget } from "../../../../domain/room-contributions";
+import { contributionChanges } from "../../../../domain/room-contributions";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { injectRoomMessageReactions } from "../../../../composables/useRoomMessageReactions";
 import { injectRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
-import { ArrowUp, MessageSquarePlus, Paperclip, X } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Paperclip, X } from "@lucide/vue";
 import type {
   DesktopAgentPresence,
   DesktopParticipantSummary,
@@ -234,6 +236,7 @@ const props = defineProps<{
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   hasOlderReplies: boolean;
   loadingOlderReplies: boolean;
+  loadingReplies?: boolean;
   revealMessageId?: string | null;
   initialScrollTop?: number | null;
   searchQuery: string;
@@ -262,6 +265,7 @@ const emit = defineEmits<{
   "open-task": [taskId: string];
   "jump-message": [messageId: string];
   "load-older-replies": [];
+  "retry-replies": [];
   "pick-attachments": [];
   "remove-attachment": [uploadId: string];
   "stage-dropped-attachments": [files: File[]];
@@ -283,7 +287,9 @@ const panelElement = ref<HTMLElement | null>(null);
 const bodyElement = ref<HTMLElement | null>(null);
 const isScrolledUp = ref(false);
 const mentionQuery = ref<string | null>(null);
+const scrollEdgeTolerance = 1;
 let scrollRevision = 0;
+let leavingLatest = false;
 let revealingMessage = false;
 let revealFrame: number | null = null;
 let revealTimer: number | null = null;
@@ -293,12 +299,26 @@ function cancelMessageRevealFrame(): void {
   revealFrame = null;
 }
 
+function isAtBottom(body: HTMLElement): boolean {
+  return body.scrollHeight - body.clientHeight - body.scrollTop <= scrollEdgeTolerance;
+}
+
 function updateScrollState(): void {
   const body = bodyElement.value;
-  isScrolledUp.value = Boolean(body && body.scrollHeight - body.scrollTop - body.clientHeight > 96);
+  isScrolledUp.value = Boolean(body && !isAtBottom(body));
+}
+
+function handleWheel(event: WheelEvent): void {
+  // A wheel gesture can start before the browser reports the new scroll position.
+  if (event.ctrlKey || event.shiftKey || event.deltaY >= 0) return;
+  const body = bodyElement.value;
+  if (!body || body.scrollTop <= scrollEdgeTolerance) return;
+  leavingLatest = true;
+  scrollRevision++;
 }
 
 function handleScroll(): void {
+  leavingLatest = false;
   updateScrollState();
   scrollRevision++;
   cancelMessageRevealFrame();
@@ -306,6 +326,8 @@ function handleScroll(): void {
 
 function scrollToLatest(): void {
   finishMessageReveal();
+  leavingLatest = false;
+  scrollRevision++;
   const body = bodyElement.value;
   body?.scrollTo({ top: body.scrollHeight, behavior: "instant" });
   isScrolledUp.value = false;
@@ -334,7 +356,9 @@ function beginMessageReveal(): void {
   revealTimer = window.setTimeout(finishMessageReveal, 800);
 }
 onBeforeUnmount(() => {
-  if (bodyElement.value) emit("scroll-position", props.parent.id, bodyElement.value.scrollTop, props.messageNamespace || props.roomIdentifier || "");
+  if (bodyElement.value && props.replies.length) {
+    emit("scroll-position", props.parent.id, bodyElement.value.scrollTop, props.messageNamespace || props.roomIdentifier || "");
+  }
   finishMessageReveal();
 });
 
@@ -445,7 +469,7 @@ watch(
     mentionQuery.value = null;
     await nextTick();
     if (!props.activeSearchMessageId && !props.revealMessageId) {
-      if (bodyElement.value) bodyElement.value.scrollTop = props.initialScrollTop ?? bodyElement.value.scrollHeight;
+      if (bodyElement.value) bodyElement.value.scrollTop = props.initialScrollTop ?? 0;
       handleScroll();
     }
   },
@@ -478,17 +502,21 @@ watch(
     const revision = scrollRevision;
     const previousScrollHeight = body.scrollHeight;
     const previousScrollTop = body.scrollTop;
-    const wasNearBottom = !revealingMessage && body.scrollHeight - body.scrollTop - body.clientHeight < 96;
+    const wasAtBottom = oldReplies.length > 0 && !revealingMessage && !leavingLatest && isAtBottom(body);
     const oldFirstId = oldReplies[0]?.id;
     const isPrepend = oldFirstId && newReplies.findIndex(reply => reply.id === oldFirstId) > 0;
     await nextTick();
-    updateScrollState();
-    if (revision !== scrollRevision || body !== bodyElement.value || body.scrollTop !== previousScrollTop) return;
-    if (isPrepend) {
-      body.scrollTop = previousScrollTop + body.scrollHeight - previousScrollHeight;
-    } else if (wasNearBottom) {
-      body.scrollTop = body.scrollHeight;
+    if (revision === scrollRevision && body === bodyElement.value && body.scrollTop === previousScrollTop) {
+      if (!oldReplies.length && newReplies.length) {
+        if (!props.activeSearchMessageId && !props.revealMessageId) body.scrollTop = props.initialScrollTop ?? 0;
+      } else if (isPrepend) {
+        const addedHeight = body.scrollHeight - previousScrollHeight;
+        if (addedHeight) body.scrollTop = previousScrollTop + addedHeight;
+      } else if (wasAtBottom && !isAtBottom(body)) {
+        body.scrollTop = body.scrollHeight - body.clientHeight;
+      }
     }
+    updateScrollState();
   },
 );
 

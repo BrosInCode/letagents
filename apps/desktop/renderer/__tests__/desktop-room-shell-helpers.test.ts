@@ -261,6 +261,51 @@ describe("desktop room shell helpers", () => {
     assert.equal(hasFilteredRoomActivity.value, true);
   });
 
+  it("keeps routine system notices out of chat while preserving actionable notices and conversation", () => {
+    const messages = [
+      roomMessage({ id: "msg_10", sender: "letagents", source: null, text: "[status] task_230 moved to accepted: Fix CI" }),
+      roomMessage({ id: "msg_11", sender: "letagents", source: null, text: "[status] Focus Room opened: Focus: Modern Daemon" }),
+      roomMessage({ id: "msg_12", sender: "letagents", source: "system", text: "[status] Focus Room opened for task_231: Fix CI" }),
+      roomMessage({ id: "msg_13", sender: "letagents", source: null,
+        text: "[status] Jev linked pull request #2055 to SCRUM-1 as a suggestion. One change waits for a room admin under Board Manager > Requests." }),
+      roomMessage({ id: "msg_14", sender: "letagents", source: "system", text: "[status] task_231 is blocked: Fix CI" }),
+      roomMessage({ id: "msg_15", sender: "letagents", source: "system",
+        text: "[status] Focus Room concluded for task_231. Result: CI passed." }),
+      roomMessage({ id: "msg_16", sender: "letagents", source: "browser", text: "[status] Focus Room opened: Focus: Modern Daemon" }),
+      roomMessage({ id: "msg_17", sender: "Agent", source: "agent", text: "PR #2055 is ready for review." }),
+      roomMessage({ id: "msg_18", sender: "letagents", source: "system", text: "[status] task_232 moved to accepted: See attached report",
+        attachments: [{ id: "report", fileName: "report.txt", mimeType: "text/plain", sizeBytes: 20, href: null }] }),
+    ];
+    const chat = useDesktopRoomMessages({
+      room: ref(roomInfo()), messages: ref(messages), githubEventsVisible: ref(true),
+      playRoomSound: () => undefined, onMessageSent: () => undefined,
+    });
+
+    assert.deepEqual(chat.timelineMessages.value.map(message => message.id), ["msg_14", "msg_15", "msg_16", "msg_17", "msg_18"]);
+    assert.equal(chat.roomMessagesForAgentInsight.value.length, messages.length);
+  });
+
+  it("loads older conversation when the opening history contains only routine system notices", async () => {
+    const notice = (id: string) => roomMessage({ id, sender: "letagents", source: null, text: "[status] Focus Room opened: Focus: Modern Daemon" });
+    const cursors: string[] = [];
+    await withWindowAsync({
+      letagentsDesktop: { room: { async getMessagesBefore(_roomIdentifier: string, cursor: string) {
+        cursors.push(cursor);
+        return cursor === "msg_20" ? { messages: [notice("msg_10")], hasOlder: true }
+          : { messages: [roomMessage({ id: "msg_1", text: "Earlier conversation" })], hasOlder: false };
+      } } },
+    }, async () => {
+      const chat = useDesktopRoomMessages({
+        room: ref(roomInfo()), messages: ref([notice("msg_20")]), githubEventsVisible: ref(true),
+        playRoomSound: () => undefined, onMessageSent: () => undefined,
+      });
+      await flushPromises();
+
+      assert.deepEqual(cursors, ["msg_20", "msg_10"]);
+      assert.deepEqual(chat.timelineMessages.value.map(message => message.id), ["msg_1"]);
+    });
+  });
+
   it("auto-loads older history when the latest page only has filtered activity", async () => {
     const githubEventsVisible = ref(false);
     const messages = ref([

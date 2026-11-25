@@ -97,14 +97,14 @@
         data-testid="room-activity-steer"
       >
         <ActivityOrb state="breathing" />
-        <span class="room-activity-text"><strong>{{ pill.offer.displayName }}</strong> is mid-turn · your message waits</span>
+        <span class="room-activity-text"><strong>{{ pill.offer.displayName }}</strong> is mid-turn</span>
         <button
           type="button"
           class="room-activity-action"
-          :disabled="steerDisabled"
+          :disabled="steerDisabled || pill.offer.pending"
           data-testid="desktop-composer-steer"
           @click="emit('steer')"
-        >Steer</button>
+        >{{ pill.offer.pending ? "Steering…" : "Steer privately" }}</button>
       </div>
       <div
         v-else-if="pill?.kind === 'notice' && pill.notice.kind === 'join'"
@@ -165,7 +165,7 @@
         data-testid="room-activity-notice"
       >
         <span class="room-activity-icon" aria-hidden="true"><Check :size="14" /></span>
-        <span class="room-activity-text">Steering <strong>{{ pill.notice.displayName }}</strong>'s current turn</span>
+        <span class="room-activity-text">Correction sent to <strong>{{ pill.notice.displayName }}</strong></span>
       </div>
       <div
         v-else-if="pill?.kind === 'notice' && pill.notice.kind === 'calm'"
@@ -448,7 +448,9 @@ const liveLabel = computed(() => {
 /** Notices and the Steer offer are announced; live work changes too often to read out. */
 const announcement = computed(() => {
   const current = pill.value;
-  if (current?.kind === "steer") return `${current.offer.displayName} is mid-turn. Your message waits. Steer is available.`;
+  if (current?.kind === "steer") return current.offer.pending
+    ? `Sending a private correction to ${current.offer.displayName}.`
+    : `${current.offer.displayName} is mid-turn. You can send this draft privately with Steer.`;
   if (current?.kind === "stopped") return `Stopped ${current.command} for ${current.agent}`;
   if (current?.kind === "background") return "";
   if (current?.kind !== "notice") return current?.kind === "typing" ? typingLabel(current.names) : "";
@@ -457,7 +459,7 @@ const announcement = computed(() => {
   if (notice.kind === "leave") return `${notice.agent.displayName} left`;
   if (notice.kind === "github") return notice.preview.headline;
   if (notice.kind === "calm") return notice.action ? `${calmNoticeText(notice)}. ${notice.action.label} is available.` : calmNoticeText(notice);
-  return `Steering ${notice.displayName}'s current turn`;
+  return `Correction sent to ${notice.displayName}`;
 });
 
 // Elapsed times move only while the list is open.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createSSRApp, h } from 'vue';
+import { createSSRApp, h, ref } from 'vue';
 import { renderToString } from '@vue/server-renderer';
 import { createServer, type ViteDevServer } from 'vite';
 import { chatBubbleStyle, chatColorContrast, chatColorPresets, defaultChatColors, normalizeChatColor, parseChatColors, readableChatSurface } from '../../../../shared/chat-colors';
@@ -25,6 +25,7 @@ test('all palette and custom colors remain readable across gradient, hover and c
   }
   for (const color of [...chatColorPresets.map(p => p.value), ...custom]) {
     const surface = readableChatSurface(color);
+    assert.ok(chatColorContrast(hex(surface.inlineCodeForeground), hex(surface.inlineCodeBackground)) >= 7, color);
     const foreground = hex(surface.foreground);
     const hover = Number(surface.hover.match(/\/ ([\d.]+)/)![1]);
     for (const stop of [rgb(surface.start), hex(color), rgb(surface.end)]) {
@@ -50,23 +51,25 @@ after(async () => { await vite?.close(); });
 
 test('color choices persist locally, synchronize between windows, and safely survive unavailable storage', async t => {
   const original = globalThis.window;
-  let stored = JSON.stringify({ self: '#ddaabb', human: 'invalid' });
+  const legacy = JSON.stringify({ self: '#ddaabb', human: '#303030', 'own-agent': 'invalid' });
+  let stored: string | null = null;
   let storageListener: (event: { key: string; newValue: string | null }) => void;
   let denied = false;
   Object.assign(globalThis, { window: {
-    localStorage: { getItem: () => stored, setItem(_key: string, value: string) { if (denied) throw Error('Denied'); stored = value; } },
+    localStorage: { getItem: (key: string) => key === 'letagents-chat-styling-v1' ? legacy : stored, setItem(_key: string, value: string) { if (denied) throw Error('Denied'); stored = value; } },
     addEventListener(type: string, listener: any) { assert.equal(type, 'storage'); storageListener = listener; },
   } });
   t.after(() => Object.assign(globalThis, { window: original }));
   const preferences = useStyling();
   assert.equal(preferences.colors.value.self, '#DDAABB');
   assert.equal(preferences.colors.value.human, defaultChatColors.human);
+  assert.deepEqual({ ...preferences.overrides.value }, { self: '#DDAABB' });
   preferences.setColor('own-agent', '#456789');
-  assert.equal(JSON.parse(stored)['own-agent'], '#456789');
+  assert.equal(JSON.parse(stored!)['own-agent'], '#456789');
   assert.equal(preferences.styleFor('own-agent')['--chat-bubble'], '#456789');
   storageListener!({ key: 'unrelated', newValue: '{}' });
   assert.equal(preferences.colors.value.self, '#DDAABB');
-  storageListener!({ key: 'letagents-chat-styling-v1', newValue: '{bad json' });
+  storageListener!({ key: 'letagents-chat-styling-v2', newValue: '{bad json' });
   assert.deepEqual({ ...preferences.colors.value }, defaultChatColors);
   denied = true;
   preferences.setColor('human', '#ffffff');
@@ -138,7 +141,46 @@ test('desktop messages use authenticated ownership for the four colors without c
     assert.ok(html.includes(`data-chat-role="${role}"`));
     assert.ok(html.includes(`--chat-bubble:${defaultChatColors[role]}`));
     assert.match(html, /data-thread-message-id="msg_99"/);
-    assert.match(html, /aria-label="Copy message"/);
-    assert.match(html, /aria-label="Jump to root"/);
+    assert.match(html, /aria-label="Message actions"/);
   }
+});
+
+
+test('a personal theme overrides the company for that account and each chat role can opt back in', async () => {
+  const { provideRoomTheme } = await vite.ssrLoadModule(fileURLToPath(new URL('../../../../shared/ui/room-theme.ts', import.meta.url)));
+  const previousWindow = globalThis.window;
+  const storage = new Map();
+  Object.assign(globalThis, { window: { localStorage: {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+    removeItem: (key: string) => storage.delete(key),
+  } } });
+  try {
+    const company = ref({ id: '42', name: 'Herotel', theme: 'mint' });
+    const account = ref('first-account');
+    const TestChild = { setup() {
+      const styles = useStyling();
+      assert.match(styles.styleFor('self')['--chat-bubble'], /^light-dark/);
+      styles.setColor('self', '#0A0A0A');
+      assert.equal(styles.styleFor('self')['--chat-bubble'], '#0A0A0A');
+      styles.useTheme('self');
+      assert.match(styles.styleFor('self')['--chat-bubble'], /^light-dark/);
+      return () => h('div');
+    } };
+    const TestParent = { setup() {
+      const appearance = provideRoomTheme(account, company);
+      assert.equal(appearance.effective.value, 'mint');
+      appearance.choose('ice');
+      assert.equal(appearance.effective.value, 'ice');
+      account.value = 'second-account';
+      assert.equal(appearance.effective.value, 'mint');
+      account.value = 'first-account';
+      assert.equal(appearance.effective.value, 'ice');
+      appearance.choose(null);
+      company.value = { id: '43', name: 'Elsewhere', theme: 'rose' };
+      assert.equal(appearance.effective.value, 'rose');
+      return () => h(TestChild);
+    } };
+    await renderToString(createSSRApp(TestParent));
+  } finally { Object.assign(globalThis, { window: previousWindow }); }
 });

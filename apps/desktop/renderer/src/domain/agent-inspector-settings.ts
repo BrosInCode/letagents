@@ -215,17 +215,15 @@ export function agentInspectorProviderSupportsEffort(providerId: string | null |
 /**
  * The effort choices the inspector offers. An Antigravity model lists its own
  * thinking levels (`supportedEfforts`); one that lists none takes no effort.
- * When no model catalog is loaded (`model === undefined`), offer Antigravity's
- * four valid thinking levels (excluding Claude's `max`). The saved effort
- * stays listed so it can be seen and changed.
+ * The saved effort stays listed so it can be seen and changed.
  */
 export function inspectorEffortChoices(
   providerId: string | null | undefined,
-  model?: { supportedEfforts?: readonly string[] } | null,
-  savedEffort?: string | null,
+  model: { supportedEfforts?: readonly string[] } | null | undefined,
+  savedEffort: string | null | undefined,
 ): Array<{ value: "" | DesktopManagedAgentEffort; label: string }> {
   if (providerId !== "antigravity") return inspectorEffortOptions;
-  const supported = new Set(model === undefined ? ["low", "medium", "high", "xhigh"] : (model?.supportedEfforts ?? []));
+  const supported = new Set(model?.supportedEfforts ?? []);
   return inspectorEffortOptions.filter((option) => option.value === "" || supported.has(option.value) || option.value === savedEffort);
 }
 

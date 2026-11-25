@@ -8,7 +8,10 @@
         <h3>{{ group.title }}</h3>
         <div v-for="role in group.roles" :key="role.id" class="styling-role">
           <span>{{ role.label }}</span>
-          <ColorPalette :label="role.label" :model-value="colors[role.id]" @update:model-value="setColor(role.id, $event)" />
+          <div class="styling-role-controls">
+            <button v-if="overrides[role.id]" type="button" class="use-theme" :aria-label="'Use theme color for ' + role.label" @click="useTheme(role.id)">Use theme</button>
+            <ColorPalette :label="role.label" :model-value="colors[role.id]" :follows-theme="!overrides[role.id]" :theme-preview="styleFor(role.id)['--chat-bubble']" @update:model-value="setColor(role.id, $event)" />
+          </div>
         </div>
       </section>
       </div>
@@ -25,7 +28,7 @@
 <script setup lang="ts">
 import ColorPalette from './ColorPalette.vue';
 import { useChatStyling } from './chat-styling';
-const { colors, saved, isDefault, styleFor, setColor, reset } = useChatStyling();
+const { colors, overrides, saved, isDefault, styleFor, setColor, useTheme, reset } = useChatStyling();
 const groups = [
   { title: 'Your side', roles: [{ id: 'self', label: 'You' }, { id: 'own-agent', label: 'Your agents' }] },
   { title: 'Other people', roles: [{ id: 'human', label: 'Other humans' }, { id: 'other-agent', label: 'Other agents' }] },
@@ -50,6 +53,8 @@ const preview = [
 .styling-group { min-width: 0; }
 .styling-group h3 { color: light-dark(#666,#999); font-size: 12px; font-weight: 500; margin: 0 0 8px; }
 .styling-role { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; font-size: 13px; }
+.styling-role-controls { display: flex; align-items: center; gap: 5px; }
+.use-theme { color: inherit; font: inherit; font-size: 11px; border: 0; border-radius: 5px; background: transparent; cursor: pointer; min-height: 32px; }
 .styling-preview { display: flex; flex-direction: column; gap: 15px; padding: 20px 16px; border-radius: 18px; background: light-dark(#eee,#080808); border: 1px solid light-dark(#ddd,#262626); }
 .preview-message { max-width: 85%; align-self: flex-start; }
 .preview-message[data-side="right"] { align-self: flex-end; text-align: right; }

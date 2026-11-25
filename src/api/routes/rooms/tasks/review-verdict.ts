@@ -12,7 +12,10 @@ import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import { isRepoAccessRoom, resolveRepoAccessTarget } from "../../../rooms/room-nature.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import { workflowEffectBroker } from "../../../workflow-effects/runtime.js";
-import type { GitHubReviewVerdict } from "../../../workflow-effects/github-review-provider.js";
+import {
+  REVIEW_VERDICT_BODY_MAX_LENGTH,
+  type GitHubReviewVerdict,
+} from "../../../workflow-effects/github-review-provider.js";
 import { REVIEW_LEASE_ACTIVE_STATUSES } from "./lease-helpers.js";
 import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
 import type { RoomTaskRouteDeps } from "./types.js";
@@ -79,8 +82,8 @@ export function registerTaskReviewVerdictRoute(app: Express, deps: RoomTaskRoute
     }
     const verdict = rawVerdict as GitHubReviewVerdict;
     const body = typeof requestBody.body === "string" ? requestBody.body : "";
-    if (body.length > 65_536) {
-      res.status(400).json({ error: "body must be at most 65536 characters" });
+    if (body.length > REVIEW_VERDICT_BODY_MAX_LENGTH) {
+      res.status(400).json({ error: `body must be at most ${REVIEW_VERDICT_BODY_MAX_LENGTH} characters` });
       return;
     }
     const idempotencyKey = typeof requestBody.idempotency_key === "string"

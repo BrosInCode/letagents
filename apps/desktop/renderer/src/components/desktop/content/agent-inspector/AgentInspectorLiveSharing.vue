@@ -1,5 +1,5 @@
 <template>
-  <section class="agent-inspector-permissions agent-inspector-home-harness" aria-labelledby="agent-inspector-live-sharing-title">
+  <section class="agent-inspector-settings-switch-row" aria-labelledby="agent-inspector-live-sharing-title">
     <div class="agent-inspector-home-harness-row">
       <strong id="agent-inspector-live-sharing-title">Share live activity with the room</strong>
       <DesktopSwitch
@@ -15,13 +15,16 @@
     </div>
     <p v-if="unavailableReason" class="agent-inspector-settings-note">{{ unavailableReason }}</p>
     <template v-if="!unavailableReason || shown">
-      <p id="agent-inspector-live-sharing-description" class="agent-inspector-settings-note">{{ LIVE_SHARING_DESCRIPTION }}</p>
+      <p id="agent-inspector-live-sharing-description" class="agent-inspector-settings-note" data-testid="agent-inspector-live-sharing-state">{{ shown ? LIVE_SHARING_ON_NOTE : LIVE_SHARING_OFF_NOTE }}</p>
       <p
         class="agent-inspector-settings-note"
         :data-tone="audience === 'public' ? 'warning' : undefined"
         data-testid="agent-inspector-live-sharing-audience"
       >{{ liveSharingAudienceNote(audience) }}</p>
-      <p class="agent-inspector-settings-note" data-testid="agent-inspector-live-sharing-state">{{ shown ? LIVE_SHARING_ON_NOTE : LIVE_SHARING_OFF_NOTE }}</p>
+      <details class="agent-inspector-settings-disclosure">
+        <summary><span>What the room can see</span><ChevronRight :size="15" aria-hidden="true" /></summary>
+        <div class="agent-inspector-disclosure-copy"><p>{{ LIVE_SHARING_DESCRIPTION }}</p></div>
+      </details>
       <p v-if="unsavedEdits && !shown" class="agent-inspector-settings-note">Save or reload your other changes before turning this on.</p>
       <p class="sr-only" role="status">{{ saving ? "Saving…" : "" }}</p>
       <p v-if="error" class="agent-inspector-settings-error" role="alert">{{ error }}</p>
@@ -31,6 +34,7 @@
 
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
+import { ChevronRight } from "@lucide/vue";
 import type { DesktopSupervisorAgentConfiguration } from "../../../../../../electron/ipc-types";
 import {
   LIVE_SHARING_DESCRIPTION,

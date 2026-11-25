@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { companyListsEntry, companyProjectGroups, mergeCompanyRooms, showsCompanyHome } from "../src/domain/company-navigation.js";
+import { companyListsEntry, companyProjectGroups, mergeCompanyRooms, newestCompanyAppearance, showsCompanyHome } from "../src/domain/company-navigation.js";
 import { appFunction } from "./app-source";
 import { buildSidebarProjectGroups } from "../src/domain/sidebar-rooms.js";
 
 const room = { kind: "repo" as const, github_repo_id: "100", room_id: "github.com/herotel/app", display_name: "app", full_name: "herotel/app", organization_id: "42", visibility: "private" as const };
 const companyRoom = { kind: "room" as const, github_repo_id: null, room_id: "room_q4", display_name: "Q4 launch", full_name: null, organization_id: "42", visibility: null };
 const parent = { id: "personal", type: "room" as const, kind: "parent" as const, roomIdentifier: "github.com/alice/personal", title: "personal", meta: "", sectionLabel: "", headline: "", description: "", latestMessageId: null, latestMessageAt: null, hasUnread: false, pinned: false, source: "account" as const };
+
+test("company appearance keeps a fresher room theme and honors a newer verified clear", () => {
+  const roomTheme = { id: "42", name: "Herotel", theme: "violet" as const, themeRevision: 3 };
+  const company = { github_org_id: "42", login: "herotel", theme_id: "mint" as const, theme_revision: 2 };
+  assert.deepEqual(newestCompanyAppearance(roomTheme, company), roomTheme);
+  assert.deepEqual(newestCompanyAppearance(roomTheme, { ...company, theme_revision: 3 }), roomTheme);
+  assert.deepEqual(newestCompanyAppearance(roomTheme, { ...company, theme_id: null, theme_revision: 4 }), {
+    ...roomTheme, theme: null, themeRevision: 4,
+  });
+});
 
 test("company discovery adds unopened repo rooms without duplicating known ones or losing pins", () => {
   const discovered = mergeCompanyRooms([], [room]);

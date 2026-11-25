@@ -55,6 +55,7 @@ const props = defineProps<{
   snapshot: WorkspaceChangeSummary;
   reader?: boolean;
   viewKey?: string;
+  initialPath?: string;
   loadPage?: (path: string, options: WorkspaceDiffPageOptions) => Promise<WorkspaceDiffPage>;
   fileNotices?: Record<string, { title: string; detail: string }>;
   footerLabel?: string;
@@ -68,9 +69,11 @@ const fileOffset = ref(0);
 const fileNav = ref<HTMLElement | null>(null);
 watch(fileOffset, () => { fileNav.value?.scrollTo({ top: 0, left: 0 }); }, { flush: 'post' });
 const visibleFiles = computed(() => props.snapshot.files.slice(fileOffset.value, fileOffset.value + 100));
-watch(() => props.snapshot, value => {
-  if (!value.files.some(file => file.path === selectedPath.value)) selectedPath.value = value.files[0]?.path ?? '';
-  fileOffset.value = Math.floor(Math.max(0, value.files.findIndex(file => file.path === selectedPath.value)) / 100) * 100;
+watch([() => props.snapshot, () => props.initialPath, () => props.viewKey], ([snapshot, initialPath, key], previous) => {
+  const newFileRequest = initialPath && (initialPath !== previous?.[1] || key !== previous?.[2]);
+  if (newFileRequest && snapshot.files.some(file => file.path === initialPath)) selectedPath.value = initialPath;
+  if (!snapshot.files.some(file => file.path === selectedPath.value)) selectedPath.value = snapshot.files[0]?.path ?? '';
+  fileOffset.value = Math.floor(Math.max(0, snapshot.files.findIndex(file => file.path === selectedPath.value)) / 100) * 100;
 }, { immediate: true });
 const selectedFile = computed(() => props.snapshot.files.find(file => file.path === selectedPath.value));
 const lineOffset = ref(0), longLine = ref<number | null>(null), textOffset = ref(0);

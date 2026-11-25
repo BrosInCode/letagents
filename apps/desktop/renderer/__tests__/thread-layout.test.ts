@@ -10,9 +10,10 @@ describe("inline room thread layout", () => {
   it("keeps the reply surface inside the owner bubble with no modal or resize pane", () => {
     assert.match(view, /<template #thread>[\s\S]*<RoomThreadPanel/);
     assert.doesNotMatch(view, /room-thread-backdrop|room-thread-resize-handle|threadPaneOverlay/);
-    const bubble = message.slice(message.indexOf('<div class="room-message-bubble">'), message.indexOf('<MessageReactionBar'));
+    const bubble = message.slice(message.indexOf('class="room-message-bubble"'), message.indexOf('<MessageReactionBar'));
     assert.match(bubble, /aria-expanded="activeThreadRoot"/);
     assert.match(bubble, /<slot name="thread"/);
+    assert.match(bubble, /<ThreadTransition reveal @settled="finishThreadMotion"/);
   });
   it("contains wheel chaining within a bounded, focusable reply scroller", () => {
     const body = styles.match(/\.room-thread-body\s*\{([^}]*)\}/)?.[1] || "";
@@ -31,6 +32,17 @@ describe("inline room thread layout", () => {
     assert.doesNotMatch(latest, /position:\s*(absolute|fixed)/);
     assert.match(latest, /visibility:\s*hidden/);
     assert.match(panel, /<button type="button" class="room-thread-latest"[^>]*:disabled="!isScrolledUp"[^>]*:aria-hidden="!isScrolledUp"/);
+  });
+  it("uses room message and composer typography for inline replies", () => {
+    const body = styles.match(/\.is-thread-context \.desktop-long-message-html\s*\{([^}]*)\}/)?.[1] ?? "";
+    const quote = styles.match(/\.room-thread-panel \.room-message-reply-text\s*\{([^}]*)\}/)?.[1] ?? "";
+    const input = styles.match(/\.room-thread-composer textarea\s*\{([^}]*)\}/)?.[1] ?? "";
+    for (const rule of [body, quote, input]) {
+      assert.ok(rule);
+      assert.doesNotMatch(rule, /(?:font(?:-size)?|line-height):/);
+    }
+    const composer = readFileSync(new URL("../src/styles/composer-agent-reasoning/composer-controls.css", import.meta.url), "utf8");
+    assert.match(composer, /\.desktop-composer-input,\s*\.room-thread-composer textarea\s*\{[^}]*font-size:[^}]*line-height:/);
   });
   it("leaves horizontal code scrolling available and honors reduced motion", () => {
     assert.doesNotMatch(styles, /overflow-x:\s*(?:hidden|clip)/);

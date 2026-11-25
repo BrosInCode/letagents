@@ -42,13 +42,13 @@ export function receiptRowLabel(state: string): string {
 }
 
 /** The mark's tone: the one thing that still needs the sender wins. */
-export type ReceiptTone = "positive" | "active" | "attention" | "nobody" | "neutral";
+export type ReceiptTone = "positive" | "active" | "waiting" | "attention" | "nobody" | "neutral";
 
 export interface ReceiptSummary {
   tone: ReceiptTone;
   replied: number;
   total: number;
-  /** The words a screen reader hears for the mark, and the popover title. */
+  /** The delivery summary a screen reader hears for the mark. */
   title: string;
 }
 
@@ -59,8 +59,10 @@ export function summarizeReceipt(receipt: Pick<DesktopMessageReceipt, "agents" |
   const replied = kinds.filter((kind) => kind === "replied").length;
   if (!total) return { tone: "nobody", replied: 0, total: 0, title: "Nobody was woken" };
   const attention = kinds.filter((kind) => kind === "attention").length;
-  const working = kinds.filter((kind) => kind === "working" || kind === "waiting").length;
-  const tone: ReceiptTone = attention ? "attention" : working ? "active" : replied ? "positive" : "neutral";
+  const tone: ReceiptTone = attention ? "attention"
+    : kinds.includes("working") ? "active"
+    : kinds.includes("waiting") ? "waiting"
+    : replied ? "positive" : "neutral";
   if (total === 1) {
     const [agent] = agents;
     const name = agent!.displayName;
@@ -81,7 +83,7 @@ function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
-/** One plain sentence on why nobody was woken. The title already says that nobody was. */
+/** One plain sentence on why nobody was woken. */
 export function noWakeSentence(noWake: DesktopMessageNoWake | null, sender: "you" | string = "you"): string {
   const you = sender === "you";
   switch (noWake?.reason) {
@@ -135,7 +137,7 @@ export function receiptRowDetail(agent: ReceiptAgent, sentAt: string, now: numbe
 
 export function readersLabel(receipt: Pick<DesktopMessageReceipt, "readers" | "notRead">): string {
   const read = receipt.readers.length;
-  if (!read) return "Nobody has read it yet";
+  if (!read) return "No reads yet";
   if (receipt.notRead && receipt.notRead.length === 0) return "Read by everyone";
   if (read === 1) return `Read by ${receipt.readers[0]!.name}`;
   return receipt.notRead ? `Read by ${read} of ${read + receipt.notRead.length}` : `Read by ${read}`;

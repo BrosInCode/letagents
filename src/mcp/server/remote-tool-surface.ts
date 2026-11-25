@@ -20,8 +20,6 @@ export const REMOTE_EXCLUDED_TOOLS: Readonly<Record<string, string>> = {
   clear_saved_auth: "No saved local auth exists on the remote endpoint.",
   get_onboarding_status: "Reports local auth bootstrap, which the remote endpoint does not use.",
   resume_room_session: "Local room sessions do not survive a remote connection.",
-  publish_page: "Reads the page from a local HTML file.",
-  get_page_reference: "For writing a page for publish_page, which reads a local file.",
 };
 
 /**
@@ -44,6 +42,8 @@ export const REMOTE_ALLOWED_TOOLS: readonly string[] = [
   "send_message", "send_thread_message", "set_agent_name", "set_board_manager_mode",
   "submit_review_verdict", "update_job", "update_task", "wait_for_messages",
   "list_pages", "read_page", "read_page_diagnostics",
+  // Remote publish_page takes a message attachment (source), never a path.
+  "publish_page", "get_page_reference",
   // letagents_api_read and letagents_api_write call the server only.
   ...API_AGENT_TOOLS.map((tool) => tool.name),
 ];

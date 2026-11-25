@@ -2,12 +2,13 @@ import type {
   DesktopGitHubAccessReason,
   DesktopOrganization,
   DesktopOrganizationInvitation,
+  DesktopOrganizationRoom,
   DesktopOrganizationSsoBlock,
 } from "../../../../../electron/ipc-types/organizations.js";
 import type { CompanyListStatus } from "../../../composables/useDesktopOrganizations";
 
 export type DesktopMcpWizardStep = "choose" | "install" | "done";
-export type FirstRunWizardStage = "welcome" | "mcp" | "github" | "organization" | "room";
+export type FirstRunWizardStage = "welcome" | "github" | "organization" | "theme" | "room";
 
 /** What the company step shows: the person's GitHub organizations and where the check stands. */
 export interface FirstRunCompanyStepState {
@@ -20,3 +21,5 @@ export interface FirstRunCompanyStepState {
   selectedId: string | null;
   joiningId: string | null;
 }
+
+export type FirstRunRoomChoice = Pick<DesktopOrganizationRoom, "kind" | "room_id" | "display_name" | "full_name" | "visibility"> & { local?: boolean };

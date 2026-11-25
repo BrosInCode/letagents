@@ -10,12 +10,11 @@
       'has-reply': Boolean(message.replyTo),
       'is-search-active': searchActive,
       'is-active-thread-root': activeThreadRoot,
-      'has-thread': context === 'timeline' && (threadIndicatorVisible || activeThreadRoot),
+      'has-thread': showThreadMarker,
       'is-compact-continuation': compactWithPrevious,
       'is-ambient-system-message': isAmbientSystem || isWakeNotice,
       'is-wake-notice': isWakeNotice,
       'is-arriving': animateArrival,
-      'is-reacting': reactionPickerAnchor !== null,
       'is-thread-context': context !== 'timeline',
       'is-thread-root-context': context === 'thread-root',
       'is-thread-reply-context': context === 'thread-reply',
@@ -31,8 +30,7 @@
     @pointerup.stop="handleSelectionPointerUp"
   >
     <WakeGlyph v-if="isWakeNotice" class="room-chat-wake-glyph" state="woke" :still="!animateArrival" />
-    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="avatarUrl" :agent="ownerKind === 'agent'" :provider="ideLabel" :agent-key="message.agentIdentity?.agentKey" :avatar="message.agentIdentity?.avatar" />
-    <div v-else class="room-chat-avatar" :style="{ '--avatar-color': senderColor }" aria-hidden="true" />
+    <div v-else-if="!senderRole" class="room-chat-avatar" :style="{ '--avatar-color': senderColor }" aria-hidden="true" />
 
     <div class="room-chat-message-content">
       <div v-if="!githubHistory" class="room-message-meta">
@@ -57,70 +55,73 @@
           </button>
           <strong v-else>{{ displayName }}</strong>
           <span v-if="ownerKind === 'agent' && ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
-
         </div>
         <div class="room-message-meta-tail">
-          <div class="room-message-actions">
-          <button
-            v-if="reactable"
-            class="room-message-reply-action room-message-react-action"
-            type="button"
-            title="Add reaction"
-            aria-label="Add reaction"
-            aria-haspopup="dialog"
-            :aria-expanded="reactionPickerAnchor !== null"
-            @click="openReactionPicker"
-          >
-            <SmilePlus :size="14" aria-hidden="true" />
-          </button>
-          <button
-            class="room-message-reply-action room-message-copy-action"
-            type="button"
-            :title="copyButtonTitle"
-            :aria-label="copyButtonTitle"
-            @click="copyMessage"
-          >
-            <Check v-if="copied" :size="14" aria-hidden="true" />
-            <Copy v-else :size="14" aria-hidden="true" />
-          </button>
-          <button
-            v-if="!message.outgoing"
-            class="room-message-reply-action room-message-quote-action"
-            type="button"
-            title="Quote reply"
-            aria-label="Quote reply"
-            @click="$emit('quote-reply', message.id)"
-          >
-            <CornerUpLeft :size="14" aria-hidden="true" />
-          </button>
-          <button
-            v-if="!message.outgoing"
-            class="room-message-reply-action room-message-thread-action"
-            type="button"
-            :title="tertiaryActionLabel"
-            :aria-label="tertiaryActionLabel"
-            @click="handleTertiaryAction"
-          >
-            <LocateFixed v-if="context !== 'timeline'" :size="14" aria-hidden="true" />
-            <MessageSquare v-else :size="14" aria-hidden="true" />
-          </button>
-          <button
-            v-if="pinnable"
-            class="room-message-reply-action room-message-pin-action"
-            type="button"
-            :title="pinned ? 'Unpin message' : 'Pin message'"
-            :aria-label="pinned ? 'Unpin message' : 'Pin message'"
-            :aria-pressed="pinned"
-            :disabled="Boolean(pinContext?.state.value.pending)"
-            @click="pinContext?.toggle(message.id)"
-          ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></button>
-          </div>
           <span v-if="provenanceLabel" class="room-message-provenance" :data-kind="ownerKind">
             {{ provenanceLabel }}
           </span>
           <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
           <time :datetime="message.timestamp">{{ formattedTime }}</time>
-          <RoomMessageReceiptMark v-if="showsReceipt" ref="receiptMark" :message-id="message.id" :context="context" :thread-root-id="message.threadRootId && message.threadRootId !== message.id ? message.threadRootId : null" />
+          <div v-if="!isAmbientSystem && !isWakeNotice" class="room-message-actions">
+            <RoomMessageReceiptMark v-if="showsReceipt" ref="receiptMark" :message-id="message.id" :context="context" :thread-root-id="message.threadRootId && message.threadRootId !== message.id ? message.threadRootId : null" />
+            <button
+              v-if="showQuickActions && reactable"
+              ref="reactionAction"
+              class="room-message-quick-action"
+              type="button"
+              title="Add reaction"
+              aria-label="Add reaction"
+              aria-haspopup="dialog"
+              :aria-expanded="reactionPickerAnchor?.element === reactionAction"
+              @click="openReactionPicker"
+            >
+              <SmilePlus :size="14" aria-hidden="true" />
+            </button>
+            <button
+              v-if="message.outgoing || showQuickActions"
+              :class="message.outgoing ? 'room-message-meta-action' : 'room-message-quick-action'"
+              type="button"
+              :title="copyButtonTitle"
+              :aria-label="copyButtonTitle"
+              @click="copyMessage"
+            >
+              <Check v-if="copied" :size="14" aria-hidden="true" />
+              <Copy v-else :size="14" aria-hidden="true" />
+            </button>
+            <template v-if="showQuickActions">
+              <button class="room-message-quick-action" type="button" title="Quote reply" aria-label="Quote reply" @click="$emit('quote-reply', message.id)">
+                <CornerUpLeft :size="14" aria-hidden="true" />
+              </button>
+              <button class="room-message-quick-action" type="button" title="Reply in thread" aria-label="Reply in thread" @click="$emit('open-thread', message.id)">
+                <MessageSquare :size="14" aria-hidden="true" />
+              </button>
+              <button
+                v-if="pinnable"
+                class="room-message-quick-action"
+                type="button"
+                :title="pinned ? 'Unpin message' : 'Pin message'"
+                :aria-label="pinned ? 'Unpin message' : 'Pin message'"
+                :aria-pressed="pinned"
+                :disabled="Boolean(pinContext?.state.value.pending)"
+                @click="pinContext?.toggle(message.id)"
+              >
+                <Pin :size="14" aria-hidden="true" />
+              </button>
+            </template>
+            <button
+              v-if="!message.outgoing"
+              ref="messageActionsTrigger"
+              class="room-message-meta-action"
+              type="button"
+              title="Message actions"
+              aria-label="Message actions"
+              aria-haspopup="menu"
+              :aria-expanded="contextMenuOpen && contextMenuInvoker === messageActionsTrigger"
+              @click="openMessageActions"
+            >
+              <Ellipsis :size="14" aria-hidden="true" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -177,114 +178,115 @@
           </template>
         </div>
       </div>
-      <div class="room-message-bubble">
-        <button
-          v-if="message.replyTo && (context !== 'thread-reply' || message.replyTo.id !== message.threadRootId)"
-          class="room-message-reply"
-          type="button"
-          :aria-label="`Reply preview from ${replyDisplayName}`"
-          @click="$emit('scroll-to-message', message.replyTo.id)"
-        >
-          <span class="room-message-reply-label">Replying to {{ replyDisplayName }}</span>
-          <span class="room-message-reply-text">{{ replyPreviewText }}</span>
-        </button>
-
-        <DesktopGitHubEventCard
-          v-if="githubEvent"
-          :history="githubHistory"
-          :timestamp="message.timestamp"
-          room
-          :event="githubEvent"
-          :task-link-enabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
-          @open-event="$emit('open-github-event', $event)"
-          @open-task="$emit('open-task', $event)"
-        />
-
-        <DesktopLongMessageContent
-          v-else-if="(!message.gif || visibleText) && (!message.outgoing?.attachmentCount || visibleText) && !(message.gif?.text_fallback_only && gifState !== 'unavailable')"
-          :text="visibleText || 'No message body.'"
-          :html="renderedText"
-          :message-id="message.id"
-          :room-identifier="roomIdentifier"
-          :sender="readerSender"
-          @message-reference-click="$emit('scroll-to-message', $event)"
-          @task-reference-click="$emit('open-task', $event)"
-          @mention-click="openMention"
-        />
-
-        <DesktopGitHubEventCard
-          v-for="preview in linkPreviews"
-          :key="preview.url"
-          :event="linkPreviewPresentation(preview)"
-          compact
-        />
-        <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @state="gifState = $event" />
-        <ul
-          v-if="message.outgoing && !message.attachments.length && outgoingAttachmentItems.length"
-          class="room-message-outgoing-attachments"
-          aria-label="Queued attachments"
-        >
-          <li v-for="item in outgoingAttachmentItems" :key="item.upload_id" class="room-message-outgoing-attachment">
-            <Paperclip :size="13" aria-hidden="true" />
-            <strong>{{ item.fileName || "Attachment" }}</strong>
-            <small v-if="item.sizeLabel">{{ item.sizeLabel }}</small>
-          </li>
-        </ul>
-        <DesktopMessageAttachments
-          v-if="message.attachments.length"
-          :message-id="message.id"
-          :attachments="message.attachments"
-          :sender-label="displayName"
-          :room-identifier="roomIdentifier"
-          :thread-root-id="message.threadRootId || message.id"
-          @open-image="$emit('open-image', $event)"
-        />
-      <button
-        v-if="context === 'timeline' && (threadIndicatorVisible || activeThreadRoot)"
-        class="room-thread-marker"
-        :class="{ 'is-active': activeThreadRoot }"
-        type="button"
-        :aria-label="threadMarkerAriaLabel"
-        :aria-expanded="activeThreadRoot"
-        :aria-controls="`room-inline-thread-${message.id}`"
-        @click="$emit('open-thread', message.id)"
-      >
-        <span class="room-thread-marker-main">
-          <MessageSquare :size="13" aria-hidden="true" />
-          <strong>{{ threadMarkerCountLabel }}</strong>
-          <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-count">
-            {{ threadSummary.unreadCount }}
-          </span>
-          <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
-          <span
-            v-if="threadSummary.hasRefusedOutgoing || threadSummary.hasUncertainOutgoing || threadSummary.hasPendingOutgoing"
-            class="room-thread-outgoing-badge"
-            :data-status="threadSummary.hasRefusedOutgoing ? 'refused' : threadSummary.hasUncertainOutgoing ? 'uncertain' : 'pending'"
+      <div class="room-message-line">
+        <ChatAvatar v-if="senderRole" :name="displayName" :avatar-url="avatarUrl" :agent="ownerKind === 'agent'" :provider="ideLabel" :agent-key="message.agentIdentity?.agentKey" :avatar="message.agentIdentity?.avatar" />
+        <div class="room-message-bubble" :data-thread-wide="threadWide || undefined">
+          <button
+            v-if="message.replyTo && (context !== 'thread-reply' || message.replyTo.id !== message.threadRootId)"
+            class="room-message-reply"
+            type="button"
+            :aria-label="`Reply preview from ${replyDisplayName}`"
+            @click="$emit('scroll-to-message', message.replyTo.id)"
           >
-            <CircleAlert v-if="threadSummary.hasRefusedOutgoing || threadSummary.hasUncertainOutgoing" :size="11" aria-hidden="true" />
-            <Clock v-else :size="11" aria-hidden="true" />
-            <span>{{ threadSummary.hasRefusedOutgoing ? "Not sent" : threadSummary.hasUncertainOutgoing ? "Delivery not confirmed" : "Sending…" }}</span>
-          </span>
-        </span>
-        <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
-          <span
-            v-for="participant in threadSummary.participants"
-            :key="participant.key"
-            class="room-thread-participant-avatar"
-            :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.sender || participant.displayName, null) }"
-            :title="participant.displayName"
+            <span class="room-message-reply-label">Replying to {{ replyDisplayName }}</span>
+            <span class="room-message-reply-text">{{ replyPreviewText }}</span>
+          </button>
+
+          <DesktopGitHubEventCard
+            v-if="githubEvent"
+            :history="githubHistory"
+            :timestamp="message.timestamp"
+            room
+            :event="githubEvent"
+            :task-link-enabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
+            @open-event="$emit('open-github-event', $event)"
+            @open-task="$emit('open-task', $event)"
+          />
+
+          <DesktopLongMessageContent
+            v-else-if="(!message.gif || visibleText) && (!message.outgoing?.attachmentCount || visibleText) && !(message.gif?.text_fallback_only && gifState !== 'unavailable')"
+            ref="longMessageContent"
+            :text="visibleText || 'No message body.'"
+            :html="renderedText"
+            :message-id="message.id"
+            :room-identifier="roomIdentifier"
+            :sender="readerSender"
+            @message-reference-click="$emit('scroll-to-message', $event)"
+            @task-reference-click="$emit('open-task', $event)"
+            @mention-click="openMention"
+          />
+
+          <DesktopGitHubEventCard
+            v-for="preview in linkPreviews"
+            :key="preview.url"
+            :event="linkPreviewPresentation(preview)"
+            compact
+          />
+          <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @state="gifState = $event" />
+          <ul
+            v-if="message.outgoing && !message.attachments.length && outgoingAttachmentItems.length"
+            class="room-message-outgoing-attachments"
+            aria-label="Queued attachments"
           >
-            {{ participantInitials(participant.displayName) }}
-          </span>
-        </span>
-        <span v-if="threadMarkerPreview" class="room-thread-marker-preview">
-          {{ threadMarkerPreview }}
-        </span>
-        <ChevronDown class="room-thread-marker-chevron" :size="14" aria-hidden="true" />
-      </button>
-        <ThreadTransition>
-          <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread"><component :is="inlineThread" v-if="inlineThread" /></slot></div>
-        </ThreadTransition>
+            <li v-for="item in outgoingAttachmentItems" :key="item.upload_id" class="room-message-outgoing-attachment">
+              <Paperclip :size="13" aria-hidden="true" />
+              <strong>{{ item.fileName || "Attachment" }}</strong>
+              <small v-if="item.sizeLabel">{{ item.sizeLabel }}</small>
+            </li>
+          </ul>
+          <DesktopMessageAttachments
+            v-if="message.attachments.length"
+            :message-id="message.id"
+            :attachments="message.attachments"
+            :sender-label="displayName"
+            :room-identifier="roomIdentifier"
+            :thread-root-id="message.threadRootId || message.id"
+            @open-image="$emit('open-image', $event)"
+          />
+          <button
+            v-if="showThreadMarker"
+            class="room-thread-marker"
+            :class="{ 'is-active': activeThreadRoot }"
+            type="button"
+            :aria-label="threadMarkerAriaLabel"
+            :aria-expanded="activeThreadRoot"
+            :aria-controls="`room-inline-thread-${message.id}`"
+            @click="$emit('open-thread', message.id)"
+          >
+            <span class="room-thread-marker-main">
+              <MessageSquare :size="13" aria-hidden="true" />
+              <strong>{{ threadMarkerCountLabel }}</strong>
+              <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-count">
+                {{ threadSummary.unreadCount }}
+              </span>
+              <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
+              <span
+                v-if="threadSummary.hasRefusedOutgoing || threadSummary.hasUncertainOutgoing || threadSummary.hasPendingOutgoing"
+                class="room-thread-outgoing-badge"
+                :data-status="threadSummary.hasRefusedOutgoing ? 'refused' : threadSummary.hasUncertainOutgoing ? 'uncertain' : 'pending'"
+              >
+                <CircleAlert v-if="threadSummary.hasRefusedOutgoing || threadSummary.hasUncertainOutgoing" :size="11" aria-hidden="true" />
+                <Clock v-else :size="11" aria-hidden="true" />
+                <span>{{ threadSummary.hasRefusedOutgoing ? "Not sent" : threadSummary.hasUncertainOutgoing ? "Delivery not confirmed" : "Sending…" }}</span>
+              </span>
+            </span>
+            <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
+              <span
+                v-for="participant in threadSummary.participants"
+                :key="participant.key"
+                class="room-thread-participant-avatar"
+                :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.sender || participant.displayName, null) }"
+                :title="participant.displayName"
+              >
+                {{ participantInitials(participant.displayName) }}
+              </span>
+            </span>
+            <ChevronDown class="room-thread-marker-chevron" :size="14" aria-hidden="true" />
+          </button>
+          <ThreadTransition reveal @settled="finishThreadMotion">
+            <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread"><component :is="inlineThread" v-if="inlineThread" /></slot></div>
+          </ThreadTransition>
+        </div>
       </div>
 
       <MessageReactionBar
@@ -305,21 +307,46 @@
         aria-live="polite"
       >
         <li
-          v-for="receipt in visibleDeliveryReceipts"
+          v-for="{ receipt, modelRecovery } in deliveryReceiptRows"
           :key="receipt.agentId"
           :data-state="receipt.state"
           :data-follow-up="receipt.scheduledRetry ? 'scheduled' : receipt.followUpNote?.state"
-          :aria-label="receiptLabel(receipt)"
+          :data-limit="inlineDeliveryLimits.has(receipt.agentId) || undefined"
+          :data-model-recovery="modelRecovery ? (modelRecovery.modelLabel && !modelRecovery.retryError ? 'ready' : 'limit') : undefined"
+          :aria-label="inlineDeliveryLimits.has(receipt.agentId) || modelRecovery ? undefined : receiptLabel(receipt)"
         >
+          <ClaudeLimitNotice
+            v-if="inlineDeliveryLimits.has(receipt.agentId)"
+            :notice="deliveryLimitNotices.get(receipt.agentId)!"
+            :agent-name="receipt.agentName"
+            :can-switch="Boolean(deliveryLimitNotices.get(receipt.agentId)?.modelFamily && agentLaunchHost?.openAgent)"
+            @switch-model="agentLaunchHost?.openAgent?.(receipt.agentId, 'settings')"
+          />
+          <template v-else>
           <span class="room-message-delivery-indicator" aria-hidden="true">
             <span v-if="receiptIsAnimated(receipt.state)" class="room-message-delivery-dots">
               <i></i><i></i><i></i>
             </span>
+            <Check v-else-if="modelRecovery?.modelLabel && !modelRecovery.retryError" :size="14" />
             <CircleAlert v-else-if="receiptNeedsAttention(receipt.state) || receipt.state === 'acknowledged_failed'" :size="14" />
             <Check v-else :size="14" />
           </span>
           <strong>{{ receipt.agentName }}</strong>
-          <small v-if="receiptStateLabel(receipt)">{{ receiptStateLabel(receipt) }}</small>
+          <small v-if="modelRecovery?.retryError">Couldn’t retry</small>
+          <small v-else-if="modelRecovery?.modelLabel">{{ modelRecovery.modelLabel }} ready</small>
+          <small v-else-if="receiptStateLabel(receipt)">{{ receiptStateLabel(receipt) }}</small>
+          <button
+            v-if="modelRecovery"
+            class="room-message-model-recovery-action"
+            type="button"
+            :disabled="modelRecovery.disabled || modelRecovery.retrying"
+            :title="modelRecovery.blocked ? 'Resolve the waiting delivery before switching models' : undefined"
+            @click.stop="modelRecovery.activate()"
+          >
+            {{ modelRecovery.retrying ? "Retrying…" : modelRecovery.modelLabel ? "Retry original message" : modelRecovery.blocked ? "Review delivery" : "Change model" }}
+            <ChevronRight v-if="!modelRecovery.modelLabel" :size="12" aria-hidden="true" />
+          </button>
+          </template>
           <template v-if="receipt.scheduledRetry">
             <small class="room-message-delivery-countdown" aria-hidden="true"><span>{{ scheduledRetryParts(receipt)[0] }}</span> <span>{{ scheduledRetryParts(receipt)[1] }}</span></small>
             <button
@@ -401,9 +428,11 @@
         class="room-message-context-menu"
         :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
         role="menu"
+        aria-label="Message actions"
         data-testid="room-message-context-menu"
         @keydown.down.prevent="focusContextMenuItem(1)"
         @keydown.up.prevent="focusContextMenuItem(-1)"
+        @keydown.tab="tabFromContextMenu"
         @pointerdown.stop
         @contextmenu.prevent.stop
       >
@@ -427,6 +456,9 @@
           </button>
           <button v-if="canCopyMessageLink" type="button" role="menuitem" @click="copyMessageLinkFromContext">
             <span>Copy link to message</span>
+          </button>
+          <button v-if="longMessageContent?.canOpenReader" type="button" role="menuitem" @click="openMessageReader">
+            <span>Open reader</span>
           </button>
           <button type="button" role="menuitem" @click="quoteReplyFromContext">
             <span>Quote reply</span>
@@ -503,7 +535,7 @@ import {
 } from "../../../domain/message-outbox";
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
-import { Check, ChevronDown, CircleAlert, Clock, Copy, CornerUpLeft, LocateFixed, MessageSquare, Paperclip, RotateCw, SmilePlus } from "@lucide/vue";
+import { Check, ChevronDown, ChevronRight, CircleAlert, Clock, Copy, CornerUpLeft, Ellipsis, MessageSquare, Paperclip, Pin, RotateCw, SmilePlus } from "@lucide/vue";
 import { formatBytes } from "./attachments/formatting";
 import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -526,7 +558,10 @@ import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCar
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
 import ChatAvatar from "../../../../../../../shared/ui/ChatAvatar.vue";
 import { chatSenderRole } from "../../../../../../../shared/chat-appearance";
-import { supervisorEntriesKey } from "./add-agent/supervisor-entries-context";
+import { isOwnedLocalRoomAgent, supervisorEntriesKey } from "./add-agent/supervisor-entries-context";
+import { composerAgentLaunchKey } from "./room-chat/composer-agent-launch";
+import ClaudeLimitNotice from "./agent-inspector/ClaudeLimitNotice.vue";
+import { claudeLimitNotice, type ClaudeLimitNotice as ClaudeLimitDetails } from "../../../domain/claude-usage-limit";
 import "../../../../../../../shared/ui/chat-palette.css";
 import { useChatStyling } from "../../../../../../../shared/ui/chat-styling";
 const chatStyling = useChatStyling();
@@ -544,6 +579,7 @@ import {
 import {
   formatTimestamp,
   highlightRenderedMessage,
+  linkRenderedGitHubReferences,
   linkRenderedMessageReferences,
   mayContainMessageReference,
   renderMessageText,
@@ -700,7 +736,7 @@ function receiptErrorLabel(error: string | null): string | null {
   return normalized.length > 180 ? `${normalized.slice(0, 179)}…` : normalized;
 }
 
-function receiptStateLabel(receipt: { state: string; terminalReason: string | null; error: string | null }): string {
+function receiptStateLabel(receipt: { agentId: string; state: string; terminalReason: string | null; error: string | null }): string {
   if (receipt.terminalReason === "upgrade_authority_unavailable") return "Retired during safety upgrade";
   const state = receipt.state;
   if (state === "retryable") return "Retrying";
@@ -710,13 +746,18 @@ function receiptStateLabel(receipt: { state: string; terminalReason: string | nu
   if (state === "queued_behind_blocked") return "Queued behind an issue";
   if (state === "queued_behind_retry") return "Queued until the agent has tried again";
   if (state === "acknowledged_no_reply") return "Read · no reply";
-  if (state === "acknowledged_failed") return receiptErrorLabel(receipt.error) || "Work did not finish";
+  if (state === "acknowledged_failed") return receiptFailureLabel(receipt);
   if (state === "cancelled_by_room_move") return "Moved rooms";
   if (state === "cancelled_by_user") return "Skipped";
   return "";
 }
 
-function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null; error: string | null;
+function receiptFailureLabel(receipt: { agentId?: string; error: string | null }): string {
+  return (receipt.agentId ? deliveryLimitNotices.value.get(receipt.agentId)?.title : null)
+    || receiptErrorLabel(receipt.error) || "Work did not finish";
+}
+
+function receiptLabel(receipt: { agentId?: string; agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null; error: string | null;
   scheduledRetry?: AgentScheduledRetryView | null; followUpNote?: RoomMessageFollowUpNote | null }): string {
   if (receipt.terminalReason === "upgrade_authority_unavailable") return `A safety upgrade retired this legacy turn for ${receipt.agentName}; its exact authority could not be reconstructed`;
   if (receipt.scheduledRetry || receipt.followUpNote) {
@@ -732,7 +773,7 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   if (receipt.state === "pending") return `${receipt.agentName} is queued to respond`;
   if (receipt.state === "acknowledged") return `${receipt.agentName} replied`;
   if (receipt.state === "acknowledged_no_reply") return `${receipt.agentName} saw this and chose not to reply`;
-  if (receipt.state === "acknowledged_failed") return `${receipt.agentName}: ${receiptErrorLabel(receipt.error) || "Work did not finish"}`;
+  if (receipt.state === "acknowledged_failed") return `${receipt.agentName}: ${receiptFailureLabel(receipt)}`;
   if (receipt.state === "retryable") return `${receipt.agentName} couldn’t finish; retrying`;
   if (receipt.state === "result_recovery") return `${receipt.agentName} answered, but LetAgents is re-reading the completed result`;
   if (receipt.state === "restoring_conversation") return `${receipt.agentName} is restoring its private conversation`;
@@ -753,6 +794,7 @@ function reminderScheduled(dueAt: string) {
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
 const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
+const messageActionsTrigger = ref<HTMLButtonElement | null>(null);
 const contextMenuInvoker = ref<HTMLElement | null>(null);
 // When the right-click landed on an external web link, the menu shows link
 // actions ("Open link in browser" / "Copy link") instead of message actions.
@@ -780,12 +822,34 @@ const isAmbientSystem = computed(() =>
 const githubEvent = computed(() => props.message.source === "browser" ? null : parseGitHubEvent(props.message));
 const viewer = useMessageViewer();
 const supervisorEntries = inject(supervisorEntriesKey, null);
-const ownedLocalAgent = computed(() => isLocalRoomIdentifier(props.roomIdentifier)
-  && Boolean(props.message.agentIdentity?.agentKey && supervisorEntries?.entries.value.some(entry =>
-    entry.localRoomId === props.roomIdentifier && entry.agentKey === props.message.agentIdentity?.agentKey)));
+const agentLaunchHost = inject(composerAgentLaunchKey, null);
+const deliveryLimitNotices = computed(() => {
+  const notices = new Map<string, ClaudeLimitDetails>();
+  for (const receipt of visibleDeliveryReceipts.value) {
+    if (receipt.state !== "acknowledged_failed" && receipt.state !== "blocked") continue;
+    const entry = supervisorEntries?.entries.value.find(agent => agent.id === receipt.agentId);
+    const notice = claudeLimitNotice(receipt.error, entry?.provider);
+    if (notice) notices.set(receipt.agentId, notice);
+  }
+  return notices;
+});
+const inlineDeliveryLimits = computed(() => new Set(visibleDeliveryReceipts.value.filter((receipt) => {
+  const notice = deliveryLimitNotices.value.get(receipt.agentId);
+  return notice && (receipt.state !== "acknowledged_failed" || !notice.modelFamily);
+}).map((receipt) => receipt.agentId)));
+const deliveryReceiptRows = computed(() => visibleDeliveryReceipts.value.map((receipt) => ({
+  receipt,
+  modelRecovery: receipt.state === "acknowledged_failed" && deliveryLimitNotices.value.get(receipt.agentId)?.modelFamily
+    ? receiptContext?.modelRecoveryFor?.(props.message, receipt.agentId)
+    : null,
+})));
+const ownedLocalAgent = computed(() => isOwnedLocalRoomAgent(
+  props.roomIdentifier, props.message.agentIdentity?.agentKey, supervisorEntries?.entries.value,
+));
 const senderRole = computed(() => chatSenderRole({ human: ownerKind.value === 'human', agent: ownerKind.value === 'agent',
   viewerLogin: viewer.value?.login, login: props.message.senderProfile?.login, agentKey: props.message.agentIdentity?.agentKey,
   ownedLocalAgent: ownedLocalAgent.value, outgoing: Boolean(props.message.outgoing) }));
+const showQuickActions = computed(() => Boolean(senderRole.value) && props.context === "timeline" && !props.message.outgoing);
 const avatarUrl = computed(() => props.message.senderProfile?.avatarUrl || (props.message.outgoing ? viewer.value?.avatar_url : null));
 const readerSender = computed(() => ({
   name: displayName.value,
@@ -893,7 +957,8 @@ function openMention(mentionKey: string, position: PersonMenuPosition): void {
   if (target.kind === "agent") emit("open-agent", target.agent);
   else emit("open-person", target.person, position);
 }
-const renderedText = computed(() => highlightRenderedMessage(mentionLinkedText.value, props.highlightQuery));
+const gitHubLinkedText = computed(() => linkRenderedGitHubReferences(mentionLinkedText.value, previewContext?.repository.value ?? null));
+const renderedText = computed(() => highlightRenderedMessage(gitHubLinkedText.value, props.highlightQuery));
 const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");
 const tertiaryActionLabel = computed(() => props.context === "timeline" ? "Reply in thread" : "Jump to root");
 const selectionActionLabel = computed(() => props.context === "timeline" ? "Add to chat" : "Add to thread");
@@ -902,17 +967,9 @@ const threadIndicatorVisible = computed(() =>
 );
 const threadMarkerCountLabel = computed(() => {
   if (props.threadSummary.loadingEarlier && props.threadSummary.count === 0) return "Loading replies";
+  if (props.threadSummary.count === 0) return "Thread";
   if (props.threadSummary.count === 1) return "1 reply";
   return `${props.threadSummary.count} replies`;
-});
-const threadMarkerPreview = computed(() => {
-  const latest = props.threadSummary.latest;
-  const preview = truncate((props.threadSummary.latestPreview || "").replace(/\s+/g, " ").trim(), 92);
-  const timestamp = props.threadSummary.latestTimestamp ? formatTimestamp(props.threadSummary.latestTimestamp) : null;
-  if (!preview && !timestamp && !latest) return props.threadSummary.hasPartialHistory ? "Earlier replies are not fully loaded" : null;
-  const latestName = latest ? parseSenderIdentity(latest).displayName : "Latest";
-  const prefix = timestamp ? `${latestName} ${timestamp}` : latestName;
-  return preview ? `${prefix}: ${preview}` : prefix;
 });
 const threadMarkerAriaLabel = computed(() => {
   const unread = props.threadSummary.unreadCount > 0 ? `, ${props.threadSummary.unreadCount} unread` : "";
@@ -972,10 +1029,27 @@ function openContextMenu(event: MouseEvent): void {
   }
   event.preventDefault();
   const article = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  const invoker = target?.closest<HTMLElement>("button, a, [tabindex]") || article;
+  showContextMenu(event.clientX, event.clientY, invoker, linkHref);
+}
+
+function openMessageActions(): void {
+  const trigger = messageActionsTrigger.value;
+  if (!trigger) return;
+  if (contextMenuOpen.value && contextMenuInvoker.value === trigger) {
+    closeContextMenu("complete");
+    return;
+  }
+  const bounds = trigger.getBoundingClientRect();
+  showContextMenu(bounds.right - messageMenuWidth, bounds.bottom + 4, trigger, null);
+}
+
+const messageMenuWidth = 180;
+
+function showContextMenu(x: number, y: number, invoker: HTMLElement | null, linkHref: string | null): void {
   contextLinkHref.value = linkHref;
-  contextMenuInvoker.value = target?.closest<HTMLElement>("button, a, [tabindex]") || article;
+  contextMenuInvoker.value = invoker;
   closeSelectionPopover();
-  const menuWidth = 180;
   // Link variant: 3 rows + separator; message variant: 4 rows + separator,
   // plus a row for each available pin/reaction action. The estimate must
   // cover the tallest variant or the last row ("Message info") clips below
@@ -984,17 +1058,29 @@ function openContextMenu(event: MouseEvent): void {
   const deletionMenuHeight = deleteContent ? 44 + props.message.attachments.length * 36 : 0;
   const menuHeight = deletionMenuHeight + (linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0)) - (hasReceipt.value ? 0 : 41);
   const clampedMenuHeight = menuHeight + (!linkHref && remindable.value ? 32 : 0) + (!linkHref && canCopyMessageLink.value ? 32 : 0)
+    + (!linkHref && longMessageContent.value?.canOpenReader ? 32 : 0)
     + (!linkHref && canMarkUnread.value ? 32 : 0);
   contextMenuPosition.value = {
-    x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - clampedMenuHeight - 8)),
+    x: Math.max(8, Math.min(x, window.innerWidth - messageMenuWidth - 8)),
+    y: Math.max(8, Math.min(y, window.innerHeight - clampedMenuHeight - 8)),
   };
   contextMenuOpen.value = true;
-  void nextTick(() => firstContextMenuButton.value?.focus());
-  window.setTimeout(() => {
-    window.addEventListener("pointerdown", closeContextMenuFromOutside, { once: true });
-    window.addEventListener("keydown", handleContextMenuKeydown);
-  }, 0);
+  void nextTick(() => {
+    const firstItem = firstContextMenuButton.value;
+    if (!contextMenuOpen.value || !firstItem) return;
+    const bounds = firstItem.parentElement?.getBoundingClientRect?.();
+    if (bounds && invoker === messageActionsTrigger.value && invoker) {
+      const anchor = invoker.getBoundingClientRect();
+      const positionAbove = anchor.bottom + 4 + bounds.height > window.innerHeight - 8;
+      contextMenuPosition.value = {
+        x: Math.max(8, Math.min(anchor.right - bounds.width, window.innerWidth - bounds.width - 8)),
+        y: Math.max(8, positionAbove ? anchor.top - bounds.height - 4 : anchor.bottom + 4),
+      };
+    }
+    firstItem.focus({ preventScroll: true });
+  });
+  window.addEventListener("pointerdown", closeContextMenuFromOutside);
+  window.addEventListener("keydown", handleContextMenuKeydown);
 }
 
 function shouldUseNativeContextMenu(event: MouseEvent): boolean {
@@ -1014,7 +1100,15 @@ function closeContextMenu(reason: ContextMenuCloseReason): void {
   contextLinkHref.value = null;
 }
 
-function closeContextMenuFromOutside(): void {
+function closeContextMenuFromOutside(event?: PointerEvent): void {
+  const trigger = messageActionsTrigger.value;
+  if (trigger === contextMenuInvoker.value && trigger && event?.target instanceof Node && trigger.contains(event.target)) return;
+  closeContextMenu("outside");
+}
+
+function tabFromContextMenu(): void {
+  // Continue through the message list from the invoker, not the teleported menu.
+  restoreContextMenuFocus(contextMenuInvoker.value);
   closeContextMenu("outside");
 }
 
@@ -1070,7 +1164,25 @@ watch([() => props.message.id, () => props.message.reactions !== undefined], () 
 }, { immediate: true });
 
 const messageElement = ref<HTMLElement | null>(null);
+const longMessageContent = ref<InstanceType<typeof DesktopLongMessageContent> | null>(null);
+const threadClosing = ref(false);
+const threadWide = computed(() => props.context === "timeline" && (threadIndicatorVisible.value || props.activeThreadRoot));
+const showThreadMarker = computed(() => threadWide.value || threadClosing.value);
+
+watch(() => props.activeThreadRoot, open => {
+  threadClosing.value = !open && props.context === "timeline";
+}, { flush: "sync" });
+
+function finishThreadMotion(): void {
+  threadClosing.value = false;
+}
+
+function openMessageReader(): void {
+  closeContextMenu("complete");
+  void nextTick(() => longMessageContent.value?.openReader());
+}
 const reactionPickerAnchor = ref<MessageReactionPickerAnchor | null>(null);
+const reactionAction = ref<HTMLButtonElement | null>(null);
 const reactionPickerInstant = ref(false);
 let reactionPickerInvoker: HTMLElement | null = null;
 let reactionPickerClosedByPress: { invoker: HTMLElement; at: number } | null = null;
@@ -1118,10 +1230,6 @@ function reactFromContext(): void {
 
 function tertiaryActionFromContext(): void {
   closeContextMenu("action");
-  handleTertiaryAction();
-}
-
-function handleTertiaryAction(): void {
   if (props.context === "timeline") {
     emit("open-thread", props.message.id);
     return;
@@ -1220,7 +1328,7 @@ function handleSelectionPointerUp(event: PointerEvent): void {
       x: Math.max(8, Math.min(bounds.left + bounds.width / 2, window.innerWidth - 112)),
       y: Math.max(8, bounds.top - 42),
     };
-    contextMenuOpen.value = false;
+    if (contextMenuOpen.value) closeContextMenu("outside");
     selectionPopoverOpen.value = true;
     addSelectionOutsidePointerListener();
     window.addEventListener("keydown", handleSelectionKeydown);

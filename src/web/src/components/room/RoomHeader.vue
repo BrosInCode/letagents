@@ -154,7 +154,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleFindShortcut))
 </script>
 
 <style scoped>
-.chat-header { position: relative; z-index: 20; min-width: 0; border-bottom: 1px solid var(--line, #27272a); background: var(--bg-0, #09090b); }
+.chat-header { position: relative; z-index: 20; min-width: 0; border-bottom: 1px solid var(--line, #27272a); background: var(--workspace-canvas, var(--bg-0, #09090b)); }
 .room-toolbar { display: flex; align-items: center; gap: 12px; min-width: 0; height: 52px; padding: env(safe-area-inset-top, 0px) max(16px, env(safe-area-inset-right, 0px)) 0 max(20px, env(safe-area-inset-left, 0px)); }
 .chat-header svg { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .room-identity { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 210px; flex: 0 1 auto; }

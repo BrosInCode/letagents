@@ -26,7 +26,7 @@ describe("agent inspector long-text contract", () => {
       ".agent-inspector-settings",
       ".agent-inspector-participant-scroll",
     ]) {
-      assert.match(rule(styles, selector), /display: grid; grid-template-columns: minmax\(0, 1fr\);/, selector);
+      assert.match(rule(styles, selector), /display: grid;\s+grid-template-columns: minmax\(0, 1fr\);/, selector);
     }
   });
 
@@ -45,8 +45,10 @@ describe("agent inspector long-text contract", () => {
       ".agent-inspector-continuation-recovery p",
       ".agent-inspector-delivery-progress div > span",
       ".agent-inspector-work-note p",
-      ".agent-inspector-settings-note, .agent-inspector-danger > p",
+      ".agent-inspector-settings-note",
       ".agent-inspector-settings-error",
+      ".agent-inspector-initial-message",
+      ".agent-inspector-permission-choice > span,\n.agent-inspector-rule-copy",
     ]) {
       assert.match(rule(styles, selector), /overflow-wrap: anywhere;/, selector);
     }

@@ -104,6 +104,8 @@
         <span ref="indicatorElement" class="desktop-room-tab-underline room-view-underline" style="visibility: hidden" aria-hidden="true" />
       </nav>
       <div class="desktop-room-tools" data-testid="desktop-room-tools">
+        <button v-if="offerTour" class="desktop-room-settings-button" type="button" aria-label="Quick tour"
+          title="Quick tour" aria-haspopup="dialog" data-testid="room-header-quick-tour" @click="emit('openTour')"><Compass aria-hidden="true" /></button>
         <RoomAttentionButton v-if="attentionCount" :count="attentionCount" :pulse="attention?.pulse" :aria-label="`Open Inbox for ${room.displayName}, ${attentionCount} ${attentionCount === 1 ? 'request needs' : 'requests need'} you`" data-testid="room-inbox-shortcut" @click="emit('openInbox')" />
         <span v-if="storage.effectiveMode === 'local'" class="desktop-room-local-label" data-testid="desktop-room-local-badge">Local</span>
         <button v-if="projectConnectionNeeded" class="desktop-room-project-connect" type="button" data-testid="desktop-room-connect-project" @click="emit('connectProject')">Connect project</button>
@@ -140,6 +142,7 @@
 </template>
 
 <script setup lang="ts">
+import { Compass } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
 import RoomViewCount from "../../../../../../../../shared/ui/RoomViewCount.vue";
@@ -154,6 +157,7 @@ const props = defineProps<{
   room: DesktopRoomInfo;
   storage: DesktopRoomStorageState;
   tabs: RoomTab[];
+  offerTour?: boolean;
   /** Pinned pages when there are more than fit as tabs; empty or absent otherwise. */
   pagesMenu?: RoomTab[];
   activeTab: RoomTabId;
@@ -164,6 +168,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  openTour: [];
   cycleSidebar: [];
   toggleSearch: [];
   toggleActionPanel: [];

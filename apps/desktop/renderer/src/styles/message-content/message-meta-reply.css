@@ -134,37 +134,133 @@
   color: var(--text-tertiary);
 }
 
-.room-message-reply-action {
+.room-message-actions {
+  --message-action-opacity: 0;
+  --message-action-events: none;
+  --message-action-transform: translateY(4px) scale(.96);
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  isolation: isolate;
+}
+
+.room-message-actions > :is(.room-message-meta-action, .room-message-quick-action) {
   display: inline-grid;
+  flex: 0 0 auto;
   place-items: center;
   width: 24px;
-  height: 24px;
+  height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 999px;
+  border-radius: 5px;
   background: transparent;
   color: var(--text-tertiary);
-  opacity: 0;
-  transform: translateY(2px);
-  transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out), background var(--duration-fast) var(--ease-out);
+  cursor: pointer;
 }
 
-
-.room-message-reply-action svg {
-  width: 14px;
-  height: 14px;
-}
-
-.room-chat-message:hover > .room-chat-message-content > .room-message-meta .room-message-reply-action,
-.room-chat-message:focus-within > .room-chat-message-content > .room-message-meta .room-message-reply-action,
-.room-chat-message.is-reacting > .room-chat-message-content > .room-message-meta .room-message-reply-action {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-.room-message-reply-action:hover {
-  background: rgba(255, 255, 255, 0.08);
+.room-message-actions > :is(.room-message-meta-action, .room-message-quick-action):is(:hover, [aria-expanded="true"], [aria-pressed="true"]) {
+  background: var(--accent-hover);
   color: var(--text);
+}
+
+.room-message-actions > :is(.room-message-meta-action, .room-message-quick-action):focus-visible {
+  outline: 2px solid var(--blue-text);
+  outline-offset: -1px;
+}
+
+.room-message-actions > button:disabled {
+  opacity: calc(var(--message-action-opacity) * .45);
+  cursor: default;
+}
+
+.room-message-actions > .room-message-quick-action {
+  display: none;
+}
+
+.room-message-actions::before,
+.room-message-actions > :is(.room-message-meta-action, .room-message-quick-action) {
+  opacity: var(--message-action-opacity);
+  transform: var(--message-action-transform);
+  transform-origin: bottom center;
+  transition: opacity 110ms ease, transform 185ms cubic-bezier(.18, 1.45, .43, 1);
+}
+
+.room-message-actions > :is(.room-message-meta-action, .room-message-quick-action) {
+  pointer-events: var(--message-action-events);
+}
+
+.room-message-actions:has(> :is(:focus-visible, [aria-expanded="true"])) {
+  --message-action-opacity: 1;
+  --message-action-events: auto;
+  --message-action-transform: none;
+}
+
+.room-message-actions:has(> :focus-visible) > button,
+.room-message-actions:has(> :focus-visible)::before {
+  transition: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .room-message-meta:hover .room-message-actions,
+  .room-chat-message-content:has(> .room-message-line > .room-message-bubble:hover) > .room-message-meta .room-message-actions {
+    --message-action-opacity: 1;
+    --message-action-events: auto;
+    --message-action-transform: none;
+  }
+
+  @container (min-width: 28rem) {
+    .room-message-actions:has(> .room-message-quick-action) {
+      gap: 1px;
+      padding: 2px 3px;
+    }
+
+    .room-message-actions:has(> .room-message-quick-action)::before {
+      content: "";
+      position: absolute;
+      z-index: -1;
+      inset: 0;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--bg-card);
+      pointer-events: none;
+    }
+
+    .room-message-actions:has(> .room-message-quick-action) > :is(.room-message-meta-action, .room-message-quick-action) {
+      display: inline-grid;
+      width: 27px;
+      height: 24px;
+      border-radius: 50%;
+    }
+
+    .room-message-actions > .room-receipt-mark::before {
+      inset: -3px -1px;
+    }
+  }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .room-message-actions {
+    --message-action-opacity: 1;
+    --message-action-events: auto;
+    --message-action-transform: none;
+  }
+
+  .room-message-actions > .room-message-meta-action {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-message-actions {
+    --message-action-transform: none;
+  }
+
+  .room-message-actions::before,
+  .room-message-actions > :is(.room-message-meta-action, .room-message-quick-action) {
+    transition-property: opacity;
+  }
 }
 
 .room-message-context-menu-separator {
@@ -263,6 +359,15 @@
   color: var(--text-secondary);
 }
 
+.room-message-delivery-receipts li[data-limit] {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  flex-basis: 100%;
+}
+
+.room-message-delivery-receipts li[data-limit] > .claude-limit-notice { width: 100%; }
+
 .room-message-delivery-receipts li[data-state="pending"] {
   color: var(--text-tertiary);
 }
@@ -345,6 +450,10 @@
   color: #6ee7b7;
 }
 
+.room-message-delivery-receipts li[data-state="acknowledged_failed"] > .room-message-delivery-indicator {
+  color: var(--amber-text);
+}
+
 .room-message-delivery-receipts li:is([data-state="result_recovery"], [data-state="queued_behind_retry"], [data-follow-up="scheduled"]) > .room-message-delivery-indicator {
   color: #fcd34d;
 }
@@ -416,6 +525,30 @@
   opacity: 0.48;
 }
 
+.room-message-delivery-receipts li[data-model-recovery] {
+  padding-inline-end: 4px;
+}
+
+.room-message-delivery-receipts li[data-model-recovery] > small {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.room-message-delivery-receipts li[data-model-recovery="ready"] > .room-message-delivery-indicator {
+  color: var(--green-text);
+}
+
+.room-message-delivery-receipts .room-message-model-recovery-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  min-height: 24px;
+  padding-inline: 8px;
+  color: var(--text);
+  white-space: normal;
+}
+
 /* The last text of a receipt with no follow-up is a short column, as before. It can shrink in a receipt that is narrower. */
 .room-message-delivery-receipts li:not([data-follow-up]) > small:last-child {
   flex: 0 1 auto;
@@ -453,6 +586,34 @@
 .room-message-reply:hover {
   background: rgba(255, 255, 255, 0.07);
   border-color: color-mix(in srgb, var(--avatar-color, #71717a) 34%, rgba(255, 255, 255, 0.12));
+}
+
+.room-chat-message[data-chat-role]:not(.is-thread-context) .room-message-bubble > .room-message-reply {
+  max-inline-size: 31rem;
+  margin: 0 0 10px;
+  padding: 3px 0 3px 11px;
+  border: 0;
+  border-inline-start: 2px solid color-mix(in srgb, currentColor 32%, transparent);
+  border-radius: 0;
+  background: transparent;
+}
+
+.room-chat-message[data-chat-role]:not(.is-thread-context) .room-message-reply-text {
+  display: -webkit-box;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--chat-foreground, var(--text)) 82%, transparent);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.room-chat-message[data-chat-role]:not(.is-thread-context) .room-message-bubble > .room-message-reply:hover {
+  border-inline-start-color: currentColor;
+}
+
+.room-message-reply:focus-visible {
+  outline: 2px solid var(--blue-text);
+  outline-offset: 2px;
 }
 
 .room-thread-marker {
@@ -678,16 +839,16 @@
   color: var(--text-secondary);
 }
 
-.room-chat-message[data-outgoing-status="pending"] > .room-chat-message-content > .room-message-bubble {
+.room-chat-message[data-outgoing-status="pending"] > .room-chat-message-content > .room-message-line > .room-message-bubble {
   opacity: 0.84;
 }
 
-.room-chat-message[data-outgoing-status="uncertain"] > .room-chat-message-content > .room-message-bubble {
+.room-chat-message[data-outgoing-status="uncertain"] > .room-chat-message-content > .room-message-line > .room-message-bubble {
   outline: 1.5px dashed color-mix(in srgb, var(--amber) 55%, var(--border-strong));
   outline-offset: -1.5px;
 }
 
-.room-chat-message[data-outgoing-status="refused"] > .room-chat-message-content > .room-message-bubble {
+.room-chat-message[data-outgoing-status="refused"] > .room-chat-message-content > .room-message-line > .room-message-bubble {
   outline: 1.5px dashed color-mix(in srgb, var(--red) 55%, var(--border-strong));
   outline-offset: -1.5px;
 }
@@ -794,35 +955,5 @@
 .room-message-meta-tail { flex-wrap: wrap; max-width: 100%; }
 .room-message-meta time { order: -1; margin-right: 5px; font-size: 10px; }
 .room-message-meta .room-message-provenance { display: none; }
-.room-message-reply-action:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
-.room-message-reply-action:disabled { cursor: default; opacity: .45; }
-@media (hover: none), (pointer: coarse) {
-  .room-message-reply-action { width: 44px; height: 44px; opacity: 1; transform: none; }
-}
-
-/* The action dock floats above the bubble and never takes reading width. */
-.room-chat-message[data-chat-role] > .room-chat-message-content > .room-message-meta .room-message-actions {
-  position: absolute; top: -16px; left: 8px; z-index: 5; display: flex; align-items: center; gap: 3px;
-  padding: 5px; border: 1px solid light-dark(#ddd, #303030); border-radius: 999px;
-  background: light-dark(#fff, #171717); box-shadow: 0 5px 18px rgb(0 0 0 / .15);
-  opacity: 0; pointer-events: none; transform: translateY(3px); transition: opacity 120ms ease, transform 120ms ease;
-}
-.room-chat-message[data-chat-role] .room-message-actions::after { content: ''; position: absolute; inset: 100% 0 -12px; }
-.room-chat-message[data-chat-role] .room-message-actions .room-message-reply-action { opacity: 1; transform: none; width: 30px; height: 30px; }
-.room-chat-message[data-chat-role] .room-message-actions .room-message-reply-action svg { width: 16px; height: 16px; }
-.room-chat-message:is([data-chat-role="self"], [data-chat-role="own-agent"]) > .room-chat-message-content > .room-message-meta .room-message-actions { left: auto; right: 8px; }
-.room-chat-message[data-chat-role]:not([data-outgoing-status]):is(:focus-within, .is-reacting) > .room-chat-message-content > .room-message-meta .room-message-actions,
-.room-chat-message[data-chat-role][data-outgoing-status] > .room-chat-message-content > .room-message-meta .room-message-actions:focus-within { opacity: 1; pointer-events: auto; transform: none; }
-.room-chat-message[data-chat-role] .room-message-actions button:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
 .room-chat-message[data-chat-role] .room-message-author-block :is(strong, button) { font-size: 12px; font-weight: 500; }
 .room-chat-message[data-chat-role] .room-message-owner { font-weight: 400; }
-@media (hover: hover) and (pointer: fine) {
-  .room-chat-message[data-chat-role]:hover > .room-chat-message-content > .room-message-meta .room-message-actions { opacity: 1; pointer-events: auto; transform: none; }
-}
-@media (hover: none), (pointer: coarse) {
-  .room-chat-message[data-chat-role] > .room-chat-message-content > .room-message-meta .room-message-actions { position: static; opacity: 1; pointer-events: auto; transform: none; box-shadow: none; border: 0; padding: 0; background: transparent; }
-  .room-chat-message[data-chat-role] .room-message-actions .room-message-reply-action { width: 44px; height: 44px; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .room-chat-message[data-chat-role] > .room-chat-message-content > .room-message-meta .room-message-actions { transform: none; transition: none; }
-}

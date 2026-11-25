@@ -12,6 +12,8 @@ import {
   agentInspectorTurnKey,
   type AgentInspectorTurnControlFence,
   type AgentInspectorActionIntent,
+  type AgentInspectorProjection,
+  type ComposerSteerIntent,
 } from "../../domain/agent-inspector";
 import { isStaleDaemonGenerationError } from "../../domain/agent-inspector-settings";
 import { desktopIpc } from "../../ipc/index.js";
@@ -31,6 +33,79 @@ export function useRoomShellInspectorRunActions(context: unknown) {
     | "useRoomShellParticipants"
     | "useRoomShellSupervisorActions"
   >;
+  let composerSteerEntryId: string | null = null;
+
+  async function dispatchExactTurnControl(
+    projection: AgentInspectorProjection,
+    daemonGeneration: number,
+    correction: string | null,
+    isCurrent: () => boolean,
+  ): Promise<AgentInspectorTurnControlFence | null> {
+    const { entry, turnControl: control } = projection;
+    const { workAttemptId, executionGenerationId, providerContinuationId } = entry;
+    const providerTurnId = control?.providerTurnId;
+    const inboxItemId = entry.roomAgentState?.turn.inboxItemId ?? null;
+    const sourceMessageId = entry.roomAgentState?.turn.sourceMessageId ?? null;
+    if (!workAttemptId || !executionGenerationId || !providerContinuationId || !providerTurnId || !inboxItemId || !sourceMessageId) {
+      throw new Error("The exact room turn is no longer available. Refresh and try again.");
+    }
+    const fence = {
+      entryId: entry.id, roomId: entry.roomId, workAttemptId, executionGenerationId,
+      providerTurnId, inboxItemId, sourceMessageId, daemonGeneration,
+    };
+    const stillExact = () => {
+      const current = app.agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.entry ?? null;
+      return isCurrent() && agentInspectorTurnControlFenceMatches(fence, current, supervisorStatus.value?.generation ?? null);
+    };
+    if (!stillExact()) return null;
+    const actionSequence = entry.lastTurnControlSequence + 1;
+    // A supervisor push can advance the provider turn while the digest yields.
+    const actionId = await agentInspectorTurnControlActionIdIfCurrent(
+      agentInspectorTurnControlActionId({ ...fence, actionSequence, correction }),
+      stillExact,
+    );
+    if (!actionId) return null;
+    await desktopIpc.supervisor.controlTurn({
+      ...fence, providerContinuationId, actionId, actionSequence, correction,
+    });
+    return fence;
+  }
+
+  async function steerComposerTurn(intent: ComposerSteerIntent, complete: (error: string | null) => void): Promise<void> {
+    const turnChanged = "That turn has ended or changed. Your draft is still here.";
+    const isReady = (projection: AgentInspectorProjection | undefined): projection is AgentInspectorProjection =>
+      projection?.entry.roomId === intent.roomId && projection.resourceFreshness === "fresh" && projection.turnControl?.status === "ready"
+      && projection.turnControl.canCorrect && projection.turnControl.providerTurnId === intent.providerTurnId;
+    const current = () => app.agentInspectorProjections.value.find((candidate) => candidate.entryId === intent.entryId);
+    const projection = current();
+    const correction = intent.text.trim();
+    if (!correction || props.room.identifier !== intent.roomId || !isReady(projection)) {
+      complete(turnChanged);
+      return;
+    }
+    if (composerSteerEntryId || (agentInspectorActionState.value?.status === "running" && agentInspectorActionState.value.entryId === intent.entryId)) {
+      complete("This agent already has a turn action in progress.");
+      return;
+    }
+    composerSteerEntryId = intent.entryId;
+    let error: string | null = null;
+    try {
+      const status = await app.refreshSupervisorStatus();
+      if (!status) {
+        error = "Couldn’t reach this agent. Your draft is still here.";
+      } else if (!await dispatchExactTurnControl(projection, status.generation, correction,
+        () => props.room.identifier === intent.roomId && isReady(current()))) {
+        error = turnChanged;
+      }
+    } catch {
+      error = "Couldn’t confirm the correction. Your draft is still here.";
+    } finally {
+      composerSteerEntryId = null;
+      void app.refreshSupervisorEntries().catch(() => undefined);
+    }
+    complete(error);
+  }
+
   function currentAgentInspectorActionIdentity(
     operationId: string,
     intent: AgentInspectorActionIntent,
@@ -56,6 +131,7 @@ export function useRoomShellInspectorRunActions(context: unknown) {
   async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Promise<void> {
     // Recovery options is local navigation; only a chosen runtime action may reach IPC.
     if (intent.kind === "recovery_options") return;
+    if ((intent.kind === "steer_turn" || intent.kind === "stop_turn") && composerSteerEntryId === intent.entryId) return;
     if (agentInspectorActionState.value?.status === "running" && agentInspectorActionState.value.entryId === intent.entryId) return;
     if (intent.roomId !== props.room.identifier) return;
     const projection = app.agentInspectorProjections.value.find((candidate) => candidate.entryId === intent.entryId);
@@ -73,8 +149,7 @@ export function useRoomShellInspectorRunActions(context: unknown) {
           ? projection.turnControl?.canResolve === true && Boolean(intent.turnControlResolution)
           : false);
     if (!actionAvailable && (!turnControlIntent || !turnControlAvailable)) return;
-    // The handed-over text is now the person's own correction; never refill it.
-    if (intent.kind === "steer_turn") app.releaseAgentCorrectionRequest({ restoreComposerText: false });
+    if (intent.kind === "steer_turn") app.releaseAgentCorrectionRequest();
 
     if (intent.kind === "mention") {
       const participant = app.roomParticipants.value.find((candidate) =>
@@ -215,74 +290,17 @@ export function useRoomShellInspectorRunActions(context: unknown) {
           }
           await desktopIpc.supervisor.controlTurn(retryInput);
         } else {
-          const currentWorkAttemptId = entry.workAttemptId;
-          const currentExecutionGenerationId = entry.executionGenerationId;
-          if (!currentWorkAttemptId || !currentExecutionGenerationId) {
-            throw new Error("The active turn changed. Refresh and try again.");
-          }
-          const exactTurnControlFence: AgentInspectorTurnControlFence = {
-            entryId: entry.id,
-            roomId: entry.roomId,
-            workAttemptId: currentWorkAttemptId,
-            executionGenerationId: currentExecutionGenerationId,
-            providerTurnId: control.providerTurnId,
-            inboxItemId: entry.roomAgentState?.turn.inboxItemId ?? null,
-            sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
-            daemonGeneration: status.generation,
-          };
-          turnControlFence = exactTurnControlFence;
-          if (!entry.providerContinuationId || !exactTurnControlFence.providerTurnId
-            || !exactTurnControlFence.inboxItemId || !exactTurnControlFence.sourceMessageId) {
-            throw new Error("The exact room turn is no longer available. Refresh and try again.");
-          }
-          const currentEntry = app.agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.entry ?? null;
-          if (!agentInspectorTurnControlFenceMatches(exactTurnControlFence, currentEntry, supervisorStatus.value?.generation ?? null)) {
-            throw new Error("The active turn changed. Refresh and try again.");
-          }
           const correction = intent.kind === "steer_turn" ? intent.correction?.trim() || null : null;
           if (intent.kind === "steer_turn" && !correction) throw new Error("Write a correction before applying it.");
-          const actionId = await agentInspectorTurnControlActionIdIfCurrent(
-              agentInspectorTurnControlActionId({
-                entryId: entry.id,
-                roomId: entry.roomId,
-                workAttemptId: currentWorkAttemptId,
-                executionGenerationId: currentExecutionGenerationId,
-                actionSequence: entry.lastTurnControlSequence + 1,
-                providerTurnId: control.providerTurnId,
-                inboxItemId: entry.roomAgentState?.turn.inboxItemId ?? null,
-                sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
-                correction,
-              }),
-              () => {
-                // A supervisor push can arrive while the digest yields. Re-read
-                // the projected entry rather than trusting the pre-digest object.
-                const currentEntryAfterDigest = app.agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.entry ?? null;
-                return currentAgentInspectorAction(operationId, intent, requestVersion, operationDaemonGeneration)
-                  && agentInspectorTurnControlFenceMatches(exactTurnControlFence, currentEntryAfterDigest, supervisorStatus.value?.generation ?? null);
-              },
+          turnControlFence = await dispatchExactTurnControl(projection, status.generation, correction,
+            () => currentAgentInspectorAction(operationId, intent, requestVersion, operationDaemonGeneration),
           );
-          if (!actionId) {
-            // The post-digest fence rejected this operation. Clear only this
-            // matching action so controls recover, never a newer user action.
+          if (!turnControlFence) {
             if (currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) {
               agentInspectorActionState.value = clearAgentInspectorActionStateIfMatching(agentInspectorActionState.value, operationId);
             }
             return;
           }
-          await desktopIpc.supervisor.controlTurn({
-            entryId: entry.id,
-            daemonGeneration: exactTurnControlFence.daemonGeneration,
-            roomId: exactTurnControlFence.roomId,
-            workAttemptId: currentWorkAttemptId,
-            executionGenerationId: currentExecutionGenerationId,
-            providerContinuationId: entry.providerContinuationId,
-            providerTurnId: exactTurnControlFence.providerTurnId,
-            inboxItemId: exactTurnControlFence.inboxItemId,
-            sourceMessageId: exactTurnControlFence.sourceMessageId,
-            actionId,
-            actionSequence: entry.lastTurnControlSequence + 1,
-            correction,
-          });
         }
       } else if (intent.kind === "retry_delivery") {
         const entry = projection.entry;
@@ -393,6 +411,6 @@ export function useRoomShellInspectorRunActions(context: unknown) {
     }
   }
   return {
-    currentAgentInspectorActionIdentity, currentAgentInspectorAction, runAgentInspectorAction,
+    currentAgentInspectorActionIdentity, currentAgentInspectorAction, runAgentInspectorAction, steerComposerTurn,
   };
 }

@@ -1,0 +1,16 @@
+[package]
+name = "letagents-daemon-spike"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.80"
+publish = false
+description = "Spike only: a Rust stand-in for four control methods of the LetAgents supervisor daemon. Not shipped."
+
+[dependencies]
+# Versions are exact and were all published more than a year before this spike.
+libc = "=0.2.158"
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+serde_json = { version = "=1.0.128", features = ["preserve_order"] }
+
+[profile.release]
+strip = true

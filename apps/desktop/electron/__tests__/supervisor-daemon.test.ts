@@ -30,6 +30,7 @@ import {
   setFocusedAgentStream,
   supervisorStateWatchAcceptsStatus,
   supervisorStateWatchRetryDelay,
+  supervisorDaemonSpawnArguments,
   supervisorDaemonSpawnEnvironment,
   supervisorRuntimeEnvironmentFingerprint,
   supervisorCompatibilityFingerprint,
@@ -3321,6 +3322,65 @@ test("desktop dev daemon uses the exact rebuilt repo MCP and packaged launches i
   assert.equal(development.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV, "1",
     "only the Desktop-derived development runtime is explicitly unsealed");
   assert.equal(development.ELECTRON_RUN_AS_NODE, "1");
+});
+
+test("the daemon starts with SIGUSR1 debugging off and still sees its own entry script", { skip: process.platform === "win32" }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-daemon-arguments-"));
+  try {
+    const script = join(directory, "entry.mjs");
+    await writeFile(script, "console.log(JSON.stringify({ script: process.argv[1], execArgv: process.execArgv }));\nsetInterval(() => {}, 1000);\n");
+    const args = supervisorDaemonSpawnArguments(script);
+    assert.equal(args.at(-1), script, "the daemon identity check expects the command to end with the script path");
+    const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+    try {
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      const [line] = await new Promise<[Buffer]>((resolve, reject) => {
+        child.stdout.once("data", (chunk: Buffer) => resolve([chunk]));
+        child.once("exit", (code) => reject(new Error(`the entry exited (${code}) before it started: ${stderr}`)));
+      });
+      assert.deepEqual(JSON.parse(line.toString()), { script, execArgv: ["--disable-sigusr1"] },
+        "daemon/main.ts reads process.argv[1] to decide that it is the entry point");
+      child.kill("SIGUSR1");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      assert.equal(child.exitCode, null, "SIGUSR1 does not stop the daemon");
+      assert.doesNotMatch(stderr, /Debugger listening/, "SIGUSR1 opens no debugger");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the client's own daemon start puts the Node flags before the daemon script", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture();
+  try {
+    const report = join(env.root, "started.json");
+    const script = join(env.root, "entry.mjs");
+    await writeFile(script, [
+      "import { writeFileSync } from \"node:fs\";",
+      `writeFileSync(${JSON.stringify(report)}, JSON.stringify({ script: process.argv[1], execArgv: process.execArgv }));`,
+      "process.exit(0);",
+      "",
+    ].join("\n"));
+    // No spawnDaemon option: this runs the client's default start, as the app does.
+    const client = new SupervisorDaemonClient({ stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath, daemonScriptPath: script });
+    const { spawnDaemon } = client as unknown as { spawnDaemon: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess };
+    spawnDaemon(script, env.root, { ...process.env });
+    let started: unknown = null;
+    for (let attempt = 0; attempt < 400 && started === null; attempt += 1) {
+      started = await readFile(report, "utf8").then((text) => JSON.parse(text) as unknown, () => null);
+      if (started === null) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.deepEqual(started, { script, execArgv: ["--disable-sigusr1"] },
+      "the daemon starts without SIGUSR1 debugging and still sees its script as argv[1]");
+  } finally {
+    await env.cleanup();
+  }
 });
 
 test("desktop development watches daemon builds and rejects a stale replacement implementation", async () => {

@@ -70,7 +70,7 @@ export function useAppCompany(context: unknown) {
     companyInviteRevision.value += 1;
     pendingCompanyInvite.value = id;
     inviteJustJoined.value = false;
-    if (firstRunStage.value === "room") firstRunStage.value = "organization";
+    if (firstRunStage.value === "room" || firstRunStage.value === "theme") firstRunStage.value = "organization";
     if (authStatus.value?.authenticated) void company.refresh();
   }
 
@@ -82,7 +82,7 @@ export function useAppCompany(context: unknown) {
       await completeCompanyInvite(invite);
       if (revision !== companyInviteRevision.value) return;
       app.firstRunRoomSelected.value = false;
-      app.continueToRoomConfirmation();
+      firstRunStage.value = "theme";
     }
   }
 
@@ -100,8 +100,8 @@ export function useAppCompany(context: unknown) {
   }
 
   // People with no organizations, invitations or blocked organizations never
-  // see the company step: setup moves on to the room step, and Back from the
-  // room step returns to GitHub. A company link always shows the step.
+  // see the company step: setup moves on to the theme step, and Back from the
+  // theme step returns to GitHub. A company link always shows the step.
   let previousStage = firstRunStage.value;
   watch(
     [firstRunStage, company.status, company.hasChoices],
@@ -110,8 +110,7 @@ export function useAppCompany(context: unknown) {
       previousStage = stage;
       if (stage !== "organization" || company.status.value !== "ready" || company.hasChoices.value) return;
       if (pendingCompanyInvite.value) return;
-      if (cameFrom === "room") firstRunStage.value = "github";
-      else app.continueToRoomConfirmation();
+      firstRunStage.value = cameFrom === "theme" ? "github" : "theme";
     },
   );
 

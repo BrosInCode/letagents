@@ -1,12 +1,35 @@
 import { githubRequest, mintInstallationCredential, type GitHubInstallationCredential } from "../github/app-client.js";
-import { getGitHubAppConfig, type GitHubAppConfig } from "../github/config.js";
+import { getGitHubAppConfig, getLetAgentsPublicBaseUrl, type GitHubAppConfig } from "../github/config.js";
 import { githubReviewPermission } from "../github/app-installation.js";
+import { parseAgentActorLabel } from "../../shared/agent-identity.js";
 
 const GITHUB_API = "https://api.github.com";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const LOOKUP_MAX_PAGES = 3;
+const ATTRIBUTION_NAME_MAX_LENGTH = 64;
+const ATTRIBUTION_TOOL_MAX_LENGTH = 32;
+/** GitHub refuses a review body longer than this. */
+const GITHUB_REVIEW_BODY_MAX_LENGTH = 65_536;
+/**
+ * The longest review text an agent may submit. The rest of GitHub's limit is
+ * kept for the signature line and the journal marker, so agent text (hidden
+ * padding included) can never push the signature out of a review.
+ */
+export const REVIEW_VERDICT_BODY_MAX_LENGTH = GITHUB_REVIEW_BODY_MAX_LENGTH - 1_024;
 
 export type GitHubReviewVerdict = "approve" | "request_changes" | "comment";
+
+/**
+ * Who asked for a review, taken by the broker from the effect row the server
+ * wrote (never from the agent's request). Every review posts as the one
+ * GitHub App, so this is the only place a reader sees which agent wrote it.
+ */
+export interface GitHubReviewAttribution {
+  /** The worker's server-side actor label, e.g. `ReviewAstra | EmmyMay's agent | Codex`. */
+  actor_label: string;
+  task_id: string | null;
+  room_id: string;
+}
 
 export interface GitHubReviewEffectRequest {
   owner: string;
@@ -39,7 +62,11 @@ export type GitHubReviewLookupResult =
   | { kind: "not_found" };
 
 export interface GitHubReviewProvider {
-  create(request: GitHubReviewEffectRequest, correlationKey: string): Promise<GitHubReviewCreateResult>;
+  create(
+    request: GitHubReviewEffectRequest,
+    correlationKey: string,
+    attribution?: GitHubReviewAttribution | null,
+  ): Promise<GitHubReviewCreateResult>;
   lookup(request: GitHubReviewEffectRequest, correlationKey: string): Promise<GitHubReviewLookupResult>;
 }
 
@@ -47,8 +74,89 @@ function marker(correlationKey: string): string {
   return `<!-- letagents-effect:${correlationKey} -->`;
 }
 
+const RESERVED_MARKER = /<!--\s*letagents-effect:[^>]*-->/gi;
+
+/**
+ * Removes every journal marker from agent text, repeating until none is left:
+ * one pass would let a nested marker (`<!-- letagents-<!-- … -->effect:… -->`)
+ * reassemble, and the webhook reader takes the first marker it finds.
+ */
 function withoutReservedMarkers(body: string): string {
-  return body.replace(/<!--\s*letagents-effect:[^>]*-->/gi, "").trim();
+  let current = body;
+  for (;;) {
+    const next = current.replace(RESERVED_MARKER, "");
+    if (next === current) return current.trim();
+    current = next;
+  }
+}
+
+/**
+ * Agent-chosen text made safe for one Markdown code span: no line breaks (a
+ * blank line would end the span), no backticks (they would close it), no
+ * angle brackets (they could form a journal marker), and no invisible format
+ * or direction characters (they could pad or reorder what a reader sees).
+ */
+function inlineCodeText(value: string, maxLength: number): string {
+  const flat = value
+    .replace(/\p{Cf}+/gu, "")
+    .replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ")
+    .replace(/[`<>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return flat.length > maxLength ? `${flat.slice(0, maxLength - 1).trimEnd()}…` : flat;
+}
+
+/**
+ * `Name (Owner's agent, Tool)`. Each part is cut on its own, so a long or
+ * padded display name can never push the real owner out of the line.
+ */
+function attributionName(actorLabel: string): string {
+  const parsed = parseAgentActorLabel(actorLabel);
+  if (!parsed) return "";
+  const name = inlineCodeText(parsed.display_name, ATTRIBUTION_NAME_MAX_LENGTH);
+  const details = [
+    parsed.owner_attribution ? inlineCodeText(parsed.owner_attribution, ATTRIBUTION_NAME_MAX_LENGTH) : "",
+    parsed.ide_label && parsed.ide_label !== "Agent" ? inlineCodeText(parsed.ide_label, ATTRIBUTION_TOOL_MAX_LENGTH) : "",
+  ].filter(Boolean);
+  return details.length > 0 ? `${name || "Agent"} (${details.join(", ")})` : name;
+}
+
+function roomUrl(baseUrl: string, roomId: string): string | null {
+  const segments = roomId.split("/").filter(Boolean);
+  if (segments.length === 0) return null;
+  return `${baseUrl.replace(/\/+$/, "")}/in/${segments.map(encodeURIComponent).join("/")}`;
+}
+
+/**
+ * The visible signature line of a review the App posts for an agent: which
+ * agent wrote it, for which board task, and a link to the room.
+ */
+export function reviewAttributionLine(attribution: GitHubReviewAttribution, baseUrl: string): string {
+  const name = attributionName(attribution.actor_label) || "Agent";
+  const taskId = attribution.task_id && /^[A-Za-z0-9_.:-]{1,80}$/.test(attribution.task_id)
+    ? attribution.task_id
+    : null;
+  const link = roomUrl(baseUrl, attribution.room_id);
+  return `<sub>Review by \`${name}\`${taskId ? ` for ${taskId}` : ""} through LetAgents${link ? ` · [Open the room](${link})` : ""}</sub>`;
+}
+
+function joinBlocks(blocks: string[]): string {
+  return blocks.filter(Boolean).join("\n\n");
+}
+
+/**
+ * Signature first, then the agent's text, then the journal marker. Markdown
+ * only reaches forward, so an unclosed fence or comment at the end of the
+ * agent's text cannot hide or restyle the signature. The route caps agent
+ * text at REVIEW_VERDICT_BODY_MAX_LENGTH so the signature always fits; only
+ * a row reserved under the older, larger cap can be too long, and that
+ * review posts without the signature instead of failing.
+ */
+function reviewBody(body: string, signature: string | null, correlationKey: string): string {
+  const visible = withoutReservedMarkers(body);
+  const signed = joinBlocks([signature ?? "", visible, marker(correlationKey)]);
+  if (!signature || signed.length <= GITHUB_REVIEW_BODY_MAX_LENGTH) return signed;
+  return joinBlocks([visible, marker(correlationKey)]);
 }
 
 function reviewEvent(verdict: GitHubReviewVerdict): "APPROVE" | "REQUEST_CHANGES" | "COMMENT" {
@@ -96,9 +204,12 @@ export function createGitHubReviewProvider(options: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   mintCredential?: (request: GitHubReviewEffectRequest) => Promise<GitHubInstallationCredential>;
+  /** The LetAgents origin for the room link in the signature line. */
+  baseUrl?: string;
 } = {}): GitHubReviewProvider {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const baseUrl = () => options.baseUrl ?? options.config?.baseUrl ?? getLetAgentsPublicBaseUrl();
 
   async function credentialFor(request: GitHubReviewEffectRequest): Promise<GitHubInstallationCredential> {
     if (options.mintCredential) return options.mintCredential(request);
@@ -111,7 +222,7 @@ export function createGitHubReviewProvider(options: {
   }
 
   return {
-    async create(request, correlationKey) {
+    async create(request, correlationKey, attribution) {
       let token: string;
       try {
         const credential = await credentialFor(request);
@@ -156,7 +267,7 @@ export function createGitHubReviewProvider(options: {
       }
 
       try {
-        const body = withoutReservedMarkers(request.body);
+        const signature = attribution ? reviewAttributionLine(attribution, baseUrl()) : null;
         const response = await githubRequest({
           url: `${GITHUB_API}/repos/${encodeURIComponent(request.owner)}/${encodeURIComponent(request.repo)}/pulls/${request.pull_number}/reviews`,
           method: "POST",
@@ -166,7 +277,7 @@ export function createGitHubReviewProvider(options: {
           body: {
             event: reviewEvent(request.verdict),
             commit_id: request.expected_head_sha,
-            body: `${body}${body ? "\n\n" : ""}${marker(correlationKey)}`,
+            body: reviewBody(request.body, signature, correlationKey),
           },
         });
         if (!response.ok) {

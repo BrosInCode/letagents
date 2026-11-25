@@ -1,3 +1,4 @@
+import type { RoomCompanyAppearance } from "../../../../shared/room-themes.mjs";
 import type { AgentAvatar } from "../../../../shared/agent-avatar.mjs";
 import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import type { DesktopActivityEntry, DesktopAgentPresence, DesktopParticipantSummary, DesktopReasoningSession } from "./activity.js";
@@ -116,6 +117,7 @@ export type DesktopRoomJoinRequestDecision = "approve" | "decline" | "cancel";
 export type { RoomJoinRequest, RoomJoinRequestSummary, RoomMember, RoomMemberRole };
 
 export interface DesktopRoomInfo {
+  companyAppearance?: RoomCompanyAppearance | null;
   identifier: string;
   code: string;
   name: string;

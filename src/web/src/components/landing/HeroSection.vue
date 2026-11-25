@@ -36,7 +36,6 @@
             <span>{{ link.label }}</span>
           </a>
         </template>
-        <a class="mac-secondary-link" :href="macDesktopBeta.checksumsUrl">Checksums</a>
       </div>
     </div>
   </section>

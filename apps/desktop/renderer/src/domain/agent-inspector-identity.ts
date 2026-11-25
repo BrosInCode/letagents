@@ -178,7 +178,7 @@ export function initialTabEffects(tab: string | undefined): InitialTabEffects {
   };
 }
 
-export function inspectorInitialTab(target: AgentModalTarget): "overview" | "live" | "work" | "workspace" {
+export function inspectorInitialTab(target: AgentModalTarget): NonNullable<AgentModalTarget["initialTab"]> {
   return target.initialTab ?? (target.workSourceMessageId ? "work" : target.workspaceSourceMessageId ? "workspace" : "overview");
 }
 

@@ -5,3 +5,7 @@
   color: var(--text-secondary);
   line-height: 1.55;
 }
+
+.room-message-reply-text {
+  font-size: .8125rem;
+}

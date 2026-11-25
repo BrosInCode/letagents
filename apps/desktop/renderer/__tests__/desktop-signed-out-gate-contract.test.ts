@@ -14,9 +14,8 @@ const signedOutSource = readFileSync(
 const shellLayoutSource = readFileSync(join(testDirectory, "../src/styles/app-shell/layout.css"), "utf8");
 
 test("desktop fails closed before mounting its room shell", () => {
-  assert.match(appSource, /v-else-if="showSignedOutGate"/);
   assert.match(appSource, /authSessionLocked\.value \|\| !authStatus\.value\?\.authenticated/);
-  assert.match(appSource, /<DesktopSignedOutView[\s\S]*?<main\s+v-else\s+class="desktop-shell"/);
+  assert.match(appSource, /<main\s+v-if="!showFirstRunSplash && !showFirstRunGate && showSignedOutGate"[^>]*>\s*<DesktopSignedOutView[\s\S]*?<\/main>\s*<main\s+v-else-if="!showFirstRunSplash && !showFirstRunGate"\s+class="desktop-shell"/);
   assert.match(appSource, /onSigningOut: clearDesktopSessionState/);
   assert.match(appSource, /rootRoomSnapshot\.value = null/);
   assert.match(appSource, /selectedSnapshot\.value = null/);

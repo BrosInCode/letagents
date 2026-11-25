@@ -286,7 +286,10 @@ export function useDesktopRoomMessages(options: {
     const request = fetchOlderMessages();
     olderMessagesRequest = request;
     void request.finally(() => {
-      if (olderMessagesRequest === request) olderMessagesRequest = null;
+      if (olderMessagesRequest !== request) return;
+      // Backfill can request another page as soon as loading becomes false.
+      olderMessagesRequest = null;
+      loadingOlderMessages.value = false;
     });
     return request;
   }
@@ -294,7 +297,8 @@ export function useDesktopRoomMessages(options: {
   async function fetchOlderMessages(): Promise<void> {
     if (loadingOlderMessages.value || !hasOlderMessages.value) return;
     const roomIdentifier = options.room.value.identifier;
-    const firstMessageId = oldestRoomHistoryCursor(loadedServerMessages.value);
+    // A page of filtered notices still advances the room's history cursor.
+    const firstMessageId = oldestRoomHistoryCursor([...olderMessages.value, ...options.messages.value]);
     if (!firstMessageId) {
       hasOlderMessages.value = false;
       return;
@@ -317,10 +321,6 @@ export function useDesktopRoomMessages(options: {
     } catch {
       if (!isCurrentHistory()) return;
       olderMessagesError.value = "Earlier messages could not be loaded. Retry to load them.";
-    } finally {
-      if (isCurrentHistory()) {
-        loadingOlderMessages.value = false;
-      }
     }
   }
 

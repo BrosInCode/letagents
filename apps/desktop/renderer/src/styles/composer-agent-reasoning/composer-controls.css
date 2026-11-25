@@ -18,6 +18,13 @@
 .desktop-composer-input-row .desktop-composer-access-wrap { position: static; }
 .desktop-composer-input-row > .desktop-composer-send { grid-area: send; }
 
+.desktop-composer-input,
+.room-thread-composer textarea {
+  font: inherit;
+  font-size: 0.88rem;
+  line-height: 1.42;
+}
+
 /* The input grows with its text up to 156px, then scrolls. The browser sizes
    it (field-sizing), so typing does no layout reads in script. */
 .desktop-composer-input {
@@ -31,9 +38,6 @@
   outline: none;
   background: transparent;
   color: var(--text);
-  font: inherit;
-  font-size: 0.88rem;
-  line-height: 1.42;
   padding: 6px 7px 4px;
 }
 

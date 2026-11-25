@@ -15,7 +15,7 @@
   padding: 7px;
   border: 1px solid var(--border-strong);
   border-radius: 16px;
-  background: var(--bg-card);
+  background: var(--workspace-composer, var(--bg-card));
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }

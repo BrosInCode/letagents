@@ -96,6 +96,8 @@ Run the unsigned path to verify bundle branding, the DMG layout, the update ZIP,
 npm --prefix apps/desktop run package:mac:local
 ```
 
+Every package build flips the Electron fuses in `electron/scripts/electron-fuses.mjs` (`LETAGENTS_ELECTRON_FUSES`) right after it assembles the bundle, before signing; `package-macos.mjs` and `package-windows.mjs` read them back from the binary that ships. The Node inspector fuse is off, so SIGUSR1 and `--inspect` open no debugger in the app; SIGUSR1 now ends the app instead. The supervisor daemon starts with `--disable-sigusr1` for the same reason. A new Electron fuse stops packaging until it gets a decision there. Dev builds (`npm run dev`) use the unflipped Electron from `node_modules`. The next hardening steps are in [docs/plans/electron-fuses.md](plans/electron-fuses.md).
+
 Unsigned output is for development only. Gatekeeper and Electron's macOS updater require the production app to be signed. Signed builds also require `MACOS_PROVISIONING_PROFILE_PATH`; the profile is embedded and the main application is signed with `electron/entitlements.mac.plist` so native push registration survives release packaging. To exercise a local Developer ID build without notarization, set the signing identity, provisioning-profile path, and `MACOS_SKIP_NOTARIZATION=1`, then run `package:mac`.
 
 For a full local release, use either a notarytool Keychain profile:

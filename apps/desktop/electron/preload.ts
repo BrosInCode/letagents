@@ -30,6 +30,7 @@ const api: DesktopApi = {
       return () => ipcRenderer.off("desktop:organizations:invited", listener);
     },
     list: () => ipcRenderer.invoke("desktop:organizations:list"),
+    setTheme: (id, theme) => ipcRenderer.invoke("desktop:organizations:set-theme", id, theme),
     join: (id, setup) => ipcRenderer.invoke("desktop:organizations:join", id, setup),
     rooms: (id) => ipcRenderer.invoke("desktop:organizations:rooms", id),
     openOnGitHub: (page) => ipcRenderer.invoke("desktop:organizations:open-github", page),

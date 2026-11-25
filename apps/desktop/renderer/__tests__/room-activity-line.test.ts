@@ -15,12 +15,10 @@ import {
   elapsedLabel,
   joinedNames,
   pickActivityPill,
-  presenceTimelineText,
   type ActivityNotice,
 } from "../src/components/desktop/content/room-chat/room-activity";
 import { orbStateForActivity, orbStateForTurn, orbStateForWork } from "../src/domain/activity-orb-state";
 import { ACTIVITY_ORB_STILL_SECONDS, createActivityOrbClock, drawActivityOrb } from "../../../../shared/ui/activity-orb";
-import { buildMessageTimelineEntries } from "../src/components/desktop/content/room-chat/timeline";
 import { composerDrafting, type ComposerEventPreview } from "../src/components/desktop/content/room-chat/composer-event-preview";
 import type { PresenceChipAgent } from "../../../../shared/ui/presence-chips";
 
@@ -305,20 +303,6 @@ test("each orb state draws dots in the ink colour only, with one colour per fram
   assert.ok([...alphas].every((alpha) => alpha >= 0 && alpha <= 1));
 });
 
-test("joins and leaves leave a quiet line in the timeline, in time order", () => {
-  const messages = [
-    { id: "m1", timestamp: "2026-10-26T10:00:00.000Z", sender: "Emmy", text: "hi", attachments: [], source: "browser" },
-    { id: "m2", timestamp: "2026-10-26T10:02:00.000Z", sender: "Emmy", text: "again", attachments: [], source: "browser" },
-  ] as never[];
-  const lines = [{ id: "presence:j", timestamp: "2026-10-26T10:01:00.000Z", kind: "connected" as const, text: presenceTimelineText("connected", agent("Juniper")) }];
-  const entries = buildMessageTimelineEntries(messages, [], lines);
-  assert.deepEqual(entries.map(entry => entry.type), ["date", "message", "presence", "message"]);
-  const presence = entries[2]!;
-  assert.equal(presence.type === "presence" && presence.line.text, "Juniper joined · Claude Code");
-  assert.equal(presenceTimelineText("disconnected", agent("Juniper")), "Juniper left");
-  assert.equal(presenceTimelineText("connected", agent("Wren", null)), "Wren joined");
-});
-
 test("joinedNames and elapsedLabel read naturally", () => {
   assert.equal(joinedNames([agent("A")]), "A");
   assert.equal(joinedNames([agent("A"), agent("B")]), "A and B");
@@ -329,7 +313,7 @@ test("joinedNames and elapsedLabel read naturally", () => {
   assert.equal(elapsedLabel("not a time", 0), "");
 });
 
-test("useRoomActivity: presence changes become notices and timeline lines; a room change starts over", async () => {
+test("useRoomActivity: presence changes show transient notices that clear on room change", async () => {
   const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   try {
     const { useRoomActivity } = await vite.ssrLoadModule("/renderer/src/composables/useRoomActivity.ts");
@@ -353,7 +337,7 @@ test("useRoomActivity: presence changes become notices and timeline lines; a roo
       await nextTick();
       assert.equal(activity.notice.value?.kind, "join");
       assert.equal(joinedNames((activity.notice.value as { agents: PresenceChipAgent[] }).agents), "Juniper and Kestrel");
-      assert.deepEqual(activity.presenceLines.value.map((line: { text: string }) => line.text), ["Juniper joined · Codex", "Kestrel joined · Codex"]);
+      assert.equal("presenceLines" in activity, false, "presence changes do not add a timeline history");
 
       drafting.value = true;
       await nextTick();
@@ -364,7 +348,6 @@ test("useRoomActivity: presence changes become notices and timeline lines; a roo
       scope.value = "room-b";
       await nextTick();
       assert.equal(activity.notice.value, null);
-      assert.deepEqual(activity.presenceLines.value, []);
     } finally {
       run.stop();
       Date.now = realNow;
@@ -382,9 +365,9 @@ test("the line renders the Steer offer, notices, live work and typing as one pil
     const work = [{ id: "w1", displayName: "Juniper", summary: "Reading app.ts", startedAt: "2026-10-26T10:00:00.000Z", activity: "searching" }];
 
     const steer = await render({ steer: { entryId: "w1", displayName: "Juniper" }, work, typingNames: ["Emmy"] });
-    assert.match(steer, /<strong>Juniper<\/strong> is mid-turn · your message waits<\/span><button type="button" class="room-activity-action" data-testid="desktop-composer-steer">Steer<\/button>/);
+    assert.match(steer, /<strong>Juniper<\/strong> is mid-turn<\/span><button type="button" class="room-activity-action" data-testid="desktop-composer-steer">Steer privately<\/button>/);
     assert.doesNotMatch(steer, /room-activity-live/, "one pill at a time");
-    assert.match(steer, /role="status" aria-live="polite" aria-atomic="true">Juniper is mid-turn\. Your message waits\. Steer is available\.</);
+    assert.match(steer, /role="status" aria-live="polite" aria-atomic="true">Juniper is mid-turn\. You can send this draft privately with Steer\.</);
 
     const live = await render({ work });
     assert.match(live, /data-orb="searching"/, "the orb comes from the agent's activity");
@@ -403,7 +386,7 @@ test("the line renders the Steer offer, notices, live work and typing as one pil
     assert.match(typing, /<strong>Emmy<\/strong> is typing/);
 
     const steered = await render({ notice: { kind: "steered", id: "s", displayName: "Juniper" } });
-    assert.match(steered, /Steering <strong>Juniper<\/strong>&#39;s current turn/);
+    assert.match(steered, /Correction sent to <strong>Juniper<\/strong>/);
 
     assert.equal((await render({})).includes("room-activity-pill"), false, "nothing to say: no pill");
   } finally { await vite.close(); }

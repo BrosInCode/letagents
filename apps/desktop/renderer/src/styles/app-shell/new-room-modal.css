@@ -336,6 +336,7 @@
   :is(.desktop-new-room-text-button, .desktop-room-project-pick):hover:not(:disabled) { color: var(--text); }
 }
 .new-room-modal-enter-active, .new-room-modal-leave-active { transition: opacity 180ms var(--ease-out); }
+.new-room-modal-leave-active { pointer-events: none; }
 .new-room-modal-enter-active .desktop-new-room-flow, .new-room-modal-leave-active .desktop-new-room-flow { transition: opacity 180ms var(--ease-out), transform 180ms var(--ease-out); }
 .new-room-modal-enter-from, .new-room-modal-leave-to { opacity: 0; }
 .new-room-modal-enter-from .desktop-new-room-flow, .new-room-modal-leave-to .desktop-new-room-flow { opacity: 0; transform: scale(.98); }

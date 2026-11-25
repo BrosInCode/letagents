@@ -17,7 +17,7 @@ const styles = source("../src/styles/message-content/message-receipts.css");
 
 test("receipts are for the sender only: the mark and Message info show on your own sent messages", () => {
   assert.match(chatMessage, /const showsReceipt = computed\(\(\) => senderRole\.value === "self"/);
-  assert.match(chatMessage, /<time :datetime="message\.timestamp">\{\{ formattedTime \}\}<\/time>\s*<RoomMessageReceiptMark v-if="showsReceipt"/);
+  assert.match(chatMessage, /class="room-message-actions">\s*<RoomMessageReceiptMark v-if="showsReceipt"/);
   const menuItems = chatMessage.match(/<template v-if="hasReceipt">\s*<div class="room-message-context-menu-separator" role="separator" \/>\s*<button type="button" role="menuitem" @click="messageInfoFromContext">/g) ?? [];
   assert.equal(menuItems.length, 2, "both context-menu variants gate Message info on the receipt");
   // The item opens the mark, so it shows only once the mark has a receipt to show.
@@ -28,7 +28,7 @@ test("receipts are for the sender only: the mark and Message info show on your o
 test("the old Message info surface is gone and the receipt popover replaces it", () => {
   assert.doesNotMatch(chatView, /RoomMessageInfoSurface/);
   assert.match(chatView, /<RoomMessageReceiptPopover[\s\S]{0,400}?@ask="askFromReceipt"/);
-  assert.match(chatView, /provideRoomMessageReceipts\(messageReceipts\)/);
+  assert.match(chatView, /provideRoomMessageReceipts\(\{ \.\.\.messageReceipts, modelRecoveryFor \}\)/);
 });
 
 test("Ask is a reply to your own message that mentions one agent", () => {
@@ -45,10 +45,11 @@ test("receipts load in batches, refresh on the live Message info event, and rese
   assert.match(session, /if \(event\.type === "open"\) \{[^}]*invalidateRoomMessageReceipts\(event\.roomIdentifier\)/);
 });
 
-test("the mark and the popover controls keep a 44px target while they look small", () => {
+test("the mark and the popover controls keep 44px targets", () => {
   assert.match(styles, /\.room-receipt-mark::before \{ content: ""; position: absolute; inset: -11px -3px; \}/);
   assert.match(styles, /\.room-receipt-ask::before \{ content: ""; position: absolute; inset: -8px -4px; \}/);
-  assert.match(styles, /\.room-receipt-foot \{[^}]*min-height: 44px/);
+  assert.match(styles, /\.room-receipt-no-reads, \.room-receipt-readers \{[^}]*min-height: 44px/);
+  assert.match(styles, /\.room-receipt-copy \{[^}]*width: 44px; height: 44px/);
 });
 
 test("the popover grows out of its mark, is a labelled dialog, and closes with Escape back to the mark", () => {
@@ -56,12 +57,18 @@ test("the popover grows out of its mark, is a labelled dialog, and closes with E
   assert.match(popover, /transformOrigin: `\$\{Math\.round\(rect\.left \+ rect\.width \/ 2 - left\)\}px \$\{below \? "0" : "100%"\}`/);
   assert.match(popover, /@keydown\.esc\.stop\.prevent="close\(true\)"/);
   assert.match(popover, /if \(restoreFocus\) mark\?\.focus\(\{ preventScroll: true \}\)/);
-  assert.match(mark, /:aria-label="`\$\{summary!\.title\}\. Show who this message woke`"/);
+  assert.match(mark, /:aria-label="`Show message info\. \$\{summary!\.title\}`"/);
 });
 
-test("motion is short, only real changes animate, and reduced motion keeps a cross-fade", () => {
+test("people's reads appear before agent activity, with unread messages shown as text", () => {
+  assert.match(popover, /class="room-receipt-reading"[\s\S]*?<p v-else class="room-receipt-no-reads"[\s\S]*?class="room-receipt-activity"/);
+  assert.match(popover, /v-show="readersOpen && receipt.readers.length" id="room-receipt-readers"/);
+});
+
+test("motion is short, queued agents do not animate, and reduced motion keeps a cross-fade", () => {
   assert.match(styles, /transition: opacity 180ms cubic-bezier\(0\.23, 1, 0\.32, 1\), transform 180ms/);
-  assert.match(popover, /if \(!opened\.value \|\| !before \|\| title === before\) return;/);
+  assert.match(mark, /<span v-if="summary!\.tone === 'active'" class="room-receipt-dots"/);
+  assert.match(mark, /<Clock3 v-else-if="summary!\.tone === 'waiting'"/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\) \{\s*\.room-receipt-popover \{ transform: none; transition: opacity 120ms ease; \}/);
   assert.doesNotMatch(styles, /transition: all/);
 });

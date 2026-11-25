@@ -103,7 +103,7 @@ async function scrollSurface(
     active: true, messages: [message("msg_1"), message("msg_2")], threadMessages: [], localAgentWork: [],
     hasOlderMessages: false, loadingOlderMessages: false, roomLoading: false, roomIdentifier: "room", messageNamespace: "room", searchQuery: "", activeSearchMessageId: null,
     initialScrollPosition: initialScrollTop === null ? null : { top: initialScrollTop, latest: false, anchor: null },
-    initialScrollTop,
+    initialScrollTop: thread ? initialScrollTop ?? 1600 : initialScrollTop,
     parent: message("msg_1"), replies: [message("msg_2")], initialThreadSummary: null, participants: [], attachmentDrafts: [], pendingAttachmentDrafts: [], taskReferenceIds: new Set(), deliveryReceiptsByMessage: {},
     ...mount.props,
   });
@@ -297,6 +297,76 @@ test("timeline: all append/reaction/preview/resize combinations preserve the rea
       assert.ok(s.calls.length <= 1, `duplicate follow: bottom=${atBottom}, mask=${mask}: ${s.calls}`);
     } finally { s.close(); }
   }
+});
+
+test("thread: opens at the first reply and restores a bookmarked position when replies arrive late", async () => {
+  for (const initialScrollTop of [null, 260]) {
+    const s = await scrollSurface(true, false, null, { props: { replies: [], initialScrollTop } });
+    try {
+      s.el.scrollHeight = s.el.clientHeight;
+      s.el.scrollTop = 0;
+      s.props.replies = [message("msg_2"), message("msg_3")];
+      await Promise.resolve();
+      s.el.scrollHeight = 2000;
+      await flush();
+      assert.equal(s.el.scrollTop, initialScrollTop ?? 0);
+    } finally { s.close(); }
+  }
+});
+
+test("thread: refreshing a single long reply never pulls the reader to the bottom", async () => {
+  const s = await scrollSurface(true, false, 0);
+  try {
+    s.el.scrollHeight = 460;
+    for (const top of [20, 60]) {
+      s.el.scrollTop = top;
+      s.el.dispatchEvent(new Event("scroll"));
+      s.calls.length = 0;
+      s.props.replies = s.props.replies.map(reply => ({ ...reply }));
+      s.reactions.revision.value++;
+      s.previews.revision.value++;
+      await flush();
+      assert.equal(s.el.scrollTop, top);
+      assert.deepEqual(s.calls, []);
+      assert.equal(s.vm.isScrolledUp.value, top < 60);
+    }
+    s.props.replies = [...s.props.replies, message("msg_3")];
+    await Promise.resolve();
+    s.el.scrollHeight += 100;
+    await flush();
+    assert.equal(s.el.scrollTop, 160);
+    assert.deepEqual(s.calls, ["scroll"]);
+  } finally { s.close(); }
+});
+
+test("thread: an upward wheel gesture wins before its first scroll event", async () => {
+  const s = await scrollSurface(true);
+  try {
+    s.reactions.revision.value++;
+    await Promise.resolve();
+    s.vm.handleWheel({ deltaY: -24 });
+    s.el.scrollHeight += 40;
+    await flush();
+    assert.equal(s.el.scrollTop, 1600);
+    assert.deepEqual(s.calls, []);
+
+    s.previews.revision.value++;
+    await Promise.resolve();
+    s.el.scrollHeight += 50;
+    await flush();
+    assert.equal(s.el.scrollTop, 1600);
+    assert.deepEqual(s.calls, []);
+
+    s.vm.scrollToLatest();
+    assert.equal(s.el.scrollTop, 1690);
+    s.calls.length = 0;
+    s.props.replies = [...s.props.replies, message("msg_3")];
+    await Promise.resolve();
+    s.el.scrollHeight += 60;
+    await flush();
+    assert.equal(s.el.scrollTop, 1750);
+    assert.deepEqual(s.calls, ["scroll"]);
+  } finally { s.close(); }
 });
 
 test("thread: paged replies and later revisions never re-run a consumed reveal or search", async () => {

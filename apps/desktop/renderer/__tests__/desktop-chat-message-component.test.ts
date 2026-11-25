@@ -34,6 +34,50 @@ after(async () => {
   await vite?.close();
 });
 
+test("agent updates link commits, PRs and Actions run IDs in the room and its threads", async (t) => {
+  const previousWindow = globalThis.window;
+  Object.assign(globalThis, { window: {} });
+  t.after(() => { globalThis.window = previousWindow; });
+  const { useDesktopRoomGitHubEvents } = await vite.ssrLoadModule(
+    "/renderer/src/components/desktop/content/room-shell/useDesktopRoomGitHubEvents.ts",
+  );
+  const text = [
+    "PR #2067 is green at c1cc5adf4 (run 44912902470).",
+    "Reviewed pull request `#2070` at head `50f85274b` on run ID `44931880357`.",
+    "Kept `worker-binding-store.ts`, `gh run rerun 44931880357 --failed`, and #317 as text.",
+    "[Existing commit](https://github.com/other/repo/commit/7c5e14e4f) and other/repo@7c5e14e4f.",
+    "~~~sh\nprintf 'PR #1515 run 44931880359'\n~~~",
+  ].join("\n\n");
+  for (const [context, parentRoomId] of [
+    ["timeline", "github.com/BrosInCode/letagents"],
+    ["thread-reply", "github.com/BrosInCode/letagents"],
+    ["timeline", null],
+  ] as const) {
+    const html = await renderToString(createSSRApp({
+      setup() {
+        useDesktopRoomGitHubEvents({
+          room: ref({ identifier: "review-room", kind: "focus", parentRoomId, gitRoom: null }),
+          messages: ref([]), initialPage: ref(null), activeTab: ref("chat"),
+          localGitRoom: ref(false), githubConnected: ref(false), connectedRepository: ref(null),
+        });
+        return () => h(DesktopChatMessage as object, {
+          context, message: { id: "msg_12", sender: "Agent", source: "agent", text, attachments: [], timestamp: "2026-11-21T20:00:00Z" },
+          threadSummary: { count: 0, unreadCount: 0, participants: [] }, activeThreadRoot: false, highlightQuery: "green", searchActive: false,
+        });
+      },
+    }));
+    for (const path of ["pull/2067", "pull/2070", "commit/c1cc5adf4", "commit/50f85274b", "actions/runs/44912902470", "actions/runs/44931880357"]) {
+      assert.equal(html.includes('href="https://github.com/brosincode/letagents/' + path + '"'), Boolean(parentRoomId), context + ": " + path);
+    }
+    assert.match(html, /<code>worker-binding-store\.ts<\/code>/);
+    assert.match(html, /<code>gh run rerun 44931880357 --failed<\/code>/);
+    if (parentRoomId) assert.match(html, /<code><a href="https:\/\/github\.com\/brosincode\/letagents\/commit\/50f85274b"/);
+    assert.match(html, /<a href="https:\/\/github\.com\/other\/repo\/commit\/7c5e14e4f"[^>]*>other\/repo@7c5e14e4f<\/a>/);
+    assert.match(html, /<mark class="message-search-hit">green<\/mark>/);
+    assert.doesNotMatch(html, /href="[^"]*\/(?:317|1515|44931880359)"/);
+  }
+});
+
 test("thread-context messages expose their DOM contract through the shared component", async () => {
   const app = createSSRApp({
     render: () => h(DesktopChatMessage as object, {
@@ -84,8 +128,8 @@ test("thread-context messages expose their DOM contract through the shared compo
   const html = await renderToString(app);
   assert.match(html, /data-thread-message-id="msg_thread_reply"/);
   assert.match(html, /data-testid="room-thread-reply-msg_thread_reply"/);
-  assert.match(html, /aria-label="Copy message"/);
-  assert.match(html, /aria-label="Jump to root"/);
+  assert.match(html, /aria-label="Message actions"/);
+  assert.match(html, /class="room-message-meta-tail"[\s\S]*?class="room-message-meta-action"/);
   assert.match(html, /data-task-reference-id="task_42"/);
   assert.match(html, /EmmyMay&#39;s agent/);
   assert.match(html, /chat-avatar is-agent/);
@@ -638,6 +682,7 @@ test("board notification renders readable copy while keeping its canonical body 
 // separately because this suite has no layout engine.
 class MenuAuditElement {
   isConnected = true;
+  getBoundingClientRect() { return { right: 780, bottom: 540, top: 512 }; }
   disabled = false;
   href: string | null = null;
   constructor(readonly label = '') { markRaw(this); }
@@ -645,7 +690,7 @@ class MenuAuditElement {
   closest(selector: string) { return this.href && (selector.includes('a[') || selector.includes('button, a')) ? this : null; }
   getAttribute(name: string) { return name === 'href' ? this.href : null; }
 }
-async function desktopMenuAudit(t: any, flags = 63, extra: Record<string, unknown> = {}) {
+async function desktopMenuAudit(t: any, flags = 63, extra: Record<string, unknown> = {}, viaButton = false, messageContext = "timeline") {
   const originals = { window: globalThis.window, document: globalThis.document, Element: globalThis.Element, HTMLElement: globalThis.HTMLElement };
   const doc: any = { activeElement: null, querySelectorAll: () => [] };
   Object.assign(globalThis, { document: doc, Element: MenuAuditElement, HTMLElement: MenuAuditElement,
@@ -660,16 +705,21 @@ async function desktopMenuAudit(t: any, flags = 63, extra: Record<string, unknow
   const target = new MenuAuditElement();
   if (flags & 1) target.href = 'https://example.com/';
   const props = { message: { id: 'msg_12', text: 'Message', sender: 'Ada', timestamp: '2026-10-02T00:00:00Z', attachments: [], reactions: [], ...extra },
-    roomIdentifier: flags & 32 ? 'room' : 'local_room', threadSummary: { count: 0, unreadCount: 0, participants: [] }, activeThreadRoot: false, highlightQuery: '', searchActive: false };
+    roomIdentifier: flags & 32 ? 'room' : 'local_room', context: messageContext, threadSummary: { count: 0, unreadCount: 0, participants: [] }, activeThreadRoot: false, highlightQuery: '', searchActive: false };
   const events: any[] = [];
   let vm: any;
   const OpenChat = { ...(DesktopChatMessage as any), setup(props: any, context: any) {
     vm = (DesktopChatMessage as any).setup(props, context);
-    vm.openContextMenu({ target, currentTarget: invoker, clientX: 799, clientY: 599, preventDefault() {} });
+    if (viaButton) {
+      vm.messageActionsTrigger.value = invoker;
+      vm.openMessageActions();
+    } else {
+      vm.openContextMenu({ target, currentTarget: invoker, clientX: 799, clientY: 599, preventDefault() {} });
+    }
     return vm;
   } };
   const app = createSSRApp({ setup() {
-    pins.provideRoomMessagePins({ canPin: ref(Boolean(flags & 2)), state: ref({ pending: extra.pinPending ? 'msg_12' : null }), isPinned: () => false, toggle: () => events.push('pin') });
+    pins.provideRoomMessagePins({ canPin: ref(Boolean(flags & 2)), state: ref({ pending: extra.pinPending ? 'msg_12' : null }), isPinned: () => Boolean(extra.pinned), toggle: () => events.push('pin') });
     reactions.provideRoomMessageReactions({ canReact: ref(Boolean(flags & 4)), reactionsFor: () => [], viewerReacted: () => false, track: () => () => {}, toggle() {} });
     provide(unreadMenuKey, { client: { account: ref(flags & 16 ? 'person' : null), mark: () => events.push('unread') }, room: ref('room') });
     return () => h(OpenChat, props);
@@ -708,6 +758,34 @@ test('integrated desktop menu renders ordered rows and reserves height across al
     vm.handleContextMenuKeydown({ key: 'Escape' }); await nextTick();
     assert.equal(document.activeElement, invoker);
   });
+});
+
+test('the message actions button opens the same menu and restores focus to its trigger', async t => {
+  const { vm, rows, invoker, events, html } = await desktopMenuAudit(t, 62, { pinned: true, source: "browser" }, true);
+  assert.ok(rows.some(row => row.label === "Copy message"));
+  assert.ok(rows.some(row => row.label === "Quote reply"));
+  assert.ok(rows.some(row => row.label === "Reply in thread"));
+  assert.ok(rows.some(row => row.label === "Add reaction…"));
+  assert.ok(rows.some(row => row.label === "Unpin message"));
+  assert.match(html, /role="menu" aria-label="Message actions"/);
+
+  vm.openMessageActions();
+  await nextTick();
+  assert.equal(vm.contextMenuOpen.value, false);
+  assert.equal(document.activeElement, invoker);
+
+  vm.openMessageActions();
+  rows[0].focus();
+  vm.pinFromContext();
+  await nextTick();
+  assert.deepEqual(events, ["pin"]);
+  assert.equal(vm.contextMenuOpen.value, false);
+  assert.equal(document.activeElement, invoker);
+});
+
+test('the actions menu on a thread reply includes Jump to root', async t => {
+  const { rows } = await desktopMenuAudit(t, 62, {}, true, "thread-reply");
+  assert.ok(rows.some(row => row.label === "Jump to root"));
 });
 
 test('desktop keyboard navigation skips a pending disabled pin row', async t => {
@@ -779,7 +857,11 @@ test("a browser publisher with a legacy agent-looking name stays human with its 
   assert.doesNotMatch(html, /chat-avatar is-agent/);
 });
 
-test("local agent bubbles use the current room's supervisor ownership, never the author label", async t => {
+test("file-change summaries share their agent bubble's authenticated ownership", async t => {
+  const RoomContribution = (await vite.ssrLoadModule(
+    "/renderer/src/components/desktop/content/room-chat/RoomContribution.vue",
+  )).default;
+  const timestamp = '2026-11-15T20:06:19Z';
   const roomIdentifier = 'local-agent-refresh-qa';
   const agentKey = 'local/supervised/supervised_scout';
   const entry = { id: 'supervised_scout', roomId: roomIdentifier, localRoomId: roomIdentifier, agentKey };
@@ -797,13 +879,29 @@ test("local agent bubbles use the current room's supervisor ownership, never the
     setMessageReactionViewer(item.viewer ? { login: item.viewer } : null);
     const html = await renderToString(createSSRApp({ setup() {
       provide(supervisorEntriesKey, { entries: ref(item.entries) });
-      return () => h(DesktopChatMessage as object, {
-        roomIdentifier: item.roomIdentifier,
-        message: { id: 'msg_agent', sender: 'Scout | Your agent | Codex', text: 'Done', source: 'agent', timestamp: '2026-11-15T20:06:19Z', attachments: [],
-          agentIdentity: { agentKey: item.agentKey, displayName: 'Scout', ownerLabel: 'You', ownerAttribution: 'Your agent', ideLabel: 'Codex' } },
-        highlightQuery: '', searchActive: false, context: 'timeline', threadSummary: { count: 0, unreadCount: 0, participants: [] },
-      });
+      return () => [
+        h(DesktopChatMessage as object, {
+          roomIdentifier: item.roomIdentifier,
+          message: { id: 'msg_agent', sender: 'Scout | Your agent | Codex', text: 'Done', source: 'agent', timestamp, attachments: [],
+            agentIdentity: { agentKey: item.agentKey, displayName: 'Scout', ownerLabel: 'You', ownerAttribution: 'Your agent', ideLabel: 'Codex' } },
+          highlightQuery: '', searchActive: false, context: 'timeline', threadSummary: { count: 0, unreadCount: 0, participants: [] },
+        }),
+        h(RoomContribution, {
+          work: {
+            attemptId: 'attempt_1', roomId: item.roomIdentifier, sourceMessageId: 'msg_agent',
+            agentKey: item.agentKey, revision: 1, updatedAt: timestamp,
+            summary: { contribution: {
+              summary: null,
+              changes: { state: 'ready', captured_at: timestamp, files: [], hidden_files: 1, additions: 6, deletions: 0 },
+            } },
+          },
+          status: 'ready',
+          participants: [],
+        }),
+      ];
     } }));
-    assert.match(html, new RegExp(`data-chat-role="${item.role}"`));
+    assert.match(html, new RegExp(`class="room-chat-message[^"]*"[^>]*data-chat-role="${item.role}"`));
+    assert.match(html, new RegExp(`class="room-contribution"[^>]*data-chat-role="${item.role}"`));
+    assert.match(html, /1 file changed/);
   });
 });
