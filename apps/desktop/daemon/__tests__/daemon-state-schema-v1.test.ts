@@ -2070,9 +2070,10 @@ test("legacy reset preserves room-only workspaces and review archives across res
         workspaceRoot: env.root,
       };
 
+      const daemonPlatform: NodeJS.Platform = process.platform === "win32" ? "win32" : "darwin";
       // Startup #1: moves legacy DB + reviews + worktrees/room-only aside, runs recoverEphemeralWorkspaces & review pruning.
       let backupName = "";
-      const daemon1 = new SupervisorDaemon(paths, process.platform);
+      const daemon1 = new SupervisorDaemon(paths, daemonPlatform);
       try {
         await daemon1.start();
         const internals = daemon1 as unknown as {
@@ -2106,7 +2107,7 @@ test("legacy reset preserves room-only workspaces and review archives across res
       );
 
       // Startup #2 on the now-modern v1005 DB: preserved backups must survive and reset status stays readable.
-      const daemon2 = new SupervisorDaemon(paths, process.platform);
+      const daemon2 = new SupervisorDaemon(paths, daemonPlatform);
       try {
         await daemon2.start();
         const internals = daemon2 as unknown as {
@@ -2140,7 +2141,7 @@ test("legacy reset preserves room-only workspaces and review archives across res
       auditPath: join(env.root, "audit.log"),
       workspaceRoot: env.root,
     };
-    const daemon = new SupervisorDaemon(paths, process.platform);
+    const daemon = new SupervisorDaemon(paths, process.platform === "win32" ? "win32" : "darwin");
     try {
       await daemon.start();
       const status = (daemon as unknown as { status(): { legacy_state_reset?: unknown } }).status();
