@@ -4,7 +4,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { LETAGENTS_NPX_ARGS } from "../../mcp-config.js";
 import { ProviderContinuationMissingError, synthesizeTerminalPayload, type ProviderAttachTerminal, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderHandle, type ProviderSpawnRequest } from "../provider-adapter.js";
 import { attestProviderSpawnPolicy } from "../provider-spawn-configuration.js";
 import { sameProcessBirthIdentity, terminateFreshLaunch } from "../provider-evidence.js";
@@ -24,19 +23,21 @@ import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
 import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
 
 /**
- * What OpenCode starts as this agent's LetAgents MCP server. Windows runs the
- * sealed bundled runtime, as Codex, Claude Code and Cursor do: npx is a .cmd
- * file there, which needs a shell, and it would run an unpinned package whose
- * daemon client nothing checked. There is no npx fallback on Windows.
+ * What OpenCode starts as this agent's LetAgents MCP server: the sealed
+ * bundled runtime on this app's own binary with ELECTRON_RUN_AS_NODE=1, on
+ * every platform, as Codex, Claude Code, Cursor and Antigravity do. npx would
+ * need Node and npm on the computer and would run an unpinned package whose
+ * daemon client nothing checked, so there is no npx fallback. A development
+ * entry, which the daemon passes only behind its development gate, comes
+ * first and is checked by the same resolver. A missing or changed bundled
+ * runtime refuses the launch.
  */
 export function openCodeMcpLaunch(
   devEntryPath?: string,
-  platform: NodeJS.Platform = process.platform,
-  resolveRuntime: () => LetAgentsMcpRuntime = () => resolveLetAgentsMcpRuntime({ env: desktopRuntimeEnvironment() }),
+  resolveRuntime: (devEntryPath?: string) => LetAgentsMcpRuntime = (entry) =>
+    resolveLetAgentsMcpRuntime({ devEntryPath: entry, env: desktopRuntimeEnvironment() }),
 ): { command: string[]; environment: Record<string, string> } {
-  if (devEntryPath) return { command: [process.execPath, devEntryPath], environment: {} };
-  if (platform !== "win32") return { command: ["npx", ...LETAGENTS_NPX_ARGS], environment: {} };
-  return { command: [process.execPath, resolveRuntime().entryPath], environment: { ELECTRON_RUN_AS_NODE: "1" } };
+  return { command: [process.execPath, resolveRuntime(devEntryPath).entryPath], environment: { ELECTRON_RUN_AS_NODE: "1" } };
 }
 
 export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
@@ -132,7 +133,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
       encoding: "utf8",
       mode: 0o600,
     });
-    const mcpLaunch = openCodeMcpLaunch(req.devMcpServerEntryPath, process.platform, this.deps.resolveMcpRuntime);
+    const mcpLaunch = openCodeMcpLaunch(req.devMcpServerEntryPath, this.deps.resolveMcpRuntime);
     const mcpCommand = mcpLaunch.command;
     const mcpEnvironment = {
       ...supervisedOpenCodeMcpEnvironment(
