@@ -171,7 +171,7 @@ export interface EdgeHostApprovalCandidate {
 export interface EdgeAgentRegistration {
   entryId: string;
   roomId: string;
-  provider: "codex" | "claude-code" | "cursor" | "open-model";
+  provider: "codex" | "claude-code" | "cursor" | "open-model" | "antigravity";
   displayName?: string;
   model?: string | null;
   charter?: string;
