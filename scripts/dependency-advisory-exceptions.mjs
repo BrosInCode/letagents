@@ -5,10 +5,13 @@
  * An exception names one advisory and one package. It holds only while every
  * copy of that package in the audited lockfile is a dev dependency (the
  * lockfile's flags here, and npm's own view in the runner), and only until
- * its end date; after that date the audit fails again. Any advisory without
+ * its end date; after that date the audit fails again. A dev dependency that
+ * ships in a bundle (BUNDLED_DEV_PACKAGES below) counts as not dev. Any advisory without
  * an exception still fails the audit. Add one only with the repository
  * owner's yes, and remove it once a fixed version ships.
  */
+
+import { readFileSync } from "node:fs";
 
 export const ADVISORY_EXCEPTIONS = Object.freeze([
   Object.freeze({
@@ -40,6 +43,56 @@ export function lockfilePackagePaths(lockfile, packageName) {
   return Object.keys(packages).filter((key) => key === suffix || key.endsWith(`/${suffix}`));
 }
 
+const desktopBundled = JSON.parse(readFileSync(new URL("../apps/desktop/renderer-bundled-packages.json", import.meta.url), "utf8"));
+
+/**
+ * Dev dependencies whose code ships all the same, by the name of the lockfile
+ * that installs them: Vite bundles the desktop renderer's packages into the
+ * app (apps/desktop/renderer-bundled-packages.json, the list that packaging
+ * uses too). Their own dependencies ship with them.
+ */
+export const BUNDLED_DEV_PACKAGES = Object.freeze({
+  "letagents-desktop": Object.freeze([
+    ...Object.keys(desktopBundled.packages),
+    ...Object.keys(desktopBundled.bundledDependencies ?? {}),
+  ]),
+});
+
+/** The lockfile entry that `name` resolves to from the package at `from`, as Node finds it. */
+function resolveLockfileDependency(packages, from, name) {
+  for (let base = from; ;) {
+    const candidate = `${base ? `${base}/` : ""}node_modules/${name}`;
+    if (Object.hasOwn(packages, candidate)) return candidate;
+    if (!base) return null;
+    const parent = base.lastIndexOf("/node_modules/");
+    base = parent < 0 ? "" : base.slice(0, parent);
+  }
+}
+
+/**
+ * The lockfile paths of the bundled packages and of everything they depend
+ * on (also optional dependencies, not peers). These ship in the app even
+ * when the lockfile marks them dev.
+ */
+export function bundledPackagePaths(lockfile, roots = BUNDLED_DEV_PACKAGES[lockfile?.name] ?? []) {
+  const packages = lockfile && typeof lockfile === "object" && lockfile.packages && typeof lockfile.packages === "object"
+    ? lockfile.packages
+    : {};
+  const found = new Set();
+  const queue = roots.map((name) => resolveLockfileDependency(packages, "", name)).filter(Boolean);
+  while (queue.length > 0) {
+    const path = queue.pop();
+    if (found.has(path)) continue;
+    found.add(path);
+    const entry = packages[path] ?? {};
+    for (const name of Object.keys({ ...entry.dependencies, ...entry.optionalDependencies })) {
+      const target = resolveLockfileDependency(packages, path, name);
+      if (target) queue.push(target);
+    }
+  }
+  return found;
+}
+
 function endOf(exception) {
   return Date.parse(`${exception.endsOn}T00:00:00Z`);
 }
@@ -66,6 +119,7 @@ function reachesAdvisory(vulnerabilities, name, seen = new Set()) {
  */
 export function evaluateAdvisoryExceptions(auditJson, lockfile, { now, exceptions = ADVISORY_EXCEPTIONS }) {
   const blocking = [];
+  const bundled = bundledPackagePaths(lockfile);
   const used = new Map();
   const vulnerabilities = auditJson && typeof auditJson === "object" ? auditJson.vulnerabilities : null;
   if (!vulnerabilities || typeof vulnerabilities !== "object" || Object.keys(vulnerabilities).length === 0) {
@@ -126,6 +180,14 @@ export function evaluateAdvisoryExceptions(auditJson, lockfile, { now, exception
       blocking.push(
         `${exception.advisory} is excepted only while every ${exception.packageName} in the lockfile is a dev dependency. ` +
           `Not dev: ${notDev.join(", ")}.`,
+      );
+      continue;
+    }
+    const bundledPaths = paths.filter((key) => bundled.has(key));
+    if (bundledPaths.length > 0) {
+      blocking.push(
+        `${exception.advisory} is excepted only for packages that are not shipped. ${exception.packageName} is a dev dependency, ` +
+          `but its code ships in a bundle: ${bundledPaths.join(", ")}.`,
       );
       continue;
     }

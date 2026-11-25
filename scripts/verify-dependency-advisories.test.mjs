@@ -7,6 +7,8 @@ import test from "node:test";
 
 import {
   ADVISORY_EXCEPTIONS,
+  BUNDLED_DEV_PACKAGES,
+  bundledPackagePaths,
   evaluateAdvisoryExceptions,
 } from "./dependency-advisory-exceptions.mjs";
 
@@ -294,6 +296,55 @@ test("rule 3: a picomatch that is not dev (at any depth), or one the lockfile do
     false,
     "a reported copy the lockfile does not list",
   );
+});
+
+/** The desktop lockfile shape: a renderer package that Vite bundles depends on picomatch, all marked dev. */
+function desktopBundledLockfile({ name = "letagents-desktop", nested = false } = {}) {
+  const lockfile = devLockfile({
+    "node_modules/vue": { version: "3.5.43", dev: true, dependencies: { "@vue/compiler-sfc": "3.5.43" } },
+    "node_modules/@vue/compiler-sfc": { version: "3.5.43", dev: true, dependencies: { picomatch: "^4.0.0" } },
+  });
+  if (name) lockfile.name = name;
+  if (nested) {
+    // A second copy below the bundled package; the top-level one is vite's only.
+    lockfile.packages["node_modules/@vue/compiler-sfc/node_modules/picomatch"] = { version: "4.0.4", dev: true };
+  }
+  return lockfile;
+}
+
+test("rule 3b: a dev package that the desktop renderer bundles ships, so it is never excepted as dev", () => {
+  const bundled = evaluate(picomatchReport(), desktopBundledLockfile());
+  assert.equal(bundled.allowed, false);
+  assert.match(bundled.blocking.join("\n"), /GHSA-fc5q-39xc-vjpf is excepted only for packages that are not shipped\. picomatch is a dev dependency, but its code ships in a bundle: node_modules\/picomatch\./);
+
+  // Node resolution: the bundled package gets its own nested copy, and only that copy ships.
+  const nested = desktopBundledLockfile({ nested: true });
+  const nestedReport = picomatchReport({ nodes: ["node_modules/picomatch", "node_modules/@vue/compiler-sfc/node_modules/picomatch"] });
+  assert.match(evaluate(nestedReport, nested).blocking.join("\n"), /ships in a bundle: node_modules\/@vue\/compiler-sfc\/node_modules\/picomatch\.$/m);
+
+  // The list is the desktop's: another lockfile with the same packages is not bundled.
+  assert.equal(evaluate(picomatchReport(), desktopBundledLockfile({ name: "web" })).allowed, true);
+});
+
+test("the bundled list is the one packaging uses, and it names the real desktop lockfile", async () => {
+  const { RENDERER_BUNDLED_PACKAGES } = await import("../apps/desktop/electron/scripts/packaged-dependencies.mjs");
+  for (const name of RENDERER_BUNDLED_PACKAGES) assert.ok(BUNDLED_DEV_PACKAGES["letagents-desktop"].includes(name), name);
+  const desktopLockfile = JSON.parse(await readFile(path.resolve("apps/desktop/package-lock.json"), "utf8"));
+  assert.equal(desktopLockfile.name, "letagents-desktop");
+  const shipped = bundledPackagePaths(desktopLockfile);
+  for (const key of ["node_modules/vue", "node_modules/@vue/runtime-core", "node_modules/three", "node_modules/dompurify", "node_modules/monaco-editor/node_modules/marked"]) {
+    assert.ok(shipped.has(key), key);
+  }
+  assert.equal(shipped.has("node_modules/vite"), false);
+  assert.equal(shipped.has("node_modules/picomatch"), false, "the real picomatch exception still applies to the desktop lockfile");
+});
+
+test("the audit runner fails an excepted advisory on a package that the desktop renderer bundles", async () => {
+  const fixture = await createAuditFixture("report", { lockfile: desktopBundledLockfile(), report: picomatchReport() });
+  const result = runFixture(fixture);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, realHasPicomatch ? /GHSA-fc5q-39xc-vjpf is excepted only for packages that are not shipped.*picomatch.*ships in a bundle: node_modules\/picomatch\./ : /GHSA-fc5q-39xc-vjpf has no exception/);
+  assert.doesNotMatch(result.stderr, /Allowing GHSA-fc5q-39xc-vjpf/);
 });
 
 test("rule 4: the exception ends at 00:00 UTC on its end date, after the dev check, and says so", () => {

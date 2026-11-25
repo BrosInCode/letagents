@@ -249,11 +249,13 @@ test("the check fails when a file names a path from its own place that the app d
     const failing = runCheck(app);
     assert.equal(failing.status, 1);
     assert.match(failing.stderr, /moved.worker-user\.js names \.\.\/shared\/worker\.mjs from its own place/);
-    // A compiled test may name a fixture that the app does not have.
+    // The packaged app has no compiled tests, so a test folder gets no exemption.
     rmSync(join(app, "dist-daemon", "moved"), { recursive: true });
     mkdirSync(join(app, "dist-daemon", "__tests__"));
     writeFileSync(join(app, "dist-daemon", "__tests__", "x.test.js"), 'export const fixture = new URL("./no-such-fixture.json", import.meta.url);\n');
-    assert.equal(runCheck(app).status, 0);
+    const withTest = runCheck(app);
+    assert.equal(withTest.status, 1);
+    assert.match(withTest.stderr, /__tests__.x\.test\.js names \.\/no-such-fixture\.json from its own place/);
   } finally {
     rmSync(app, { recursive: true, force: true });
   }

@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { importedPackageName, RENDERER_BUNDLED_PACKAGES, runtimeImports } from "./packaged-dependencies.mjs";
+import {
+  importedPackageName,
+  importSpecifiers,
+  RENDERER_BUNDLED_PACKAGES,
+  RENDERER_NOTICE_FILES,
+  rendererImports,
+  runtimeImports,
+} from "./packaged-dependencies.mjs";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const desktopPackage = JSON.parse(readFileSync(join(desktopRoot, "package.json"), "utf8"));
@@ -64,4 +71,50 @@ test("the renderer's bundled packages are dev dependencies that the app does not
 
 test("no code that the app runs imports a test file", () => {
   assert.deepEqual(imports.testImports, []);
+});
+
+test("the import scan reads the require forms that the app's code uses", () => {
+  const source = [
+    'import { a } from "pkg-a";',
+    'export * from "pkg-b/sub";',
+    'import "pkg-c";',
+    'const d = await import("pkg-d");',
+    'const e = createRequire(import.meta.url)("pkg-e");',
+    'const f = createRequire(import.meta.url)(\n  "pkg-f",\n);',
+    "const require = createRequire(import.meta.url);",
+    'const g = require("pkg-g");',
+    'const h = require.resolve("pkg-h");',
+    "const i = await import(`pkg-i/x.js`);",
+    "const j = require(`pkg-j`);",
+    "const k = await import(`${dynamic}/k.js`);",
+    'import type { L } from "pkg-l";',
+    "// A comment that reads from `cwd` is not an import.",
+  ].join("\n");
+  assert.deepEqual(importSpecifiers(source), ["pkg-a", "pkg-b/sub", "pkg-c", "pkg-d", "pkg-e", "pkg-f", "pkg-g", "pkg-h", "pkg-i/x.js", "pkg-j"]);
+});
+
+test("every package that the renderer imports is a dependency of the app's own code or is in the bundled list", () => {
+  const renderer = rendererImports(desktopRoot);
+  assert.ok(renderer.files > 300, `only ${renderer.files} renderer files were read`);
+  const unlisted = [...renderer.packages.keys()].filter((name) => !Object.hasOwn(dependencies, name) && !RENDERER_BUNDLED_PACKAGES.includes(name));
+  assert.deepEqual(unlisted, [], "add the package to renderer-bundled-packages.json, with its licence files");
+  const unused = RENDERER_BUNDLED_PACKAGES.filter((name) => !renderer.packages.has(name));
+  assert.deepEqual(unused, [], "the renderer no longer imports these bundled packages");
+});
+
+test("the renderer notices hold the licence of every bundled package", () => {
+  const viteConfig = readFileSync(join(desktopRoot, "vite.config.ts"), "utf8");
+  assert.match(viteConfig, /import rendererBundledPackages from "\.\/renderer-bundled-packages\.json"/);
+  assert.match(viteConfig, /const files = rendererNoticeFiles\(\);/);
+  for (const name of RENDERER_BUNDLED_PACKAGES) {
+    const licences = RENDERER_NOTICE_FILES.filter((file) => file.startsWith(`${name}/`));
+    assert.ok(licences.length > 0, `${name} has no licence file in the notices`);
+    // Every licence file the package has, by its real name.
+    const own = readdirSync(join(desktopRoot, "node_modules", name)).filter((file) => /^(licen[cs]e|copying|notice)/i.test(file));
+    for (const file of own) assert.ok(licences.includes(`${name}/${file}`), `${name}/${file} is not in the notices`);
+  }
+  for (const file of RENDERER_NOTICE_FILES) {
+    const path = join(desktopRoot, "node_modules", file);
+    assert.ok(existsSync(path) && statSync(path).size > 0, `${file} does not exist`);
+  }
 });
