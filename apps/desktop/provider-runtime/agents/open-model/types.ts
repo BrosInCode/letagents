@@ -17,8 +17,8 @@ export const NO_REPLY_SENTINEL = "LETAGENTS_NO_ROOM_REPLY";
 export const SESSION_ORDERING_SCAN_LIMIT = 4_096;
 
 export interface OpenModelProviderAdapterDependencies {
-  /** Tests only: the sealed MCP runtime that Windows starts. */
-  resolveMcpRuntime?: () => LetAgentsMcpRuntime;
+  /** Tests only: the sealed MCP runtime (or the checked development entry) that OpenCode starts. */
+  resolveMcpRuntime?: (devEntryPath?: string) => LetAgentsMcpRuntime;
   /** Why OpenCode cannot run on this computer (a macOS older than its minimum), or null. */
   unsupportedSystem(): { message: string; detail: string } | null;
   launch(input: {
