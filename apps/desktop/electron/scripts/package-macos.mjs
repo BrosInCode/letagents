@@ -10,6 +10,7 @@ import { sign } from "@electron/osx-sign";
 import { createDifferentialBlockmap } from "./differential-blockmap.mjs";
 import { assertPackagedElectronFuses } from "./electron-fuses.mjs";
 import { notarizeWithStapleRecovery, validateStapledTicket } from "./notarization-staple-recovery.mjs";
+import { assertPackageArtifactManifest, signMacBundleWithManifest } from "./package-artifact-manifest.mjs";
 import { describeArtifact } from "./release-artifacts.mjs";
 import {
   assertDesktopArchitecture,
@@ -87,19 +88,32 @@ await mkdir(artifactsDirectory, { recursive: true });
 
 if (!skipSigning) {
   await cp(provisioningProfile, join(packagedApp, "Contents", "embedded.provisionprofile"));
-  await sign({
-    app: packagedApp,
+  // Signing rewrites a Mach-O file. So the manifest's Mach-O entries (OpenCode)
+  // are signed first, with the arguments osx-sign uses for a nested file, and
+  // the manifest records those signed bytes. osx-sign then seals the bundle,
+  // the manifest included, and leaves the signed entries as they are. The
+  // manifest is checked before the notary submission.
+  await signMacBundleWithManifest({
+    bundle: packagedApp,
     identity,
-    platform: "darwin",
-    type: "distribution",
-    hardenedRuntime: true,
-    gatekeeperAssess: false,
-    provisioningProfile,
-    optionsForFile: (filePath) => filePath === packagedApp
-      ? { entitlements }
-      : {},
+    entitlements: fileURLToPath(new URL("../entitlements/default.darwin.plist", import.meta.resolve("@electron/osx-sign"))),
+    execFile: execFileAsync,
+    signBundle: async ({ ignore }) => {
+      await sign({
+        app: packagedApp,
+        identity,
+        platform: "darwin",
+        type: "distribution",
+        hardenedRuntime: true,
+        gatekeeperAssess: false,
+        provisioningProfile,
+        optionsForFile: (filePath) => filePath === packagedApp
+          ? { entitlements }
+          : {},
+        ignore,
+      });
+    },
   });
-  await execFileAsync("codesign", ["--verify", "--deep", "--strict", "--verbose=2", packagedApp]);
 }
 // The fuses package-artifact.mjs flipped are in the binary that ships.
 await assertPackagedElectronFuses({ bundle: packagedApp, platform: "darwin" });
@@ -110,6 +124,10 @@ if (credentials) {
   await validateStapledTicket(packagedApp, { execFile: execFileAsync });
   await execFileAsync("spctl", ["--assess", "--type", "execute", "--verbose=2", packagedApp]);
 }
+
+// Every manifest entry describes the file in the final app (signed, notarized
+// and stapled). The zip and the DMG copy this app.
+await assertPackageArtifactManifest({ bundle: packagedApp, platform: "darwin" });
 
 await execFileAsync("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", packagedApp, zip]);
 await createDifferentialBlockmap(zip, blockmap);
