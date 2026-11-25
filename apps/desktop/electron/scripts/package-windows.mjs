@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 
 import { createDifferentialBlockmap } from "./differential-blockmap.mjs";
 import { assertPackagedElectronFuses } from "./electron-fuses.mjs";
+import { assertPackageArtifactManifest } from "./package-artifact-manifest.mjs";
 import { describeArtifact } from "./release-artifacts.mjs";
 import {
   assertDesktopVersion,
@@ -62,6 +63,8 @@ const artifactManifest = JSON.parse(await readFile(join(packagedApp, "resources"
 if (artifactManifest.platform !== "win32" || artifactManifest.version !== version || artifactManifest.arch !== arch) {
   throw new Error(`The packaged app is ${artifactManifest.platform}-${artifactManifest.arch} ${artifactManifest.version}; expected win32-${arch} ${version}.`);
 }
+// Every manifest entry describes the file the installer copies.
+await assertPackageArtifactManifest({ bundle: packagedApp, platform: "win32" });
 // The fuses package-artifact.mjs flipped are in the executable that ships.
 await assertPackagedElectronFuses({ bundle: packagedApp, platform: "win32", executableName: "LetAgents.exe" });
 
