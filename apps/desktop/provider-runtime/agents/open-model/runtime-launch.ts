@@ -9,6 +9,7 @@ import { probeScratchWorkspaceGit } from "../../../../../shared/scratch-workspac
 import { synthesizeTerminalPayload, type ProviderTerminalPayload } from "../provider-adapter.js";
 import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, providerTreeExit, type ProviderProcessExit } from "../provider-evidence.js";
 import type { OpenCodeEvent, OpenCodeRuntimeAuth } from "../opencode-server-client.js";
+import { openCodeUnsupportedSystem } from "../opencode-runtime.js";
 import { OpenCodeBoundedTurnError } from "./errors.js";
 import type { OpenModelProviderAdapterDependencies } from "./types.js";
 import { ownerPrivatePlatform, protectOwnerPrivate, readOwnerPrivateFile, writePrivateFileAtomically } from "../../../../../shared/owner-private-fs.mjs";
@@ -183,6 +184,7 @@ export async function resolveBeforeDeadline<T>(operation: Promise<T>, deadline: 
 }
 
 export const defaultDependencies: OpenModelProviderAdapterDependencies = {
+  unsupportedSystem: () => openCodeUnsupportedSystem(),
   launch: defaultLaunch,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,

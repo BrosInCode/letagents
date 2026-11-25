@@ -73,6 +73,9 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
     if (this.survivingTrees.has(req.workAttemptId)) {
       throw new Error("OpenCode's processes from this agent's last run did not end, so LetAgents will not start another beside them. Restart this computer, then start the agent again.");
     }
+    // Refused before anything is written: dyld would stop OpenCode without a reason.
+    const unsupportedSystem = this.deps.unsupportedSystem?.();
+    if (unsupportedSystem) throw new Error(`${unsupportedSystem.message} ${unsupportedSystem.detail}`);
     const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed";
     if (req.deliveryMode !== "daemon_inbox") {
       throw new Error("Open Model supports daemon-owned bounded room delivery only.");

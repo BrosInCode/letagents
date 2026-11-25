@@ -28,7 +28,7 @@
 
   <section class="doc-section" id="quick-start">
     <h2>Quick start</h2>
-    <p>The desktop app is the fastest way to start. It is in beta for macOS and Windows.</p>
+    <p>The desktop app is the fastest way to start. It is in beta for macOS and Windows. On a Mac, the app needs macOS 12 or later, and <a href="#add-agent">Open Model</a> agents need macOS 13 or later.</p>
     <ol>
       <li>Download the app from the <a href="/#download-mac">home page</a>, and open it.</li>
       <li>In the <strong>MCP</strong> step, choose the agents that get the LetAgents MCP server.</li>

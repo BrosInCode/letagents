@@ -13,8 +13,12 @@ import {
 import { resolveOpenModelLimits } from "#provider-runtime/agents/open-model-limits.js";
 import { openCodeConfig, parseConfiguredOpenModelImageInput } from "#provider-runtime/agents/opencode-launch-contract.js";
 import {
+  OPENCODE_MINIMUM_MACOS,
   OPENCODE_RUNTIME_VERSION,
+  currentMacOSVersion,
+  macOSVersionFromDarwinRelease,
   openCodeInstallCommand,
+  openCodeUnsupportedSystem,
   resolveOpenCodeBinary,
 } from "#provider-runtime/agents/opencode-runtime.js";
 import {
@@ -238,6 +242,62 @@ test("Open Model preflight checks OpenCode and accepts a per-agent model", async
     } else {
       process.env.LETAGENTS_OPENCODE_BIN = previousOpenCodeBin;
     }
+  }
+});
+
+test("Open Model is unavailable on a macOS older than OpenCode's minimum", () => {
+  assert.equal(OPENCODE_MINIMUM_MACOS, "13.0");
+  const monterey = openCodeUnsupportedSystem("darwin", () => "12.7.4");
+  assert.equal(monterey?.message, "Open Model needs macOS 13 or later.");
+  assert.match(monterey?.detail ?? "", /This Mac has macOS 12\.7\.4\./);
+  assert.equal(openCodeUnsupportedSystem("darwin", () => "13.0"), null);
+  assert.equal(openCodeUnsupportedSystem("darwin", () => "26.1"), null);
+  // Plain Node (the daemon) knows only the major, which is not held against a minor minimum.
+  assert.equal(openCodeUnsupportedSystem("darwin", () => "13", "13.3"), null);
+  assert.equal(openCodeUnsupportedSystem("darwin", () => "13.2", "13.3")?.message, "Open Model needs macOS 13.3 or later.");
+  // An unknown version is not refused, and only macOS has a minimum.
+  assert.equal(openCodeUnsupportedSystem("darwin", () => null), null);
+  assert.equal(openCodeUnsupportedSystem("win32", () => "12.0"), null);
+  assert.equal(openCodeUnsupportedSystem("linux", () => "12.0"), null);
+});
+
+test("the macOS version comes from Electron, or else from the Darwin kernel release", () => {
+  assert.equal(macOSVersionFromDarwinRelease("21.6.0"), "12");
+  assert.equal(macOSVersionFromDarwinRelease("22.1.0"), "13");
+  assert.equal(macOSVersionFromDarwinRelease("24.6.0"), "15");
+  assert.equal(macOSVersionFromDarwinRelease("25.0.0"), "26");
+  assert.equal(macOSVersionFromDarwinRelease("19.6.0"), null);
+  assert.equal(macOSVersionFromDarwinRelease("not-darwin"), null);
+  assert.equal(currentMacOSVersion("21.6.0", "12.7.4"), "12.7.4");
+  assert.equal(currentMacOSVersion("21.6.0", ""), "12");
+  // A binary built against an old SDK is told 10.16; the kernel is right.
+  assert.equal(currentMacOSVersion("22.1.0", "10.16"), "13");
+});
+
+test("Open Model preflight on macOS 12 says why it is unavailable and never runs OpenCode", async () => {
+  const marker = join(await mkdtemp(join(tmpdir(), "letagents-opencode-ran-")), "ran");
+  const bin = writeFakeProvider(join(tmpdir(), `letagents-opencode-old-macos-${Date.now()}`), [
+    `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran');`,
+    `console.log('opencode ${OPENCODE_RUNTIME_VERSION}');`,
+    "",
+  ].join("\n"));
+  const previousOpenCodeBin = process.env.LETAGENTS_OPENCODE_BIN;
+  process.env.LETAGENTS_OPENCODE_BIN = bin;
+  try {
+    const result = await runDesktopAgentProviderPreflight(
+      "open-model",
+      { repoRootPath: tmpdir() },
+      { commandTimeoutMs: 0, openCodeSystem: { platform: "darwin", macOSVersion: () => "12.7.4" } },
+    );
+    assert.equal(result.canStart, false);
+    assert.equal(result.status, "error");
+    assert.equal(result.nextAction, null);
+    assert.equal(result.message, "Open Model needs macOS 13 or later.");
+    assert.match(result.detail ?? "", /macOS 12\.7\.4/);
+    await assert.rejects(readFile(marker), { code: "ENOENT" });
+  } finally {
+    if (previousOpenCodeBin === undefined) delete process.env.LETAGENTS_OPENCODE_BIN;
+    else process.env.LETAGENTS_OPENCODE_BIN = previousOpenCodeBin;
   }
 });
 

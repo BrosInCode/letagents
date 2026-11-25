@@ -29,6 +29,7 @@ import { resolveCodexExecutable } from "#provider-runtime/agents/codex-executabl
 import { cachedProbe, clearProbeCache, probeKey } from "#provider-runtime/provider-probe-cache.js";
 import {
   openCodeInstallCommand,
+  openCodeUnsupportedSystem,
   resolveOpenCodeBinary,
 } from "#provider-runtime/agents/opencode-runtime.js";
 import { getOpenModelSettingsStatus } from "#provider-runtime/agents/open-model-settings.js";
@@ -85,6 +86,8 @@ export type DesktopAgentProviderPreflightOptions = {
    * pass 0 to disable (tests use this so results never depend on host load).
    */
   commandTimeoutMs?: number;
+  /** Tests only: the system that Open Model checks OpenCode's macOS minimum against. */
+  openCodeSystem?: { platform?: NodeJS.Platform; macOSVersion?: () => string | null };
 };
 
 function assertAgentProviderId(providerId: string): asserts providerId is DesktopAgentProviderId {
@@ -447,8 +450,22 @@ async function openModelPreflight(
   provider: DesktopAgentProvider,
   input: DesktopAgentProviderPreflightInput,
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
-  timeoutMs?: number,
+  { commandTimeoutMs: timeoutMs, openCodeSystem }: DesktopAgentProviderPreflightOptions,
 ): Promise<DesktopAgentProviderPreflight> {
+  // The app starts on an older macOS than OpenCode does; dyld would stop
+  // OpenCode at its first start and give no reason.
+  const unsupportedSystem = openCodeUnsupportedSystem(openCodeSystem?.platform, openCodeSystem?.macOSVersion);
+  if (unsupportedSystem) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      ...unsupportedSystem,
+      nextAction: null,
+      version: null,
+      mcpStatus,
+    };
+  }
   const command = resolveOpenCodeBinary();
   const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
     execFileWithTimeout(command, ["--version"], { timeoutMs }));
@@ -670,7 +687,7 @@ export async function runDesktopAgentProviderPreflight(
     }));
   }
   if (provider.id === "open-model") {
-    return withManagedRuntimeValidation(await openModelPreflight(provider, input, mcpStatus, options.commandTimeoutMs));
+    return withManagedRuntimeValidation(await openModelPreflight(provider, input, mcpStatus, options));
   }
   if (provider.id === "antigravity") {
     return withManagedRuntimeValidation(await antigravityPreflight(provider, input, mcpStatus, options.commandTimeoutMs));
