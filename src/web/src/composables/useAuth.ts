@@ -146,8 +146,7 @@ export function useAuth() {
     isSignedIn.value = false
   }
 
-  /** Resolves true when the browser is leaving for GitHub. */
-  async function signIn(redirectTo?: string): Promise<boolean> {
+  async function signIn(redirectTo?: string) {
     isLoading.value = true
     isSigningIn.value = true
     try {
@@ -160,7 +159,6 @@ export function useAuth() {
       const data = await res.json()
       if (data.auth_url) {
         window.location.href = data.auth_url
-        return true
       }
     } catch (error) {
       console.error('Sign in failed:', error)
@@ -168,7 +166,6 @@ export function useAuth() {
       isLoading.value = false
       isSigningIn.value = false
     }
-    return false
   }
 
   async function signOut() {

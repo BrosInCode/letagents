@@ -41,48 +41,20 @@
           </span>
         </a>
       </div>
-      <p class="download-meta reveal" role="status">
-        <Transition name="swap" mode="out-in">
-          <span v-if="downloaded" key="started">Your download has started. Open LetAgents and sign in with GitHub.</span>
-          <span v-else-if="releaseLoaded" key="version">LetAgents {{ macDesktopBeta.version }} for desktop, beta</span>
-          <span v-else key="plain">The desktop app, beta</span>
-        </Transition>
-      </p>
-
-      <div class="browser-path reveal">
-        <span class="browser-lead">Or use it in the browser</span>
-        <button v-if="auth.isSignedIn.value" type="button" class="browser-link" @click="openWork">
-          Open my work
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m9 5 7 7-7 7" /></svg>
-        </button>
-        <button v-else type="button" class="browser-link" :disabled="signIn === 'opening'" :aria-busy="signIn === 'opening'" @click="startSignIn">
-          <GitHubIcon :size="15" />
-          <Transition name="swap" mode="out-in">
-            <span :key="signIn">{{ signIn === 'opening' ? 'Opening GitHub…' : 'Sign in with GitHub' }}</span>
-          </Transition>
-        </button>
-        <p v-if="signIn === 'failed'" class="browser-hint" role="status">GitHub sign-in did not open. Try again.</p>
-      </div>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import GitHubIcon from '@/components/icons/GitHubIcon.vue'
 import DesktopPlatformIcon from './DesktopPlatformIcon.vue'
-import { createInkScene, type InkMode, type InkScene } from './ink-scene'
-import { useAuth } from '@/composables/useAuth'
+import { createInkScene, type InkScene } from './ink-scene'
 import {
   desktopDownloadOffer,
   detectDesktopVisitorPlatform,
   fetchCurrentMacDesktopBeta,
   MAC_DESKTOP_BETA,
 } from '@/domain/desktopRelease'
-
-const auth = useAuth()
-const router = useRouter()
 
 // ---- Desktop downloads: the main action, and the site's download anchor (`/#download-mac`).
 // The visitor's own platform comes first and is the lit button.
@@ -95,9 +67,6 @@ const downloadLinks = computed(() => {
     return { ...link, name, detail }
   })
 })
-const downloaded = ref(false)
-// The bundled release can be old; show a version only once the current one has loaded.
-const releaseLoaded = ref(false)
 
 // ---- The ink scene: plays the opening once, then rests. It wakes only when the visitor
 // stirs it with the pointer or presses a button, so an idle page does no GPU work.
@@ -198,19 +167,11 @@ function wake() {
   liveRunning = true
   liveFrame = requestAnimationFrame(liveLoop)
 }
-function setInk(mode: InkMode) {
-  if (!scene || reduced) return
-  cancelAnimationFrame(frame)
-  cancelAnimationFrame(liveFrame)
-  liveRunning = false
-  scene.setMode(mode)
-  wake()
-}
 
 // The visitor is the warm ink: a mouse moving over the water leaves a trail. Touch scrolls instead.
 let lastPointer: { x: number; y: number } | null = null
 function onPointerMove(event: PointerEvent) {
-  if (!scene || reduced || event.pointerType !== 'mouse' || signIn.value === 'opening' || !openingDone()) return
+  if (!scene || reduced || event.pointerType !== 'mouse' || !openingDone()) return
   const box = sceneCanvas.value?.getBoundingClientRect()
   if (!box?.width) return
   const x = (event.clientX - box.left) / box.width
@@ -225,7 +186,6 @@ function onPointerMove(event: PointerEvent) {
 }
 
 function onDownload(event: MouseEvent) {
-  downloaded.value = true
   if (!scene || reduced) return
   // The agent answers the press: a ring from the dot, and mint ink streams toward the button.
   const box = sceneCanvas.value?.getBoundingClientRect()
@@ -253,34 +213,10 @@ function makeGrain() {
   grain.value = `url(${tile.toDataURL()})`
 }
 
-// ---- The browser path: the site's own GitHub sign-in, as the header's Sign In does.
-type SignInState = 'idle' | 'opening' | 'failed'
-const signIn = ref<SignInState>('idle')
-
-function openWork() { void router.push('/my-work') }
-
-async function startSignIn() {
-  if (signIn.value === 'opening') return
-  signIn.value = 'opening'
-  // The mark lets go while the browser leaves for GitHub; nothing waits on the animation.
-  setInk('success')
-  const leaving = await auth.signIn()
-  if (!leaving) {
-    signIn.value = 'failed'
-    setInk('settle')
-  }
-}
-
-// Back from GitHub out of the page cache: offer sign-in again with the mark formed.
-function onPageShow(event: PageTransitionEvent) {
-  if (!event.persisted || signIn.value !== 'opening') return
-  signIn.value = 'idle'
-  setInk('settle')
-}
 
 onMounted(() => {
   void fetchCurrentMacDesktopBeta()
-    .then((release) => { macDesktopBeta.value = release; releaseLoaded.value = true })
+    .then((release) => { macDesktopBeta.value = release })
     .catch(() => { /* Keep the bundled fallback. */ })
   reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
   makeGrain()
@@ -289,7 +225,6 @@ onMounted(() => {
     scene.resize()
     if (startedAt) scene.render(elapsed())
   })
-  window.addEventListener('pageshow', onPageShow)
   void play()
 })
 
@@ -297,7 +232,6 @@ onUnmounted(() => {
   cancelAnimationFrame(frame)
   cancelAnimationFrame(liveFrame)
   observer?.disconnect()
-  window.removeEventListener('pageshow', onPageShow)
   scene?.dispose()
   scene = null
 })
@@ -360,14 +294,10 @@ onUnmounted(() => {
 .line-muted > span { color: rgba(239, 238, 230, .3); animation-delay: 3.25s; }
 .reveal { animation: fade-up 1s var(--reveal) both; }
 .downloads.reveal { animation-delay: 3.45s; }
-.download-meta.reveal { animation-delay: 3.62s; }
-.browser-path.reveal { animation-delay: 3.72s; }
 /* No shader: there is nothing to wait for, so the copy arrives at once. */
 .welcome[data-fallback="true"] .line:first-child > span { animation-delay: .2s; }
 .welcome[data-fallback="true"] .line-muted > span { animation-delay: .3s; }
 .welcome[data-fallback="true"] .downloads.reveal { animation-delay: .52s; }
-.welcome[data-fallback="true"] .download-meta.reveal { animation-delay: .62s; }
-.welcome[data-fallback="true"] .browser-path.reveal { animation-delay: .7s; }
 
 /* ---- The downloads: the main characters. */
 .downloads {
@@ -411,34 +341,6 @@ onUnmounted(() => {
 .download-name { font: 600 17px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.015em; white-space: nowrap; }
 .download-name small { margin-left: 7px; font-size: 13px; font-weight: 500; opacity: .55; }
 
-.download-meta { min-height: 18px; margin: 14px 0 0; color: var(--ink-3); font: 400 12.5px/1.4 ui-sans-serif, system-ui, sans-serif; }
-
-/* ---- The browser path: quiet, one line. */
-.browser-path {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 10px;
-  margin-top: clamp(16px, 3vh, 28px);
-  font: 400 14px/1.4 ui-sans-serif, system-ui, sans-serif; color: var(--ink-3);
-}
-.browser-link {
-  display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 4px;
-  border: 0; background: none; cursor: pointer;
-  color: var(--ink-2); font: 500 14px/1 ui-sans-serif, system-ui, sans-serif;
-  text-decoration: underline; text-decoration-color: rgba(239, 238, 230, .25); text-underline-offset: 4px;
-  transition: color 200ms ease, text-decoration-color 200ms ease;
-  touch-action: manipulation;
-}
-.browser-link svg { width: 15px; height: 15px; }
-@media (hover: hover) and (pointer: fine) {
-  .browser-link:hover { color: var(--ink); text-decoration-color: currentColor; }
-}
-.browser-link:disabled { cursor: default; }
-.browser-link:focus-visible { outline: 2px solid rgba(127, 224, 189, .85); outline-offset: 2px; border-radius: 6px; }
-.browser-hint { flex-basis: 100%; margin: 0; color: var(--ink-2); font-size: 13px; }
-
-.swap-enter-active { transition: opacity 220ms ease, transform 280ms cubic-bezier(.23, 1, .32, 1); }
-.swap-leave-active { transition: opacity 120ms ease; }
-.swap-enter-from { opacity: 0; transform: translateY(4px); }
-.swap-leave-to { opacity: 0; }
 
 /* Pressed during the scene: show everything at once, without the stagger. */
 .welcome[data-skipped="true"] :is(.line > span, .reveal) { animation-delay: 0s !important; animation-duration: .45s !important; }
@@ -449,7 +351,7 @@ onUnmounted(() => {
 
 @media (prefers-reduced-motion: reduce) {
   .line > span, .reveal, .welcome-mark { animation: fade 400ms ease both !important; }
-  .download, .browser-link { transition: none; }
+  .download { transition: none; }
 }
 
 @media (max-width: 760px) {
