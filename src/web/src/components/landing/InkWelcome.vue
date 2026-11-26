@@ -30,7 +30,7 @@
 
       <div id="download-mac" class="downloads reveal" role="group" aria-label="Download the desktop app">
         <a v-for="(link, index) in downloadLinks" :key="link.href" class="download" :data-primary="index === 0"
-          :href="link.href" @click="onDownload($event)">
+          :href="link.href" :aria-label="`Download for ${link.label}`" @click="onDownload($event)">
           <span v-if="index === 0" class="download-glow" aria-hidden="true" />
           <span class="download-ring" aria-hidden="true"><span class="download-spin" /></span>
           <span class="download-face">
@@ -39,7 +39,6 @@
               <svg v-else viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8" /><path d="M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
             </span>
             <span class="download-text">
-              <span class="download-kicker">Download for</span>
               <span class="download-name">{{ link.name }}<small v-if="link.detail">{{ link.detail }}</small></span>
             </span>
             <span class="download-arrow" aria-hidden="true">
@@ -357,7 +356,6 @@ onUnmounted(() => {
 .download-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; }
 .download-icon :deep(svg), .download-icon > svg { width: 28px; height: 28px; }
 .download-text { display: grid; gap: 6px; flex: 1 1 auto; }
-.download-kicker { font: 600 10.5px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .12em; text-transform: uppercase; white-space: nowrap; opacity: .5; }
 .download-name { font: 650 21px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
 .download-name small { margin-left: 8px; font-size: 13.5px; font-weight: 500; letter-spacing: -.01em; opacity: .5; }
 .download-arrow {

@@ -1,7 +1,7 @@
 <template>
   <dialog ref="dialogRef" class="web-ask-dialog" aria-labelledby="web-ask-title" tabindex="-1"
     @cancel.prevent="close" @click="closeOnBackdrop($event, close)">
-    <AskAgentPanel :key="generation" :models="models" :rooms="rooms" :initial-room="roomIdentifier"
+    <AskAgentPanel :key="generation" :models="models" :rooms="rooms" :initial-room="roomIdentifier" :allow-new-room="false"
       :loading="loading" :busy="busy" :error="error" :created-link="createdLink" :copied="copied"
       heading-id="web-ask-title" @create="create" @retry="load" @copy="copy" @close="close">
       <template #close><button type="button" class="give-close" aria-label="Close" :disabled="busy" @click="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></template>
@@ -26,11 +26,10 @@ const models = ref<AskAgentModel[]>([]), rooms = ref<{ id: string; label: string
 const loading = ref(true), busy = ref(false), copied = ref(false)
 const error = ref<string | null>(null), createdLink = ref<string | null>(null)
 const generation = ref(0)
-let createdRoomId: string | null = null
 onBeforeUnmount(() => { generation.value++ })
 watch([accountId, () => props.roomIdentifier], () => {
   generation.value++
-  models.value = []; rooms.value = []; createdLink.value = null; createdRoomId = null
+  models.value = []; rooms.value = []; createdLink.value = null
   busy.value = false; copied.value = false; error.value = null
   if (!accountId.value) { emit('close'); return }
   void load()
@@ -63,30 +62,12 @@ async function load() {
 async function create(input: AskAgentInput) {
   if (busy.value || loading.value || createdLink.value || !accountId.value) return
   const model = models.value.find(model => model.providerId === input.providerId && model.model === input.model)
-  if (!model || (input.roomId !== '__new__' && !rooms.value.some(room => room.id === input.roomId))) return
+  // The website never creates a room: the agent works in one of the person's rooms.
+  if (!model || !rooms.value.some(room => room.id === input.roomId)) return
   const version = generation.value
-  const name = input.newRoomName.trim().replace(/\s+/g, ' ')
-  if (input.roomId === '__new__' && name && (name.length < 2 || name.length > 64)) {
-    error.value = 'Use between 2 and 64 characters for the room name.'; return
-  }
   busy.value = true; error.value = null
   try {
-    let roomId = input.roomId
-    if (roomId === '__new__') {
-      if (!createdRoomId) {
-        const result = await apiFetch('/projects', { method: 'POST' })
-        if (version !== generation.value) return
-        const id = result.project?.id || result.id
-        if (typeof id !== 'string' || !id.trim()) throw new Error('The server did not return a room. Try again.')
-        createdRoomId = id
-      }
-      roomId = createdRoomId
-      if (name) {
-        await apiFetch(roomPath(roomId), { method: 'PATCH', body: JSON.stringify({ display_name: name }) })
-        if (version !== generation.value) return
-      }
-    }
-    const result = await apiFetch(`${roomPath(roomId)}/agent-asks`, {
+    const result = await apiFetch(`${roomPath(input.roomId)}/agent-asks`, {
       method: 'POST', body: JSON.stringify({ provider_id: model.providerId, model: model.model, amount_percent: input.amountPercent, note: input.note }),
     })
     if (version !== generation.value) return

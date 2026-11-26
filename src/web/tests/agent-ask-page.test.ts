@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { before, beforeEach, after, test } from 'node:test'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createRenderer, createSSRApp, h, reactive, nextTick, ssrContextKey } from 'vue'
 import { renderToString } from '@vue/server-renderer'
@@ -150,21 +151,16 @@ test('web asks use authenticated room/model data and submit the selected form th
   assert.equal(vm.createdLink.value, 'https://letagents.chat/ask/created')
 })
 
-test('web new-room asks reuse the room after a failed request and keep errors retryable', async t => {
-  let creates = 0, attempts = 0
-  creationFetch(url => {
-    if (url === '/projects') { creates++; return json({ project: { id: 'new-room' } }) }
-    if (url === '/rooms/new-room') return json({})
-    if (++attempts === 1) return json({ error: 'Busy right now. Try again.' }, 503)
-    return json({ link: 'https://letagents.chat/ask/retried' })
-  })
+test('web asks never create a room: New room is not offered and a new-room request does nothing', async t => {
+  const urls: string[] = []
+  creationFetch(url => { urls.push(url); return json({ link: 'https://letagents.chat/ask/never' }) })
   const { vm } = mountCreation(t); await settle()
-  const input = { ...createInput, roomId: '__new__', newRoomName: 'Review room', amountPercent: 20 }
-  await vm.create(input)
-  assert.equal(vm.busy.value, false); assert.match(vm.error.value, /Busy right now/)
-  await vm.create(input)
-  assert.equal(creates, 1); assert.equal(attempts, 2); assert.equal(vm.error.value, null)
-  assert.equal(vm.createdLink.value, 'https://letagents.chat/ask/retried')
+  await vm.create({ ...createInput, roomId: '__new__', newRoomName: 'Review room' })
+  assert.deepEqual(urls, [])
+  assert.equal(vm.createdLink.value, null)
+  const source = readFileSync(fileURLToPath(new URL('../src/components/room/AskAgentDialog.vue', import.meta.url)), 'utf8')
+  assert.match(source, /:allow-new-room="false"/)
+  assert.doesNotMatch(source, /'\/projects'/)
 })
 
 test('web asks prevent duplicate submissions and closing while creating the link', async t => {
@@ -179,19 +175,19 @@ test('web asks prevent duplicate submissions and closing while creating the link
   vm.close(); assert.deepEqual(events, [['close']])
 })
 
-test('logout clears an ask form and prevents a late room creation from creating an agent request', async t => {
+test('logout clears an ask form and a late agent request does not show a link', async t => {
   let finish!: (result: Response) => void
   const writes: string[] = []
   creationFetch(url => {
     writes.push(url)
-    return url === '/projects' ? new Promise(resolve => { finish = resolve }) : json({})
+    return url.endsWith('/agent-asks') ? new Promise(resolve => { finish = resolve }) : json({})
   })
   const { vm, events } = mountCreation(t); await settle()
-  const pending = vm.create({ ...createInput, roomId: '__new__', newRoomName: 'Private room' })
+  const pending = vm.create(createInput)
   await auth.signOut()
   assert.equal(vm.createdLink.value, null); assert.deepEqual(vm.rooms.value, []); assert.deepEqual(events, [['close']])
-  finish(json({ project: { id: 'late-room' } })); await pending
-  assert.deepEqual(writes, ['/projects', '/auth/logout'])
+  finish(json({ link: 'https://letagents.chat/ask/late' })); await pending
+  assert.equal(writes.length, 2); assert.match(writes[0], /\/agent-asks$/); assert.equal(writes[1], '/auth/logout')
   assert.equal(vm.createdLink.value, null)
 })
 

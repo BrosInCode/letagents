@@ -118,12 +118,15 @@ const props = withDefaults(defineProps<{
   createdLink?: string | null;
   copied?: boolean;
   headingId?: string;
-}>(), { headingId: 'ask-agent-title' });
+  /** Offer "New room" as a place for the agent. The website turns this off. */
+  allowNewRoom?: boolean;
+}>(), { headingId: 'ask-agent-title', allowNewRoom: true });
 const emit = defineEmits<{ create: [input: AskAgentInput]; close: []; retry: []; copy: [] }>();
-const roomOptions = computed(() => [...props.rooms, { id: '__new__', label: 'New room' }]);
-const roomChoice = ref(props.initialRoom ?? props.rooms[0]?.id ?? '__new__');
+const roomOptions = computed(() => props.allowNewRoom ? [...props.rooms, { id: '__new__', label: 'New room' }] : props.rooms);
+const fallbackRoom = () => props.rooms[0]?.id ?? (props.allowNewRoom ? '__new__' : '');
+const roomChoice = ref(props.initialRoom ?? fallbackRoom());
 watch([() => props.rooms, () => props.loading], () => {
-  if (!props.loading && !roomOptions.value.some(room => room.id === roomChoice.value)) roomChoice.value = props.rooms[0]?.id ?? '__new__';
+  if (!props.loading && !roomOptions.value.some(room => room.id === roomChoice.value)) roomChoice.value = fallbackRoom();
 }, { immediate: true });
 const modelChoice = ref('');
 const modelOptions = computed(() => props.models.map((model, index) => ({ id: String(index), label: model.label, keywords: `${providerLabel(model.providerId)} ${model.model ?? ''}` })));
