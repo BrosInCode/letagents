@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   agentInspectorSettingsFenceCurrent,
   agentInspectorProviderSupportsEffort,
+  agentInspectorRuntimeSignature,
+  settleConfigurationRuntimeRefresh,
   configurationDraft,
   configurationHasRuntimeLag,
   IMAGE_INPUT_DESCRIPTION,
@@ -254,4 +256,37 @@ test("a saved access level that has not reached the running agent is marked, and
     assert.equal(permissionTimingNote(mode, true), "Your new access level is saved. The agent gets it the next time it starts.");
   }
   assert.equal(permissionTimingNote("daemon_inbox"), permissionTimingNote("daemon_inbox", false));
+});
+
+test("an open panel drops the runtime lag once a fresh read shows the runtime caught up, and keeps the draft", () => {
+  const lagging = { ...resource(), draft: { ...configurationDraft(configuration), charter: "Unsaved edit" } };
+  assert.equal(configurationHasRuntimeLag(lagging.configuration), true);
+  const settled = settleConfigurationRuntimeRefresh(lagging, { ...configuration, runtimeConfigurationRevision: 4 });
+  assert.equal(configurationHasRuntimeLag(settled.configuration), false);
+  assert.equal(settled.draft?.charter, "Unsaved edit");
+  assert.equal(settled.configuration?.configRevision, 4);
+});
+
+test("a real lag stays: same runtime revision, another saved revision, or another generation change nothing", () => {
+  const lagging = resource();
+  assert.equal(settleConfigurationRuntimeRefresh(lagging, { ...configuration }), lagging);
+  assert.equal(settleConfigurationRuntimeRefresh(lagging, { ...configuration, configRevision: 5, runtimeConfigurationRevision: 5 }), lagging);
+  assert.equal(settleConfigurationRuntimeRefresh(lagging, { ...configuration, daemonGeneration: configuration.daemonGeneration + 1, runtimeConfigurationRevision: 4 }), lagging);
+  assert.equal(settleConfigurationRuntimeRefresh({ ...lagging, status: "refreshing" }, { ...configuration, runtimeConfigurationRevision: 4 }).configuration, lagging.configuration);
+});
+
+test("the runtime signature changes when the daemon replaces the runtime", () => {
+  const entry = { observedState: "idle", runtimeGenerationId: "r1", executionGenerationId: "e1", providerPid: 10 };
+  assert.equal(agentInspectorRuntimeSignature(entry), agentInspectorRuntimeSignature({ ...entry }));
+  assert.notEqual(agentInspectorRuntimeSignature(entry), agentInspectorRuntimeSignature({ ...entry, observedState: "recovering" }));
+  assert.notEqual(agentInspectorRuntimeSignature(entry), agentInspectorRuntimeSignature({ ...entry, runtimeGenerationId: "r2", providerPid: 11 }));
+  assert.notEqual(agentInspectorRuntimeSignature(entry), agentInspectorRuntimeSignature({ ...entry, permissionPending: true }));
+});
+
+test("the inspector wires the runtime refresh into its watchers", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/composables/room-shell/useRoomShellAgentInspector.ts", import.meta.url), "utf8");
+  assert.match(source, /useAgentInspectorRuntimeRefresh\(\{ projection: selectedAgentDetailProjection/);
+  const refresh = readFileSync(new URL("../src/components/desktop/content/room-shell/useAgentInspectorRuntimeRefresh.ts", import.meta.url), "utf8");
+  assert.match(refresh, /configurationHasRuntimeLag\(options\.resource\.value\.configuration\)\s*\?\s*agentInspectorRuntimeSignature/);
 });

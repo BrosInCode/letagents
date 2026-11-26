@@ -177,6 +177,38 @@ export function configurationHasRuntimeLag(configuration: DesktopSupervisorAgent
   return Boolean(configuration && configuration.runtimeConfigurationRevision < configuration.configRevision);
 }
 
+/**
+ * What changes when the daemon replaces or restarts an agent's runtime. The
+ * entry does not carry configuration revisions, so an open Settings panel
+ * re-reads its saved configuration when this value changes while it still
+ * shows a runtime lag.
+ */
+export function agentInspectorRuntimeSignature(entry: {
+  observedState: string;
+  runtimeGenerationId?: string | null;
+  executionGenerationId: string | null;
+  providerPid: number | null;
+  permissionPending?: true;
+}): string {
+  return JSON.stringify([entry.observedState, entry.runtimeGenerationId ?? null,
+    entry.executionGenerationId, entry.providerPid, entry.permissionPending ?? false]);
+}
+
+/**
+ * Take the runtime revision from a fresh read without touching the draft. A
+ * read that shows another saved revision belongs to the conflict flow, not here.
+ */
+export function settleConfigurationRuntimeRefresh(
+  resource: AgentInspectorConfigurationResource,
+  fresh: DesktopSupervisorAgentConfiguration,
+): AgentInspectorConfigurationResource {
+  const current = resource.configuration;
+  if (resource.status !== "ready" || !current || current.entryId !== fresh.entryId
+    || current.daemonGeneration !== fresh.daemonGeneration || current.configRevision !== fresh.configRevision
+    || current.runtimeConfigurationRevision === fresh.runtimeConfigurationRevision) return resource;
+  return { ...resource, configuration: { ...current, runtimeConfigurationRevision: fresh.runtimeConfigurationRevision } };
+}
+
 export function snapshotConfigurationApply(
   resource: AgentInspectorConfigurationResource,
   entryId: string,
