@@ -6,6 +6,7 @@
 ;   SOURCE_DIR     the packaged app folder (release/LetAgents-win32/LetAgents)
 ;   PAYLOAD_NSH    the generated include with REMOVE_LETAGENTS_PAYLOAD and
 ;                  LETAGENTS_PAYLOAD_ENTRIES
+;   MANIFEST_FILE  the install manifest: every file and folder the payload has
 ;   ICON_FILE      the app icon (.ico)
 ;   OUTPUT_FILE    the installer to write
 ;   HELPER_NAME    the process-tree helper's file name, in RUNTIME_DIR
@@ -63,6 +64,10 @@ RequestExecutionLevel user
 !define STAGE_DIR ".letagents-new"
 !define BACKUP_DIR ".letagents-old"
 !define MOVED_IN_LIST ".moved-in"
+; Lists every file and folder the install wrote (WINDOWS_INSTALL_MANIFEST_NAME
+; in electron/scripts/windows-packaging.mjs, which writes it). The payload
+; include names it as a payload entry, so an update swaps it with the rest.
+!define INSTALL_MANIFEST "LetAgents.install-manifest"
 
 Name "${PRODUCT_NAME}"
 OutFile "${OUTPUT_FILE}"
@@ -97,6 +102,8 @@ Var Staging
 ; "1" when a failed update leaves the old version whole, so --force-run
 ; starts it again.
 Var RestartAfterFailure
+; The folder RemoveListedPayload works in: $INSTDIR, or ${BACKUP_DIR} in it.
+Var PayloadRoot
 
 !define MUI_ICON "${ICON_FILE}"
 !define MUI_UNICON "${ICON_FILE}"
@@ -282,7 +289,9 @@ FunctionEnd
 ;   3. Write ${MOVED_IN_LIST} into ${BACKUP_DIR}: the entries step 4 moves in.
 ;   4. Move the new entries from ${STAGE_DIR} into $INSTDIR.
 ;   5. The commit: remove ${STAGE_DIR}, which is empty now.
-;   6. Delete ${BACKUP_DIR} with the old version in it.
+;   6. Delete the old version in ${BACKUP_DIR}: the files its install
+;      manifest lists. Anything else there (a file the user kept in a payload
+;      folder) moves back into $INSTDIR, then ${BACKUP_DIR} goes.
 ;
 ; A run that stops (power loss, a killed installer) leaves this, and the next
 ; run of the installer or the uninstaller does this (RecoverInterruptedUpdate):
@@ -301,6 +310,117 @@ FunctionEnd
 ; wins in full; ${BACKUP_DIR} alone means it was, and the new version stays.
 ; A rollback (SwapInStagedPayload) keeps both folders until the old version
 ; is whole again.
+
+; Removes what an install wrote from $PayloadRoot, as the install manifest
+; there lists it: each file ("F <path>"), then each folder ("D <path>",
+; deepest first) that is empty by then. A file LetAgents did not install
+; stays, and so does every folder that holds one, also in a custom /D=
+; folder shared with other files. A line that is not "F " or "D " and a path
+; inside the folder (not empty, no leading separator, no ":" and no "..") is
+; skipped. The manifest itself stays: the caller deletes it when it is done,
+; so a run that stops before then still finds it. Sets $R9 to 1 when the
+; manifest was there, else 0. Uses $R3-$R9.
+!macro DEFINE_REMOVE_LISTED_PAYLOAD PREFIX
+Function ${PREFIX}RemoveListedPayload
+  StrCpy $R9 "0"
+  ClearErrors
+  FileOpen $R3 "$PayloadRoot\${INSTALL_MANIFEST}" r
+  ${If} ${Errors}
+    Return
+  ${EndIf}
+  StrCpy $R9 "1"
+  ${Do}
+    ClearErrors
+    FileReadUTF16LE $R3 $R4
+    ${If} ${Errors}
+      ${Break}
+    ${EndIf}
+    ; The line without its CR LF.
+    ${Do}
+      StrCpy $R5 $R4 1 -1
+      ${If} $R5 == "$\r"
+      ${OrIf} $R5 == "$\n"
+        StrCpy $R4 $R4 -1
+      ${Else}
+        ${Break}
+      ${EndIf}
+    ${Loop}
+    StrCpy $R5 $R4 2
+    StrCpy $R6 $R4 "" 2
+    StrCpy $R7 $R6 1
+    ${If} $R7 == ""
+    ${OrIf} $R7 == "\"
+    ${OrIf} $R7 == "/"
+      ${Continue}
+    ${EndIf}
+    System::Call 'shlwapi::StrStrW(w R6, w "..")p.R7'
+    System::Call 'shlwapi::StrChrW(w R6, i 58)p.R8'
+    ${If} $R7 P<> 0
+    ${OrIf} $R8 P<> 0
+      ${Continue}
+    ${EndIf}
+    ${If} $R5 S== "F "
+      Delete "$PayloadRoot\$R6"
+    ${ElseIf} $R5 S== "D "
+      RMDir "$PayloadRoot\$R6"
+    ${EndIf}
+  ${Loop}
+  FileClose $R3
+FunctionEnd
+
+; Moves each entry below $INSTDIR\${BACKUP_DIR}\<rel> back to $INSTDIR\<rel>:
+; an entry that is not there moves whole; a folder that is there too is
+; merged the same way; a file that is there stays behind (the installed
+; version's file wins). The old install manifest stays behind. Takes <rel>
+; ("" or "x\y\") on the stack. Keeps $0-$2.
+Function ${PREFIX}MergeBackLeftovers
+  Exch $0
+  Push $1
+  Push $2
+  FindFirst $1 $2 "$INSTDIR\${BACKUP_DIR}\$0*"
+  ${DoWhile} $2 != ""
+    ${If} $2 != "."
+    ${AndIf} $2 != ".."
+    ${AndIf} "$0$2" != "${INSTALL_MANIFEST}"
+      ${IfNot} ${FileExists} "$INSTDIR\$0$2"
+        Rename "$INSTDIR\${BACKUP_DIR}\$0$2" "$INSTDIR\$0$2"
+      ${ElseIf} ${FileExists} "$INSTDIR\${BACKUP_DIR}\$0$2\*.*"
+      ${AndIf} ${FileExists} "$INSTDIR\$0$2\*.*"
+        Push "$0$2\"
+        Call ${PREFIX}MergeBackLeftovers
+      ${EndIf}
+    ${EndIf}
+    FindNext $1 $2
+  ${Loop}
+  FindClose $1
+  Pop $2
+  Pop $1
+  Pop $0
+FunctionEnd
+
+; Step 6 below: deletes the old version from ${BACKUP_DIR}, but keeps files
+; LetAgents did not install. It removes what the old version's manifest lists
+; and moves the rest back into $INSTDIR. An old version without a manifest
+; (0.1.143 and earlier) is deleted whole only in the default folder, which
+; LetAgents owns; in any other folder all of it moves back where the new
+; version has no file of the same path, so nothing LetAgents did not install
+; is deleted (old files the new version dropped stay too). The old manifest
+; goes only with ${BACKUP_DIR} at the end: a run that stops before then
+; repeats this with it. Uses $R3-$R9.
+Function ${PREFIX}DiscardOldVersion
+  Delete "$INSTDIR\${BACKUP_DIR}\${MOVED_IN_LIST}"
+  StrCpy $PayloadRoot "$INSTDIR\${BACKUP_DIR}"
+  Call ${PREFIX}RemoveListedPayload
+  ${If} $R9 == "1"
+  ${OrIf} $INSTDIR != "$LOCALAPPDATA\Programs\${PRODUCT_NAME}"
+    Push ""
+    Call ${PREFIX}MergeBackLeftovers
+  ${EndIf}
+  RMDir /r "$INSTDIR\${BACKUP_DIR}"
+FunctionEnd
+!macroend
+!insertmacro DEFINE_REMOVE_LISTED_PAYLOAD ""
+!insertmacro DEFINE_REMOVE_LISTED_PAYLOAD "un."
 
 !macro DEFINE_UPDATE_RECOVERY PREFIX
 ; Renames $MoveFrom\$MoveName to $MoveTo\$MoveName when the source exists.
@@ -418,6 +538,10 @@ Function ${PREFIX}RecoverInterruptedUpdate
     ${If} $MoveFailures <> 0
       !insertmacro FAIL_INSTALL "An earlier ${PRODUCT_NAME} update did not finish, and its files in $INSTDIR could not be put back. Close the programs that use them, then try again."
     ${EndIf}
+  ${ElseIf} ${FileExists} "$INSTDIR\${BACKUP_DIR}\*.*"
+  ${AndIfNot} ${FileExists} "$INSTDIR\${STAGE_DIR}\*.*"
+    ; Cases 5 and 6: the new version is in; files the user kept stay.
+    Call ${PREFIX}DiscardOldVersion
   ${EndIf}
   ; ${BACKUP_DIR} first: with only ${STAGE_DIR} left, a stop here is case 1.
   RMDir /r "$INSTDIR\${BACKUP_DIR}"
@@ -473,7 +597,7 @@ Function SwapInStagedPayload
     RMDir "$INSTDIR\${STAGE_DIR}"
     ${IfNot} ${FileExists} "$INSTDIR\${STAGE_DIR}\*.*"
       StrCpy $Staging "0"
-      RMDir /r "$INSTDIR\${BACKUP_DIR}"
+      Call DiscardOldVersion
       Return
     ${EndIf}
   ${EndIf}
@@ -537,7 +661,10 @@ Section "Install"
   ; A file that cannot be written (a full disk) either sets the error flag
   ; (Ignore) or stops the install (Abort, a decompression error), which
   ; ends in .onInstFailed. Both leave the installed version as it was.
+  ; The install manifest first, so an install that stops part way can still
+  ; be removed exactly.
   ClearErrors
+  File "/oname=${INSTALL_MANIFEST}" "${MANIFEST_FILE}"
   File /r "${SOURCE_DIR}\*"
   StrCpy $R1 "0"
   ${If} ${Errors}
@@ -602,6 +729,20 @@ Section "Install"
   ${EndIf}
 SectionEnd
 
+; Removes only what the install wrote, as its install manifest lists it. An
+; install without a manifest (0.1.143 and earlier) is removed by its
+; top-level entries, folders whole, only in the default folder, which
+; LetAgents owns; in any other folder its files stay. Uses $R3-$R9.
+Function un.RemoveInstalledPayload
+  StrCpy $PayloadRoot "$INSTDIR"
+  Call un.RemoveListedPayload
+  ${If} $R9 == "0"
+  ${AndIf} $INSTDIR == "$LOCALAPPDATA\Programs\${PRODUCT_NAME}"
+    !insertmacro REMOVE_LETAGENTS_PAYLOAD
+  ${EndIf}
+  Delete "$INSTDIR\${INSTALL_MANIFEST}"
+FunctionEnd
+
 ; User data (%APPDATA%\LetAgents) stays, as it does when the macOS app is
 ; moved to the Trash.
 Section "Uninstall"
@@ -614,7 +755,7 @@ Section "Uninstall"
   ; links, Installed apps entry and updater cache belong to the registered
   ; install.
   ${If} $InstalledHere == "1"
-    !insertmacro REMOVE_LETAGENTS_PAYLOAD
+    Call un.RemoveInstalledPayload
     Delete "$SMPROGRAMS\${PRODUCT_NAME}.lnk"
     Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
     DeleteRegKey HKCU "${URL_KEY}"

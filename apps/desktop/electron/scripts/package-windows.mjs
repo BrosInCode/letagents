@@ -18,10 +18,13 @@ import {
   normalizeReleaseBaseUrl,
 } from "./release-metadata.mjs";
 import {
+  WINDOWS_INSTALL_MANIFEST_NAME,
   assertPayloadPathsFit,
+  createInstallManifest,
   createNsisPayloadInclude,
   findMakensis,
   listPayloadEntries,
+  listPayloadPaths,
   longestPayloadPath,
   payloadSizeKb,
   windowsFileVersion,
@@ -77,6 +80,8 @@ await mkdir(nsisDirectory, { recursive: true });
 assertPayloadPathsFit(await longestPayloadPath(packagedApp));
 const payloadInclude = join(nsisDirectory, "payload.nsh");
 await writeFile(payloadInclude, createNsisPayloadInclude(await listPayloadEntries(packagedApp)));
+const installManifest = join(nsisDirectory, WINDOWS_INSTALL_MANIFEST_NAME);
+await writeFile(installManifest, createInstallManifest(await listPayloadPaths(packagedApp)));
 const makensis = findMakensis();
 const { stdout: nsisVersion } = await execFileAsync(makensis, ["/VERSION"]);
 const { stdout: nsisLog } = await execFileAsync(makensis, [
@@ -86,6 +91,7 @@ const { stdout: nsisLog } = await execFileAsync(makensis, [
   `/DFILE_VERSION=${windowsFileVersion(version)}`,
   `/DSOURCE_DIR=${packagedApp}`,
   `/DPAYLOAD_NSH=${payloadInclude}`,
+  `/DMANIFEST_FILE=${installManifest}`,
   `/DICON_FILE=${join(packagedApp, "resources", "letagents.ico")}`,
   `/DOUTPUT_FILE=${installer}`,
   `/DHELPER_NAME=${PROCESS_TREE_HELPER_NAME}`,

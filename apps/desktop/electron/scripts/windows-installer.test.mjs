@@ -1,6 +1,7 @@
 // The NSIS installer on a real Windows: it installs, updates in place, keeps
 // the installed version when an update meets a file in use, and recovers
-// from an update that stopped part way. The installer is built from a tiny
+// from an update that stopped part way, and leaves files the user keeps in
+// the install folder through an update and an uninstall. The installer is built from a tiny
 // fake payload with TEST_INSTANCE, so it has its own product name, Installed
 // apps key, link scheme and updater cache, and installs only into a temporary
 // /D= folder: it never touches a real LetAgents install.
@@ -23,12 +24,15 @@ import { deflateSync } from "node:zlib";
 
 import {
   WINDOWS_BACKUP_DIR,
+  WINDOWS_INSTALL_MANIFEST_NAME,
   WINDOWS_STAGE_DIR,
   WINDOWS_UNINSTALLER_NAME,
   createIcoFile,
+  createInstallManifest,
   createNsisPayloadInclude,
   findMakensis,
   listPayloadEntries,
+  listPayloadPaths,
 } from "./windows-packaging.mjs";
 
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
@@ -111,6 +115,8 @@ async function buildInstaller({ root, id, version, payload }) {
   await writePayload(source, payload);
   const include = join(root, `payload-${version}.nsh`);
   await writeFile(include, createNsisPayloadInclude(await listPayloadEntries(source)));
+  const manifest = join(root, `payload-${version}.manifest`);
+  await writeFile(manifest, createInstallManifest(await listPayloadPaths(source)));
   const icon = join(root, "test.ico");
   await writeFile(icon, createIcoFile([{ size: 16, png: solidPng(16) }]));
   const output = join(root, `letagents-test-${version}.exe`);
@@ -121,6 +127,7 @@ async function buildInstaller({ root, id, version, payload }) {
     `/DFILE_VERSION=${version}.0`,
     `/DSOURCE_DIR=${source}`,
     `/DPAYLOAD_NSH=${include}`,
+    `/DMANIFEST_FILE=${manifest}`,
     `/DICON_FILE=${icon}`,
     `/DOUTPUT_FILE=${output}`,
     "/DHELPER_NAME=letagents-test-helper.exe",
@@ -142,12 +149,18 @@ async function readTree(directory) {
   return tree;
 }
 
-/** The folder holds exactly `payload` and the uninstaller, and no staging or backup folder. */
-async function assertInstalled(directory, payload, message) {
+/**
+ * The folder holds exactly `payload`, the uninstaller and the install
+ * manifest (plus `kept`, files the user put there), and no staging or backup
+ * folder.
+ */
+async function assertInstalled(directory, payload, message, kept = {}) {
   const tree = await readTree(directory);
-  assert.ok(WINDOWS_UNINSTALLER_NAME in tree, `${message}: the uninstaller is missing`);
-  delete tree[WINDOWS_UNINSTALLER_NAME];
-  assert.deepEqual(tree, payload, message);
+  for (const name of [WINDOWS_UNINSTALLER_NAME, WINDOWS_INSTALL_MANIFEST_NAME]) {
+    assert.ok(name in tree, `${message}: ${name} is missing`);
+    delete tree[name];
+  }
+  assert.deepEqual(tree, { ...payload, ...kept }, message);
   assertNoUpdateFolders(directory, message);
 }
 
@@ -248,10 +261,14 @@ test("the Windows installer installs, updates, keeps the old version on a failed
       const backup = join(directory, WINDOWS_BACKUP_DIR);
       const stage = join(directory, WINDOWS_STAGE_DIR);
       await mkdir(backup);
-      for (const name of ["LetAgents.exe", "ffmpeg.dll", "locales", "resources"]) await rename(join(directory, name), join(backup, name));
-      const newEntries = (await listPayloadEntries(join(root, "payload-2.0.0"))).map((entry) => entry.name).sort((left, right) => left.localeCompare(right, "en"));
+      for (const name of ["LetAgents.exe", "ffmpeg.dll", "locales", "resources", WINDOWS_INSTALL_MANIFEST_NAME]) await rename(join(directory, name), join(backup, name));
+      const newEntries = [
+        ...(await listPayloadEntries(join(root, "payload-2.0.0"))).map((entry) => entry.name).sort((left, right) => left.localeCompare(right, "en")),
+        WINDOWS_INSTALL_MANIFEST_NAME,
+      ];
       await writeFile(join(backup, ".moved-in"), newEntries.map((name) => `${name}\n`).join(""));
       await writePayload(stage, V2);
+      await writeFile(join(stage, WINDOWS_INSTALL_MANIFEST_NAME), createInstallManifest(await listPayloadPaths(join(root, "payload-2.0.0"))));
       for (const name of ["LetAgents.exe", "d3dcompiler_47.dll"]) await rename(join(stage, name), join(directory, name));
     }
 
@@ -265,11 +282,55 @@ test("the Windows installer installs, updates, keeps the old version on a failed
     await withInstall("after an update stopped after its commit, the new version stays and the old files go", async (directory) => {
       const backup = join(directory, WINDOWS_BACKUP_DIR);
       await mkdir(backup);
-      for (const name of ["LetAgents.exe", "ffmpeg.dll", "locales"]) await rename(join(directory, name), join(backup, name));
+      for (const name of ["LetAgents.exe", "ffmpeg.dll", "locales", WINDOWS_INSTALL_MANIFEST_NAME]) await rename(join(directory, name), join(backup, name));
       await rm(join(directory, "resources"), { recursive: true });
       await writePayload(directory, V2);
+      await writeFile(join(directory, WINDOWS_INSTALL_MANIFEST_NAME), createInstallManifest(await listPayloadPaths(join(root, "payload-2.0.0"))));
       assert.equal(run(v2, ["--updated", "/S", `/D=${directory}`]), 0);
       await assertInstalled(directory, V2, "after the recovery");
+    });
+
+    // Files the user put in the install folder, also in folders the payload has.
+    const KEPT = {
+      "user-notes.txt": "the user's",
+      "locales/user-notes.txt": "the user's",
+      "resources/app/user-notes.txt": "the user's",
+    };
+
+    await withInstall("an update and the uninstaller delete only the files the install wrote", async (directory) => {
+      await writePayload(directory, KEPT);
+      assert.equal(run(v2, ["--updated", "/S", `/D=${directory}`]), 0);
+      await assertInstalled(directory, V2, "after the update", KEPT);
+      assert.equal(run(join(directory, WINDOWS_UNINSTALLER_NAME), ["/S", `_?=${directory}`]), 0);
+      const left = await readTree(directory);
+      delete left[WINDOWS_UNINSTALLER_NAME];
+      assert.deepEqual(left, KEPT, "the uninstaller deleted a file the install did not write, or left one it did");
+      assertNoUpdateFolders(directory, "after the uninstall");
+    });
+
+    await withInstall("an update stopped while it discarded the old version still keeps the user's files", async (directory) => {
+      // The state a stop inside step 6 leaves: the new version is in, and the
+      // backup holds the old manifest, part of the old files and a user file.
+      const backup = join(directory, WINDOWS_BACKUP_DIR);
+      await mkdir(join(backup, "locales"), { recursive: true });
+      for (const name of ["resources", WINDOWS_INSTALL_MANIFEST_NAME]) await rename(join(directory, name), join(backup, name));
+      await writeFile(join(backup, "locales", "user-notes.txt"), KEPT["locales/user-notes.txt"]);
+      await rm(join(directory, "LetAgents.exe"));
+      await rm(join(directory, "ffmpeg.dll"));
+      await rm(join(directory, "locales"), { recursive: true });
+      await writePayload(directory, V2);
+      await writeFile(join(directory, WINDOWS_INSTALL_MANIFEST_NAME), createInstallManifest(await listPayloadPaths(join(root, "payload-2.0.0"))));
+      assert.equal(run(v2, ["--updated", "/S", `/D=${directory}`]), 0);
+      await assertInstalled(directory, V2, "after the recovery", { "locales/user-notes.txt": KEPT["locales/user-notes.txt"] });
+    });
+
+    await withInstall("an update over an install without a manifest (0.1.143) in a custom folder deletes nothing else", async (directory) => {
+      await rm(join(directory, WINDOWS_INSTALL_MANIFEST_NAME));
+      await writePayload(directory, KEPT);
+      assert.equal(run(v2, ["--updated", "/S", `/D=${directory}`]), 0);
+      // Not the default folder, so the old files the new version dropped stay
+      // too: without a manifest they cannot be told from the user's.
+      await assertInstalled(directory, V2, "after the update", { ...KEPT, "resources/app/v1-only.txt": V1["resources/app/v1-only.txt"] });
     });
 
     await withInstall("the uninstaller recovers a stopped update first and then removes the whole install", async (directory) => {
