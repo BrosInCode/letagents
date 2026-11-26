@@ -19,6 +19,7 @@ import { useSupervisedAgentLaunch } from "./useSupervisedAgentLaunch";
 import { useAddAgentConfiguration } from "./useAddAgentConfiguration";
 import { useAddAgentSetup } from "./useAddAgentSetup";
 import { useAddAgentPresentation } from "./useAddAgentPresentation";
+import { useProviderSignIn } from "./useProviderSignIn";
 import { contextualAddAgentError } from "./add-agent-errors";
 import {
   canStartNewSupervisedLaunch,
@@ -346,6 +347,18 @@ const {
   copyExternalJoinPrompt,
 } = setupActions;
 
+const providerSignIn = useProviderSignIn({
+  open: () => props.open,
+  providerId: () => selectedProviderId.value,
+  providerName: () => selectedProvider.value?.name || "the provider",
+  onSignedIn: (update) => {
+    setSetupMessage(update.message || "Signed in.", "status");
+    // Main cleared its provider probe memo before this update, so a plain
+    // check sees the new sign-in without restarting the local supervisor.
+    void refreshSelectedProvider({ forceModels: true });
+  },
+});
+
 async function openProviderInstallGuide(): Promise<void> {
   if (!installUrl.value) return;
   try {
@@ -559,5 +572,5 @@ async function startManagedAgent(
   }
 }
 
-  return { configuredName, configuredAvatar, roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, secureStorageStatus, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelContextWindow, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, providerModelCliUpdate, refreshProviderModels, handleModelChoiceValue, handleEffortValue, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, externalJoinPrompt, copyingExternalPrompt, selectPermissionProfile, copyExternalJoinPrompt, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, customModelError, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent };
+  return { configuredName, configuredAvatar, roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, secureStorageStatus, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelContextWindow, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, providerModelCliUpdate, refreshProviderModels, handleModelChoiceValue, handleEffortValue, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, externalJoinPrompt, copyingExternalPrompt, selectPermissionProfile, copyExternalJoinPrompt, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, customModelError, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, providerSignIn, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent };
 }

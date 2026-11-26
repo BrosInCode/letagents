@@ -79,15 +79,6 @@
     </section>
 
     <section
-      v-if="preflight?.nextAction === 'authenticate' && authCommand"
-      class="desktop-add-agent-auth-command"
-      aria-label="Agent sign-in command"
-    >
-      <span>Sign-in command</span>
-      <code>{{ authCommand }}</code>
-    </section>
-
-    <section
       v-if="preflight?.nextAction === 'install_external_runtime' && installCommand"
       class="desktop-add-agent-auth-command"
       aria-label="Agent installation command"
@@ -126,7 +117,6 @@ const props = defineProps<{
   showWorktrees: boolean;
   worktrees: RepoWorktreeEntry[];
   worktreeDescription: string;
-  authCommand: string | null;
   installCommand: string | null;
   error: string | null;
 }>();

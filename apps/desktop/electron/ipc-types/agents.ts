@@ -115,6 +115,29 @@ export interface DesktopAgentProviderSetupResult {
   detail: string | null;
 }
 
+export type DesktopProviderSignInState =
+  | "starting"
+  | "waiting"
+  | "verifying"
+  | "signed_in"
+  | "failed"
+  | "cancelled";
+
+/** One step of a provider sign-in that the desktop runs for the user. */
+export interface DesktopProviderSignInUpdate {
+  providerId: DesktopAgentProviderId;
+  state: DesktopProviderSignInState;
+  /** The first web address the provider printed for the user. */
+  url?: string | null;
+  /** A one-time device code the user enters on that page. */
+  code?: string | null;
+  /** The provider is waiting for a code pasted back from the browser. */
+  acceptsCode?: boolean;
+  /** The sign-in runs in a Terminal window that the app opened. */
+  inTerminal?: boolean;
+  message?: string | null;
+}
+
 export type DesktopManagedAgentDeliveryMode = "daemon_inbox";
 
 export type DesktopManagedAgentEffort =
