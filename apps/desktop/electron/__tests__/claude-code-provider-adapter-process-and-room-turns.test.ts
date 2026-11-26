@@ -1062,3 +1062,59 @@ test("Claude recovery fails closed when the exact terminal boundary is absent", 
     },
   );
 });
+
+test("exact-reference Claude stop returns when the process exits, not after the whole grace period", async () => {
+  const birth = OS_BIRTH.first;
+  const h = createHarness({ identities: new Map([[4100, birth]]), dieOnSigterm: false });
+  const owner = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const handle = await owner.spawn(spawnRequest());
+  // The CLI needs about 80 ms to exit after SIGTERM; the grace period is 5 s (the production default).
+  h.dependencies.signalProcess = (pid, signal) => {
+    h.signals.push({ pid, signal });
+    if (signal === "SIGTERM") setTimeout(() => h.identities.set(pid, null), 80);
+  };
+  const fresh = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const startedAt = Date.now();
+  const terminal = await withLoopAlive(fresh.stopRef({ workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection }, { graceMs: 5_000 }));
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 1_000, `stop waited ${elapsedMs} ms for a process that exited after about 80 ms`);
+  assert.deepEqual(h.signals.map(value => value.signal), ["SIGTERM"], "no escalation once the process is gone");
+  assert.equal(terminal.nativeRuntimeDeath?.pid, 4100);
+});
+
+test("exact-reference Claude stop still escalates to SIGKILL after the grace period for a stubborn process", async () => {
+  const birth = OS_BIRTH.first;
+  const h = createHarness({ identities: new Map([[4100, birth]]), dieOnSigterm: false });
+  const owner = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const handle = await owner.spawn(spawnRequest());
+  const fresh = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const startedAt = Date.now();
+  await withLoopAlive(fresh.stopRef({ workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection }, { graceMs: 150 }));
+  assert.ok(Date.now() - startedAt >= 140, "a live process gets the whole grace period before SIGKILL");
+  assert.deepEqual(h.signals.map(value => value.signal), ["SIGTERM", "SIGKILL"]);
+});
+
+test("exact-reference Claude stop keeps waiting while the process identity is unreadable", async () => {
+  const birth = OS_BIRTH.first;
+  const h = createHarness({ identities: new Map([[4100, birth]]), dieOnSigterm: false });
+  const owner = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const handle = await owner.spawn(spawnRequest());
+  // After SIGTERM the identity is unknown for about 100 ms, then the process is gone.
+  h.dependencies.signalProcess = (pid, signal) => {
+    h.signals.push({ pid, signal });
+    if (signal === "SIGTERM") {
+      h.identities.set(pid, undefined);
+      setTimeout(() => h.identities.set(pid, null), 100);
+    }
+  };
+  const fresh = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const startedAt = Date.now();
+  const terminal = await withLoopAlive(fresh.stopRef({ workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection }, { graceMs: 5_000 }));
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs >= 90 && elapsedMs < 1_000, `stop took ${elapsedMs} ms`);
+  assert.deepEqual(h.signals.map(value => value.signal), ["SIGTERM"]);
+  assert.equal(terminal.nativeRuntimeDeath?.pid, 4100);
+});

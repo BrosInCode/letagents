@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { notarize } from "@electron/notarize";
 import { sign } from "@electron/osx-sign";
 
+import { normalizeBundleTimestamps } from "./archive-timestamps.mjs";
 import { createDifferentialBlockmap } from "./differential-blockmap.mjs";
 import { assertPackagedElectronFuses } from "./electron-fuses.mjs";
 import { notarizeWithStapleRecovery, validateStapledTicket } from "./notarization-staple-recovery.mjs";
@@ -129,7 +130,13 @@ if (credentials) {
 // and stapled). The zip and the DMG copy this app.
 await assertPackageArtifactManifest({ bundle: packagedApp, platform: "darwin" });
 
-await execFileAsync("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", packagedApp, zip]);
+// The update ZIP holds the same bytes for every file that did not change since
+// the last release, so the differential update reuses them: one fixed time on
+// every entry, and no extended attributes or resource forks (ditto would add
+// an AppleDouble entry for each, stamped with the time it runs). The app needs
+// neither: its signature and stapled ticket are files in the bundle.
+await normalizeBundleTimestamps(packagedApp);
+await execFileAsync("ditto", ["-c", "-k", "--norsrc", "--noextattr", "--noqtn", "--noacl", "--keepParent", packagedApp, zip]);
 await createDifferentialBlockmap(zip, blockmap);
 
 const dmgSource = join(release, "dmg-source");
@@ -137,15 +144,25 @@ await rm(dmgSource, { recursive: true, force: true });
 await mkdir(dmgSource, { recursive: true });
 await cp(packagedApp, join(dmgSource, "LetAgents.app"), { recursive: true, verbatimSymlinks: true });
 await symlink("/Applications", join(dmgSource, "Applications"));
+// hdiutil create -format UDZO straight from a folder writes an image about a
+// third larger than the same disk compressed by hdiutil convert (390 MB against
+// 245 MB for 0.1.143's app; the disks inside are identical). So the folder goes
+// into an uncompressed read-only image first, which convert then compresses.
+// This runs before the DMG is signed and notarized.
+const dmgUncompressed = join(release, "LetAgents-uncompressed.dmg");
+await rm(dmgUncompressed, { force: true });
 await execFileAsync("hdiutil", [
   "create",
   "-volname", "LetAgents",
   "-srcfolder", dmgSource,
   "-ov",
-  "-format", "UDZO",
-  dmg,
+  "-format", "UDRO",
+  dmgUncompressed,
 ]);
 await rm(dmgSource, { recursive: true, force: true });
+await execFileAsync("hdiutil", ["convert", dmgUncompressed, "-format", "UDZO", "-ov", "-o", dmg]);
+await rm(dmgUncompressed, { force: true });
+await execFileAsync("hdiutil", ["verify", dmg]);
 
 if (!skipSigning) {
   await execFileAsync("codesign", ["--sign", identity, "--force", "--timestamp", dmg]);

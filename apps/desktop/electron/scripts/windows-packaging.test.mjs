@@ -11,13 +11,23 @@ import { deflateSync } from "node:zlib";
 import {
   DAEMON_PIPE_ADDON_APP_PATH,
   PROCESS_TREE_HELPER_APP_PATH,
+  WINDOWS_BACKUP_DIR,
   WINDOWS_EXECUTABLE_NAME,
+  WINDOWS_INSTALL_MANIFEST_NAME,
+  WINDOWS_LONGEST_STAGE_ROOT,
+  WINDOWS_MAX_PATH_LENGTH,
+  WINDOWS_STAGE_DIR,
+  WINDOWS_UNINSTALLER_NAME,
+  assertPayloadPathsFit,
   assertWindowsExecutableBytes,
   buildDaemonPipeAddon,
   buildProcessTreeHelper,
   createIcoFile,
+  createInstallManifest,
   createNsisPayloadInclude,
   findMakensis,
+  listPayloadPaths,
+  longestPayloadPath,
   payloadSizeKb,
   readPngDimensions,
   resolveWindowsOpenCodeExecutable,
@@ -123,7 +133,7 @@ test("makensis comes from LETAGENTS_MAKENSIS, PATH, or the NSIS install folder",
   assert.throws(() => findMakensis({ env: { PATH: "" }, exists: () => false }), /NSIS \(makensis\.exe\) was not found/);
 });
 
-test("the installer removes exactly the packaged top-level entries", () => {
+test("the installer removes and moves exactly the packaged top-level entries", () => {
   const include = createNsisPayloadInclude([
     { name: "resources", directory: true },
     { name: WINDOWS_EXECUTABLE_NAME, directory: false },
@@ -139,11 +149,22 @@ test("the installer removes exactly the packaged top-level entries", () => {
     '  RMDir /r "$INSTDIR\\locales"',
     '  RMDir /r "$INSTDIR\\resources"',
     '  RMDir /r "$INSTDIR\\shared"',
+    '  Delete "$INSTDIR\\LetAgents.install-manifest"',
+    "!macroend",
+    "!macro LETAGENTS_PAYLOAD_ENTRIES MACRO",
+    '  !insertmacro ${MACRO} "ffmpeg.dll"',
+    '  !insertmacro ${MACRO} "LetAgents.exe"',
+    '  !insertmacro ${MACRO} "locales"',
+    '  !insertmacro ${MACRO} "resources"',
+    '  !insertmacro ${MACRO} "shared"',
+    '  !insertmacro ${MACRO} "LetAgents.install-manifest"',
     "!macroend",
     "",
   ].join("\r\n"));
   assert.throws(() => createNsisPayloadInclude([{ name: "resources", directory: true }]), /must contain LetAgents\.exe/);
-  for (const name of ['bad"name', "$PLUGINSDIR", "..", "Uninstall LetAgents.exe"]) {
+  // A dot first is refused too: the installer's staging folders start with one.
+  // The install manifest is the installer's own entry, not the payload's.
+  for (const name of ['bad"name', "$PLUGINSDIR", "..", ".letagents-new", "Uninstall LetAgents.exe", WINDOWS_INSTALL_MANIFEST_NAME]) {
     assert.throws(
       () => createNsisPayloadInclude([{ name: WINDOWS_EXECUTABLE_NAME, directory: false }, { name, directory: false }]),
       /Unexpected top-level entry/,
@@ -163,9 +184,9 @@ test("the NSIS script honours electron-updater's installer flags and stays per-u
   assert.match(script, /!define UPDATER_CACHE "letagents-desktop-updater"/);
   assert.match(script, /"\$LOCALAPPDATA\\\$\{UPDATER_CACHE\}\\installer\.exe"/);
   assert.match(script, /WriteRegStr HKCU "\$\{URL_KEY\}\\shell\\open\\command" "" '"\$INSTDIR\\\$\{EXE_NAME\}" "%1"'/);
-  // The previous payload is removed only from the folder the install is registered in.
-  const guarded = /Call (?:un\.)?IsRegisteredInstall\s+(?:;[^\n]*\s+)*\$\{If\} \$InstalledHere == "1"\s+!insertmacro REMOVE_LETAGENTS_PAYLOAD/g;
-  assert.equal(script.match(guarded)?.length, 2);
+  // The uninstaller removes the payload only from the folder the install is registered in.
+  const guarded = /Call un\.IsRegisteredInstall\s+(?:;[^\n]*\s+)*\$\{If\} \$InstalledHere == "1"\s+Call un\.RemoveInstalledPayload/g;
+  assert.equal(script.match(guarded)?.length, 1);
   assert.match(script, /ReadRegStr \$R0 HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"/);
   assert.match(script, /^InstallDirRegKey HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"$/m);
   assert.doesNotMatch(script, /RMDir \/r "\$INSTDIR"/);
@@ -179,6 +200,211 @@ test("the NSIS script honours electron-updater's installer flags and stays per-u
   for (const removal of ['DeleteRegKey HKCU "${UNINSTALL_KEY}"', 'DeleteRegKey HKCU "${URL_KEY}"', 'RMDir /r "$LOCALAPPDATA\\${UPDATER_CACHE}"', 'Delete "$SMPROGRAMS\\${PRODUCT_NAME}.lnk"']) {
     assert.ok(registeredOnly.includes(removal), removal);
   }
+});
+
+/** The text from `start` to the first `end` after it. */
+function between(text, start, end) {
+  const from = text.indexOf(start);
+  assert.notEqual(from, -1, start);
+  const to = text.indexOf(end, from);
+  assert.notEqual(to, -1, end);
+  return text.slice(from, to);
+}
+
+test("the install manifest lists every file, then every folder deepest first, in UTF-16LE", () => {
+  const manifest = createInstallManifest({
+    files: ["resources/app/main.js", WINDOWS_EXECUTABLE_NAME, "shared/process-tree.mjs", "locales/en-US.pak"],
+    directories: ["resources", "shared", "resources/app", "locales"],
+  });
+  assert.notEqual(manifest[0], 0xff, "no byte-order mark: FileReadUTF16LE would read it into the first path");
+  assert.equal(manifest.toString("utf16le"), [
+    "F LetAgents.exe",
+    "F locales\\en-US.pak",
+    "F resources\\app\\main.js",
+    "F shared\\process-tree.mjs",
+    "D resources\\app",
+    "D locales",
+    "D resources",
+    "D shared",
+    "",
+  ].join("\r\n"));
+  const files = [WINDOWS_EXECUTABLE_NAME];
+  assert.throws(() => createInstallManifest({ files: ["resources/x"], directories: [] }), /must contain LetAgents\.exe/);
+  for (const path of ["a/../b", "..", "a/..b", "C:/x", "a\\b", "/abs", "a//b", "a/./b", "x\u0001", "a*b", "x".repeat(901)]) {
+    assert.throws(() => createInstallManifest({ files: [...files, path], directories: [] }), /cannot hold/, path);
+  }
+  for (const path of [WINDOWS_UNINSTALLER_NAME, WINDOWS_INSTALL_MANIFEST_NAME.toUpperCase()]) {
+    assert.throws(() => createInstallManifest({ files: [...files, path], directories: [] }), /must not contain/, path);
+  }
+});
+
+test("the payload paths are every file and folder, relative, with forward slashes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-payload-paths-"));
+  try {
+    await mkdir(join(directory, "resources", "app"), { recursive: true });
+    await mkdir(join(directory, "empty"));
+    await writeFile(join(directory, WINDOWS_EXECUTABLE_NAME), "MZ");
+    await writeFile(join(directory, "resources", "app", "main.js"), "1");
+    const { files, directories } = await listPayloadPaths(directory);
+    assert.deepEqual(files.sort(), [WINDOWS_EXECUTABLE_NAME, "resources/app/main.js"]);
+    assert.deepEqual(directories.sort(), ["empty", "resources", "resources/app"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an update and the uninstaller delete only what the install manifest lists", async () => {
+  const script = await readFile(join(desktopRoot, "electron", "installer", "windows", "installer.nsi"), "utf8");
+  assert.match(script, new RegExp(`^!define INSTALL_MANIFEST "${WINDOWS_INSTALL_MANIFEST_NAME.replaceAll(".", "\\.")}"$`, "m"));
+  // The manifest is written before the payload, into the same folder.
+  const install = between(script, 'Section "Install"', "SectionEnd");
+  assert.match(install, /SetOutPath "\$R0"[\s\S]*File "\/oname=\$\{INSTALL_MANIFEST\}" "\$\{MANIFEST_FILE\}"\s+File \/r "\$\{SOURCE_DIR\}\\\*"/);
+  // Files, then folders that are empty by then; unsafe paths are skipped.
+  const listed = between(script, "Function ${PREFIX}RemoveListedPayload", "FunctionEnd");
+  assert.match(listed, /FileReadUTF16LE \$R3 \$R4/);
+  assert.match(listed, /StrStrW\(w R6, w "\.\."\)/);
+  assert.match(listed, /StrChrW\(w R6, i 58\)/);
+  assert.match(listed, /\$\{If\} \$R5 S== "F "\s+Delete "\$PayloadRoot\\\$R6"\s+\$\{ElseIf\} \$R5 S== "D "\s+RMDir "\$PayloadRoot\\\$R6"/);
+  assert.doesNotMatch(listed, /RMDir \/r/);
+  // The manifest stays until its caller is done, so a stopped run finds it again.
+  assert.doesNotMatch(listed, /Delete "\$PayloadRoot\\\$\{INSTALL_MANIFEST\}"/);
+  assert.match(between(script, "Function ${PREFIX}MergeBackLeftovers", "FunctionEnd"), /\$\{AndIf\} "\$0\$2" != "\$\{INSTALL_MANIFEST\}"/);
+  // The old version in the backup folder: listed files go, the rest moves back,
+  // except a pre-manifest install in the default folder, which goes whole.
+  const discard = between(script, "Function ${PREFIX}DiscardOldVersion", "FunctionEnd");
+  const discardSteps = [
+    'StrCpy $PayloadRoot "$INSTDIR\\${BACKUP_DIR}"',
+    "Call ${PREFIX}RemoveListedPayload",
+    '${OrIf} $INSTDIR != "$LOCALAPPDATA\\Programs\\${PRODUCT_NAME}"',
+    "Call ${PREFIX}MergeBackLeftovers",
+    'RMDir /r "$INSTDIR\\${BACKUP_DIR}"',
+  ];
+  const discardAt = discardSteps.map((step) => discard.indexOf(step));
+  assert.ok(discardAt.every((index) => index > 0), JSON.stringify(discardAt));
+  assert.deepEqual(discardAt, [...discardAt].sort((a, b) => a - b));
+  // An update stopped after its commit discards the old version the same way.
+  const recover = between(script, "Function ${PREFIX}RecoverInterruptedUpdate", "FunctionEnd");
+  assert.match(recover, /\$\{AndIfNot\} \$\{FileExists\} "\$INSTDIR\\\$\{STAGE_DIR\}\\\*\.\*"\s+(?:;[^\n]*\s+)*Call \$\{PREFIX\}DiscardOldVersion/);
+  // The uninstaller: the manifest, and the recursive legacy removal only without one in the default folder.
+  const uninstallPayload = between(script, "Function un.RemoveInstalledPayload", "FunctionEnd");
+  assert.match(uninstallPayload, /StrCpy \$PayloadRoot "\$INSTDIR"\s+Call un\.RemoveListedPayload\s+\$\{If\} \$R9 == "0"\s+\$\{AndIf\} \$INSTDIR == "\$LOCALAPPDATA\\Programs\\\$\{PRODUCT_NAME\}"\s+!insertmacro REMOVE_LETAGENTS_PAYLOAD/);
+  assert.match(uninstallPayload, /!insertmacro REMOVE_LETAGENTS_PAYLOAD\s+\$\{EndIf\}\s+Delete "\$INSTDIR\\\$\{INSTALL_MANIFEST\}"/);
+  assert.equal(script.match(/!insertmacro REMOVE_LETAGENTS_PAYLOAD/g)?.length, 1);
+});
+
+test("an update writes the new version beside the installed one and swaps it in only when it is complete", async () => {
+  const script = await readFile(join(desktopRoot, "electron", "installer", "windows", "installer.nsi"), "utf8");
+  const install = between(script, 'Section "Install"', "SectionEnd");
+  // Both folders are in $INSTDIR, so every rename stays on one volume; a dot
+  // first, which no payload entry has, so they never clash with one. The
+  // build's MAX_PATH check uses the same names.
+  assert.equal(/^!define STAGE_DIR "([^"]+)"$/m.exec(script)?.[1], WINDOWS_STAGE_DIR);
+  assert.equal(/^!define BACKUP_DIR "([^"]+)"$/m.exec(script)?.[1], WINDOWS_BACKUP_DIR);
+  assert.match(WINDOWS_STAGE_DIR, /^\./);
+  assert.match(WINDOWS_BACKUP_DIR, /^\./);
+  // The old payload is not deleted before the new one is written.
+  assert.doesNotMatch(install, /REMOVE_LETAGENTS_PAYLOAD/);
+  // One copy of the payload in the installer, written to the staging folder
+  // only for the registered install (a first install writes into $INSTDIR).
+  assert.equal(script.match(/File \/r "\$\{SOURCE_DIR\}\\\*"/g)?.length, 1);
+  assert.match(install, /Call IsRegisteredInstall\s+\$\{If\} \$InstalledHere == "1"\s+StrCpy \$RestartAfterFailure "1"\s+StrCpy \$Staging "1"\s+StrCpy \$R0 "\$INSTDIR\\\$\{STAGE_DIR\}"\s+\$\{Else\}\s+StrCpy \$R0 "\$INSTDIR"/);
+  // An extraction error stops the install before anything moves, with the
+  // staging folder removed and a non-zero exit code also in silent mode.
+  assert.match(install, /ClearErrors\s+File "\/oname=\$\{INSTALL_MANIFEST\}" "\$\{MANIFEST_FILE\}"\s+File \/r "\$\{SOURCE_DIR\}\\\*"\s+StrCpy \$R1 "0"\s+\$\{If\} \$\{Errors\}\s+StrCpy \$R1 "1"/);
+  const failed = between(install, '${If} $R1 == "1"', "Call SwapInStagedPayload");
+  assert.match(failed, /\$\{If\} \$Staging == "1"\s+RMDir \/r "\$INSTDIR\\\$\{STAGE_DIR\}"[\s\S]*!insertmacro FAIL_INSTALL/);
+  assert.match(between(script, "!macro FAIL_INSTALL", "!macroend"), /MessageBox [^\n]* \/SD IDOK\s+SetErrorLevel 2\s+Abort/);
+  // Windows does not rename or delete a folder that is the working folder.
+  assert.ok(install.indexOf('SetOutPath "$INSTDIR"', install.indexOf('File /r "')) < install.indexOf("Call SwapInStagedPayload"));
+  // The order: close the app, recover an interrupted update, write, swap, then the rest.
+  const order = ["Call CloseRunningApp", "Call RecoverInterruptedUpdate", "Call IsRegisteredInstall", 'File /r "', "Call SwapInStagedPayload", "WriteUninstaller"];
+  assert.ok(order.every((step) => install.includes(step)));
+  assert.deepEqual(order.map((step) => install.indexOf(step)), order.map((step) => install.indexOf(step)).sort((a, b) => a - b));
+
+  // The swap: old entries aside (stopping at the first that does not move),
+  // the list of what moves in, new entries in, the commit (the empty staging
+  // folder goes), then the old entries go. Otherwise it rolls back.
+  const swap = between(script, "Function SwapInStagedPayload", "FunctionEnd");
+  const steps = [
+    'StrCpy $MoveStopAtFailure "1"',
+    'StrCpy $MoveTo "$INSTDIR\\${BACKUP_DIR}"',
+    'FileOpen $R4 "$INSTDIR\\${BACKUP_DIR}\\${MOVED_IN_LIST}" w',
+    "!insertmacro LETAGENTS_PAYLOAD_ENTRIES LIST_LETAGENTS_ENTRY",
+    'StrCpy $MoveFrom "$INSTDIR\\${STAGE_DIR}"',
+    'RMDir "$INSTDIR\\${STAGE_DIR}"',
+    "Call DiscardOldVersion",
+    "Call RestoreOldVersion",
+  ];
+  const at = steps.map((step) => swap.indexOf(step));
+  assert.ok(at.every((index) => index > 0), JSON.stringify(at));
+  assert.deepEqual(at, [...at].sort((a, b) => a - b));
+  // When the old version cannot be put back whole, both folders stay, so the
+  // next run sees a swap that was not committed and puts it back.
+  const rollbackFailed = between(swap.slice(swap.indexOf("Call RestoreOldVersion")), "${If} $MoveFailures <> 0", "${EndIf}");
+  assert.doesNotMatch(rollbackFailed, /RMDir/);
+  assert.match(rollbackFailed, /!insertmacro FAIL_INSTALL/);
+  assert.doesNotMatch(script, /CopyFiles[^\n]*(?:STAGE_DIR|BACKUP_DIR)/);
+  const move = between(script, "Function ${PREFIX}MoveLetAgentsEntry", "FunctionEnd");
+  assert.match(move, /^Function \$\{PREFIX\}MoveLetAgentsEntry\s+\$\{If\} \$MoveStopAtFailure == "1"\s+\$\{AndIf\} \$MoveFailures <> 0\s+Return/);
+  assert.match(move, /Rename "\$MoveFrom\\\$MoveName" "\$MoveTo\\\$MoveName"/);
+
+  // Restoring: first the listed (new) entries go, then the list, then every old entry comes back.
+  const restore = between(script, "Function ${PREFIX}RestoreOldVersion", "FunctionEnd");
+  const restoreSteps = ['StrCpy $MoveStopAtFailure "0"', "Call ${PREFIX}DeleteLetAgentsEntry", 'Delete "$INSTDIR\\${BACKUP_DIR}\\${MOVED_IN_LIST}"', 'FindFirst $R1 $R2 "$INSTDIR\\${BACKUP_DIR}\\*"', "Call ${PREFIX}MoveLetAgentsEntry"];
+  const restoreAt = restoreSteps.map((step) => restore.indexOf(step));
+  assert.ok(restoreAt.every((index) => index > 0), JSON.stringify(restoreAt));
+  assert.deepEqual(restoreAt, [...restoreAt].sort((a, b) => a - b));
+  // Recovery, only in the registered folder: both folders mean not committed,
+  // so the old version is put back; then the backup goes before the staging folder.
+  const recover = between(script, "Function ${PREFIX}RecoverInterruptedUpdate", "FunctionEnd");
+  assert.match(recover, /^Function \$\{PREFIX\}RecoverInterruptedUpdate\s+ReadRegStr \$R0 HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"\s+\$\{If\} \$R0 != \$INSTDIR\s+Return/);
+  assert.match(recover, /\$\{If\} \$\{FileExists\} "\$INSTDIR\\\$\{STAGE_DIR\}\\\*\.\*"\s+\$\{AndIf\} \$\{FileExists\} "\$INSTDIR\\\$\{BACKUP_DIR\}\\\*\.\*"\s+Call \$\{PREFIX\}RestoreOldVersion/);
+  assert.ok(recover.indexOf('RMDir /r "$INSTDIR\\${BACKUP_DIR}"') < recover.indexOf('RMDir /r "$INSTDIR\\${STAGE_DIR}"'));
+  assert.match(script, /^!insertmacro DEFINE_UPDATE_RECOVERY ""$/m);
+  assert.match(script, /^!insertmacro DEFINE_UPDATE_RECOVERY "un\."$/m);
+  // A failed install removes the staging folder only when no backup exists:
+  // with both there, removing it would commit a swap that was not committed.
+  const onFailed = between(script, "Function .onInstFailed", "FunctionEnd");
+  assert.match(onFailed, /\$\{If\} \$Staging == "1"\s+\$\{AndIfNot\} \$\{FileExists\} "\$INSTDIR\\\$\{BACKUP_DIR\}\\\*\.\*"\s+SetOutPath "\$INSTDIR"\s+RMDir \/r "\$INSTDIR\\\$\{STAGE_DIR\}"/);
+  // With --force-run, a failed update starts the old version again.
+  assert.match(onFailed, /\$RestartAfterFailure == "1"\s+\$\{AndIf\} \$ForceRun == "1"\s+\$\{AndIf\} \$\{FileExists\} "\$INSTDIR\\\$\{EXE_NAME\}"\s+Exec/);
+  // The uninstaller recovers first: LetAgents.exe can be in the backup folder.
+  const uninstall = between(script, 'Section "Uninstall"', "SectionEnd");
+  assert.match(uninstall, /Call un\.CloseRunningApp\s+(?:;[^\n]*\s+)*Call un\.RecoverInterruptedUpdate\s+Call un\.IsRegisteredInstall/);
+});
+
+test("only the Windows installer test builds with its own names", async () => {
+  const script = await readFile(join(desktopRoot, "electron", "installer", "windows", "installer.nsi"), "utf8");
+  const release = between(script, "!ifndef TEST_INSTANCE", "!else");
+  const testBuild = between(script, "!else", "!endif");
+  for (const name of ["PRODUCT_NAME", "APP_ID", "URL_SCHEME", "UPDATER_CACHE"]) {
+    const value = (text) => new RegExp(`^\\s*!define ${name} "([^"]+)"$`, "m").exec(text)?.[1];
+    assert.ok(value(release), name);
+    assert.ok(value(testBuild)?.includes("${TEST_INSTANCE}"), `${name} must differ in a test build`);
+  }
+  assert.match(script, /^!define URL_KEY "Software\\Classes\\\$\{URL_SCHEME\}"$/m);
+  assert.doesNotMatch(await readFile(join(scriptsDirectory, "package-windows.mjs"), "utf8"), /TEST_INSTANCE/);
+});
+
+test("the build fails when a payload path would not fit in MAX_PATH below the staging folder", async () => {
+  assert.equal(WINDOWS_LONGEST_STAGE_ROOT, `C:\\Users\\${"u".repeat(32)}\\AppData\\Local\\Programs\\LetAgents\\.letagents-new`);
+  assert.equal(WINDOWS_LONGEST_STAGE_ROOT.length, 89);
+  const room = WINDOWS_MAX_PATH_LENGTH - WINDOWS_LONGEST_STAGE_ROOT.length - 1;
+  assert.equal(assertPayloadPathsFit("x".repeat(room)), 259);
+  assert.throws(() => assertPayloadPathsFit("x".repeat(room + 1)), /is 260 characters below .*no path longer than 259/);
+  const directory = await mkdtemp(join(tmpdir(), "letagents-payload-path-"));
+  try {
+    await mkdir(join(directory, "resources", "app", "node_modules", "pkg"), { recursive: true });
+    await writeFile(join(directory, "LetAgents.exe"), "");
+    await writeFile(join(directory, "resources", "app", "node_modules", "pkg", "index.js"), "");
+    assert.equal(await longestPayloadPath(directory), "resources\\app\\node_modules\\pkg\\index.js");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+  // package-windows.mjs checks the packaged app before it compiles the installer.
+  const packager = await readFile(join(scriptsDirectory, "package-windows.mjs"), "utf8");
+  assert.ok(packager.indexOf("assertPayloadPathsFit(await longestPayloadPath(packagedApp));") > 0);
+  assert.ok(packager.indexOf("assertPayloadPathsFit(") < packager.indexOf("execFileAsync(makensis, ["));
 });
 
 test("the process-tree helper ships at the path the app looks for it, built strictly unless one is given", () => {

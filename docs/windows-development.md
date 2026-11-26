@@ -106,7 +106,7 @@ of `-Tools` adds it again: remove that entry after each run if you want the inst
 ## Run the Windows CI suites
 
 Run these in Git Bash at the repository root. They are the steps of the jobs `mcp-tests-windows`,
-`process-tree-windows` and `desktop-tests-windows` in `.github/workflows/ci.yml`.
+`process-tree-windows`, `windows-installer` and `desktop-tests-windows` in `.github/workflows/ci.yml`.
 
 The tests write under the home folder. Point `HOME` and `USERPROFILE` at a scratch folder first, so they never touch
 your real `~/.letagents`, and point the API at an address where nothing listens. Then set the global Git settings
@@ -152,6 +152,13 @@ rm apps/desktop/native/win-process-tree/build/x64/letagents-process-tree.exe
 
 The last line removes the helper from its default build folder, where the app's code finds it: CI builds it in its own
 job, so the desktop suites run without it.
+
+NSIS installer (`windows-installer`), with NSIS 3 installed (or `LETAGENTS_MAKENSIS` set to `makensis.exe`). It builds
+a test installer with its own product name and registry keys, and installs it only into a temporary folder:
+
+```bash
+LETAGENTS_REQUIRE_INSTALLER_TEST=1 node --test --test-timeout=900000 apps/desktop/electron/scripts/windows-installer.test.mjs
+```
 
 Desktop (`desktop-tests-windows`):
 
