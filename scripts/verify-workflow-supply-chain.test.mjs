@@ -539,7 +539,7 @@ test("the dependency gates run once, in dependency-audit, before every check job
   // scripts, so each waits for the gates and none repeats them.
   const notGated = new Set(["dependency-audit", "build", "integration-tests", "npm-publish", "docker", "deploy", "room-ack-evaluation"]);
   const checkJobs = jobs.filter((candidate) => !notGated.has(candidate.name));
-  assert.deepEqual(checkJobs.map((candidate) => candidate.name).sort(), ["build-checks", "desktop-edge-tests-macos", "desktop-packaged-smoke", "desktop-tests", "desktop-tests-windows", "integration-db-tests", "mcp-tests-windows", "process-tree-windows"]);
+  assert.deepEqual(checkJobs.map((candidate) => candidate.name).sort(), ["build-checks", "desktop-edge-tests-macos", "desktop-packaged-smoke", "desktop-tests", "desktop-tests-windows", "integration-db-tests", "mcp-tests-windows", "process-tree-windows", "windows-installer"]);
   // Each non-Linux job's gate: the step after which its suites run.
   const windowsGates = {
     "mcp-tests-windows": { name: "Build the MCP server", id: "build" },
