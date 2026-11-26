@@ -88,26 +88,26 @@ function getSetupStorePath(): string {
 
 function getMcpInstallTargetDefinitions(): McpInstallTargetDefinition[] {
   const home = process.env.LETAGENTS_DESKTOP_MCP_CONFIG_HOME?.trim() || homedir();
-  const claudeSettingsPath = join(home, ".claude", "settings.json");
+  // Each target lists only the files its client reads MCP servers from, so a
+  // server written there and read back is one the client discovers. Claude
+  // Code reads user-scope servers from ~/.claude.json (created here when it
+  // does not exist yet) and ignores mcpServers in ~/.claude/settings.json.
+  // The Antigravity CLI reads ~/.gemini/config/mcp_config.json, not the older
+  // Gemini ~/.gemini/settings.json.
   const claudeJsonPath = join(home, ".claude.json");
+  const antigravityMcpPath = join(home, ".gemini", "config", "mcp_config.json");
   return [
     {
       id: "claude-code",
       name: "Claude Code",
       description: "Add the LetAgents MCP so agents here can communicate in shared rooms.",
-      configPath: claudeSettingsPath,
+      configPath: claudeJsonPath,
       configLocations: [
-        {
-          path: claudeSettingsPath,
-          label: "Claude settings",
-          configFormat: "json",
-          writePolicy: "always",
-        },
         {
           path: claudeJsonPath,
           label: "Claude user config",
           configFormat: "json",
-          writePolicy: "if_present",
+          writePolicy: "always",
         },
       ],
       restartHint:
@@ -117,11 +117,11 @@ function getMcpInstallTargetDefinitions(): McpInstallTargetDefinition[] {
       id: "antigravity",
       name: "Antigravity",
       description: "Add the LetAgents MCP so agents here can communicate in shared rooms.",
-      configPath: join(home, ".gemini", "settings.json"),
+      configPath: antigravityMcpPath,
       configLocations: [
         {
-          path: join(home, ".gemini", "settings.json"),
-          label: "Antigravity settings",
+          path: antigravityMcpPath,
+          label: "Antigravity MCP config",
           configFormat: "json",
           writePolicy: "always",
         },

@@ -189,17 +189,46 @@
   font-size: 0.72rem;
 }
 
+.desktop-add-agent-auth-command-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.desktop-add-agent-auth-copy {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.desktop-add-agent-auth-copy:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.desktop-add-agent-auth-copy:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .desktop-add-agent-auth-command code {
+  display: block;
   min-width: 0;
-  overflow: hidden;
+  max-height: 12em;
+  overflow: auto;
   padding: 8px 10px;
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.24);
   color: var(--text);
   font-size: 0.82rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 :slotted(.desktop-add-agent-feedback) {

@@ -68,8 +68,10 @@
               :worktrees="matchingWorktrees"
               :worktree-description="worktreePickerDescription"
               :auth-command="authCommand"
+              :copying-auth-command="copyingAuthCommand"
               :install-command="installCommand"
               @refresh="retryProviderSetup"
+              @copy-auth-command="copyAgentAuthCommand"
               @choose-worktree="chooseWorktree"
               @open-secure-storage="openSecureCredentialStorage"
             >

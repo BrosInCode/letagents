@@ -537,6 +537,17 @@ jobs:
             exit 1
           fi
 
+          # The SHA-256 an R2 object carries in its metadata: empty when the
+          # object does not exist, "None" when it has no such metadata.
+          remote_sha256_of() {
+            aws s3api head-object \
+              --endpoint-url "${R2_ENDPOINT_URL}" \
+              --bucket "${R2_BUCKET_NAME}" \
+              --key "$1" \
+              --query 'Metadata.sha256' \
+              --output text 2>/dev/null || true
+          }
+
           for artifact in "${artifacts[@]}"; do
             artifact_name=$(basename "${artifact}")
             object_key="desktop/v${DESKTOP_VERSION}/${artifact_name}"
@@ -574,12 +585,39 @@ jobs:
               *.sha256) content_type="text/plain" ;;
               *) content_type="application/octet-stream" ;;
             esac
-            aws s3 cp "${artifact}" "s3://${R2_BUCKET_NAME}/${object_key}" \
+            # A multipart upload can fail as it completes (InvalidPart stopped
+            # 0.1.125, 0.1.133 and 0.1.134). The CLI aborts that upload, so the
+            # next attempt is a fresh one. An object that appeared anyway must
+            # carry this artifact's SHA-256, and so must the uploaded one.
+            upload_attempt=1
+            until aws s3 cp "${artifact}" "s3://${R2_BUCKET_NAME}/${object_key}" \
               --endpoint-url "${R2_ENDPOINT_URL}" \
               --cache-control "public,max-age=31536000,immutable" \
               --content-type "${content_type}" \
               --metadata "sha256=${local_sha256}" \
-              --no-progress
+              --no-progress; do
+              remote_sha256=$(remote_sha256_of "${object_key}")
+              if [[ "${remote_sha256}" == "${local_sha256}" ]]; then
+                echo "The upload of ${object_key} reported an error, but the object is complete with the expected SHA-256."
+                break
+              fi
+              if [[ -n "${remote_sha256}" && "${remote_sha256}" != "None" ]]; then
+                echo "Immutable R2 object ${object_key} exists with different bytes after a failed upload." >&2
+                exit 1
+              fi
+              if (( upload_attempt >= 3 )); then
+                echo "The upload of ${object_key} failed ${upload_attempt} times." >&2
+                exit 1
+              fi
+              sleep $(( upload_attempt * 15 ))
+              upload_attempt=$(( upload_attempt + 1 ))
+              echo "Uploading ${object_key} again (attempt ${upload_attempt} of 3)." >&2
+            done
+            remote_sha256=$(remote_sha256_of "${object_key}")
+            if [[ "${remote_sha256}" != "${local_sha256}" ]]; then
+              echo "R2 object ${object_key} does not carry the uploaded SHA-256 (${remote_sha256:-missing})." >&2
+              exit 1
+            fi
           done
 
       - name: Validate mutable release monotonicity

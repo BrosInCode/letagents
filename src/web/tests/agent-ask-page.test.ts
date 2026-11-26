@@ -37,7 +37,10 @@ test('web shares the receiver/message design and preserves the desktop-only laun
   assert.match(html, /Our room/)
   assert.match(html, /20% of your main usage limit/)
   assert.match(html, /href="letagents:\/\/ask\/some-token"/)
-  assert.match(html, /Apple silicon/); assert.match(html, /Intel/)
+  // Every installer the landing page offers, Windows too, in the same words.
+  assert.match(html, /href="\/downloads\/mac\/arm64"[^>]*>Mac · Apple Silicon</)
+  assert.match(html, /href="\/downloads\/mac\/x64"[^>]*>Intel Mac</)
+  assert.match(html, /href="\/downloads\/windows\/x64"[^>]*>Windows</)
   assert.doesNotMatch(html, /data-testid="agent-give-add"|class="give-amount-choices"/)
   assert.deepEqual(calls, [['/agent-asks/link/some-token', { credentials: 'same-origin' }]])
 })

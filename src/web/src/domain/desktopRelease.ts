@@ -31,14 +31,15 @@ function toPresentation(release: {
   }
 }
 
-// The bundled release predates Windows builds; the Windows link appears once
-// the current-release manifest names an installer.
+// The site's own download routes, which redirect to the current release's
+// installers. Every current release has a Windows installer, so pages that
+// never fetch the current-release manifest offer Windows too.
 export const MAC_DESKTOP_BETA: MacDesktopBetaPresentation = {
   ...toPresentation(MAC_DESKTOP_BETA_RELEASE),
   downloads: {
     arm64: '/downloads/mac/arm64',
     x64: '/downloads/mac/x64',
-    windows: null,
+    windows: '/downloads/windows/x64',
   },
 }
 
@@ -79,6 +80,33 @@ export function desktopDownloadOffer(
     : null
   if (windows && platform === 'windows') return { primary: windows, others: [appleSilicon, intel] }
   return { primary: appleSilicon, others: windows ? [intel, windows] : [intel] }
+}
+
+/** The download links in the landing page's order: the visitor's platform first. */
+export function desktopDownloadLinks(
+  release: MacDesktopBetaPresentation,
+  platform: DesktopVisitorPlatform,
+): DesktopDownloadLink[] {
+  const offer = desktopDownloadOffer(release, platform)
+  return [offer.primary, ...offer.others]
+}
+
+/** What follows link `index` of `count` in "A, B or C". */
+export function downloadListSeparator(index: number, count: number): string {
+  if (index >= count - 1) return ''
+  return index === count - 2 ? ' or ' : ', '
+}
+
+/**
+ * The single "Download the app" link of a page that has room for one: the
+ * Windows installer on Windows; on a Mac, the landing page's download choices,
+ * because a browser cannot tell an Intel Mac from an Apple silicon one.
+ */
+export function singleDesktopDownloadHref(
+  release: MacDesktopBetaPresentation,
+  platform: DesktopVisitorPlatform,
+): string {
+  return platform === 'windows' && release.downloads.windows ? release.downloads.windows : '/#download-mac'
 }
 
 export async function fetchCurrentMacDesktopBeta(

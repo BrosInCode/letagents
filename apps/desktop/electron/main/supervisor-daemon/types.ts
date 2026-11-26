@@ -70,6 +70,14 @@ export interface SupervisorDaemonLifecycleOptions {
    * negotiation. Default 2000 ms. Zero turns the cache off.
    */
   readyStatusTtlMs?: number;
+  /** Unexpected-exit respawn policy. Tests only, except `enabled`. */
+  respawn?: {
+    enabled?: boolean;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    stableMs?: number;
+    maxQuickFailures?: number;
+  };
 }
 
 /**

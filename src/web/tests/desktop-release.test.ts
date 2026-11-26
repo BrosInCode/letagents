@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { desktopDownloadOffer, detectDesktopVisitorPlatform, fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA } from '../src/domain/desktopRelease'
+import { desktopDownloadLinks, desktopDownloadOffer, detectDesktopVisitorPlatform, downloadListSeparator, fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA, singleDesktopDownloadHref } from '../src/domain/desktopRelease'
 
 test('Mac beta fallback uses current same-origin download routes', () => {
   assert.deepEqual(MAC_DESKTOP_BETA, {
@@ -12,7 +12,7 @@ test('Mac beta fallback uses current same-origin download routes', () => {
     downloads: {
       arm64: '/downloads/mac/arm64',
       x64: '/downloads/mac/x64',
-      windows: null,
+      windows: '/downloads/windows/x64',
     },
   })
   assert.doesNotMatch(JSON.stringify(MAC_DESKTOP_BETA), /github\.com/)
@@ -89,7 +89,16 @@ test('the visitor platform leads the download links, and Windows appears only wi
   assert.deepEqual(labels(desktopDownloadOffer(withWindows, 'windows')), ['Windows', 'Mac · Apple Silicon', 'Intel Mac'])
   assert.deepEqual(labels(desktopDownloadOffer(withWindows, 'mac')), ['Mac · Apple Silicon', 'Intel Mac', 'Windows'])
   assert.deepEqual(labels(desktopDownloadOffer(withWindows, 'other')), ['Mac · Apple Silicon', 'Intel Mac', 'Windows'])
-  assert.deepEqual(labels(desktopDownloadOffer(MAC_DESKTOP_BETA, 'windows')), ['Mac · Apple Silicon', 'Intel Mac'])
+  const noWindows = { ...MAC_DESKTOP_BETA, downloads: { ...MAC_DESKTOP_BETA.downloads, windows: null } }
+  assert.deepEqual(labels(desktopDownloadOffer(noWindows, 'windows')), ['Mac · Apple Silicon', 'Intel Mac'])
+  // The bundled links are the site's own routes, Windows included, for pages
+  // that never fetch the current-release manifest (rooms, agent requests, invitations).
+  assert.deepEqual(desktopDownloadLinks(MAC_DESKTOP_BETA, 'windows').map((link) => link.href), ['/downloads/windows/x64', '/downloads/mac/arm64', '/downloads/mac/x64'])
+  assert.deepEqual(['a', 'b', 'c'].map((_, index) => downloadListSeparator(index, 3)), [', ', ' or ', ''])
+  assert.deepEqual(['a', 'b'].map((_, index) => downloadListSeparator(index, 2)), [' or ', ''])
+  assert.equal(singleDesktopDownloadHref(MAC_DESKTOP_BETA, 'windows'), '/downloads/windows/x64')
+  assert.equal(singleDesktopDownloadHref(MAC_DESKTOP_BETA, 'mac'), '/#download-mac')
+  assert.equal(singleDesktopDownloadHref(noWindows, 'windows'), '/#download-mac')
 
   const icons = (offer: ReturnType<typeof desktopDownloadOffer>) => [offer.primary.icon, ...offer.others.map((link) => link.icon)]
   assert.deepEqual(icons(desktopDownloadOffer(withWindows, 'windows')), ['windows', 'apple', null])

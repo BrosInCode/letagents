@@ -18,6 +18,10 @@ import { loadHostApprovalSigner, type HostApprovalSigner } from "../host-approva
 import type { HostApprovalChallenge } from "../../../shared/host-approval-auth.js";
 import type { DesktopHostApproval, HostApprovalCandidate, HostApprovalSelection } from "../../../shared/host-approvals.js";
 import {
+  DAEMON_RESPAWN_BASE_MS,
+  DAEMON_RESPAWN_MAX_MS,
+  DAEMON_RESPAWN_MAX_QUICK_FAILURES,
+  DAEMON_RESPAWN_STABLE_MS,
   KILL_EXIT_TIMEOUT_MS,
   NATURAL_EXIT_TIMEOUT_MS,
   PROCESS_POLL_INTERVAL_MS,
@@ -46,6 +50,16 @@ export interface DaemonRpcCallOptions {
   assertDispatch?: () => void;
   maintenance?: boolean;
 }
+
+export type OwnedDaemon = {
+  pid: number | null;
+  ready: boolean;
+  retiredGeneration: number | undefined;
+  runtimeEnvironmentFingerprint: string;
+  compatibilityFingerprint: string;
+  /** Set when the app itself is retiring this child (handoff, drain, maintenance, update). */
+  intentionalExit?: boolean;
+};
 
 export abstract class SupervisorDaemonClientBase {
   /** The daemon's state directory; every local path below derives from it, never from the socket. */
@@ -108,16 +122,18 @@ export abstract class SupervisorDaemonClientBase {
   protected attachedDaemonObservation: {
     identity: DaemonProcessIdentity;
     generation: number;
+    observedAt: number;
+    /** Set when the app itself is retiring this daemon; its loss is not a crash. */
+    intentionalExit?: boolean;
   } | null = null;
   // Caller deadlines do not end child custody. Retain the launch and its
   // readiness fences until process exit or a completed negotiated handoff.
-  protected ownedDaemon: {
-    pid: number | null;
-    ready: boolean;
-    retiredGeneration: number | undefined;
-    runtimeEnvironmentFingerprint: string;
-    compatibilityFingerprint: string;
-  } | null = null;
+  protected ownedDaemon: OwnedDaemon | null = null;
+  /** Unexpected-exit respawn state. */
+  protected respawnTimer: ReturnType<typeof setTimeout> | null = null;
+  protected respawnQuickFailures = 0;
+  protected respawnStopped = false;
+  protected readonly respawnPolicy: Required<NonNullable<SupervisorDaemonLifecycleOptions["respawn"]>>;
   protected readonly loadApprovalSigner: typeof loadHostApprovalSigner;
   protected approvalSigner: { fingerprint: string; promise: Promise<HostApprovalSigner> } | null = null;
   protected readonly approvalPresentations = new Map<string, {
@@ -160,6 +176,13 @@ export abstract class SupervisorDaemonClientBase {
     this.asyncRpcWaitTimeoutsMs = options.asyncRpcWaitTimeoutsMs;
     this.now = options.now ?? (() => new Date());
     this.readyStatusTtlMs = options.readyStatusTtlMs ?? 2000;
+    this.respawnPolicy = {
+      enabled: options.respawn?.enabled ?? true,
+      baseDelayMs: options.respawn?.baseDelayMs ?? DAEMON_RESPAWN_BASE_MS,
+      maxDelayMs: options.respawn?.maxDelayMs ?? DAEMON_RESPAWN_MAX_MS,
+      stableMs: options.respawn?.stableMs ?? DAEMON_RESPAWN_STABLE_MS,
+      maxQuickFailures: options.respawn?.maxQuickFailures ?? DAEMON_RESPAWN_MAX_QUICK_FAILURES,
+    };
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd, env) => {
       const child = spawn(process.execPath, supervisorDaemonSpawnArguments(scriptPath), {
         cwd,
