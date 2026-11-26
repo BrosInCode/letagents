@@ -7,7 +7,7 @@ const DAEMON_LIFECYCLE_LOG_MAX_BYTES = 256 * 1024;
 const daemonLifecycleLogWrites = new Map<string, Promise<void>>();
 
 export type DesktopDaemonLifecycleEvent = {
-  event: "daemon_spawned" | "daemon_spawn_error" | "daemon_exited" | "daemon_disappeared" | "daemon_identity_changed";
+  event: "daemon_spawned" | "daemon_spawn_error" | "daemon_exited" | "daemon_disappeared" | "daemon_identity_changed" | "daemon_respawn_scheduled" | "daemon_respawn_gave_up";
   pid: number | null;
   detail?: string | null;
   exitCode?: number | null;

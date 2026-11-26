@@ -16,7 +16,7 @@ import { appendDaemonLifecycleEvent } from "./lifecycle-log.js";
 import { supervisorDaemonSpawnEnvironment } from "./spawn-environment.js";
 import { mapStatus } from "./status-mapping.js";
 import type { DaemonIdentityInspection, DaemonProcessIdentity, RetiredDaemonObservation } from "./types.js";
-import { SupervisorDaemonClientBase } from "./client-base.js";
+import { SupervisorDaemonClientBase, type OwnedDaemon } from "./client-base.js";
 
 export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonClientBase {
   async isMaintenanceHeld(): Promise<boolean> {
@@ -36,6 +36,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     if (this.applicationUpdatePrepared) return Promise.reject(new Error("The application update is already being installed."));
     if (this.maintenanceOperation) return this.maintenanceOperation;
     this.maintenanceRequested = true;
+    this.markOwnedDaemonRetiring();
     this.invalidateReadyStatus();
     for (const cancel of this.maintenanceRequests) cancel();
     const operation = withDaemonMaintenanceOperation(async owner => {
@@ -128,6 +129,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
    * generations during normal startup reconciliation.
    */
   prepareForApplicationUpdate(): Promise<void> {
+    this.markOwnedDaemonRetiring();
     this.invalidateReadyStatus();
     if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     if (!supervisorDaemonAllowed()) {
@@ -150,6 +152,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
   /** Restore the current app's daemon only when Squirrel failed to take over. */
   resumeAfterApplicationUpdateFailure(): Promise<DesktopSupervisorDaemonStatus> {
     this.applicationUpdatePrepared = false;
+    if (this.attachedDaemonObservation) this.attachedDaemonObservation.intentionalExit = false;
     this.invalidateReadyStatus();
     return this.ensureRunning();
   }
@@ -288,7 +291,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     const statePreparation = prepareSupervisorState(child, undefined, this.statePreparationWaitMs,
       async () => approvalPublicKey);
     const childPid = Number.isSafeInteger(child.pid) && (child.pid ?? 0) > 0 ? child.pid! : null;
-    const owned = {
+    const owned: OwnedDaemon = {
       pid: childPid,
       ready: false,
       retiredGeneration,
@@ -308,15 +311,20 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
         detail: error instanceof Error ? error.stack || error.message : String(error),
       });
     });
+    const spawnedAt = Date.now();
     child.once("exit", (exitCode, signal) => {
       this.invalidateReadyStatus();
-      if (this.ownedDaemon === owned) this.ownedDaemon = null;
+      const wasOwned = this.ownedDaemon === owned;
+      if (wasOwned) this.ownedDaemon = null;
       appendDaemonLifecycleEvent(this.lifecycleLogPath, {
         event: "daemon_exited",
         pid: childPid,
         exitCode,
         signal,
       });
+      // Only a daemon that was serving, was still ours, and was not being
+      // retired by the app counts as a crash.
+      if (wasOwned && owned.ready && !owned.intentionalExit) this.scheduleRespawn(spawnedAt, childPid);
     });
     // Migration/OS-key custody has its own bootstrap protocol. The socket's
     // short startup deadline must not expire while a large backup is fsyncing.
@@ -325,6 +333,60 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
       owned.runtimeEnvironmentFingerprint, owned.compatibilityFingerprint);
     owned.ready = true;
     return status;
+  }
+
+  /** The app is about to end this child on purpose; its exit is not a crash. */
+  private markOwnedDaemonRetiring(): void {
+    if (this.ownedDaemon) this.ownedDaemon.intentionalExit = true;
+    if (this.attachedDaemonObservation) this.attachedDaemonObservation.intentionalExit = true;
+    this.cancelRespawn();
+  }
+
+  private cancelRespawn(): void {
+    if (this.respawnTimer) clearTimeout(this.respawnTimer);
+    this.respawnTimer = null;
+  }
+
+  /** App quit: never start another daemon from here on. */
+  stopAutoRespawn(): void {
+    this.respawnStopped = true;
+    this.cancelRespawn();
+  }
+
+  private respawnBlocked(): boolean {
+    return this.respawnStopped || !this.respawnPolicy.enabled || this.maintenanceRequested
+      || this.drainingCurrentDaemon || Boolean(this.maintenanceOperation)
+      || Boolean(this.applicationUpdateHandoff) || this.applicationUpdatePrepared
+      || !supervisorDaemonAllowed();
+  }
+
+  private scheduleRespawn(spawnedAt: number, exitedPid: number | null): void {
+    const policy = this.respawnPolicy;
+    if (this.respawnBlocked()) return;
+    this.respawnQuickFailures = Date.now() - spawnedAt >= policy.stableMs ? 1 : this.respawnQuickFailures + 1;
+    if (this.respawnQuickFailures > policy.maxQuickFailures) {
+      this.respawnStopped = true;
+      appendDaemonLifecycleEvent(this.lifecycleLogPath, {
+        event: "daemon_respawn_gave_up",
+        pid: exitedPid,
+        detail: `The service exited ${this.respawnQuickFailures - 1} times in quick succession; automatic restart stopped.`,
+      });
+      return;
+    }
+    const delay = Math.min(policy.maxDelayMs, policy.baseDelayMs * 2 ** (this.respawnQuickFailures - 1));
+    appendDaemonLifecycleEvent(this.lifecycleLogPath, {
+      event: "daemon_respawn_scheduled",
+      pid: exitedPid,
+      detail: `Restarting the service in ${delay} ms (attempt ${this.respawnQuickFailures}).`,
+    });
+    this.cancelRespawn();
+    this.respawnTimer = setTimeout(() => {
+      this.respawnTimer = null;
+      if (this.respawnBlocked() || this.ownedDaemon) return;
+      // A respawn that fails (for example the spawn throws) is one more quick failure.
+      this.ensureRunning().catch(() => this.scheduleRespawn(Date.now(), exitedPid));
+    }, delay);
+    this.respawnTimer.unref?.();
   }
 
   private async waitForOwnedDaemonReadiness(): Promise<void> {
@@ -336,6 +398,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
   }
 
   private async drainCurrentDaemon(daemonVersion: number): Promise<void> {
+    this.markOwnedDaemonRetiring();
     this.invalidateReadyStatus();
     this.drainingCurrentDaemon = true;
     for (const ready of this.startupApprovalWaiters) ready();
@@ -343,6 +406,11 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
       // Approval reads must reach this live owner even when ensureOperation is
       // waiting for an upgrade. Joining that promise would deadlock the turn.
       await this.call("daemon.prepare_handoff", undefined, { version: daemonVersion });
+    } catch (error) {
+      // The daemon was not retired, so a later loss of it is a crash again.
+      if (this.ownedDaemon) this.ownedDaemon.intentionalExit = false;
+      if (this.attachedDaemonObservation) this.attachedDaemonObservation.intentionalExit = false;
+      throw error;
     } finally {
       this.drainingCurrentDaemon = false;
     }
@@ -443,6 +511,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     const observation = {
       identity: { ...inspected, expectedScriptPath: this.daemonScriptPath },
       generation: status.generation,
+      observedAt: Date.now(),
     };
     this.attachedDaemonObservation = observation;
     this.maintenanceTarget = observation.identity;
@@ -463,6 +532,10 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
         ? current.reason
         : `Observed daemon became ${current.kind}.`,
     });
+    // An attached daemon has no child handle, so this confirmed loss (found by
+    // the state watch or any caller) is the crash signal. A start already in
+    // progress will spawn the replacement itself.
+    if (!observation.intentionalExit && !this.ensureOperation) this.scheduleRespawn(observation.observedAt, observation.identity.pid);
   }
 
   private stopAttachedDaemonObservation(): void {

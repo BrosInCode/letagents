@@ -26,3 +26,13 @@ export const NATURAL_EXIT_TIMEOUT_MS = 2_000;
 export const TERMINATE_EXIT_TIMEOUT_MS = 2_000;
 export const KILL_EXIT_TIMEOUT_MS = 1_000;
 export const PROCESS_POLL_INTERVAL_MS = 25;
+
+// Automatic respawn of the owned daemon after an unexpected exit. The first
+// retry is prompt; repeated quick deaths back off and then stop, so a daemon
+// that cannot stay up never turns into a spawn loop.
+export const DAEMON_RESPAWN_BASE_MS = 250;
+export const DAEMON_RESPAWN_MAX_MS = 30_000;
+/** A daemon that stays up this long (ms) after spawn is healthy: the failure count resets. */
+export const DAEMON_RESPAWN_STABLE_MS = 30_000;
+/** Quick failures in a row after which automatic respawn stops. */
+export const DAEMON_RESPAWN_MAX_QUICK_FAILURES = 5;
