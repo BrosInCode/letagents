@@ -321,12 +321,17 @@ onUnmounted(() => {
   transition: transform 260ms cubic-bezier(.23, 1, .32, 1);
   touch-action: manipulation;
 }
-.download[data-primary="true"] { min-width: 328px; color: #0b0c0b; }
+.download[data-primary="true"] { min-width: 328px; }
+/* No fill: the ink shows only on the edge. The mask cuts the middle out of the ring. */
 .download-ring {
   position: absolute; inset: 0; z-index: -1; overflow: hidden; border-radius: inherit;
+  padding: 1.5px;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
   opacity: .55; transition: opacity 260ms ease;
 }
-.download[data-primary="true"] .download-ring { opacity: 1; }
+.download[data-primary="true"] .download-ring { padding: 2px; opacity: 1; }
 .download-spin {
   position: absolute; left: 50%; top: 50%; width: 400px; aspect-ratio: 1;
   background: conic-gradient(from 0deg, #f08a4b, rgba(240, 138, 75, 0) 22%, rgba(127, 224, 189, 0) 40%, #7fe0bd 52%, rgba(127, 224, 189, 0) 70%, rgba(240, 138, 75, 0) 82%, #f08a4b);
@@ -335,24 +340,20 @@ onUnmounted(() => {
   will-change: transform;
 }
 .download[data-primary="false"] .download-spin { animation-duration: 11s; }
+/* A pool of both inks under the main button, outside its clear face. */
 .download-glow {
-  position: absolute; inset: 14px 8px -16px; z-index: -2; border-radius: 30px;
-  background: linear-gradient(90deg, rgba(240, 138, 75, .55), rgba(127, 224, 189, .6));
-  filter: blur(24px); opacity: .8;
+  position: absolute; left: 18px; right: 18px; bottom: -22px; height: 22px; z-index: -2; border-radius: 50%;
+  background: linear-gradient(90deg, rgba(240, 138, 75, .7), rgba(127, 224, 189, .75));
+  filter: blur(18px); opacity: .7;
   transition: opacity 260ms ease, transform 260ms cubic-bezier(.23, 1, .32, 1);
 }
 .download-face {
   position: absolute; inset: 1.5px; border-radius: 20.5px;
   display: flex; align-items: center; gap: 16px; padding: 0 18px 0 24px;
-  background: linear-gradient(rgba(22, 23, 22, .94), rgba(12, 13, 12, .96));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07);
+  background: none;
   text-align: left;
 }
-.download[data-primary="true"] .download-face {
-  inset: 2px; border-radius: 20px;
-  background: linear-gradient(#f7f6f0, #e2e0d6);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9), inset 0 -1px 0 rgba(0, 0, 0, .12);
-}
+.download[data-primary="true"] .download-face { inset: 2px; border-radius: 20px; }
 .download-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; }
 .download-icon :deep(svg), .download-icon > svg { width: 28px; height: 28px; }
 .download-text { display: grid; gap: 6px; flex: 1 1 auto; }
@@ -360,17 +361,17 @@ onUnmounted(() => {
 .download-name small { margin-left: 8px; font-size: 13.5px; font-weight: 500; letter-spacing: -.01em; opacity: .5; }
 .download-arrow {
   display: grid; place-items: center; flex: 0 0 38px; width: 38px; height: 38px; border-radius: 50%;
-  background: rgba(239, 238, 230, .07); box-shadow: inset 0 0 0 1px rgba(239, 238, 230, .1);
-  transition: background-color 260ms ease;
+  box-shadow: inset 0 0 0 1px rgba(239, 238, 230, .16);
+  transition: box-shadow 260ms ease;
 }
-.download[data-primary="true"] .download-arrow { background: #0b0c0b; color: #f5f4ee; box-shadow: none; }
+.download[data-primary="true"] .download-arrow { box-shadow: inset 0 0 0 1px rgba(127, 224, 189, .55); color: #a8f0d4; }
 .download-arrow svg { width: 17px; height: 17px; transition: transform 320ms cubic-bezier(.23, 1, .32, 1); }
 @media (hover: hover) and (pointer: fine) {
   .download:hover { transform: translateY(-3px); }
   .download:hover .download-ring { opacity: 1; }
   .download:hover .download-glow { opacity: 1; transform: translateY(4px) scale(1.05); }
-  .download:hover .download-arrow { background-color: rgba(239, 238, 230, .14); }
-  .download[data-primary="true"]:hover .download-arrow { background-color: #000; }
+  .download:hover .download-arrow { box-shadow: inset 0 0 0 1px rgba(239, 238, 230, .4); }
+  .download[data-primary="true"]:hover .download-arrow { box-shadow: inset 0 0 0 1px rgba(127, 224, 189, .9); }
   .download:hover .download-arrow svg { transform: translateY(2px); }
 }
 .download:active { transform: translateY(0) scale(.975); transition-duration: 120ms; }
