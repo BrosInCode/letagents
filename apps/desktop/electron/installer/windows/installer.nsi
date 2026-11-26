@@ -4,7 +4,8 @@
 ;   VERSION        x.y.z
 ;   FILE_VERSION   x.y.z.0
 ;   SOURCE_DIR     the packaged app folder (release/LetAgents-win32/LetAgents)
-;   PAYLOAD_NSH    the generated include with REMOVE_LETAGENTS_PAYLOAD
+;   PAYLOAD_NSH    the generated include with REMOVE_LEGACY_LETAGENTS_PAYLOAD
+;   MANIFEST_FILE  the install manifest: every file and folder the payload has
 ;   ICON_FILE      the app icon (.ico)
 ;   OUTPUT_FILE    the installer to write
 ;   HELPER_NAME    the process-tree helper's file name, in RUNTIME_DIR
@@ -44,6 +45,9 @@ RequestExecutionLevel user
 !define URL_KEY "Software\Classes\letagents"
 ; Must match updaterCacheDirName in resources\app-update.yml.
 !define UPDATER_CACHE "letagents-desktop-updater"
+; Lists what the install wrote; WINDOWS_INSTALL_MANIFEST_NAME in
+; electron/scripts/windows-packaging.mjs, which writes it.
+!define INSTALL_MANIFEST "LetAgents.install-manifest"
 
 Name "${PRODUCT_NAME}"
 OutFile "${OUTPUT_FILE}"
@@ -182,6 +186,82 @@ FunctionEnd
 !insertmacro DEFINE_IS_REGISTERED_INSTALL ""
 !insertmacro DEFINE_IS_REGISTERED_INSTALL "un."
 
+; Removes what the install in $INSTDIR wrote, as its install manifest lists
+; it: each file ("F <path>"), then each folder ("D <path>", deepest first)
+; that is empty by then. A file LetAgents did not install stays, and so does
+; every folder that holds one, also in a custom /D= folder shared with other
+; files. A line that is not "F " or "D " and a path inside $INSTDIR (not
+; empty, no leading separator, no ":" and no "..") is skipped. Sets $R9 to 1
+; when the manifest was there, else 0. Uses $R3-$R9.
+!macro DEFINE_REMOVE_INSTALLED_PAYLOAD PREFIX
+Function ${PREFIX}RemoveInstalledPayload
+  StrCpy $R9 "0"
+  ClearErrors
+  FileOpen $R3 "$INSTDIR\${INSTALL_MANIFEST}" r
+  ${If} ${Errors}
+    Return
+  ${EndIf}
+  StrCpy $R9 "1"
+  ${Do}
+    ClearErrors
+    FileReadUTF16LE $R3 $R4
+    ${If} ${Errors}
+      ${Break}
+    ${EndIf}
+    ; The line without its CR LF.
+    ${Do}
+      StrCpy $R5 $R4 1 -1
+      ${If} $R5 == "$\r"
+      ${OrIf} $R5 == "$\n"
+        StrCpy $R4 $R4 -1
+      ${Else}
+        ${Break}
+      ${EndIf}
+    ${Loop}
+    StrCpy $R5 $R4 2
+    StrCpy $R6 $R4 "" 2
+    StrCpy $R7 $R6 1
+    ${If} $R7 == ""
+    ${OrIf} $R7 == "\"
+    ${OrIf} $R7 == "/"
+      ${Continue}
+    ${EndIf}
+    System::Call 'shlwapi::StrStrW(w R6, w "..")p.R7'
+    System::Call 'shlwapi::StrChrW(w R6, i 58)p.R8'
+    ${If} $R7 P<> 0
+    ${OrIf} $R8 P<> 0
+      ${Continue}
+    ${EndIf}
+    ${If} $R5 S== "F "
+      Delete "$INSTDIR\$R6"
+    ${ElseIf} $R5 S== "D "
+      RMDir "$INSTDIR\$R6"
+    ${EndIf}
+  ${Loop}
+  FileClose $R3
+  Delete "$INSTDIR\${INSTALL_MANIFEST}"
+FunctionEnd
+!macroend
+!insertmacro DEFINE_REMOVE_INSTALLED_PAYLOAD ""
+!insertmacro DEFINE_REMOVE_INSTALLED_PAYLOAD "un."
+
+; The previous install's payload: what its manifest lists. An install made
+; before the manifest existed (0.1.143 and earlier) is removed by its
+; top-level entries, folders with all they hold, only in the default folder,
+; which LetAgents owns; in any other folder it is left for the new files to
+; overwrite, so nothing that LetAgents did not install is deleted.
+!macro DEFINE_REMOVE_PREVIOUS_PAYLOAD PREFIX
+Function ${PREFIX}RemovePreviousPayload
+  Call ${PREFIX}RemoveInstalledPayload
+  ${If} $R9 == "0"
+  ${AndIf} $INSTDIR == "$LOCALAPPDATA\Programs\${PRODUCT_NAME}"
+    !insertmacro REMOVE_LEGACY_LETAGENTS_PAYLOAD
+  ${EndIf}
+FunctionEnd
+!macroend
+!insertmacro DEFINE_REMOVE_PREVIOUS_PAYLOAD ""
+!insertmacro DEFINE_REMOVE_PREVIOUS_PAYLOAD "un."
+
 ; CreateShortCut cannot set a shortcut's AppUserModelID. Windows shows a
 ; desktop app's toast notifications only when the process's ID matches a
 ; Start menu shortcut's, so the ID is written through the shell's own
@@ -245,13 +325,15 @@ FunctionEnd
 Section "Install"
   Call CloseRunningApp
   ; Remove the previous version's files first, but only from the folder this
-  ; user's LetAgents install is registered in, so files of the same names in
-  ; any other folder are never touched.
+  ; user's LetAgents install is registered in, and only the files it wrote.
   Call IsRegisteredInstall
   ${If} $InstalledHere == "1"
-    !insertmacro REMOVE_LETAGENTS_PAYLOAD
+    Call RemovePreviousPayload
   ${EndIf}
   SetOutPath "$INSTDIR"
+  ; The manifest first, so an install that stops part-way can still be
+  ; removed exactly.
+  File "/oname=${INSTALL_MANIFEST}" "${MANIFEST_FILE}"
   File /r "${SOURCE_DIR}\*"
   WriteUninstaller "$INSTDIR\${UNINSTALLER_NAME}"
 
@@ -308,7 +390,7 @@ Section "Uninstall"
   ; links, Installed apps entry and updater cache belong to the registered
   ; install.
   ${If} $InstalledHere == "1"
-    !insertmacro REMOVE_LETAGENTS_PAYLOAD
+    Call un.RemovePreviousPayload
     Delete "$SMPROGRAMS\${PRODUCT_NAME}.lnk"
     Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
     DeleteRegKey HKCU "${URL_KEY}"

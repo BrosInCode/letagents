@@ -20,6 +20,16 @@ export function desktopUpdateFeedBaseUrl(arch: string, platform: string = "darwi
   return `https://downloads.letagents.chat/desktop/feeds/${arch}`;
 }
 
+/**
+ * Whether a packaged app-update.yml names a publisherName. electron-updater's
+ * NsisUpdater checks an installer's Authenticode signature only then, so it
+ * is the Windows build's own record of whether its releases are signed.
+ * package-artifact.mjs writes the file as JSON, which is also YAML.
+ */
+export function updaterConfigNamesPublisher(config: string): boolean {
+  return /(?:^|[{,])\s*["']?publisherName["']?\s*:/m.test(config);
+}
+
 export interface DesktopDownloadedUpdate {
   releaseName?: string | null;
   releaseNotes?: string | null;
@@ -59,6 +69,10 @@ export interface DesktopUpdaterControllerOptions {
   currentVersion: string;
   supported: boolean;
   unsupportedReason?: string | null;
+  /** The build installs code-signed releases. Defaults to false. */
+  releaseSigned?: boolean;
+  /** Running agents keep running while an update installs. Defaults to true. */
+  agentsSurviveInstall?: boolean;
   checkForUpdates: () => Promise<DesktopUpdateCheckResult | null>;
   downloadUpdate: () => Promise<unknown>;
   prepareForInstall: () => Promise<void>;
@@ -136,12 +150,34 @@ export function versionFromReleaseName(releaseName: string | null | undefined): 
   return match?.[1] || null;
 }
 
+function releaseVersionParts(version: string): number[] | null {
+  const match = version.trim().replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+  return match ? match.slice(1, 4).map(Number) : null;
+}
+
+/**
+ * Whether `candidate` is a newer release than `staged`. An unknown staged
+ * version counts as older, so the newest release is staged again.
+ */
+export function isNewerReleaseVersion(candidate: string, staged: string | null | undefined): boolean {
+  if (!staged) return true;
+  const next = releaseVersionParts(candidate);
+  const current = releaseVersionParts(staged);
+  if (!next || !current) return candidate.trim() !== staged.trim();
+  for (let index = 0; index < 3; index += 1) {
+    if (next[index] !== current[index]) return next[index] > current[index];
+  }
+  return false;
+}
+
 export class DesktopUpdaterController {
   private status: DesktopUpdateStatus;
   private readonly options: DesktopUpdaterControllerOptions;
   private checkOperation: Promise<DesktopUpdateStatus> | null = null;
   private installOperation: Promise<DesktopUpdateStatus> | null = null;
   private installRecoveryOperation: Promise<DesktopUpdateStatus> | null = null;
+  /** A check of the feed while a downloaded update waits for a restart. */
+  private recheckingReady = false;
 
   constructor(options: DesktopUpdaterControllerOptions) {
     this.options = options;
@@ -161,6 +197,8 @@ export class DesktopUpdaterController {
       unsupportedReason: options.supported
         ? null
         : options.unsupportedReason || "Automatic updates are unavailable in this build.",
+      releaseSigned: options.supported && options.releaseSigned === true,
+      agentsSurviveInstall: options.agentsSurviveInstall !== false,
       canCheck: false,
       canInstall: false,
     });
@@ -179,12 +217,15 @@ export class DesktopUpdaterController {
 
   check(): Promise<DesktopUpdateStatus> {
     if (this.checkOperation) return this.checkOperation;
-    if (!this.options.supported || ["installing", "downloading", "ready"].includes(this.status.phase)) {
+    if (!this.options.supported || ["installing", "downloading"].includes(this.status.phase)) {
       return Promise.resolve(this.getStatus());
     }
+    // A downloaded update still checks the feed: a newer release replaces it,
+    // so a restart never installs a version that already has a successor.
+    const run = this.status.phase === "ready" ? () => this.recheckWhileReady() : () => this.checkOnce();
     // Defer the provider call until after the owning operation is recorded so
     // even a synchronously emitted electron-updater error is classified once.
-    this.checkOperation = Promise.resolve().then(() => this.checkOnce()).finally(() => {
+    this.checkOperation = Promise.resolve().then(run).finally(() => {
       this.checkOperation = null;
     });
     return this.checkOperation;
@@ -306,17 +347,85 @@ export class DesktopUpdaterController {
       downloadAttemptLimit: null,
     });
     this.report({ event: "check_started", stage: "check" });
+    const checked = await this.checkFeedWithRetries();
+    if (!checked.ok) {
+      return this.failOperation("check", checked.error, checked.attempt, checked.attemptLimit);
+    }
+    const result = checked.result;
+    if (!result?.isUpdateAvailable) {
+      this.markUpToDate();
+      this.report({ event: "update_not_available", stage: "check" });
+      return this.getStatus();
+    }
+    this.markAvailable(result);
+    this.report({
+      event: "update_available",
+      stage: "check",
+      version: result.version || versionFromReleaseName(result.releaseName),
+    });
+    return this.downloadAvailableUpdate();
+  }
+
+  /**
+   * Check the feed while a downloaded update waits. The downloaded update
+   * stays installable during the check and after a failed or empty one. Only
+   * a release newer than the downloaded one starts a new download.
+   */
+  private async recheckWhileReady(): Promise<DesktopUpdateStatus> {
+    const stagedVersion = this.status.availableVersion;
+    this.recheckingReady = true;
+    this.update({});
+    this.report({ event: "check_started", stage: "check", version: stagedVersion });
+    let checked: Awaited<ReturnType<DesktopUpdaterController["checkFeedWithRetries"]>>;
+    try {
+      checked = await this.checkFeedWithRetries();
+    } finally {
+      this.recheckingReady = false;
+    }
+    // The person chose Restart while the feed was read: install what is ready.
+    if (this.status.phase !== "ready") {
+      this.update({});
+      return this.getStatus();
+    }
+    if (!checked.ok) {
+      this.update({ lastCheckedAt: this.now() });
+      this.report({
+        event: "check_failed",
+        stage: "check",
+        attempt: checked.attempt,
+        attemptLimit: checked.attemptLimit,
+        version: stagedVersion,
+        detail: errorDetail(checked.error),
+      });
+      return this.getStatus();
+    }
+    const result = checked.result;
+    const version = result?.isUpdateAvailable
+      ? result.version?.trim() || versionFromReleaseName(result.releaseName)
+      : null;
+    if (!result || !version || !isNewerReleaseVersion(version, stagedVersion)) {
+      this.update({ lastCheckedAt: this.now() });
+      this.report({ event: "update_not_available", stage: "check", version: stagedVersion });
+      return this.getStatus();
+    }
+    this.markAvailable(result);
+    this.report({ event: "update_available", stage: "check", version });
+    return this.downloadAvailableUpdate();
+  }
+
+  private async checkFeedWithRetries(): Promise<
+    | { ok: true; result: DesktopUpdateCheckResult | null }
+    | { ok: false; error: unknown; attempt: number; attemptLimit: number }
+  > {
     const attemptLimit = this.transportAttemptLimit();
     const sleep = this.options.sleep ?? defaultSleep;
     const retryDelayMs = this.options.retryDelayMs ?? defaultRetryDelayMs;
-    let result: DesktopUpdateCheckResult | null = null;
-    for (let attempt = 1; attempt <= attemptLimit; attempt += 1) {
+    for (let attempt = 1; ; attempt += 1) {
       try {
-        result = await this.options.checkForUpdates();
-        break;
+        return { ok: true, result: await this.options.checkForUpdates() };
       } catch (error) {
         if (attempt >= attemptLimit || !isRetryableUpdateTransportError(error)) {
-          return this.failOperation("check", error, attempt, attemptLimit);
+          return { ok: false, error, attempt, attemptLimit };
         }
         const nextAttempt = attempt + 1;
         const delayMs = Math.max(0, retryDelayMs(nextAttempt));
@@ -331,18 +440,6 @@ export class DesktopUpdaterController {
         await sleep(delayMs);
       }
     }
-    if (!result?.isUpdateAvailable) {
-      this.markUpToDate();
-      this.report({ event: "update_not_available", stage: "check" });
-      return this.getStatus();
-    }
-    this.markAvailable(result);
-    this.report({
-      event: "update_available",
-      stage: "check",
-      version: result.version || versionFromReleaseName(result.releaseName),
-    });
-    return this.downloadAvailableUpdate();
   }
 
   private async downloadAvailableUpdate(): Promise<DesktopUpdateStatus> {
@@ -501,7 +598,9 @@ export class DesktopUpdaterController {
   private withCapabilities(status: DesktopUpdateStatus): DesktopUpdateStatus {
     return {
       ...status,
-      canCheck: this.options.supported && !["checking", "downloading", "ready", "installing"].includes(status.phase),
+      canCheck: this.options.supported
+        && !this.recheckingReady
+        && !["checking", "downloading", "installing"].includes(status.phase),
       canInstall: status.phase === "ready",
     };
   }

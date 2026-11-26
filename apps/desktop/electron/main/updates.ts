@@ -1,5 +1,6 @@
 import electron from "electron";
 import electronUpdaterModule, { type ProgressInfo, type UpdateInfo } from "electron-updater";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { isIsolatedDesktopPreview } from "#provider-runtime/preview-mode.js";
@@ -7,6 +8,7 @@ import type { DesktopUpdateStatus } from "../ipc-types.js";
 import {
   DesktopUpdaterController,
   desktopUpdateFeedBaseUrl,
+  updaterConfigNamesPublisher,
 } from "./desktop-updater.js";
 import { supervisorDaemonClient } from "./supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./supervisor-grant-coordinator.js";
@@ -42,6 +44,34 @@ function unsupportedReason(): string | null {
     return `Automatic updates do not have a release feed for the ${process.arch} architecture.`;
   }
   return null;
+}
+
+/**
+ * Whether this build installs code-signed releases, read from the build
+ * itself. macOS: Squirrel.Mac installs an update only when its code signature
+ * matches the running app's, so a packaged build that can update is signed.
+ * Windows: electron-updater checks an installer's Authenticode signature
+ * only when the packaged app-update.yml names a publisherName, which
+ * createDesktopUpdaterConfig adds once Windows builds are signed.
+ */
+function releaseSigned(): boolean {
+  if (process.platform === "darwin") return true;
+  if (process.platform !== "win32" || !process.resourcesPath) return false;
+  try {
+    return updaterConfigNamesPublisher(readFileSync(join(process.resourcesPath, "app-update.yml"), "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether running agents keep running while an update installs. On macOS the
+ * update retires only the supervisor daemon, and the next version adopts the
+ * agents. On Windows the installer stops every program running from the
+ * install's resources folder, the process-tree helpers that own agents too.
+ */
+function agentsSurviveInstall(): boolean {
+  return process.platform !== "win32";
 }
 
 function publishStatus(status: DesktopUpdateStatus): void {
@@ -94,6 +124,8 @@ export const desktopUpdater = new DesktopUpdaterController({
   currentVersion: app?.getVersion?.() || process.env.npm_package_version || "0.0.0",
   supported: updatesSupported(),
   unsupportedReason: unsupportedReason(),
+  releaseSigned: updatesSupported() && releaseSigned(),
+  agentsSurviveInstall: agentsSurviveInstall(),
   checkForUpdates: async () => {
     const result = await desktopAutoUpdater().checkForUpdates();
     if (!result) return null;
