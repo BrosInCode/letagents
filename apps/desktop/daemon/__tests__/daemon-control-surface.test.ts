@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import { WorkDurabilityStore } from "../durability-store.js";
 import { ManifestStore } from "../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
+import { ROOM_POLL_FIRST_ANSWER_HOLD_MS, ROOM_POLL_FLOOR_HOLD_MS } from "../room-poll-hold.js";
 import { CONTINUATION_REPAIR_EXHAUSTED_ERROR, continuationRepairExhaustionNeedsPersistence, continuationRepairMissingContinuation, isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, resolveReadyReachedAt, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView } from "../types.js";
 import { STATE_WATCH_ACTIVITY_SUMMARY_LIMIT } from "../state-watch-projection.js";
@@ -579,14 +580,18 @@ test("production room observation polls stay below common proxy idle cutoffs unt
       signal: new AbortController().signal,
     };
 
-    // A lane whose health still waits for its first answer.
+    // A lane whose health still waits for its first answer asks for the short
+    // first-answer hold: far below any proxy cutoff, and its owner reads
+    // "Starting" until the answer comes.
     await productionSupervisedDeliveryHttp.poll(input);
     const request = new URL(requestedUrl);
-    assert.equal(request.searchParams.get("timeout"), "25000");
+    assert.equal(request.searchParams.get("timeout"), String(ROOM_POLL_FIRST_ANSWER_HOLD_MS));
+    assert.ok(ROOM_POLL_FIRST_ANSWER_HOLD_MS < ROOM_POLL_FLOOR_HOLD_MS, "the first answer never waits longer than the proxy-safe floor");
     assert.equal(request.searchParams.get("after"), "msg_42");
 
     // An observing lane may ask for twice the time a poll is proven to stay
-    // open. These answers came at once, so the 25 s floor is all that is proven.
+    // open. These answers came at once, so the 25 s floor is all that is proven,
+    // and the short first answer proved nothing more.
     await productionSupervisedDeliveryHttp.poll({ ...input, observing: true });
     assert.equal(new URL(requestedUrl).searchParams.get("timeout"), "50000");
     await productionSupervisedDeliveryHttp.poll({ ...input, observing: true });

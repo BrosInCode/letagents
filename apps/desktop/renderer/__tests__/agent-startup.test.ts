@@ -168,6 +168,25 @@ test("an agent with nothing to say yet counts as joined a minute after it joined
   assert.equal(view.stages.at(-1)!.ms, null, "no first output was measured");
 });
 
+test("a restart of an agent that was ready before has no Reading the room phase", () => {
+  // QA 2026-11-26: a configuration replacement launched Claude again. The ready stamp is set once and
+  // is older than the new launch, and the new launch has no first output while the agent sits idle.
+  const restart = progress(LAUNCHED, null, { startedAt: at(100_000) });
+  const phases = restart.phases.map((phase, index) => ({ ...phase, startedAt: at(100_000 + index * 1_000) }));
+  const launched = { ...restart, phases, endedAt: at(106_000) };
+  const view = agentStartupView(entry({ observedState: "idle", launchProgress: launched, readyReachedAt: at(3_500) }), context, T0 + 107_000);
+  assert.equal(view.status, "joined", "the agent is idle and ready: nothing is left to read");
+  assert.equal(view.stages.at(-1)!.state, "done");
+  assert.equal(view.stages.at(-1)!.ms, null, "no first output was measured");
+  // The same restart is still joining until the new launch has bound the agent.
+  const joining = agentStartupView(entry({ launchProgress: { ...launched, state: "running", current: "install", endedAt: null }, readyReachedAt: at(3_500) }), context, T0 + 105_000);
+  assert.equal(joining.status, "running");
+  assert.equal(joining.stages[joining.stages.findIndex((stage) => stage.state === "now")]!.key, "join");
+  // A first launch keeps the phase: its ready stamp is newer than the launch start.
+  const first = agentStartupView(entry({ launchProgress: progress(LAUNCHED, null), readyReachedAt: at(3_500) }), context, T0 + 4_000);
+  assert.equal(first.line, "Reading the room…");
+});
+
 test("a daemon retry after a failure is timed on its own", () => {
   const retry = { ...progress([["prepare", 100]], "slot_wait"), attempt: 2, startedAt: at(9_000) };
   const view = agentStartupView(entry({ launchProgress: retry }), context, T0 + 9_500);
