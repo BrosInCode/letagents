@@ -197,3 +197,23 @@ test("a local room's poll stays the 25 s request it was, and no hold is kept for
     authorization: "Bearer worker-secret",
   })));
 });
+
+test("an outage cannot become a 1 s poll loop: the short first-answer hold is paced by the failure backoff", async (t) => {
+  const { clock, requests, script, ask } = harness(t);
+  const { pollErrorBackoffMs } = await import("../supervised-agent-delivery/helpers.js");
+  // The delivery loop, as delivery.ts runs it: a failed poll throws, and the next poll waits pollErrorBackoffMs(failures).
+  let failures = 0;
+  const starts: number[] = [];
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    script.push({ openMs: 50, error: new TypeError("fetch failed") });
+    starts.push(clock.now);
+    await assert.rejects(ask({ observing: false }), /fetch failed/);
+    failures += 1;
+    clock.now += pollErrorBackoffMs(failures);
+  }
+  assert.ok(requests.every((request) => request.timeout === 1_000), "every poll of a lane that never answered is short");
+  const gaps = starts.slice(1).map((start, index) => start - starts[index]!);
+  assert.ok(gaps[0]! >= 250, "the first retry waits the backoff base");
+  assert.ok(gaps.every((gap, index) => index === 0 || gap > gaps[index - 1]!), "and each gap is longer than the one before, up to the cap");
+  assert.equal(pollErrorBackoffMs(40), 30_000, "the cap keeps a long outage at one short poll every 30 s");
+});
