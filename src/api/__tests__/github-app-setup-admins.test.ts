@@ -3,7 +3,8 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 import express from "express";
 
-process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+// Always unreachable: a real DB_URL from the shell must not receive the setup state.
+process.env.DB_URL = "postgresql://test:test@127.0.0.1:1/test";
 const { registerGitHubIntegrationSetupRoute } = await import("../routes/github/integration.js");
 const { resolveGitHubAppRoomIntegrationStatus } = await import("../github/app-installation.js");
 const {
@@ -47,12 +48,12 @@ test("the setup button shows only to a server admin while no app is configured",
   );
 });
 
-async function setupServer(login: string) {
+async function setupServer(login: string, authKind = "session") {
   const calls: string[] = [];
   const project = { id: "github.com/attacker/repo" };
   const app = express();
   app.use((req, _res, next) => {
-    Object.assign(req, { authKind: "session", sessionAccount: { account_id: "acct_room_admin", login } });
+    Object.assign(req, { authKind, sessionAccount: { account_id: "acct_room_admin", login } });
     next();
   });
   registerGitHubIntegrationSetupRoute(app, {
@@ -118,6 +119,18 @@ test("a room admin who is not a named server admin cannot start GitHub App setup
     const server = await setupServer("attacker");
     try {
       assert.equal((await server.post()).status, 403);
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+test("a named server admin's owner token cannot start GitHub App setup", async () => {
+  await withPlatformAdmins("EmmyMay", async () => {
+    const server = await setupServer("emmymay", "owner_token");
+    try {
+      assert.equal((await server.post()).status, 403);
+      assert.deepEqual(server.calls, ["requireAdmin"]);
     } finally {
       await server.close();
     }

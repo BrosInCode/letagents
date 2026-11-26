@@ -78,8 +78,13 @@ async function getGitHubRoomIntegrationProject(
   };
 }
 
+/**
+ * A named server admin, signed in as a person (a browser or app session). An
+ * owner token is refused: agents often hold one, and the setup replaces the
+ * server-wide GitHub App.
+ */
 function isPlatformAdmin(req: AuthenticatedRequest): boolean {
-  return isPlatformAdminLogin(req.sessionAccount?.login);
+  return req.authKind === "session" && isPlatformAdminLogin(req.sessionAccount?.login);
 }
 
 async function buildGitHubRoomIntegrationResponse(
@@ -120,7 +125,7 @@ export function registerGitHubIntegrationSetupRoute(
 
     if (!isPlatformAdmin(req)) {
       res.status(403).json({
-        error: "Only a server admin can set up the GitHub App. Server admins are the GitHub logins in LETAGENTS_PLATFORM_ADMINS.",
+        error: "Only a server admin, signed in to the LetAgents app, can set up the GitHub App. Server admins are the GitHub logins in LETAGENTS_PLATFORM_ADMINS.",
       });
       return;
     }
