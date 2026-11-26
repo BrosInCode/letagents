@@ -157,7 +157,8 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
       backgroundCommands: (entry) => this.agentStreamRegistry.runningBackgroundCommands(entry.id),
       deliveryAdmission: (entry) => this.providerStreams.deliveryAdmission(entry),
       recordRecovery: (entry) => this.runtimeConfigurationApply.recordRecovery(entry),
-      configurationRestarting: (entry) => this.providerTerminals.configurationRestarting(entry),
+      configurationRestarting: (entry) => this.runtimeConfigurationApply.applyingConfiguration(entry.id)
+        || this.providerTerminals.configurationRestarting(entry),
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       nowMs: () => this.nowMs(),
       startedAt: this.startedAt,

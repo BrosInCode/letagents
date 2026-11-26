@@ -203,6 +203,40 @@ test("configuration apply replaces only the exact idle runtime and leaves revisi
     "ordinary convergence resumes only after lifecycle exclusion is released");
 });
 
+test("a settings apply is in progress from the moment it takes delivery over until it ends", async () => {
+  const seen: Record<string, boolean> = {};
+  const env = applyHarness({});
+  const reserve = env.options.delivery!.reserveIdle;
+  env.options.delivery = { reserveIdle: async (entryId) => {
+    seen.duringReserve = env.coordinator.applyingConfiguration(entryId);
+    return reserve(entryId);
+  } };
+  const replace = env.options.terminals.replaceConfiguration;
+  env.options.terminals.replaceConfiguration = async (exact, stop) => {
+    seen.beforeReplacement = env.coordinator.applyingConfiguration("agent-1");
+    return replace(exact, stop);
+  };
+  assert.equal(env.coordinator.applyingConfiguration("agent-1"), false);
+  assert.deepEqual(await env.coordinator.apply({
+    entryId: "agent-1", daemonGeneration: 7, expectedConfigurationRevision: 2,
+  }), { outcome: "restarting" });
+  assert.deepEqual(seen, { duringReserve: true, beforeReplacement: true });
+  assert.equal(env.coordinator.applyingConfiguration("agent-1"), false, "after success the terminal coordinator's rule covers it");
+});
+
+test("a settings apply that gives up without replacing the runtime is no longer in progress", async () => {
+  const busy = applyHarness({ stopIfIdle: async () => false });
+  assert.deepEqual(await busy.coordinator.apply({
+    entryId: "agent-1", daemonGeneration: 7, expectedConfigurationRevision: 2,
+  }), { outcome: "busy_active_turn" });
+  assert.equal(busy.coordinator.applyingConfiguration("agent-1"), false);
+  const conflict = applyHarness({});
+  assert.deepEqual(await conflict.coordinator.apply({
+    entryId: "agent-1", daemonGeneration: 7, expectedConfigurationRevision: 9,
+  }), { outcome: "conflict" });
+  assert.equal(conflict.coordinator.applyingConfiguration("agent-1"), false);
+});
+
 /** An apply harness whose saved configuration is the applied one, with a record that blocks delivery unless told otherwise. */
 function blockedRecordHarness(input: Parameters<typeof applyHarness>[0] = {}) {
   const state = { block: "source_gap" as string | null, admission: "unavailable" as "pending" | "ready" | "unavailable" };
