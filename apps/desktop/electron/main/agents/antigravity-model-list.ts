@@ -5,7 +5,7 @@
  * of its own, opens one session with no tools, reads the list, closes the
  * session and ends the process. Nothing is sent to a model.
  */
-import { copyFileSync, lstatSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { type BigIntStats, constants, copyFileSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { protectOwnerPrivateSync } from "../../../../../shared/owner-private-fs.mjs";
@@ -92,37 +92,98 @@ export function antigravitySessionModelRows(session: unknown): AntigravityModelR
 
 /**
  * agy keeps its sign-in in a file in its own folder when the keychain does
- * not answer in time, and the keychain item is then gone. A read may leave
- * the only copy here. When the owner's folder has no file sign-in, that copy
- * goes back there; otherwise it is removed, so this folder never holds a
- * sign-in between reads. `since` is when the read started: a regular file
- * changed after it is agy's own, not the owner's link placed before the read.
+ * not answer in time, and the keychain item is then gone. So a read can leave
+ * the only copy of the sign-in here, and it must never be deleted by mistake.
+ *
+ * Before each read, the owner's file sign-in is placed here (a link, or a
+ * copy), and a marker records which entry that is (device, inode, kind, and
+ * for a file its size and time), or "nothing placed". File times alone cannot
+ * tell the two apart. After the read, and before the next one in case the app
+ * ended during a read:
+ * 1. The file the marker names is LetAgents' own: it is removed.
+ * 2. Any other usable file is agy's. It goes back to the owner's folder when
+ *    the owner has no file sign-in, and is removed when the owner has one.
+ * 3. When it cannot go back, it stays here and agy uses it as it is.
+ * Returns true in case 3.
  */
-export function settleModelListSignIn(folder: string, ownerGeminiDir: string, since: number): void {
-  const local = join(folder, ANTIGRAVITY_TOKEN_FILE);
-  let agyWroteIt = false;
+const SIGN_IN_MARKER = "letagents-sign-in.json";
+/** What LetAgents placed. A file also keeps its size and time: an inode number can be reused for a file agy writes later. */
+type PlacedSignIn = { dev: string; ino: string; kind: "link" | "file"; size: string; mtimeNs: string };
+type SignInMarker = { placing: true } | { placed: PlacedSignIn | null };
+
+function placedIdentity(stat: BigIntStats): PlacedSignIn {
+  const kind = stat.isSymbolicLink() ? "link" : "file";
+  return { dev: String(stat.dev), ino: String(stat.ino), kind, size: kind === "file" ? String(stat.size) : "", mtimeNs: kind === "file" ? String(stat.mtimeNs) : "" };
+}
+
+function samePlacedSignIn(a: PlacedSignIn, b: PlacedSignIn): boolean {
+  return a.dev === b.dev && a.ino === b.ino && a.kind === b.kind && a.size === b.size && a.mtimeNs === b.mtimeNs;
+}
+
+function readSignInMarker(folder: string): SignInMarker | null {
   try {
-    const stat = lstatSync(local);
-    agyWroteIt = stat.isFile() && stat.size > 0 && stat.mtimeMs >= since;
+    const parsed = JSON.parse(readFileSync(join(folder, SIGN_IN_MARKER), "utf8")) as SignInMarker;
+    return parsed && typeof parsed === "object" && ("placing" in parsed || "placed" in parsed) ? parsed : null;
   } catch {
-    return;
+    return null;
   }
-  if (agyWroteIt && !ownerAntigravityTokenFileExists(ownerGeminiDir)) {
-    const owner = ownerAntigravityTokenPath(ownerGeminiDir);
-    try {
-      mkdirSync(dirname(owner), { recursive: true, mode: 0o700 });
-      renameSync(local, owner);
-      return;
-    } catch { /* another volume */ }
-    try {
-      copyFileSync(local, owner);
-      protectOwnerPrivateSync(owner, "file");
-    } catch {
-      // Keep the only copy where it is; the next read tries again.
+}
+
+function writeSignInMarker(folder: string, marker: SignInMarker): void {
+  writeFileSync(join(folder, SIGN_IN_MARKER), JSON.stringify(marker), { mode: 0o600 });
+}
+
+export function settleModelListSignIn(folder: string, ownerGeminiDir: string): boolean {
+  const local = join(folder, ANTIGRAVITY_TOKEN_FILE);
+  let stat: BigIntStats;
+  try {
+    stat = lstatSync(local, { bigint: true });
+  } catch {
+    return false;
+  }
+  const marker = readSignInMarker(folder);
+  const placedByLetAgents = marker !== null && ("placing" in marker
+    // Nothing else runs while the sign-in is being placed, so whatever is here is LetAgents'.
+    || (marker.placed !== null && samePlacedSignIn(marker.placed, placedIdentity(stat))));
+  const usable = stat.isFile() && stat.size > 0n;
+  if (placedByLetAgents || !usable || ownerAntigravityTokenFileExists(ownerGeminiDir)) {
+    try { rmSync(local, { force: true }); } catch { /* removed on the next read */ }
+    return false;
+  }
+  const owner = ownerAntigravityTokenPath(ownerGeminiDir);
+  try {
+    mkdirSync(dirname(owner), { recursive: true, mode: 0o700 });
+    renameSync(local, owner);
+    return false;
+  } catch { /* another volume, or the owner's folder cannot be written */ }
+  try {
+    copyFileSync(local, owner, constants.COPYFILE_EXCL);
+    protectOwnerPrivateSync(owner, "file");
+  } catch {
+    return true;
+  }
+  try { rmSync(local, { force: true }); } catch { /* the owner's copy is in place */ }
+  return false;
+}
+
+/** Place the owner's file sign-in for one read and record what was placed. */
+function prepareModelListSignIn(folder: string, ownerGeminiDir: string): void {
+  try {
+    if (settleModelListSignIn(folder, ownerGeminiDir)) {
+      // agy's own sign-in stays here; the read uses it.
+      writeSignInMarker(folder, { placed: null });
       return;
     }
+    writeSignInMarker(folder, { placing: true });
+    shareAntigravitySignIn(folder, ownerGeminiDir);
+    let placed: PlacedSignIn | null = null;
+    try {
+      placed = placedIdentity(lstatSync(join(folder, ANTIGRAVITY_TOKEN_FILE), { bigint: true }));
+    } catch { /* the owner has no file sign-in: nothing placed */ }
+    writeSignInMarker(folder, { placed });
+  } catch (error) {
+    throw new Error(`LetAgents could not prepare Antigravity's model-list folder: ${error instanceof Error ? error.message : String(error)}`);
   }
-  rmSync(local, { force: true });
 }
 
 /** One read at a time per folder: two `agy acp` processes on one folder would share, and clear, its files. */
@@ -148,10 +209,7 @@ async function readOnce(agyBin: string, deps: AntigravityModelListDependencies):
   // agy runs workspace hooks and MCP servers without asking; the agents refuse such a folder, and so does this.
   const refusal = deps.workspaceRefusal(deps.folder);
   if (refusal) throw new Error(refusal);
-  // A sign-in an earlier read left here (the app ended during it) goes back to the owner first.
-  settleModelListSignIn(deps.folder, deps.ownerGeminiDir, 0);
-  const startedAt = Date.now();
-  shareAntigravitySignIn(deps.folder, deps.ownerGeminiDir);
+  prepareModelListSignIn(deps.folder, deps.ownerGeminiDir);
   const child = deps.launchChild({ agyBin, args: ["acp", "--gemini-dir", deps.folder], cwd: deps.folder, env: {} });
   let signInRequired = false;
   let sessionId: string | null = null;
@@ -221,7 +279,6 @@ async function readOnce(agyBin: string, deps: AntigravityModelListDependencies):
     for (const name of PER_READ_FOLDERS) {
       try { rmSync(join(deps.folder, "antigravity-cli", name), { recursive: true, force: true }); } catch { /* the next read clears it */ }
     }
-    // Leave a 1 s margin: some file systems keep modification times to the second.
-    try { settleModelListSignIn(deps.folder, deps.ownerGeminiDir, startedAt - 1_000); } catch { /* the next read settles it */ }
+    settleModelListSignIn(deps.folder, deps.ownerGeminiDir);
   }
 }

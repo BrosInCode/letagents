@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -231,20 +231,59 @@ test("a sign-in agy writes into the folder during a read goes back to the owner 
   assert.equal(existsSync(second.localToken), false);
 });
 
-test("a sign-in left by a read the app did not finish goes back to the owner before the next read", () => {
-  const { deps, ownerToken, localToken } = harness();
-  writeToken(localToken, "left-behind");
-  utimesSync(localToken, new Date(1_000_000), new Date(1_000_000));
-  settleModelListSignIn(deps.folder, deps.ownerGeminiDir, 0);
-  assert.equal(readFileSync(ownerToken, "utf8"), "left-behind");
+test("a sign-in agy wrote stays in the folder when it cannot go back to the owner, and the next read uses it", async () => {
+  const { agy, deps, localToken } = harness();
+  // The owner's folder cannot be made: a file is in its place.
+  writeFileSync(deps.ownerGeminiDir, "not a folder");
+  agy.onSessionNew = () => writeToken(localToken, "only-copy");
+  await readAntigravityModelsOverAcp("/bin/agy", deps);
+  assert.equal(readFileSync(localToken, "utf8"), "only-copy", "the only copy is kept");
+
+  const next = new FakeAgy();
+  let seen = "";
+  next.onSessionNew = () => { seen = readFileSync(localToken, "utf8"); };
+  await readAntigravityModelsOverAcp("/bin/agy", { ...deps, launchChild: () => next });
+  assert.equal(seen, "only-copy", "agy reads the kept sign-in");
+  assert.equal(readFileSync(localToken, "utf8"), "only-copy", "and it is still kept");
+});
+
+test("a link LetAgents placed is removed, never moved, even after the owner signed out", () => {
+  const { deps, folder, ownerToken, localToken } = harness();
+  writeToken(ownerToken, "owner-token");
+  // A Windows hard link that an unfinished read left, with its marker.
+  mkdirSync(join(localToken, ".."), { recursive: true });
+  linkSync(ownerToken, localToken);
+  const stat = lstatSync(localToken, { bigint: true });
+  writeFileSync(join(folder, "letagents-sign-in.json"), JSON.stringify({ placed: {
+    dev: String(stat.dev), ino: String(stat.ino), kind: "file", size: String(stat.size), mtimeNs: String(stat.mtimeNs),
+  } }));
+  rmSync(ownerToken); // the owner signs out
+  assert.equal(settleModelListSignIn(folder, deps.ownerGeminiDir), false);
   assert.equal(existsSync(localToken), false);
-  // An old file is not agy's work during a read that started later: it is removed, not moved.
-  const other = harness();
-  writeToken(other.localToken, "old");
-  utimesSync(other.localToken, new Date(1_000_000), new Date(1_000_000));
-  settleModelListSignIn(other.deps.folder, other.deps.ownerGeminiDir, Date.now() - 1_000);
-  assert.equal(existsSync(other.ownerToken), false);
-  assert.throws(() => lstatSync(other.localToken));
+  assert.equal(existsSync(ownerToken), false, "the sign-out stays");
+});
+
+test("after an unfinished read, agy's own sign-in goes back to the owner and a half-placed one is removed", () => {
+  const agyWrote = harness();
+  writeToken(agyWrote.localToken, "agy-wrote");
+  writeFileSync(join(agyWrote.folder, "letagents-sign-in.json"), JSON.stringify({ placed: null }));
+  assert.equal(settleModelListSignIn(agyWrote.folder, agyWrote.deps.ownerGeminiDir), false);
+  assert.equal(readFileSync(agyWrote.ownerToken, "utf8"), "agy-wrote");
+  assert.equal(existsSync(agyWrote.localToken), false);
+
+  const halfPlaced = harness();
+  writeToken(halfPlaced.localToken, "placing");
+  writeFileSync(join(halfPlaced.folder, "letagents-sign-in.json"), JSON.stringify({ placing: true }));
+  settleModelListSignIn(halfPlaced.folder, halfPlaced.deps.ownerGeminiDir);
+  assert.equal(existsSync(halfPlaced.localToken), false);
+  assert.equal(existsSync(halfPlaced.ownerToken), false);
+});
+
+test("a folder that cannot be prepared is a clear error, and agy does not start", async () => {
+  const { deps, launches, localToken } = harness();
+  mkdirSync(join(localToken, "in-the-way"), { recursive: true });
+  await assert.rejects(readAntigravityModelsOverAcp("/bin/agy", deps), /could not prepare Antigravity's model-list folder/);
+  assert.equal(launches.length, 0);
 });
 
 test("two reads of one folder run one after the other, even for two agy paths", async () => {
