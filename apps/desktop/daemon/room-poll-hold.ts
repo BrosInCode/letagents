@@ -4,6 +4,12 @@
  */
 export const ROOM_POLL_FLOOR_HOLD_MS = 25_000;
 /**
+ * The hold of a lane that is not observing yet. Its owner reads "starting"
+ * until this poll is answered, and an idle room answers only when the hold
+ * ends, so the hold must be short.
+ */
+export const ROOM_POLL_FIRST_ANSWER_HOLD_MS = 1_000;
+/**
  * The longest hold asked for: one doubling step above the floor.
  *
  * - The most common proxy limit is 60 seconds (the default of nginx
