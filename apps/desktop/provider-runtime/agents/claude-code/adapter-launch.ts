@@ -21,10 +21,12 @@ import type { ClaudeCliChild, ClaudeStreamMessage } from "./types.js";
 const PROCESS_EXIT_POLL_MS = 25;
 
 /**
- * Waits for an exact process to stop, for at most `graceMs`. It returns as
- * soon as its birth is gone (or no longer readable); the caller re-reads the
- * identity and decides. A fixed sleep here held every restart of a live
- * Claude process for the whole grace period, even when it exited at once.
+ * Waits for an exact process to stop, for at most `graceMs`. It returns early
+ * only when its birth is gone (null) or replaced. An unreadable identity
+ * (undefined, or a throw) is not proof of exit: it keeps polling, so a
+ * briefly unreadable identity still has the whole grace period to recover.
+ * The caller re-reads the identity and decides. A fixed sleep here held every
+ * restart of a live Claude process for the whole grace period.
  */
 export async function waitUntilProcessNotAlive(
   readIdentity: () => string | null | undefined,
@@ -34,8 +36,8 @@ export async function waitUntilProcessNotAlive(
   const deadline = Date.now() + graceMs;
   for (;;) {
     let identity: string | null | undefined;
-    try { identity = readIdentity(); } catch { return; }
-    if (identity === undefined || identity === null || !sameProcessBirthIdentity(identity, birth)) return;
+    try { identity = readIdentity(); } catch { identity = undefined; }
+    if (identity === null || (typeof identity === "string" && !sameProcessBirthIdentity(identity, birth))) return;
     const remaining = deadline - Date.now();
     if (remaining <= 0) return;
     await delay(Math.min(PROCESS_EXIT_POLL_MS, remaining));
