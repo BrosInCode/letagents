@@ -169,6 +169,23 @@ jobs:
           export LETAGENTS_DESKTOP_RELEASE_NOTES="LetAgents desktop ${DESKTOP_VERSION}"
           npm --prefix apps/desktop run package:mac
 
+      # How much of the new update ZIP an update from the published release
+      # downloads, with electron-updater's own download planner, in the run
+      # summary. It does not fail the release: the feed may be unreachable,
+      # or this may be the first release for the architecture.
+      - name: Measure the differential update download
+        continue-on-error: true
+        env:
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          DESKTOP_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          blockmaps=(apps/desktop/release/artifacts/*.zip.blockmap)
+          node apps/desktop/electron/scripts/update-download-size.mjs \
+            --feed "${R2_PUBLIC_BASE_URL}/desktop/feeds/${DESKTOP_ARCH}/latest-mac.yml" \
+            --blockmap "${blockmaps[0]}"
+
       - name: Attest installer and update provenance
         if: ${{ github.event.repository.visibility == 'public' || vars.ENABLE_DESKTOP_PROVENANCE_ATTESTATION == 'true' }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4

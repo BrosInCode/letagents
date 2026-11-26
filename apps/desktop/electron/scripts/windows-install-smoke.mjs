@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -14,6 +14,7 @@ import {
   PROCESS_TREE_HELPER_APP_PATH,
   WINDOWS_APP_USER_MODEL_ID,
   WINDOWS_EXECUTABLE_NAME,
+  WINDOWS_INSTALL_MANIFEST_NAME,
   WINDOWS_UNINSTALLER_NAME,
 } from "./windows-packaging.mjs";
 
@@ -24,7 +25,8 @@ import {
 // helper, and loads its sealed daemon pipe addon to reach a daemon through
 // it, updates the running app the way electron-updater does (with an agent's
 // process-tree helper still running from the install), and uninstalls it
-// and checks that the install folder and registration are gone.
+// and checks that the payload and registration are gone, while files the
+// user put in the install folder stay.
 // For CI runners: it installs into the runner user's own profile.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -112,6 +114,7 @@ assert(existsSync(executable), `The installer did not write ${executable}.`);
 assert(existsSync(join(installDirectory, WINDOWS_UNINSTALLER_NAME)), "The installer did not write its uninstaller.");
 assert(existsSync(join(installDirectory, "resources", "app", "runtime", "opencode.exe")), "The install has no bundled opencode.exe.");
 assert(existsSync(join(installDirectory, "shared", "message-contracts.mjs")), "The install has no shared contracts.");
+assert(existsSync(join(installDirectory, WINDOWS_INSTALL_MANIFEST_NAME)), "The install wrote no install manifest.");
 
 // The process-tree helper: the sealed bytes, at the path the app looks in,
 // accepted by the installed shared/process-tree.mjs, and able to end a tree
@@ -262,6 +265,17 @@ const agent = run(executable, ["-e", [
 ].join("\n"), installDirectory], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, timeout: 2 * 60_000 });
 const agentHelper = /LETAGENTS_RUNNING_AGENT_HELPER (\d+)/.exec(agent.stdout)?.[1];
 assert(agent.status === 0 && agentHelper && processRunning(agentHelper, PROCESS_TREE_HELPER_NAME), "The running agent's helper did not start.");
+// Files LetAgents did not install, in the install folder and in folders the
+// payload also has: an update and the uninstaller must leave them.
+const userFiles = [
+  join(installDirectory, "user-notes.txt"),
+  join(installDirectory, "shared", "user-notes.txt"),
+  join(installDirectory, "locales", "user-notes.txt"),
+];
+for (const file of userFiles) {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, "not LetAgents's\n");
+}
 const update = run(installer, ["--updated", "--force-run", "/S"], { timeout: 10 * 60_000 });
 assert(update.status === 0, `The update installer exited with ${update.status}.`);
 assert(!processRunning(agentHelper, PROCESS_TREE_HELPER_NAME), "The update left the running agent's process-tree helper running.");
@@ -270,6 +284,8 @@ assert(!processRunning(agentHelper, PROCESS_TREE_HELPER_NAME), "The update left 
 await waitFor("the updated app to start again", () => [...runningAppIds()].some((id) => !before.has(id)));
 assert(!existsSync(desktopShortcut), "The update created the deleted desktop shortcut again.");
 assert(registryValue(uninstallKey, "InstallLocation")?.includes(installDirectory), "The update moved the install.");
+for (const file of userFiles) assert(existsSync(file), `The update deleted ${file}, which LetAgents did not install.`);
+assert(existsSync(join(installDirectory, WINDOWS_INSTALL_MANIFEST_NAME)), "The update left no install manifest.");
 // The update created the Start menu shortcut again; it must carry the ID too.
 const updatedAppIds = shellAppIds([startMenuShortcut]);
 assert(
@@ -287,6 +303,13 @@ const uninstall = run(uninstaller, ["/S", `_?=${installDirectory}`], { timeout: 
 assert(uninstall.status === 0, `The uninstaller exited with ${uninstall.status}.`);
 assert(!existsSync(executable), "The uninstaller left LetAgents.exe.");
 assert(!existsSync(join(installDirectory, "resources")), "The uninstaller left the resources folder.");
+assert(!existsSync(join(installDirectory, WINDOWS_INSTALL_MANIFEST_NAME)), "The uninstaller left the install manifest.");
+for (const file of userFiles) assert(existsSync(file), `The uninstaller deleted ${file}, which LetAgents did not install.`);
+// Each payload folder that held a user file keeps only that file.
+for (const folder of ["shared", "locales"]) {
+  const left = readdirSync(join(installDirectory, folder));
+  assert(left.length === 1 && left[0] === "user-notes.txt", `The uninstaller left ${JSON.stringify(left)} in ${folder}.`);
+}
 assert(registryValue(uninstallKey, "DisplayVersion") === null, "The uninstaller left the Installed apps entry.");
 assert(registryValue(urlKey) === null, "The uninstaller left the letagents:// registration.");
 
