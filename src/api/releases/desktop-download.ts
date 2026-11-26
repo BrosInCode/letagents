@@ -255,7 +255,13 @@ export function registerDesktopDownloadRoutes(
   app.get("/downloads/mac/current.json", async (_req, res) => {
     try {
       const release = await loadCurrentRelease();
-      // A Windows installer that failed its proof is not offered.
+      // The landing page links straight to the installers this lists. With a
+      // Mac installer unproven it gets no manifest and keeps the site's own
+      // routes, which serve only proved installers. An unproven Windows
+      // installer is left out.
+      if ((["arm64", "x64"] as const).some((architecture) => unprovenDesktopInstallerReason(release, architecture))) {
+        throw new Error("A Mac installer of the current release is unproven.");
+      }
       res
         .set("Cache-Control", "public, max-age=30, must-revalidate")
         .json(unprovenDesktopInstallerReason(release, WINDOWS_INSTALLER_LABEL) ? { ...release, windows: null } : release);

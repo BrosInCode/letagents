@@ -587,6 +587,10 @@ test("a Mac installer that fails its proof uses the bundled fallback or fails cl
   assert.equal((await fetch(`${baseUrl}/downloads/mac/arm64`, { redirect: "manual" })).status, 302);
   assert.equal((await fetch(`${baseUrl}/downloads/windows/x64`, { redirect: "manual" })).status, 302);
   assert.equal((await fetch(`${baseUrl}/downloads/mac/x64`, { redirect: "manual" })).status, 503);
+  // The landing page gets no manifest that links straight to the unproven DMG.
+  const manifest = await fetch(`${baseUrl}/downloads/mac/current.json`);
+  assert.equal(manifest.status, 503);
+  assert.doesNotMatch(await manifest.text(), /darwin-x64\.dmg/);
   fallback = true;
   const bundled = await fetch(`${baseUrl}/downloads/mac/x64`, { redirect: "manual" });
   assert.equal(bundled.status, 302);

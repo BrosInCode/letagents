@@ -24,13 +24,13 @@ process.env.LETAGENTS_DESKTOP_USER_DATA_DIR = userDataDirectory;
 // leaving the other selected target fully writable.
 await mkdir(join(configHome, ".cursor", "mcp.json"), { recursive: true });
 
-// A LetAgents entry only in ~/.claude/settings.json, which Claude Code does not
-// read MCP servers from: it must not count as installed.
+// LetAgents entries only in the files Claude Code and the Antigravity CLI do
+// not read MCP servers from: they must not count as installed.
+const staleEntry = JSON.stringify({ mcpServers: { letagents: { command: "npx", args: ["-y", "letagents"] } } });
 await mkdir(join(configHome, ".claude"), { recursive: true });
-await writeFile(
-  join(configHome, ".claude", "settings.json"),
-  JSON.stringify({ mcpServers: { letagents: { command: "npx", args: ["-y", "letagents"] } } }),
-);
+await writeFile(join(configHome, ".claude", "settings.json"), staleEntry);
+await mkdir(join(configHome, ".gemini"), { recursive: true });
+await writeFile(join(configHome, ".gemini", "settings.json"), staleEntry);
 
 const { buildMcpInstallState, installLetAgentsMcpServers } = await import("../main/mcp-setup.js");
 
@@ -86,5 +86,6 @@ test("Antigravity setup writes the CLI's MCP config and keeps its other servers"
   const config = JSON.parse(await readFile(path, "utf8")) as { mcpServers?: Record<string, { command?: string }> };
   assert.equal(config.mcpServers?.other?.command, "other-mcp");
   assert.equal(config.mcpServers?.letagents?.command, "npx");
-  await assert.rejects(readFile(join(configHome, ".gemini", "settings.json"), "utf8"), { code: "ENOENT" });
+  // The old Gemini settings file is not where the CLI looks, and setup leaves it as it was.
+  assert.equal(await readFile(join(configHome, ".gemini", "settings.json"), "utf8"), staleEntry);
 });
