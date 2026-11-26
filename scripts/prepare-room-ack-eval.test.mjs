@@ -94,6 +94,7 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
     "desktop-edge-tests-macos": checks,
     "desktop-packaged-smoke": checks,
     "process-tree-windows": checks,
+    "windows-installer": checks,
     "integration-tests": gate,
     "npm-publish": staging,
     docker: staging,
@@ -109,6 +110,7 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
     ["mcp-tests-windows", "windows-latest"],
     ["desktop-tests-windows", "windows-latest"],
     ["process-tree-windows", "windows-latest"],
+    ["windows-installer", "windows-2022"],
     ["desktop-edge-tests-macos", "macos-15"],
   ]) {
     const checkJob = workflow.jobs[name];
