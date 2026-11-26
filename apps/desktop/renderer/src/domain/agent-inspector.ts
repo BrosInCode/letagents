@@ -1195,6 +1195,8 @@ export function projectAgentInspector(
   const providerStopped = resourceFreshness === "fresh" && options.workResource?.status === "ready"
     && entry.deliveryMode === "daemon_inbox"
     && entry.desiredState === "running" && !entry.runtimeRecovery
+    // The daemon is already starting a replacement (for example to apply saved settings); the exited runtime is the old one.
+    && entry.observedState !== "starting" && entry.observedState !== "recovering"
     && detail?.entry_id === entry.id && detail.room_id === entry.roomId
     && detail.runtime_control?.runtime_state === "exited"
     && agentInspectorRuntimeControlMatchesFence(detail.runtime_control, entry.executionGenerationId,

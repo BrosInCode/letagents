@@ -254,6 +254,14 @@ export class ProviderTerminalCoordinator {
     }
   }
 
+  /** Whether the entry's runtime is being stopped on purpose to apply its settings. */
+  configurationReplacementPlanned(entryId: string): boolean {
+    for (const installation of this.plannedConfigurationReplacements.keys()) {
+      if (installation.entryId === entryId) return true;
+    }
+    return false;
+  }
+
   /**
    * Whether this entry's runtime has exited and that exit is not yet recorded.
    * Until it is, the entry has no runtime and its generation has no terminal:

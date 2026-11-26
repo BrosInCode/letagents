@@ -236,6 +236,35 @@ test("stopped runtime evidence gives Overview the same confirmed recovery path a
   }
 });
 
+test("the old runtime's exit never reads as needs attention while a replacement for it is starting", () => {
+  const replacing = entry({ observedState: "recovering", runtimeGenerationId: "runtime_1" });
+  replacing.roomAgentState!.inbox.state = "waiting_for_desktop_credentials";
+  replacing.roomAgentState!.connection.state = "reconnecting";
+  replacing.roomAgentState!.ingress.state = "stopped";
+  const workResource: AgentInspectorWorkResource = {
+    status: "ready", error: null, sourceMessageId: null,
+    detail: {
+      availability: "not_loaded", entry_id: replacing.id, room_id: replacing.roomId,
+      requested_source_message_id: null, inbox_item_id: null, source_message: null,
+      receipt: null, terminal: null, publication: null, continuation_repair: null,
+      timeline: [], items: [], uncertain_effects: [], history_boundary: null,
+      runtime_control: { runtime_generation_id: "runtime_1", execution_generation_id: replacing.executionGenerationId!,
+        daemon_generation_id: "7", runtime_state: "exited", control_state: "responsive", observed_at: "2026-10-14T22:45:00Z" },
+    },
+  };
+  const options = { roomId: replacing.roomId, workResource, daemonGeneration: 7 };
+  for (const observedState of ["recovering", "starting"] as const) {
+    const projection = projectAgentInspector({ ...replacing, observedState }, options)!;
+    assert.equal(projection.runtimeExited, false);
+    assert.notEqual(projection.now?.kind, "attention");
+    assert.ok(!projection.actions.some(action => action.kind === "recovery_options" && action.available));
+  }
+  // A runtime that stays exited while the entry is idle is still a real stop.
+  const stopped = projectAgentInspector({ ...replacing, observedState: "idle" }, options)!;
+  assert.equal(stopped.runtimeExited, true);
+  assert.equal(stopped.now?.label, "Agent stopped");
+});
+
 test("truthful online state requires the exact delivery connection and preserves reconnecting", () => {
   assert.equal(agentInspectorOverallState(entry()), "online");
   assert.equal(agentInspectorOverallState(entry({

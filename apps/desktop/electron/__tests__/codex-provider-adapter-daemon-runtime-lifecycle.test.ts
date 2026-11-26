@@ -340,6 +340,30 @@ for (const exit of ["in the same tick it is signalled", "a moment after it is si
   });
 }
 
+test("a planned configuration replacement never shows the agent as failed while the stopped process exits", async () => {
+  const agent = await codexDaemonFixture({ ownerSetup: true });
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const seen = new Set<string>();
+    let sampling = true;
+    const sampler = (async () => {
+      while (sampling) { seen.add((await agent.view()).observed_state); await new Promise((resolve) => setTimeout(resolve, 2)); }
+    })();
+    const off = await agent.setOwnerSetup(false);
+    assert.equal(off.ok, true, off.error);
+    await agent.eventually(() => agent.harness.launches.length === 2, "a replacement is started");
+    await agent.eventually(() => agent.harness.clients.length === 2, "the replacement is up");
+    sampling = false;
+    await sampler;
+    assert.ok(!seen.has("failed"), `the agent was never shown as failed (saw ${[...seen].join(", ")})`);
+    assert.deepEqual((await agent.transitions()).filter((line) => line.from === "failed" || line.to === "failed"), []);
+  } finally {
+    await agent.cleanup();
+  }
+});
+
 test("a daemon restart does not make a runtime that has the owner's setup look isolated: it is attached as it is, and turning the setup off during a turn still replaces it afterwards", async () => {
   const agent = await codexDaemonFixture();
   try {

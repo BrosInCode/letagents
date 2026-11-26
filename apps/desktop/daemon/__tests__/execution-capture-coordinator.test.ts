@@ -1640,7 +1640,7 @@ test("pending lifecycle projection survives coordinator restart and reconciles o
   }
 });
 
-test("detached-lane runtimeFailure stays pending until both subject and observer runtimes are exited", () => {
+function detachedRuntimeFailure(planned: boolean): void {
   // 1. Cursor turn/lost (manifest_failed) with liveInstallation: null while runtime is still live -> pending until runtime exits.
   const c = fixture("cursor_cli");
   try {
@@ -1715,7 +1715,7 @@ test("detached-lane runtimeFailure stays pending until both subject and observer
   const f = fixture("cursor_cli");
   try {
     f.db.prepare("UPDATE agents SET observed_state='idle' WHERE agent_id='agent'").run();
-    const store = new ExecutionShadowStore(f.db);
+    const store = new ExecutionShadowStore(f.db, { configurationReplacementPlanned: () => planned });
     const subjectRuntimeId = executionRuntimeStorageIdentity("agent", "subject-generation", "cursor_cli", 99, "subject-birth");
     const observerRuntimeId = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
     store.registerRuntime({
@@ -1777,7 +1777,7 @@ test("detached-lane runtimeFailure stays pending until both subject and observer
     };
     const first = store.ingest("detached-source", observer, lostTurnFact, { liveInstallation: null });
     assert.equal(first.status, "accepted");
-    assert.deepEqual(first.lifecycleProjection, { status: "pending" },
+    assert.deepEqual(first.lifecycleProjection, { status: planned ? "superseded" : "pending" },
       "detached runtimeFailure must remain pending while observer runtime is not yet exited");
     assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "idle");
 
@@ -1788,13 +1788,18 @@ test("detached-lane runtimeFailure stays pending until both subject and observer
       observerExecutionGenerationId: observer.observerExecutionGenerationId,
       observerRuntimeGenerationId: observer.observerRuntimeGenerationId,
     }, null);
-    assert.deepEqual(retried, { status: "applied", observedState: "failed" });
-    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, "failed");
+    // A planned configuration replacement is recorded as recovering by the terminal coordinator, never as failed.
+    assert.deepEqual(retried, planned ? { status: "superseded" } : { status: "applied", observedState: "failed" });
+    assert.equal(f.db.prepare("SELECT observed_state FROM agents WHERE agent_id='agent'").get()?.observed_state, planned ? "idle" : "failed");
   } finally {
     f.capture.close();
     if (f.db.isOpen) f.db.close();
   }
-});
+}
+
+test("detached-lane runtimeFailure stays pending until both subject and observer runtimes are exited", () => detachedRuntimeFailure(false));
+
+test("a runtime failure is not projected as failed while the daemon stops that runtime to apply the agent's settings", () => detachedRuntimeFailure(true));
 
 test("capture flush stays fail-closed on a suspended lane and reused-handle archival fences late facts from the archived child", async () => {
   // 1. Suspended lane must fail closed on flush() (never bypass suspension).
