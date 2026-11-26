@@ -2,6 +2,7 @@
 import { readCodexUsageTail } from "../provider-usage.js";
 import type { ProviderUsage } from "../../../shared/provider-usage.js";
 import { sameProviderConnectionIdentity, type SupervisedProviderAdapter, type ProviderAttachTerminal, type ProviderContinuationRef, type ProviderHandle, type ProviderSpawnRequest } from "../provider-adapter.js";
+import { sameProcessBirthIdentity } from "../provider-evidence.js";
 import { CodexAdapterLifecycle } from "./adapter-lifecycle.js";
 import { stopCodexBackgroundTerminal } from "./background-terminals.js";
 import { CodexProviderHandle } from "./handle.js";
@@ -111,6 +112,26 @@ export class CodexProviderAdapter extends CodexAdapterLifecycle implements Super
   ): Promise<ProviderHandle> {
     if (ref.workAttemptId !== req.workAttemptId) {
       throw new Error("Codex resume ref must belong to the same work attempt.");
+    }
+    const current = this.handles.get(req.workAttemptId);
+    if (current && !current.terminal) {
+      throw new Error(`Codex work attempt '${req.workAttemptId}' already has a live process.`);
+    }
+    // A resume starts a second app-server for the same conversation. The
+    // process the saved reference names may still run: a daemon that ended, or
+    // handed off, leaves its Codex alive on purpose, and a successor may start
+    // long after. When that exact birth is still alive, stop it before the
+    // replacement starts. The daemon decides what a missing or unreadable
+    // birth means (it holds the witnessed death and blocks an unproven
+    // predecessor); this fence signals only a verified exact birth, through
+    // stopRef, and never a pid that another process now has.
+    const recorded = ref.providerConnection;
+    if (recorded?.kind === "codex_app_server" && typeof recorded.pid === "number" && recorded.pid > 0
+      && typeof recorded.processIdentity === "string" && recorded.processIdentity.trim()) {
+      const live = this.deps.getProcessIdentity(recorded.pid);
+      if (typeof live === "string" && sameProcessBirthIdentity(live, recorded.processIdentity)) {
+        await this.stopRef(ref);
+      }
     }
     return this.start(req, ref);
   }
