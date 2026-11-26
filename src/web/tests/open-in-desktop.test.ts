@@ -42,8 +42,8 @@ test('the offer shows on Mac and Windows browsers only, once per room per sessio
   const phone = harness({ platform: () => 'other' })
   phone.setRoom('design-lounge')
   assert.equal(phone.visible.value, false, 'no desktop app on a phone')
-  assert.equal(harness({ platform: () => 'windows' }).downloadHref.value, '/#download-mac', 'no Windows installer yet: the landing page')
-  assert.equal(mac.downloadHref.value, '/downloads/mac/arm64')
+  assert.equal(harness({ platform: () => 'windows' }).downloadHref.value, '/downloads/windows/x64', 'Windows gets the Windows installer')
+  assert.equal(mac.downloadHref.value, '/#download-mac', 'a browser cannot tell an Intel Mac: the landing page offers both Mac builds')
 })
 
 test('Open hands the room to the app once and turns the pill into the opening state', () => {

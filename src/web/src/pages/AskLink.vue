@@ -3,7 +3,7 @@
     <GiveAgentPanel handoff :request="ask" :loading="loading" :unavailable="unavailable" :error="error" @retry="load">
       <template #handoff>
         <a class="give-primary ask-open-app" :href="appLink">Open in LetAgents<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg></a>
-        <p class="ask-downloads">Don’t have the app? Download for <a :href="release.downloads.arm64">Apple silicon</a> or <a :href="release.downloads.x64">Intel</a>, then open this link again.</p>
+        <p class="ask-downloads">Don’t have the app? Download for <template v-for="(link, index) in downloadLinks" :key="link.href"><a :href="link.href">{{ link.label }}</a>{{ downloadListSeparator(index, downloadLinks.length) }}</template>, then open this link again.</p>
       </template>
     </GiveAgentPanel>
   </main>
@@ -12,7 +12,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAuth } from '@/composables/useAuth'
-import { MAC_DESKTOP_BETA } from '@/domain/desktopRelease'
+import { MAC_DESKTOP_BETA, desktopDownloadLinks, detectDesktopVisitorPlatform, downloadListSeparator } from '@/domain/desktopRelease'
 import GiveAgentPanel from '../../../../shared/ui/give-agent/GiveAgentPanel.vue'
 import type { GiveAgentRequest } from '../../../../shared/ui/give-agent/types'
 
@@ -24,7 +24,7 @@ const loading = ref(true)
 const ask = ref<GiveAgentRequest | null>(null)
 const unavailable = ref<string | null>(null)
 const error = ref<string | null>(null)
-const release = MAC_DESKTOP_BETA
+const downloadLinks = desktopDownloadLinks(MAC_DESKTOP_BETA, detectDesktopVisitorPlatform(typeof navigator === 'undefined' ? undefined : navigator))
 const appLink = computed(() => `letagents://ask/${encodeURIComponent(props.token)}`)
 let generation = 0
 onBeforeUnmount(() => { generation++ })
