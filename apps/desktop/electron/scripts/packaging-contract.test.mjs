@@ -301,8 +301,10 @@ test("the macOS app ships Electron's and Chromium's notices, and the package che
   assert.match(packager, /const ELECTRON_NOTICE_FILES = \["LICENSE", "LICENSES\.chromium\.html"\];/);
   // Copied from beside Electron.app into Contents/Resources...
   assert.match(packager, /for \(const notice of ELECTRON_NOTICE_FILES\) \{\s+await cp\(join\(root, "node_modules", "electron", "dist", notice\), join\(resources, notice\)\);/);
-  // ...and required in the finished package on both platforms.
-  assert.match(packager, /\.\.\.ELECTRON_NOTICE_FILES\.map\(\(notice\) => \{\s+const absolutePath = join\(windows \? bundle : resources, notice\);/);
+  // ...and required in the finished package: in the macOS manifest, and
+  // beside the Windows executable (where Electron's own folder has them).
+  assert.match(packager, /\.\.\.\(windows \? \[\] : ELECTRON_NOTICE_FILES\.map\(\(notice\) => \{\s+const absolutePath = join\(resources, notice\);/);
+  assert.match(packager, /for \(const notice of ELECTRON_NOTICE_FILES\) \{\s+if \(!\(await stat\(join\(bundle, notice\)\)/);
 });
 
 test("a failed R2 upload is retried with a fresh upload and the object's checksum is checked", async () => {

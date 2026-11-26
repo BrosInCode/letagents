@@ -194,6 +194,12 @@ async function assembleWindowsBundle() {
   if (brandedVersion !== windowsFileVersion(desktopVersion)) {
     throw new Error(`${WINDOWS_EXECUTABLE_NAME} reports version ${brandedVersion ?? "none"}; expected ${windowsFileVersion(desktopVersion)}.`);
   }
+  // Electron's and Chromium's notices stay beside the executable, as Electron ships them.
+  for (const notice of ELECTRON_NOTICE_FILES) {
+    if (!(await stat(join(bundle, notice)).catch(() => null))?.isFile()) {
+      throw new Error(`The Windows app must ship Electron's ${notice} beside ${WINDOWS_EXECUTABLE_NAME}.`);
+    }
+  }
 }
 
 await rm(release, { recursive: true, force: true });
@@ -450,12 +456,13 @@ const required = [
     absolutePath: join(bundle, relative),
     manifestPath: relative,
   })),
-  // The notices Electron's and Chromium's licenses require: beside the
-  // executable on Windows (Electron's own layout), in Contents/Resources on macOS.
-  ...ELECTRON_NOTICE_FILES.map((notice) => {
-    const absolutePath = join(windows ? bundle : resources, notice);
+  // The notices Electron's and Chromium's licenses require, in
+  // Contents/Resources on macOS. (Windows keeps them beside the executable,
+  // where manifest paths cannot point: assembleWindowsBundle checks them.)
+  ...(windows ? [] : ELECTRON_NOTICE_FILES.map((notice) => {
+    const absolutePath = join(resources, notice);
     return { absolutePath, manifestPath: bundlePath(absolutePath) };
-  }),
+  })),
   ...[
     "shared/agent-branch.mjs",
     "shared/api-agent-tools.mjs",
