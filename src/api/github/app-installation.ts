@@ -104,7 +104,7 @@ export function resolveGitHubAppRoomIntegrationStatus(
   return {
     configured: input.configured,
     install_url_available: Boolean(input.configured && input.appSlug),
-    setup_manifest_available: !input.configured && (input.isPlatformAdmin ?? true),
+    setup_manifest_available: !input.configured && input.isPlatformAdmin === true,
     app_slug: input.appSlug?.trim() || null,
     setup_url: input.setupUrl?.trim() || null,
     connected,

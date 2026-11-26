@@ -294,6 +294,8 @@ Optional — **PDF text for agents** (`read_attachment` on a PDF): the server re
 
 Optional — **long room long-polls** (multi-hour `wait_for_messages` / `GET …/messages/poll`): set the **same** `LETAGENTS_POLL_MAX_MS` on **both** the API process and any MCP client you run from source (milliseconds; default `180000`).
 
+Optional — **set up the GitHub App from a room**: set `LETAGENTS_PLATFORM_ADMINS` to a comma-separated list of GitHub logins (for example `LETAGENTS_PLATFORM_ADMINS=octocat,hubot`). Only these server admins can create or replace the server's GitHub App from a room's GitHub panel. When the list is empty, nobody can; set the `GITHUB_APP_*` and `GITHUB_WEBHOOK_SECRET` variables instead.
+
 The API now uses PostgreSQL with Drizzle ORM. `DB_URL` must be set before starting the server or running migrations.
 
 Useful database commands:
