@@ -1462,6 +1462,7 @@ test("a passive relaunched desktop records when its negotiated daemon abruptly d
       stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath,
       daemonScriptPath,
       lifecycleLogPath,
+      respawn: { enabled: false }, // this test records the loss itself
       inspectDaemonProcess: () => inspected,
       spawnDaemon: () => { throw new Error("an existing daemon must not be replaced"); },
     });
@@ -1598,6 +1599,73 @@ test("a crash loop backs off and then stops respawning", async () => {
     assert.match(recorded, /Restarting the service in 40 ms/);
     assert.match(recorded, /Restarting the service in 80 ms/);
     assert.match(recorded, /Restarting the service in 160 ms/);
+  } finally { await h.cleanup(); }
+});
+
+test("an attached daemon that dies unexpectedly is respawned; an intentional retire is not", async () => {
+  for (const intentional of [false, true]) {
+    const env = await fixture();
+    const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+    const wires: Array<Awaited<ReturnType<typeof startWireDaemon>>> = [];
+    let alive = true;
+    let spawns = 0;
+    let retire: () => void = () => undefined;
+    const attached = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 25, () => retire());
+    wires.push(attached);
+    const client = new SupervisorDaemonClient({
+      stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath, daemonScriptPath,
+      lifecycleLogPath: join(env.root, "daemon-lifecycle.jsonl"),
+      inspectDaemonProcess: () => alive ? fakeDaemonProcessIdentity() : null,
+      spawnDaemon: () => {
+        spawns++;
+        const child = new EventEmitter() as ChildProcess;
+        Object.defineProperty(child, "pid", { value: 901 });
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 26).then((w) => { wires.push(w); });
+        return child;
+      },
+    });
+    try {
+      assert.equal((await client.connectIfRunning())?.generation, 25, "attached, not spawned");
+      assert.equal(spawns, 0);
+      const lose = async () => { alive = false; await closeServer(attached.server, env.socketPath); };
+      if (intentional) {
+        retire = () => { void lose(); };
+        await client.prepareForApplicationUpdate();
+        assert.equal(await client.connectIfRunning(), null); // the watch sees the daemon gone
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        assert.equal(spawns, 0, "a retired attached daemon is not respawned");
+      } else {
+        await lose();
+        const lostAt = Date.now();
+        assert.equal(await client.connectIfRunning(), null); // the state watch notices the closed connection
+        assert.ok(await until(() => spawns === 1, 1_500), "a lost attached daemon is respawned");
+        assert.ok(Date.now() - lostAt < 1_000);
+      }
+    } finally {
+      client.stopAutoRespawn();
+      for (const w of wires) await closeServer(w.server, env.socketPath);
+      if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+      else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+      await env.cleanup();
+    }
+  }
+});
+
+test("a respawn that fails is retried with backoff until the limit", async () => {
+  const h = await respawnHarness({ respawn: { baseDelayMs: 30, maxDelayMs: 120, maxQuickFailures: 3, stableMs: 60_000 } });
+  try {
+    await h.client.ensureRunning();
+    h.serve = false;
+    const real = (h.client as unknown as { spawnDaemon: unknown });
+    let attempts = 0;
+    real.spawnDaemon = () => { attempts++; throw new Error("spawn failed"); };
+    h.childExit(0);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    assert.equal(attempts, 3, "each failed respawn schedules the next one, up to the limit");
+    const recorded = await readFile(h.lifecycleLogPath, "utf8");
+    assert.match(recorded, /"event":"daemon_respawn_gave_up"/);
+    for (const ms of [30, 60, 120]) assert.match(recorded, new RegExp(`Restarting the service in ${ms} ms`));
   } finally { await h.cleanup(); }
 });
 

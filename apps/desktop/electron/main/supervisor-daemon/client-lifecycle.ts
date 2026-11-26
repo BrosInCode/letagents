@@ -152,6 +152,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
   /** Restore the current app's daemon only when Squirrel failed to take over. */
   resumeAfterApplicationUpdateFailure(): Promise<DesktopSupervisorDaemonStatus> {
     this.applicationUpdatePrepared = false;
+    if (this.attachedDaemonObservation) this.attachedDaemonObservation.intentionalExit = false;
     this.invalidateReadyStatus();
     return this.ensureRunning();
   }
@@ -337,6 +338,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
   /** The app is about to end this child on purpose; its exit is not a crash. */
   private markOwnedDaemonRetiring(): void {
     if (this.ownedDaemon) this.ownedDaemon.intentionalExit = true;
+    if (this.attachedDaemonObservation) this.attachedDaemonObservation.intentionalExit = true;
     this.cancelRespawn();
   }
 
@@ -381,7 +383,8 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     this.respawnTimer = setTimeout(() => {
       this.respawnTimer = null;
       if (this.respawnBlocked() || this.ownedDaemon) return;
-      this.ensureRunning().catch(() => undefined);
+      // A respawn that fails (for example the spawn throws) is one more quick failure.
+      this.ensureRunning().catch(() => this.scheduleRespawn(Date.now(), exitedPid));
     }, delay);
     this.respawnTimer.unref?.();
   }
@@ -403,6 +406,11 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
       // Approval reads must reach this live owner even when ensureOperation is
       // waiting for an upgrade. Joining that promise would deadlock the turn.
       await this.call("daemon.prepare_handoff", undefined, { version: daemonVersion });
+    } catch (error) {
+      // The daemon was not retired, so a later loss of it is a crash again.
+      if (this.ownedDaemon) this.ownedDaemon.intentionalExit = false;
+      if (this.attachedDaemonObservation) this.attachedDaemonObservation.intentionalExit = false;
+      throw error;
     } finally {
       this.drainingCurrentDaemon = false;
     }
@@ -503,6 +511,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     const observation = {
       identity: { ...inspected, expectedScriptPath: this.daemonScriptPath },
       generation: status.generation,
+      observedAt: Date.now(),
     };
     this.attachedDaemonObservation = observation;
     this.maintenanceTarget = observation.identity;
@@ -523,6 +532,10 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
         ? current.reason
         : `Observed daemon became ${current.kind}.`,
     });
+    // An attached daemon has no child handle, so this confirmed loss (found by
+    // the state watch or any caller) is the crash signal. A start already in
+    // progress will spawn the replacement itself.
+    if (!observation.intentionalExit && !this.ensureOperation) this.scheduleRespawn(observation.observedAt, observation.identity.pid);
   }
 
   private stopAttachedDaemonObservation(): void {

@@ -122,6 +122,9 @@ export abstract class SupervisorDaemonClientBase {
   protected attachedDaemonObservation: {
     identity: DaemonProcessIdentity;
     generation: number;
+    observedAt: number;
+    /** Set when the app itself is retiring this daemon; its loss is not a crash. */
+    intentionalExit?: boolean;
   } | null = null;
   // Caller deadlines do not end child custody. Retain the launch and its
   // readiness fences until process exit or a completed negotiated handoff.
