@@ -1,7 +1,7 @@
 <template>
   <section ref="root" class="welcome" :data-skipped="skipped" :data-fallback="fallback" :style="markStyle"
     aria-labelledby="welcome-title" @pointerdown="skip" @keydown="skip" @pointermove="onPointerMove">
-    <canvas v-if="!fallback" :key="runId" ref="sceneCanvas" class="welcome-scene" aria-hidden="true" />
+    <canvas v-if="!fallback" :key="runId" ref="sceneCanvas" class="welcome-scene" :data-veiled="veiled" aria-hidden="true" />
     <div v-else class="welcome-mark" aria-hidden="true">
       <svg viewBox="-12 -12 152 152">
         <defs>
@@ -84,6 +84,12 @@ const skipped = ref(false)
 const runId = ref(0)
 const grain = ref('')
 const markStyle = ref<Record<string, string>>({})
+// Hidden while a whole opening is simulated in slices (reduced motion, a rebuild), then faded in.
+const veiled = ref(false)
+// A device that cannot hold the opening near 60 fps gets no extra ink work (stirring, pulses).
+let struggling = false
+const frameTimes: number[] = []
+let lastFrame = 0
 let reduced = false
 let scene: InkScene | null = null
 let frame = 0
@@ -94,18 +100,34 @@ let observer: ResizeObserver | undefined
 // The grids are sized to the canvas shape when the scene is made. A later change of shape
 // would stretch the ink (a wider window makes a fat mark), so the scene is made again.
 let sceneShape = 0
+let sceneWidth = 0
 let rebuildTimer: ReturnType<typeof setTimeout> | undefined
 
-function elapsed() { return scene && startedAt ? Math.min((performance.now() - startedAt) / 1000, scene.end) : 0 }
-function openingDone() { return Boolean(scene && startedAt && (performance.now() - startedAt) / 1000 >= scene.end) }
+function openingTime(now = performance.now()) {
+  if (!scene) return 0
+  if (reduced) return scene.end
+  return startedAt ? Math.min((now - startedAt) / 1000, scene.end) : 0
+}
 
+// One loop drives the opening. It ends once the opening has been simulated to its end;
+// after that the page draws only when the visitor stirs the ink or presses a download.
 function tick(now: number) {
   if (!scene) return
   // The clock starts on the first drawn frame, as CSS animations do.
   if (!startedAt) startedAt = now
-  const t = (now - startedAt) / 1000
-  scene.render(Math.min(t, scene.end))
-  if (t < scene.end) frame = requestAnimationFrame(tick)
+  const t = openingTime(now)
+  const caughtUp = scene.render(t)
+  if (caughtUp && !veiled.value && t < scene.end && lastFrame) frameTimes.push(now - lastFrame)
+  lastFrame = now
+  if (caughtUp && veiled.value) veiled.value = false
+  if (t < scene.end || !caughtUp) { frame = requestAnimationFrame(tick); return }
+  const sorted = frameTimes.slice().sort((a, b) => a - b)
+  struggling = sorted.length > 30 && sorted[Math.floor(sorted.length / 2)] > 24
+}
+function runOpening() {
+  cancelAnimationFrame(frame)
+  lastFrame = 0
+  frame = requestAnimationFrame(tick)
 }
 
 // The mark forms in the free space between the navigation bar and the copy.
@@ -126,7 +148,7 @@ async function play() {
   cancelAnimationFrame(frame)
   cancelAnimationFrame(liveFrame)
   liveRunning = false
-  scene?.dispose()
+  scene?.dispose(true)
   scene = null
   runId.value++
   await nextTick()
@@ -137,8 +159,9 @@ async function play() {
   canvas.addEventListener('webglcontextlost', onContextLost, { once: true })
   observer?.observe(canvas)
   startedAt = 0
-  if (reduced) { scene.render(scene.end); return }
-  frame = requestAnimationFrame(tick)
+  // Reduced motion: no opening to watch; the formed mark fades in once it is ready.
+  veiled.value = reduced
+  runOpening()
 }
 
 function canvasShape(canvas: HTMLCanvasElement) {
@@ -156,32 +179,35 @@ function build(canvas: HTMLCanvasElement): InkScene | null {
     console.error(error)
   }
   sceneShape = canvasShape(canvas)
+  sceneWidth = canvas.getBoundingClientRect().width
   return made
 }
 
-// Make the scene again for the new shape, at the same moment: the fixed time step
-// draws the same picture for the same time, so the opening carries on where it was.
+// Make the scene again for the new shape. The fixed time step draws the same picture for the
+// same time, so it is simulated again (in slices, hidden) up to the same moment.
 function rebuild() {
   const canvas = sceneCanvas.value
   if (!scene || !canvas) return
-  const t = reduced ? scene.end : startedAt ? Math.min((performance.now() - startedAt) / 1000, scene.end) : 0
   cancelAnimationFrame(liveFrame)
   liveRunning = false
   scene.dispose()
-  scene = null
-  const made = build(canvas)
-  scene = made
-  if (!made) { cancelAnimationFrame(frame); fallback.value = true; return }
-  made.render(t)
+  scene = build(canvas)
+  if (!scene) { cancelAnimationFrame(frame); fallback.value = true; return }
+  veiled.value = true
+  runOpening()
 }
 
 function onResize() {
   const canvas = sceneCanvas.value
   if (!scene || !canvas) return
   scene.resize()
-  if (startedAt || reduced) scene.render(reduced ? scene.end : elapsed())
-  const shape = canvasShape(canvas)
-  if (!shape || !sceneShape || Math.abs(shape / sceneShape - 1) < .02) return
+  const box = canvas.getBoundingClientRect()
+  if (!box.height || !sceneShape || !sceneWidth) return
+  const shapeChange = Math.abs(box.width / box.height / sceneShape - 1)
+  const widthChange = Math.abs(box.width / sceneWidth - 1)
+  // A phone's address bar changes only the height, by a little: a slight stretch is not worth
+  // simulating the whole opening again. A new width (a window resized, a phone turned) is.
+  if (!(widthChange > .02 && shapeChange > .02) && shapeChange < .15) return
   clearTimeout(rebuildTimer)
   rebuildTimer = setTimeout(rebuild, 180)
 }
@@ -201,9 +227,9 @@ function skip(event: Event) {
   const now = performance.now()
   if (startedAt && (now - startedAt) / 1000 >= scene.end) return
   skipped.value = true
-  cancelAnimationFrame(frame)
+  // Catch up to the formed mark in slices: a quick fast-forward, never one long GPU stall.
   startedAt = now - scene.end * 1000
-  scene.render(scene.end)
+  runOpening()
 }
 
 function liveLoop(now: number) {
@@ -220,7 +246,7 @@ function wake() {
 // The visitor is the warm ink: a mouse moving over the water leaves a trail. Touch scrolls instead.
 let lastPointer: { x: number; y: number } | null = null
 function onPointerMove(event: PointerEvent) {
-  if (!scene || reduced || event.pointerType !== 'mouse' || !openingDone()) return
+  if (!scene || reduced || struggling || event.pointerType !== 'mouse' || !scene.ready()) return
   const box = sceneCanvas.value?.getBoundingClientRect()
   if (!box?.width) return
   const x = (event.clientX - box.left) / box.width
@@ -235,12 +261,11 @@ function onPointerMove(event: PointerEvent) {
 }
 
 function onDownload(event: MouseEvent) {
-  if (!scene || reduced) return
+  if (!scene || reduced || struggling || !scene.ready()) return
   // The agent answers the press: a ring from the dot, and mint ink streams toward the button.
   const box = sceneCanvas.value?.getBoundingClientRect()
   const button = (event.currentTarget as HTMLElement).getBoundingClientRect()
   if (!box?.width) return
-  cancelAnimationFrame(frame)
   scene.pulse((button.left + button.width / 2 - box.left) / box.width, 1 - (button.top - box.top) / box.height)
   cancelAnimationFrame(liveFrame)
   liveRunning = false
@@ -278,7 +303,8 @@ onUnmounted(() => {
   cancelAnimationFrame(frame)
   cancelAnimationFrame(liveFrame)
   observer?.disconnect()
-  scene?.dispose()
+  // Leaving the landing view: give the WebGL context back now instead of at garbage collection.
+  scene?.dispose(true)
   scene = null
 })
 </script>
@@ -308,7 +334,9 @@ onUnmounted(() => {
 }
 .welcome-grain { position: absolute; inset: 0; z-index: -1; opacity: .045; pointer-events: none; }
 /* The shader is the whole page, behind the type. */
-.welcome-scene { position: absolute; inset: 0; z-index: -3; width: 100%; height: 100%; }
+.welcome-scene { position: absolute; inset: 0; z-index: -3; width: 100%; height: 100%; transition: opacity 450ms ease; }
+/* Hidden at once while the ink is simulated again; it fades back in when ready. */
+.welcome-scene[data-veiled="true"] { opacity: 0; transition: none; }
 .welcome::after {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
   background: radial-gradient(120% 90% at 50% 36%, transparent 50%, rgba(0, 0, 0, .6));

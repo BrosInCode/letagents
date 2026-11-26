@@ -172,9 +172,18 @@ export interface InkSceneOptions {
 }
 export interface InkScene {
   end: number;
-  render(t: number): void;
+  /**
+   * Advance the opening toward `t` seconds and draw. A late start (a skip, a tab that was
+   * hidden, a rebuild) catches up a slice at a time, never all at once: the whole opening is
+   * about 300 steps, which is a long GPU stall on a phone. Returns true once caught up.
+   */
+  render(t: number): boolean;
+  /** True once the opening has been simulated to its end; live modes wait for it. */
+  ready(): boolean;
+  /** Match the canvas to its box and draw again (a size change clears the canvas). */
   resize(): void;
-  dispose(): void;
+  /** Free the GPU resources. `release` also gives the WebGL context back at once. */
+  dispose(release?: boolean): void;
   /** After the opening: keep the fluid alive while sign-in waits, then resolve it. */
   setMode(mode: InkMode): void;
   /** Advance the live mode to wall-clock `now` (ms). Returns false once the mode has come to rest. */
@@ -400,13 +409,19 @@ export function createInkScene(canvas: HTMLCanvasElement, options: InkSceneOptio
   }
 
   let done = 0;
+  const total = Math.floor(INK_END / STEP);
+  // Steps per frame: a little ahead of real time while playing, a bounded slice when behind.
+  const PLAY_BUDGET = 4, CATCH_UP_BUDGET = options.light ? 6 : 10;
   function render(t: number) {
     const wanted = Math.floor(Math.min(t, INK_END) / STEP);
-    // Normal playback keeps up a few steps a frame; a skip or a late start catches up at once.
-    const budget = wanted - done > 30 ? wanted - done : 4;
-    for (let n = 0; n < budget && done < wanted; n++) step(++done * STEP);
-    display();
+    const budget = wanted - done > 30 ? CATCH_UP_BUDGET : PLAY_BUDGET;
+    let stepped = 0;
+    for (; stepped < budget && done < wanted; stepped++) step(++done * STEP);
+    // No new step, no new picture: a 120 Hz screen does not draw the same frame twice.
+    if (stepped) display();
+    return done >= wanted;
   }
+  const ready = () => done >= total;
 
   // ---- Live modes, after the opening.
   let mode: InkMode = "still";
@@ -414,8 +429,8 @@ export function createInkScene(canvas: HTMLCanvasElement, options: InkSceneOptio
   let seed = 11;
   const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
   function setMode(next: InkMode) {
-    // Finish the opening first, so live modes start from the formed mark.
-    if (done < Math.floor(INK_END / STEP)) render(INK_END);
+    // Live modes start from the formed mark; until then a request is ignored.
+    if (!ready()) return;
     mode = next;
     modeStart = 0;
     modeSteps = 0;
@@ -523,14 +538,14 @@ export function createInkScene(canvas: HTMLCanvasElement, options: InkSceneOptio
   let lastStir = 0;
   let pulseTo: [number, number] = [.5, .2];
   function stir(x: number, y: number, dx: number, dy: number) {
-    if (mode === "success") return;
+    if (mode === "success" || !ready()) return;
     if (mode !== "stir") setMode("stir");
     stirs.push({ x, y, dx, dy });
     if (stirs.length > 8) stirs.shift();
     lastStir = modeStart ? (performance.now() - modeStart) / 1000 : 0;
   }
   function pulse(x: number, y: number) {
-    if (mode === "success") return;
+    if (mode === "success" || !ready()) return;
     pulseTo = [x, y];
     setMode("pulse");
   }
@@ -542,8 +557,9 @@ export function createInkScene(canvas: HTMLCanvasElement, options: InkSceneOptio
     const rate = mode === "simmer" ? 30 : 60;
     const wanted = Math.floor(lt * rate);
     let going = true;
-    for (let n = 0; n < 3 && modeSteps < wanted; n++) { modeSteps++; going = liveStep(modeSteps / rate); }
-    display();
+    let stepped = 0;
+    for (; stepped < 3 && modeSteps < wanted; stepped++) { modeSteps++; going = liveStep(modeSteps / rate); }
+    if (stepped) display();
     if (!going) mode = "still";
     return going;
   }
@@ -551,9 +567,18 @@ export function createInkScene(canvas: HTMLCanvasElement, options: InkSceneOptio
   function resize() {
     const rect = canvas.getBoundingClientRect();
     const ratio = Math.min(devicePixelRatio || 1, options.light ? 1.5 : 2) * .75;
-    canvas.width = Math.max(1, Math.round(rect.width * ratio));
-    canvas.height = Math.max(1, Math.round(rect.height * ratio));
+    const width = Math.max(1, Math.round(rect.width * ratio)), height = Math.max(1, Math.round(rect.height * ratio));
+    if (canvas.width === width && canvas.height === height) return;
+    canvas.width = width;
+    canvas.height = height;
+    display();
   }
   resize();
-  return { end: INK_END, render, resize, setMode, live, stir, pulse, dispose() { created.forEach(remove => remove()); } };
+  function dispose(release = false) {
+    created.forEach(remove => remove());
+    created.length = 0;
+    // The canvas leaves the page with the landing view; free its GPU memory now, not at GC.
+    if (release) gl!.getExtension("WEBGL_lose_context")?.loseContext();
+  }
+  return { end: INK_END, render, ready, resize, setMode, live, stir, pulse, dispose };
 }
