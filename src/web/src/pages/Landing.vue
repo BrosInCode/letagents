@@ -24,13 +24,7 @@
       </div>
     </section>
 
-    <HeroSection :theme="theme" />
-    <SymbiosisSection />
-    <SetupSection />
-    <ComputeLendingSection />
-    <SwarmOrchestrationSection />
-    <RoomEntrySection />
-    <FeaturesSection />
+    <InkWelcome />
   </div>
 </template>
 
@@ -38,15 +32,7 @@
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
-import HeroSection from '@/components/landing/HeroSection.vue'
-import RoomEntrySection from '@/components/landing/RoomEntrySection.vue'
-import SetupSection from '@/components/landing/SetupSection.vue'
-import FeaturesSection from '@/components/landing/FeaturesSection.vue'
-import SymbiosisSection from '@/components/landing/SymbiosisSection.vue'
-import ComputeLendingSection from '@/components/landing/ComputeLendingSection.vue'
-import SwarmOrchestrationSection from '@/components/landing/SwarmOrchestrationSection.vue'
-
-withDefaults(defineProps<{ theme?: 'light' | 'dark' }>(), { theme: 'dark' })
+import InkWelcome from '@/components/landing/InkWelcome.vue'
 
 const auth = useAuth()
 const route = useRoute()
@@ -109,25 +95,28 @@ function retryRepoRoom(room: string) {
 
 <style scoped>
 .landing {
-  --text-tertiary: var(--text-secondary);
-  --text-muted: var(--text-secondary);
-  min-height: 100vh;
-  min-height: 100svh;
-}
-
-.landing > :deep(section:not(.hero)) {
   position: relative;
-  z-index: 2;
 }
 
+/* A repo-room sign-in bounce sits over the welcome screen, under the navigation bar. */
 .repo-access-banner {
+  position: absolute;
+  z-index: 3;
+  top: calc(92px + env(safe-area-inset-top, 0px));
+  left: 50%;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
-  max-width: var(--max-width);
-  margin: 0 auto;
-  padding: calc(112px + env(safe-area-inset-top, 0px)) 40px 0;
+  width: min(var(--max-width), calc(100% - 40px));
+  box-sizing: border-box;
+  transform: translateX(-50%);
+  padding: 20px 24px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  background: rgba(14, 15, 14, 0.86);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 
 .repo-access-copy {
@@ -184,7 +173,8 @@ function retryRepoRoom(room: string) {
 @media (max-width: 820px) {
   .repo-access-banner {
     flex-direction: column;
-    padding: calc(96px + env(safe-area-inset-top, 0px)) 20px 0;
+    top: calc(76px + env(safe-area-inset-top, 0px));
+    padding: 16px 18px;
   }
 }
 </style>
