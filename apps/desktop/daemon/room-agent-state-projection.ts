@@ -13,6 +13,7 @@ export type RoomAgentLiveHandle = {
 };
 
 /** What an owner reads while the daemon is still going to get the agent past a gap in its record by itself. */
+export const CONFIGURATION_RESTART_DETAIL = "The agent is restarting to apply its new settings. Messages wait until it is ready.";
 export const RECORD_RESTART_PENDING_DETAIL = "Part of this agent's activity record is missing. LetAgents restarts the agent when it is idle and continues with a new record; messages wait until then.";
 
 export type RoomAgentIngressHealth = {
@@ -43,6 +44,11 @@ export type RoomAgentStateProjectionInput = {
    * does, in words for the owner.
    */
   recordRecovery?: string | null;
+  /**
+   * The owner asked for this restart (new settings): the runtime is being
+   * replaced on purpose. Delivery waits like any start still being verified.
+   */
+  configurationRestarting?: boolean;
   ingressHealth: RoomAgentIngressHealth | null;
   continuationRepair: Pick<ProviderContinuationRepair, "inbox_item_id" | "phase"> | null;
   receipts: readonly SupervisedInboxReceiptProjection[];
@@ -130,16 +136,24 @@ export function projectRoomAgentManifestEntry(
   const blocked = receipts.find((receipt) => receipt.receipt_state === "blocked") ?? null;
   const hasCurrentBinding = bindingMatchesCurrentGeneration;
   const waitingForDesktopGrant = !currentHostGrantAvailable;
-  const admissionHeld = entry.desired_state === "running"
-    && ["starting", "recovering", "working", "idle"].includes(entry.observed_state)
-    && (input.lifecycleAdmission === "pending" || input.lifecycleAdmission === "unavailable");
+  const runningStates = ["starting", "recovering", "working", "idle"];
+  // The owner asked for this restart: it is progress, whatever the old or new runtime's evidence says.
+  const settingsRestart = input.configurationRestarting === true
+    && entry.desired_state === "running"
+    && runningStates.includes(entry.observed_state)
+    && input.lifecycleAdmission !== "ready";
+  const admissionHeld = settingsRestart || (entry.desired_state === "running"
+    && runningStates.includes(entry.observed_state)
+    && (input.lifecycleAdmission === "pending" || input.lifecycleAdmission === "unavailable"));
   // A record the daemon is about to get past by itself holds delivery like a
   // start that is still being verified: it is not yet a matter for the owner.
-  const admission = input.lifecycleAdmission === "unavailable" && input.recordRecovery === null ? "pending" : input.lifecycleAdmission;
-  const admissionDetail = input.lifecycleAdmission !== "unavailable"
-    ? "Waiting for verified agent readiness evidence before delivery can start."
-    : input.recordRecovery === null ? RECORD_RESTART_PENDING_DETAIL
-      : input.recordRecovery ?? "The agent's readiness evidence is unavailable. Delivery is blocked until recovery is verified.";
+  const admission = settingsRestart ? "pending"
+    : input.lifecycleAdmission === "unavailable" && input.recordRecovery === null ? "pending" : input.lifecycleAdmission;
+  const admissionDetail = settingsRestart ? CONFIGURATION_RESTART_DETAIL
+    : input.lifecycleAdmission !== "unavailable"
+      ? "Waiting for verified agent readiness evidence before delivery can start."
+      : input.recordRecovery === null ? RECORD_RESTART_PENDING_DETAIL
+        : input.recordRecovery ?? "The agent's readiness evidence is unavailable. Delivery is blocked until recovery is verified.";
   const inbox = activeContinuationRepair
       ? {
           state: "restoring_conversation" as const,

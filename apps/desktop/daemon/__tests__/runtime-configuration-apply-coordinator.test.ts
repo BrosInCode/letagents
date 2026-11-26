@@ -18,6 +18,7 @@ import {
   EXIT_SETTLEMENT_BOUNDS,
   ProviderTerminalCoordinator,
   type ProviderTerminalPorts,
+  CONFIGURATION_RESTART_GRACE_MS,
 } from "../provider-terminal-coordinator.js";
 import {
   RuntimeConfigurationApplyCoordinator,
@@ -496,6 +497,62 @@ test("intentional replacement classifies an onExit/stop-result race exactly once
   }]);
   assert.equal(convergenceRequests, 0,
     "the apply owner releases lifecycle exclusion before requesting successor convergence");
+});
+
+test("a restart for new settings is shown as progress only for a bounded time, and never hides a later failure", async () => {
+  const liveHandles = new Map([["agent-1", handle]]);
+  const entry = manifestEntry();
+  let now = Date.parse("2026-09-02T00:00:00.000Z");
+  const coordinator = new ProviderTerminalCoordinator({
+    authority: terminalAuthority,
+    settleRuntimeApprovals: async () => {},
+    currentDaemonGeneration: () => 7,
+    nowMs: () => now,
+    liveHandles,
+    manifest: { getEntry: async () => entry, load: async () => ({ entries: [entry] }) },
+    durability: {
+      getAttempt: async () => ({ execution_generations: [{
+        execution_generation_id: "generation-1", actor: "daemon-provider", generation: 7, terminal: null }] }) as never,
+      recordTerminal: async () => ({}) as never,
+      releaseTerminalExecutionFence: async () => {},
+    },
+    runtimeCustody: { deletePendingResumeBinding: () => {} },
+    streams: {
+      remove: () => liveHandles.delete("agent-1"),
+      isLatestInstallation: () => true,
+    },
+    delivery: { start: async () => {} },
+    serializeEntry: async (_entryId, operation) => operation(),
+    serializeManifest: async operation => operation(),
+    transitionOnce: async () => {},
+    requestConvergence: () => {},
+    diagnostic: () => {},
+  });
+  const view = (observed_state: string) => ({ id: "agent-1", observed_state });
+  const replace = async () => {
+    const own = { ...installation, nonce: Symbol("installation"), handle: { ...handle } };
+    liveHandles.set("agent-1", own.handle);
+    await coordinator.replaceConfiguration(own, async () => {
+      await coordinator.handleTerminal(own, terminal);
+      return terminal;
+    });
+  };
+  assert.equal(coordinator.configurationRestarting(view("recovering")), false, "no restart was asked for");
+  await replace();
+  now += 1_000;
+  assert.equal(coordinator.configurationRestarting(view("recovering")), true, "within the bound it is progress");
+  now += CONFIGURATION_RESTART_GRACE_MS;
+  assert.equal(coordinator.configurationRestarting(view("recovering")), false, "a resume that hangs shows the real state");
+
+  now += 3_600_000;
+  await replace();
+  now += CONFIGURATION_RESTART_GRACE_MS + 1;
+  assert.equal(coordinator.configurationRestarting(view("recovering")), false,
+    "nothing read the record in between: a later crash is still not hidden by the old restart");
+  await replace();
+  assert.equal(coordinator.configurationRestarting(view("idle")), false, "the new runtime took over: the restart is over");
+  now += 1_000;
+  assert.equal(coordinator.configurationRestarting(view("recovering")), false, "a crash after the restart is a real failure");
 });
 
 for (const ending of ["a crash", "a planned replacement", "a settlement that loses its installation"] as const) test(`an entry reports that its exit is being settled until ${ending} is recorded, and a pass that was turned away is converged again`, async () => {

@@ -53,6 +53,8 @@ export type DaemonReadModelPorts = {
    * by itself, or why it now waits for its owner. Undefined otherwise.
    */
   recordRecovery?(entry: DaemonManifestEntry): string | null | undefined;
+  /** Whether the entry's runtime is being replaced on purpose to apply its settings. */
+  configurationRestarting?(entry: DaemonManifestEntry): boolean;
   manifest: {
     pendingRuntimeRecovery(agentId: string): Promise<import("./runtime-recovery-journal.js").RuntimeRecoveryRecord | null>;
     load(): Promise<{ entries: DaemonManifestEntry[] }>;
@@ -254,6 +256,7 @@ export class DaemonReadModel {
       liveHandle: liveHandle ?? null,
       lifecycleAdmission: this.ports.deliveryAdmission(entry),
       recordRecovery: this.ports.recordRecovery?.(entry),
+      configurationRestarting: this.ports.configurationRestarting?.(entry) ?? false,
     };
     const activeTurn = hasExactRoomAgentDeliveryOwner(authorityFacts)
       && binding

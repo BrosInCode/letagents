@@ -347,9 +347,16 @@ test("a planned configuration replacement never shows the agent as failed while 
     await agent.turnsRecorded(1);
     await new Promise((resolve) => setTimeout(resolve, 500));
     const seen = new Set<string>();
+    const needsOwner = new Set<string>();
     let sampling = true;
     const sampler = (async () => {
-      while (sampling) { seen.add((await agent.view()).observed_state); await new Promise((resolve) => setTimeout(resolve, 2)); }
+      while (sampling) {
+        const view = await agent.view();
+        seen.add(view.observed_state);
+        if (view.condition !== "none") needsOwner.add(`condition ${view.condition}`);
+        if (view.room_agent_state?.inbox.state === "blocked") needsOwner.add("inbox blocked");
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
     })();
     const off = await agent.setOwnerSetup(false);
     assert.equal(off.ok, true, off.error);
@@ -358,6 +365,7 @@ test("a planned configuration replacement never shows the agent as failed while 
     sampling = false;
     await sampler;
     assert.ok(!seen.has("failed"), `the agent was never shown as failed (saw ${[...seen].join(", ")})`);
+    assert.deepEqual([...needsOwner], [], "the restart the owner asked for never asks the owner to act");
     assert.deepEqual((await agent.transitions()).filter((line) => line.from === "failed" || line.to === "failed"), []);
   } finally {
     await agent.cleanup();
