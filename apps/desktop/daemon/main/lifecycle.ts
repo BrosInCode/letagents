@@ -84,6 +84,7 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
       this.executionCapture = ExecutionCaptureCoordinator.attach(database, this.providerPort, {
         currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
         assertWriteFence: writeFence,
+        configurationReplacementPlanned: (agentId) => this.providerTerminals.configurationReplacementPlanned(agentId),
         changed: (agentId) => {
           this.roomWorkPublisher?.changed(agentId);
           this.providerStreams.typedLifecycleAdmissionChanged(agentId);

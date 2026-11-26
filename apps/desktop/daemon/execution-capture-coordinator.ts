@@ -27,6 +27,8 @@ type CaptureOptions = {
   diagnostic(agentId: string, code: CaptureCode): void;
   /** Synchronous generation fence check run inside every write transaction before COMMIT. */
   assertWriteFence?(): void;
+  /** The agent's runtime is being stopped on purpose to apply its settings. */
+  configurationReplacementPlanned?(agentId: string): boolean;
   /** This agent's record stops here for the runtime it has: a gap, a full record, or a fact the record refuses. */
   recordStopped?(agentId: string): void;
   changed?(agentId: string): void;
@@ -89,7 +91,10 @@ export class ExecutionCaptureCoordinator {
   }
 
   constructor(private readonly database: DatabaseSync, private readonly options: CaptureOptions) {
-    this.store = new ExecutionShadowStore(database, { assertWriteFence: options.assertWriteFence });
+    this.store = new ExecutionShadowStore(database, {
+      assertWriteFence: options.assertWriteFence,
+      configurationReplacementPlanned: options.configurationReplacementPlanned,
+    });
   }
 
   /** Discard queued callbacks only after their exact dead runtime was archived. */

@@ -43,6 +43,12 @@ export type ShadowIngestInstallation = {
 export type ExecutionShadowStoreOptions = {
   /** Synchronous generation fence check run inside every write transaction before COMMIT. */
   assertWriteFence?: () => void;
+  /**
+   * True while the daemon is stopping this agent's runtime on purpose to apply
+   * its settings. The exit of that runtime is the planned replacement, not a
+   * failure, so it must not project the agent as failed.
+   */
+  configurationReplacementPlanned?: (agentId: string) => boolean;
 };
 export type LifecycleProjectionOutcome =
   | { status: "applied"; observedState: ObservedState }
@@ -964,6 +970,8 @@ export class ExecutionShadowStore {
     const durableBirth = manifestRuntimeId === observerRuntimeGenerationId
       && agent.provider_execution_generation_id === observerExecutionGenerationId;
     const runtimeFailure = effectKind === "manifest_failed";
+    // The terminal coordinator records the planned exit as recovering.
+    if (runtimeFailure && this.options.configurationReplacementPlanned?.(fact.agentId)) return { status: "superseded" };
     const cursorTurnEffect = subjectRuntime.provider === "cursor"
       && fact.domain === "turn" && (fact.state === "terminal" || fact.state === "lost");
     const runtimeReady = effectKind === "manifest_idle"

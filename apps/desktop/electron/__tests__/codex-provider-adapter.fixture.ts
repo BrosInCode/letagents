@@ -1274,6 +1274,9 @@ export async function codexDaemonFixture(options: {
       },
       workAttemptId,
       /** The causes of the agent's recorded state changes, oldest first. */
+      /** The agent's recorded state changes, oldest first. */
+      transitions: async () => (await readFile(paths.auditPath, "utf8")).split("\n").filter(Boolean)
+        .map((line) => JSON.parse(line) as { entry_id?: string; from?: string; to?: string; cause?: string }).filter((line) => line.entry_id === id),
       transitionCauses: async () => (await readFile(paths.auditPath, "utf8")).split("\n").filter(Boolean)
         .map((line) => JSON.parse(line) as { entry_id?: string; cause?: string }).filter((line) => line.entry_id === id).map((line) => line.cause ?? "") };
   } catch (error) {
