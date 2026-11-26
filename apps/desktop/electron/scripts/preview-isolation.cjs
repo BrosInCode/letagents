@@ -1,4 +1,4 @@
-const { lstatSync, mkdirSync, realpathSync } = require("node:fs");
+const { lstatSync, mkdirSync, readlinkSync, realpathSync, symlinkSync } = require("node:fs");
 const { userInfo } = require("node:os");
 const { join } = require("node:path");
 
@@ -38,6 +38,38 @@ function privateDirectory(path) {
   return path;
 }
 
+/**
+ * macOS looks for the login Keychain under $HOME/Library/Keychains. The preview
+ * HOME has none, so `security` and the agy CLI cannot see the owner's
+ * Antigravity sign-in. Link only that one folder to the owner's. Claude and
+ * Codex state stays private (Claude keys its login by CLAUDE_CONFIG_DIR).
+ * Never deletes or replaces anything that already exists.
+ */
+function linkLoginKeychains({ home, ownerHome, platform = process.platform, warn = console.warn }) {
+  if (platform !== "darwin") return "skipped";
+  const target = join(ownerHome, "Library", "Keychains");
+  const link = join(home, "Library", "Keychains");
+  try {
+    let existing;
+    try { existing = lstatSync(link); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+    if (existing) {
+      if (existing.isSymbolicLink() && readlinkSync(link) === target) return "present";
+      warn(`The preview left ${link} unchanged: it is not a link to ${target}.`);
+      return "conflict";
+    }
+    if (!lstatSync(target, { throwIfNoEntry: false })?.isDirectory()) {
+      warn(`The preview did not link the login Keychain: ${target} is not a folder.`);
+      return "missing-target";
+    }
+    privateDirectory(join(home, "Library"));
+    symlinkSync(target, link, "dir");
+    return "created";
+  } catch (error) {
+    warn(`The preview could not link the login Keychain: ${error?.message ?? error}`);
+    return "failed";
+  }
+}
+
 /** Run before importing any desktop module: several create stores on import. */
 function configureIsolatedPreview({ app, profile, env = process.env, realHome = userInfo().homedir, globalObject = globalThis, changeDirectory = process.chdir }) {
   if (!app.isPackaged || profile?.id !== PREVIEW_PROFILE.id
@@ -64,6 +96,8 @@ function configureIsolatedPreview({ app, profile, env = process.env, realHome = 
   for (const child of [".letagents", ".codex", ".claude", ".config", ".cache", ".local", ".local/share"]) {
     privateDirectory(join(home, child));
   }
+
+  linkLoginKeychains({ home, ownerHome });
 
   // Keep executable discovery, not inherited credentials, path overrides,
   // provider sessions, NODE_OPTIONS, or shell startup configuration.
@@ -131,4 +165,4 @@ function configurePreviewSafeStorage({ app, safeStorage, realHome, env = process
   }
 }
 
-module.exports = { PREVIEW_PROFILE, PREVIEW_MARKER, desktopArtifactProfile, configureIsolatedPreview, configurePreviewSafeStorage };
+module.exports = { linkLoginKeychains, PREVIEW_PROFILE, PREVIEW_MARKER, desktopArtifactProfile, configureIsolatedPreview, configurePreviewSafeStorage };
