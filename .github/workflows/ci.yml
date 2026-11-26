@@ -537,6 +537,38 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The NSIS installer on a real Windows: install, update in place, an update
+  # that meets a file in use (exit 2, old version kept), and recovery from an
+  # update that stopped part way (apps/desktop/electron/scripts/
+  # windows-installer.test.mjs). windows-2022, as in desktop-release.yml: the
+  # windows-2025 image (windows-latest) has no NSIS, and windows-2022 has NSIS
+  # 3.10 preinstalled. It installs no npm package: the test uses Node and NSIS
+  # only, and installs a test build with its own names into a temporary folder.
+  windows-installer:
+    needs: dependency-audit
+    if: inputs.purpose != 'room-ack-evaluation'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Keep committed line endings
+        shell: bash
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install, update and recover the Windows installer
+        shell: bash
+        env:
+          LETAGENTS_REQUIRE_INSTALLER_TEST: "1"
+        run: node --test --test-timeout=900000 apps/desktop/electron/scripts/windows-installer.test.mjs
+
   # The desktop app must install, update and run on Windows, with supervised
   # agents off until they are ported. This job type checks and builds it and
   # runs every desktop suite on a Windows runner, split as desktop-tests is
@@ -868,7 +900,7 @@ jobs:
   # this gate runs even after a failure or cancellation, and passes only when
   # every job it waits for succeeded.
   build:
-    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows, process-tree-windows, desktop-tests-windows, desktop-edge-tests-macos, desktop-packaged-smoke]
+    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows, process-tree-windows, windows-installer, desktop-tests-windows, desktop-edge-tests-macos, desktop-packaged-smoke]
     if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
