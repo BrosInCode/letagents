@@ -37,6 +37,7 @@ import {
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
 import { SupervisorDaemonRequestTimeoutError } from "../main/supervisor-daemon/errors.js";
+import type { SupervisorDaemonLifecycleOptions } from "../main/supervisor-daemon/types.js";
 import {
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
@@ -1415,6 +1416,7 @@ test("desktop records the exact exit of a spawned daemon", async () => {
       stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath,
       daemonScriptPath,
       lifecycleLogPath,
+      respawn: { enabled: false }, // this test records the exit itself
       spawnDaemon: () => {
         void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 24)
           .then((started) => { wireServer = started.server; });
@@ -1485,6 +1487,118 @@ test("a passive relaunched desktop records when its negotiated daemon abruptly d
     else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
     await env.cleanup();
   }
+});
+
+/** A scripted daemon: each spawn is a fake child that serves a wire daemon on the shared socket. */
+async function respawnHarness(options: { respawn?: SupervisorDaemonLifecycleOptions["respawn"]; onPrepare?: () => void } = {}) {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const lifecycleLogPath = join(env.root, "daemon-lifecycle.jsonl");
+  const harness = {
+    env, lifecycleLogPath,
+    servers: [] as Server[],
+    children: [] as ChildProcess[],
+    spawnTimes: [] as number[],
+    serve: true,
+    alive: true,
+    childExit: (index: number) => { harness.alive = false; void closeServer(harness.servers[index] ?? null, env.socketPath); harness.children[index]!.emit("exit", null, "SIGKILL"); },
+    client: null as unknown as SupervisorDaemonClient,
+    cleanup: async () => {
+      harness.client.stopAutoRespawn();
+      for (const server of harness.servers) await closeServer(server, env.socketPath);
+      if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+      else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+      await env.cleanup();
+    },
+  };
+  harness.client = new SupervisorDaemonClient({
+    stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath, daemonScriptPath, lifecycleLogPath,
+    respawn: options.respawn,
+    inspectDaemonProcess: () => harness.alive ? fakeDaemonProcessIdentity() : null,
+    spawnDaemon: () => {
+      const child = new EventEmitter() as ChildProcess;
+      Object.defineProperty(child, "pid", { value: 900 + harness.children.length });
+      harness.children.push(child);
+      harness.spawnTimes.push(Date.now());
+      if (harness.serve) {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 10 + harness.children.length, options.onPrepare)
+          .then((started) => { harness.servers.push(started.server); });
+      }
+      return child;
+    },
+  });
+  return harness;
+}
+
+async function until(condition: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return condition();
+}
+
+test("an unexpected exit of the ready daemon respawns it promptly", async () => {
+  const h = await respawnHarness();
+  try {
+    await h.client.ensureRunning();
+    assert.equal(h.children.length, 1);
+    const exitedAt = Date.now();
+    h.childExit(0);
+    assert.ok(await until(() => h.children.length === 2, 1_500), "the daemon starts again without any caller");
+    assert.ok(h.spawnTimes[1]! - exitedAt < 1_000, "the new daemon starts within one second");
+    const recorded = await readFile(h.lifecycleLogPath, "utf8");
+    assert.match(recorded, /"event":"daemon_respawn_scheduled"/);
+  } finally { await h.cleanup(); }
+});
+
+test("an intentional exit during handoff, and an app quit, never respawn the daemon", async () => {
+  let exit: () => void = () => undefined;
+  const h = await respawnHarness({ onPrepare: () => exit() });
+  try {
+    await h.client.ensureRunning();
+    exit = () => h.childExit(0);
+    await h.client.prepareForApplicationUpdate();
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    assert.equal(h.children.length, 1, "a drained daemon is replaced by the next version, not by this client");
+  } finally { await h.cleanup(); }
+
+  const quit = await respawnHarness();
+  try {
+    await quit.client.ensureRunning();
+    quit.client.stopAutoRespawn();
+    quit.childExit(0);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    assert.equal(quit.children.length, 1, "no daemon starts after the app began to quit");
+  } finally { await quit.cleanup(); }
+});
+
+test("a crash loop backs off and then stops respawning", async () => {
+  const h = await respawnHarness({ respawn: { baseDelayMs: 40, maxDelayMs: 160, maxQuickFailures: 3, stableMs: 60_000 } });
+  try {
+    await h.client.ensureRunning();
+    h.childExit(0);
+    assert.ok(await until(() => h.children.length === 2 && h.servers.length === 2, 1_500));
+    await h.client.ensureRunning(); // a respawned daemon counts as a crash only once it served
+    h.childExit(1);
+    assert.ok(await until(() => h.children.length === 3 && h.servers.length === 3, 1_500));
+    await h.client.ensureRunning(); // a respawned daemon counts as a crash only once it served
+    h.childExit(2);
+    assert.ok(await until(() => h.children.length === 4 && h.servers.length === 4, 1_500));
+    await h.client.ensureRunning(); // a respawned daemon counts as a crash only once it served
+    // Delays double: 40, 80, 160 ms between each exit and the next spawn.
+    h.childExit(3);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(h.children.length, 4, "after the failure limit no further daemon starts");
+    const recorded = await readFile(h.lifecycleLogPath, "utf8");
+    assert.match(recorded, /"event":"daemon_respawn_gave_up"/);
+    assert.equal((recorded.match(/"event":"daemon_respawn_scheduled"/g) ?? []).length, 3);
+    assert.match(recorded, /Restarting the service in 40 ms/);
+    assert.match(recorded, /Restarting the service in 80 ms/);
+    assert.match(recorded, /Restarting the service in 160 ms/);
+  } finally { await h.cleanup(); }
 });
 
 test("state-watch retry delay backs off exponentially and remains bounded", () => {
