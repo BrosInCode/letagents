@@ -22,7 +22,8 @@ import { thisComputerLabel } from "./supervised-agents-support";
  *   bootstrap          -> Connecting to <model> (Claude Code only; other
  *                         providers count it as part of their start)
  *   install + bind     -> Joining #room (until the agent is bound and reachable)
- *   first output       -> Reading the room (until the agent's first visible output)
+ *   first output       -> Reading the room (until the agent's first visible output;
+ *                         a restart of an agent that was ready before skips it)
  *
  * Without daemon progress (an older daemon, or after a daemon restart) the
  * stages follow the manifest milestones alone.
@@ -251,7 +252,11 @@ function stageFacts(entry: Entry, progress: DesktopSupervisorLaunchProgress | nu
     startMs: install.startMs,
   });
   // An agent with nothing to say yet has still joined; the room is read by then.
-  const contextDone = joinEndMs != null && (firstOutputMs != null || nowMs - joinEndMs >= READING_MAX_MS);
+  // A restart of an agent that was ready before this launch (a configuration
+  // replacement, a recovery) has no fresh first read to wait for: its ready
+  // stamp is set once, so one older than this launch is the mark of a restart.
+  const restarted = readyMs != null && launchStartMs != null && readyMs < launchStartMs;
+  const contextDone = joinEndMs != null && (firstOutputMs != null || restarted || nowMs - joinEndMs >= READING_MAX_MS);
   set("context", {
     done: contextDone,
     ms: contextDone && firstOutputMs != null ? Math.max(0, firstOutputMs - joinEndMs) : null,
