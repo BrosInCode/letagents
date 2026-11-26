@@ -46,9 +46,7 @@
 
 .landing-theme .navbar::after,
 .landing-theme .nav-link::after,
-.landing-theme .nav-divider,
-.landing-theme .nav-btn-primary,
-.landing-theme .nav-mobile-primary {
+.landing-theme .nav-divider {
   display: none;
 }
 

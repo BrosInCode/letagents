@@ -3,13 +3,6 @@
     <NavbarBrand />
     <NavbarLinks />
 
-    <RouterLink
-      :to="ROOM_ENTRY_LINK.to"
-      class="nav-btn nav-btn-primary nav-btn-sm nav-mobile-primary"
-      @click="closeMobileMenu"
-    >
-      {{ ROOM_ENTRY_LINK.mobileLabel }}
-    </RouterLink>
     <button
       ref="mobileToggle"
       class="nav-mobile-toggle"
@@ -34,7 +27,6 @@ import MenuIcon from '@/components/icons/MenuIcon.vue'
 import NavbarBrand from './navbar/NavbarBrand.vue'
 import NavbarLinks from './navbar/NavbarLinks.vue'
 import NavbarMobilePanel from './navbar/NavbarMobilePanel.vue'
-import { ROOM_ENTRY_LINK } from './navbar/links'
 import { useNavbarState } from './navbar/useNavbarState'
 
 const {

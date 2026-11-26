@@ -14,7 +14,7 @@
       </a>
     </div>
 
-    <div class="nav-mobile-auth">
+    <div v-if="showAuth" class="nav-mobile-auth">
       <NavbarAuthControls mobile @close="$emit('close')" />
     </div>
   </div>
@@ -23,6 +23,9 @@
 <script setup lang="ts">
 import NavbarAuthControls from './NavbarAuthControls.vue'
 import { DOCS_LINK, GITHUB_REPOSITORY_URL } from './links'
+import { useNavbarAuthVisible } from './useNavbarAuthVisible'
+
+const showAuth = useNavbarAuthVisible()
 
 defineEmits<{
   close: []
