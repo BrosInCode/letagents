@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import isolation from "./preview-isolation.cjs";
 
-const { PREVIEW_PROFILE, PREVIEW_MARKER, configureIsolatedPreview, configurePreviewSafeStorage, desktopArtifactProfile } = isolation;
+const { linkLoginKeychains, PREVIEW_PROFILE, PREVIEW_MARKER, configureIsolatedPreview, configurePreviewSafeStorage, desktopArtifactProfile } = isolation;
 const scripts = dirname(fileURLToPath(import.meta.url));
 const desktop = resolve(scripts, "../..");
 const require = createRequire(import.meta.url);
@@ -179,5 +179,62 @@ test("actual preview bootstrap keeps imported storage and child HOME isolated af
     assert.equal(result.daemon.manifestPath, join(previewHome, ".letagents", "daemon-state.sqlite"));
     assert.equal(await readFile(join(home, ".letagents", "local-chat.sqlite"), "utf8"), "installed app sentinel");
     assert.equal((await readFile(result.db)).subarray(0, 15).toString(), "SQLite format 3");
+  } finally { await rm(temporary, { recursive: true, force: true }); }
+});
+
+test("preview links only the login Keychain folder to the owner's, safely", { skip: process.platform === "win32" }, async () => {
+  const temporary = await realpath(await mkdtemp(join(scratchBase, "pv-")));
+  const warnings = [];
+  const warn = (message) => warnings.push(message);
+  try {
+    const ownerHome = join(temporary, "owner");
+    const target = join(ownerHome, "Library", "Keychains");
+    await mkdir(target, { recursive: true });
+    const run = (home) => linkLoginKeychains({ home, ownerHome, platform: "darwin", warn });
+
+    const fresh = join(temporary, "fresh");
+    await mkdir(fresh);
+    assert.equal(run(fresh), "created");
+    assert.equal(await readlink(join(fresh, "Library", "Keychains")), target);
+    assert.equal(run(fresh), "present");
+    assert.deepEqual(warnings, []);
+
+    const otherLink = join(temporary, "other-link");
+    await mkdir(join(otherLink, "Library"), { recursive: true });
+    await mkdir(join(temporary, "elsewhere"));
+    await symlink(join(temporary, "elsewhere"), join(otherLink, "Library", "Keychains"), "dir");
+    assert.equal(run(otherLink), "conflict");
+    assert.equal(await readlink(join(otherLink, "Library", "Keychains")), join(temporary, "elsewhere"));
+
+    const realFolder = join(temporary, "real-folder");
+    await mkdir(join(realFolder, "Library", "Keychains"), { recursive: true });
+    await writeFile(join(realFolder, "Library", "Keychains", "keep.txt"), "user data");
+    assert.equal(run(realFolder), "conflict");
+    assert.equal(await readFile(join(realFolder, "Library", "Keychains", "keep.txt"), "utf8"), "user data");
+    assert.equal(warnings.length, 2);
+
+    const noTarget = join(temporary, "no-target");
+    await mkdir(noTarget);
+    assert.equal(linkLoginKeychains({ home: noTarget, ownerHome: join(temporary, "empty-owner"), platform: "darwin", warn }), "missing-target");
+    await assert.rejects(lstat(join(noTarget, "Library")));
+
+    const linux = join(temporary, "linux");
+    await mkdir(linux);
+    assert.equal(linkLoginKeychains({ home: linux, ownerHome, platform: "linux", warn }), "skipped");
+    await assert.rejects(lstat(join(linux, "Library")));
+  } finally { await rm(temporary, { recursive: true, force: true }); }
+});
+
+test("preview bootstrap links the Keychain folder on macOS only and leaves Codex and Claude homes private", { skip: process.platform !== "darwin" }, async () => {
+  const temporary = await realpath(await mkdtemp(join(scratchBase, "pv-")));
+  try {
+    await mkdir(join(temporary, "Library", "Keychains"), { recursive: true });
+    const result = configureIsolatedPreview({
+      app: { isPackaged: true, setName() {}, setPath() {}, commandLine: { removeSwitch() {} } },
+      profile: PREVIEW_PROFILE, env: { PATH: "/usr/bin" }, realHome: temporary, globalObject: {}, changeDirectory() {},
+    });
+    assert.equal(await readlink(join(result.home, "Library", "Keychains")), join(temporary, "Library", "Keychains"));
+    for (const name of [".codex", ".claude"]) assert.ok((await lstat(join(result.home, name))).isDirectory());
+    assert.equal((await lstat(join(result.home, ".claude"))).isSymbolicLink(), false);
   } finally { await rm(temporary, { recursive: true, force: true }); }
 });
