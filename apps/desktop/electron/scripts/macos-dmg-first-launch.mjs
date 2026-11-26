@@ -33,7 +33,11 @@ import { execFile, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+// Every path this check builds is a macOS path, so it uses POSIX rules on
+// every host (the unit tests also run on Windows). Only the repo root comes
+// from the host.
+import { dirname as hostDirname, resolve as hostResolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path/posix";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -43,7 +47,7 @@ import { validateStapledTicket } from "./notarization-staple-recovery.mjs";
 import { assertDesktopArchitecture, desktopAssetNames } from "./release-metadata.mjs";
 
 const execFileAsync = promisify(execFile);
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const root = hostResolve(hostDirname(fileURLToPath(import.meta.url)), "../..");
 
 export const APP_NAME = "LetAgents.app";
 export const SMOKE_RESULT_MARKER = "LETAGENTS_DESKTOP_SMOKE";
