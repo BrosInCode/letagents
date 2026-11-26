@@ -315,6 +315,28 @@ test("a restart the owner asked for, to apply settings, is progress; the same mi
   assert.notEqual(paused.room_agent_state?.inbox.detail, CONFIGURATION_RESTART_DETAIL);
 });
 
+test("the stopped ingress of a settings apply that has not yet replaced the runtime reads as a restart, not Disconnected", () => {
+  const stopped = { room_id: "room_1", state: "stopped" as const, detail: "Ingress stopped by the supervisor.", execution_generation_id: "generation_1" };
+  const idle = { ...entry, observed_state: "idle" as const };
+  const restarting = projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission: "ready", ingressHealth: stopped,
+    configurationRestarting: true, receipts: [] }));
+  assert.equal(restarting.room_agent_state?.ingress.state, "starting");
+  assert.equal(restarting.room_agent_state?.ingress.detail, CONFIGURATION_RESTART_DETAIL);
+  assert.equal(restarting.room_agent_state?.connection.state, "reconnecting");
+  assert.equal(restarting.condition, "none");
+  assert.equal(agentInspectorOverallState(mapEntry(restarting)), "reconnecting");
+  // Delivery admission is not held when the runtime reports ready.
+  assert.notEqual(restarting.room_agent_state?.inbox.detail, CONFIGURATION_RESTART_DETAIL);
+  // Without a settings apply, a stopped ingress still reads as stopped.
+  const real = projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission: "ready", ingressHealth: stopped, receipts: [] }));
+  assert.equal(real.room_agent_state?.ingress.state, "stopped");
+  assert.equal(real.room_agent_state?.ingress.detail, "Ingress stopped by the supervisor.");
+  // A paused agent is not restarting.
+  const paused = projectRoomAgentManifestEntry(facts({ entry: { ...idle, desired_state: "paused" }, lifecycleAdmission: "ready",
+    ingressHealth: stopped, configurationRestarting: true, receipts: [] }));
+  assert.notEqual(paused.room_agent_state?.ingress.detail, CONFIGURATION_RESTART_DETAIL);
+});
+
 test("rejects a stale binding and derives stale persisted liveness", () => {
   const staleBinding = { ...binding, execution_generation_id: "generation_old" };
   const input = facts({

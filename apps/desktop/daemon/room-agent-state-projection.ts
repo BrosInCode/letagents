@@ -142,6 +142,14 @@ export function projectRoomAgentManifestEntry(
     && entry.desired_state === "running"
     && runningStates.includes(entry.observed_state)
     && input.lifecycleAdmission !== "ready";
+  // Settings apply stops the room ingress before the new runtime is
+  // registered. The old runtime still reports ready, so admission is not
+  // held, but the stopped ingress is part of the restart the owner asked for.
+  const settingsIngressStop = input.configurationRestarting === true
+    && !settingsRestart
+    && entry.desired_state === "running"
+    && runningStates.includes(entry.observed_state)
+    && input.ingressHealth?.state === "stopped";
   const admissionHeld = settingsRestart || (entry.desired_state === "running"
     && runningStates.includes(entry.observed_state)
     && (input.lifecycleAdmission === "pending" || input.lifecycleAdmission === "unavailable"));
@@ -199,7 +207,13 @@ export function projectRoomAgentManifestEntry(
                 detail: null,
               };
   const hasLiveDeliveryOwner = hasExactRoomAgentDeliveryOwner(input);
-  const connection = admissionHeld
+  const connection = settingsIngressStop && hasLiveDeliveryOwner
+    ? {
+        state: "reconnecting" as const,
+        observed_at: entry.native_liveness?.observed_at ?? null,
+        detail: CONFIGURATION_RESTART_DETAIL,
+      }
+    : admissionHeld
     ? {
         state: admission === "pending" ? "reconnecting" as const : "disconnected" as const,
         observed_at: entry.native_liveness?.observed_at ?? null,
@@ -234,7 +248,13 @@ export function projectRoomAgentManifestEntry(
     && ingressHealth.execution_generation_id === entry.provider_ref?.execution_generation_id,
   );
   const hasLiveIngressOwner = Boolean(hasCurrentBinding && credentialAvailable && ingressMatches);
-  const ingress = admissionHeld
+  const ingress = settingsIngressStop && hasLiveIngressOwner
+    ? {
+        state: "starting" as const,
+        observed_at: entry.native_liveness?.observed_at ?? null,
+        detail: CONFIGURATION_RESTART_DETAIL,
+      }
+    : admissionHeld
     ? {
         state: admission === "unavailable" ? "blocked" as const : "starting" as const,
         observed_at: entry.native_liveness?.observed_at ?? null,
