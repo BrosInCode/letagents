@@ -27,7 +27,6 @@
         <span class="line"><span>Humans and agents,</span></span>
         <span class="line line-muted"><span>working as one.</span></span>
       </h1>
-      <p class="welcome-sub reveal">One room for your team and its agents. The same conversation, the same board, the same work.</p>
 
       <div id="download-mac" class="downloads reveal" role="group" aria-label="Download the desktop app">
         <a v-for="(link, index) in downloadLinks" :key="link.href" class="download" :data-primary="index === 0"
@@ -359,20 +358,13 @@ onUnmounted(() => {
 .line > span { display: inline-block; white-space: nowrap; animation: line-up 1.15s var(--reveal) both; }
 .line:first-child > span { animation-delay: 3.15s; }
 .line-muted > span { color: rgba(239, 238, 230, .3); animation-delay: 3.25s; }
-.welcome-sub {
-  max-width: 420px; margin: 18px 0 0; color: var(--ink-2);
-  font: 400 15px/1.55 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.005em;
-  text-wrap: balance;
-}
 .reveal { animation: fade-up 1s var(--reveal) both; }
-.welcome-sub.reveal { animation-delay: 3.4s; }
-.downloads.reveal { animation-delay: 3.5s; }
+.downloads.reveal { animation-delay: 3.45s; }
 .download-meta.reveal { animation-delay: 3.62s; }
 .browser-path.reveal { animation-delay: 3.72s; }
 /* No shader: there is nothing to wait for, so the copy arrives at once. */
 .welcome[data-fallback="true"] .line:first-child > span { animation-delay: .2s; }
 .welcome[data-fallback="true"] .line-muted > span { animation-delay: .3s; }
-.welcome[data-fallback="true"] .welcome-sub.reveal { animation-delay: .42s; }
 .welcome[data-fallback="true"] .downloads.reveal { animation-delay: .52s; }
 .welcome[data-fallback="true"] .download-meta.reveal { animation-delay: .62s; }
 .welcome[data-fallback="true"] .browser-path.reveal { animation-delay: .7s; }
@@ -380,7 +372,7 @@ onUnmounted(() => {
 /* ---- The downloads: the main characters. */
 .downloads {
   display: flex; flex-wrap: wrap; justify-content: center; gap: 12px;
-  margin-top: clamp(26px, 4.4vh, 40px);
+  margin-top: clamp(30px, 5vh, 48px);
   scroll-margin-top: calc(92px + env(safe-area-inset-top, 0px));
 }
 .download {
@@ -462,7 +454,6 @@ onUnmounted(() => {
 
 @media (max-width: 760px) {
   .welcome h1 { font-size: clamp(32px, 9.6vw, 44px); }
-  .welcome-sub { font-size: 14.5px; margin-top: 14px; }
   .downloads { display: grid; grid-template-columns: 1fr 1fr; width: 100%; max-width: 420px; gap: 10px; }
   .download { min-width: 0; height: 56px; padding: 0 14px; gap: 10px; backdrop-filter: none; -webkit-backdrop-filter: none; background-color: rgba(20, 21, 20, .72); }
   .download[data-primary="true"] { grid-column: 1 / -1; min-width: 0; height: 60px; justify-content: center; }

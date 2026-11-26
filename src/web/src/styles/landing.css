@@ -66,13 +66,32 @@
   align-items: center;
 }
 
+/* Every header link has one shape: the same box, centring, type and colour, so the
+   text of Docs, GitHub and Sign In sits on one line. */
 .landing-theme .nav-link,
 .landing-theme .nav-btn-ghost,
 .landing-theme .nav-signout {
-  border-color: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
   background: transparent;
   color: rgba(239, 238, 230, 0.56);
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.005em;
   transition: color 200ms ease;
+}
+
+.landing-theme .nav-btn-ghost svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
 }
 
 @media (hover: hover) and (pointer: fine) {
