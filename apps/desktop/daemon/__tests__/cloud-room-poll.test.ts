@@ -39,12 +39,15 @@ function harness(t: TestContext) {
   return { clock, requests, script, ask, idle };
 }
 
-test("a lane that is not observing yet asks for the floor hold, as every poll did before", async (t) => {
-  const { requests, ask } = harness(t);
+test("a lane that is not observing yet asks for a one-second hold, so its owner is not left on Starting", async (t) => {
+  const { clock, requests, ask, idle } = harness(t);
   await ask({ observing: false });
   await ask({ observing: false });
-  assert.deepEqual(requests.map((request) => request.timeout), [25_000, 25_000]);
-  assert.deepEqual(requests[0], { origin: "https://letagents.test", timeout: 25_000, after: "msg_42", authorization: "Bearer worker-secret" });
+  assert.deepEqual(requests.map((request) => request.timeout), [1_000, 1_000]);
+  assert.deepEqual(requests[0], { origin: "https://letagents.test", timeout: 1_000, after: "msg_42", authorization: "Bearer worker-secret" });
+  assert.equal(clock.now, 2_000, "an idle room answers after the short hold, not after 25 s");
+  // The short answers prove nothing about the path: the first long poll is still the 50 s probe.
+  assert.deepEqual(await idle(1), [50_000]);
 });
 
 test("the idle polls of an observing lane go to 50 s in one step and stay there", async (t) => {
@@ -95,10 +98,10 @@ test("a failure that a 25 s poll would have met too is thrown as before, and the
     && error instanceof Error && error.message === "Supervised room poll failed with HTTP 503.");
   script.push({ openMs: 40, error: new TypeError("fetch failed") });
   await assert.rejects(ask(), /fetch failed/);
-  // The lane's next poll is its confirming one, at the floor.
+  // The lane's next poll is its confirming one, with the short first-answer hold.
   script.push({ openMs: 30_000, status: 502 });
   await assert.rejects(ask({ observing: false }), /HTTP 502/);
-  assert.deepEqual(requests.map((request) => request.timeout), [50_000, 50_000, 25_000], "no failure was asked again");
+  assert.deepEqual(requests.map((request) => request.timeout), [50_000, 50_000, 1_000], "no failure was asked again");
   assert.deepEqual(await idle(1), [50_000], "and no cool-down started");
   // Now 50 s is proven, and an early failure does not take the proof away:
   script.push({ openMs: 3_000, status: 503 });
@@ -193,4 +196,24 @@ test("a local room's poll stays the 25 s request it was, and no hold is kept for
     url: "letagents-local://rooms/rooms/local-room/messages/poll?timeout=25000&after=msg_7",
     authorization: "Bearer worker-secret",
   })));
+});
+
+test("an outage cannot become a 1 s poll loop: the short first-answer hold is paced by the failure backoff", async (t) => {
+  const { clock, requests, script, ask } = harness(t);
+  const { pollErrorBackoffMs } = await import("../supervised-agent-delivery/helpers.js");
+  // The delivery loop, as delivery.ts runs it: a failed poll throws, and the next poll waits pollErrorBackoffMs(failures).
+  let failures = 0;
+  const starts: number[] = [];
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    script.push({ openMs: 50, error: new TypeError("fetch failed") });
+    starts.push(clock.now);
+    await assert.rejects(ask({ observing: false }), /fetch failed/);
+    failures += 1;
+    clock.now += pollErrorBackoffMs(failures);
+  }
+  assert.ok(requests.every((request) => request.timeout === 1_000), "every poll of a lane that never answered is short");
+  const gaps = starts.slice(1).map((start, index) => start - starts[index]!);
+  assert.ok(gaps[0]! >= 250, "the first retry waits the backoff base");
+  assert.ok(gaps.every((gap, index) => index === 0 || gap > gaps[index - 1]!), "and each gap is longer than the one before, up to the cap");
+  assert.equal(pollErrorBackoffMs(40), 30_000, "the cap keeps a long outage at one short poll every 30 s");
 });

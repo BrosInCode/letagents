@@ -21,7 +21,7 @@ import {
 import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
 import { ROOM_HISTORY_TURN_VIEW_LINES, roomHistoryTurnSummary } from "../../../shared/room-history-summary.mjs";
 import type { PeerReceiptResult } from "./queued-peer-deliveries.js";
-import { ROOM_POLL_FLOOR_HOLD_MS, RoomPollHold } from "./room-poll-hold.js";
+import { ROOM_POLL_FIRST_ANSWER_HOLD_MS, ROOM_POLL_FLOOR_HOLD_MS, RoomPollHold } from "./room-poll-hold.js";
 
 /** Exact self-receipt reporting for messages explicitly delivered in another turn. */
 export async function reportGroupedNoReply(input: {
@@ -407,8 +407,8 @@ async function requestRoomPoll(request: typeof roomRequest, input: RoomPollInput
  * longer hold costs on a path that is not healthy is listed at RoomPollHold.
  *
  * A lane that is not observing yet (its first poll, or the first after a
- * failure) asks for the floor hold, which works behind every proxy seen so
- * far: what its owner reads about it waits for that one answer. After that
+ * failure) asks for a one-second hold: what its owner reads about it ("Starting")
+ * waits for that one answer, and a hold this short works behind every proxy. After that
  * the hold grows as far as the path to this room server is proven to allow
  * (see RoomPollHold), and all agents of one server share that proof. A long
  * hold that is cut is asked again once, with the same cursor and bearer and a
@@ -424,6 +424,10 @@ export function supervisedRoomPoll(options: { nowMs?: () => number; request?: ty
   const holds = new Map<string, RoomPollHold>();
   return async (input) => {
     if (isLocalRoomApi(input.apiUrl)) return requestRoomPoll(request, input, ROOM_POLL_FLOOR_HOLD_MS);
+    // The lane shows as starting until this poll is answered, and the server
+    // answers an idle room only when the hold ends. A short hold gives the
+    // owner that answer at once; the polls after it are held for long.
+    if (!input.observing) return requestRoomPoll(request, input, ROOM_POLL_FIRST_ANSWER_HOLD_MS);
     let hold = holds.get(input.apiUrl);
     if (!hold) holds.set(input.apiUrl, hold = new RoomPollHold(nowMs));
     let attempt = hold.start(!input.observing);
